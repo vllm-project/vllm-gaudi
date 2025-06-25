@@ -1,0 +1,10 @@
+model_card:
+  model_name: /mnt/weka/llm/Qwen3-30B-A3B-FP8/
+  tasks: gsm8k
+  num_fewshot: 5
+  trust_remote_code: true
+  limit: 256
+
+metrics:
+  name: exact_match,strict-match
+  value: 0.9

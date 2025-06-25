@@ -1,0 +1,10 @@
+model_card:
+  model_name: /mnt/weka/data/mlperf_models/Mixtral-8x7B-Instruct-v0.1
+  tasks: gsm8k_cot
+  num_fewshot: 8
+  trust_remote_code: true
+  limit: 250
+
+metrics:
+  name: exact_match,strict-match
+  value: 0.6967
