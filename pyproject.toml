@@ -16,7 +16,6 @@ license = "Apache-2.0"
 readme = "README.md"
 description = "HPU plugin package for vLLM."
 classifiers = [
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
