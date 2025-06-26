@@ -120,7 +120,6 @@ def launch_simple(eval_config):
     generated_text = ""
     for output in outputs:
         generated_text += output.outputs[0].text
-    found_countries: list[str] = []
 
     european_countries = [
         "Albania", "Andorra", "Armenia", "Austria", "Azerbaijan", "Belarus",
