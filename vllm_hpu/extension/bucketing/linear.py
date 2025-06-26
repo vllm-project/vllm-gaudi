@@ -3,7 +3,7 @@ import logging
 import operator
 import os
 from dataclasses import dataclass, field
-from typing import Tuple
+from typing import tuple
 from .common import WeakSingleton
 
 from vllm_hpu.extension.runtime import get_config
@@ -13,12 +13,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class HPUBucketingGlobalState(metaclass=WeakSingleton):
-    prompt_bs_bucket_cfg: Tuple[int, int, int] = field(init=False)
-    decode_bs_bucket_cfg: Tuple[int, int, int] = field(init=False)
-    prompt_seq_bucket_cfg: Tuple[int, int, int] = field(init=False)
-    decode_block_bucket_cfg: Tuple[int, int, int] = field(init=False)
-    prompt_buckets: list[Tuple[int, int]] = field(init=False)
-    decode_buckets: list[Tuple[int, int]] = field(init=False)
+    prompt_bs_bucket_cfg: tuple[int, int, int] = field(init=False)
+    decode_bs_bucket_cfg: tuple[int, int, int] = field(init=False)
+    prompt_seq_bucket_cfg: tuple[int, int, int] = field(init=False)
+    decode_block_bucket_cfg: tuple[int, int, int] = field(init=False)
+    prompt_buckets: list[tuple[int, int]] = field(init=False)
+    decode_buckets: list[tuple[int, int]] = field(init=False)
 
 
 class HPUBucketingContext(metaclass=WeakSingleton):
@@ -42,9 +42,15 @@ class HPUBucketingContext(metaclass=WeakSingleton):
             max_num_prefill_seqs (int): The maximum number of prefill sequences.
             block_size (int): The size cache block.
             max_num_batched_tokens (int): The maximum number of batched tokens.
-            max_model_len (int, optional): The maximum length of the model. This serves as the default value for max_prompt_seq and max_decode_seq. Defaults to None.
-            max_prompt_seq (int, optional): The maximum length of the prompt sequence. Defaults to max_model_len. Must be less than or equal to max_model_len.
-            max_decode_seq (int, optional): The maximum length of the decode sequence. Defaults to max_model_len. Must be less than or equal to max_model_len.
+            max_model_len (int, optional): The maximum length of the model. 
+                This serves as the default value for max_prompt_seq 
+                and max_decode_seq. Defaults to None.
+            max_prompt_seq (int, optional): The maximum length of the 
+                prompt sequence. Defaults to max_model_len. 
+                Must be less than or equal to max_model_len.
+            max_decode_seq (int, optional): The maximum length of the decode 
+                sequence. Defaults to max_model_len. 
+                Must be less than or equal to max_model_len.
         """
         self.max_num_seqs = max_num_seqs
         self.max_num_prefill_seqs = max_num_prefill_seqs
@@ -64,13 +70,16 @@ class HPUBucketingContext(metaclass=WeakSingleton):
         default_max_prompt_seq = 1024
         default_max_decode_seq = 2048
         if self.max_model_len is None and self.max_prompt_seq is None:
-            logger.warning(
-                f"max_model_len and max_prompt_seq are not set. Using default value max_prompt_seq={default_max_prompt_seq}. This may cause issues."
-            )
+            msg = ("max_model_len and max_prompt_seq are not set. Using"
+                   "  default value max_prompt_seq={default_max_prompt_seq}."
+                   " This may cause issues.")
+            logger.warning(msg)
         if self.max_model_len is None and self.max_decode_seq is None:
-            logger.warning(
-                f"max_model_len and max_decode_seq are not set. Using default value max_decode_seq={default_max_decode_seq}. This may cause issues."
-            )
+            msg = (
+                "max_model_len and max_decode_seq are not set."
+                f" Using default value max_decode_seq={default_max_decode_seq}."
+                " This may cause issues.")
+            logger.warning(msg)
 
         max_prompt_seq = next(
             (item for item in [self.max_prompt_seq, self.max_model_len]
@@ -114,8 +123,10 @@ class HPUBucketingContext(metaclass=WeakSingleton):
             print(
                 'Merged prefill is enabled!\n'
                 'Overriding prompt bucketing settings!\n'
-                f'prompt bs cfg: {prev_prompt_bs_bucket_cfg} -> {new_prompt_bs_bucket_cfg}\n'
-                f'prompt seq cfg: {prev_prompt_seq_bucket_cfg} -> {new_prompt_seq_bucket_cfg}\n'
+                'prompt bs cfg: '
+                f'{prev_prompt_bs_bucket_cfg} -> {new_prompt_bs_bucket_cfg}\n'
+                'prompt seq cfg: '
+                f'{prev_prompt_seq_bucket_cfg} -> {new_prompt_seq_bucket_cfg}\n'
             )
 
         msg = ("Prompt bucket config (min, step, max_warmup) "
@@ -154,9 +165,10 @@ class HPUBucketingContext(metaclass=WeakSingleton):
         self.global_state.decode_buckets = generate_decode_buckets(
             self.global_state.decode_bs_bucket_cfg,
             self.global_state.decode_block_bucket_cfg, max_blocks)
-        logger.info(f"Generated {len(self.global_state.decode_buckets)} "
-                    f"decode buckets [bs, total_blocks]: "
-                    f"{list(sorted(self.global_state.decode_buckets))}")
+        msg = (f"Generated {len(self.global_state.decode_buckets)} "
+               f"decode buckets [bs, total_blocks]: "
+               f"{list(sorted(self.global_state.decode_buckets))}")
+        logger.info(msg)
 
     def get_max_prompt_shape(self):
         return (self.global_state.prompt_bs_bucket_cfg[-1],
@@ -204,7 +216,8 @@ class HPUBucketingContext(metaclass=WeakSingleton):
             The singleton instance of the class.
 
         Raises:
-            AssertionError: If the class has not been initialized and no instance exists.
+            AssertionError: If the class has not been initialized 
+                and no instance exists.
         """
         assert cls in cls._instances, "Singleton instance not initialized"
         return type(cls)._instances[cls]
@@ -225,11 +238,12 @@ def read_bucket_settings(phase: str, dim: str, **defaults):
         int(os.environ.get(e, d)) for e, d in zip(env_vars, default_values)
     ]
     for e, v, d in zip(env_vars, values, default_values):
-        logger.info(f'{e}={v} (default:{d})')
+        msg = f'{e}={v} (default:{d})'
+        logger.info(msg)
     return values
 
 
-def warmup_range(config: Tuple[int, int, int]):
+def warmup_range(config: tuple[int, int, int]):
     """Generate a warmup range.
 
     Start from bmin and multiply by 2 until you reach bstep.
@@ -337,7 +351,8 @@ def generate_decode_buckets(bs_bucket_config, blocks_bucket_config,
     for bs in bs_buckets:
         for blocks in block_buckets:
             if bs > blocks:
-                # Skip a dummy case when bs > blocks, which cannot occur in real execution
+                # Skip a dummy case when bs > blocks, which cannot occur
+                # in real execution
                 continue
             if blocks >= last_bucket:
                 buckets.append((bs, 1, last_bucket))
@@ -357,7 +372,7 @@ def round_up(value: int, k: int) -> int:
     return (value + k - 1) // k * k
 
 
-def find_bucket(value: int, config: Tuple[int, int, int]) -> int:
+def find_bucket(value: int, config: tuple[int, int, int]) -> int:
     bmin, bstep, _ = config
     if value <= bmin:
         return bmin

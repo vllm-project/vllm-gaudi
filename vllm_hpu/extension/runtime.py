@@ -5,12 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
 
-
 from vllm_hpu.extension.environment import get_environment
-from vllm_hpu.extension.features import get_features, get_user_flags, get_experimental_flags
+from vllm_hpu.extension.features import (get_features, get_user_flags,
+                                         get_experimental_flags)
 from vllm_hpu.extension.config import Config
 from vllm_hpu.extension.logger import logger
-
 
 DETECTED = None
 
@@ -41,7 +40,8 @@ def get_config():
 
     experimental_flags = experimental_flags | environment_flags | feature_flags
 
-    detected = Config(user_flags | experimental_flags | environment_values | feature_values)
+    detected = Config(user_flags | experimental_flags | environment_values
+                      | feature_values)
     detected.get_all()
 
     user_flags = filter_defined(detected, user_flags.keys())
@@ -50,13 +50,18 @@ def get_config():
     feature_values = filter_defined(detected, feature_values.keys())
 
     experimental_flag_names = experimental_flags.keys()
-    if len(experimental_flag_names) > 0 and not detected.VLLM_ENABLE_EXPERIMENTAL_FLAGS:
+    if len(experimental_flag_names
+           ) > 0 and not detected.VLLM_ENABLE_EXPERIMENTAL_FLAGS:
         asterisks = 48 * '*'
         header = f"{asterisks} Warning! {asterisks}"
         footer = '*' * len(header)
         logger().warning(header)
-        logger().warning(f"Following environment variables are considered experimental: {', '.join(experimental_flag_names)}")
-        logger().warning("In future releases using those flags without VLLM_ENABLE_EXPERIMENTAL_FLAGS will trigger a fatal error.")
+        msg = ("Following environment variables are considered experimental: "
+               f"{', '.join(experimental_flag_names)}")
+        logger().warning(msg)
+        logger().warning(
+            "In future releases using those flags without "
+            "VLLM_ENABLE_EXPERIMENTAL_FLAGS will trigger a fatal error.")
         logger().warning(footer)
 
     dump('Environment', environment_values)

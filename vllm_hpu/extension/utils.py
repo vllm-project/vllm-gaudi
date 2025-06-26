@@ -6,7 +6,7 @@
 ###############################################################################
 
 import os
-from functools import lru_cache, wraps
+from functools import wraps, cache
 
 import habana_frameworks.torch as htorch
 import torch
@@ -14,7 +14,7 @@ import torch
 from vllm_hpu.extension.runtime import get_config
 
 
-@lru_cache(maxsize=None)
+@cache
 def is_fake_hpu() -> bool:
     return os.environ.get('VLLM_USE_FAKE_HPU', '0') != '0'
 
@@ -36,7 +36,7 @@ def with_mark_steps(fn):
 class Matmul(torch.nn.Module):
 
     def __init__(self):
-        super(Matmul, self).__init__()
+        super().__init__()
 
     def forward(self, x, y):
         return torch.matmul(x, y)
@@ -54,7 +54,7 @@ class Softmax(torch.nn.Module):
 class VLLMKVCache(torch.nn.Module):
 
     def __init__(self):
-        super(VLLMKVCache, self).__init__()
+        super().__init__()
         self.use_contiguous_pa = get_config().use_contiguous_pa
 
     def forward(self, input, cache, slot_mapping):
@@ -80,10 +80,12 @@ class VLLMFP8KVCache(VLLMKVCache):
         self.output_scale = 1.0 / self.input_scale
 
     def quant_input(self, input):
-        return torch.ops.hpu.cast_to_fp8_v2(input, self.input_scale, False, False, torch.float8_e4m3fn)[0]
-    
+        return torch.ops.hpu.cast_to_fp8_v2(input, self.input_scale, False,
+                                            False, torch.float8_e4m3fn)[0]
+
     def dequant_output(self, output):
-        return torch.ops.hpu.cast_from_fp8(output, self.output_scale, torch.bfloat16)
+        return torch.ops.hpu.cast_from_fp8(output, self.output_scale,
+                                           torch.bfloat16)
 
     def forward(self, input, *args, **kwargs):
         qinput = self.quant_input(input)
@@ -92,7 +94,7 @@ class VLLMFP8KVCache(VLLMKVCache):
     def fetch_from_cache(self, quant_cache, blocks, permutations=None):
         if permutations:
             output_cache = super().fetch_from_cache(quant_cache, blocks,
-                                                        permutations)
+                                                    permutations)
             for i in range(len(output_cache)):
                 output_cache[i] = self.dequant_output(output_cache[i])
             return output_cache
@@ -102,19 +104,25 @@ class VLLMFP8KVCache(VLLMKVCache):
 
 class FP8Matmul(torch.nn.Module):
 
-    def __init__(self, scale_input=1.0, scale_other=1.0,):
+    def __init__(
+        self,
+        scale_input=1.0,
+        scale_other=1.0,
+    ):
         super().__init__()
         self.scale_input = scale_input
         self.scale_other = scale_other
 
     def quant_input(self, x, scale):
-        return torch.ops.hpu.cast_to_fp8_v2(
-            x, scale, False, False, torch.float8_e4m3fn
-        )[0]
+        return torch.ops.hpu.cast_to_fp8_v2(x, scale, False, False,
+                                            torch.float8_e4m3fn)[0]
 
-    def matmul_fp8(
-        self, x, other, out_dtype, scale_input_inv=None, scale_other_inv=None
-    ):
+    def matmul_fp8(self,
+                   x,
+                   other,
+                   out_dtype,
+                   scale_input_inv=None,
+                   scale_other_inv=None):
         return torch.ops.hpu.fp8_gemm_v2(
             A=x,
             trans_A=False,
@@ -142,9 +150,10 @@ class FP8Matmul(torch.nn.Module):
 
 
 class ModuleFusedSDPA(torch.nn.Module):
+
     def __init__(self, fusedSDPA):
         super().__init__()
-        assert fusedSDPA is not None, f'fusedSDPA kernel is None'
+        assert fusedSDPA is not None, 'fusedSDPA kernel is None'
         self._hpu_kernel_fsdpa = fusedSDPA
 
     def forward(
@@ -174,5 +183,3 @@ class ModuleFusedSDPA(torch.nn.Module):
             valid_sequence_lengths,
             padding_side,
         )
-
-
