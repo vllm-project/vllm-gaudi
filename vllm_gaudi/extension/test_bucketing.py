@@ -8,8 +8,8 @@
 
 import pytest
 
-import vllm_hpu.extension.bucketing.linear as linear
-from vllm_hpu.extension.bucketing.exponential import HPUExponentialBucketingContext
+import vllm_gaudi.extension.bucketing.linear as linear
+from vllm_gaudi.extension.bucketing.exponential import HPUExponentialBucketingContext
 
 
 @pytest.fixture
