@@ -9,8 +9,6 @@
   <img src="./docs/assets/logos/gaudi-logo.png" alt="Intel-Gaudi" width="30%">
 </p>
 
-
-
 vLLM Gaudi plugin (vllm-gaudi) integrates Intel Gaudi accelerators with vLLM to optimize large language model inference.
 
 This plugin follows the [[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162) and [[RFC]: Enhancing vLLM Plugin Architecture](https://github.com/vllm-project/vllm/issues/19161) principles, providing a modular interface for Intel Gaudi hardware.

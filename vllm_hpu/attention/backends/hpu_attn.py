@@ -279,6 +279,8 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
         if not self.use_merged_prefill:
+            assert attn_metadata.seq_lens_tensor is not None, \
+                "seq_lens_tensor must be provided for prefill attention"
             batch_size = attn_metadata.seq_lens_tensor.shape[0]
         else:
             batch_size = 1
@@ -492,7 +494,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         attn_metadata: HPUAttentionMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Forward pass with xFormers and PagedAttention.
+        """Forward pass with PagedAttention.
 
         Args:
             query: shape = [num_tokens, num_heads * head_size]
@@ -522,6 +524,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 else:
                     batch_size = 1
             else:
+                assert attn_metadata.block_mapping is not None, \
+                    "seq_lens_tensor must be provided for attention"
                 batch_size = attn_metadata.block_mapping.shape[1]
             num_tokens, hidden_size = query.shape
             seq_len = num_tokens // batch_size

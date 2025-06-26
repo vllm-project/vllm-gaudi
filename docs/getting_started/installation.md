@@ -15,7 +15,6 @@ This guide provides instructions on running vLLM with Intel Gaudi devices.
     To achieve the best performance on HPU, please follow the methods outlined in the
     [Optimizing Training Platform Guide](https://docs.habana.ai/en/latest/PyTorch/Model_Optimization_PyTorch/Optimization_in_Training_Platform.html).
 
-
 ## Quick Start Using Dockerfile
 # --8<-- [start:docker_quickstart]
 Set up the container with the latest Intel Gaudi Software Suite release using the Dockerfile.
@@ -46,12 +45,10 @@ Set up the container with the latest Intel Gaudi Software Suite release using th
 ### Environment Verification
 To verify that the Intel Gaudi software was correctly installed, run the following:
 
-```{.console}
-$ hl-smi # verify that hl-smi is in your PATH and each Gaudi accelerator is visible
-$ apt list --installed | grep habana # verify that habanalabs-firmware-tools, habanalabs-graph, habanalabs-rdma-core, habanalabs-thunk and habanalabs-container-runtime are installed
-$ pip list | grep habana # verify that habana-torch-plugin, habana-torch-dataloader, habana-pyhlml and habana-media-loader are installed
-$ pip list | grep neural # verify that neural-compressor is installed
-```
+    $ hl-smi # verify that hl-smi is in your PATH and each Gaudi accelerator is visible
+    $ apt list --installed | grep habana # verify that habanalabs-firmware-tools, habanalabs-graph, habanalabs-rdma-core, habanalabs-thunk and habanalabs-container-runtime are installed
+    $ pip list | grep habana # verify that habana-torch-plugin, habana-torch-dataloader, habana-pyhlml and habana-media-loader are installed
+    $ pip list | grep neural # verify that neural-compressor is installed
 
 Refer to [System Verification and Final Tests](https://docs.habana.ai/en/latest/Installation_Guide/System_Verification_and_Final_Tests.html) for more details.
 
@@ -62,10 +59,8 @@ Refer to the [Intel Gaudi documentation](https://docs.habana.ai/en/latest/Instal
 
 Use the following commands to run a Docker image. Make sure to update the versions below as listed in the [Support Matrix](https://docs.habana.ai/en/latest/Support_Matrix/Support_Matrix.html):
 
-```{.console}
-docker pull vault.habana.ai/gaudi-docker/1.21.0/ubuntu22.04/habanalabs/pytorch-installer-2.6.0:latest
-docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --ipc=host vault.habana.ai/gaudi-docker/1.21.0/ubuntu22.04/habanalabs/pytorch-installer-2.6.0:latest
-```
+    docker pull vault.habana.ai/gaudi-docker/1.21.0/ubuntu22.04/habanalabs/pytorch-installer-2.6.0:latest
+    docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --ipc=host vault.habana.ai/gaudi-docker/1.21.0/ubuntu22.04/habanalabs/pytorch-installer-2.6.0:latest
 
 ### Build and Install vLLM
 
@@ -119,4 +114,3 @@ Currently, multiple ways are provided which can be used to install vLLM with Int
     cd vllm-hpu
     pip install -e .
     ```
-
