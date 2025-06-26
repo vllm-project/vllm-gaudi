@@ -55,7 +55,7 @@ plugins:
   - awesome-nav
   # For API reference generation
   - api-autonav:
-      modules: ["vllm_hpu"]
+      modules: ["vllm_gaudi"]
       api_root_uri: "api"
   - mkdocstrings:
       handlers:

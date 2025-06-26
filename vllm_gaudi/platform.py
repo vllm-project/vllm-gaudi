@@ -64,7 +64,7 @@ class HpuPlatform(Platform):
         if parallel_config.worker_cls == "auto":
             if envs.VLLM_USE_V1:
                 parallel_config.worker_cls = \
-                    "vllm_hpu.v1.worker.hpu_worker.HPUWorker"
+                    "vllm_gaudi.v1.worker.hpu_worker.HPUWorker"
             else:
                 parallel_config.worker_cls = \
                     "vllm.worker.hpu_worker.HPUWorker"
@@ -117,11 +117,11 @@ class HpuPlatform(Platform):
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        return "vllm_hpu.lora.punica_wrapper.punica_hpu.PunicaWrapperHPU"
+        return "vllm_gaudi.lora.punica_wrapper.punica_hpu.PunicaWrapperHPU"
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
-        return "vllm_hpu.distributed.device_communicators.hpu_communicator.HpuCommunicator"  # noqa
+        return "vllm_gaudi.distributed.device_communicators.hpu_communicator.HpuCommunicator"  # noqa
 
     @classmethod
     def supports_structured_output(cls) -> bool:

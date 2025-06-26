@@ -33,5 +33,5 @@ nav:
   - API Reference:
     - Summary: api/README.md
     - Contents:
-      - glob: api/vllm_hpu/*
+      - glob: api/vllm_gaudi/*
         preserve_directory_names: true
