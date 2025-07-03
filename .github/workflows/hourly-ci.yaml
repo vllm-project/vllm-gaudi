@@ -2,12 +2,12 @@ name: Hourly Commit Check and Tests
 
 on:
   # Schedule the workflow to run every 4 hours
-  # schedule:
-  #   # Use cron syntax: "minute hour day_of_month month day_of_week"
-  #   # This runs at minute 0, every 4th hour (0, 4, 8, 12, 16, 20 UTC)
-  #   # Adjust 'hour' if you need a specific starting point or timezone offset.
-  #   # GitHub Actions schedules are in UTC.
-  #   - cron: '0 */4 * * *'
+  schedule:
+    # Use cron syntax: "minute hour day_of_month month day_of_week"
+    # This runs at minute 0, every 4th hour (0, 4, 8, 12, 16, 20 UTC)
+    # Adjust 'hour' if you need a specific starting point or timezone offset.
+    # GitHub Actions schedules are in UTC.
+    - cron: '0 */4 * * *'
 
   # Allow manual triggering for testing purposes
   workflow_dispatch: {}
@@ -61,13 +61,11 @@ jobs:
           docker build --no-cache -t hpu-plugin-v1-test-env-hourly-ci -f - . <<EOF
           FROM 1.22-413-pt2.7.1:latest
 
-          # Copy *this* repository's code into the image
-          COPY ./ /workspace/vllm
-
-          WORKDIR /workspace/vllm
+          WORKDIR /workspace
 
           RUN git clone https://github.com/vllm-project/vllm.git vllm
           WORKDIR /workspace/vllm
+          RUN git checkout main
 
           # Pinning versions in requirements might be good practice for CI consistency
           RUN pip install -v -r requirements/hpu.txt
