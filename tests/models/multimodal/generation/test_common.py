@@ -120,7 +120,6 @@ def launch_simple(eval_config):
     generated_text = ""
     for output in outputs:
         generated_text += output.outputs[0].text
-    found_countries = []
 
     european_countries = [
         "Albania", "Andorra", "Armenia", "Austria", "Azerbaijan", "Belarus",
@@ -134,7 +133,7 @@ def launch_simple(eval_config):
         "Spain", "Sweden", "Switzerland", "Turkey", "Ukraine",
         "United Kingdom", "Vatican City"
     ]
-    found_countries = []
+    found_countries: list[str] = []
     for country in european_countries:
         if country in generated_text:
             found_countries.append(country)

@@ -19,7 +19,6 @@ This guide will help you quickly get started with vLLM to perform:
     To achieve the best performance on HPU, please follow the methods outlined in the
     [Optimizing Training Platform Guide](https://docs.habana.ai/en/latest/PyTorch/Model_Optimization_PyTorch/Optimization_in_Training_Platform.html).
 
-
 ## Quick Start Using Dockerfile
 
 --8<-- "docs/getting_started/installation.md:docker_quickstart"
