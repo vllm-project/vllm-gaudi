@@ -65,4 +65,8 @@ def main(args: dict):
 if __name__ == "__main__":
     parser = create_parser()
     args: dict = vars(parser.parse_args())
-    main(args)
+    try:
+        main(args)
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        os._exit(1)
