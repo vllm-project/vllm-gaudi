@@ -13,7 +13,10 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  check_and_test:
+  list_commits_and_test:
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.ref == 'refs/heads/main'
     runs-on: ucb-vllm-cicd-g2
     permissions:
       contents: read # Required to checkout code and read history
@@ -24,6 +27,21 @@ jobs:
         with:
           # Fetch full history for accurate commit comparison
           fetch-depth: 0
+
+      - name: Pre-Job Workspace Cleanup (Custom Folder)
+        # This step will run even if previous steps failed, ensuring cleanup.
+        if: always()
+        run: |
+          echo "Attempting to remove remote branch"
+          git remote remove vllm-upstream || true
+
+          echo "Cleanup of remote branch complete."
+
+      - name: Clean and Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true # Ensure a clean workspace before checkout
 
       - name: Add vLLM upstream as a remote and fetch its history
         run: |
@@ -51,6 +69,7 @@ jobs:
 
           # Use the 'vllm-upstream/main' ref to log commits from that remote
           git log HEAD..vllm-upstream/main --pretty=format:"%h - %an, %ar : %s" --since="${{ steps.prev_run_time.outputs.PREV_RUN_TIME }}"
+
 
       - name: Setup Docker environment and build image
         # Using a multi-line string for the Dockerfile is generally fine,
