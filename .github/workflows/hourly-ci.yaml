@@ -2,18 +2,21 @@ name: Hourly Commit Check and Tests
 
 on:
   # Schedule the workflow to run every 4 hours
-  # schedule:
-  #   # Use cron syntax: "minute hour day_of_month month day_of_week"
-  #   # This runs at minute 0, every 4th hour (0, 4, 8, 12, 16, 20 UTC)
-  #   # Adjust 'hour' if you need a specific starting point or timezone offset.
-  #   # GitHub Actions schedules are in UTC.
-  #   - cron: '0 */4 * * *'
+  schedule:
+    # Use cron syntax: "minute hour day_of_month month day_of_week"
+    # This runs at minute 0, every 4th hour (0, 4, 8, 12, 16, 20 UTC)
+    # Adjust 'hour' if you need a specific starting point or timezone offset.
+    # GitHub Actions schedules are in UTC.
+    - cron: '0 */4 * * *'
 
   # Allow manual triggering for testing purposes
   workflow_dispatch: {}
 
 jobs:
-  check_and_test:
+  list_commits_and_test:
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.ref == 'refs/heads/main'
     runs-on: ucb-vllm-cicd-g2
     permissions:
       contents: read # Required to checkout code and read history
@@ -24,6 +27,21 @@ jobs:
         with:
           # Fetch full history for accurate commit comparison
           fetch-depth: 0
+
+      - name: Pre-Job Workspace Cleanup (Custom Folder)
+        # This step will run even if previous steps failed, ensuring cleanup.
+        if: always()
+        run: |
+          echo "Attempting to remove remote branch"
+          git remote remove vllm-upstream || true
+
+          echo "Cleanup of remote branch complete."
+
+      - name: Clean and Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true # Ensure a clean workspace before checkout
 
       - name: Add vLLM upstream as a remote and fetch its history
         run: |
@@ -52,6 +70,7 @@ jobs:
           # Use the 'vllm-upstream/main' ref to log commits from that remote
           git log HEAD..vllm-upstream/main --pretty=format:"%h - %an, %ar : %s" --since="${{ steps.prev_run_time.outputs.PREV_RUN_TIME }}"
 
+
       - name: Setup Docker environment and build image
         # Using a multi-line string for the Dockerfile is generally fine,
         # but consider moving it to a separate file for better readability/maintainability
@@ -61,13 +80,11 @@ jobs:
           docker build --no-cache -t hpu-plugin-v1-test-env-hourly-ci -f - . <<EOF
           FROM 1.22-413-pt2.7.1:latest
 
-          # Copy *this* repository's code into the image
-          COPY ./ /workspace/vllm
-
-          WORKDIR /workspace/vllm
+          WORKDIR /workspace
 
           RUN git clone https://github.com/vllm-project/vllm.git vllm
           WORKDIR /workspace/vllm
+          RUN git checkout main
 
           # Pinning versions in requirements might be good practice for CI consistency
           RUN pip install -v -r requirements/hpu.txt
