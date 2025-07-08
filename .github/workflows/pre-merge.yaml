@@ -9,10 +9,7 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  list_commits_and_test:
-    if: |
-      github.event_name == 'workflow_dispatch' ||
-      github.ref == 'refs/heads/main'
+  pre_merge_hpu_test:
     runs-on: ucb-vllm-cicd-g2
     permissions:
       contents: read # Required to checkout code and read history
