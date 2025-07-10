@@ -8,6 +8,10 @@ on:
   # Allow manual triggering for testing purposes
   workflow_dispatch: {}
 
+concurrency: 
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   pre_merge_hpu_test:
     runs-on: ucb-vllm-cicd-g2
