@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 ###############################################################################
 # Copyright (C) 2024-2025 Habana Labs, Ltd. an Intel Company
@@ -6,7 +7,7 @@
 
 import os
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 import vllm_hpu.extension.kernels as kernels
@@ -18,7 +19,6 @@ from vllm_hpu.extension.utils import (FP8Matmul, Matmul, ModuleFusedSDPA,
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
                                               AttentionMetadata, AttentionType)
-
 from vllm.attention.backends.mla.common import MLACommonImpl
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm_hpu.attention.ops.hpu_paged_attn import (HPUPagedAttention,
@@ -35,15 +35,15 @@ class HPUAttentionBackend(AttentionBackend):
         return "HPU_ATTN"
 
     @staticmethod
-    def get_impl_cls() -> type["HPUAttentionImpl"]:
+    def get_impl_cls() -> Type["HPUAttentionImpl"]:
         return HPUAttentionImpl
 
     @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
+    def get_metadata_cls() -> Type["AttentionMetadata"]:
         return HPUAttentionMetadata
 
     @staticmethod
-    def get_state_cls() -> type["CommonAttentionState"]:
+    def get_state_cls() -> Type["CommonAttentionState"]:
         return CommonAttentionState
 
     @staticmethod
@@ -52,7 +52,7 @@ class HPUAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> tuple[int, ...]:
+    ) -> Tuple[int, ...]:
         return HPUPagedAttention.get_kv_cache_shape(num_blocks, block_size,
                                                     num_kv_heads, head_size)
 
@@ -66,7 +66,7 @@ class HPUAttentionBackend(AttentionBackend):
 
     @staticmethod
     def copy_blocks(
-        kv_caches: list[torch.Tensor],
+        kv_caches: List[torch.Tensor],
         src_to_dsts: torch.Tensor,
     ) -> None:
         HPUPagedAttention.copy_blocks(kv_caches, src_to_dsts)
@@ -79,15 +79,15 @@ class HPUMLAAttentionBackend(AttentionBackend):
         return "HPU_MLA"
 
     @staticmethod
-    def get_impl_cls() -> type["HPUMLAImpl"]:
+    def get_impl_cls() -> Type["HPUMLAImpl"]:
         return HPUMLAImpl
 
     @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
+    def get_metadata_cls() -> Type["AttentionMetadata"]:
         return HPUMLAMetadata
 
     @staticmethod
-    def get_state_cls() -> type["CommonAttentionState"]:
+    def get_state_cls() -> Type["CommonAttentionState"]:
         return CommonAttentionState
 
     @staticmethod
@@ -96,23 +96,23 @@ class HPUMLAAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> tuple[int, ...]:
+    ) -> Tuple[int, ...]:
         return (num_blocks * block_size, head_size)
 
     @staticmethod
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
-        src_to_dst: torch.Tensor,
+        src_to_dsts: torch.Tensor,
     ) -> None:
-        HPUPagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
+        HPUPagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dsts)
 
     @staticmethod
     def copy_blocks(
-        kv_caches: list[torch.Tensor],
-        src_to_dists: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        src_to_dsts: torch.Tensor,
     ) -> None:
-        HPUPagedAttention.copy_blocks(kv_caches, src_to_dists)
+        HPUPagedAttention.copy_blocks(kv_caches, src_to_dsts)
 
 
 @dataclass
@@ -126,8 +126,8 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     seq_lens_tensor: Optional[torch.Tensor]
     context_lens_tensor: Optional[torch.Tensor]
     input_positions: torch.Tensor
-    seq_lens: Optional[list[int]] = None
-    encoder_seq_lens: Optional[list[int]] = None
+    seq_lens: Optional[List[int]] = None
+    encoder_seq_lens: Optional[List[int]] = None
     encoder_seq_lens_tensor: Optional[torch.Tensor] = None
     max_encoder_seq_len: Optional[int] = None
     cross_block_list: Optional[torch.Tensor] = None
@@ -136,6 +136,12 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     cross_block_groups: Optional[torch.Tensor] = None
     cross_block_usage: Optional[torch.Tensor] = None
     cross_attn_bias: Optional[torch.Tensor] = None
+    window_block_list: Optional[torch.Tensor] = None
+    window_slot_mapping: Optional[torch.Tensor] = None
+    window_block_mapping: Optional[torch.Tensor] = None
+    window_block_groups: Optional[torch.Tensor] = None
+    window_block_usage: Optional[torch.Tensor] = None
+    window_attn_bias: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -151,13 +157,13 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
             head_size: int,
             scale: float,
             num_kv_heads: int,
-            alibi_slopes: Optional[list[float]],
+            alibi_slopes: Optional[List[float]],
             sliding_window: Optional[int],
             kv_cache_dtype: str,
-            blocksparse_params: Optional[dict[str, Any]],
+            blocksparse_params: Optional[Dict[str, Any]],
             logits_soft_cap: Optional[float],
             attn_type: str,
-            kv_sharing_target_layer_name: Optional[str],
+            kv_sharing_target_layer_name: Optional[str] = None,
             # MLA Specific Arguments
             **kwargs) -> None:
         torch.nn.Module.__init__(self)
@@ -178,10 +184,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
             else FP8Matmul()
         self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn \
             else VLLMFP8KVCache()
-        HPUFusedSDPA = kernels.fsdpa()
-        self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
-            else ModuleFusedSDPA(HPUFusedSDPA)
-        self.use_merged_prefill = get_config().merged_prefill
+        self.fused_scaled_dot_product_attention = kernels.fsdpa()
 
         self.prefill_impl = get_config().prompt_attn_impl
         assert self.prefill_impl != 'fsdpa_impl' or alibi_slopes is None, \
@@ -216,8 +219,11 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
             raise NotImplementedError(
                 "output is not yet supported for MLAImplBase")
 
+        batch_size = q.shape[0]
         is_prefill = attn_metadata.is_prompt
 
+        k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
+        q = q.view(-1, self.num_heads, self.qk_head_dim)
         if not is_prefill:
             # decode
             q_nope, q_pe = q.split(
@@ -245,32 +251,16 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
             k_cache = kv_cache[0]
 
         if is_prefill:
-            return self._forward_prefill(q, latent_vec_k, k_cache,
-                                         attn_metadata)
+            return self._forward_prefill(q, k_c_normed, k_pe, attn_metadata,
+                                         batch_size)
         else:
             return self._forward_decode(decode_ql_nope, q_pe, k_cache,
-                                        attn_metadata)
+                                        attn_metadata, batch_size)
 
     def _forward_prefill(  # type: ignore
-            self, q: torch.Tensor, latent_vec_k: torch.Tensor,
-            k_cache: torch.Tensor,
-            attn_metadata: HPUAttentionMetadata) -> torch.Tensor:
-
-        ##### get prefix cache #####
-        if attn_metadata.block_list is not None:
-            current = latent_vec_k
-            past = self.latent_cache_k.fetch_from_cache(
-                k_cache.unflatten(0, (-1, attn_metadata.block_size)),
-                attn_metadata.block_list)
-            past = past.view(-1, past.shape[-1])
-            current = torch.concat((past, current), dim=0)
-            latent_vec_k = current
-        # =========================== #
-
-        k_c_normed, k_pe = latent_vec_k.split(
-            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
-
+            self, q: torch.Tensor, k_c_normed: torch.Tensor,
+            k_pe: torch.Tensor, attn_metadata: HPUAttentionMetadata,
+            batch_size: int) -> torch.Tensor:
         kv_nope = self.kv_b_proj(k_c_normed)[0]\
             .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = kv_nope\
@@ -278,10 +268,6 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
 
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
-        if not self.use_merged_prefill:
-            batch_size = attn_metadata.seq_lens_tensor.shape[0]
-        else:
-            batch_size = 1
         q = q.view(batch_size, -1, self.num_heads, self.qk_head_dim)
         k = k.view(batch_size, -1, self.num_heads, self.qk_head_dim)
         v = v.view(batch_size, -1, self.num_heads, self.v_head_dim)
@@ -296,30 +282,33 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         else:
             v_padded = v
 
-        output = ops.prompt_attention(
+        out = ops.prompt_attention(
             impl=self.prefill_impl,
             query=q,
             key=k,
             value=v_padded,
             is_causal=True,
             attn_bias=attn_metadata.attn_bias,
-            position_bias=None,
             valid_seq_lengths=attn_metadata.seq_lens_tensor,
-            **self.common_attention_args())
+            scale=self.scale,
+            matmul_qk_op=self.matmul_qk,
+            softmax_op=self.softmax,
+            matmul_av_op=self.matmul_av,
+            fsdpa_op=self.fused_scaled_dot_product_attention.apply \
+            if self.fused_scaled_dot_product_attention is not None else None)
+        attn_output = out.view(batch_size, -1, self.num_heads, q.shape[-1])
+        attn_output = attn_output[..., :v.shape[-1]]\
+                .reshape(batch_size, -1, self.num_heads * v.shape[-1])
 
-        # remove padding
-        output = output.view(-1, self.num_heads,
-                             q.shape[-1])[..., :v.shape[-1]]
-        return output.reshape(-1, self.num_heads * v.shape[-1])
+        return attn_output
 
     def _forward_decode(  # type: ignore
             self, q_nope: torch.Tensor, q_pe: torch.Tensor,
-            k_cache: torch.Tensor,
-            attn_metadata: HPUAttentionMetadata) -> torch.Tensor:
+            k_cache: torch.Tensor, attn_metadata: HPUAttentionMetadata,
+            batch_size: int) -> torch.Tensor:
         query = torch.cat([q_nope, q_pe], dim=-1)
         key_cache = k_cache.unsqueeze(1)
         value_cache = None
-
         output = HPUPagedAttention.forward_decode(
             query=query,
             key_cache=key_cache,
@@ -338,28 +327,8 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
             values_fetch_func=None,
             kv_lora_rank=self.kv_lora_rank)
         result = self._v_up_proj(output)
+        result = result.view(batch_size, 1, -1)
         return result
-
-    def common_attention_args(self,
-                              block_list=None,
-                              key_cache=None,
-                              value_cache=None,
-                              block_size=None):
-        return {
-            'scale': self.scale,
-            'matmul_qk_op': self.matmul_qk,
-            'matmul_av_op': self.matmul_av,
-            'batch2block_matmul_op': self.batch2block_matmul,
-            'block2batch_matmul_op': self.block2batch_matmul,
-            'fsdpa_op': self.fused_scaled_dot_product_attention,
-            'keys_fetch_func': self.latent_cache_k.fetch_from_cache,
-            'values_fetch_func': None,
-            'softmax_op': self.softmax,
-            'block_list': block_list,
-            'key_cache': key_cache,
-            'value_cache': value_cache,
-            'block_size': block_size,
-        }
 
 
 class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
@@ -385,16 +354,18 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
+        alibi_slopes: Optional[List[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[dict[str, Any]] = None,
+        blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
     ) -> None:
         super(AttentionImpl, self).__init__()
+        if kv_sharing_target_layer_name is not None:
+            raise NotImplementedError("KV sharing is not supported in V0.")
         if use_irope:
             logger.warning_once(
                 "Using irope in HPU is not supported yet, it will fall back "
@@ -421,7 +392,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         HPUFusedSDPA = kernels.fsdpa()
         self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
             else ModuleFusedSDPA(HPUFusedSDPA)
-        self.use_merged_prefill = get_config().merged_prefill
 
         self.prefill_impl = get_config().prompt_attn_impl
         self.use_contiguous_pa = get_config().use_contiguous_pa
@@ -515,24 +485,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 v_scale=layer._k_scale_float,
             )
 
-        if query.dim() == 2:
-            if attn_metadata.seq_lens_tensor is not None:
-                if not self.use_merged_prefill:
-                    batch_size = attn_metadata.seq_lens_tensor.shape[0]
-                else:
-                    batch_size = 1
-            else:
-                batch_size = attn_metadata.block_mapping.shape[1]
-            num_tokens, hidden_size = query.shape
-            seq_len = num_tokens // batch_size
-            query = query.view(batch_size, seq_len, -1)
-        else:
-            batch_size, seq_len, hidden_size = query.shape
-
-        if key.dim() == 2:
-            seq_len_kv = key.shape[0] // batch_size
-        else:
-            seq_len_kv = key.shape[1]
+        batch_size, seq_len, hidden_size = query.shape
+        _, seq_len_kv, _ = key.shape
 
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
@@ -585,6 +539,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             block_list = attn_metadata.block_list if attn_metadata \
                 and attn_metadata.block_list is not None else None
 
+            if self.sliding_window \
+               and attn_metadata.window_attn_bias is not None:
+                attn_bias = attn_metadata.window_attn_bias
+
             out = ops.prompt_attention(
                 impl=self.prefill_impl,
                 query=query.view(query_shape),
@@ -597,9 +555,21 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 **self.common_attention_args(block_list, key_cache,
                                              value_cache,
                                              attn_metadata.block_size))
+
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
             # Decoding run.
+            if not self.sliding_window:
+                block_list = attn_metadata.block_list
+                block_groups = attn_metadata.block_groups
+                block_mapping = attn_metadata.block_mapping
+                attn_bias = attn_metadata.attn_bias
+            else:
+                block_list = attn_metadata.window_block_list
+                block_groups = attn_metadata.window_block_groups
+                block_mapping = attn_metadata.window_block_mapping
+                attn_bias = attn_metadata.window_attn_bias
+
             self.position_bias = None
             alibi_blocks = getattr(attn_metadata, 'alibi_blocks', None)
             if self.alibi_slopes is not None and alibi_blocks is not None:
@@ -615,12 +585,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
 
             output = HPUPagedAttention.forward_decode(
                 query=query,
-                block_mapping=attn_metadata.block_mapping,
-                block_bias=attn_metadata.attn_bias,
-                block_groups=attn_metadata.block_groups,
+                block_mapping=block_mapping,
+                block_bias=attn_bias,
+                block_groups=block_groups,
                 position_bias=self.position_bias,
-                **self.common_attention_args(attn_metadata.block_list,
-                                             key_cache, value_cache,
+                **self.common_attention_args(block_list, key_cache,
+                                             value_cache,
                                              attn_metadata.block_size))
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
