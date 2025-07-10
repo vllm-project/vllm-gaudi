@@ -4,7 +4,7 @@ from vllm_hpu.platform import HpuPlatform
 def register():
     """Register the HPU platform."""
     HpuPlatform.set_torch_compile()
-    HpuPlatform.set_synced_weight_loader()
+    HpuPlatform.set_synchronized_weight_loader()
     return "vllm_hpu.platform.HpuPlatform"
 
 

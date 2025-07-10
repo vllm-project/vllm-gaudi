@@ -148,7 +148,7 @@ class HpuPlatform(Platform):
             os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
 
     @classmethod
-    def set_synced_weight_loader(cls) -> None:
+    def set_synchronized_weight_loader(cls) -> None:
 
         def set_weight_attrs(
             weight: torch.Tensor,
@@ -191,5 +191,9 @@ class HpuPlatform(Platform):
 
             return _synced_weight_loader
 
+        msg = ("Monkey-patching vllm.model_executor.utils.set_weight_attrs "
+               "to enable synchronized weight loader. This is a hack "
+               "preventing Llama 405B OOM.")
+        logger.warning(msg)
         import vllm.model_executor.utils as utils
         utils.set_weight_attrs = set_weight_attrs
