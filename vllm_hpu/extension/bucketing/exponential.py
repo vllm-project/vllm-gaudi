@@ -4,6 +4,7 @@ import math
 import os
 import numpy as np
 from dataclasses import dataclass, field
+from typing import Set, Tuple
 from .common import WeakSingleton
 
 from vllm_hpu.extension.runtime import get_config
@@ -13,12 +14,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class HPUExponentialBucketingGlobalState(metaclass=WeakSingleton):
-    prompt_bs_bucket_cfg: tuple[int, int, int, int] = field(init=False)
-    decode_bs_bucket_cfg: tuple[int, int, int, int] = field(init=False)
-    prompt_seq_bucket_cfg: tuple[int, int, int, int] = field(init=False)
-    decode_block_bucket_cfg: tuple[int, int, int, int] = field(init=False)
-    prompt_buckets: list[tuple[int, int]] = field(init=False)
-    decode_buckets: list[tuple[int, int]] = field(init=False)
+    prompt_bs_bucket_cfg: Tuple[int, int, int, int] = field(init=False)
+    decode_bs_bucket_cfg: Tuple[int, int, int, int] = field(init=False)
+    prompt_seq_bucket_cfg: Tuple[int, int, int, int] = field(init=False)
+    decode_block_bucket_cfg: Tuple[int, int, int, int] = field(init=False)
+    prompt_buckets: list[Tuple[int, int]] = field(init=False)
+    decode_buckets: list[Tuple[int, int]] = field(init=False)
 
 
 class HPUExponentialBucketingContext(metaclass=WeakSingleton):
@@ -42,15 +43,9 @@ class HPUExponentialBucketingContext(metaclass=WeakSingleton):
             max_num_prefill_seqs (int): The maximum number of prefill sequences.
             block_size (int): The size cache block.
             max_num_batched_tokens (int): The maximum number of batched tokens.
-            max_model_len (int, optional): The maximum length of the model. 
-                This serves as the default value for max_prompt_seq 
-                and max_decode_seq. Defaults to None.
-            max_prompt_seq (int, optional): The maximum length of the 
-                prompt sequence. Defaults to max_model_len. 
-                Must be less than or equal to max_model_len.
-            max_decode_seq (int, optional): The maximum length of the 
-                decode sequence. Defaults to max_model_len. 
-                Must be less than or equal to max_model_len.
+            max_model_len (int, optional): The maximum length of the model. This serves as the default value for max_prompt_seq and max_decode_seq. Defaults to None.
+            max_prompt_seq (int, optional): The maximum length of the prompt sequence. Defaults to max_model_len. Must be less than or equal to max_model_len.
+            max_decode_seq (int, optional): The maximum length of the decode sequence. Defaults to max_model_len. Must be less than or equal to max_model_len.
         """
         self.max_num_seqs = max_num_seqs
         self.max_num_prefill_seqs = max_num_prefill_seqs
@@ -68,17 +63,13 @@ class HPUExponentialBucketingContext(metaclass=WeakSingleton):
         default_max_prompt_seq = 1024
         default_max_decode_seq = 2048
         if self.max_model_len is None and self.max_prompt_seq is None:
-            msg = (
-                "max_model_len and max_prompt_seq are not set. "
-                f"Using default value max_prompt_seq={default_max_prompt_seq}. "
-                "This may cause issues.")
-            logger.warning(msg)
+            logger.warning(
+                f"max_model_len and max_prompt_seq are not set. Using default value max_prompt_seq={default_max_prompt_seq}. This may cause issues."
+            )
         if self.max_model_len is None and self.max_decode_seq is None:
-            msg = (
-                "max_model_len and max_decode_seq are not set. "
-                f"Using default value max_decode_seq={default_max_decode_seq}. "
-                "This may cause issues.")
-            logger.warning(msg)
+            logger.warning(
+                f"max_model_len and max_decode_seq are not set. Using default value max_decode_seq={default_max_decode_seq}. This may cause issues."
+            )
 
         max_prompt_seq = next(
             (item for item in [self.max_prompt_seq, self.max_model_len]
@@ -160,10 +151,9 @@ class HPUExponentialBucketingContext(metaclass=WeakSingleton):
             self.global_state.decode_bs_bucket_cfg,
             self.global_state.decode_block_bucket_cfg, max_blocks,
             self.max_model_len, self.block_size)
-        msg = (f"Generated {len(self.global_state.decode_buckets)} "
-               f"decode buckets [bs, total_blocks]: "
-               f"{list(sorted(self.global_state.decode_buckets))}")
-        logger.info(msg)
+        logger.info(f"Generated {len(self.global_state.decode_buckets)} "
+                    f"decode buckets [bs, total_blocks]: "
+                    f"{list(sorted(self.global_state.decode_buckets))}")
 
     def get_max_prompt_shape(self):
         return (self.global_state.prompt_bs_bucket_cfg[-2],
@@ -220,8 +210,7 @@ class HPUExponentialBucketingContext(metaclass=WeakSingleton):
             The singleton instance of the class.
 
         Raises:
-            AssertionError: If the class has not been initialized and 
-                no instance exists.
+            AssertionError: If the class has not been initialized and no instance exists.
         """
         assert cls in cls._instances, "Singleton instance not initialized"
         return type(cls)._instances[cls]
@@ -245,7 +234,7 @@ def read_bucket_settings(phase: str, dim: str, **defaults):
     ]
     for p, e, v, d in zip(params, env_vars, values, default_values):
         prefix = '[non-modifiable] ' if p in hidden_params else ''
-        suffix = '' if p in hidden_params else f' (default: {d})'
+        suffix = '' if p in hidden_params else ' (default: %d)' % d
         logger_call = logger.debug if p in hidden_params else logger.info
         logger_call(f'{prefix}{e}={v}{suffix}')
     return values
@@ -257,9 +246,9 @@ def find_bucket(buckets, value, dim=None):
     try:
         return next(p for p in sorted(buckets) if p >= value)
     except StopIteration:
-        msg = (f"Couldn't find a bucket for value: {value} in {buckets} "
-               f"dim:{dim}")
-        logger.warning(msg)
+        logger.warning(
+            f"Couldn't find a bucket for value: {value} in {buckets} dim:{dim}"
+        )
         return value
 
 
@@ -313,10 +302,8 @@ def generate_prompt_buckets(bs_bucket_config,
         # Remove buckets exceeding batch token budget
         filtered_buckets = list(
             filter(
-                lambda bucket: (bucket[0] *
-                                (bucket[1] + bucket[2] * block_size)) <=
-                max_num_batched_tokens and bucket[1] <= max_model_len,
-                buckets))
+                lambda bucket: bucket[0] * (bucket[1] +  bucket[2] * block_size) <= max_num_batched_tokens \
+                and bucket[1] <= max_model_len, buckets))
 
         if len(filtered_buckets) == 0:
             # we can handle this if we ignore max_num_batched_tokens
@@ -391,7 +378,7 @@ def generate_decode_buckets(bs_bucket_config,
     return list(sorted(buckets, key=lambda b: (b[0] * b[1], b[1], b[0])))
 
 
-def warmup_range_with_limit(config: tuple[int, int, int, int], fill=True):
+def warmup_range_with_limit(config: Tuple[int, int, int, int], fill=True):
     """ 
     NOTE(kzawora): we'll use exponential spacing for buckets in which scaled 
     power will return bmin for first bucket iteration, and bmax for last 
@@ -456,7 +443,7 @@ def warmup_range_with_limit(config: tuple[int, int, int, int], fill=True):
     assert num_buckets > 0, "num_buckets must be a positive integer"
     if num_buckets == 1:
         return [bmax]
-    buckets: set[tuple[int, int]] = set()
+    buckets: Set[Tuple[int, int]] = set()
     for i in range(num_buckets):
         power_unpadded = bmin * np.float_power(
             bmax / bmin, (1. / float(num_buckets - 1)) * i)
