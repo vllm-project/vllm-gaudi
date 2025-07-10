@@ -41,11 +41,13 @@ include = ["vllm_hpu"]
 
 [tool.yapfignore]
 ignore_patterns = [
-    "build/**",
+    "build/**", 
+    "vllm_hpu/extension/**"  # NOTE(kzawora): re-enable this once extension refactor is ready
 ]
 
 [tool.ruff]
 # Allow lines to be as long as 80.
+extend-exclude = ["vllm_hpu/extension/**"]  # NOTE(kzawora): re-enable this once extension refactor is ready
 line-length = 80
 
 [tool.ruff.lint]

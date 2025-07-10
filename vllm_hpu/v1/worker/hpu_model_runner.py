@@ -814,7 +814,7 @@ class HPUModelRunner:
             self.input_batch.num_computed_tokens_cpu[req_index] = (
                 num_computed_tokens)
             self.input_batch.block_table.append_row(new_block_ids, req_index)
-            
+
             # For the last rank, we don't need to update the token_ids_cpu
             # because the sampled tokens are already cached.
             if not is_last_rank:
@@ -822,17 +822,21 @@ class HPUModelRunner:
                 start_token_index = num_computed_tokens
                 end_token_index = num_computed_tokens + len(new_token_ids)
                 self.input_batch.token_ids_cpu[
-                    req_index, start_token_index:end_token_index] = new_token_ids
-                self.input_batch.num_tokens_no_spec[req_index] = end_token_index
+                    req_index,
+                    start_token_index:end_token_index] = new_token_ids
+                self.input_batch.num_tokens_no_spec[
+                    req_index] = end_token_index
                 # Add spec_token_ids to token_ids_cpu.
-                spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
-                    req_id, ())
+                spec_token_ids = \
+                    scheduler_output.scheduled_spec_decode_tokens.get(
+                        req_id, ())
                 if spec_token_ids:
                     start_index = end_token_index
                     end_token_index += len(spec_token_ids)
                     self.input_batch.token_ids_cpu[
-                        req_index, start_index:end_token_index] = spec_token_ids
-                # NOTE(woosuk): `num_tokens` here may include spec decode tokens.
+                        req_index,
+                        start_index:end_token_index] = spec_token_ids
+                # NOTE(woosuk): `num_tokens` here may include spec decode tokens
                 self.input_batch.num_tokens[req_index] = end_token_index
 
         # Check if the batch has changed. If not, we can skip copying the
@@ -1669,7 +1673,8 @@ class HPUModelRunner:
         # NOTE(woosuk): As an exception, when using PP, the scheduler sends
         # the sampled tokens back, because there's no direct communication
         # between the first-stage worker and the last-stage worker.
-        for req_idx, sampled_ids in enumerate(postprocessed_sampled_token_ids[:num_reqs]):
+        for req_idx, sampled_ids in enumerate(
+                postprocessed_sampled_token_ids[:num_reqs]):
             if not sampled_ids:
                 continue
 
