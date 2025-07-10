@@ -1,2 +1,0 @@
-Qwen2-7b-Instruct.yaml
-Mistral-7B-Instruct-v0.3.yaml

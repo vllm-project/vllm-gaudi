@@ -11,7 +11,7 @@ from vllm import LLM, SamplingParams
 
 TEST_DATA_FILE = os.environ.get(
     "TEST_DATA_FILE",
-    ".jenkins/vision/configs/Meta-Llama-3.2-11B-Vision-Instruct.yaml")
+    ".jenkins/vision/configs/Llama-4-Scout-17B-16E-Instruct.yaml")
 
 TP_SIZE = int(os.environ.get("TP_SIZE", 1))
 
