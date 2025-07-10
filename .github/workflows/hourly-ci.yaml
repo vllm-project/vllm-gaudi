@@ -1,0 +1,132 @@
+name: Hourly Commit Check and Tests
+
+on:
+  # Schedule the workflow to run every 4 hours
+  schedule:
+    # Use cron syntax: "minute hour day_of_month month day_of_week"
+    # This runs at minute 0, every 4th hour (0, 4, 8, 12, 16, 20 UTC)
+    # Adjust 'hour' if you need a specific starting point or timezone offset.
+    # GitHub Actions schedules are in UTC.
+    - cron: '0 */4 * * *'
+
+  # Allow manual triggering for testing purposes
+  workflow_dispatch: {}
+
+jobs:
+  list_commits_and_test:
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.ref == 'refs/heads/main'
+    runs-on: ucb-vllm-cicd-g2
+    permissions:
+      contents: read # Required to checkout code and read history
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Fetch full history for accurate commit comparison
+          fetch-depth: 0
+
+      - name: Pre-Job Workspace Cleanup (Custom Folder)
+        # This step will run even if previous steps failed, ensuring cleanup.
+        if: always()
+        run: |
+          echo "Attempting to remove remote branch"
+          git remote remove vllm-upstream || true
+
+          echo "Cleanup of remote branch complete."
+
+      - name: Clean and Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true # Ensure a clean workspace before checkout
+
+      - name: Add vLLM upstream as a remote and fetch its history
+        run: |
+          git remote add vllm-upstream https://github.com/vllm-project/vllm.git
+          git fetch vllm-upstream --depth=100 # Fetch enough history to cover 4 hours or more
+          # Alternatively, fetch all history for vllm-upstream: git fetch vllm-upstream --no-tags
+
+      - name: Calculate previous run time
+        id: prev_run_time
+        run: |
+          CURRENT_RUN_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "Current run started at: $CURRENT_RUN_TIME"
+
+          # Calculate the time 4 hours ago. This assumes regular 4-hour intervals.
+          PREV_RUN_TIME=$(date -u -d "4 hours ago" +"%Y-%m-%dT%H:%M:%SZ")
+          echo "Looking for commits since: $PREV_RUN_TIME"
+
+          # Store these for subsequent steps
+          echo "CURRENT_RUN_TIME=$CURRENT_RUN_TIME" >> "$GITHUB_OUTPUT"
+          echo "PREV_RUN_TIME=$PREV_RUN_TIME" >> "$GITHUB_OUTPUT"
+
+      - name: List commit differences in the last 4 hours
+        run: |
+          echo "Commits merged/pushed in vllm-project/vllm.git in the last 4 hours:"
+
+          # Use the 'vllm-upstream/main' ref to log commits from that remote
+          git log HEAD..vllm-upstream/main --pretty=format:"%h - %an, %ar : %s" --since="${{ steps.prev_run_time.outputs.PREV_RUN_TIME }}"
+
+
+      - name: Setup Docker environment and build image
+        # Using a multi-line string for the Dockerfile is generally fine,
+        # but consider moving it to a separate file for better readability/maintainability
+        run: |
+          echo "Attempting to build Docker image..."
+          # Ensure this image is accessible from GitHub Actions (e.g., public registry or authenticated private registry).
+          docker build --no-cache -t hpu-plugin-v1-test-env-hourly-ci -f - . <<EOF
+          FROM 1.22-413-pt2.7.1:latest
+
+          WORKDIR /workspace
+
+          RUN git clone https://github.com/vllm-project/vllm.git vllm
+          WORKDIR /workspace/vllm
+          RUN git checkout main
+
+          # Pinning versions in requirements might be good practice for CI consistency
+          RUN pip install -v -r requirements/hpu.txt
+          RUN pip install git+https://github.com/vllm-project/vllm-gaudi.git
+
+          ENV no_proxy=localhost,127.0.0.1
+          ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
+
+          # Ensure setup.py install works as expected
+          RUN VLLM_TARGET_DEVICE=hpu python3 setup.py install
+
+          # install development dependencies (for testing)
+          RUN python3 -m pip install -e tests/vllm_test_utils
+
+          # WORKDIR should be /workspace/ for cloning vllm-gaudi sibling to vllm
+          WORKDIR /workspace/
+
+          # Clone vllm-gaudi here, parallel to vllm
+          RUN git clone https://github.com/vllm-project/vllm-gaudi.git
+
+          # Symlinks. Ensure target paths are correct relative to the current WORKDIR
+          # '/workspace/vllm/tests' is correct
+          # Ensure these are created relative to the /workspace/ directory
+          RUN ln -s /workspace/vllm/tests /workspace/tests \
+              && ln -s /workspace/vllm/examples /workspace/examples \
+              && ln -s /workspace/vllm/benchmarks /workspace/benchmarks
+
+          EOF
+          echo "Docker image built successfully."
+
+      - name: Run test scripts
+        run: |
+          EXITCODE=1
+          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-hourly-ci || true; }
+          trap 'remove_docker_containers; exit $EXITCODE;' EXIT
+          remove_docker_containers
+
+          echo "Running HPU plugin v1 test"
+          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-hourly-ci --network=host \
+            -e HABANA_VISIBLE_DEVICES=all \
+            hpu-plugin-v1-test-env-hourly-ci \
+            /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_tests.sh"
+          
+          EXITCODE=$?
+          echo "Test script exited with code: $EXITCODE"
