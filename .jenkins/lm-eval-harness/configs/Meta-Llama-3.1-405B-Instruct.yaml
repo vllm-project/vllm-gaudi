@@ -1,0 +1,14 @@
+# FIXME(kzawora): these scores were generated using vLLM on HPU, we need to confirm them on HF
+model_name: "/mnt/weka/data/pytorch/llama3.1/Meta-Llama-3.1-405B-Instruct/"
+tasks:
+- name: "gsm8k_cot_llama"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.9575
+  - name: "exact_match,flexible-extract"
+    value: 0.9583
+limit: null
+num_fewshot: 8
+dtype: "bfloat16"
+fewshot_as_multiturn: true
+apply_chat_template: true
