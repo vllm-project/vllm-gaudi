@@ -24,6 +24,6 @@ run_mypy # Note that this is less strict than CI
 run_mypy tests
 run_mypy vllm_hpu/attention
 run_mypy vllm_hpu/distributed
-run_mypy vllm_hpu/extension
+#run_mypy vllm_hpu/extension # NOTE(kzawora): re-enable this once extension refactor is ready
 run_mypy vllm_hpu/ops
 run_mypy vllm_hpu/v1

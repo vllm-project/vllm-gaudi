@@ -669,7 +669,7 @@ class HPULlama4VisionRotaryEmbedding(Llama4VisionRotaryEmbedding):
         key: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Ensure the cache is on the right device.
-        self.cos_sin_cache = self.cos_sin_cache.to(query.device)
+        self.cos_sin_cache: torch.Tensor = self.cos_sin_cache.to(query.device)
         cos_cache, sin_cache = self.cos_sin_cache.chunk(2, dim=-1)
         # shape: [577, 1, 44]
 
