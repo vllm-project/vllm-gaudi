@@ -2,7 +2,6 @@ name: Basic HPU test suite
 
 on:
   pull_request:
-  push:
     branches: [main]
 
   # Allow manual triggering for testing purposes

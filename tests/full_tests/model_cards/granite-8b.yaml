@@ -1,0 +1,9 @@
+model_card:
+  model_name: "ibm-granite/granite-3.3-2b-instruct"
+  tasks: gsm8k_cot
+  num_fewshot: 8
+  limit: 500
+
+metrics:
+  name: exact_match,strict-match
+  value: 0.6542
