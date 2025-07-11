@@ -1,0 +1,11 @@
+model_card:
+  model_name: "/mnt/weka/llm/Llama-4-Scout-17B-16E-Instruct"
+  tasks: gsm8k
+  num_fewshot: 5
+  limit: 250
+  trust_remote_code: True
+  enable_expert_parallel: True
+
+metrics:
+  name: exact_match,strict-match
+  value: 0.88

@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# Trap Ctrl-C (SIGINT) to cancel running test and prevent further scheduling
+TEST_PROCESS=""
+trap 'echo "Interrupted by user. Killing running test and exiting."; if [[ -n "$TEST_PROCESS" ]]; then kill -9 $TEST_PROCESS 2>/dev/null || true; fi; exit 130' SIGINT
+
 usage() {
     echo``
     echo "Runs lm eval harness on GSM8k using vllm and compares to "
@@ -64,7 +68,9 @@ do
         JUNIT_FAMILY="-o junit_family=xunit1"
         JUNIT_XML="--junitxml=${LOG_PATH}"
     fi
-    timeout $TIMEOUT_S pytest -s test_lm_eval_correctness.py "$JUNIT_FAMILY" "$JUNIT_XML" &
+    echo "Executing command:"
+    echo "LM_EVAL_TEST_DATA_FILE=$LM_EVAL_TEST_DATA_FILE LM_EVAL_TP_SIZE=$LM_EVAL_TP_SIZE LM_EVAL_APC_ENABLED=$LM_EVAL_APC_ENABLED PT_HPU_ENABLE_LAZY_COLLECTIVES=$PT_HPU_ENABLE_LAZY_COLLECTIVES VLLM_SKIP_WARMUP=$VLLM_SKIP_WARMUP timeout $TIMEOUT_S pytest -s test_lm_eval_correctness.py \"$JUNIT_FAMILY\" \"$JUNIT_XML\""
+    LM_EVAL_TEST_DATA_FILE=$LM_EVAL_TEST_DATA_FILE LM_EVAL_TP_SIZE=$LM_EVAL_TP_SIZE LM_EVAL_APC_ENABLED=$LM_EVAL_APC_ENABLED PT_HPU_ENABLE_LAZY_COLLECTIVES=$PT_HPU_ENABLE_LAZY_COLLECTIVES VLLM_SKIP_WARMUP=$VLLM_SKIP_WARMUP timeout $TIMEOUT_S pytest -s test_lm_eval_correctness.py "$JUNIT_FAMILY" "$JUNIT_XML" &
     TEST_PROCESS=$!
     wait $TEST_PROCESS
     LOCAL_SUCCESS=$?
