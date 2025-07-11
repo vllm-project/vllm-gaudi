@@ -2,7 +2,6 @@ name: Basic HPU test suite
 
 on:
   pull_request:
-  push:
     branches: [main]
 
   # Allow manual triggering for testing purposes
@@ -49,6 +48,7 @@ jobs:
 
           # Pinning versions in requirements might be good practice for CI consistency
           RUN pip install -v -r requirements/hpu.txt
+          RUN pip install lm_eval pytest pytest_asyncio
 
           ENV no_proxy=localhost,127.0.0.1
           ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true

@@ -27,3 +27,40 @@ if [ $? -ne 0 ]; then
     exit -1
 fi
 echo "Test with deepseek v2 lite passed"
+
+# gsm8k test
+# used to check HPUattn + MLP
+echo "Testing GSM8K on ganite-8b"
+echo VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
+pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/granite-8b.yaml
+VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
+pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/granite-8b.yaml
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for granite-8b" >&2
+    exit -1
+fi
+echo "Test with granite-8b passed"
+
+# used to check MLA + MOE
+echo "Testing GSM8K on deepseek v2 lite"
+# deepseek-R1
+echo VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml
+VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
+pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for deepseek R1" >&2
+    exit -1
+fi
+echo "Test with deepseek R1 passed"
+
+# used to check HPUATTN + MOE + ExpertParallel
+echo "Testing GSM8K on QWEN3-30B-A3B"
+echo VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 TP_SIZE=2 \
+pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/Qwen3-30B-A3B.yaml
+VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 TP_SIZE=2 \
+pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/Qwen3-30B-A3B.yaml
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for QWEN3-30B-A3B" >&2
+    exit -1
+fi
+echo "Test with QWEN3-30B-A3B passed"
