@@ -39,11 +39,11 @@ class HPUBucketingManager():
                 get_config().VLLM_EXPONENTIAL_BUCKETING
         
         if use_exponential_bucketing:
-            from vllm_hpu.extension.bucketing.exponential import (
+            from vllm_gaudi.extension.bucketing.exponential import (
                 ExponentialBucketingStrategy)
             strategy = ExponentialBucketingStrategy()
         else:
-            from vllm_hpu.extension.bucketing.linear import LinearBucketingStrategy
+            from vllm_gaudi.extension.bucketing.linear import LinearBucketingStrategy
             strategy = LinearBucketingStrategy()
         return strategy
 
