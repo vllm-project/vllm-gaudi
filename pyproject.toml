@@ -16,7 +16,6 @@ license = "Apache-2.0"
 readme = "README.md"
 description = "HPU plugin package for vLLM."
 classifiers = [
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -42,11 +41,13 @@ include = ["vllm_hpu"]
 
 [tool.yapfignore]
 ignore_patterns = [
-    "build/**",
+    "build/**", 
+    "vllm_hpu/extension/**"  # NOTE(kzawora): re-enable this once extension refactor is ready
 ]
 
 [tool.ruff]
 # Allow lines to be as long as 80.
+extend-exclude = ["vllm_hpu/extension/**"]  # NOTE(kzawora): re-enable this once extension refactor is ready
 line-length = 80
 
 [tool.ruff.lint]
@@ -79,9 +80,17 @@ ignore = [
 ]
 
 [tool.mypy]
+plugins = ['pydantic.mypy']
 ignore_missing_imports = true
+explicit_package_bases = true
 check_untyped_defs = true
 follow_imports = "silent"
+
+# After fixing type errors resulting from follow_imports: "skip" -> "silent",
+# move the directory here and remove it from tools/mypy.sh
+files = [
+    "vllm_hpu/*.py",
+]
 
 
 [tool.codespell]

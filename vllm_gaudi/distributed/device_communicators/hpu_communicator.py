@@ -3,9 +3,8 @@
 import torch
 import torch.distributed as dist
 
-from vllm.platforms import current_platform
-
-from vllm.distributed.device_communicators.base_device_communicator import DeviceCommunicatorBase
+from vllm.distributed.device_communicators.base_device_communicator \
+    import DeviceCommunicatorBase
 
 import habana_frameworks.torch as htorch  # noqa: F401
 
