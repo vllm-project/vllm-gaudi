@@ -1,7 +1,7 @@
 from typing import Callable, Optional
 
 import torch
-from vllm_hpu import envs
+from vllm_gaudi import envs
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 

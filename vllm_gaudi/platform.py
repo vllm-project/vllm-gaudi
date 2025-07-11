@@ -37,10 +37,11 @@ class HpuPlatform(Platform):
                              use_mla: bool) -> str:
         if use_v1 and not use_mla:
             logger.info("Using HPUAttentionV1 backend.")
-            return "vllm_hpu.attention.backends.hpu_attn.HPUAttentionBackend"
+            return "vllm_gaudi.attention.backends.hpu_attn.HPUAttentionBackend"
         if use_v1 and use_mla:
             logger.info("Using HPUAttentionMLA backend.")
-            return "vllm_hpu.attention.backends.hpu_attn.HPUMLAAttentionBackend"
+            return ("vllm_gaudi.attention.backends.hpu_attn."
+                    "HPUMLAAttentionBackend")
 
         # Fall back to in-tree HPUAttention backend
         if use_mla:
