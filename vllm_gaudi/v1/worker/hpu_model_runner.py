@@ -2282,17 +2282,13 @@ class HPUModelRunner:
                 "supported yet.")
 
         kv_caches: dict[str, torch.Tensor] = {}
-        kv_cache_sizes = {}
-        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            assert len(kv_cache_tensor.shared_by) == 1
-            kv_cache_sizes[kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
 
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
-            for layer_name in kv_cache_group.layer_names:
-                tensor_size = kv_cache_sizes[layer_name]
-                assert tensor_size % kv_cache_spec.page_size_bytes == 0
-                num_blocks = tensor_size // kv_cache_spec.page_size_bytes
+            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+                assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
+                num_blocks = \
+                    kv_cache_tensor.size // kv_cache_spec.page_size_bytes
                 # `num_blocks` is the number of blocks the model runner can use.
                 # `kv_cache_config.num_blocks` is the number of blocks that
                 # KVCacheManager may allocate.
@@ -2305,17 +2301,29 @@ class HPUModelRunner:
                     kv_cache_shape = self.attn_backend.get_kv_cache_shape(
                         num_blocks + 1, kv_cache_spec.block_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
+                    v_cache_shape = None if self.model_config.use_mla \
+                    else kv_cache_shape
                     dtype = kv_cache_spec.dtype
                     key_cache = torch.zeros(kv_cache_shape,
                                             dtype=dtype,
                                             device=self.device)
-                    value_cache = torch.zeros_like(key_cache)
-                    kv_caches[layer_name] = (key_cache, value_cache)
+                    if v_cache_shape is not None:
+                        value_cache = torch.zeros(v_cache_shape,
+                                                  dtype=dtype,
+                                                  device=self.device)
+                    else:
+                        value_cache = None
+                    for layer_name in kv_cache_tensor.shared_by:
+                        kv_caches[layer_name] = (key_cache, value_cache)
                 else:
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.
                     raise ValueError("Unknown KV cache spec type.")
-
+            layer_names = set()
+            for group in kv_cache_config.kv_cache_groups:
+                layer_names.update(group.layer_names)
+            assert layer_names == set(
+                kv_caches.keys()), "Some layers are not correctly initialized"
         bind_kv_cache(
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
