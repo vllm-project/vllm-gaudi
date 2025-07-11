@@ -415,6 +415,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             else ModuleFusedSDPA(HPUFusedSDPA)
         self.prefill_impl = get_config().prompt_attn_impl
         self.use_contiguous_pa = get_config().use_contiguous_pa
+        self.use_merged_prefill = get_config().merged_prefill
         if alibi_slopes is not None:
             assert self.prefill_impl != 'flex_impl', \
                 'Prefill with Flex Attention not supported with alibi slopes!'
