@@ -1,0 +1,12 @@
+model_name: "/mnt/weka/llm/Qwen3/Qwen3-30B-A3B/"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.9
+  - name: "exact_match,flexible-extract"
+    value: 0.9
+limit: 256
+num_fewshot: 5
+dtype: "bfloat16"
+trust_remote_code: True
