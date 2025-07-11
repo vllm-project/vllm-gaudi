@@ -1,9 +1,7 @@
 from functools import cache
 import os
 from vllm.utils import make_tensor_with_pad, TORCH_DTYPE_TO_NUMPY_DTYPE
-from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, Sequence, Tuple, Type, TypeVar, Union, cast,
-                    overload)
+from typing import (Optional, TypeVar, Union)
 import torch
 import numpy as np
 import numpy.typing as npt
@@ -11,6 +9,7 @@ import math
 
 T = TypeVar("T")
 U = TypeVar("U")
+
 
 @cache
 def is_fake_hpu() -> bool:
@@ -109,4 +108,3 @@ def make_tensor_with_pad_align(
         tensor = tensor.pin_memory()
 
     return tensor
-
