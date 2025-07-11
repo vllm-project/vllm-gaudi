@@ -1,5 +1,5 @@
 # Summary
 
 [](){ #pkg_overview }
-### Full package overview
-::: vllm_hpu
+## Full package overview
+::: vllm_gaudi

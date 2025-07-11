@@ -21,8 +21,9 @@ run_mypy() {
 }
 
 run_mypy # Note that this is less strict than CI
-run_mypy vllm_hpu/attention
-run_mypy vllm_hpu/distributed
-run_mypy vllm_hpu/ops
-run_mypy vllm_hpu/worker
-run_mypy vllm_hpu/v1
+run_mypy tests
+run_mypy vllm_gaudi/attention
+run_mypy vllm_gaudi/distributed
+#run_mypy vllm_gaudi/extension # NOTE(kzawora): re-enable this once extension refactor is ready
+run_mypy vllm_gaudi/ops
+run_mypy vllm_gaudi/v1

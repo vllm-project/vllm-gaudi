@@ -1,16 +1,11 @@
-import importlib.util
 import logging
 import os
-import subprocess
-import sys
-from sysconfig import get_paths
-from typing import Dict, List
 
 from setuptools import setup, find_packages
 from setuptools_scm import get_version
 
 try:
-    VERSION = get_version(write_to="vllm_hpu/_version.py")
+    VERSION = get_version(write_to="vllm_gaudi/_version.py")
 except LookupError:
     # The checkout action in github action CI does not checkout the tag. It
     # only checks out the commit. In this case, we set a dummy version.
@@ -20,13 +15,15 @@ ROOT_DIR = os.path.dirname(__file__)
 logger = logging.getLogger(__name__)
 ext_modules = []
 
+
 def get_path(*filepath) -> str:
     return os.path.join(ROOT_DIR, *filepath)
 
-def get_requirements() -> List[str]:
+
+def get_requirements() -> list[str]:
     """Get Python package dependencies from requirements.txt."""
 
-    def _read_requirements(filename: str) -> List[str]:
+    def _read_requirements(filename: str) -> list[str]:
         with open(get_path(filename)) as f:
             requirements = f.read().strip().split("\n")
         resolved_requirements = []
@@ -42,18 +39,19 @@ def get_requirements() -> List[str]:
     try:
         requirements = _read_requirements("requirements.txt")
     except ValueError:
-        print("Failed to read requirements.txt in vllm_hpu.")
+        print("Failed to read requirements.txt in vllm_gaudi.")
     return requirements
-  
+
+
 setup(
-    name="vllm_hpu",
+    name="vllm_gaudi",
     version=VERSION,
     author="Intel",
-    long_description="HPU plugin package for vLLM.",
+    long_description="Intel Gaudi plugin package for vLLM.",
     long_description_content_type="text/markdown",
-    url="https://github.com/vllm-project/vllm-hpu",
+    url="https://github.com/vllm-project/vllm-gaudi",
     project_urls={
-        "Homepage": "https://github.com/vllm-project/vllm-hpu",
+        "Homepage": "https://github.com/vllm-project/vllm-gaudi",
     },
     classifiers=[
         "Programming Language :: Python :: 3",
@@ -65,7 +63,7 @@ setup(
     ext_modules=ext_modules,
     extras_require={},
     entry_points={
-        "vllm.platform_plugins": ["hpu = vllm_hpu:register"],
-        "vllm.general_plugins": ["hpu_custom_ops = vllm_hpu:register_ops"],
+        "vllm.platform_plugins": ["hpu = vllm_gaudi:register"],
+        "vllm.general_plugins": ["hpu_custom_ops = vllm_gaudi:register_ops"],
     },
 )

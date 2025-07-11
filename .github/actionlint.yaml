@@ -1,0 +1,3 @@
+self-hosted-runner:
+  labels:
+    - ucb-vllm-cicd-g2
