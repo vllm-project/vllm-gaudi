@@ -12,7 +12,7 @@ import torch
 import torch.nn.functional as F
 import math
 import habana_frameworks.torch.core as htcore
-from vllm_hpu.extension.runtime import get_config
+from vllm_gaudi.extension.runtime import get_config
 import habana_frameworks.torch.utils.experimental as htexp
 
 is_hpu_gaudi2 = htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi2

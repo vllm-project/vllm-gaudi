@@ -12,7 +12,7 @@ class HPURMSNorm(RMSNorm):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        from vllm_hpu.extension.kernels import rms_norm
+        from vllm_gaudi.extension.kernels import rms_norm
         HPUFusedRMSNorm = rms_norm()
         if residual is not None:
             orig_shape = x.shape

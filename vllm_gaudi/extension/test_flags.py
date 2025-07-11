@@ -7,7 +7,7 @@
 
 import os
 import pytest
-from vllm_hpu.extension.config import VersionRange, Config, Kernel, Env, boolean, All, Not, Eq, Enabled, FirstEnabled, choice
+from vllm_gaudi.extension.config import VersionRange, Config, Kernel, Env, boolean, All, Not, Eq, Enabled, FirstEnabled, choice
 
 
 def with_cfg(fn):

@@ -10,9 +10,9 @@ from vllm.model_executor.layers.quantization.fp8 import (Fp8LinearMethod as
                                                          OrigFp8LinearMethod,
                                                          Fp8MoEMethod,
                                                          Fp8Config)
-import vllm_hpu.extension.ops as hpu_ops
-from vllm_hpu.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel,
-                                    VllmMixtureOfExpertsOpFP8)
+import vllm_gaudi.extension.ops as hpu_ops
+from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel,
+                                      VllmMixtureOfExpertsOpFP8)
 
 
 class Fp8LinearMethod(OrigFp8LinearMethod):

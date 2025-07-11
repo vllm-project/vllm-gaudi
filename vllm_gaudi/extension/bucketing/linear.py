@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Tuple
 from .common import WeakSingleton
 
-from vllm_hpu.extension.runtime import get_config
+from vllm_gaudi.extension.runtime import get_config
 
 logger = logging.getLogger(__name__)
 

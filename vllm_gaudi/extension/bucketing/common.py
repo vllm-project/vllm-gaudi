@@ -42,9 +42,9 @@ def get_bucketing_context():
     use_exponential_bucketing = os.environ.get(
         'VLLM_EXPONENTIAL_BUCKETING', 'true').lower() == 'true'
     if use_exponential_bucketing:
-        from vllm_hpu.extension.bucketing.exponential import (
+        from vllm_gaudi.extension.bucketing.exponential import (
             HPUExponentialBucketingContext as HPUBucketingContext)
     else:
-        from vllm_hpu.extension.bucketing.linear import HPUBucketingContext
+        from vllm_gaudi.extension.bucketing.linear import HPUBucketingContext
 
     return HPUBucketingContext

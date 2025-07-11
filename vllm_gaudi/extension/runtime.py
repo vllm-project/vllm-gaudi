@@ -6,10 +6,10 @@
 ###############################################################################
 
 
-from vllm_hpu.extension.environment import get_environment
-from vllm_hpu.extension.features import get_features, get_user_flags, get_experimental_flags
-from vllm_hpu.extension.config import Config
-from vllm_hpu.extension.logger import logger
+from vllm_gaudi.extension.environment import get_environment
+from vllm_gaudi.extension.features import get_features, get_user_flags, get_experimental_flags
+from vllm_gaudi.extension.config import Config
+from vllm_gaudi.extension.logger import logger
 
 
 DETECTED = None

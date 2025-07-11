@@ -20,7 +20,7 @@ def _get_hw(_):
             return "gaudi2"
         case htexp.synDeviceType.synDeviceGaudi3:
             return "gaudi3"
-    from vllm_hpu.extension.utils import is_fake_hpu
+    from vllm_gaudi.extension.utils import is_fake_hpu
     if is_fake_hpu():
         return "cpu"
     logger().warning(f'Unknown device type: {device_type}')
@@ -40,7 +40,7 @@ def _get_build(_):
     if output.returncode == 0 and match:
         return match.group('version')
     # In cpu-test environment we don't have access to habana-torch-plugin
-    from vllm_hpu.extension.utils import is_fake_hpu
+    from vllm_gaudi.extension.utils import is_fake_hpu
     result = '0.0.0.0' if is_fake_hpu() else None
     logger().warning(f"Unable to detect habana-torch-plugin version! Returning: {result}")
     return result
@@ -58,7 +58,7 @@ def set_vllm_config(cfg):
     # t.compile is very picky about what functions we can call inside modules
     # since this is the last step we can force recompilation of config to
     # ensure all values are computed before entering the model
-    from vllm_hpu.extension.runtime import get_config
+    from vllm_gaudi.extension.runtime import get_config
     get_config().finalize()
 
 

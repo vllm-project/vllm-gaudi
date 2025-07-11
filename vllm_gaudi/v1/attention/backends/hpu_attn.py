@@ -10,8 +10,8 @@ from typing import Optional
 import torch
 
 from vllm.attention.backends.abstract import AttentionMetadata
-from vllm_hpu.attention.backends.hpu_attn import (HPUAttentionBackend,
-                                                  HPUAttentionMetadata)
+from vllm_gaudi.attention.backends.hpu_attn import (HPUAttentionBackend,
+                                                    HPUAttentionMetadata)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)

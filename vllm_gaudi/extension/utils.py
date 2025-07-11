@@ -11,7 +11,7 @@ from functools import lru_cache, wraps
 import habana_frameworks.torch as htorch
 import torch
 
-from vllm_hpu.extension.runtime import get_config
+from vllm_gaudi.extension.runtime import get_config
 
 
 @lru_cache(maxsize=None)

@@ -19,8 +19,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors import (
     compressed_tensors_moe)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
     CompressedTensorsW8A8Fp8MoEMethod)
-import vllm_hpu.extension.ops as hpu_ops
-from vllm_hpu.extension.ops import VllmMixtureOfExpertsOpFP8PerChannel
+import vllm_gaudi.extension.ops as hpu_ops
+from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpFP8PerChannel
 
 SUPPORTED_STRATEGIES = [
     QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR

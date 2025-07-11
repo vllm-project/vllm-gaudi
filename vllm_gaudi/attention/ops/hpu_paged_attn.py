@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
-from vllm_hpu.extension import cache_ops, ops
+from vllm_gaudi.extension import cache_ops, ops
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512

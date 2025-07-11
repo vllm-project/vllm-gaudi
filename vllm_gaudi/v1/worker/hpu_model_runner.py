@@ -14,9 +14,9 @@ import habana_frameworks.torch.internal.bridge_config as bc
 import numpy as np
 import torch
 import torch.distributed
-import vllm_hpu.extension.environment as environment
-from vllm_hpu.extension.profiler import HabanaMemoryProfiler, format_bytes
-from vllm_hpu.extension.runtime import get_config
+import vllm_gaudi.extension.environment as environment
+from vllm_gaudi.extension.profiler import HabanaMemoryProfiler, format_bytes
+from vllm_gaudi.extension.runtime import get_config
 
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
@@ -32,10 +32,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader import get_model
 from vllm.sampling_params import SamplingType
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-from vllm_hpu.utils import is_fake_hpu
+from vllm_gaudi.utils import is_fake_hpu
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
                         is_pin_memory_available)
-from vllm_hpu.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
+from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
@@ -43,13 +43,13 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
-from vllm_hpu.v1.worker.hpu_input_batch import InputBatch
+from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
 from vllm.distributed.parallel_state import get_pp_group
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
 
-from vllm_hpu.extension.bucketing.common import get_bucketing_context
+from vllm_gaudi.extension.bucketing.common import get_bucketing_context
 
 logger = init_logger(__name__)
 

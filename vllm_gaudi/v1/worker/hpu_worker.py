@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Optional
 import torch
 import torch.distributed
 import torch.nn as nn
-from vllm_hpu.extension.profiler import HabanaMemoryProfiler, format_bytes
+from vllm_gaudi.extension.profiler import HabanaMemoryProfiler, format_bytes
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
@@ -18,12 +18,12 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm_hpu.utils import is_fake_hpu
+from vllm_gaudi.utils import is_fake_hpu
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
-from vllm_hpu.v1.worker.hpu_model_runner import HPUModelRunner, bool_helper
+from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, bool_helper
 
 logger = init_logger(__name__)
 

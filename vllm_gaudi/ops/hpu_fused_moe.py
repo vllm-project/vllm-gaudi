@@ -3,7 +3,7 @@ from typing import Callable, Optional
 import torch
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod)
-from vllm_hpu.extension.ops import (VllmMixtureOfExpertsOp)
+from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOp)
 
 
 @UnquantizedFusedMoEMethod.register_oot
