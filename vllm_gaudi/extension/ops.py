@@ -700,6 +700,7 @@ def dynamic_quant(data, single_scale = False):
 
 
 def fp8_block_linear_postprocess_weights(layer, force_channel_fp8=False):
+    torch.hpu.synchronize()
     if torch.isnan(layer.weight.data).any():
         raise ValueError("NaN detected in weights. Please use the flag VLLM_HPU_CONVERT_TO_FP8UZ to convert it at runtime or" \
         " convert the weights using scripts/deepseek_gaudi2 from vllm-hpu-extension")
