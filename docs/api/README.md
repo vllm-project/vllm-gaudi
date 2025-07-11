@@ -2,4 +2,4 @@
 
 [](){ #pkg_overview }
 ## Full package overview
-::: vllm_hpu
+::: vllm_gaudi

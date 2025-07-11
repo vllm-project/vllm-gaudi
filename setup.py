@@ -5,7 +5,7 @@ from setuptools import setup, find_packages
 from setuptools_scm import get_version
 
 try:
-    VERSION = get_version(write_to="vllm_hpu/_version.py")
+    VERSION = get_version(write_to="vllm_gaudi/_version.py")
 except LookupError:
     # The checkout action in github action CI does not checkout the tag. It
     # only checks out the commit. In this case, we set a dummy version.
@@ -39,12 +39,12 @@ def get_requirements() -> list[str]:
     try:
         requirements = _read_requirements("requirements.txt")
     except ValueError:
-        print("Failed to read requirements.txt in vllm_hpu.")
+        print("Failed to read requirements.txt in vllm_gaudi.")
     return requirements
 
 
 setup(
-    name="vllm_hpu",
+    name="vllm_gaudi",
     version=VERSION,
     author="Intel",
     long_description="Intel Gaudi plugin package for vLLM.",
@@ -63,7 +63,7 @@ setup(
     ext_modules=ext_modules,
     extras_require={},
     entry_points={
-        "vllm.platform_plugins": ["hpu = vllm_hpu:register"],
-        "vllm.general_plugins": ["hpu_custom_ops = vllm_hpu:register_ops"],
+        "vllm.platform_plugins": ["hpu = vllm_gaudi:register"],
+        "vllm.general_plugins": ["hpu_custom_ops = vllm_gaudi:register_ops"],
     },
 )
