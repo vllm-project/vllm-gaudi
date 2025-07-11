@@ -185,7 +185,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn \
             else VLLMFP8KVCache()
         self.fused_scaled_dot_product_attention = kernels.fsdpa()
-
+        self.use_merged_prefill = get_config().merged_prefill
         self.prefill_impl = get_config().prompt_attn_impl
         assert self.prefill_impl != 'fsdpa_impl' or alibi_slopes is None, \
             'Prefill with FusedSDPA not supported with alibi slopes!'
@@ -219,11 +219,8 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
             raise NotImplementedError(
                 "output is not yet supported for MLAImplBase")
 
-        batch_size = q.shape[0]
         is_prefill = attn_metadata.is_prompt
 
-        k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
-        q = q.view(-1, self.num_heads, self.qk_head_dim)
         if not is_prefill:
             # decode
             q_nope, q_pe = q.split(
@@ -252,15 +249,15 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
 
         if is_prefill:
             return self._forward_prefill(q, latent_vec_k, k_cache,
-                                         attn_metadata, batch_size)
+                                         attn_metadata)
         else:
             return self._forward_decode(decode_ql_nope, q_pe, k_cache,
-                                        attn_metadata, batch_size)
+                                        attn_metadata)
 
     def _forward_prefill(  # type: ignore
             self, q: torch.Tensor, latent_vec_k: torch.Tensor,
-            k_cache: torch.Tensor, attn_metadata: HPUAttentionMetadata,
-            batch_size: int) -> torch.Tensor:
+            k_cache: torch.Tensor,
+            attn_metadata: HPUAttentionMetadata) -> torch.Tensor:
 
         ##### get prefix cache #####
         if attn_metadata.block_list is not None:
@@ -284,6 +281,12 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
 
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
+        if not self.use_merged_prefill:
+            assert attn_metadata.seq_lens_tensor is not None, \
+                "seq_lens_tensor must be provided for prefill attention"
+            batch_size = attn_metadata.seq_lens_tensor.shape[0]
+        else:
+            batch_size = 1
         q = q.view(batch_size, -1, self.num_heads, self.qk_head_dim)
         k = k.view(batch_size, -1, self.num_heads, self.qk_head_dim)
         v = v.view(batch_size, -1, self.num_heads, self.v_head_dim)
@@ -318,12 +321,13 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         # remove padding
         output = output.view(-1, self.num_heads,
                              q.shape[-1])[..., :v.shape[-1]]
+
         return output.reshape(-1, self.num_heads * v.shape[-1])
 
     def _forward_decode(  # type: ignore
             self, q_nope: torch.Tensor, q_pe: torch.Tensor,
-            k_cache: torch.Tensor, attn_metadata: HPUAttentionMetadata,
-            batch_size: int) -> torch.Tensor:
+            k_cache: torch.Tensor,
+            attn_metadata: HPUAttentionMetadata) -> torch.Tensor:
         query = torch.cat([q_nope, q_pe], dim=-1)
         key_cache = k_cache.unsqueeze(1)
         value_cache = None
@@ -409,7 +413,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         HPUFusedSDPA = kernels.fsdpa()
         self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
             else ModuleFusedSDPA(HPUFusedSDPA)
-
         self.prefill_impl = get_config().prompt_attn_impl
         self.use_contiguous_pa = get_config().use_contiguous_pa
         if alibi_slopes is not None:
