@@ -10,7 +10,7 @@ build-backend = "setuptools.build_meta"
 
 
 [project]
-name = "vllm_hpu"
+name = "vllm_gaudi"
 authors = [{name = "Intel"}]
 license = "Apache-2.0"
 readme = "README.md"
@@ -29,7 +29,7 @@ requires-python = ">=3.9,<3.13"
 dynamic = [ "version", "dependencies", "optional-dependencies"]
 
 [project.urls]
-Homepage = "https://github.com/HabanaAI/vllm-hpu-extension"
+Homepage = "https://github.com/vllm-project/vllm-gaudi"
 
 
 [tool.setuptools_scm]
@@ -37,17 +37,17 @@ Homepage = "https://github.com/HabanaAI/vllm-hpu-extension"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["vllm_hpu"]
+include = ["vllm_gaudi"]
 
 [tool.yapfignore]
 ignore_patterns = [
     "build/**", 
-    "vllm_hpu/extension/**"  # NOTE(kzawora): re-enable this once extension refactor is ready
+    "vllm_gaudi/extension/**"  # NOTE(kzawora): re-enable this once extension refactor is ready
 ]
 
 [tool.ruff]
 # Allow lines to be as long as 80.
-extend-exclude = ["vllm_hpu/extension/**"]  # NOTE(kzawora): re-enable this once extension refactor is ready
+extend-exclude = ["vllm_gaudi/extension/**"]  # NOTE(kzawora): re-enable this once extension refactor is ready
 line-length = 80
 
 [tool.ruff.lint]
@@ -89,7 +89,7 @@ follow_imports = "silent"
 # After fixing type errors resulting from follow_imports: "skip" -> "silent",
 # move the directory here and remove it from tools/mypy.sh
 files = [
-    "vllm_hpu/*.py",
+    "vllm_gaudi/*.py",
 ]
 
 
