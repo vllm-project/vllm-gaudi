@@ -1,0 +1,66 @@
+# basic model
+echo "Testing basic model with vllm-hpu plugin v1"
+echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model facebook/opt-125m
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model facebook/opt-125m
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for basic model" >&2
+    exit -1
+fi
+echo "Test with basic model passed"
+
+# tp=2
+echo "Testing tensor parallel size 2 with vllm-hpu plugin v1"
+echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model facebook/opt-125m --tensor-parallel-size 2
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model facebook/opt-125m --tensor-parallel-size 2
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for tensor parallel size 2" >&2
+    exit -1
+fi
+echo "Test with tensor parallel size 2 passed"
+
+# mla and moe
+echo "Testing MLA and MoE with vllm-hpu plugin v1"
+echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for deepseek v2 lite passed" >&2
+    exit -1
+fi
+echo "Test with deepseek v2 lite passed"
+
+# gsm8k test
+# used to check HPUattn + MLP
+echo "Testing GSM8K on ganite-8b"
+echo VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
+pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/granite-8b.yaml
+VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
+pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/granite-8b.yaml
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for granite-8b" >&2
+    exit -1
+fi
+echo "Test with granite-8b passed"
+
+# used to check MLA + MOE
+echo "Testing GSM8K on deepseek v2 lite"
+# deepseek-R1
+echo VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml
+VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
+pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for deepseek R1" >&2
+    exit -1
+fi
+echo "Test with deepseek R1 passed"
+
+# used to check HPUATTN + MOE + ExpertParallel
+echo "Testing GSM8K on QWEN3-30B-A3B"
+echo VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 TP_SIZE=2 \
+pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/Qwen3-30B-A3B.yaml
+VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 TP_SIZE=2 \
+pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/Qwen3-30B-A3B.yaml
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for QWEN3-30B-A3B" >&2
+    exit -1
+fi
+echo "Test with QWEN3-30B-A3B passed"
