@@ -13,7 +13,8 @@ from vllm_gaudi.extension.logger import logger
 
 
 DETECTED = None
-
+HIDDEN_PARAMS = ['exponential_bucketing', 'linear_bucketing', 
+                     'flex_impl', 'fsdpa_impl', 'naive_impl']
 
 def filter_defined(config, keys):
     return {k: v for k, v in config.get_all(keys).items() if v is not None}
@@ -24,6 +25,8 @@ def dump(prefix, values):
         padding = ' ' * 4
         logger().info(f'{prefix}:')
         for key, value in values.items():
+            if key in HIDDEN_PARAMS:
+                continue
             logger().info(f'{padding}{key}: {value}')
 
 

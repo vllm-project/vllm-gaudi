@@ -18,12 +18,13 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm_gaudi.utils import is_fake_hpu
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
+from vllm_gaudi.utils import is_fake_hpu
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, bool_helper
+from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
 
 
-class HPUWorker:
+class HPUWorker(WorkerBase):
 
     def __init__(
         self,
@@ -100,10 +101,6 @@ class HPUWorker:
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
-
-    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
-        """Allocate GPU KV cache with the specified kv_cache_config."""
-        self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
@@ -192,27 +189,27 @@ class HPUWorker:
         gc.collect()
         return cache_size_bytes - dummy_block_headroom
 
-    # def initialize_cache(self, kv_cache_configs: list[KVCacheConfig]) -> None:
-    #     """Allocate GPU KV cache with the specified kv_cache_config."""
-    #     kv_cache_config = kv_cache_configs[self.rank]
-
-    #     with HabanaMemoryProfiler() as m:
-    #         self.model_runner.initialize_kv_cache(kv_cache_config)
-    #         torch.hpu.synchronize()
-    #     msg = (f"Usable num_blocks: {kv_cache_config.num_blocks}, "
-    #            f"actual allocated num_blocks: "
-    #            f"{self.model_runner.kv_caches[0][0].shape[0]} "
-    #            f"(_PAD_BLOCK_ID={self.model_runner._PAD_BLOCK_ID}, "
-    #            f"_PAD_SLOT_ID={self.model_runner._PAD_SLOT_ID})")
-    #     logger.info(msg)
-    #     msg = ("Initializing cache engine "
-    #            f"took {m.get_summary_string()}")
-    #     logger.info(msg)
-    #     self.compile_or_warm_up_model()
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
+
+    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
+        """Allocate GPU KV cache with the specified kv_cache_config."""
+
+        with HabanaMemoryProfiler() as m:
+            self.model_runner.initialize_kv_cache(kv_cache_config)
+            torch.hpu.synchronize()
+        msg = (f"Usable num_blocks: {kv_cache_config.num_blocks}, "
+               f"actual allocated num_blocks: "
+               f"{self.model_runner.kv_caches[0][0].shape[0]} "
+               f"(_PAD_BLOCK_ID={self.model_runner._PAD_BLOCK_ID}, "
+               f"_PAD_SLOT_ID={self.model_runner._PAD_SLOT_ID})")
+        logger.info(msg)
+        msg = ("Initializing cache engine "
+               f"took {m.get_summary_string()}")
+        logger.info(msg)
+        self.compile_or_warm_up_model()
 
     def compile_or_warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
