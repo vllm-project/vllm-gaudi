@@ -1,10 +1,12 @@
-model_card:
-  model_name: "/mnt/weka/llm/DeepSeek-V2-Lite-Chat"
-  tasks: gsm8k
-  num_fewshot: 5
-  limit: 1000
-  trust_remote_code: True
-
-metrics:
-  name: exact_match,strict-match
-  value: 0.66
+model_name: "/mnt/weka/llm/DeepSeek-V2-Lite-Chat"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.66
+  - name: "exact_match,flexible-extract"
+    value: 0.66
+limit: 1000
+num_fewshot: 5
+dtype: "bfloat16"
+trust_remote_code: True
