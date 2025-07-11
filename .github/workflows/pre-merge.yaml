@@ -83,6 +83,8 @@ jobs:
           echo "Running HPU plugin v1 test"
           docker run --rm --runtime=habana --name=hpu-plugin-v1-test-pre-merge --network=host \
             -e HABANA_VISIBLE_DEVICES=all \
+            -e HF_HOME=/workspace/hf_cache \
+            -v `pwd`/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-pre-merge \
             /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_tests.sh"
           
