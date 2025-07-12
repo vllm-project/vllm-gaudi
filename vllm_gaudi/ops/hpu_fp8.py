@@ -106,6 +106,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        **kwargs,
     ) -> torch.Tensor:
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
