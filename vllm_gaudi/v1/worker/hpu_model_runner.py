@@ -42,7 +42,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.utils import bind_kv_cache
+from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.distributed.parallel_state import get_pp_group
