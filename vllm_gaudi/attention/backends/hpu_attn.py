@@ -23,9 +23,9 @@ from vllm.attention.backends.mla.common import MLACommonImpl
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention,
                                                      HPUPagedAttentionMetadata)
-from vllm.logger import init_logger
 
-logger = init_logger(__name__)
+from vllm_gaudi.extension.logger import logger as init_logger
+logger = init_logger()
 
 
 class HPUAttentionBackend(AttentionBackend):

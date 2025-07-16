@@ -12,9 +12,8 @@ import torch
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm_gaudi.attention.backends.hpu_attn import (HPUAttentionBackend,
                                                     HPUAttentionMetadata)
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
+from vllm_gaudi.extension.logger import logger as init_logger
+logger = init_logger()
 
 
 class HPUAttentionBackendV1(HPUAttentionBackend):

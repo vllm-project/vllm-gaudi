@@ -24,7 +24,6 @@ from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import get_sampler
@@ -50,7 +49,8 @@ from vllm.distributed.parallel_state import get_pp_group
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
 
-logger = init_logger(__name__)
+from vllm_gaudi.extension.logger import logger as init_logger
+logger = init_logger()
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
