@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any, Optional
 import torch
 
 from vllm import envs
-from vllm.logger import init_logger
 
 from vllm.platforms import Platform, PlatformEnum, _Backend
 
@@ -16,7 +15,9 @@ else:
     ModelConfig = None
     VllmConfig = None
 
-logger = init_logger(__name__)
+from vllm_gaudi.extension.logger import logger as init_logger
+
+logger = init_logger()
 
 
 class HpuPlatform(Platform):
