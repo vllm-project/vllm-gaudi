@@ -1703,6 +1703,10 @@ class HPUModelRunner:
                     self.model = prepare(self.model, config)
                 elif config.quantize:
                     self.model = convert(self.model, config)
+                else:
+                    raise ValueError(
+                        "Unknown quantization config mode,"
+                        "please validate quantization config file")
                 htcore.hpu_initialize(self.model,
                                       mark_only_scales_as_const=True)
             self.inc_initialized_successfully = True
