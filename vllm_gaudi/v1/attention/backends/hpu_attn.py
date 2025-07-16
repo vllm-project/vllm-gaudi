@@ -13,6 +13,7 @@ from vllm.attention.backends.abstract import AttentionMetadata
 from vllm_gaudi.attention.backends.hpu_attn import (HPUAttentionBackend,
                                                     HPUAttentionMetadata)
 from vllm_gaudi.extension.logger import logger as init_logger
+
 logger = init_logger()
 
 

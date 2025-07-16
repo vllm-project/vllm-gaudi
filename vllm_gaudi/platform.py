@@ -16,6 +16,7 @@ else:
     VllmConfig = None
 
 from vllm_gaudi.extension.logger import logger as init_logger
+
 logger = init_logger()
 
 

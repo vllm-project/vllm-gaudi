@@ -25,6 +25,7 @@ from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention,
                                                      HPUPagedAttentionMetadata)
 
 from vllm_gaudi.extension.logger import logger as init_logger
+
 logger = init_logger()
 
 

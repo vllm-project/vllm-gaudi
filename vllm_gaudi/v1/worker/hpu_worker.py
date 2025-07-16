@@ -26,6 +26,7 @@ from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, bool_helper
 from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_gaudi.extension.logger import logger as init_logger
+
 logger = init_logger()
 
 if TYPE_CHECKING:

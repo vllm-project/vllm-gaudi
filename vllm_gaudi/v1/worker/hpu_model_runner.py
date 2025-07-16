@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
 
 from vllm_gaudi.extension.logger import logger as init_logger
+
 logger = init_logger()
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
