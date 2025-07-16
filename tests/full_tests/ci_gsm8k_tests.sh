@@ -28,6 +28,28 @@ if [ $? -ne 0 ]; then
 fi
 echo "Test with deepseek v2 lite passed"
 
+# granite + inc
+echo "Testing granite-8b + inc with vllm-hpu plugin v1"
+echo QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_unit_scale_quant.json HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model ibm-granite/granite-3.3-2b-instruct --trust-remote-code  --quantization inc --kv_cache_dtype fp8_inc
+QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_unit_scale_quant.json \
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model ibm-granite/granite-3.3-2b-instruct --trust-remote-code --quantization inc --kv_cache_dtype fp8_inc
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for granite + inc" >&2
+    exit -1
+fi
+echo "Test with granite + inc passed"
+
+# deepseek v2 + inc
+echo "Testing deepseek_v2 + inc with vllm-hpu plugin v1"
+echo QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_unit_scale_quant.json HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code  --quantization inc --kv_cache_dtype fp8_inc
+QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_unit_scale_quant.json \
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --kv_cache_dtype fp8_inc
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for deepseek_v2 + inc" >&2
+    exit -1
+fi
+echo "Test with deepseek_v2 + inc passed"
+
 # gsm8k test
 # used to check HPUattn + MLP
 echo "Testing GSM8K on ganite-8b"
