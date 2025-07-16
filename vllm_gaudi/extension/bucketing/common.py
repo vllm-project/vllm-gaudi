@@ -55,7 +55,8 @@ class HPUBucketingManager():
                             max_num_prefill_seqs = self.max_num_prefill_seqs,
                             block_size = self.block_size,
                             max_num_batched_tokens = self.max_num_batched_tokens,
-                            max_model_len = self.max_model_len)
+                            max_model_len = self.max_model_len,
+                            max_num_blocks = self.num_hpu_blocks)
             self.log_generate_info(True)
         else:
             logger().info("Bucketing is off - skipping prompt buckets generation")
