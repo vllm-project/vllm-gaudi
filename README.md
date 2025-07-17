@@ -17,3 +17,12 @@ Learn more:
 
 📚 [Intel Gaudi Documentation](https://docs.habana.ai/en/v1.21.1/index.html)  
 🚀 [vLLM Plugin System Overview](https://docs.vllm.ai/en/latest/design/plugin_system.html)
+
+## Installation guide for developers
+
+```
+git clone https://github.com/vllm-project/vllm && cd vllm
+VLLM_TARGET_DEVICE=hpu python3 setup.py
+cd .. && git clone https://github.com/vllm-project/vllm-gaudi && cd vllm-gaudi
+pip install -e .
+```
