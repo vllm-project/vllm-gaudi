@@ -47,14 +47,13 @@ jobs:
           RUN git checkout main
 
           # Pinning versions in requirements might be good practice for CI consistency
-          RUN pip install -v -r requirements/hpu.txt
           RUN pip install lm_eval pytest pytest_asyncio
 
           ENV no_proxy=localhost,127.0.0.1
           ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
 
           # Ensure setup.py install works as expected
-          RUN VLLM_TARGET_DEVICE=hpu python3 setup.py install
+          RUN VLLM_TARGET_DEVICE=empty pip install .
 
           # install development dependencies (for testing)
           RUN python3 -m pip install -e tests/vllm_test_utils
