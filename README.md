@@ -21,28 +21,28 @@ Learn more:
 ## Getting Started
 1. Install vLLM with `pip` or [from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source):  
 
-```bash
-pip install vllm
-```
+    ```bash
+    pip install vllm
+    ```
 
-or
+    or
 
-```bash
-# Build vLLM from source for empty platform, reusing existing torch installation
-git clone https://github.com/vllm-project/vllm
-cd vllm
-pip install -r <(sed '/^[torch]/d' requirements/build.txt)
-VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
-cd ..
-```
+    ```bash
+    # Build vLLM from source for empty platform, reusing existing torch installation
+    git clone https://github.com/vllm-project/vllm
+    cd vllm
+    pip install -r <(sed '/^[torch]/d' requirements/build.txt)
+    VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
+    cd ..
+    ```
 
-1. Install vLLM-Gaudi from source:
+2. Install vLLM-Gaudi from source:
 
-```bash
-git clone https://github.com/vllm-project/vllm-gaudi
-cd vllm-gaudi
-pip install -e .
-```
+    ```bash
+    git clone https://github.com/vllm-project/vllm-gaudi
+    cd vllm-gaudi
+    pip install -e .
+    ```
 
 ### Full installation from source (vLLM and vLLM-Gaudi):
 
