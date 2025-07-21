@@ -7,7 +7,7 @@
 
 import os
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 import vllm_gaudi.extension.kernels as kernels
@@ -161,7 +161,6 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
             alibi_slopes: Optional[list[float]],
             sliding_window: Optional[int],
             kv_cache_dtype: str,
-            blocksparse_params: Optional[dict[str, Any]],
             logits_soft_cap: Optional[float],
             attn_type: str,
             kv_sharing_target_layer_name: Optional[str] = None,
@@ -170,7 +169,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         torch.nn.Module.__init__(self)
         MLACommonImpl.__init__(self, num_heads, head_size, scale, num_kv_heads,
                                alibi_slopes, sliding_window, kv_cache_dtype,
-                               blocksparse_params, logits_soft_cap, attn_type,
+                               logits_soft_cap, attn_type,
                                kv_sharing_target_layer_name, **kwargs)
         self.enable_fp8_attn = kv_cache_dtype == 'fp8_inc' and os.environ.get(
             'QUANT_CONFIG', None) is None
@@ -191,13 +190,11 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         assert self.prefill_impl != 'fsdpa_impl' or alibi_slopes is None, \
             'Prefill with FusedSDPA not supported with alibi slopes!'
 
-        unsupported_features = [
-            alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap
-        ]
+        unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
             raise NotImplementedError(
                 "HPUMLAImpl does not support one of the following: "
-                "alibi_slopes, sliding_window, blocksparse_params, "
+                "alibi_slopes, sliding_window, "
                 "logits_soft_cap")
 
         if attn_type != AttentionType.DECODER:
@@ -379,7 +376,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
