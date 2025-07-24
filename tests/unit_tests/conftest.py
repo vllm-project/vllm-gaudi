@@ -3,6 +3,7 @@ from vllm.distributed import (cleanup_dist_env_and_memory,
                               initialize_model_parallel)
 import pytest
 import tempfile
+from huggingface_hub import snapshot_download
 
 
 @pytest.fixture
@@ -18,3 +19,14 @@ def dist_init():
     initialize_model_parallel(1, 1)
     yield
     cleanup_dist_env_and_memory()
+
+
+@pytest.fixture(scope="session")
+def sql_lora_huggingface_id():
+    # huggingface repo id is used to test lora runtime downloading.
+    return "yard1/llama-2-7b-sql-lora-test"
+
+
+@pytest.fixture(scope="session")
+def sql_lora_files(sql_lora_huggingface_id):
+    return snapshot_download(repo_id=sql_lora_huggingface_id)
