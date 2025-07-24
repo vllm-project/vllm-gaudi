@@ -95,7 +95,7 @@ class HpuPlatform(Platform):
 
         if (vllm_config.model_config is not None
                 and vllm_config.model_config.dtype
-                in (torch.float16, torch.float32)):
+                in (torch.float16,)):
             logger.warning(
                 "The HPU backend currently does not support %s. "
                 "Using bfloat16 instead.", vllm_config.model_config.dtype)
