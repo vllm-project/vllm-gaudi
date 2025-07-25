@@ -37,13 +37,20 @@ def launch_lm_eval(eval_config):
         'batch_size': max_num_seqs,
         'enable_expert_parallel': eval_config.get('enable_expert_parallel',
                                                   False),
+        'chat_template_args': eval_config.get('chat_template_args', {}),
     }
     if kv_cache_dtype is not None:
         model_args['kv_cache_dtype'] = kv_cache_dtype
-    if eval_config.get("fp8"):
-        model_args['quantization'] = 'inc'
-        model_args['kv_cache_dtype'] = 'fp8_inc'
-        model_args['weights_load_device'] = 'cpu'
+
+    if eval_config.get("inc"):
+        assert os.environ.get(
+            'QUANT_CONFIG',
+            None), "must set QUANT_CONFIG environment variable for using INC"
+        model_args[
+            'quantization'] = 'inc'  # for both calibration and quantization
+        if eval_config.get("fp8"):  # for quantization in fp8
+            model_args['kv_cache_dtype'] = 'fp8_inc'
+
     kwargs = {}
     if 'fewshot_as_multiturn' in eval_config:
         kwargs['fewshot_as_multiturn'] = eval_config['fewshot_as_multiturn']

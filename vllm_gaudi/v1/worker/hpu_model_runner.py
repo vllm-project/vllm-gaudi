@@ -56,6 +56,10 @@ logger = init_logger()
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
 
+class BucketingFailedException(Exception):
+    pass
+
+
 def setup_profiler(warmup, active):
     schedule = torch.profiler.schedule(wait=0,
                                        warmup=warmup,
@@ -536,7 +540,6 @@ class HPUModelRunner:
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
-        self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
 
         self.sampler = get_sampler()
@@ -986,6 +989,8 @@ class HPUModelRunner:
 
     def _bucketize_2d_prompt(self, seq_lens, num_blocks):
         bs = len(seq_lens)
+        if bs > self.max_prefill_batch_size:
+            raise BucketingFailedException
         seq = max(seq_lens)
         num_blocks = max(num_blocks) if len(num_blocks) > 0 else 0
         bs, seq, num_blocks = self.bucketing_manager.find_prompt_bucket(
@@ -1001,6 +1006,11 @@ class HPUModelRunner:
     def _can_merge_prefill_contents(self, lhs, rhs):
         combined_num_tokens = lhs.get_num_tokens() + rhs.get_num_tokens()
         bucketing_fn = self._get_prompt_bucketing_fn()
+        try:
+            target_bs, target_seq, target_blocks = bucketing_fn(
+                combined_num_tokens, [])
+        except BucketingFailedException:
+            return False
         target_bs, target_seq, target_blocks = bucketing_fn(
             combined_num_tokens, [])
         return target_bs <= self.max_prefill_batch_size and\
@@ -1703,6 +1713,10 @@ class HPUModelRunner:
                     self.model = prepare(self.model, config)
                 elif config.quantize:
                     self.model = convert(self.model, config)
+                else:
+                    raise ValueError(
+                        "Unknown quantization config mode,"
+                        "please validate quantization config file")
                 htcore.hpu_initialize(self.model,
                                       mark_only_scales_as_const=True)
             self.inc_initialized_successfully = True
