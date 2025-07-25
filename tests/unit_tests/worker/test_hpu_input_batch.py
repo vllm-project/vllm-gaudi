@@ -62,8 +62,9 @@ def _compare_objs(obj1,
             f" in {obj1} and {obj2}: {a} != {b}"
 
 
-def _remove_requests(input_batch: InputBatch, batch_size: int,
-                     reqs: list[CachedRequestState]) -> set[str]:
+def _remove_requests(
+        input_batch: InputBatch, batch_size: int,
+        reqs: list[CachedRequestState]) -> tuple[set[str], set[int]]:
     """
     Remove some requests randomly from the batch and returns
     set of request removed
