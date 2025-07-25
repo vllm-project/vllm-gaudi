@@ -1,4 +1,4 @@
-name: Basic HPU test suite 
+name: HPU unit test suite
 
 on:
   pull_request:
@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  pre_merge_hpu_test:
+  hpu_unit_tests:
     runs-on: ucb-vllm-cicd-g2
     permissions:
       contents: read # Required to checkout code and read history
