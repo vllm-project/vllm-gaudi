@@ -3,6 +3,7 @@
 
 import pytest
 import torch
+import habana_frameworks.torch  # noqa: F401
 
 from vllm.attention import Attention
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,

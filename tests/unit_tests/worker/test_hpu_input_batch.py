@@ -8,6 +8,7 @@ from typing import Optional
 import numpy as np
 import pytest
 import torch
+import habana_frameworks.torch  # noqa: F401
 
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
@@ -175,6 +176,7 @@ def _create_sampling_params():
     return SamplingParams(
         top_k=np.random.randint(1, 10),
         top_p=np.random.uniform(0.0, 1.0),
+        min_p=np.random.uniform(0.0, 1.0),
         presence_penalty=np.random.uniform(-2.0, 2.0),
         repetition_penalty=np.random.uniform(0.0, 2.0),
         frequency_penalty=np.random.uniform(-2.0, 2.0),
@@ -253,6 +255,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
 
     # Compact the input batch
     input_batch.condense(req_indices_to_remove)
+    input_batch.refresh_sampling_metadata()
 
     # Generate the sampling metadata
     sampling_metadata = input_batch._make_sampling_metadata()
