@@ -1,0 +1,93 @@
+name: Basic HPU test suite 
+
+on:
+  pull_request:
+    branches: [main]
+
+  # Allow manual triggering for testing purposes
+  workflow_dispatch: {}
+
+concurrency: 
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pre_merge_hpu_test:
+    runs-on: ucb-vllm-cicd-g2
+    permissions:
+      contents: read # Required to checkout code and read history
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Fetch full history for accurate commit comparison
+          fetch-depth: 0
+
+      - name: Clean and Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true # Ensure a clean workspace before checkout
+
+      - name: Setup Docker environment and build image
+        # Using a multi-line string for the Dockerfile is generally fine,
+        # but consider moving it to a separate file for better readability/maintainability
+        run: |
+          echo "Attempting to build Docker image..."
+          # Ensure this image is accessible from GitHub Actions (e.g., public registry or authenticated private registry).
+          docker build --no-cache -t hpu-plugin-v1-test-env-unit-tests -f - . <<EOF
+          FROM 1.22-526-pt2.7.1:latest
+
+          COPY ./ /workspace/vllm-gaudi
+          WORKDIR /workspace
+
+          RUN git clone https://github.com/vllm-project/vllm.git vllm
+          WORKDIR /workspace/vllm
+          RUN git checkout main
+
+          # Pinning versions in requirements might be good practice for CI consistency
+          RUN pip install pytest pytest_asyncio
+          RUN pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git
+
+          ENV no_proxy=localhost,127.0.0.1
+          ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
+
+          # Ensure setup.py install works as expected
+          RUN bash -c 'pip install -r <(sed "/^[torch]/d" requirements/build.txt)'
+          RUN VLLM_TARGET_DEVICE=empty pip install --no-build-isolation .
+
+          # install development dependencies (for testing)
+          RUN python3 -m pip install -e tests/vllm_test_utils
+
+          WORKDIR /workspace/vllm-gaudi
+          RUN pip install -e .
+
+          WORKDIR /workspace
+          # Symlinks. Ensure target paths are correct relative to the current WORKDIR
+          # '/workspace/vllm/tests' is correct
+          # Ensure these are created relative to the /workspace/ directory
+          RUN ln -s /workspace/vllm/tests /workspace/tests \
+              && ln -s /workspace/vllm/examples /workspace/examples \
+              && ln -s /workspace/vllm/benchmarks /workspace/benchmarks
+
+          EOF
+          echo "Docker image built successfully."
+
+      - name: Run test scripts
+        run: |
+          EXITCODE=1
+          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-unit-tests || true; }
+          trap 'remove_docker_containers; exit $EXITCODE;' EXIT
+          remove_docker_containers
+
+          echo "Running HPU plugin v1 test"
+          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-unit-tests --network=host \
+            -e HABANA_VISIBLE_DEVICES=all \
+            -e HF_HOME=/workspace/hf_cache \
+            -v /mnt/hf_cache:/workspace/hf_cache \
+            hpu-plugin-v1-test-env-unit-tests \
+            /bin/bash "pytest /workspace/vllm-gaudi/tests/unit_tests"
+          
+          EXITCODE=$?
+          echo "Test script exited with code: $EXITCODE"
