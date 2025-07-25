@@ -22,14 +22,14 @@ from vllm_gaudi.extension.runtime import get_config
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
-from vllm.config import VllmConfig
+from vllm.config import (VllmConfig, update_config)
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.sampling_params import SamplingType
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
@@ -2386,3 +2386,41 @@ class HPUModelRunner:
             tasks.extend(self.get_supported_pooling_tasks())
 
         return tuple(tasks)
+
+    def _get_nans_in_logits(
+        self,
+        logits: Optional[torch.Tensor],
+    ) -> dict[str, int]:
+        try:
+            if logits is None:
+                return {req_id: 0 for req_id in self.input_batch.req_ids}
+
+            num_nans_in_logits = {}
+            num_nans_for_index = logits.isnan().sum(dim=-1).cpu().numpy()
+            for req_id in self.input_batch.req_ids:
+                req_index = self.input_batch.req_id_to_index[req_id]
+                num_nans_in_logits[req_id] = (
+                    int(num_nans_for_index[req_index])
+                    if num_nans_for_index is not None
+                    and req_index < logits.shape[0] else 0)
+            return num_nans_in_logits
+        except IndexError:
+            return {}
+
+    def update_config(self, overrides: dict[str, Any]) -> None:
+        allowed_config_names = {"load_config", "model_config"}
+        for config_name, config_overrides in overrides.items():
+            assert config_name in allowed_config_names, \
+                f"Config `{config_name}` not supported. " \
+                f"Allowed configs: {allowed_config_names}"
+            config = getattr(self, config_name)
+            new_config = update_config(config, config_overrides)
+            setattr(self, config_name, new_config)
+
+    def reload_weights(self) -> None:
+        assert getattr(self, "model", None) is not None, \
+            "Cannot reload weights before model is loaded."
+        model_loader = get_model_loader(self.load_config)
+        logger.info("Reloading weights inplace...")
+        model_loader.load_weights(self.model, model_config=self.model_config)
+        torch.hpu.synchronize()

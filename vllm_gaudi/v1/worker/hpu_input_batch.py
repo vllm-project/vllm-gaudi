@@ -246,7 +246,7 @@ class InputBatch:
         self,
         request: "CachedRequestState",
         req_index: Optional[int] = None,
-    ) -> None:
+    ) -> int:
         if req_index is None:
             req_index = self.num_reqs
         assert req_index < self.max_num_reqs
@@ -359,6 +359,7 @@ class InputBatch:
         else:
             # No LoRA
             self.request_lora_mapping[req_index] = 0
+        return req_index
 
     def remove_request(self, req_id: str) -> Optional[int]:
         """This method must always be followed by a call to condense()."""
