@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Optional
 import torch
 import torch.distributed
 import torch.nn as nn
+from vllm.tasks import SupportedTask
 from vllm_gaudi.extension.profiler import HabanaMemoryProfiler, format_bytes
 
 import vllm.envs as envs
@@ -229,6 +230,9 @@ class HPUWorker(WorkerBase):
             output = self.model_runner.execute_model(scheduler_output)
         # TODO(woosuk): Send the output to the engine process.
         return output if self.rank == 0 else None
+
+    def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        return self.model_runner.get_supported_tasks()
 
 
 def init_worker_distributed_environment(
