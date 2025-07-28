@@ -16,10 +16,10 @@ import torch
 import torch.distributed
 import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
-from vllm_hpu_extension.profiler import (HabanaHighLevelProfiler,
-                                         HabanaMemoryProfiler,
-                                         HabanaProfilerCounterHelper,
-                                         format_bytes)
+from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler,
+                                           HabanaMemoryProfiler,
+                                           HabanaProfilerCounterHelper,
+                                           format_bytes)
 from vllm_gaudi.extension.runtime import get_config
 
 from vllm.attention.backends.abstract import AttentionType
