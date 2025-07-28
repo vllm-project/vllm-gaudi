@@ -93,9 +93,11 @@ class HpuPlatform(Platform):
                     "VLLM_WORKER_MULTIPROC_METHOD=fork explicitly.")
                 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-        if vllm_config.model_config.dtype in (torch.float16, torch.float32):
+        if (vllm_config.model_config is not None
+                and vllm_config.model_config.dtype
+                in (torch.float16, torch.float32)):
             logger.warning(
-                "The TPU backend currently does not support %s. "
+                "The HPU backend currently does not support %s. "
                 "Using bfloat16 instead.", vllm_config.model_config.dtype)
             vllm_config.model_config.dtype = torch.bfloat16
 
