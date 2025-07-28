@@ -90,7 +90,7 @@ jobs:
             -e HF_HOME=/workspace/hf_cache \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-pre-merge \
-            /bin/bash -c "pytest -vvv /workspace/vllm-gaudi/tests/unit_tests"
+            /bin/bash -c "pytest -vvv --durations=10 /workspace/vllm-gaudi/tests/unit_tests"
           
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
