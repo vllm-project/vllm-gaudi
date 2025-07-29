@@ -109,9 +109,9 @@ def generate_prompt_buckets(bs_bucket_config,
                 else:
                     num_buckets_3d = math.ceil(math.log2(max_blocks_range)) + 1
 
-                for i in range(num_buckets_3d):
+                for i in range(1, num_buckets_3d + 1):
                     power_unpadded = 1 * np.float_power(
-                        max_blocks_range, (1 / float(num_buckets_3d - 1)) * i)
+                        max_blocks_range, (1 / float(num_buckets_3d)) * i)
                     new_bucket = math.ceil(power_unpadded)
                     buckets_3d.append((bs, b, new_bucket))
 
