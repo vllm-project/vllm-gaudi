@@ -53,27 +53,12 @@ class FileWriter(threading.Thread):
 
 class HabanaProfilerCounterHelper:
 
-    def __init__(self, is_v1 = True):
+    def __init__(self):
         self.niter = 0
         self.average_real_throughput = None
         self.logged_once = False
         self.prompt_real_seq_lens = []
         self.decode_real_seq_lens = []
-        self.is_v1 = is_v1
-        self.real_seq_lens = []
-        self.prompt_seq_lens = []
-    
-    def capture_seq_group_metadata_stats(self, seq_group_metadata_list):
-        self.real_seq_lens = [
-            len(seq_data.prompt_token_ids) + len(seq_data.output_token_ids)
-            for seq_group_metadata in seq_group_metadata_list
-            for seq_data in seq_group_metadata.seq_data.values()
-        ]
-        self.prompt_seq_lens = [
-            len(seq_data.prompt_token_ids)
-            for seq_group_metadata in seq_group_metadata_list
-            for seq_data in seq_group_metadata.seq_data.values()
-        ]
 
     def capture_decode_seq_stats(self, real_seq_lens):
         self.decode_real_seq_lens = real_seq_lens
@@ -89,16 +74,12 @@ class HabanaProfilerCounterHelper:
                          is_prompt):
         throughput = batch_size_padded / (duration / 1e6)
         throughput_effective = real_batch_size / (duration / 1e6)
-        if self.is_v1:
-            if is_prompt:
-                real_max_seq_len = max(self.prompt_real_seq_lens[prompt_batch_idx])
-                real_num_tokens = sum(self.prompt_real_seq_lens[prompt_batch_idx])
-            else:
-                real_max_seq_len = max(self.decode_real_seq_lens)
-                real_num_tokens = sum(self.decode_real_seq_lens)
+        if is_prompt:
+            real_max_seq_len = max(self.prompt_real_seq_lens[prompt_batch_idx])
+            real_num_tokens = sum(self.prompt_real_seq_lens[prompt_batch_idx])
         else:
-            real_max_seq_len = max(self.real_seq_lens)
-            real_num_tokens = sum(self.real_seq_lens)
+            real_max_seq_len = max(self.decode_real_seq_lens)
+            real_num_tokens = sum(self.decode_real_seq_lens)
         padded_num_tokens = batch_size_padded * seq_len
         batch_token_utilization = real_num_tokens / padded_num_tokens
         if self.average_real_throughput is None:
@@ -123,11 +104,8 @@ class HabanaProfilerCounterHelper:
         if is_prompt:
             prompt_bucket_in_throughput = (seq_len * batch_size_padded) / (
                 duration / 1e6)
-            if self.is_v1:
-                prompt_real_in_throughput = sum(
-                    self.prompt_real_seq_lens[prompt_batch_idx]) / (duration / 1e6)
-            else:
-                prompt_real_in_throughput = sum(self.real_seq_lens) / (duration / 1e6)
+            prompt_real_in_throughput = sum(
+                self.prompt_real_seq_lens[prompt_batch_idx]) / (duration / 1e6)
             counters[
                 f'{phase}_bucket_in_throughput'] = prompt_bucket_in_throughput
             counters[f'{phase}_real_in_throughput'] = prompt_real_in_throughput
@@ -135,18 +113,12 @@ class HabanaProfilerCounterHelper:
         # KV cache might not be created yet (e.g. for profiling run)
         if cache_config.num_gpu_blocks is not None and \
             cache_config.num_gpu_blocks != 0:
-            if self.is_v1:
-                seq_lens = self.prompt_real_seq_lens[prompt_batch_idx] \
-                    if is_prompt \
-                    else self.decode_real_seq_lens
-                cache_num_blocks_used = [
-                    math.ceil(sl / cache_config.block_size) for sl in seq_lens
-                ]
-            else:
-                cache_num_blocks_used = [
-                    math.ceil(sl / cache_config.block_size)
-                    for sl in self.real_seq_lens
-                ]
+            seq_lens = self.prompt_real_seq_lens[prompt_batch_idx] \
+                if is_prompt \
+                else self.decode_real_seq_lens
+            cache_num_blocks_used = [
+                math.ceil(sl / cache_config.block_size) for sl in seq_lens
+            ]
             cache_total_num_blocks_used = sum(cache_num_blocks_used)
             num_cache_blocks = cache_config.num_gpu_blocks
             cache_total_num_free_blocks = \
