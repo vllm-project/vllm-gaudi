@@ -453,12 +453,9 @@ class HpuModelAdapter(torch.nn.Module):
 
 
 def _maybe_wrap_in_hpu_graph(*args, **kwargs):
-    '''
     return htorch.hpu.wrap_in_hpu_graph(
         HpuModelAdapter(*args, **kwargs), disable_tensor_cache=True
     ) if htorch.utils.internal.is_lazy() else HpuModelAdapter(*args, **kwargs)
-    '''
-    return HpuModelAdapter(*args, **kwargs)
 
 
 def subtuple(obj: object,
@@ -2234,7 +2231,8 @@ class HPUModelRunner:
         htorch.core.mark_step()
         _ = self._execute_model_generic(input_ids_device, position_ids_device,
                                         attn_metadata, logits_indices_device,
-                                        kv_caches, lora_logits_mask, lora_mask, True)
+                                        kv_caches, lora_logits_mask, lora_mask,
+                                        True)
         # TODO: do sampling on logits, warmup sampler and prefill joiner
         htorch.core.mark_step()
         self.profiler.end()
