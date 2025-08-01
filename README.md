@@ -22,40 +22,19 @@ Learn more:
 1. Install vLLM with `pip` or [from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source):  
 
     ```bash
-    pip install vllm
-    ```
-
-    or
-
-    ```bash
-    # Build vLLM from source for empty platform, reusing existing torch installation
-    git clone https://github.com/vllm-project/vllm
-    cd vllm
-    pip install -r <(sed '/^[torch]/d' requirements/build.txt)
-    VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
-    cd ..
+    VLLM_TARGET_DEVICE=empty pip install git+https://github.com/vllm-project/vllm.git@v0.10.0
     ```
 
 2. Install vLLM-Gaudi from source:
 
     ```bash
-    git clone https://github.com/vllm-project/vllm-gaudi
+    git clone https://github.com/vllm-project/vllm-gaudi -b v0.10.0-llama-perf
     cd vllm-gaudi
     pip install -e .
     ```
 
-### Full installation from source (vLLM and vLLM-Gaudi):
+3. Example:
 
-```bash
-# Build vLLM from source for empty platform, reusing existing torch installation
-git clone https://github.com/vllm-project/vllm
-cd vllm
-pip install -r <(sed '/^[torch]/d' requirements/build.txt)
-VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
-cd ..
-
-# Build vLLM-Gaudi from source
-git clone https://github.com/vllm-project/vllm-gaudi
-cd vllm-gaudi
-pip install -e .
-```
+    ```bash
+    VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1  python tests/full_tests/generate.py --model /mnt/weka/data/pytorch/llama3/Meta-Llama-3-8B-Instruct
+    ```
