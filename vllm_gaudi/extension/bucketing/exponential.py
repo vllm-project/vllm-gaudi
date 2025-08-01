@@ -71,7 +71,8 @@ class ExponentialBucketingStrategy():
         decode_bs_limit = math.ceil(math.log2(max_num_seqs)) + 1
         decode_bs_bucket_cfg = [1, 2, max_num_seqs, decode_bs_limit]
         max_decode_block_limit = math.ceil(math.log2(max_blocks)) + 1
-        decode_block_bucket_cfg = [block_size, block_size, max_blocks, max_decode_block_limit]
+        max_decode_blocks = min(int((max_model_len // block_size) * max_num_seqs), max_blocks)
+        decode_block_bucket_cfg = [max_num_seqs, max_num_seqs, max_decode_blocks, max_decode_block_limit]
 
         msg = ("Decode bucket config (min, step, max_warmup, limit) "
                f"bs:{decode_bs_bucket_cfg}, "
@@ -167,9 +168,7 @@ def generate_decode_buckets(bs_bucket_config, blocks_bucket_config,
                             skip_invalid=False):
     buckets = []
     bs_buckets = warmup_range_with_limit(bs_bucket_config)
-    tmp_blocks_bucket_config = blocks_bucket_config
-    tmp_blocks_bucket_config = (*tmp_blocks_bucket_config[:2], max_blocks, tmp_blocks_bucket_config[-1])
-    block_buckets = warmup_range_with_limit(tmp_blocks_bucket_config)
+    block_buckets = warmup_range_with_limit(blocks_bucket_config)
     last_bucket = max_blocks
     valid_blocks = set()
     if not skip_invalid:
@@ -194,9 +193,15 @@ def generate_decode_buckets(bs_bucket_config, blocks_bucket_config,
             max_blocks_per_bs = min(bs * math.ceil(max_model_len / block_size), last_bucket)
             upper_bucket_bound = next(x for x in sorted(block_buckets) if x >= max_blocks_per_bs)
             valid_blocks = set((bs, 1, x) for x in sorted(block_buckets) if x <= upper_bucket_bound)
-            
     buckets.extend(list(valid_blocks))
-    return list(sorted(buckets, key=lambda b: (b[0] * b[1], b[1], b[0])))
+
+    # remove decodes with too much blocks
+    filtered_buckets = []
+    for b in buckets:
+        if (b[2] / b[0]) * block_size <= max_model_len:
+            filtered_buckets.append(b)
+
+    return list(sorted(filtered_buckets, key=lambda b: (b[0] * b[1], b[1], b[0])))
 
 
 def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=False, fill=True):
