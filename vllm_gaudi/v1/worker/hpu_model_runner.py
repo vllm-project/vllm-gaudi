@@ -738,7 +738,6 @@ class HPUModelRunner:
                 generator.manual_seed(sampling_params.seed)
             else:
                 generator = None
-
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
@@ -752,7 +751,6 @@ class HPUModelRunner:
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
             )
-
             req_ids_to_add.append(req_id)
         # Update the states of the running/resumed requests.
         is_last_rank = get_pp_group().is_last_rank
@@ -1492,6 +1490,7 @@ class HPUModelRunner:
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
+        #print(scheduler_output)
         # NOTE(kzawora): Since scheduler doesn't differentiate between prefills
         # and decodes, we must handle mixed batches. In _update_states we make
         # sure that first self.input_batch.num_decodes requests are decodes,
@@ -1661,10 +1660,10 @@ class HPUModelRunner:
 
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
             end_idx = start_idx + len(sampled_ids)
-            assert end_idx <= self.max_model_len, (
+            assert end_idx <= (self.max_model_len + 1), (
                 "Sampled token IDs exceed the max model length. "
                 f"Total number of tokens: {end_idx} > max_model_len: "
-                f"{self.max_model_len}")
+                f"{(self.max_model_len + 1)}")
 
             self.input_batch.token_ids_cpu[req_idx,
                                            start_idx:end_idx] = sampled_ids
@@ -2019,9 +2018,16 @@ class HPUModelRunner:
             self.graphed_buckets.add(graphed_bucket)
             self.log_warmup(phase, idx, num_candidates, batch_size, seq_len,
                             num_blocks)
+            cfg = (batch_size, seq_len, num_blocks)
+            prompt_cfg, decode_cfg = None, None
             with HabanaMemoryProfiler() as mem_prof:
-                self.warmup_scenario(batch_size, seq_len, num_blocks,
-                                     is_prompt, kv_caches)
+                if is_prompt:
+                    prompt_cfg = cfg
+                else:
+                    decode_cfg = cfg
+                self._execute_dummy_scenario(prompt_cfg, decode_cfg)
+                #self.warmup_scenario(batch_size, seq_len, num_blocks,
+                #                     is_prompt, kv_caches)
             #TODO(kzawora): align_workers
             used_mem = mem_prof.consumed_device_memory
             total_mem += used_mem
@@ -2038,7 +2044,7 @@ class HPUModelRunner:
         num_blocks = round_up(total_tokens, self.block_size) // self.block_size
         prompt_token_ids = list(range(total_tokens))
 
-        req_id = f'req-{len(requests)}'
+        req_id = f'{len(requests)}'
         block_ids = [0] * num_blocks
         sampling_params = SamplingParams(temperature=0.0)
 
@@ -2052,6 +2058,7 @@ class HPUModelRunner:
             block_ids=[block_ids],
             num_computed_tokens=num_computed_tokens,
             lora_request=None,
+            pooling_params=None,
         )
         requests.append(req)
         num_scheduled_tokens[req_id] = scheduled_tokens
@@ -2059,46 +2066,55 @@ class HPUModelRunner:
     @staticmethod
     def _generate_seq_lengths(num_samples, num_blocks, block_size):
         assert num_samples <= num_blocks
+        print("num_samples, num_blocks, block_size", num_samples, num_blocks, block_size)
         blocks = [num_blocks // num_samples] * num_samples
+        print(blocks)
         missing_blocks = num_blocks - sum(blocks)
+        print(missing_blocks)
         for i in range(missing_blocks):
             blocks[i] += 1
         seq_lengths = [b * block_size - 1 for b in blocks]
+        print(seq_lengths)
+        print("b * block_size - 1 for b in blocks")
         return seq_lengths
 
     def _execute_dummy_scenario(self, prompt_cfg, decode_cfg):
-        from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+        from vllm.v1.core.sched.output import (CachedRequestData, 
+                                    NewRequestData, SchedulerOutput)
         requests: list[NewRequestData] = []
         scheduled_tokens: dict[str, int] = {}
+        print("@@@ _execute_dummy_scenario: p / d ", prompt_cfg, decode_cfg)
 
         if prompt_cfg:
             prompt_bs, prompt_query_len, prompt_blocks = prompt_cfg
             prompt_ctx_len = prompt_blocks * self.block_size
             prompt_total_tokens = prompt_query_len + prompt_ctx_len
-            for _ in range(prompt_bs):
+            for i in range(prompt_bs):
                 self._add_dummy_request(requests,
                                         scheduled_tokens,
                                         num_computed_tokens=prompt_ctx_len,
                                         total_tokens=prompt_total_tokens,
                                         scheduled_tokens=prompt_query_len)
         if decode_cfg:
-            decode_bs, decode_blocks = decode_cfg
+            decode_bs, decode_query_len, decode_blocks = decode_cfg
             decode_seq_lengths = self._generate_seq_lengths(
                 decode_bs, decode_blocks, self.block_size)
+            print(decode_seq_lengths)
             for dsl in decode_seq_lengths:
                 self._add_dummy_request(requests,
                                         scheduled_tokens,
                                         num_computed_tokens=dsl,
                                         total_tokens=dsl,
                                         scheduled_tokens=1)
+        
         sched_output = SchedulerOutput(
             scheduled_new_reqs=requests,
-            scheduled_cached_reqs=[],
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
             num_scheduled_tokens=scheduled_tokens,
             total_num_scheduled_tokens=sum(scheduled_tokens.values()),
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=[0],
+            num_common_prefix_blocks=0,
             finished_req_ids=set(),
             free_encoder_input_ids=[],
             structured_output_request_ids={},
@@ -2106,17 +2122,19 @@ class HPUModelRunner:
         )
         cleanup = SchedulerOutput(
             scheduled_new_reqs=[],
-            scheduled_cached_reqs=[],
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
             num_scheduled_tokens={},
             total_num_scheduled_tokens=0,
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=[0],
+            num_common_prefix_blocks=0,
             finished_req_ids=set(req.req_id for req in requests),
             free_encoder_input_ids=[],
             structured_output_request_ids={},
             grammar_bitmask=None,
         )
+        if prompt_cfg == None:
+            pass #print(sched_output)
         self.execute_model(sched_output)
         self.execute_model(cleanup)
 

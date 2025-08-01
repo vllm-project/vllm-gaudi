@@ -81,6 +81,7 @@ class InputBatch:
         # Find a way to reduce the CPU memory usage.
         # This buffer is not directly transferred to the GPU, so it does not
         # need to be pinned.
+        #print("(max_num_reqs, max_model_len)", max_num_reqs, max_model_len)
         self.token_ids_cpu_tensor = torch.zeros(
             (max_num_reqs, max_model_len),
             device="cpu",
@@ -88,6 +89,7 @@ class InputBatch:
             pin_memory=False,
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
+        #print("self.token_ids_cpu", self.token_ids_cpu)
         self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_tokens_no_spec = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
@@ -264,6 +266,9 @@ class InputBatch:
         # Copy the prompt token ids and output token ids.
         num_prompt_tokens = len(request.prompt_token_ids)
         self.num_prompt_tokens[req_index] = num_prompt_tokens
+        print("request.prompt_token_ids -", "req_index", req_index, "num_prompt_tokens", num_prompt_tokens)
+        print("self.token_ids_cpu[req_index, :num_prompt_tokens]")
+        print(self.token_ids_cpu.shape)
         self.token_ids_cpu[
             req_index, :num_prompt_tokens] = request.prompt_token_ids
         start_idx = num_prompt_tokens
@@ -275,7 +280,7 @@ class InputBatch:
         self.num_tokens[req_index] = request.num_tokens
         # Number of tokens without spec decode tokens.
         self.num_tokens_no_spec[req_index] = request.num_tokens
-
+        
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
         self.block_table.add_row(request.block_ids, req_index)
 

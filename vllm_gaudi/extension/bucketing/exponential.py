@@ -71,7 +71,8 @@ class ExponentialBucketingStrategy():
         decode_bs_limit = math.ceil(math.log2(max_num_seqs)) + 1
         decode_bs_bucket_cfg = [1, 2, max_num_seqs, decode_bs_limit]
         max_decode_block_limit = math.ceil(math.log2(max_blocks)) + 1
-        decode_block_bucket_cfg = [block_size, block_size, max_blocks, max_decode_block_limit]
+        max_decode_blocks = min(int((max_model_len // block_size) * max_num_seqs), max_blocks)
+        decode_block_bucket_cfg = [max_num_seqs, max_num_seqs, max_decode_blocks, max_decode_block_limit]
 
         msg = ("Decode bucket config (min, step, max_warmup, limit) "
                f"bs:{decode_bs_bucket_cfg}, "
@@ -81,6 +82,7 @@ class ExponentialBucketingStrategy():
         decode_buckets = generate_decode_buckets(
             decode_bs_bucket_cfg, decode_block_bucket_cfg,
             num_max_blocks, max_model_len, block_size)
+        print("decode_buckets", decode_buckets)
 
         return sorted(decode_buckets)
 
@@ -109,9 +111,9 @@ def generate_prompt_buckets(bs_bucket_config,
                 else:
                     num_buckets_3d = math.ceil(math.log2(max_blocks_range)) + 1
 
-                for i in range(num_buckets_3d):
+                for i in range(1, num_buckets_3d + 1):
                     power_unpadded = 1 * np.float_power(
-                        max_blocks_range, (1 / float(num_buckets_3d - 1)) * i)
+                        max_blocks_range, (1 / float(num_buckets_3d)) * i)
                     new_bucket = math.ceil(power_unpadded)
                     buckets_3d.append((bs, b, new_bucket))
 
@@ -168,8 +170,8 @@ def generate_decode_buckets(bs_bucket_config, blocks_bucket_config,
     buckets = []
     bs_buckets = warmup_range_with_limit(bs_bucket_config)
     tmp_blocks_bucket_config = blocks_bucket_config
-    tmp_blocks_bucket_config = (*tmp_blocks_bucket_config[:2], max_blocks, tmp_blocks_bucket_config[-1])
-    block_buckets = warmup_range_with_limit(tmp_blocks_bucket_config)
+    block_buckets = warmup_range_with_limit(blocks_bucket_config)
+    print("block_buckets", block_buckets)
     last_bucket = max_blocks
     valid_blocks = set()
     if not skip_invalid:
@@ -194,8 +196,18 @@ def generate_decode_buckets(bs_bucket_config, blocks_bucket_config,
             max_blocks_per_bs = min(bs * math.ceil(max_model_len / block_size), last_bucket)
             upper_bucket_bound = next(x for x in sorted(block_buckets) if x >= max_blocks_per_bs)
             valid_blocks = set((bs, 1, x) for x in sorted(block_buckets) if x <= upper_bucket_bound)
-            
     buckets.extend(list(valid_blocks))
+
+    # remove decodes with too much blocks
+    max_decode_blocks = blocks_bucket_config[2]
+    print(buckets)
+    for b in buckets:
+        if b[0] * b[2] > max_decode_blocks:
+            print("out: ", b)
+            buckets.remove(b)
+        else:
+            print("leaving: ", b)
+    print(buckets)
     return list(sorted(buckets, key=lambda b: (b[0] * b[1], b[1], b[0])))
 
 
