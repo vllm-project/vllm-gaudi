@@ -1645,9 +1645,12 @@ class HPUModelRunner:
             assert decode_data is not None
             htorch.core.mark_step()
             _, logits_device = self._execute_model_generic(
-                decode_data.token_ids, decode_data.position_ids,
-                decode_data.attn_metadata, decode_data.logits_indices,
-                self.kv_caches, warmup_mode=warmup_mode)
+                decode_data.token_ids,
+                decode_data.position_ids,
+                decode_data.attn_metadata,
+                decode_data.logits_indices,
+                self.kv_caches,
+                warmup_mode=warmup_mode)
             htorch.core.mark_step()
             with self.profiler.record_event('internal', "sampler"):
                 sampling_metadata = self._prepare_sampling(
@@ -1986,8 +1989,8 @@ class HPUModelRunner:
         return seq_lengths
 
     def _execute_dummy_scenario(self, prompt_cfg, decode_cfg):
-        from vllm.v1.core.sched.output import (CachedRequestData, 
-                                    NewRequestData, SchedulerOutput)
+        from vllm.v1.core.sched.output import (CachedRequestData,
+                                               NewRequestData, SchedulerOutput)
         requests: list[NewRequestData] = []
         scheduled_tokens: dict[str, int] = {}
 
@@ -2011,7 +2014,7 @@ class HPUModelRunner:
                                         num_computed_tokens=dsl,
                                         total_tokens=dsl,
                                         scheduled_tokens=1)
-        
+
         sched_output = SchedulerOutput(
             scheduled_new_reqs=requests,
             scheduled_cached_reqs=CachedRequestData.make_empty(),
@@ -2195,15 +2198,14 @@ class HPUModelRunner:
         # it is important to create tensors inside the loop, rather than
         # multiplying the list, to avoid Dynamo from treating them as
         # tensor aliasing.
-        num_layers = self.model_config.get_num_layers(self.parallel_config)
-        kv_caches = [None] * num_layers
 
         # Run empty prefill forwards - prefill max batch and prefill max seq
         self._execute_dummy_scenario((1, self.max_model_len, 0), None)
         max_seq_len = math.ceil(
             (self.max_num_tokens // self.max_prefill_batch_size) /
             self.block_size) * self.block_size
-        self._execute_dummy_scenario((self.max_prefill_batch_size, max_seq_len, 0), None)
+        self._execute_dummy_scenario(
+            (self.max_prefill_batch_size, max_seq_len, 0), None)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
