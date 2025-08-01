@@ -19,6 +19,8 @@ Learn more:
 🚀 [vLLM Plugin System Overview](https://docs.vllm.ai/en/latest/design/plugin_system.html)
 
 ## Getting Started
+0. vllm only works with PT2.7, please use 1.22.0-585 and later docker
+
 1. Install vLLM with `pip` or [from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source):  
 
     ```bash
