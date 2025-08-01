@@ -47,6 +47,10 @@ def batch2block(tensor, block_mapping, matmul_op=torch.matmul):
 def block2batch(tensor, block_mapping, matmul_op=torch.matmul):
     return b2b_impl(tensor, block_mapping.t(), matmul_op)
 
+def group_sum(partial_sum, block_mapping):
+    sums = block2batch(partial_sum, block_mapping)
+    sums = batch2block(sums, block_mapping)
+    return sums
 
 def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, batch_size,
                  matmul_av_op, batch2block_matmul_op, block2batch_matmul_op):
@@ -100,6 +104,23 @@ def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, batch_siz
         # Post processing for the attention scores
         rescale = block_adjustment.div(group_sum_adjusted)
     attn = attn.mul(rescale)
+    return attn
+
+def const_norm_pa(attn, value, block_bias, block_groups, block_mapping, batch_size,
+                 matmul_av_op, batch2block_matmul_op, block2batch_matmul_op):
+    #normalization
+    const_norm_value = get_config().const_norm_value
+    attn.sub_(const_norm_value)
+    # end of norm
+    attn = attn.exp()
+    sums = attn.sum(dim=-1).unsqueeze(-1)
+    block_sum = sums
+    # Sum block's sums that belongs to the same sequeneces
+    group_sums = group_sum(sums, block_mapping)
+    group_sums.add_(torch.finfo(group_sums.dtype).tiny)
+    group_sums = torch.maximum(block_sum, group_sums)
+    attn.div_(group_sums)
+    attn = matmul_av_op(attn, value)
     return attn
 
 def flat_pa_mla(query, key_cache, value_cache, block_list, block_mapping,
@@ -188,7 +209,11 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping,
             attn = attn.to(dtype=position_bias.dtype)
         attn.add_(position_bias.unsqueeze(-2))
 
-    attn = pipelined_pa(attn, value, block_bias, block_groups, block_mapping,
+    if get_config().use_const_norm:
+        pa_impl = const_norm_pa
+    else:
+        pa_impl = pipelined_pa
+    attn = pa_impl(attn, value, block_bias, block_groups, block_mapping,
                         batch_size=batch_size, matmul_av_op=matmul_av_op,
                         batch2block_matmul_op=batch2block_matmul_op, block2batch_matmul_op=block2batch_matmul_op)
     attn = block2batch(attn, block_mapping, block2batch_matmul_op)
