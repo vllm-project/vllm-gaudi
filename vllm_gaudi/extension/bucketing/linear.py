@@ -139,7 +139,7 @@ def generate_prompt_buckets(bs_bucket_config,
         for bs in batch_size_buckets:
             for b in seq_bucket_config:
                 max_blocks_range = (bmax - b) // block_size
-                for i in range(0, max_blocks_range + 1):
+                for i in range(0, max_blocks_range + 2):
                     buckets_3d.append((bs, b, i))
         buckets = buckets_3d
     else:

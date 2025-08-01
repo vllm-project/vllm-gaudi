@@ -10,6 +10,29 @@ from vllm_gaudi.extension.logger import logger as logger
 from vllm_gaudi.extension.runtime import get_config
 
 
+def calc_fallback_value(n: int, base_step: int):
+    """ Calculate next bucket for yet unbucketized value"""
+    if n <= 1:
+        return n
+    power = 1/3
+    # The basic idea is that we first estimate bucket size based
+    # on exponent of the number, so higher numbers will generate
+    # bigger gaps between individual buckets, but it's not as steep
+    # as exponential bucketing. Additionally this has a nice
+    # property that generated values are guaranteed to be divisible
+    # by base_step
+    #
+    # examples:
+    # n=31, base_step=32
+    #   => bucket_size = ceil(31^1/3) * 32 = 4 * 32 = 128
+    #   => next_value = round_up(31, 128) = 128
+    # n=4001, base_step=32
+    #   => bucket_size = ceil(4001^1/3) * 32 = 16 * 32 = 512
+    #   => next_value = round_up(4001, 512) = 4096
+    bucket_size = math.ceil(math.pow(n, power)) * base_step
+    return math.ceil(n / bucket_size) * bucket_size
+
+
 class HPUBucketingManager():
     _instance = None
     prompt_buckets: List[Tuple[int, int, int]] = []
@@ -30,6 +53,10 @@ class HPUBucketingManager():
         self.num_hpu_blocks = None
         self.max_model_len = max_model_len
         self.initialized = True
+
+        self.fallback_bs_base_step = 2
+        self.fallback_seq_base_step = 32
+        self.fallback_blocks_base_step = 32
 
     def get_bucketing_strategy(self):
         strategy = None
@@ -86,14 +113,23 @@ class HPUBucketingManager():
                f"{list(buckets)}")
         logger().info(msg)
 
+    def generate_fallback_bucket(self, batch_size, seq_len, ctx):
+        assert self.max_num_batched_tokens is not None
+        new_batch_size = calc_fallback_value(batch_size, self.fallback_bs_base_step)
+        new_seq_len = min(calc_fallback_value(seq_len, self.fallback_seq_base_step),
+                          self.max_num_batched_tokens)
+        if self.num_hpu_blocks is None:
+            new_ctx = 0
+        else:
+            new_ctx = min(calc_fallback_value(ctx, self.fallback_blocks_base_step),
+                      self.num_hpu_blocks)
+        return (new_batch_size, new_seq_len, new_ctx)
+
     def find_prompt_bucket(self, batch_size, seq_len, ctx=0):
         if self.initialized:
             found_bucket = find_equal_or_closest_greater_config(self.prompt_buckets, (batch_size, seq_len, ctx))
             if found_bucket is None:
-                new_batch_size = 2 ** math.ceil(math.log2(batch_size))
-                new_seq_len = math.ceil(seq_len / self.block_size) * self.block_size
-                new_ctx = math.ceil(ctx / 2) * 2
-                new_bucket = (new_batch_size, new_seq_len, new_ctx)
+                new_bucket = self.generate_fallback_bucket(batch_size, seq_len, ctx)
                 logger().warning(f"Prompt bucket for {batch_size, seq_len, ctx}"
                                  f" was not prepared. Adding new bucket: {new_bucket}")
                 self.prompt_buckets.append(new_bucket)
@@ -106,9 +142,7 @@ class HPUBucketingManager():
         if self.initialized:
             found_bucket = find_equal_or_closest_greater_config(self.decode_buckets, (batch_size, 1, num_blocks))
             if found_bucket is None:
-                new_batch_size = 2 ** math.ceil(math.log2(batch_size))
-                new_num_blocks = math.ceil(num_blocks / 2) * 2
-                new_bucket = (new_batch_size, 1, new_num_blocks)
+                new_bucket = self.generate_fallback_bucket(batch_size, 1, num_blocks)
                 logger().warning(f"Decode bucket for {batch_size, 1, num_blocks}"
                                  f" was not prepared. Adding new bucket: {new_bucket}")
                 self.decode_buckets.append(new_bucket)
