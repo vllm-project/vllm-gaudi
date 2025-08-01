@@ -1826,160 +1826,6 @@ class HPUModelRunner:
                f'used_mem:{format_bytes(total_mem)}')
         logger.info(msg)
 
-    def warmup_scenario(self,
-                        batch_size,
-                        seq_or_block,
-                        num_blocks,
-                        is_prompt,
-                        kv_caches,
-                        is_pt_profiler_run=True) -> None:
-        """Dummy warmup run for memory usage and graph compilation."""
-
-        query_seq_len = seq_or_block if is_prompt else 1
-        input_ids = torch.zeros((batch_size, query_seq_len),
-                                dtype=torch.int32,
-                                device='cpu')
-        position_ids = torch.zeros((batch_size, query_seq_len),
-                                   dtype=torch.int32,
-                                   device='cpu')
-        slot_mapping = torch.zeros((batch_size, query_seq_len),
-                                   dtype=torch.int64,
-                                   device='cpu')
-
-        input_ids_device = _async_h2d_tensor_copy(input_ids, self.device)
-        position_ids_device = _async_h2d_tensor_copy(position_ids, self.device)
-        slot_mapping_device = _async_h2d_tensor_copy(slot_mapping, self.device)
-
-        use_graphs = self._use_graphs()
-        input_ids = torch.zeros((batch_size, query_seq_len),
-                                dtype=torch.int32,
-                                device='cpu')
-        position_ids = torch.zeros((batch_size, query_seq_len),
-                                   dtype=torch.int32,
-                                   device='cpu')
-        slot_mapping = torch.zeros((batch_size, query_seq_len),
-                                   dtype=torch.int64,
-                                   device='cpu')
-
-        input_ids_device = _async_h2d_tensor_copy(input_ids, self.device)
-        position_ids_device = _async_h2d_tensor_copy(position_ids, self.device)
-        slot_mapping_device = _async_h2d_tensor_copy(slot_mapping, self.device)
-        times = 3 if use_graphs or is_pt_profiler_run else 1
-        for time_index in range(times):
-            if is_prompt:
-                seq_lens = torch.zeros((batch_size),
-                                       dtype=torch.int32,
-                                       device='cpu')
-                seq_lens.fill_(seq_or_block)
-                seq_lens_device = _async_h2d_tensor_copy(seq_lens, self.device)
-                block_list_device = None
-                if num_blocks:
-                    prefix_block_tables = torch.ones(
-                        (batch_size, num_blocks),
-                        dtype=torch.int32,
-                        device='cpu') * self._PAD_BLOCK_ID
-                    block_list_device = _async_h2d_tensor_copy(
-                        prefix_block_tables.flatten(), self.device)
-                attn_metadata = \
-                    HPUAttentionMetadataV1.make_prefill_metadata(
-                        attn_bias=None,
-                        seq_lens_tensor=seq_lens_device,
-                        context_lens_tensor=seq_lens_device,
-                        slot_mapping=slot_mapping_device,
-                        block_list=block_list_device,
-                        block_size=self.block_size)
-            else:
-                block_tables = [
-                    x.tolist()
-                    for x in np.array_split(np.arange(num_blocks), batch_size)
-                ]
-                block_list, block_groups, block_usage = \
-                    self.get_habana_paged_attn_buffers(
-                        slot_mapping=slot_mapping,
-                        block_tables=block_tables,
-                        batch_size=batch_size)
-                block_list_device = _async_h2d_tensor_copy(
-                    block_list, self.device)
-                block_usage_device = _async_h2d_tensor_copy(
-                    block_usage, self.device)
-                block_groups_device = _async_h2d_tensor_copy(
-                    block_groups, self.device)
-                attn_metadata = HPUAttentionMetadataV1.make_decode_metadata(
-                    block_list=block_list_device,
-                    block_usage=block_usage_device,
-                    block_groups=block_groups_device,
-                    num_decode_tokens=batch_size,
-                    input_positions=None,
-                    slot_mapping=slot_mapping_device,
-                    block_size=self.block_size)
-
-        logits_indices = torch.arange(0, batch_size, device='cpu')
-        logits_indices_device = _async_h2d_tensor_copy(logits_indices,
-                                                       self.device)
-        # Dummy run.
-        htorch.core.mark_step()
-        logits = self._execute_model_generic(input_ids_device,
-                                             position_ids_device,
-                                             attn_metadata,
-                                             logits_indices_device, kv_caches,
-                                             True)
-        # TODO: do sampling on logits, warmup sampler and prefill joiner
-        htorch.core.mark_step()
-        temperature = torch.ones(batch_size, dtype=torch.float32, device='cpu')
-        top_p = torch.ones(batch_size, dtype=torch.float32, device='cpu')
-        top_k = torch.ones(batch_size, dtype=torch.float32, device='cpu')
-        temperature_device = _async_h2d_tensor_copy(temperature, self.device)
-        top_p_device = _async_h2d_tensor_copy(top_p, self.device)
-        top_k_device = _async_h2d_tensor_copy(top_k, self.device)
-        generators = {
-            i: None
-            for i in range(batch_size)
-        }  # NOTE(kzawora): idk what to set here
-        max_num_logprobs = 0  # NOTE(kzawora): idk what to set here
-        # NOTE(kzawora: do this in a smarter way)
-        return None
-        htorch.core.mark_step()
-        sampling_metadata = SamplingMetadata(
-            temperature=temperature_device,
-            all_greedy=False,  # hacky
-            all_random=True,  # hacky
-            top_p=top_p_device,
-            top_k=top_k_device,
-            no_top_p=True,
-            no_top_k=True,
-            generators=generators,
-            max_num_logprobs=max_num_logprobs,
-        )
-        tokens_all_random = self.sampler(logits, sampling_metadata)
-        htorch.core.mark_step()
-        sampling_metadata = SamplingMetadata(
-            temperature=temperature_device,
-            all_greedy=True,  # hacky
-            all_random=False,  # hacky
-            top_p=top_p_device,
-            top_k=top_k_device,
-            no_top_p=True,
-            no_top_k=True,
-            generators=generators,
-            max_num_logprobs=max_num_logprobs,
-        )
-        tokens_all_greedy = self.sampler(logits, sampling_metadata)
-        htorch.core.mark_step()
-        sampling_metadata = SamplingMetadata(
-            temperature=temperature_device,
-            all_greedy=False,  # hacky
-            all_random=False,  # hacky
-            top_p=top_p_device,
-            top_k=top_k_device,
-            no_top_p=True,
-            no_top_k=True,
-            generators=generators,
-            max_num_logprobs=max_num_logprobs,
-        )
-        tokens_mixed = self.sampler(logits, sampling_metadata)
-        htorch.core.mark_step()
-        return tokens_all_random, tokens_all_greedy, tokens_mixed
-
     def log_warmup(self, phase, i, max_i, batch_size, seq_len, num_blocks):
         free_mem = format_bytes(
             HabanaMemoryProfiler.current_free_device_memory())
@@ -2018,16 +1864,13 @@ class HPUModelRunner:
             self.graphed_buckets.add(graphed_bucket)
             self.log_warmup(phase, idx, num_candidates, batch_size, seq_len,
                             num_blocks)
-            cfg = (batch_size, seq_len, num_blocks)
             prompt_cfg, decode_cfg = None, None
             with HabanaMemoryProfiler() as mem_prof:
                 if is_prompt:
-                    prompt_cfg = cfg
+                    prompt_cfg = (batch_size, seq_len, num_blocks)
                 else:
-                    decode_cfg = cfg
+                    decode_cfg = (batch_size, 1, num_blocks)
                 self._execute_dummy_scenario(prompt_cfg, decode_cfg)
-                #self.warmup_scenario(batch_size, seq_len, num_blocks,
-                #                     is_prompt, kv_caches)
             #TODO(kzawora): align_workers
             used_mem = mem_prof.consumed_device_memory
             total_mem += used_mem
@@ -2285,17 +2128,11 @@ class HPUModelRunner:
         kv_caches = [None] * num_layers
 
         # Run empty prefill forwards - prefill max batch and prefill max seq
-        self.warmup_scenario(batch_size=1,
-                             seq_or_block=self.max_model_len,
-                             is_prompt=True,
-                             kv_caches=kv_caches)
+        self._execute_dummy_scenario((1, self.max_model_len, 0), None)
         max_seq_len = math.ceil(
             (self.max_num_tokens // self.max_prefill_batch_size) /
             self.block_size) * self.block_size
-        self.warmup_scenario(batch_size=self.max_prefill_batch_size,
-                             seq_or_block=max_seq_len,
-                             is_prompt=True,
-                             kv_caches=kv_caches)
+        self._execute_dummy_scenario((self.max_prefill_batch_size, max_seq_len, 0), None)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
