@@ -3,9 +3,11 @@
 ###############################################################################
 
 import gc
+import gzip
 import json
 import os
 import queue
+import math
 import threading
 import time
 from contextlib import contextmanager
@@ -47,6 +49,99 @@ class FileWriter(threading.Thread):
 
             with open(self.filename, 'a') as outfile:
                 outfile.write(content)
+
+
+class HabanaProfilerCounterHelper:
+
+    def __init__(self):
+        self.niter = 0
+        self.average_real_throughput = None
+        self.logged_once = False
+        self.prompt_real_seq_lens = []
+        self.decode_real_seq_lens = []
+
+    def capture_decode_seq_stats(self, real_seq_lens):
+        self.decode_real_seq_lens = real_seq_lens
+
+    def capture_prompt_seq_stats(self, real_seq_lens):
+        self.prompt_real_seq_lens.append(real_seq_lens)
+
+    def reset_prompt_seq_stats(self):
+        self.prompt_real_seq_lens = []
+
+    def get_counter_dict(self, cache_config, duration, seq_len,
+                         batch_size_padded, real_batch_size, prompt_batch_idx,
+                         is_prompt):
+        throughput = batch_size_padded / (duration / 1e6)
+        throughput_effective = real_batch_size / (duration / 1e6)
+        if is_prompt:
+            real_max_seq_len = max(self.prompt_real_seq_lens[prompt_batch_idx])
+            real_num_tokens = sum(self.prompt_real_seq_lens[prompt_batch_idx])
+        else:
+            real_max_seq_len = max(self.decode_real_seq_lens)
+            real_num_tokens = sum(self.decode_real_seq_lens)
+        padded_num_tokens = batch_size_padded * seq_len
+        batch_token_utilization = real_num_tokens / padded_num_tokens
+        if self.average_real_throughput is None:
+            self.average_real_throughput = throughput_effective
+        else:  # https://www.heikohoffmann.de/htmlthesis/node134.html
+            self.average_real_throughput = self.average_real_throughput + 1 / (
+                self.niter + 1) * (throughput_effective -
+                                   self.average_real_throughput)
+        phase = "prompt" if is_prompt else "decode"
+        counters = {
+            f'{phase}_bucket_batch_size': batch_size_padded,
+            f'{phase}_batch_size': real_batch_size,
+            f'{phase}_bucket_seq_len': seq_len,
+            f'{phase}_seq_len': real_max_seq_len,
+            f'{phase}_bucket_gen_throughput': throughput,
+            f'{phase}_real_gen_throughput': throughput_effective,
+            f'{phase}_batch_token_utilization': batch_token_utilization,
+            'average_real_throughput': self.average_real_throughput,
+            'engine_iteration': self.niter,
+        }
+        self.niter += 1
+        if is_prompt:
+            prompt_bucket_in_throughput = (seq_len * batch_size_padded) / (
+                duration / 1e6)
+            prompt_real_in_throughput = sum(
+                self.prompt_real_seq_lens[prompt_batch_idx]) / (duration / 1e6)
+            counters[
+                f'{phase}_bucket_in_throughput'] = prompt_bucket_in_throughput
+            counters[f'{phase}_real_in_throughput'] = prompt_real_in_throughput
+
+        # KV cache might not be created yet (e.g. for profiling run)
+        if cache_config.num_gpu_blocks is not None and \
+            cache_config.num_gpu_blocks != 0:
+            seq_lens = self.prompt_real_seq_lens[prompt_batch_idx] \
+                if is_prompt \
+                else self.decode_real_seq_lens
+            cache_num_blocks_used = [
+                math.ceil(sl / cache_config.block_size) for sl in seq_lens
+            ]
+            cache_total_num_blocks_used = sum(cache_num_blocks_used)
+            num_cache_blocks = cache_config.num_gpu_blocks
+            cache_total_num_free_blocks = \
+                num_cache_blocks - cache_total_num_blocks_used
+            cache_computed_utilization = \
+                cache_total_num_blocks_used / num_cache_blocks
+            max_blocks_per_seq = math.ceil(seq_len / cache_config.block_size)
+            batch_block_utilization = cache_total_num_blocks_used / (
+                batch_size_padded * max_blocks_per_seq)
+            counters['cache_num_blocks_used'] = cache_total_num_blocks_used
+            counters['cache_num_free_blocks'] = cache_total_num_free_blocks
+            counters['cache_computed_utilization'] = cache_computed_utilization
+            counters[
+                f'{phase}_batch_block_utilization'] = batch_block_utilization
+        if not self.logged_once:
+            counters['const_cache_num_blocks'] = cache_config.num_gpu_blocks
+            counters[
+                'const_gpu_memory_utilization'] = \
+                    cache_config.gpu_memory_utilization
+            counters['const_block_size'] = cache_config.block_size
+            self.logged_once = True
+
+        return counters
 
 
 class HabanaHighLevelProfiler:
@@ -121,6 +216,55 @@ class HabanaHighLevelProfiler:
             event = self.event_cache.pop()
             event['dur'] = ts - event['ts']
             self._dump_with_sep(event)
+ 
+
+    def full_trace_handler(self, dir_name, use_gzip=False):
+
+        def handler_fn(prof) -> None:
+            if not os.path.isdir(dir_name):
+                try:
+                    os.makedirs(dir_name, exist_ok=True)
+                except Exception as e:
+                    raise RuntimeError("Can't create directory: " +
+                                       dir_name) from e
+            file_name = f"vllm.{time.time_ns()}.pt.trace.json"
+            file_path = os.path.join(dir_name, file_name)
+            prof.export_chrome_trace(file_path)
+            with open(file_path) as f:
+                pytorch_trace = json.load(f)
+            os.remove(file_path)
+            base = pytorch_trace['baseTimeNanoseconds'] / 1000
+            events = self.profiling_trace_events
+            while True:
+                try:
+                    event_str = events.get_nowait()
+                    event = json.loads(event_str[:-1])
+                    event['ts'] = event['ts'] - base
+                    pytorch_trace['traceEvents'].append(event)
+                except queue.Empty:
+                    break
+
+            pytorch_trace['traceEvents'].append({
+                "args": {
+                    "name": "vLLM"
+                },
+                "name": "process_name",
+                "ph": "M",
+                "pid": 1,
+                "tid": 0,
+                "ts": 0.0
+            })
+            if use_gzip:
+                file_path = file_path + ".gz"
+                with gzip.open(file_path, 'wt', encoding="ascii") as zipfile:
+                    json.dump(pytorch_trace, zipfile)
+            else:
+                with open(file_path, "w") as outfile:
+                    outfile.write(json.dumps(pytorch_trace))
+            logger().info("Saved full profiling to %s", file_path)
+
+        return handler_fn
+
 
     @contextmanager
     def record_event(self, type, name, args=None):
