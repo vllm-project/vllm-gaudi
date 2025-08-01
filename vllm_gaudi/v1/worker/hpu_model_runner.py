@@ -1489,8 +1489,8 @@ class HPUModelRunner:
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
+        warmup_mode: bool = False,
     ) -> ModelRunnerOutput:
-        #print(scheduler_output)
         # NOTE(kzawora): Since scheduler doesn't differentiate between prefills
         # and decodes, we must handle mixed batches. In _update_states we make
         # sure that first self.input_batch.num_decodes requests are decodes,
@@ -1577,7 +1577,7 @@ class HPUModelRunner:
                 prefill_hidden_states_ts, logits_device = \
                     self._execute_model_generic(
                         token_ids, position_ids, attn_metadata, logits_indices,
-                        self.kv_caches)
+                        self.kv_caches, warmup_mode=warmup_mode)
                 htorch.core.mark_step()
                 sampling_metadata = self._prepare_sampling(
                     batch_changed, req_id, pad_to=logits_device.shape[0])
@@ -1596,7 +1596,7 @@ class HPUModelRunner:
             _, logits_device = self._execute_model_generic(
                 decode_data.token_ids, decode_data.position_ids,
                 decode_data.attn_metadata, decode_data.logits_indices,
-                self.kv_caches)
+                self.kv_caches, warmup_mode=warmup_mode)
             htorch.core.mark_step()
             sampling_metadata = self._prepare_sampling(
                 batch_changed,
@@ -2066,16 +2066,11 @@ class HPUModelRunner:
     @staticmethod
     def _generate_seq_lengths(num_samples, num_blocks, block_size):
         assert num_samples <= num_blocks
-        print("num_samples, num_blocks, block_size", num_samples, num_blocks, block_size)
         blocks = [num_blocks // num_samples] * num_samples
-        print(blocks)
         missing_blocks = num_blocks - sum(blocks)
-        print(missing_blocks)
         for i in range(missing_blocks):
             blocks[i] += 1
         seq_lengths = [b * block_size - 1 for b in blocks]
-        print(seq_lengths)
-        print("b * block_size - 1 for b in blocks")
         return seq_lengths
 
     def _execute_dummy_scenario(self, prompt_cfg, decode_cfg):
@@ -2083,7 +2078,6 @@ class HPUModelRunner:
                                     NewRequestData, SchedulerOutput)
         requests: list[NewRequestData] = []
         scheduled_tokens: dict[str, int] = {}
-        print("@@@ _execute_dummy_scenario: p / d ", prompt_cfg, decode_cfg)
 
         if prompt_cfg:
             prompt_bs, prompt_query_len, prompt_blocks = prompt_cfg
@@ -2099,7 +2093,6 @@ class HPUModelRunner:
             decode_bs, decode_query_len, decode_blocks = decode_cfg
             decode_seq_lengths = self._generate_seq_lengths(
                 decode_bs, decode_blocks, self.block_size)
-            print(decode_seq_lengths)
             for dsl in decode_seq_lengths:
                 self._add_dummy_request(requests,
                                         scheduled_tokens,
@@ -2133,10 +2126,8 @@ class HPUModelRunner:
             structured_output_request_ids={},
             grammar_bitmask=None,
         )
-        if prompt_cfg == None:
-            pass #print(sched_output)
-        self.execute_model(sched_output)
-        self.execute_model(cleanup)
+        self.execute_model(sched_output, warmup_mode=True)
+        self.execute_model(cleanup, warmup_mode=True)
 
     def _generate_profiling(self, prompt_cfg, decode_cfg):
         steps = 3

@@ -82,7 +82,6 @@ class ExponentialBucketingStrategy():
         decode_buckets = generate_decode_buckets(
             decode_bs_bucket_cfg, decode_block_bucket_cfg,
             num_max_blocks, max_model_len, block_size)
-        print("decode_buckets", decode_buckets)
 
         return sorted(decode_buckets)
 
@@ -169,9 +168,7 @@ def generate_decode_buckets(bs_bucket_config, blocks_bucket_config,
                             skip_invalid=False):
     buckets = []
     bs_buckets = warmup_range_with_limit(bs_bucket_config)
-    tmp_blocks_bucket_config = blocks_bucket_config
     block_buckets = warmup_range_with_limit(blocks_bucket_config)
-    print("block_buckets", block_buckets)
     last_bucket = max_blocks
     valid_blocks = set()
     if not skip_invalid:
@@ -199,16 +196,12 @@ def generate_decode_buckets(bs_bucket_config, blocks_bucket_config,
     buckets.extend(list(valid_blocks))
 
     # remove decodes with too much blocks
-    max_decode_blocks = blocks_bucket_config[2]
-    print(buckets)
+    filtered_buckets = []
     for b in buckets:
-        if b[0] * b[2] > max_decode_blocks:
-            print("out: ", b)
-            buckets.remove(b)
-        else:
-            print("leaving: ", b)
-    print(buckets)
-    return list(sorted(buckets, key=lambda b: (b[0] * b[1], b[1], b[0])))
+        if (b[2] / b[0]) * block_size <= max_model_len:
+            filtered_buckets.append(b)
+
+    return list(sorted(filtered_buckets, key=lambda b: (b[0] * b[1], b[1], b[0])))
 
 
 def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=False, fill=True):
