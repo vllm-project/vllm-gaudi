@@ -26,17 +26,25 @@ from typing import Any, Dict, List, Optional
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
-                                           GroupQuantScaleParameter,
-                                           PackedColumnParameter,
-                                           PackedvLLMParameter,
-                                           RowvLLMParameter)
+from vllm.model_executor.layers.quantization import register_quantization_config
 
+def get_linear_classes():
+    from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+    return LinearBase, LinearMethodBase
 
+def get_parameter_classes():
+    from vllm.model_executor.parameter import (
+        ChannelQuantScaleParameter,
+        GroupQuantScaleParameter,
+        PackedColumnParameter,
+        PackedvLLMParameter,
+        RowvLLMParameter,
+    )
+    return ChannelQuantScaleParameter, GroupQuantScaleParameter, PackedColumnParameter, PackedvLLMParameter, RowvLLMParameter
+
+@register_quantization_config("gptq_hpu")
 class GPTQHPUConfig(QuantizationConfig):
     """Config class for GPTQ.
 
@@ -105,6 +113,8 @@ class GPTQHPUConfig(QuantizationConfig):
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["GPTQHPULinearMethod"]:
+        LinearBase, _ = get_linear_classes()
+        from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
         if (isinstance(layer, LinearBase) or
             (isinstance(layer, ParallelLMHead) and self.lm_head_quantized)):
             return GPTQHPULinearMethod(self)
@@ -114,7 +124,7 @@ class GPTQHPUConfig(QuantizationConfig):
         return []
 
 
-class GPTQHPULinearMethod(LinearMethodBase):
+class GPTQHPULinearMethod:
     """Linear method for GPTQ.
 
     Args:
@@ -122,6 +132,13 @@ class GPTQHPULinearMethod(LinearMethodBase):
     """
 
     def __init__(self, quant_config: GPTQHPUConfig):
+        _, LinearMethodBase = get_linear_classes()
+        if not issubclass(self.__class__, LinearMethodBase):
+            self.__class__ = type(
+                self.__class__.__name__,
+                (self.__class__, LinearMethodBase),
+                dict(self.__class__.__dict__),
+            )
         self.quant_config = quant_config
 
     def create_weights(
@@ -134,6 +151,12 @@ class GPTQHPULinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        (ChannelQuantScaleParameter,
+        GroupQuantScaleParameter,
+        PackedColumnParameter,
+        PackedvLLMParameter,
+        RowvLLMParameter) = get_parameter_classes()
+
         del output_size  # Unused.
         weight_loader = extra_weight_attrs.get("weight_loader")
         if input_size_per_partition % self.quant_config.group_size != 0:
@@ -216,6 +239,8 @@ class GPTQHPULinearMethod(LinearMethodBase):
                 packed_dim=1,
                 packed_factor=self.quant_config.pack_factor,
                 **qzeros_args)
+            
+        qzeros.pack_factor = self.quant_config.pack_factor
 
         layer.register_parameter("qweight", qweight)
         layer.register_parameter("g_idx", g_idx)
