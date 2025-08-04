@@ -1642,6 +1642,51 @@ class HPUModelRunner:
         quant_config = os.getenv("QUANT_CONFIG", None) is not None
         return (self.model_config.quantization == "inc" or quant_config)
 
+    def _configure_lora(self, input, requests, req_ids, is_prompt):
+        lora_mask = None
+        lora_logits_mask = None
+        if self.lora_config:
+            if is_prompt:
+                lora_requests = [] if req_ids else requests
+                lora_ids = []
+                lora_index_mapping = []
+                lora_prompt_mapping = []
+                for i, r_id in enumerate(req_ids):
+                    lora_requests.append(requests[r_id].lora_request)
+                for lora_req in lora_requests:
+                    lora_id = lora_req.lora_int_id if lora_req else 0
+                    lora_index_mapping += [lora_id] * (input.shape[1])
+                    #TODO: This may need to change when logprobs
+                    # sampling is enabled
+                    lora_prompt_mapping += [lora_id]
+                    lora_ids.append(lora_id)
+            else:
+                lora_requests = []
+                # lora_ids, lora_index_mapping, lora_prompt_mapping
+                # filled with 0 (indicating no lora) to account for
+                # any padding
+                lora_ids = [0] * input.shape[0]
+                lora_index_mapping = [0] * input.shape[0]
+                lora_prompt_mapping = [0] * input.shape[0]
+                for i, r_id in enumerate(req_ids):
+                    lora_requests.append(requests[r_id].lora_request)
+
+                for i, lora_req in enumerate(lora_requests):
+                    lora_id = lora_req.lora_int_id if lora_req else 0
+                    lora_index_mapping[i] = lora_id
+                    lora_prompt_mapping[i] = lora_id
+                    lora_ids[i] = lora_id
+
+            # is_prefill should always be "False" for HPU
+            lora_mapping = LoRAMapping(lora_index_mapping,
+                                       lora_prompt_mapping,
+                                       is_prefill=False)
+            self.set_active_loras(lora_requests, lora_mapping)
+            lora_mask, lora_logits_mask = self.create_lora_mask(
+                input, lora_ids, is_prompt)
+
+        return lora_mask, lora_logits_mask
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1729,38 +1774,11 @@ class HPUModelRunner:
                       attn_metadata, logits_indices,
                       logits_requests) in enumerate(
                           zip(*shallow_tuple(prefill_data))):
+                lora_mask, lora_logits_mask = self._configure_lora(
+                    token_ids, self.requests, req_id, True)
                 self.event_start = self.profiler.get_timestamp_us()
                 self.profiler.start("internal", "prefill")
                 htorch.core.mark_step()
-                lora_requests = []
-                lora_ids = []
-                lora_index_mapping = []
-                lora_prompt_mapping = []
-                lora_mask = None
-                lora_logits_mask = None
-                ###### Code for LoRA. Move to a function later #######
-                # We only need lora_mask and lora_logits_mask here,
-                # everything else could have been done in _prepare_inputs
-                if self.lora_config:
-                    for i, r_id in enumerate(req_id):
-                        lora_request = self.requests[r_id].lora_request
-                        lora_id = self.requests[
-                            r_id].lora_request.lora_int_id if \
-                                lora_request else 0
-                        if lora_id > 0:
-                            lora_requests.append(lora_request)
-                        lora_index_mapping += [lora_id] * (token_ids.shape[1])
-                        lora_prompt_mapping += [
-                            lora_id
-                        ]  #TODO: This may need to change for some cases
-                        lora_ids.append(lora_id)
-                    lora_mapping = LoRAMapping(lora_index_mapping,
-                                               lora_prompt_mapping,
-                                               is_prefill=False)
-                    self.set_active_loras(lora_requests, lora_mapping)
-                    lora_mask, lora_logits_mask = self.create_lora_mask(
-                        token_ids, lora_ids, True)
-
                 prefill_hidden_states_ts, logits_device = \
                     self._execute_model_generic(
                         token_ids, position_ids, attn_metadata, logits_indices,
@@ -1795,43 +1813,13 @@ class HPUModelRunner:
         ######################### DECODES #########################
         # Decodes run as one single batch with [padded_decode_bs, 1]
         if num_decodes > 0:
+            lora_mask, lora_logits_mask = self._configure_lora(
+                decode_data.token_ids, self.requests, pd_info.decode_req_ids,
+                False)
             self.event_start = self.profiler.get_timestamp_us()
             self.profiler.start("internal", "decode")
             assert decode_data is not None
             htorch.core.mark_step()
-            lora_requests = []
-            lora_ids = []
-            lora_index_mapping = []
-            lora_prompt_mapping = []
-            lora_mask = None
-            lora_logits_mask = None
-            ###### Code for LoRA. Move to a function later #######
-            if self.lora_config:
-                for i, r_id in enumerate(pd_info.decode_req_ids):
-                    lora_request = self.requests[r_id].lora_request
-                    lora_id = self.requests[
-                        r_id].lora_request.lora_int_id if lora_request else 0
-                    lora_requests = []
-                    if lora_id > 0:
-                        lora_requests.append(lora_request)
-                    lora_index_mapping += [lora_id]
-                    lora_prompt_mapping += [lora_id]
-                    lora_ids.append(lora_id)
-                if decode_data.token_ids.shape[0] > len(
-                        pd_info.decode_req_ids
-                ):  #TODO: Need to remove this hack for handling padding
-                    for i in range(decode_data.token_ids.shape[0] -
-                                   len(pd_info.decode_req_ids)):
-                        lora_index_mapping += [0]
-                        lora_prompt_mapping += [0]
-                        lora_ids.append(lora_id)
-                lora_mapping = LoRAMapping(lora_index_mapping,
-                                           lora_prompt_mapping,
-                                           is_prefill=False)
-                self.set_active_loras(lora_requests, lora_mapping)
-                lora_mask, lora_logits_mask = self.create_lora_mask(
-                    decode_data.token_ids, lora_ids, False)
-
             _, logits_device = self._execute_model_generic(
                 decode_data.token_ids, decode_data.position_ids,
                 decode_data.attn_metadata, decode_data.logits_indices,
@@ -2189,7 +2177,6 @@ class HPUModelRunner:
         logits_indices_device = _async_h2d_tensor_copy(logits_indices,
                                                        self.device)
 
-        # TODO: Fix the GC assert seen when this is enabled
         dummy_lora_requests: list[LoRARequest] = []
         dummy_lora_requests_per_seq: list[LoRARequest] = []
         lora_mask = None
@@ -2212,20 +2199,8 @@ class HPUModelRunner:
                     for idx in range(batch_size)
                 ]
 
-            lora_ids = []
-            lora_index_mapping = []
-            lora_prompt_mapping = []
-            for idx in range(batch_size):
-                lora_id = dummy_lora_requests_per_seq[idx].lora_int_id
-                lora_index_mapping += [lora_id] * query_seq_len
-                lora_prompt_mapping += [lora_id]
-                lora_ids.append(lora_id)
-            lora_mapping = LoRAMapping(lora_index_mapping,
-                                       lora_prompt_mapping,
-                                       is_prefill=False)
-            self.set_active_loras(dummy_lora_requests_per_seq, lora_mapping)
-            lora_mask, lora_logits_mask = self.create_lora_mask(
-                input_ids, lora_ids, is_prompt)
+        lora_mask, lora_logits_mask = self._configure_lora(
+            input_ids, dummy_lora_requests_per_seq, [], True)
 
         # Dummy run.
         htorch.core.mark_step()
