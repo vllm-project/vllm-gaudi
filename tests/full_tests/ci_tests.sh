@@ -27,3 +27,24 @@ if [ $? -ne 0 ]; then
     exit -1
 fi
 echo "Test with deepseek v2 lite passed"
+
+# awq
+echo "Testing awq inference with vllm-hpu plugin v1"
+echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model TheBloke/Llama-2-7B-Chat-AWQ --dtype bfloat16 --quantization awq_hpu
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model TheBloke/Llama-2-7B-Chat-AWQ --dtype bfloat16 --quantization awq_hpu
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for awq" >&2
+    exit -1
+fi
+echo "Test with awq passed"
+
+# gptq
+echo "Testing gptq inference with vllm-hpu plugin v1"
+echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model TheBloke/Llama-2-7B-Chat-GPTQ --dtype bfloat16 --quantization gptq_hpu
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model TheBloke/Llama-2-7B-Chat-GPTQ --dtype bfloat16 --quantization gptq_hpu
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for gptq" >&2
+    exit -1
+fi
+echo "Test with gptq passed"
+
