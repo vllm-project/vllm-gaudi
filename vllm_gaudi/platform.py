@@ -143,7 +143,7 @@ class HpuPlatform(Platform):
         # Eager backend (PT_HPU_LAZY_MODE = 0) must be selected for
         # torch.compile support
         os.environ['PT_HPU_WEIGHT_SHARING'] = '0'
-        is_lazy = os.environ.get('PT_HPU_LAZY_MODE', '1') == '1'
+        is_lazy = os.environ.get('PT_HPU_LAZY_MODE', '0') == '1'
         if is_lazy:
             torch._dynamo.config.disable = True
             # NOTE multi-HPU inference with HPUGraphs (lazy-only)
