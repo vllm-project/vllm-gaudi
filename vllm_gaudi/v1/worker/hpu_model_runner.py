@@ -1813,12 +1813,12 @@ class HPUModelRunner:
         ######################### DECODES #########################
         # Decodes run as one single batch with [padded_decode_bs, 1]
         if num_decodes > 0:
+            assert decode_data is not None
             lora_mask, lora_logits_mask = self._configure_lora(
                 decode_data.token_ids, self.requests, pd_info.decode_req_ids,
                 False)
             self.event_start = self.profiler.get_timestamp_us()
             self.profiler.start("internal", "decode")
-            assert decode_data is not None
             htorch.core.mark_step()
             _, logits_device = self._execute_model_generic(
                 decode_data.token_ids, decode_data.position_ids,
