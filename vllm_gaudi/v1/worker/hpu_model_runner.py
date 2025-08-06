@@ -1612,6 +1612,11 @@ class HPUModelRunner:
                         token_ids, position_ids, attn_metadata, logits_indices,
                         self.kv_caches)
                 htorch.core.mark_step()
+                # pad logits before sampler
+                logits_len_before_pad = logits_device.shape[0]
+                pad_amount = len(req_id) - logits_len_before_pad
+                if pad_amount > 0:
+                    logits_device = torch.nn.functional.pad(logits_device, (0, 0, 0, pad_amount))
                 with self.profiler.record_event('internal', "sampler"):
                     sampling_metadata = self._prepare_sampling(
                         batch_changed, req_id, pad_to=logits_device.shape[0])
@@ -1621,6 +1626,9 @@ class HPUModelRunner:
                     prefill_sampled_token_ids.append(
                         sampler_output.sampled_token_ids.flatten())
                     prefill_sampled_requests.extend(logits_requests)
+                # unpad after sampler
+                if pad_amount > 0:
+                    logits_device [:logits_len_before_pad, :]
                 htorch.core.mark_step()
                 if self.is_driver_worker and self.profiler.enabled:
                     # Stop recording 'execute_model_generic' event
@@ -1637,7 +1645,6 @@ class HPUModelRunner:
                     self.profiler.record_counter(self.event_start, counters)
             if self.is_driver_worker and self.profiler.enabled:
                 self.profiler_counter_helper.reset_prompt_seq_stats()
-
         ######################### DECODES #########################
         # Decodes run as one single batch with [padded_decode_bs, 1]
         if num_decodes > 0:
@@ -1676,7 +1683,6 @@ class HPUModelRunner:
                     prompt_batch_idx=None,
                     is_prompt=False)
                 self.profiler.record_counter(self.event_start, counters)
-
         # From this point onward, all operations are done on CPU.
         # We already have tokens. Let's copy the data to
         # CPU as is, and then discard padded tokens.
