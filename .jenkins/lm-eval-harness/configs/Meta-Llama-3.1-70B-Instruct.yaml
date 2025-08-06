@@ -1,5 +1,5 @@
 # bash .buildkite/lm-eval-harness/run-lm-eval-gsm-hf-baseline.sh -m meta-llama/Meta-Llama-3-70B-Instruct -b 32 -l 250 -f 5
-model_name: "/mnt/weka/data/pytorch/llama3/Meta-Llama-3-70B-Instruct"
+model_name: "/mnt/weka/data/pytorch/llama3/Meta-Llama-3.1-70B-Instruct"
 tasks:
 - name: "gsm8k"
   metrics:
