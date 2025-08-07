@@ -15,7 +15,7 @@ import numpy as np
 import torch
 import torch.distributed
 import vllm_gaudi.extension.environment as environment
-from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
+from vllm_gaudi.extension.bucketing.common import HPUBucketingManager, VisionBuckets
 from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler,
                                            HabanaMemoryProfiler,
                                            HabanaProfilerCounterHelper,
@@ -33,6 +33,12 @@ from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model, get_model_loader
+from vllm.model_executor.models import supports_multimodal
+from vllm.model_executor.sampling_metadata import SequenceGroupToSample
+from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
+                             MultiModalKwargs, MultiModalPlaceholderMap,
+                             MultiModalRegistry)
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingType
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
@@ -419,6 +425,7 @@ class HpuModelAdapter(torch.nn.Module):
         attn_meta = kwargs.pop('attn_metadata')
         if 'kv_caches' in kwargs:
             kwargs.pop('kv_caches')
+        logger.info(f'args: {args}, kwargs: {list(kwargs.keys())}')
         with set_forward_context(attn_meta, self.vllm_config):
             hidden_states = self.model(*args, **kwargs)
             if self._rotary_prepare_cos_sin is not None:
@@ -597,6 +604,10 @@ class HPUModelRunner:
             self.model_config.is_attention_free,
             use_mla=self.model_config.use_mla,
         )
+
+        # Mult-modal-related.
+        self.uses_mrope = model_config.uses_mrope
+        logger.info(f"Using mrope: {self.uses_mrope}")
 
         # Lazy initialization
         # self.model: nn.Module  # set after load_model
