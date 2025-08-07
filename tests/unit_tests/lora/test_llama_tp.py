@@ -4,11 +4,19 @@ from typing import Union
 
 import vllm
 from vllm.lora.request import LoRARequest
-
+import os
 #from ..utils import VLLM_PATH, create_new_process_for_each_test, multi_gpu_test
 
-MODEL_PATH = "/mnt/weka/data/pytorch/llama2/Llama-2-7b-hf"
-#MODEL_PATH = "meta-llama/Llama-2-7b-hf"
+# Need to create symlink to avoid long path error
+# thrown by HF Hub validation check. Downloading
+# model directly from Hub can be done but will need
+# adding HF token to repo secrets
+src = "/mnt/weka/data/pytorch/llama2/Llama-2-7b-hf"
+dst = "test_model"
+if os.path.islink(dst):
+    os.remove(dst)
+os.symlink(src, dst)
+MODEL_PATH = dst
 
 EXPECTED_NO_LORA_OUTPUT = [
     "\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_75 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant",  # noqa: E501

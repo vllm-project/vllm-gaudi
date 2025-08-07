@@ -2,6 +2,18 @@ from typing import Optional
 
 from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
 from vllm.lora.request import LoRARequest
+import os
+
+# Need to create symlink to avoid long path error
+# thrown by HF Hub validation check. Downloading
+# model directly from Hub can be done but will need
+# adding HF token to repo secrets
+src = "/mnt/weka/data/pytorch/llama2/Llama-2-7b-hf"
+dst = "test_model"
+if os.path.islink(dst):
+    os.remove(dst)
+os.symlink(src, dst)
+MODEL_PATH = dst
 
 
 def create_test_prompts(
@@ -99,14 +111,13 @@ expected_output = [
 
 def _test_llama_multilora(sql_lora_files, tp_size):
     """Main function that sets up and runs the prompt processing."""
-    engine_args = EngineArgs(
-        model="/mnt/weka/data/pytorch/llama2/Llama-2-7b-hf",
-        enable_lora=True,
-        max_loras=2,
-        max_lora_rank=8,
-        max_num_seqs=256,
-        dtype='bfloat16',
-        tensor_parallel_size=tp_size)
+    engine_args = EngineArgs(model=MODEL_PATH,
+                             enable_lora=True,
+                             max_loras=2,
+                             max_lora_rank=8,
+                             max_num_seqs=256,
+                             dtype='bfloat16',
+                             tensor_parallel_size=tp_size)
     engine = LLMEngine.from_engine_args(engine_args)
     test_prompts = create_test_prompts(sql_lora_files)
     results = process_requests(engine, test_prompts)
