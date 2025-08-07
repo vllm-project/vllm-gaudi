@@ -379,6 +379,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         HPUFusedSDPA = kernels.fsdpa()
         self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
             else ModuleFusedSDPA(HPUFusedSDPA)
+        # self.block_softmax_max_const = BlockSoftmaxConstMax()
+        self.block_softmax_max_const = None
         self.prefill_impl = get_config().prompt_attn_impl
         self.use_contiguous_pa = get_config().use_contiguous_pa
         self.use_merged_prefill = get_config().merged_prefill
@@ -509,8 +511,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             if (attn_metadata.block_list is None and self.prompt_position_bias is not None
                     and self.alibi_slopes is not None):
                 assert attn_bias is not None, \
-                        'attn_bias must be set before calling ' \
-                        'model.forward with alibi biases'
+                    'attn_bias must be set before calling ' \
+                    'model.forward with alibi biases'
                 slice_1_size = attn_bias.size(-2)
                 slice_2_size = attn_bias.size(-1)
                 if self.max_seq_len >= max(slice_1_size, slice_2_size):
@@ -592,6 +594,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             'keys_fetch_func': self.k_cache.fetch_from_cache,
             'values_fetch_func': self.v_cache.fetch_from_cache,
             'softmax_op': self.softmax,
+            'block_softmax_max_const_op': self.block_softmax_max_const,
             'block_list': block_list,
             'key_cache': key_cache,
             'value_cache': value_cache,
@@ -705,7 +708,7 @@ def _make_prompt_alibi_bias(
     bias = torch.arange(seq_len, dtype=dtype, device=alibi_slopes.device)
     bias = bias[None, :] - bias[:, None]  # Shape: [seq_len, seq_len]
 
-    #padded_len = (seq_len + 7) // 8 * 8
+    # padded_len = (seq_len + 7) // 8 * 8
     num_heads = alibi_slopes.shape[0]
     per_head_bias = torch.empty(
         1,
