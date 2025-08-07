@@ -27,3 +27,14 @@ if [ $? -ne 0 ]; then
     exit -1
 fi
 echo "Test with deepseek v2 lite passed"
+
+# deepseek v2 + inc + dynamic quantization + tp2
+echo "Testing deepseek_v2 + inc with vllm-hpu plugin v1"
+echo QUANT_CONFIG=vllm-fork/tests/models/language/generation/inc_dynamic_quant.json HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-fork/tests/full_tests/generate.py --model $model_path --trust-remote-code  --quantization inc --kv_cache_dtype fp8_inc
+QUANT_CONFIG=vllm-fork/tests/models/language/generation/inc_dynamic_quant.json \
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-fork/tests/full_tests/generate.py --model $model_path --trust-remote-code --quantization inc --tensor-parallel-size 2
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for deepseek_v2 + inc dynamic quantization" >&2
+    exit -1
+fi
+echo "Test with deepseek_v2 + inc dynamic quantization + tp 2"
