@@ -4,6 +4,7 @@
 # This source code is licensed under the Apache 2.0 license found in the
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
+import os
 from typing import Callable, Optional, Tuple, List
 import habana_frameworks.torch as htorch
 import torch
@@ -19,7 +20,6 @@ FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
 if is_hpu_gaudi2:
     FP8_MAX = torch.finfo(torch.float8_e4m3fnuz).max
 
-import os
 # MAX_EXPERTS_PER_SLICE is needed for 1.20, up to 64 experts per slice
 MAX_EXPERTS_PER_SLICE = int(os.environ.get("MAX_EXPERTS_PER_SLICE", -1))
 
@@ -52,7 +52,7 @@ def block2batch(tensor, block_mapping, matmul_op=torch.matmul):
 
 
 def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, batch_size, matmul_av_op, batch2block_matmul_op,
-                 block2batch_matmul_op):
+                 block2batch_matmul_op, block_softmax_max_const_op):
     # When fp32_softmax is enabled attn is left in fp32 after Q@K
     # We can return to native dtype after we renormalize and calculate the adjustments
     if block_bias is not None and attn.dtype != block_bias.dtype:
@@ -100,6 +100,16 @@ def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, batch_siz
         # Post processing for the attention scores
         rescale = block_adjustment.div(group_sum_adjusted)
     attn = attn.mul(rescale)
+    return attn
+
+
+def pa_block_softmax_with_const_max(attn, value, block_bias, block_groups, block_mapping, batch_size, matmul_av_op,
+                                    batch2block_matmul_op, block2batch_matmul_op, block_softmax_max_const_op):
+    const_norm_value = get_config().const_norm_value
+    # print(f"ops attn dtype: {attn.dtype}, block_bias dtype: {block_bias.dtype}, block_groups dtype: {block_groups.dtype}, batch_size: {batch_size}, const_norm_value: {const_norm_value}")
+    # attn = block_softmax_max_const_op(attn, block_bias, block_groups, batch_size, const_norm_value)
+    attn = torch.ops.hpu.block_softmax_const_max(attn, block_bias, block_groups, batch_size, const_norm_value)
+    attn = matmul_av_op(attn, value)
     return attn
 
 
@@ -155,7 +165,7 @@ def flat_pa_mla(query, key_cache, value_cache, block_list, block_mapping, block_
 
 def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias, block_groups, block_size, scale,
             matmul_qk_op, position_bias, matmul_av_op, batch2block_matmul_op, block2batch_matmul_op, keys_fetch_func,
-            values_fetch_func, **ignored_args):
+            values_fetch_func, block_softmax_max_const_op, **ignored_args):
     batch_size, _, hidden_size = query.shape
     _, kv_heads, head_size = key_cache.shape
     q_heads = hidden_size // head_size
@@ -186,15 +196,20 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
             attn = attn.to(dtype=position_bias.dtype)
         attn.add_(position_bias.unsqueeze(-2))
 
-    attn = pipelined_pa(attn,
-                        value,
-                        block_bias,
-                        block_groups,
-                        block_mapping,
-                        batch_size=batch_size,
-                        matmul_av_op=matmul_av_op,
-                        batch2block_matmul_op=batch2block_matmul_op,
-                        block2batch_matmul_op=block2batch_matmul_op)
+    if get_config().fused_block_softmax_with_const_max:
+        pa_impl = pa_block_softmax_with_const_max
+    else:
+        pa_impl = pipelined_pa
+    attn = pa_impl(attn,
+                   value,
+                   block_bias,
+                   block_groups,
+                   block_mapping,
+                   batch_size=batch_size,
+                   matmul_av_op=matmul_av_op,
+                   batch2block_matmul_op=batch2block_matmul_op,
+                   block2batch_matmul_op=block2batch_matmul_op,
+                   block_softmax_max_const_op=block_softmax_max_const_op)
     attn = block2batch(attn, block_mapping, block2batch_matmul_op)
     attn = attn.squeeze(-2)
 
@@ -457,7 +472,7 @@ class VllmMixtureOfExpertsOp(torch.nn.Module):
         else:
             max_expert_per_slice = self.num_experts
         self.moe_n_slice = 1 if self.num_experts <= max_expert_per_slice \
-                else self.num_experts // max_expert_per_slice
+            else self.num_experts // max_expert_per_slice
         self.num_expert_per_group = self.num_experts // self.moe_n_slice
 
     def forward(self, hidden_states, expert_routing_table, router_weights, permuted_weights=True, activation="silu"):
@@ -749,8 +764,9 @@ def fp8_block_linear_postprocess_weights(layer, force_channel_fp8=False):
 
 def fp8_block_moe_prepare_weights(layer, force_channel_fp8=False):
     if torch.isnan(layer.w13_weight.data).any():
-        raise ValueError("NaN detected in weights. Please use the flag VLLM_HPU_CONVERT_TO_FP8UZ to convert it at runtime or" \
-        " convert the weights using scripts/deepseek_gaudi2 from vllm-hpu-extension")
+        raise ValueError(
+            "NaN detected in weights. Please use the flag VLLM_HPU_CONVERT_TO_FP8UZ to convert it at runtime or"
+            " convert the weights using scripts/deepseek_gaudi2 from vllm-hpu-extension")
     if force_channel_fp8:
         # convert to channel-wise fp8
         w13_weight, w13_weight_scale_inv = dynamic_quant(
@@ -881,7 +897,7 @@ class VllmMixtureOfExpertsOpFP8(torch.nn.Module):
         else:
             max_expert_per_slice = self.num_experts
         self.moe_n_slice = 1 if self.num_experts <= max_expert_per_slice \
-                else self.num_experts // max_expert_per_slice
+            else self.num_experts // max_expert_per_slice
         self.num_expert_per_group = self.num_experts // self.moe_n_slice
 
     def forward(
