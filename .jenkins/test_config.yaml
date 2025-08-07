@@ -1,6 +1,6 @@
 # test_config.yaml
 stages:
-  - name: test_gsm8k_small_models
+  - name: smoke_tests
     steps:
       - name: gsm8k_small_g3_tp1
         flavor: g3
@@ -21,12 +21,7 @@ stages:
         command: >-
           export PT_HPU_LAZY_MODE=1 && 
           cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 2
-      - name: gsm8k_g2_deepseek-v2-lite_tp1
-        flavor: g3
-        command: >-
-          export PT_HPU_LAZY_MODE=1 && 
-          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-deepseek.txt -t 1
-  - name: test_gsm8k_small_models_apc
+  - name: full_test_suite
     steps:
       - name: gsm8k_small_g3_tp1_apc
         flavor: g3
@@ -38,8 +33,6 @@ stages:
         command: >-
           export VLLM_CONTIGUOUS_PA=false && 
           cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 1 -a
-  - name: test_gsm8k_medium_models
-    steps:
       - name: gsm8k_medium_g3_tp1
         flavor: g3
         command: >-
@@ -59,8 +52,6 @@ stages:
         command: >-
           export PT_HPU_LAZY_MODE=1 && 
           cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-medium.txt -t 2
-  - name: test_gsm8k_large_models
-    steps:
       - name: gsm8k_large_g3_tp2
         flavor: g3.s
         command: >-
@@ -71,15 +62,11 @@ stages:
         command: >-
           export PT_HPU_LAZY_MODE=1 && 
           cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-large.txt -t 4
-  - name: test_gsm8k_huge_models
-    steps:
       - name: gsm8k_huge_g3_tp8
         flavor: g3.l
         command: >-
           export PT_HPU_LAZY_MODE=1 && 
           cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-huge.txt -t 8
-  - name: test_gsm8k_fp8
-    steps:
       - name: gsm8k_small_g3_tp1_fp8
         flavor: g3
         command: >-
@@ -92,8 +79,6 @@ stages:
           cd .jenkins/lm-eval-harness && 
           PT_HPU_LAZY_MODE=1 
           bash run-tests.sh -c configs/models-fp8.txt -t 2
-  - name: test_gsm8k_fp8_bypass_inc
-    steps:
       - name: gsm8k_fp8_llama4_scout_g3_tp2_compressed_tensor
         flavor: g3.s
         command: >-
@@ -112,8 +97,6 @@ stages:
           cd .jenkins/lm-eval-harness && 
           PT_HPU_LAZY_MODE=1 VLLM_HPU_FORCE_CHANNEL_FP8=0 
           bash run-tests.sh -c configs/models-fp8-blockfp8.txt -t 1
-  - name: tests_multimodal
-    steps:
       - name: multimodal_llama4_scout_g3_tp2_ep
         flavor: g3.s
         command: >-

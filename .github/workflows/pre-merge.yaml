@@ -37,7 +37,7 @@ jobs:
           echo "Attempting to build Docker image..."
           # Ensure this image is accessible from GitHub Actions (e.g., public registry or authenticated private registry).
           docker build --no-cache -t hpu-plugin-v1-test-env-pre-merge -f - . <<EOF
-          FROM 1.22-526-pt2.7.1:latest
+          FROM 1.22-619-pt2.7.1:latest
 
           COPY ./ /workspace/vllm-gaudi
           WORKDIR /workspace
