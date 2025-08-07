@@ -1732,10 +1732,14 @@ class HPUModelRunner:
 
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
             end_idx = start_idx + len(sampled_ids)
-            assert end_idx <= (self.max_model_len + 1), (
+            # NOTE(adobrzyn): assert for full max prompt length including
+            # max_model_len and one token that's going to be generated
+            # especially needed for biggest prompt in warm-up phase
+            full_max_prompt = self.max_model_len + 1
+            assert end_idx <= full_max_prompt, (
                 "Sampled token IDs exceed the max model length. "
                 f"Total number of tokens: {end_idx} > max_model_len: "
-                f"{(self.max_model_len + 1)}")
+                f"{full_max_prompt}")
 
             self.input_batch.token_ids_cpu[req_idx,
                                            start_idx:end_idx] = sampled_ids

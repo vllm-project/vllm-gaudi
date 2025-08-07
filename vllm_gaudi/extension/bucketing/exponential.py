@@ -65,13 +65,12 @@ class ExponentialBucketingStrategy():
                            num_max_blocks):
         self.check_for_user_flags('decode')
         prefix_caching = get_config().prefix_caching
-        max_blocks = num_max_blocks
 
         # cfgs shape: [min, step, max, limit]
         decode_bs_limit = math.ceil(math.log2(max_num_seqs)) + 1
         decode_bs_bucket_cfg = [1, 2, max_num_seqs, decode_bs_limit]
-        max_decode_block_limit = math.ceil(math.log2(max_blocks)) + 1
-        max_decode_blocks = min(int((max_model_len // block_size) * max_num_seqs), max_blocks)
+        max_decode_block_limit = math.ceil(math.log2(num_max_blocks)) + 1
+        max_decode_blocks = min(int((max_model_len // block_size) * max_num_seqs), num_max_blocks)
         decode_block_bucket_cfg = [max_num_seqs, max_num_seqs, max_decode_blocks, max_decode_block_limit]
 
         msg = ("Decode bucket config (min, step, max_warmup, limit) "
@@ -164,44 +163,25 @@ def generate_prompt_buckets(bs_bucket_config,
 
 
 def generate_decode_buckets(bs_bucket_config, blocks_bucket_config,
-                            max_blocks, max_model_len, block_size, 
-                            skip_invalid=False):
+                            max_blocks, max_model_len, block_size):
     buckets = []
     bs_buckets = warmup_range_with_limit(bs_bucket_config)
     block_buckets = warmup_range_with_limit(blocks_bucket_config)
     last_bucket = max_blocks
     valid_blocks = set()
-    if not skip_invalid:
-        #NOTE(kzawora): this case will generate all possible combinations of
-        # exponentially-spaced bs and blocks, even if combination is
-        # invalid (exceeds max_model_len). Unfortunately, this is necessary 
-        # to handle scenario where bucket dimensions are determined by 
-        # get_padded_decode_num_blocks or get_padded_decode_batch_size, 
-        # since they don't include information about the other dimension. 
-        # This will need to be refactored at some point in the model runner,
-        # but for now, we are dealing with this.
-        valid_blocks = set((bs, 1, x) for x in sorted(block_buckets) for bs in bs_buckets)
-    else:
-        #NOTE(kzawora): this case will generate only valid combinations of
-        # exponentially-spaced bs and blocks, where the product of bs and blocks
-        # is less than or equal to max_model_len. To handle corner cases 
-        # (e.g. longer context due to fragmentation), we're adding an additional
-        # bucket with max_blocks for each batch size.
-        # For this to work properly, bucket dimensions need be requested as 
-        # a combination of (batch_size, num_blocks), not separately.
-        for bs in bs_buckets:
-            max_blocks_per_bs = min(bs * math.ceil(max_model_len / block_size), last_bucket)
-            upper_bucket_bound = next(x for x in sorted(block_buckets) if x >= max_blocks_per_bs)
-            valid_blocks = set((bs, 1, x) for x in sorted(block_buckets) if x <= upper_bucket_bound)
+    #NOTE(kzawora): generate only valid combinations of
+    # exponentially-spaced bs and blocks, where the product of bs and blocks
+    # is less than or equal to max_model_len. To handle corner cases 
+    # (e.g. longer context due to fragmentation), we're adding an additional
+    # bucket with max_blocks for each batch size.
+    # For this to work properly, bucket dimensions need be requested as 
+    # a combination of (batch_size, num_blocks), not separately.
+    for bs in bs_buckets:
+        max_blocks_per_bs = min(bs * math.ceil(max_model_len / block_size), last_bucket)
+        upper_bucket_bound = next(x for x in sorted(block_buckets) if x >= max_blocks_per_bs)
+        valid_blocks = set((bs, 1, x) for x in sorted(block_buckets) if x <= upper_bucket_bound)
     buckets.extend(list(valid_blocks))
-
-    # remove decodes with too much blocks
-    filtered_buckets = []
-    for b in buckets:
-        if (b[2] / b[0]) * block_size <= max_model_len:
-            filtered_buckets.append(b)
-
-    return list(sorted(filtered_buckets, key=lambda b: (b[0] * b[1], b[1], b[0])))
+    return list(buckets)
 
 
 def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=False, fill=True):
