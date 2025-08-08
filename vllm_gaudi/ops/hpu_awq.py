@@ -12,19 +12,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import torch
 
-from vllm import _custom_ops as ops
-from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
-                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.parameter import (GroupQuantScaleParameter,
-                                           PackedvLLMParameter)
+
+from vllm.model_executor.layers.quantization import register_quantization_config
+
+def get_linear_classes():
+    from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               UnquantizedLinearMethod)
+    return LinearBase, LinearMethodBase, UnquantizedLinearMethod
+
+def get_parameter_classes():
+    from vllm.model_executor.parameter import (
+        GroupQuantScaleParameter,
+        PackedvLLMParameter,
+    )
+    return GroupQuantScaleParameter, PackedvLLMParameter
 
 
+@register_quantization_config("awq_hpu")
 class AWQHPUConfig(QuantizationConfig):
     """Config class for AWQ.
 
@@ -36,7 +46,7 @@ class AWQHPUConfig(QuantizationConfig):
         weight_bits: int,
         group_size: int,
         zero_point: bool,
-        modules_to_not_convert: Optional[List[str]] = None,
+        modules_to_not_convert: Optional[list[str]] = None,
     ) -> None:
         self.weight_bits = weight_bits
         self.group_size = group_size
@@ -58,7 +68,7 @@ class AWQHPUConfig(QuantizationConfig):
     def get_name(self) -> str:
         return "awq_hpu"
 
-    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.bfloat16]
 
     @classmethod
@@ -67,7 +77,7 @@ class AWQHPUConfig(QuantizationConfig):
         return 0
 
     @staticmethod
-    def get_config_filenames() -> List[str]:
+    def get_config_filenames() -> list[str]:
         return [
             "quant_config.json",  # E.g., casperhansen/vicuna-7b-v1.5-awq
             # E.g., abhinavkulkarni/mosaicml-mpt-7b-instruct-w4-g128-awq
@@ -75,7 +85,7 @@ class AWQHPUConfig(QuantizationConfig):
         ]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "AWQHPUConfig":
+    def from_config(cls, config: dict[str, Any]) -> "AWQHPUConfig":
         weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])
         group_size = cls.get_from_keys(config, ["q_group_size", "group_size"])
         zero_point = cls.get_from_keys(config, ["zero_point"])
@@ -90,25 +100,27 @@ class AWQHPUConfig(QuantizationConfig):
         is_valid_user_quant = user_quant == "awq_hpu"
 
         if is_valid_user_quant:
-            return cls.get_name(cls)
+            instance = cls(weight_bits=4, group_size=128, zero_point=True)
+            return instance.get_name()
 
         return None
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["AWQHPULinearMethod"]:
+        LinearBase, _, UnquantizedLinearMethod = get_linear_classes()
         if isinstance(layer, LinearBase):
             if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
                 return UnquantizedLinearMethod()
             return AWQHPULinearMethod(self)
         return None
 
-    def get_scaled_act_names(self) -> List[str]:
+    def get_scaled_act_names(self) -> list[str]:
         return ["gelu", "gelu_fast", "gelu_new", "gelu_pytorch_tanh"]
 
-def is_layer_skipped_awq(prefix: str, modules_to_not_convert: List[str]):
+def is_layer_skipped_awq(prefix: str, modules_to_not_convert: list[str]):
     return any(module_name in prefix for module_name in modules_to_not_convert)
 
-class AWQHPULinearMethod(LinearMethodBase):
+class AWQHPULinearMethod:
     """Linear method for AWQ.
 
     Args:
@@ -116,13 +128,23 @@ class AWQHPULinearMethod(LinearMethodBase):
     """
 
     def __init__(self, quant_config: AWQHPUConfig):
+        _, LinearMethodBase,_ = get_linear_classes()
+        if not issubclass(self.__class__, LinearMethodBase):
+            self.__class__ = type(
+                self.__class__.__name__,
+                (self.__class__, LinearMethodBase),
+                dict(self.__class__.__dict__),
+            )
         self.quant_config = quant_config
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: List[int], input_size: int,
+                       output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
+        
+        (GroupQuantScaleParameter,
+        PackedvLLMParameter) = get_parameter_classes()
         if input_size_per_partition % self.quant_config.group_size != 0:
             raise ValueError(
                 "The input size is not aligned with the quantized "
@@ -169,6 +191,9 @@ class AWQHPULinearMethod(LinearMethodBase):
                                           input_dim=0,
                                           output_dim=1,
                                           weight_loader=weight_loader)
+
+        qzeros.pack_factor = self.quant_config.pack_factor
+        qweight.pack_factor = self.quant_config.pack_factor
 
         layer.register_parameter("qweight", qweight)
         layer.register_parameter("qzeros", qzeros)

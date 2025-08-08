@@ -21,22 +21,34 @@
 # SOFTWARE.
 
 from fractions import Fraction
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
-                                           GroupQuantScaleParameter,
-                                           PackedColumnParameter,
-                                           PackedvLLMParameter,
-                                           RowvLLMParameter)
+from vllm.model_executor.layers.quantization import register_quantization_config
 
+def get_linear_classes():
+    from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+    return LinearBase, LinearMethodBase
 
+def get_parameter_classes():
+    from vllm.model_executor.parameter import (
+        ChannelQuantScaleParameter,
+        GroupQuantScaleParameter,
+        PackedColumnParameter,
+        PackedvLLMParameter,
+        RowvLLMParameter,
+    )
+    return (ChannelQuantScaleParameter, 
+            GroupQuantScaleParameter, 
+            PackedColumnParameter, 
+            PackedvLLMParameter, 
+            RowvLLMParameter)
+
+@register_quantization_config("gptq_hpu")
 class GPTQHPUConfig(QuantizationConfig):
     """Config class for GPTQ.
 
@@ -71,7 +83,7 @@ class GPTQHPUConfig(QuantizationConfig):
         return "gptq_hpu"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.bfloat16]
 
     @classmethod
@@ -80,11 +92,11 @@ class GPTQHPUConfig(QuantizationConfig):
         return 0
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return ["quantize_config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "GPTQHPUConfig":
+    def from_config(cls, config: dict[str, Any]) -> "GPTQHPUConfig":
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         desc_act = cls.get_from_keys(config, ["desc_act"])
@@ -99,22 +111,27 @@ class GPTQHPUConfig(QuantizationConfig):
         is_valid_user_quant = user_quant == "gptq_hpu"
 
         if  is_valid_user_quant:
-            return cls.get_name()
+            instance = cls(weight_bits=4, group_size=128,
+                           desc_act=True, lm_head_quantized=False)
+            return instance.get_name()
 
         return None
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["GPTQHPULinearMethod"]:
+        LinearBase, _ = get_linear_classes()
+        from vllm.model_executor.layers.vocab_parallel_embedding \
+                import ParallelLMHead
         if (isinstance(layer, LinearBase) or
             (isinstance(layer, ParallelLMHead) and self.lm_head_quantized)):
             return GPTQHPULinearMethod(self)
         return None
 
-    def get_scaled_act_names(self) -> List[str]:
+    def get_scaled_act_names(self) -> list[str]:
         return []
 
 
-class GPTQHPULinearMethod(LinearMethodBase):
+class GPTQHPULinearMethod:
     """Linear method for GPTQ.
 
     Args:
@@ -122,18 +139,31 @@ class GPTQHPULinearMethod(LinearMethodBase):
     """
 
     def __init__(self, quant_config: GPTQHPUConfig):
+        _, LinearMethodBase = get_linear_classes()
+        if not issubclass(self.__class__, LinearMethodBase):
+            self.__class__ = type(
+                self.__class__.__name__,
+                (self.__class__, LinearMethodBase),
+                dict(self.__class__.__dict__),
+            )
         self.quant_config = quant_config
 
     def create_weights(
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        (ChannelQuantScaleParameter,
+        GroupQuantScaleParameter,
+        PackedColumnParameter,
+        PackedvLLMParameter,
+        RowvLLMParameter) = get_parameter_classes()
+
         del output_size  # Unused.
         weight_loader = extra_weight_attrs.get("weight_loader")
         if input_size_per_partition % self.quant_config.group_size != 0:
@@ -216,6 +246,8 @@ class GPTQHPULinearMethod(LinearMethodBase):
                 packed_dim=1,
                 packed_factor=self.quant_config.pack_factor,
                 **qzeros_args)
+            
+        qzeros.pack_factor = self.quant_config.pack_factor
 
         layer.register_parameter("qweight", qweight)
         layer.register_parameter("g_idx", g_idx)
@@ -225,7 +257,8 @@ class GPTQHPULinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
 
-        self.wf = torch.tensor(list(range(0, 32, self.quant_config.weight_bits)), dtype=torch.int32).unsqueeze(0)
+        self.wf = torch.tensor(list(range(0, 32, 
+            self.quant_config.weight_bits)), dtype=torch.int32).unsqueeze(0)
         weight = self.unpack_weight_from_cuda_old_format(layer)
         layer.qweight.data = self.pack_tensor(weight).to('hpu')
 
@@ -236,11 +269,14 @@ class GPTQHPULinearMethod(LinearMethodBase):
         # TODO: Support group indexing and remove the check
         columns = layer.qweight.shape[0]
         if self.quant_config.group_size > 0:
-            g_idx_trivial = [i // self.quant_config.group_size for i in range(columns)]
+            g_idx_trivial = [i // self.quant_config.group_size
+                              for i in range(columns)]
         else:
             g_idx_trivial = [0] * columns
         g_idx_trivial = torch.tensor(g_idx_trivial, dtype=torch.int32)
-        assert torch.equal(layer.g_idx, g_idx_trivial.to('hpu')), "Non-trivial tensor g_idx is not supported"
+        g_idx_trivial = g_idx_trivial.to('hpu')
+        assert torch.equal(layer.g_idx, 
+          g_idx_trivial), "Non-trivial tensor g_idx is not supported"
 
         # for torch.compile
         layer.qweight = Parameter(layer.qweight.data, requires_grad=False)
@@ -286,14 +322,15 @@ class GPTQHPULinearMethod(LinearMethodBase):
 
         bits = self.quant_config.weight_bits
         zeros = torch.bitwise_right_shift(
-            torch.unsqueeze(layer.qzeros.to('cpu'), 2).expand(-1, -1, 32 // bits),
+            torch.unsqueeze(layer.qzeros.to('cpu'), 
+                        2).expand(-1, -1, 32 // bits),
             self.wf.unsqueeze(0),
         ).to(torch.int16 if bits == 8 else torch.int8)
 
         zeros = zeros + 1
         zeros = torch.bitwise_and(
             zeros, (2**bits) - 1
-        ).to(layer.scales.dtype)  # NOTE: It appears that casting here after the `zeros = zeros + 1` is important.
+        ).to(layer.scales.dtype) 
         zeros = zeros.reshape(-1, zeros.shape[1] * zeros.shape[2])
         return zeros
 
@@ -307,5 +344,6 @@ class GPTQHPULinearMethod(LinearMethodBase):
                 self.wf.unsqueeze(-1),
             ).to(torch.int16 if bits == 8 else torch.int8)
         weight = torch.bitwise_and(weight, (2**bits) - 1)
-        weight = weight.reshape((weight.shape[0]*weight.shape[1], weight.shape[2]))
+        weight = weight.reshape((weight.shape[0]*weight.shape[1],
+                                 weight.shape[2]))
         return weight
