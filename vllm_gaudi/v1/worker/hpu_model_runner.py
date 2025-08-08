@@ -1705,7 +1705,6 @@ class HPUModelRunner:
                       logits_requests) in enumerate(
                           zip(*shallow_tuple(prefill_data))):
                 self.event_start = self.profiler.get_timestamp_us()
-
                 self.profiler.start("internal", "prefill")
                 htorch.core.mark_step()
                 prefill_hidden_states_ts, logits_device = \
@@ -1744,7 +1743,6 @@ class HPUModelRunner:
             if self.is_driver_worker and self.profiler.enabled:
                 self.profiler_counter_helper.reset_prompt_seq_stats()
 
-        
         ######################### DECODES #########################
         # Decodes run as one single batch with [padded_decode_bs, 1]
         if num_decodes > 0:
