@@ -1706,10 +1706,6 @@ class HPUModelRunner:
                           zip(*shallow_tuple(prefill_data))):
                 self.event_start = self.profiler.get_timestamp_us()
 
-                logger.info(f"token_ids {token_ids}, "
-                            f"position_ids {position_ids}, "
-                            f"attn_metadata {attn_metadata}, "
-                            f"logits_indices {logits_indices}, ")
                 self.profiler.start("internal", "prefill")
                 htorch.core.mark_step()
                 prefill_hidden_states_ts, logits_device = \
@@ -1798,15 +1794,12 @@ class HPUModelRunner:
             logits_combined = logits_decode+logits_prompt
             logits = torch.cat(logits_combined, dim=0)
             # Apply structured output bitmasks if present
-            logger.info(f"logits before grammar {logits}, {torch.argmax(logits, -1)}")
             if scheduler_output.grammar_bitmask is not None:
                 self.apply_grammar_bitmask(scheduler_output, logits)
-            logger.info(f"logits after grammar {logits}, {torch.argmax(logits, -1)}")
             sampling_metadata = self._prepare_sampling(
                 batch_changed,
                 pd_info.prompt_req_ids + pd_info.decode_req_ids,
                 pad_to=logits.shape[0])
-            logger.info(f"sampling metadata {sampling_metadata}")
             # sampling_metadata = self.input_batch.sampling_metadata
             sampler_output = self.sampler(
                 logits=logits,
