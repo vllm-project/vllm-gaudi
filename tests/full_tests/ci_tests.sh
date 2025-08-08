@@ -34,7 +34,7 @@ echo QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_dynamic_quant.
 QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_dynamic_quant.json \
 HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model $model_path --trust-remote-code --quantization inc --tensor-parallel-size 2
 if [ $? -ne 0 ]; then
-    echo "Error: Test failed for deepseek_v2 + inc dynamic quantization" >&2
+    echo "Error: Test failed for deepseek_v2 + inc dynamic quantization + tp2" >&2
     exit -1
 fi
 echo "Test with deepseek_v2 + inc dynamic quantization + tp 2"
