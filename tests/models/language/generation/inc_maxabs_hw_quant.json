@@ -1,0 +1,9 @@
+ {
+    "mode": "QUANTIZE",
+    "scale_method": "maxabs_hw",
+    "dump_stats_path": "./hqt_output/measure",
+       "blocklist": {
+        "types": [],
+        "names": []
+    }
+ }
