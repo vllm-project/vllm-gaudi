@@ -100,7 +100,8 @@ class AWQHPUConfig(QuantizationConfig):
         is_valid_user_quant = user_quant == "awq_hpu"
 
         if is_valid_user_quant:
-            return cls.get_name(cls)
+            instance = cls(weight_bits=4, group_size=128, zero_point=True)
+            return instance.get_name()
 
         return None
 

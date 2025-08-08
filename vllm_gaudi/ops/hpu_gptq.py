@@ -111,7 +111,9 @@ class GPTQHPUConfig(QuantizationConfig):
         is_valid_user_quant = user_quant == "gptq_hpu"
 
         if  is_valid_user_quant:
-            return cls.get_name()
+            instance = cls(weight_bits=4, group_size=128,
+                           desc_act=True, lm_head_quantized=False)
+            return instance.get_name()
 
         return None
 
@@ -272,8 +274,9 @@ class GPTQHPULinearMethod:
         else:
             g_idx_trivial = [0] * columns
         g_idx_trivial = torch.tensor(g_idx_trivial, dtype=torch.int32)
+        g_idx_trivial = g_idx_trivial.to('hpu')
         assert torch.equal(layer.g_idx, 
-          g_idx_trivial.to('hpu')), "Non-trivial tensor g_idx is not supported"
+          g_idx_trivial), "Non-trivial tensor g_idx is not supported"
 
         # for torch.compile
         layer.qweight = Parameter(layer.qweight.data, requires_grad=False)
