@@ -1590,11 +1590,15 @@ class HPUModelRunner:
         # Force use of the torch.compile implementation from xgrammar to work
         # around issues with the Triton kernel in concurrent structured output
         # scenarios. See PR #19565 and issues #19493, #18376 for details.
+
         # xgr_torch_compile.apply_token_bitmask_inplace_torch_compile(
         #     logits,
         #     grammar_bitmask.to(self.device, non_blocking=True),
         #     indices=out_indices if not skip_out_indices else None,
         # )
+
+        # NOTE(tianmu-li): xgr_torch_compile uses torch.inductor by default.
+        # Have to use the CPU backend, which has its overhead.
         logits_cpu = logits.cpu().to(torch.float32)
         xgr_cpu.apply_token_bitmask_inplace_cpu(
             logits_cpu,
@@ -1683,7 +1687,7 @@ class HPUModelRunner:
         prefill_sampled_requests = []
         decode_sampled_token_ids = []
         decode_sampled_requests = []
-        # NOTE(tianmuli): For structured output, combine logits before
+        # NOTE(tianmu-li): For structured output, combine logits before
         # postprocessing. Should it be done for all requests?
         structured_output = False
         if scheduler_output.grammar_bitmask is not None:
@@ -1691,6 +1695,7 @@ class HPUModelRunner:
             logits_decode = []
             structured_output = True
 
+        
         ######################### PREFILLS #########################
         if num_prefills > 0:
             htorch.core.mark_step()
@@ -1700,6 +1705,10 @@ class HPUModelRunner:
                           zip(*shallow_tuple(prefill_data))):
                 self.event_start = self.profiler.get_timestamp_us()
 
+                logger.info(f"token_ids {token_ids}, "
+                            f"position_ids {position_ids}, "
+                            f"attn_metadata {attn_metadata}, "
+                            f"logits_indices {logits_indices}, ")
                 self.profiler.start("internal", "prefill")
                 htorch.core.mark_step()
                 prefill_hidden_states_ts, logits_device = \
@@ -1707,7 +1716,6 @@ class HPUModelRunner:
                         token_ids, position_ids, attn_metadata, logits_indices,
                         self.kv_caches)
                 htorch.core.mark_step()
-                logger.info(f"Prefill logits shape: {logits_device.shape}")
                 # Skip separate sampling for structured output
                 if structured_output:
                     logits_prompt.append(logits_device)
@@ -1789,12 +1797,16 @@ class HPUModelRunner:
             logits_combined = logits_decode+logits_prompt
             logits = torch.cat(logits_combined, dim=0)
             # Apply structured output bitmasks if present
+            logger.info(f"logits before grammar {logits}, {torch.argmax(logits, -1)}")
             if scheduler_output.grammar_bitmask is not None:
                 self.apply_grammar_bitmask(scheduler_output, logits)
+            logger.info(f"logits after grammar {logits}, {torch.argmax(logits, -1)}")
             sampling_metadata = self._prepare_sampling(
                 batch_changed,
                 pd_info.prompt_req_ids + pd_info.decode_req_ids,
                 pad_to=logits.shape[0])
+            logger.info(f"sampling metadata {sampling_metadata}")
+            # sampling_metadata = self.input_batch.sampling_metadata
             sampler_output = self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata)
