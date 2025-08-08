@@ -1528,6 +1528,7 @@ class HPUModelRunner:
         quant_config = os.getenv("QUANT_CONFIG", None) is not None
         return (self.model_config.quantization == "inc" or quant_config)
 
+    # Copied from vllm/v1/worker/gpu_model_runner.py
     def apply_grammar_bitmask(
         self,
         scheduler_output: "SchedulerOutput",
