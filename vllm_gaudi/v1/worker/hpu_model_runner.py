@@ -1807,7 +1807,6 @@ class HPUModelRunner:
         prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
         all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
         logprobs = None
-
         model_runner_output = ModelRunnerOutput(
             req_ids=all_req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
@@ -1816,8 +1815,8 @@ class HPUModelRunner:
             spec_token_ids=None,
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             pooler_output=[],
-            finished_sending=finished_sending,
-            finished_recving=finished_recving,
+            #finished_sending=finished_sending,
+            #finished_recving=finished_recving,
         )
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()

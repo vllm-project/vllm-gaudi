@@ -2,19 +2,6 @@
 
 echo "Warning: LMCache disaggregated prefill support for vLLM v1 is experimental and subject to change."
 
-#!/bin/bash
-
-usage() {
-    echo``
-    echo "Runs simple request check on multimodal models using vllm"
-    echo
-    echo "usage: ${0} <options>"
-    echo
-    echo "  -s    - remote_server (redis/lm). default:lm"
-    echo "  -t    - tensor parallel size. default:1"
-    echo "  -m    - model. default:meta-llama/Llama-3.1-8B-Instruct"
-    echo
-}
 
 PIDS=()
 
@@ -35,7 +22,7 @@ check_hf_token() {
 
 check_num_gpus() {
     # can you check if the number of GPUs are >=2 via nvidia-smi?
-    num_gpus=$(hl-smi --query-gpu=name --format=csv,noheader | wc -l)
+    num_gpus=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
     if [ "$num_gpus" -lt 2 ]; then
         echo "You need at least 2 GPUs to run disaggregated prefill."
         exit 1
@@ -46,7 +33,7 @@ check_num_gpus() {
 
 ensure_python_library_installed() {
     echo "Checking if $1 is installed..."
-    python -c "import $1" > /dev/null 2>&1
+    python3 -c "import $1" > /dev/null 2>&1
     if [ $? -ne 0 ]; then
         if [ "$1" == "nixl" ]; then
             echo "$1 is not installed. Please refer to https://github.com/ai-dynamo/nixl for installation."
@@ -90,84 +77,55 @@ wait_for_server() {
 }
 
 
-SERVER="lm"
-TP_SIZE=1
-MODEL="meta-llama/Llama-3.1-8B-Instruct"
-
 main() {
-    while [[ "$#" -gt 0 ]]; do
-        case $1 in
-            -s) SERVER="$2"; shift ;;
-            -t) TP_SIZE="$2"; shift ;;
-            -m) MODEL="$2"; shift ;;
-            *) echo "Unknown parameter passed: $1"; exit 1 ;;
-        esac
-        shift
-    done
-
-    echo "server: $SERVER"
-    echo "tensor parallel size: $TP_SIZE"
-    echo "model: $MODEL"
-
-    #check_hf_token
+    check_hf_token
     check_num_gpus
     ensure_python_library_installed lmcache
+    ensure_python_library_installed nixl
     ensure_python_library_installed pandas
     ensure_python_library_installed datasets
     ensure_python_library_installed vllm
 
     trap cleanup INT
     trap cleanup USR1
-    trap cleanup TERM    
+    trap cleanup TERM
 
     echo "Launching prefiller, decoder and proxy..."
     echo "Please check prefiller.log, decoder.log and proxy.log for logs."
 
-    if [[ $SERVER == "lm" ]]; then
-        echo "starting lmcache "
-        python -m lmcache.v1.server localhost 8100 2>&1 &
-    elif [[ $SERVER == "redis" ]]; then
-        echo "starting redis-server "
-        redis-server --port 6379 &
-    else
-        echo "Invalid server: $SERVER"
-        exit 1
-    fi
-
-    echo "start prefiller "
-    bash disagg_vllm_launcher.sh prefiller $SERVER $TP_SIZE $MODEL \
+    bash disagg_vllm_launcher.sh prefiller \
         > >(tee prefiller.log) 2>&1 &
     prefiller_pid=$!
     PIDS+=($prefiller_pid)
-    echo "start decoder "
-    bash disagg_vllm_launcher.sh decoder $SERVER $TP_SIZE $MODEL \
+
+    bash disagg_vllm_launcher.sh decoder  \
         > >(tee decoder.log)  2>&1 &
     decoder_pid=$!
     PIDS+=($decoder_pid)
 
-    python3 ../../disagg_prefill_lmcache_v1/disagg_proxy_server.py \
+    python3 disagg_proxy_server.py \
         --host localhost \
-        --port 1000 \
+        --port 9000 \
         --prefiller-host localhost \
-        --prefiller-port 1100 \
+        --prefiller-port 8100 \
         --decoder-host localhost \
-        --decoder-port 1200  \
+        --decoder-port 8200  \
         > >(tee proxy.log)    2>&1 &
     proxy_pid=$!
     PIDS+=($proxy_pid)
 
-    wait_for_server 1100
-    wait_for_server 1200
-    wait_for_server 1000
+    wait_for_server 8100
+    wait_for_server 8200
+    wait_for_server 9000
 
     echo "All servers are up. Starting benchmark..."
 
     # begin benchmark
     cd ../../../../benchmarks/
-    python benchmark_serving.py  --port 1000 --seed 12345 \
-        --model $MODEL \
-        --dataset-name random --random-input-len 8000 --random-output-len 200 \
-        --num-prompts 100 --burstiness 100 --request-rate 3.6 | tee benchmark.log
+    python3 benchmark_serving.py --port 9000 --seed $(date +%s) \
+        --model meta-llama/Llama-3.1-8B-Instruct \
+        --dataset-name random --random-input-len 7500 --random-output-len 200 \
+        --num-prompts 200 --burstiness 100 --request-rate 3.6 | tee benchmark.log
 
     echo "Benchmarking done. Cleaning up..."
 
@@ -175,4 +133,4 @@ main() {
 
 }
 
-main "$@"
+main
