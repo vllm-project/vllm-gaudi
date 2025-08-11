@@ -5,9 +5,10 @@ import functools
 import itertools
 import math
 import os
+import gc
 import time
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast, get_args
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -51,8 +52,11 @@ from vllm.distributed.parallel_state import get_pp_group
 
 from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.interfaces_base import (
-    is_pooling_model, is_text_generation_model)
+    VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
+from vllm.pooling_params import PoolingParams, PoolingTask
+from vllm.v1.attention.backends.utils import (CommonAttentionMetadata)
+from vllm.forward_context import (DPMetadata)
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -598,6 +602,7 @@ class HPUModelRunner:
             self.parallel_config)
         self.head_size = self.model_config.get_head_size()
         self.hidden_size = self.model_config.get_hidden_size()
+        self.is_pooling_model = model_config.pooler_config is not None
 
         self.attn_backend = get_attn_backend(
             self.head_size,
@@ -683,17 +688,17 @@ class HPUModelRunner:
             # TODO: Support other attention modules, e.g., sliding window,
             # cross-attention
             assert isinstance(attn_module, Attention)
-            if attn_module.attn_type == AttentionType.DECODER:
+            if attn_module.attn_type == AttentionType.ENCODER_ONLY:
                 kv_cache_spec[layer_name] = FullAttentionSpec(
                     block_size=block_size,
                     num_kv_heads=attn_module.num_kv_heads,
                     head_size=attn_module.head_size,
                     dtype=self.kv_cache_dtype,
                     use_mla=use_mla)
-            elif attn_module.attn_type in (AttentionType.ENCODER,
-                                           AttentionType.ENCODER_ONLY):
-                # encoder-only attention does not need KV cache.
-                continue
+            # elif attn_module.attn_type in (AttentionType.ENCODER,
+            #                                AttentionType.ENCODER_ONLY):
+            #     # encoder-only attention does not need KV cache.
+            #     continue
             elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
                 raise NotImplementedError
             else:
@@ -747,15 +752,26 @@ class HPUModelRunner:
         req_ids_to_add: list[str] = []
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
-            assert new_req_data.sampling_params is not None, \
-                "Pooling is not supported in HPU yet"
+            # assert new_req_data.sampling_params is not None, \
+            #     "Pooling is not supported in HPU yet"
             req_id = new_req_data.req_id
             sampling_params = new_req_data.sampling_params
+            pooling_params = new_req_data.pooling_params
             if sampling_params.sampling_type == SamplingType.RANDOM_SEED:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
             else:
                 generator = None
+                
+            if pooling_params:
+                assert (task := pooling_params.task) is not None, (
+                    "You did not set `task` in the API")
+
+                model = cast(VllmModelForPooling, self.model)
+                to_update = model.pooler.get_pooling_updates(task)
+                assert to_update is not None, (
+                    f"{pooling_params.task=} is not supported by the model")
+                to_update.apply(pooling_params)
 
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
@@ -763,7 +779,7 @@ class HPUModelRunner:
                 mm_kwargs=new_req_data.mm_kwargs,
                 mm_positions=new_req_data.mm_positions,
                 sampling_params=sampling_params,
-                pooling_params=None,
+                pooling_params=pooling_params,
                 generator=generator,
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
@@ -871,6 +887,16 @@ class HPUModelRunner:
     def get_model(self) -> torch.nn.Module:
         assert self.model is not None
         return self.model
+
+    def get_supported_pooling_tasks(self) -> list[PoolingTask]:
+        model = self.get_model()
+        if not is_pooling_model(model):
+            return []
+
+        return [
+            task for task in get_args(PoolingTask)
+            if model.pooler.get_pooling_updates(task)
+        ]
 
     def _get_prompts_and_decodes(
         self,
@@ -2431,9 +2457,214 @@ class HPUModelRunner:
     def __del__(self):
         self.shutdown_inc()
 
+    def get_dp_padding(self,
+                       num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
+        dp_size = self.vllm_config.parallel_config.data_parallel_size
+        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+
+        # For DP: Don't pad when setting enforce_eager.
+        # This lets us set enforce_eager on the prefiller in a P/D setup and
+        # still use CUDA graphs (enabled by this padding) on the decoder.
+        #
+        # TODO(tms) : There are many cases where padding is enabled for
+        # prefills, causing unnecessary and excessive padding of activations.
+
+        if dp_size == 1 or self.vllm_config.model_config.enforce_eager:
+            # Early exit.
+            return 0, None
+
+        num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
+            num_tokens, dp_size, dp_rank)
+        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp).item()
+        num_tokens_after_padding = torch.tensor([max_tokens_across_dp_cpu] *
+                                                dp_size,
+                                                device="cpu",
+                                                dtype=torch.int32)
+        return max_tokens_across_dp_cpu - num_tokens, num_tokens_after_padding
+        
+    @torch.inference_mode()
+    def _dummy_run(
+        self,
+        num_tokens: int,
+        capture_attn_hpugraph: bool = True,
+        skip_eplb: bool = False,
+        is_profile: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+
+        # Padding for DP
+        num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
+        num_tokens += num_pad
+
+        # Set num_scheduled_tokens based on num_tokens and max_num_seqs
+        # for dummy run with LoRA so that the num_reqs collectively
+        # has num_tokens in total.
+        assert num_tokens <= self.scheduler_config.max_num_batched_tokens
+        max_num_reqs = self.scheduler_config.max_num_seqs
+        num_reqs = min(num_tokens, max_num_reqs)
+        min_tokens_per_req = num_tokens // num_reqs
+        num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
+        num_scheduled_tokens_list[-1] += num_tokens % num_reqs
+        assert sum(num_scheduled_tokens_list) == num_tokens
+        assert len(num_scheduled_tokens_list) == num_reqs
+        num_scheduled_tokens = np.array(num_scheduled_tokens_list,
+                                        dtype=np.int32)
+
+        attn_metadata: Optional[dict[str, Any]] = None
+        if capture_attn_hpugraph:
+            attn_metadata = {}
+
+            # Make sure max_model_len is used at the graph capture time.
+            self.seq_lens_np[:num_reqs] = self.max_model_len
+            self.seq_lens_np[num_reqs:] = 0
+            self.seq_lens[:num_reqs].copy_(self.seq_lens_cpu[:num_reqs],
+                                           non_blocking=True)
+
+            for kv_cache_group_id, kv_cache_group_spec in enumerate(
+                    self.kv_cache_config.kv_cache_groups):
+                common_attn_metadata = CommonAttentionMetadata(
+                    query_start_loc=self.query_start_loc[:num_reqs + 1],
+                    query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs +
+                                                                 1],
+                    seq_lens=self.seq_lens[:num_reqs],
+                    seq_lens_cpu=self.seq_lens_cpu[:num_reqs],
+                    num_computed_tokens_cpu=self.input_batch.
+                    num_computed_tokens_cpu_tensor[:num_reqs],
+                    num_reqs=num_reqs,
+                    num_actual_tokens=num_tokens,
+                    max_query_len=num_tokens,
+                    block_table_tensor=self.input_batch.block_table[
+                        kv_cache_group_id].get_device_tensor()[:num_reqs],
+                    slot_mapping=self.input_batch.
+                    block_table[kv_cache_group_id].slot_mapping[:num_reqs])
+
+                attn_metadata_i = self.attn_metadata_builders[
+                    kv_cache_group_id].build_for_cudagraph_capture(
+                        common_attn_metadata)
+                for layer_name in kv_cache_group_spec.layer_names:
+                    attn_metadata[layer_name] = attn_metadata_i
+
+        # with self.maybe_dummy_run_with_lora(self.lora_config,
+        #                                     num_scheduled_tokens):
+            model = self.model
+            if self.is_multimodal_model:
+                input_ids = None
+                inputs_embeds = self.inputs_embeds[:num_tokens]
+            else:
+                input_ids = self.input_ids[:num_tokens]
+                inputs_embeds = None
+            if self.uses_mrope:
+                positions = self.mrope_positions[:, :num_tokens]
+            else:
+                positions = self.positions[:num_tokens]
+
+            if get_pp_group().is_first_rank:
+                intermediate_tensors = None
+            else:
+                if self.intermediate_tensors is None:
+                    self.intermediate_tensors = (
+                        self.model.make_empty_intermediate_tensors(
+                            batch_size=self.max_num_tokens,
+                            dtype=self.model_config.dtype,
+                            device=self.device))
+
+                intermediate_tensors = self.sync_and_slice_intermediate_tensors(
+                    num_tokens, None, False)
+
+            with self.maybe_randomize_inputs(input_ids), set_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
+                    num_tokens=num_tokens,
+                    num_tokens_across_dp=num_tokens_across_dp):
+                outputs = model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                )
+            if self.use_aux_hidden_state_outputs:
+                hidden_states, _ = outputs
+            else:
+                hidden_states = outputs
+
+            # if self.speculative_config and self.speculative_config.use_eagle():
+            #     assert isinstance(self.drafter, EagleProposer)
+            #     self.drafter.dummy_run(num_tokens)
+
+        # This is necessary to avoid blocking DP.
+        # For dummy runs, we typically skip EPLB since we don't have any real
+        # requests to process.
+        # However, in DP settings, there may be cases when some DP ranks do
+        # not have any requests to process, so they're executing dummy batches.
+        # In such cases, we still have to trigger EPLB to make sure
+        # ranks execute the rearrangement in synchronization.
+        # if not skip_eplb:
+        #     self.eplb_step(is_dummy=True, is_profile=is_profile)
+
+        logit_indices = np.cumsum(num_scheduled_tokens) - 1
+        return hidden_states, hidden_states[logit_indices]
+
+    @torch.inference_mode()
+    def _dummy_pooler_run(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+
+        num_tokens = hidden_states.shape[0]
+        max_num_reqs = self.scheduler_config.max_num_seqs
+        num_reqs = min(num_tokens, max_num_reqs)
+        min_tokens_per_req = num_tokens // num_reqs
+        num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
+        num_scheduled_tokens_list[-1] += num_tokens % num_reqs
+        assert sum(num_scheduled_tokens_list) == num_tokens
+        assert len(num_scheduled_tokens_list) == num_reqs
+
+        hidden_states_list = list(
+            torch.split(hidden_states, num_scheduled_tokens_list))
+
+        req_num_tokens = num_tokens // num_reqs
+
+        model = cast(VllmModelForPooling, self.model)
+        dummy_task = self.get_supported_pooling_tasks()[0]
+        dummy_pooling_params = PoolingParams(task=dummy_task)
+
+        to_update = model.pooler.get_pooling_updates(dummy_task)
+        assert to_update is not None
+        to_update.apply(dummy_pooling_params)
+
+        dummy_metadata = PoolingMetadata(
+            prompt_lens=torch.tensor([h.shape[0] for h in hidden_states_list],
+                                     device=self.device),
+            prompt_token_ids=torch.zeros((num_reqs, req_num_tokens),
+                                         dtype=torch.int32,
+                                         device=self.device),
+            pooling_params=[dummy_pooling_params] * num_reqs)
+
+        try:
+            pooler_output = model.pooler(hidden_states=hidden_states_list,
+                                         pooling_metadata=dummy_metadata)
+        except RuntimeError as e:
+            if 'out of memory' in str(e):
+                raise RuntimeError(
+                    "CUDA out of memory occurred when warming up pooler with "
+                    f"{num_reqs} dummy requests. Please try lowering "
+                    "`max_num_seqs` or `gpu_memory_utilization` when "
+                    "initializing the engine.") from e
+            else:
+                raise e
+        return pooler_output
+
     @torch.inference_mode()
     def profile_run(self) -> None:
-        return
+        if self.is_pooling_model:
+            hidden_states, _ \
+            = self._dummy_run(self.max_num_tokens, is_profile=True)
+            output = self._dummy_pooler_run(hidden_states)
+        else:
+            output = None
+        self._sync_device()
+        del hidden_states, output
+        self.encoder_cache.clear()
+        gc.collect()
         """Profile to measure peak memory during forward pass."""
 
         # use an empty tensor instead of `None`` to force Dynamo to pass

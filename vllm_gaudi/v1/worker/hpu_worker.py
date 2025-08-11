@@ -28,7 +28,7 @@ from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, bool_helper
 from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_gaudi.extension.logger import logger as init_logger
-
+from vllm.pooling_params import PoolingTask
 logger = init_logger()
 
 if TYPE_CHECKING:
@@ -136,6 +136,9 @@ class HPUWorker(WorkerBase):
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
+    
+    def get_supported_pooling_tasks(self) -> list[PoolingTask]:
+        return self.model_runner.get_supported_pooling_tasks()
 
     def load_model(self) -> None:
         self.model_runner.load_model()
