@@ -26,7 +26,7 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import (VllmConfig, update_config)
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import set_forward_context, DPMetadata
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import get_sampler
@@ -1365,6 +1365,8 @@ class HPUModelRunner:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
 
+        # TODO wuxun: consider dp aware padding for bs, block bucket, etc.
+
         num_reqs = num_prefills + num_decodes
 
         # Get the number of scheduled tokens for each request.
@@ -1403,6 +1405,32 @@ class HPUModelRunner:
             logger.warning(
                 "Configuration: (%s, %s, %s, %s) was not warmed-up!", phase,
                 batch_size, seq_len, num_blocks)
+
+    # TODO wuxun: dp padding for prefill/decode inputs
+    def get_dp_padding(self,
+                       num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
+        dp_size = self.vllm_config.parallel_config.data_parallel_size
+        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+
+        # For DP: Don't pad when setting enforce_eager.
+        # This lets us set enforce_eager on the prefiller in a P/D setup and
+        # still use CUDA graphs (enabled by this padding) on the decoder.
+        #
+        # TODO(tms) : There are many cases where padding is enabled for
+        # prefills, causing unnecessary and excessive padding of activations.
+
+        if dp_size == 1 or self.vllm_config.model_config.enforce_eager:
+            # Early exit.
+            return 0, None
+
+        num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
+            num_tokens, dp_size, dp_rank)
+        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp).item()
+        num_tokens_after_padding = torch.tensor([max_tokens_across_dp_cpu] *
+                                                dp_size,
+                                                device="cpu",
+                                                dtype=torch.int32)
+        return max_tokens_across_dp_cpu - num_tokens, num_tokens_after_padding
 
     def _execute_model_generic(self,
                                token_ids,
@@ -2045,7 +2073,10 @@ class HPUModelRunner:
                         num_blocks,
                         is_prompt,
                         kv_caches,
-                        is_pt_profiler_run=True) -> None:
+                        num_iters=3,
+                        is_pt_profiler_run=True,
+                        align_worker=False,
+                        is_dummy_run=False) -> None:
         """Dummy warmup run for memory usage and graph compilation."""
 
         query_seq_len = seq_or_block if is_prompt else 1
@@ -2063,7 +2094,7 @@ class HPUModelRunner:
         position_ids_device = _async_h2d_tensor_copy(position_ids, self.device)
         slot_mapping_device = _async_h2d_tensor_copy(slot_mapping, self.device)
 
-        use_graphs = self._use_graphs()
+        use_graphs = is_dummy_run or self._use_graphs()
         phase = "prompt" if is_prompt else "decode"
         scenario_name = ("warmup_"
                          f"{phase}_"
@@ -2086,7 +2117,10 @@ class HPUModelRunner:
         slot_mapping_device = _async_h2d_tensor_copy(slot_mapping, self.device)
         self.profiler.start('internal', scenario_name)
 
-        times = 3 if use_graphs or is_pt_profiler_run else 1
+        # TODO wuxun: consider dp aware padding for bs, block bucket, etc.
+        # should be similarly done in _prepare_inputs
+
+        times = num_iters if use_graphs or is_pt_profiler_run else 1
         for time_index in range(times):
             if is_prompt:
                 seq_lens = torch.zeros((batch_size),
@@ -2458,6 +2492,20 @@ class HPUModelRunner:
                              seq_or_block=max_seq_len,
                              is_prompt=True,
                              kv_caches=kv_caches)
+
+    def _dummy_run(self, max_num_batched_tokens: int) -> None:
+        # TODO wuxun: dummy run implementation
+        assert max_num_batched_tokens == 1
+        self.warmup_scenario(max_num_batched_tokens,
+                             1,
+                             1,
+                             is_prompt=False,
+                             kv_caches=None,
+                             num_iters=1,
+                             is_pt_profiler_run=False,
+                             align_worker=True,
+                             is_dummy_run=True)
+        return
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
