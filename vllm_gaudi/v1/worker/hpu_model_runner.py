@@ -30,7 +30,7 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import (VllmConfig, update_config)
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import set_forward_context, DPMetadata
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import get_sampler
@@ -58,6 +58,7 @@ from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.distributed.parallel_state import get_pp_group
+
 from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.interfaces_base import (
     is_pooling_model, is_text_generation_model)
@@ -423,7 +424,8 @@ class HpuModelAdapter(torch.nn.Module):
         if model_mm_kwargs is not None:
             kwargs.update(model_mm_kwargs)
 
-        with set_forward_context(attn_meta, self.vllm_config):
+        num_input_tokens = input_ids.size(0) * input_ids.size(1)
+        with set_forward_context(attn_meta, self.vllm_config, num_tokens=num_input_tokens):
             hidden_states = self.model(*args, **kwargs)
             if self._rotary_prepare_cos_sin is not None:
                 self._reset_rotary_cos_sin()
@@ -1401,6 +1403,17 @@ class HPUModelRunner:
                 merge_contents(all_batch_contents[-1], new_batch_contents)
             else:
                 all_batch_contents.append(new_batch_contents)
+
+        if (len(all_batch_contents[0].req_ids) > 0):
+            num_prefill_batches = len(all_batch_contents)
+        else:
+            # no real prefill batches
+            num_prefill_batches = 0
+
+        num_pad = self.get_dp_padding(num_prefill_batches)
+        if num_pad > 0:
+            for _ in range(num_pad):
+                all_batch_contents.append(BatchContents())
         return all_batch_contents
 
     def _make_attn_bias(self, context_groups, token_groups):
@@ -1468,6 +1481,11 @@ class HPUModelRunner:
         has_context = sum(context_lens) > 0
         target_bs, target_seq, target_blocks = self._get_prompt_bucketing_fn()(
             query_lens, num_context_blocks)
+
+        # dp aware padding
+        target_bs += self.get_dp_padding(target_bs)
+        target_seq += self.get_dp_padding(target_seq)
+        target_blocks += self.get_dp_padding(target_blocks)
 
         # NOTE: If model does not support multimodal inputs, we pad here.
         # For models with multimodal support, we may want to get embeddings
@@ -1564,7 +1582,6 @@ class HPUModelRunner:
     def _prepare_prefill_inputs(
             self, num_prefills, num_decodes,
             num_scheduled_tokens: list[int]) -> PrefillInputData:
-
         all_batch_contents = self._extract_prefill_batch_contents(
             num_prefills, num_decodes, num_scheduled_tokens)
         all_batches = [
@@ -1601,6 +1618,9 @@ class HPUModelRunner:
         padded_batch_size: int
         padded_batch_size = self.bucketing_manager.find_decode_bucket(
             num_decodes, sum(num_blocks))[0]
+
+        # dp aware padding
+        padded_batch_size += self.get_dp_padding(padded_batch_size)
 
         num_tokens_per_req = num_scheduled_tokens[:num_decodes]
         num_tokens = max(num_tokens_per_req)
@@ -1965,6 +1985,30 @@ class HPUModelRunner:
         if not seen and not warmup_mode:
             logger.warning("Configuration: %s was not warmed-up!", cfg)
 
+    def get_dp_padding(self,
+                       num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
+        dp_size = self.vllm_config.parallel_config.data_parallel_size
+        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+
+        # For DP: Don't pad when setting enforce_eager.
+        # This lets us set enforce_eager on the prefiller in a P/D setup and
+        # still use CUDA graphs (enabled by this padding) on the decoder.
+        #
+        # TODO(tms) : There are many cases where padding is enabled for
+        # prefills, causing unnecessary and excessive padding of activations.
+
+        # skip padding for non PD disagg case to avoid padding on prefill batch
+        # size and decode batch size
+        if dp_size == 1 or self.vllm_config.model_config.enforce_eager or (
+                self.vllm_config.kv_transfer_config is None
+                or self.vllm_config.kv_transfer_config.kv_connector is None):
+            return 0
+
+        num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
+            num_tokens, dp_size, dp_rank)
+        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp).item()
+        return max_tokens_across_dp_cpu - num_tokens
+
     def _execute_model_generic(self,
                                token_ids,
                                position_ids,
@@ -2282,6 +2326,8 @@ class HPUModelRunner:
 
         ######################### PREFILLS #########################
         if num_prefills > 0:
+            # Wuxun: merged prefill forward if enabled
+            # 2D bucketing or merged prefill bucketing
             htorch.core.mark_step()
             for idx, (req_id, prompt_len, token_ids, position_ids,
                       attn_metadata, logits_indices,
@@ -3051,7 +3097,6 @@ class HPUModelRunner:
 
     @torch.inference_mode()
     def profile_run(self) -> None:
-        return
         """Profile to measure peak memory during forward pass."""
 
         # use an empty tensor instead of `None`` to force Dynamo to pass
@@ -3069,6 +3114,14 @@ class HPUModelRunner:
             self.block_size) * self.block_size
         self._execute_dummy_scenario(
             (self.max_prefill_batch_size, max_seq_len, 0), None)
+
+    def _dummy_run(self, max_num_batched_tokens: int) -> None:
+        assert max_num_batched_tokens == 1
+        prompt_cfg = None
+        decode_cfg = 1, 1
+        # add dummy decode run
+        self._execute_dummy_scenario(prompt_cfg, decode_cfg)
+        return
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
