@@ -1568,6 +1568,10 @@ class HPUModelRunner:
         seq = sorted(scheduler_output.structured_output_request_ids.items(),
                      key=lambda x: x[1])
 
+        if logits.shape[0] < len(seq):
+            # The last request is an incomplete prompt
+            seq = seq[:-1]
+
         for req_id, _ in seq:
             logit_index = struct_out_req_batch_indices[req_id]
             num_spec_tokens = len(
@@ -1802,7 +1806,8 @@ class HPUModelRunner:
             sampler_output = self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata)
-            for i in range(num_prefills):
+            # Deal with the case of incomplete prompt
+            for i in range(logits.shape[0]-num_decodes):
                 prefill_sampled_token_ids.append(sampler_output.sampled_token_ids[num_decodes + i].flatten())
             decode_sampled_token_ids.append(sampler_output.sampled_token_ids[:num_decodes].flatten())
 
