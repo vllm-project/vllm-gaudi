@@ -1422,7 +1422,8 @@ class HPUModelRunner:
         # Create a mapping from request_id to newly generated token
         req_to_token = {}
         #### ACCURACY THREAT ?????????????
-        for token, req_id in zip(prefill_sampled_tokens, prefill_sampled_requests):
+        tokens = [token for token in prefill_sampled_tokens if token.shape != torch.Size([0])]
+        for token, req_id in zip(tokens, prefill_sampled_requests):
             req_to_token[req_id] = token
         
         # For lookahead decodes (which start after original decodes), update their input tokens
@@ -1431,12 +1432,10 @@ class HPUModelRunner:
             prefill_idx = i - original_num_decodes
             batch_idx = original_num_decodes + prefill_idx
             req_id = self.input_batch.req_ids[batch_idx]
-            
             if req_id in req_to_token:
                 # Update the decode input to use the newly generated token
                 new_token = req_to_token[req_id]
                 decode_data.token_ids[i, 0] = new_token
-                
                 # Update position to point to the correct location (after the generated token)
                 prompt_len = self.input_batch.num_prompt_tokens[batch_idx]
                 decode_data.position_ids[i, 0] = prompt_len
@@ -1705,8 +1704,6 @@ class HPUModelRunner:
         pd_info = self._get_prompts_and_decodes(scheduler_output)
         num_decodes = len(pd_info.decode_req_ids)
         num_prefills = len(pd_info.prompt_req_ids)
-        if num_decodes > num_prefills:
-            pass
         original_num_decodes = num_decodes - num_prefills
         num_reqs = original_num_decodes + num_prefills
         with self.profiler.record_event('internal', 'prepare_input_tensors'):
@@ -1782,9 +1779,6 @@ class HPUModelRunner:
                 decode_sampled_token_ids = \
                     sampler_output.sampled_token_ids.flatten()
 
-                #if num_decodes > num_prefills:
-                #    import fpdb
-                #    fpdb.ForkedPdb().set_trace()
                 for req_id, token_ids in zip(
                         pd_info.decode_req_ids,
                         decode_sampled_token_ids[:num_decodes].split(1)):
@@ -1818,9 +1812,10 @@ class HPUModelRunner:
         # We already have tokens. Let's copy the data to
         # CPU as is, and then discard padded tokens.
         with self.profiler.record_event('internal', "sampler_postprocessing"):
-            prefill_sampled_token_ids = torch.cat([
-                tensor.cpu() for tensor in prefill_sampled_token_ids
-            ]).tolist()
+            if num_prefills > 0:
+                prefill_sampled_token_ids = torch.cat([
+                    tensor.cpu() for tensor in prefill_sampled_token_ids
+                ]).tolist()
             max_req_index = max(self.input_batch.req_id_to_index.values())
             postprocessed_sampled_token_ids: list[list]
             postprocessed_sampled_token_ids = [[]
