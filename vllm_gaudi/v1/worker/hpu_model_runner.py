@@ -1413,7 +1413,7 @@ class HPUModelRunner:
         Update decode_data for lookahead decoding to use newly generated tokens from prefill phase
         instead of stale prompt tokens as inputs.
         """
-        if not self.use_lookahead_decoding or num_prefills == 0 or not prefill_sampled_tokens:
+        if not self.use_lookahead_decoding:
             return
         
         # Get the original decode count (before lookahead decodes)
@@ -1439,12 +1439,11 @@ class HPUModelRunner:
                 # Update position to point to the correct location (after the generated token)
                 prompt_len = self.input_batch.num_prompt_tokens[batch_idx]
                 decode_data.position_ids[i, 0] = prompt_len
-        
+
         # Replace tokens in regular decodes with lookahead stored tokens
         for i in range(0, original_num_decodes):
             req_id = self.input_batch.req_ids[i]
             decode_data.token_ids[i, 0] = self.lookahead_tokens.get(req_id, 0)[0]
-
 
     def _prepare_inputs(
         self,
@@ -1822,23 +1821,15 @@ class HPUModelRunner:
                                                for _ in range(max_req_index +
                                                               1)]
             
-            lookahead_token_mapping = {}  # req_id : token_id
-            scheduled_token_mapping = {}  # req_id : [token_ids]
             for req_id in decode_sampled_requests:
                 req_index = self.input_batch.req_id_to_index[req_id]
                 tok_id = self.lookahead_tokens[req_id].pop(0).item()
                 postprocessed_sampled_token_ids[req_index].append(tok_id)
-                if req_id not in scheduled_token_mapping:
-                    scheduled_token_mapping[req_id] = []
-                scheduled_token_mapping[req_id].append(tok_id)
 
             for tok_id, req_id in zip(prefill_sampled_token_ids,
                                       prefill_sampled_requests):
                 req_index = self.input_batch.req_id_to_index[req_id]
                 postprocessed_sampled_token_ids[req_index].append(tok_id)
-                if req_id not in scheduled_token_mapping:
-                    scheduled_token_mapping[req_id] = []
-                scheduled_token_mapping[req_id].append(tok_id)
                 
         # NOTE(kzawora): idk what happens if part of batch doesn't have logprobs
 
