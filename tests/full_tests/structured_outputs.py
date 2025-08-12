@@ -67,9 +67,8 @@ guided_decoding_params_grammar = GuidedDecodingParams(
     grammar=simplified_sql_grammar)
 sampling_params_grammar = SamplingParams(
     guided_decoding=guided_decoding_params_grammar)
-prompt_grammar = (
-    "Generate an SQL query to show the 'username' and 'email'from the 'users' table."
-)
+prompt_grammar = ("Generate an SQL query to show the "
+                  "'username' and 'email'from the 'users' table.")
 
 
 def format_output(title: str, output: str):
