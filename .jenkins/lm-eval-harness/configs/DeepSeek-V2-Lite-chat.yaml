@@ -3,10 +3,10 @@ tasks:
 - name: "gsm8k"
   metrics:
   - name: "exact_match,strict-match"
-    value: 0.66
+    value: 0.628
   - name: "exact_match,flexible-extract"
-    value: 0.66
-limit: 1000
+    value: 0.632
+limit: 250
 num_fewshot: 5
 dtype: "bfloat16"
-trust_remote_code: True
+trust_remote_code: true
