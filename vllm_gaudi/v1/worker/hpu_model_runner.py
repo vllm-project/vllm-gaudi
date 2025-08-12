@@ -1829,7 +1829,7 @@ class HPUModelRunner:
         if (not is_fake_hpu() and not htorch.utils.internal.is_lazy()
                 and not self.vllm_config.model_config.enforce_eager):
             self.compile_config = HPUCompileConfig()
-            if self.compile_config.is_regional_compilation:
+            if self.compile_config.regional_compilation:
                 self._compile_methods()
                 self.regional_compilation_layers_list = [
                     RMSNorm, VocabParallelEmbedding
@@ -2196,7 +2196,7 @@ class HPUModelRunner:
 
         if not htorch.utils.internal.is_lazy(
         ) and not self.model_config.enforce_eager:
-            multiplier = 3 if self.compile_config.is_regional_compilation else 1
+            multiplier = 3 if self.compile_config.regional_compilation else 1
             cache_size_limit = 1 + multiplier * (
                 len(self.bucketing_manager.prompt_buckets) +
                 len(self.bucketing_manager.decode_buckets))

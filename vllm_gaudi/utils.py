@@ -130,7 +130,7 @@ class HPUCompileConfig:
             get_config().fullgraph_compilation
         self.dynamic = dynamic if dynamic is not None else \
             get_config().dynamic_shapes_compilation
-        self.is_regional_compilation = get_config().regional_compilation
+        self.regional_compilation = get_config().regional_compilation
 
     def get_compile_args(self) -> dict[str, Any]:
         if self.dynamic:
