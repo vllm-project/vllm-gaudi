@@ -7,13 +7,14 @@ import math
 import os
 import time
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, List, Tuple
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
 import numpy as np
 import torch
 import torch.distributed
+import torch.nn.functional as F
 import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager, VisionBuckets
 from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler,
@@ -35,9 +36,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.sampling_metadata import SequenceGroupToSample
-from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalKwargs, MultiModalPlaceholderMap,
-                             MultiModalRegistry)
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
+                                    PlaceholderRange)
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingType
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
@@ -407,7 +409,7 @@ class HpuModelAdapter(torch.nn.Module):
             attn_metadata = self._set_block_mapping(attn_metadata, batch_size,
                                                     device, dtype)
         return attn_metadata
-
+                
     def forward(self, *args, **kwargs):
         # TODO(kzawora): something goes VERY WRONG when operating on
         # kwargs['attn_metadata'].slot_mapping, compared to untrimmed metadata
@@ -425,7 +427,7 @@ class HpuModelAdapter(torch.nn.Module):
         attn_meta = kwargs.pop('attn_metadata')
         if 'kv_caches' in kwargs:
             kwargs.pop('kv_caches')
-        logger.info(f'args: {args}, kwargs: {list(kwargs.keys())}')
+        
         with set_forward_context(attn_meta, self.vllm_config):
             hidden_states = self.model(*args, **kwargs)
             if self._rotary_prepare_cos_sin is not None:
@@ -772,6 +774,43 @@ class HPUModelRunner:
                 lora_request=new_req_data.lora_request,
             )
 
+            # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+            if self.uses_mrope:
+                image_grid_thw = []
+                video_grid_thw = []
+                second_per_grid_ts = []
+                audio_feature_lengths = []
+                use_audio_in_video = False
+                for mm_input in self.requests[req_id].mm_inputs:
+                    if mm_input.get("image_grid_thw") is not None:
+                        image_grid_thw.extend(
+                            mm_input["image_grid_thw"].tolist())
+                    if mm_input.get("video_grid_thw") is not None:
+                        video_grid_thw.extend(
+                            mm_input["video_grid_thw"].tolist())
+                    if mm_input.get("second_per_grid_ts") is not None:
+                        second_per_grid_ts.extend(
+                            mm_input["second_per_grid_ts"])
+                    if mm_input.get("audio_feature_lengths") is not None:
+                        audio_feature_lengths.extend(
+                            mm_input["audio_feature_lengths"])
+                    if mm_input.get("use_audio_in_video") is True:
+                        use_audio_in_video = True
+
+                hf_config = self.model_config.hf_config
+
+                self.requests[req_id].mrope_positions, \
+                    self.requests[req_id].mrope_position_delta = \
+                    MRotaryEmbedding.get_input_positions_tensor(
+                        self.requests[req_id].prompt_token_ids,
+                        hf_config=hf_config,
+                        image_grid_thw=image_grid_thw,
+                        video_grid_thw=video_grid_thw,
+                        second_per_grid_ts=second_per_grid_ts,
+                        audio_feature_lengths=audio_feature_lengths,
+                        use_audio_in_video=use_audio_in_video,
+                    )
+            logger.info(f"** Mrope positions size: {self.requests[req_id].mrope_positions.shape} **")
             req_ids_to_add.append(req_id)
         # Update the states of the running/resumed requests.
         is_last_rank = get_pp_group().is_last_rank
@@ -1010,6 +1049,25 @@ class HPUModelRunner:
         data = pad_list(data, target_bs, itertools.repeat(padding))
         return data
 
+    def _align_and_pad_mrope_positions(
+        self, input_mrope_positions : List[List[List[int]]], bucketing : Tuple[int, int], padding_gen : int) -> torch.Tensor:
+        mrope_input_positions : List[List[int]] = [[] for _ in range(3)]
+        bs = len(input_mrope_positions)
+        target_bs, target_len = bucketing
+        # TODO(attafosu): Check how this applies to mrope positions
+        if target_bs == 1 and bs > 1:
+            input_mrope_positions = [list(itertools.chain(*input_mrope_positions))]
+
+        for idx in range(3):
+            for b_idx, input_mrope_position in enumerate(input_mrope_positions):
+                #TODO (attafosu): Check if mrope_input_positions[idx] is None. For mixed modality??
+                padding_size = target_len - len(input_mrope_position[idx])
+                assert padding_size >= 0
+                padded_positions = input_mrope_position[idx] \
+                    + padding_size * [padding_gen]
+                mrope_input_positions[idx].extend(padded_positions)
+        return torch.tensor(mrope_input_positions, dtype=torch.long, device='cpu').to('hpu', non_blocking=True)
+
     def _bucketize_merged_prompt(self, seq_lens, num_blocks):
         seq = sum(seq_lens)
         num_blocks = sum(num_blocks)
@@ -1130,9 +1188,11 @@ class HPUModelRunner:
             list(range(cl, cl + ql))
             for cl, ql in zip(context_lens, query_lens)
         ]
+
         block_assignment = [[
             divmod(pos, self.block_size) for pos in positions
         ] for positions in token_positions]
+
         token_slots = [[
             blocks[bi] * self.block_size + bo for bi, bo in assignment
         ] for blocks, assignment in zip(contents.blocks, block_assignment)]
@@ -1154,7 +1214,15 @@ class HPUModelRunner:
         token_ids = self._align_and_pad(contents.token_ids,
                                         (target_bs, target_seq),
                                         itertools.repeat(-1))
-        token_positions = self._align_and_pad(token_positions,
+
+        # If the model uses M-RoPE, we need to align and pad the M-RoPE positions.
+        if self.uses_mrope:
+            mrope_token_positions = [self.requests[req_id].mrope_positions.tolist()
+                               for req_id in contents.req_ids]
+            mrope_token_positions = self._align_and_pad_mrope_positions(
+                mrope_token_positions, (target_bs, target_seq), -1)
+        else:
+            token_positions = self._align_and_pad(token_positions,
                                               (target_bs, target_seq),
                                               itertools.repeat(-1))
         token_slots = self._align_and_pad(token_slots, (target_bs, target_seq),
@@ -1201,7 +1269,7 @@ class HPUModelRunner:
 
         query_lens = _async_h2d_tensor(query_lens, torch.int32)
         token_ids = _async_h2d_tensor(token_ids, torch.int32)
-        token_positions = _async_h2d_tensor(token_positions, torch.int32)
+        token_positions = mrope_token_positions if self.uses_mrope else _async_h2d_tensor(token_positions, torch.int32)
         token_slots = _async_h2d_tensor(token_slots, torch.int64)
         logits_indices = _async_h2d_tensor(logits_indices, torch.int32)
         context_lens = _async_h2d_tensor(context_lens, torch.int32)
@@ -1219,7 +1287,7 @@ class HPUModelRunner:
             block_list=context_blocks_t,
             attn_bias=attn_bias,
             block_size=self.block_size)
-
+        logger.info(f"Token positions size: {token_positions.shape}")
         return PrefillInputData(request_ids=[req_ids],
                                 prompt_lens=[query_lens],
                                 token_ids=[token_ids],
@@ -1284,6 +1352,29 @@ class HPUModelRunner:
         padded_index = torch.zeros((padded_batch_size, 1), dtype=torch.int64)
         index = positions.to(torch.int64)[:num_decodes]
         padded_index[:num_decodes] = index
+        
+        input_mrope_positions: List[List[int]] = [[] for _ in range(3)]
+        if self.uses_mrope:
+            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[:num_decodes]
+            for idx, req_id in enumerate(self.input_batch.req_ids[:num_decodes]):
+                seq_data = self.requests[req_id]
+                context_len = num_computed_tokens[idx]
+                position = context_len-1
+                if seq_data.mrope_position_delta is not None:
+                    pos_for_mrope = MRotaryEmbedding \
+                        .get_next_input_positions(
+                            seq_data.mrope_position_delta,
+                            context_len=context_len,
+                            seq_len=context_len + 1)
+                else:
+                    pos_for_mrope = [[position]] * 3
+                for idx in range(3):
+                    input_mrope_positions[idx].extend(pos_for_mrope[idx])
+            
+            input_mrope_positions = torch.tensor(
+                input_mrope_positions,
+                dtype=torch.long,
+                device='cpu').to('hpu', non_blocking=True)
 
         # TOKEN_IDS. [batch, 1]
         token_ids = torch.zeros((padded_batch_size, 1), dtype=torch.int32)
@@ -1332,7 +1423,8 @@ class HPUModelRunner:
 
         # CPU<>HPU sync *should not* happen here.
         token_ids_device = _async_h2d_tensor_copy(token_ids, self.device)
-        positions_device = _async_h2d_tensor_copy(positions, self.device)
+        positions_device = input_mrope_positions if self.uses_mrope \
+                        else _async_h2d_tensor_copy(positions, self.device)
         logits_indices_device = _async_h2d_tensor_copy(logits_indices,
                                                        self.device)
         block_list_device = _async_h2d_tensor_copy(block_list, self.device)
