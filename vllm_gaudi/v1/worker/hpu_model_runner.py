@@ -1976,6 +1976,7 @@ class HPUModelRunner:
         """Entrypoint for a torch.compilation of the model"""
         if (not is_fake_hpu() and not htorch.utils.internal.is_lazy()
                 and not self.vllm_config.model_config.enforce_eager):
+            torch._dynamo.config.force_parameter_static_shapes = False
             self.compile_config = HPUCompileConfig()
             if self.compile_config.regional_compilation:
                 self._compile_methods()

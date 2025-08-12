@@ -40,6 +40,11 @@ class HPURotaryEmbedding(RotaryEmbedding):
                                           2,
                                           dim=-1,
                                           output_size=cos_sin.shape[-1])
+
+        if not torch.compiler.is_compiling():
+            torch._dynamo.mark_dynamic(cos, 0)
+            torch._dynamo.mark_dynamic(sin, 0)
+
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
