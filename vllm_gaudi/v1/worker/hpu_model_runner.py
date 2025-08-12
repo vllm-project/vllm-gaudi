@@ -1568,10 +1568,6 @@ class HPUModelRunner:
         seq = sorted(scheduler_output.structured_output_request_ids.items(),
                      key=lambda x: x[1])
 
-        if logits.shape[0] < len(seq):
-            # The last request is an incomplete prompt
-            seq = seq[:-1]
-
         for req_id, _ in seq:
             logit_index = struct_out_req_batch_indices[req_id]
             num_spec_tokens = len(
@@ -1710,6 +1706,11 @@ class HPUModelRunner:
                           zip(*shallow_tuple(prefill_data))):
                 self.event_start = self.profiler.get_timestamp_us()
                 self.profiler.start("internal", "prefill")
+                # Align behavior of incomplete prompt with gpu_model_runner
+                if structured_output and logits_indices.shape[0]<1:
+                    logits_indices = torch.tensor([prompt_len-1],
+                                                  device=token_ids.device,
+                                                  dtype=torch.int32)
                 htorch.core.mark_step()
                 prefill_hidden_states_ts, logits_device = \
                     self._execute_model_generic(
@@ -1761,7 +1762,7 @@ class HPUModelRunner:
             htorch.core.mark_step()
 
             if structured_output:
-                logits_decode.append(logits_device)
+                logits_decode.append(logits_device[:num_decodes])
                 decode_sampled_requests.extend(self.input_batch.req_ids[:num_decodes])
             else:
                 with self.profiler.record_event('internal', "sampler"):
