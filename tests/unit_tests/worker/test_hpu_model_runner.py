@@ -4,6 +4,8 @@
 import pytest
 import torch
 import habana_frameworks.torch  # noqa: F401
+from habana_frameworks.torch.utils.internal import is_lazy
+from vllm.model_executor.model_loader import get_model
 
 from vllm.attention import Attention
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
@@ -667,3 +669,39 @@ def test_init_kv_cache_with_kv_sharing_valid():
     assert len(kv_cache_config.kv_cache_groups[0].layer_names) == 2
     assert kv_cache_config.kv_cache_groups[0].layer_names[0] == layer_0
     assert kv_cache_config.kv_cache_groups[0].layer_names[1] == layer_1
+
+
+@pytest.mark.skipif(is_lazy(),
+                    reason="Test skipped because lazy mode is enabled.")
+def test_model_torch_regional_compilation(dist_init, model_runner):
+    from vllm_gaudi.utils import HPUCompileConfig
+    from vllm.model_executor.models.opt import OPTDecoderLayer
+    from vllm.model_executor.layers.vocab_parallel_embedding import \
+        VocabParallelEmbedding
+    from torch.nn.modules.normalization import LayerNorm
+    from torch._dynamo.eval_frame import OptimizedModule
+
+    def assert_layer_compilation(model, layer_name, module):
+        submodule = model.get_submodule(layer_name)
+        assert isinstance(submodule, OptimizedModule), \
+        f"Layer: '{module.__name__}' was not wrapped with OptimizedModule"
+        assert isinstance(submodule._orig_mod, module), \
+        f"_orig_mod is different from the original module: '{module.__name__}'"
+
+    vllm_config = get_vllm_config()
+    model = get_model(vllm_config=vllm_config)
+    model_runner.compile_config = HPUCompileConfig()
+    model_runner.regional_compilation_layers_list = [
+        LayerNorm, VocabParallelEmbedding
+    ]
+
+    model_runner._regional_compilation(model)
+
+    for i in range(len(model.get_submodule("model.decoder.layers"))):
+        assert_layer_compilation(model, f"model.decoder.layers.{i}",
+                                 OPTDecoderLayer)
+    assert_layer_compilation(model, "lm_head", VocabParallelEmbedding)
+    assert_layer_compilation(model, "model.decoder.embed_tokens",
+                             VocabParallelEmbedding)
+    assert_layer_compilation(model, "model.decoder.final_layer_norm",
+                             LayerNorm)

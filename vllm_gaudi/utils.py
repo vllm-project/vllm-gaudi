@@ -1,6 +1,7 @@
 from functools import cache
 import os
 from vllm.utils import make_tensor_with_pad, TORCH_DTYPE_TO_NUMPY_DTYPE
+from vllm_gaudi.extension.runtime import get_config
 from typing import (Any, Optional, TypeVar, Union)
 import torch
 import numpy as np
@@ -126,15 +127,10 @@ class HPUCompileConfig:
         of the whole model.
         """
         self.fullgraph = fullgraph if fullgraph is not None else \
-              self._parse_bool_env('VLLM_T_COMPILE_FULLGRAPH')
+            get_config().fullgraph_compilation
         self.dynamic = dynamic if dynamic is not None else \
-            self._parse_bool_env('VLLM_T_COMPILE_DYNAMIC_SHAPES')
-        self.is_regional_compilation = self._parse_bool_env(
-            'VLLM_REGIONAL_COMPILATION', 'true')
-
-    @staticmethod
-    def _parse_bool_env(env_var: str, default: str = 'false') -> bool:
-        return os.getenv(env_var, default).strip().lower() in ("1", "true")
+            get_config().dynamic_shapes_compilation
+        self.is_regional_compilation = get_config().regional_compilation
 
     def get_compile_args(self) -> dict[str, Any]:
         if self.dynamic:
