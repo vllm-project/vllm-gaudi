@@ -1695,7 +1695,6 @@ class HPUModelRunner:
             logits_prompt = []
             logits_decode = []
             structured_output = True
-
         
         ######################### PREFILLS #########################
         if num_prefills > 0:
@@ -1707,8 +1706,9 @@ class HPUModelRunner:
                 self.event_start = self.profiler.get_timestamp_us()
                 self.profiler.start("internal", "prefill")
                 # Align behavior of incomplete prompt with gpu_model_runner
-                if structured_output and logits_indices.shape[0]<1:
-                    logits_indices = torch.tensor([prompt_len-1],
+                # If logits_indices is empty, use the last token position
+                if structured_output and logits_indices.shape[0] < 1:
+                    logits_indices = torch.tensor([prompt_len - 1],
                                                   device=token_ids.device,
                                                   dtype=torch.int32)
                 htorch.core.mark_step()
