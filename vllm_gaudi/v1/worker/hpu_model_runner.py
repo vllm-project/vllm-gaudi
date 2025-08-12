@@ -1640,6 +1640,7 @@ class HPUModelRunner:
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
+        warmup_mode=False,
     ) -> ModelRunnerOutput:
         # NOTE(kzawora): Since scheduler doesn't differentiate between prefills
         # and decodes, we must handle mixed batches. In _update_states we make
@@ -1745,7 +1746,7 @@ class HPUModelRunner:
                 prefill_hidden_states_ts, logits_device = \
                     self._execute_model_generic(
                         token_ids, position_ids, attn_metadata, logits_indices,
-                        self.kv_caches)
+                        self.kv_caches, warmup_mode=warmup_mode)
                 htorch.core.mark_step()
                 # Skip separate sampling for structured output
                 if structured_output:
@@ -1788,9 +1789,12 @@ class HPUModelRunner:
             assert decode_data is not None
             htorch.core.mark_step()
             _, logits_device = self._execute_model_generic(
-                decode_data.token_ids, decode_data.position_ids,
-                decode_data.attn_metadata, decode_data.logits_indices,
-                self.kv_caches)
+                decode_data.token_ids,
+                decode_data.position_ids,
+                decode_data.attn_metadata,
+                decode_data.logits_indices,
+                self.kv_caches,
+                warmup_mode=warmup_mode)
             htorch.core.mark_step()
 
             if structured_output:
@@ -2320,8 +2324,8 @@ class HPUModelRunner:
             structured_output_request_ids={},
             grammar_bitmask=None,
         )
-        self.execute_model(sched_output)
-        self.execute_model(cleanup)
+        self.execute_model(sched_output, warmup_mode=True)
+        self.execute_model(cleanup, warmup_mode=True)
 
     def _generate_profiling(self, prompt_cfg, decode_cfg):
         steps = 3
