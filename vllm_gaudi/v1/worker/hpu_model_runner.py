@@ -61,9 +61,8 @@ if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
-    xgr_cpu = LazyLoader(
-        "xgr_cpu", globals(),
-        "xgrammar.kernels.apply_token_bitmask_inplace_cpu")
+    xgr_cpu = LazyLoader("xgr_cpu", globals(),
+                         "xgrammar.kernels.apply_token_bitmask_inplace_cpu")
     xgr_torch_compile = LazyLoader(
         "xgr_torch_compile", globals(),
         "xgrammar.kernels.apply_token_bitmask_inplace_torch_compile")
@@ -1606,7 +1605,8 @@ class HPUModelRunner:
             grammar_bitmask.to("cpu"),
             indices=out_indices if not skip_out_indices else None,
         )
-        logits.copy_(logits_cpu.to(self.device, non_blocking=True).to(logits.dtype))
+        logits.copy_(
+            logits_cpu.to(self.device, non_blocking=True).to(logits.dtype))
 
     @torch.inference_mode()
     def execute_model(
@@ -1695,7 +1695,7 @@ class HPUModelRunner:
             logits_prompt = []
             logits_decode = []
             structured_output = True
-        
+
         ######################### PREFILLS #########################
         if num_prefills > 0:
             htorch.core.mark_step()
@@ -1724,7 +1724,9 @@ class HPUModelRunner:
                 else:
                     with self.profiler.record_event('internal', "sampler"):
                         sampling_metadata = self._prepare_sampling(
-                            batch_changed, req_id, pad_to=logits_device.shape[0])
+                            batch_changed,
+                            req_id,
+                            pad_to=logits_device.shape[0])
                         sampler_output = self.sampler(
                             logits=logits_device,
                             sampling_metadata=sampling_metadata)
@@ -1763,7 +1765,8 @@ class HPUModelRunner:
 
             if structured_output:
                 logits_decode.append(logits_device[:num_decodes])
-                decode_sampled_requests.extend(self.input_batch.req_ids[:num_decodes])
+                decode_sampled_requests.extend(
+                    self.input_batch.req_ids[:num_decodes])
             else:
                 with self.profiler.record_event('internal', "sampler"):
                     sampling_metadata = self._prepare_sampling(
@@ -1771,7 +1774,8 @@ class HPUModelRunner:
                         pd_info.decode_req_ids,
                         pad_to=logits_device.shape[0])
                     sampler_output = self.sampler(
-                        logits=logits_device, sampling_metadata=sampling_metadata)
+                        logits=logits_device,
+                        sampling_metadata=sampling_metadata)
                     decode_sampled_token_ids.append(
                         sampler_output.sampled_token_ids.flatten())
                     decode_sampled_requests.extend(
@@ -1794,23 +1798,25 @@ class HPUModelRunner:
 
         if structured_output:
             # Scheduler places cached before prompt
-            logits_combined = logits_decode+logits_prompt
+            logits_combined = logits_decode + logits_prompt
             logits = torch.cat(logits_combined, dim=0)
             # Apply structured output bitmasks if present
             if scheduler_output.grammar_bitmask is not None:
                 self.apply_grammar_bitmask(scheduler_output, logits)
-            sampling_metadata = self._prepare_sampling(
-                batch_changed,
-                pd_info.prompt_req_ids + pd_info.decode_req_ids,
-                pad_to=logits.shape[0])
+            sampling_metadata = self._prepare_sampling(batch_changed,
+                                                       pd_info.prompt_req_ids +
+                                                       pd_info.decode_req_ids,
+                                                       pad_to=logits.shape[0])
             # sampling_metadata = self.input_batch.sampling_metadata
-            sampler_output = self.sampler(
-                logits=logits,
-                sampling_metadata=sampling_metadata)
+            sampler_output = self.sampler(logits=logits,
+                                          sampling_metadata=sampling_metadata)
             # Deal with the case of incomplete prompt
-            for i in range(logits.shape[0]-num_decodes):
-                prefill_sampled_token_ids.append(sampler_output.sampled_token_ids[num_decodes + i].flatten())
-            decode_sampled_token_ids.append(sampler_output.sampled_token_ids[:num_decodes].flatten())
+            for i in range(logits.shape[0] - num_decodes):
+                prefill_sampled_token_ids.append(
+                    sampler_output.sampled_token_ids[num_decodes +
+                                                     i].flatten())
+            decode_sampled_token_ids.append(
+                sampler_output.sampled_token_ids[:num_decodes].flatten())
 
         # From this point onward, all operations are done on CPU.
         # We already have tokens. Let's copy the data to
