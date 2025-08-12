@@ -30,6 +30,7 @@ class HpuPlatform(Platform):
     supported_quantization: list[str] = [
         "compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu"
     ]
+    simple_compile_backend = "hpu_backend"
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
@@ -58,6 +59,17 @@ class HpuPlatform(Platform):
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         return cls.device_name
+
+    @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        torch.hpu.set_device(device)
+        # With this trick we can force the device to be set eagerly
+        # see https://github.com/pytorch/pytorch/issues/155668
+        # for why and when it is needed
+        _ = torch.zeros(1, device=device)
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:

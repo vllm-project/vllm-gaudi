@@ -2496,15 +2496,18 @@ class HPUModelRunner:
     def _dummy_run(self, max_num_batched_tokens: int) -> None:
         # TODO wuxun: dummy run implementation
         assert max_num_batched_tokens == 1
-        self.warmup_scenario(max_num_batched_tokens,
-                             1,
-                             1,
-                             is_prompt=False,
-                             kv_caches=None,
-                             num_iters=1,
-                             is_pt_profiler_run=False,
-                             align_worker=True,
-                             is_dummy_run=True)
+        # self.warmup_scenario(max_num_batched_tokens,
+        #                      1,
+        #                      1,
+        #                      is_prompt=False,
+        #                      kv_caches=None,
+        #                      num_iters=1,
+        #                      is_pt_profiler_run=False,
+        #                      align_worker=True,
+        #                      is_dummy_run=True)
+        prompt_cfg = 1, 1, 0
+        decode_cfg = None
+        self._execute_dummy_scenario(prompt_cfg, decode_cfg)
         return
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:

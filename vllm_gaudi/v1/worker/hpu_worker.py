@@ -18,6 +18,7 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.model_executor import set_random_seed
+from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
@@ -120,6 +121,7 @@ class HPUWorker(WorkerBase):
         self.profiler.stop()
 
     def init_device(self):
+        current_platform.set_device(torch.device("hpu"))
         # Initialize the distributed environment.
         init_worker_distributed_environment(self.parallel_config, self.rank,
                                             self.distributed_init_method,
