@@ -1976,6 +1976,7 @@ class HPUModelRunner:
     def _maybe_compile(self, *args, **kwargs):
         if not is_fake_hpu() and not htorch.utils.internal.is_lazy(
         ) and not self.vllm_config.model_config.enforce_eager:
+            torch._dynamo.config.force_parameter_static_shapes = False
             if os.getenv('VLLM_REGIONAL_COMPILATION',
                          'true').strip().lower() in ("1", "true"):
                 compiled_methods = [
