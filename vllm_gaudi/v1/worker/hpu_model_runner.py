@@ -767,7 +767,7 @@ class HPUModelRunner:
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
-                mm_inputs=new_req_data.mm_inputs,
+                mm_kwargs=new_req_data.mm_kwargs,
                 mm_positions=new_req_data.mm_positions,
                 sampling_params=sampling_params,
                 pooling_params=pooling_params,
@@ -2098,10 +2098,11 @@ class HPUModelRunner:
         req = NewRequestData(
             req_id=req_id,
             prompt_token_ids=prompt_token_ids,
-            mm_inputs=[],
+            mm_kwargs=[],
             mm_hashes=[],
             mm_positions=[],
             sampling_params=sampling_params,
+            pooling_params=None,
             block_ids=[block_ids],
             num_computed_tokens=num_computed_tokens,
             lora_request=None,
@@ -2120,7 +2121,8 @@ class HPUModelRunner:
         return seq_lengths
 
     def _execute_dummy_scenario(self, prompt_cfg, decode_cfg):
-        from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+        from vllm.v1.core.sched.output import (NewRequestData, SchedulerOutput,
+                                               CachedRequestData)
         requests: list[NewRequestData] = []
         scheduled_tokens: dict[str, int] = {}
 
@@ -2146,7 +2148,7 @@ class HPUModelRunner:
                                         scheduled_tokens=1)
         sched_output = SchedulerOutput(
             scheduled_new_reqs=requests,
-            scheduled_cached_reqs=[],
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
             num_scheduled_tokens=scheduled_tokens,
             total_num_scheduled_tokens=sum(scheduled_tokens.values()),
             scheduled_spec_decode_tokens={},
@@ -2159,7 +2161,7 @@ class HPUModelRunner:
         )
         cleanup = SchedulerOutput(
             scheduled_new_reqs=[],
-            scheduled_cached_reqs=[],
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
             num_scheduled_tokens={},
             total_num_scheduled_tokens=0,
             scheduled_spec_decode_tokens={},
