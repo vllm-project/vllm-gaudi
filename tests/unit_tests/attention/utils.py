@@ -172,23 +172,28 @@ def create_vllm_config(model_name: str = "meta-llama/Meta-Llama-3-8B",
 
 
 def spearman_correlation(x, y):
-    """Simple Spearman correlation without scipy dependency."""
-    n = len(x)
-    if n != len(y):
-        raise ValueError("Arrays must have same length")
+    """CPU-based Spearman correlation."""
+    x_cpu = x.detach().cpu()
+    y_cpu = y.detach().cpu()
 
-    # Rank the arrays
-    def rank_array(arr):
+    if torch.isnan(x_cpu).any() or torch.isnan(y_cpu).any():
+        return 0.0
+
+    if torch.isinf(x_cpu).any() or torch.isinf(y_cpu).any():
+        return 0.0
+
+    # Rank the arrays on CPU
+    def rank_array_cpu(arr):
         sorted_indices = torch.argsort(arr, descending=True)
         ranks = torch.zeros_like(arr, dtype=torch.float)
         for i, idx in enumerate(sorted_indices):
             ranks[idx] = i + 1
         return ranks
 
-    rank_x = rank_array(x)
-    rank_y = rank_array(y)
+    rank_x = rank_array_cpu(x_cpu)
+    rank_y = rank_array_cpu(y_cpu)
 
-    # Calculate correlation
+    # Calculate correlation on CPU
     mean_rank_x = torch.mean(rank_x)
     mean_rank_y = torch.mean(rank_y)
 
@@ -218,3 +223,7 @@ def check_token_ordering_preservation(backend_tensor, sdpa_tensor):
             all_correlations.append(correlation)
 
     return all_correlations
+
+
+def is_prefill_scenario(batch_spec: BatchSpec) -> bool:
+    return any(q_len > 1 for q_len in batch_spec.query_lens)

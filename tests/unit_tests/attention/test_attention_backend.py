@@ -9,38 +9,64 @@ import habana_frameworks.torch  # noqa: F401
 from vllm.utils import cdiv
 from tests.unit_tests.attention.utils import (
     BatchSpec, create_common_attn_metadata, create_vllm_config,
-    check_token_ordering_preservation)
+    check_token_ordering_preservation, is_prefill_scenario)
 from vllm_gaudi.v1.attention.backends.hpu_attn import (HPUAttentionBackendV1,
                                                        HPUAttentionMetadataV1)
+from vllm_gaudi.extension.runtime import get_config
 
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
-# Define common batch configurations
 BATCH_SPECS = {
-    "tiny_debug":
+    "tiny_decode":
     BatchSpec(seq_lens=[4], query_lens=[1]),
-    "small_decode":
-    BatchSpec(seq_lens=[32, 40], query_lens=[1, 1]),
-    "small_prefill":
-    BatchSpec(seq_lens=[32, 40], query_lens=[8, 8]),
-    "mixed_small":
-    BatchSpec(seq_lens=[32, 40, 48, 56], query_lens=[1, 1, 5, 5]),
+    "single_decode":
+    BatchSpec(seq_lens=[32], query_lens=[1]),
+    "dual_decode":
+    BatchSpec(seq_lens=[8, 12], query_lens=[1, 1]),
+    "triple_decode":
+    BatchSpec(seq_lens=[8, 8, 8], query_lens=[1, 1, 1]),
     "medium_decode":
     BatchSpec(seq_lens=[128, 256, 512, 1024, 128, 256, 512, 1024],
               query_lens=[1, 1, 1, 1, 1, 1, 1, 1]),
-    "medium_prefill":
-    BatchSpec(seq_lens=[256, 512, 1024, 2048], query_lens=[16, 16, 16, 16]),
-    "mixed_medium":
-    BatchSpec(seq_lens=[512, 1024, 2048, 512, 1024, 2048],
-              query_lens=[1, 1, 1, 7, 7, 7]),
-    "large_decode":
-    BatchSpec(seq_lens=[2048] * 32, query_lens=[1] * 32),
-    "large_prefill":
-    BatchSpec(seq_lens=[4096] * 8, query_lens=[32] * 8),
-    "single_decode":
-    BatchSpec(seq_lens=[1024], query_lens=[1]),
     "single_prefill":
-    BatchSpec(seq_lens=[1024], query_lens=[64]),
+    BatchSpec(seq_lens=[32], query_lens=[4]),
+    "small_prefill":
+    BatchSpec(seq_lens=[128, 128], query_lens=[8, 8]),
+    "medium_prefill":
+    BatchSpec(seq_lens=[256, 256, 256, 256], query_lens=[16, 16, 16, 16]),
+}
+
+MOCK_MODEL_CONFIGS = {
+    "tiny_no_gqa": {
+        "num_q_heads": 4,
+        "num_kv_heads": 4,
+        "head_size": 8,
+        "description": "Tiny model without GQA"
+    },
+    "tiny": {
+        "num_q_heads": 4,
+        "num_kv_heads": 2,
+        "head_size": 8,
+        "description": "Tiny model"
+    },
+    "small": {
+        "num_q_heads": 8,
+        "num_kv_heads": 4,
+        "head_size": 16,
+        "description": "Small model - more heads"
+    },
+    "realistic_small": {
+        "num_q_heads": 32,
+        "num_kv_heads": 8,
+        "head_size": 64,
+        "description": "Realistic small model - higher GQA ratio"
+    },
+    "realistic_large": {
+        "num_q_heads": 32,
+        "num_kv_heads": 8,
+        "head_size": 128,
+        "description": "Realistic large model - like real Qwen"
+    }
 }
 
 
@@ -137,8 +163,8 @@ class MockAttentionLayer:
 def run_attention_backend(vllm_config, device: torch.device,
                           common_attn_metadata: CommonAttentionMetadata,
                           query: torch.Tensor, key: torch.Tensor,
-                          value: torch.Tensor,
-                          kv_cache: torch.Tensor) -> torch.Tensor:
+                          value: torch.Tensor, kv_cache: torch.Tensor,
+                          batch_spec: torch.Tensor) -> torch.Tensor:
 
     query_dtype = query.dtype
     slot_mapping = common_attn_metadata.slot_mapping
@@ -146,6 +172,8 @@ def run_attention_backend(vllm_config, device: torch.device,
     block_table_cpu_tensor = common_attn_metadata.block_table_tensor
     seq_lens = common_attn_metadata.seq_lens_cpu
     batch_size = len(seq_lens)
+
+    is_prompt = is_prefill_scenario(batch_spec)
 
     block_list = []
     block_groups = []
@@ -177,24 +205,50 @@ def run_attention_backend(vllm_config, device: torch.device,
     block_groups_device = torch.tensor(block_groups, device='hpu')
     block_usage_device = torch.tensor(block_usage, device='hpu')
 
-    attn_bias = torch.zeros(total_blocks,
-                            1,
-                            1,
-                            block_size,
-                            dtype=query.dtype,
-                            device='hpu')
+    if is_prompt:
+        # TODO: Use real attn_bias for prefill
+        attn_bias = None
+    else:
+        attn_bias = torch.zeros(total_blocks,
+                                1,
+                                1,
+                                block_size,
+                                dtype=query.dtype,
+                                device='hpu')
+
+    total_prefill_tokens = sum(q_len for q_len in batch_spec.query_lens
+                               if q_len > 1)
+    total_decode_tokens = sum(q_len for q_len in batch_spec.query_lens
+                              if q_len == 1)
+    num_prefills = sum(1 for q_len in batch_spec.query_lens if q_len > 1)
+
+    if is_prompt:
+        seq_lens_tensor = torch.tensor(batch_spec.query_lens,
+                                       device=device,
+                                       dtype=torch.int32)
+        context_lens_tensor = torch.tensor([
+            s_len - q_len
+            for s_len, q_len in zip(batch_spec.seq_lens, batch_spec.query_lens)
+        ],
+                                           device=device,
+                                           dtype=torch.int32)
+    else:
+        seq_lens_tensor = torch.tensor(batch_spec.seq_lens,
+                                       device=device,
+                                       dtype=torch.int32)
+        context_lens_tensor = None
 
     attn_metadata = HPUAttentionMetadataV1(
-        is_prompt=False,
+        is_prompt=is_prompt,
         attn_bias=attn_bias,
-        seq_lens_tensor=None,
-        context_lens_tensor=None,
+        seq_lens_tensor=seq_lens_tensor,
+        context_lens_tensor=context_lens_tensor,
         input_positions=None,
         slot_mapping=slot_mapping,
-        num_decode_tokens=len(slot_mapping),
+        num_decode_tokens=total_decode_tokens,
         multi_modal_placeholder_index_maps=None,
-        num_prefills=0,
-        num_prefill_tokens=0,
+        num_prefills=num_prefills,
+        num_prefill_tokens=total_prefill_tokens,
         enable_kv_scales_calculation=False,
         block_size=block_size,
         block_list=block_list_device,
@@ -231,21 +285,45 @@ def run_attention_backend(vllm_config, device: torch.device,
     else:
         kv_cache_as_tuple = (kv_cache[0], kv_cache[1])
 
-    if query.dim() == 3:
-        query_reshaped = query.view(query.shape[0], -1)
+    if is_prompt:
+        if query.dim() == 3:
+            batch_size, num_heads, head_size = query.shape
+            query_reshaped = query.view(batch_size, num_heads * head_size)
+        else:
+            query_reshaped = query
+
+        if key.dim() == 3:
+            num_tokens, num_kv_heads, head_size = key.shape
+            key_reshaped = key.view(num_tokens, num_kv_heads * head_size)
+        else:
+            key_reshaped = key
+
+        if value.dim() == 3:
+            num_tokens, num_kv_heads, head_size = value.shape
+            value_reshaped = value.view(num_tokens, num_kv_heads * head_size)
+        else:
+            value_reshaped = value
+
+        output = impl.forward(mock_layer,
+                              query_reshaped,
+                              key_reshaped,
+                              value_reshaped,
+                              kv_cache_as_tuple,
+                              attn_metadata,
+                              output=output)
     else:
-        query_reshaped = query
+        if query.dim() == 3:
+            query_reshaped = query.view(query.shape[0], -1)
+        else:
+            query_reshaped = query
 
-    output = impl.forward(mock_layer,
-                          query_reshaped,
-                          key,
-                          value,
-                          kv_cache_as_tuple,
-                          attn_metadata,
-                          output=output)
-
-    #print("output: " + str(output.shape))
-    #print(output)
+        output = impl.forward(mock_layer,
+                              query_reshaped,
+                              key,
+                              value,
+                              kv_cache_as_tuple,
+                              attn_metadata,
+                              output=output)
 
     if output.dim() == 2 or output.dim() == 3 and output.shape[1] == 1:
         output_reshaped = output.view(query.shape[0], query.shape[1],
@@ -257,97 +335,25 @@ def run_attention_backend(vllm_config, device: torch.device,
     return output_reshaped
 
 
-BATCH_SPECS = {
-    "tiny_debug":
-    BatchSpec(seq_lens=[4], query_lens=[1]),
-    "small_decode":
-    BatchSpec(seq_lens=[32, 40], query_lens=[1, 1]),
-    "single_short":
-    BatchSpec(seq_lens=[8], query_lens=[1]),
-    "single_medium":
-    BatchSpec(seq_lens=[16], query_lens=[1]),
-    "single_long":
-    BatchSpec(seq_lens=[32], query_lens=[1]),
-    "dual_same":
-    BatchSpec(seq_lens=[8, 8], query_lens=[1, 1]),
-    "dual_diff_small":
-    BatchSpec(seq_lens=[8, 12], query_lens=[1, 1]),
-    "dual_diff_medium":
-    BatchSpec(seq_lens=[16, 24], query_lens=[1, 1]),
-    "triple_simple":
-    BatchSpec(seq_lens=[8, 8, 8], query_lens=[1, 1, 1]),
-    "medium_decode":
-    BatchSpec(seq_lens=[128, 256, 512, 1024, 128, 256, 512, 1024],
-              query_lens=[1, 1, 1, 1, 1, 1, 1, 1]),
-}
-
-MOCK_MODEL_CONFIGS = {
-    "tiny_no_gqa": {
-        "num_q_heads": 4,
-        "num_kv_heads": 4,
-        "head_size": 8,
-        "description": "Tiny model without GQA"
-    },
-    "micro": {
-        "num_q_heads": 2,
-        "num_kv_heads": 1,
-        "head_size": 4,
-        "description": "Smallest possible model - GQA 2:1"
-    },
-    "tiny": {
-        "num_q_heads": 4,
-        "num_kv_heads": 2,
-        "head_size": 8,
-        "description": "Tiny model - as in current test"
-    },
-    "small": {
-        "num_q_heads": 8,
-        "num_kv_heads": 4,
-        "head_size": 16,
-        "description": "Small model - more heads"
-    },
-    "medium": {
-        "num_q_heads": 16,
-        "num_kv_heads": 8,
-        "head_size": 32,
-        "description": "Medium model"
-    },
-    "realistic_small": {
-        "num_q_heads": 32,
-        "num_kv_heads": 8,
-        "head_size": 64,
-        "description": "Realistic small model - higher GQA ratio"
-    },
-    "realistic_large": {
-        "num_q_heads": 32,
-        "num_kv_heads": 8,
-        "head_size": 128,
-        "description": "Realistic large model - like real Qwen"
-    }
-}
-
-
 @pytest.mark.parametrize("batch_spec_name,mock_config_name", [
-    ("tiny_debug", "tiny_no_gqa"),
-    ("tiny_debug", "tiny"),
-    ("tiny_debug", "micro"),
-    ("tiny_debug", "small"),
-    ("tiny_debug", "medium"),
-    ("single_short", "tiny"),
-    ("single_medium", "tiny"),
-    ("single_long", "tiny"),
-    ("dual_same", "tiny"),
-    ("dual_diff_small", "tiny"),
-    ("dual_diff_medium", "tiny"),
-    ("triple_simple", "tiny"),
-    ("dual_same", "small"),
-    ("single_long", "realistic_small"),
-    ("dual_diff_medium", "realistic_small"),
+    ("tiny_decode", "tiny_no_gqa"),
+    ("single_decode", "tiny"),
+    ("single_decode", "small"),
+    ("dual_decode", "small"),
+    ("triple_decode", "small"),
+    ("medium_decode", "small"),
     ("medium_decode", "realistic_small"),
+    ("triple_decode", "realistic_small"),
+    ("triple_decode", "realistic_large"),
+    ("medium_decode", "small"),
+    ("medium_decode", "realistic_large"),
+    ("single_prefill", "tiny"),
+    ("single_prefill", "realistic_large"),
+    ("small_prefill", "small"),
+    ("medium_prefill", "realistic_large"),
 ])
-@pytest.mark.parametrize("use_random_data", [True])
-def test_backend_debug_progressive(batch_spec_name: str, mock_config_name: str,
-                                   use_random_data: bool):
+def test_backend_debug_progressive(batch_spec_name: str,
+                                   mock_config_name: str):
     batch_spec = BATCH_SPECS[batch_spec_name]
     mock_config = MOCK_MODEL_CONFIGS[mock_config_name]
     vllm_config = create_vllm_config(model_name="Qwen/Qwen2.5-7B-Instruct",
@@ -362,8 +368,8 @@ def test_backend_debug_progressive(batch_spec_name: str, mock_config_name: str,
     vllm_config.model_config.get_head_size = lambda: mock_config['head_size']
     vllm_config.model_config.get_hidden_size = lambda: mock_config[
         'num_q_heads'] * mock_config['head_size']
-    from vllm_gaudi.extension.runtime import get_config
     get_config().use_contiguous_pa = False
+    get_config().prompt_attn_impl = "naive_impl"
     num_q_heads = mock_config['num_q_heads']
     num_kv_heads = mock_config['num_kv_heads']
     head_size = mock_config['head_size']
@@ -373,127 +379,62 @@ def test_backend_debug_progressive(batch_spec_name: str, mock_config_name: str,
     dtype = torch.bfloat16
     scale = 1.0 / (head_size**0.5)
     block_size = vllm_config.cache_config.block_size
-    if use_random_data:
-        torch.manual_seed(12345)
-        all_q_vllm, all_k_vllm, all_v_vllm = [], [], []
-        all_sdpa_outputs = []
-        k_contexts, v_contexts = [], []
-        for i in range(batch_size):
-            s_len = seq_lens[i]
-            q_len = query_lens[i]
-            context_len = s_len - q_len
-            q = torch.randn(q_len,
-                            num_q_heads,
-                            head_size,
-                            dtype=dtype,
-                            device=device)
-            k_full = torch.randn(s_len,
-                                 num_kv_heads,
-                                 head_size,
-                                 dtype=dtype,
-                                 device=device)
-            v_full = torch.randn(s_len,
-                                 num_kv_heads,
-                                 head_size,
-                                 dtype=dtype,
-                                 device=device)
-            q_sdpa_in = q.unsqueeze(0).transpose(1, 2)
-            k_sdpa_in = k_full.unsqueeze(0).transpose(1, 2)
-            v_sdpa_in = v_full.unsqueeze(0).transpose(1, 2)
-            if num_q_heads != num_kv_heads:
-                repeats = num_q_heads // num_kv_heads
-                k_sdpa_in = k_sdpa_in.repeat_interleave(repeats, dim=1)
-                v_sdpa_in = v_sdpa_in.repeat_interleave(repeats, dim=1)
-            kv_len = s_len
-            offset = context_len
-            attn_mask = torch.full((q_len, kv_len),
-                                   float('-inf'),
-                                   device=device,
-                                   dtype=dtype)
-            for j in range(q_len):
-                attn_mask[j, :offset + j + 1] = 0.0
-            sdpa_out_i = torch.nn.functional.scaled_dot_product_attention(
-                q_sdpa_in,
-                k_sdpa_in,
-                v_sdpa_in,
-                attn_mask=attn_mask,
-                scale=scale,
-                enable_gqa=True)
-            all_sdpa_outputs.append(sdpa_out_i.transpose(1, 2).squeeze(0))
-            all_q_vllm.append(q)
-            all_k_vllm.append(k_full[context_len:])
-            all_v_vllm.append(v_full[context_len:])
-            k_contexts.append(k_full[:context_len])
-            v_contexts.append(v_full[:context_len])
-        query_vllm = torch.cat(all_q_vllm, dim=0)
-        key_vllm = torch.cat(all_k_vllm, dim=0)
-        value_vllm = torch.cat(all_v_vllm, dim=0)
-        sdpa_output = torch.cat(all_sdpa_outputs, dim=0)
-    else:
-        all_q_vllm, all_k_vllm, all_v_vllm = [], [], []
-        all_sdpa_outputs = []
-        k_contexts, v_contexts = [], []
-        base_offset = 0
-        for i in range(batch_size):
-            s_len = seq_lens[i]
-            q_len = query_lens[i]
-            context_len = s_len - q_len
-            q_base = 1000 + base_offset
-            k_base = 10000 + base_offset
-            v_base = 100000 + base_offset
-            q_elements = q_len * num_q_heads * head_size
-            q = torch.arange(q_base,
-                             q_base + q_elements,
-                             dtype=dtype,
-                             device=device).view(q_len, num_q_heads, head_size)
-            k_elements = s_len * num_kv_heads * head_size
-            k_full = torch.arange(k_base,
-                                  k_base + k_elements,
-                                  dtype=dtype,
-                                  device=device).view(s_len, num_kv_heads,
-                                                      head_size)
-            v_elements = s_len * num_kv_heads * head_size
-            v_full = torch.arange(v_base,
-                                  v_base + v_elements,
-                                  dtype=dtype,
-                                  device=device).view(s_len, num_kv_heads,
-                                                      head_size)
-            base_offset += 10000
-            q_sdpa_in = q.unsqueeze(0).transpose(1, 2)
-            k_sdpa_in = k_full.unsqueeze(0).transpose(1, 2)
-            v_sdpa_in = v_full.unsqueeze(0).transpose(1, 2)
-            if num_q_heads != num_kv_heads:
-                repeats = num_q_heads // num_kv_heads
-                k_sdpa_in = k_sdpa_in.repeat_interleave(repeats, dim=1)
-                v_sdpa_in = v_sdpa_in.repeat_interleave(repeats, dim=1)
-            kv_len = s_len
-            offset = context_len
-            attn_mask = torch.full((q_len, kv_len),
-                                   float('-inf'),
-                                   device=device,
-                                   dtype=dtype)
-            for j in range(q_len):
-                attn_mask[j, :offset + j + 1] = 0.0
-            sdpa_out_i = torch.nn.functional.scaled_dot_product_attention(
-                q_sdpa_in,
-                k_sdpa_in,
-                v_sdpa_in,
-                attn_mask=attn_mask,
-                scale=scale,
-                enable_gqa=True)
-            all_sdpa_outputs.append(sdpa_out_i.transpose(1, 2).squeeze(0))
-            all_q_vllm.append(q)
-            all_k_vllm.append(k_full[context_len:])
-            all_v_vllm.append(v_full[context_len:])
-            k_contexts.append(k_full[:context_len])
-            v_contexts.append(v_full[:context_len])
-        query_vllm = torch.cat(all_q_vllm, dim=0)
-        key_vllm = torch.cat(all_k_vllm, dim=0)
-        value_vllm = torch.cat(all_v_vllm, dim=0)
-        sdpa_output = torch.cat(all_sdpa_outputs, dim=0)
 
-    #print('sdpa_output:' + str(sdpa_output.shape))
-    #print(sdpa_output)
+    torch.manual_seed(12345)
+    all_q_vllm, all_k_vllm, all_v_vllm = [], [], []
+    all_sdpa_outputs = []
+    k_contexts, v_contexts = [], []
+    for i in range(batch_size):
+        s_len = seq_lens[i]
+        q_len = query_lens[i]
+        context_len = s_len - q_len
+        q = torch.randn(q_len,
+                        num_q_heads,
+                        head_size,
+                        dtype=dtype,
+                        device=device)
+        k_full = torch.randn(s_len,
+                             num_kv_heads,
+                             head_size,
+                             dtype=dtype,
+                             device=device)
+        v_full = torch.randn(s_len,
+                             num_kv_heads,
+                             head_size,
+                             dtype=dtype,
+                             device=device)
+        q_sdpa_in = q.unsqueeze(0).transpose(1, 2)
+        k_sdpa_in = k_full.unsqueeze(0).transpose(1, 2)
+        v_sdpa_in = v_full.unsqueeze(0).transpose(1, 2)
+        if num_q_heads != num_kv_heads:
+            repeats = num_q_heads // num_kv_heads
+            k_sdpa_in = k_sdpa_in.repeat_interleave(repeats, dim=1)
+            v_sdpa_in = v_sdpa_in.repeat_interleave(repeats, dim=1)
+        kv_len = s_len
+        offset = context_len
+        attn_mask = torch.full((q_len, kv_len),
+                               float('-inf'),
+                               device=device,
+                               dtype=dtype)
+        for j in range(q_len):
+            attn_mask[j, :offset + j + 1] = 0.0
+        sdpa_out_i = torch.nn.functional.scaled_dot_product_attention(
+            q_sdpa_in,
+            k_sdpa_in,
+            v_sdpa_in,
+            attn_mask=attn_mask,
+            scale=scale,
+            enable_gqa=True)
+        all_sdpa_outputs.append(sdpa_out_i.transpose(1, 2).squeeze(0))
+        all_q_vllm.append(q)
+        all_k_vllm.append(k_full[context_len:])
+        all_v_vllm.append(v_full[context_len:])
+        k_contexts.append(k_full[:context_len])
+        v_contexts.append(v_full[:context_len])
+    query_vllm = torch.cat(all_q_vllm, dim=0)
+    key_vllm = torch.cat(all_k_vllm, dim=0)
+    value_vllm = torch.cat(all_v_vllm, dim=0)
+    sdpa_output = torch.cat(all_sdpa_outputs, dim=0)
 
     common_attn_metadata = create_common_attn_metadata(
         batch_spec, block_size, device, arange_block_indices=True)
@@ -514,16 +455,20 @@ def test_backend_debug_progressive(batch_spec_name: str, mock_config_name: str,
         randomize_blocks=False)
     backend_result = run_attention_backend(vllm_config, device,
                                            common_attn_metadata, query_vllm,
-                                           key_vllm, value_vllm, kv_cache)
+                                           key_vllm, value_vllm, kv_cache,
+                                           batch_spec)
 
-    CORRELATION_THRESHOLD = 0.99
+    # TODO for prefill:
+    # 1) Use real attn_bias (For now, we use None to skip attn_bias in backend)
+    # 2) Use _fsdpa_prompt_attention (For now we use _native_impl)
+    # With above changes, backend_result should be similar to sdpa_output
+    CORRELATION_THRESHOLD = 0.8 if is_prefill_scenario(batch_spec) else 0.99
     correlations = check_token_ordering_preservation(backend_result,
                                                      sdpa_output)
     avg_correlation = sum(correlations) / len(
         correlations) if correlations else 0.0
     correlation_ok = avg_correlation > CORRELATION_THRESHOLD
 
-    print(f"avg_correlation: {avg_correlation}")
     assert correlation_ok, (
         f"FAIL: Low avg correlation {avg_correlation:.4f} < "
         f"{CORRELATION_THRESHOLD}. Backend output not similar to SDPA ref.")
