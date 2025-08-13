@@ -1152,9 +1152,9 @@ class HPUModelRunner:
             query_lens, num_context_blocks)
 
         # dp aware padding
-        target_bs = self.get_dp_padding(target_bs)
-        target_seq = self.get_dp_padding(target_seq)
-        target_blocks = self.get_dp_padding(target_blocks)
+        target_bs += self.get_dp_padding(target_bs)
+        target_seq += self.get_dp_padding(target_seq)
+        target_blocks += self.get_dp_padding(target_blocks)
 
         token_ids = self._align_and_pad(contents.token_ids,
                                         (target_bs, target_seq),
@@ -1273,7 +1273,7 @@ class HPUModelRunner:
             num_decodes, sum(num_blocks))[0]
 
         # dp aware padding
-        padded_batch_size = self.get_dp_padding(padded_batch_size)
+        padded_batch_size += self.get_dp_padding(padded_batch_size)
 
         block_tables_list = []
         for i, n in enumerate(num_blocks):
@@ -1427,7 +1427,7 @@ class HPUModelRunner:
 
         if dp_size == 1 or self.vllm_config.model_config.enforce_eager:
             # Early exit.
-            return 0, None
+            return 0
 
         num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
             num_tokens, dp_size, dp_rank)
@@ -1436,7 +1436,7 @@ class HPUModelRunner:
         #                                         dp_size,
         #                                         device="cpu",
         #                                         dtype=torch.int32).item()
-        return max_tokens_across_dp_cpu
+        return max_tokens_across_dp_cpu - num_tokens
 
     def _execute_model_generic(self,
                                token_ids,
@@ -1643,11 +1643,9 @@ class HPUModelRunner:
             logits_cpu.to(self.device, non_blocking=True).to(logits.dtype))
 
     @torch.inference_mode()
-    def execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
-        warmup_mode=False,
-    ) -> ModelRunnerOutput:
+    def execute_model(self,
+                      scheduler_output: "SchedulerOutput",
+                      warmup_mode=False) -> ModelRunnerOutput:
         # NOTE(kzawora): Since scheduler doesn't differentiate between prefills
         # and decodes, we must handle mixed batches. In _update_states we make
         # sure that first self.input_batch.num_decodes requests are decodes,
@@ -1751,8 +1749,12 @@ class HPUModelRunner:
                 htorch.core.mark_step()
                 prefill_hidden_states_ts, logits_device = \
                     self._execute_model_generic(
-                        token_ids, position_ids, attn_metadata, logits_indices,
-                        self.kv_caches, warmup_mode=warmup_mode)
+                        token_ids,
+                        position_ids,
+                        attn_metadata,
+                        logits_indices,
+                        self.kv_caches,
+                        warmup_mode=warmup_mode)
                 htorch.core.mark_step()
                 # Skip separate sampling for structured output
                 if structured_output:
@@ -2477,7 +2479,6 @@ class HPUModelRunner:
 
     @torch.inference_mode()
     def profile_run(self) -> None:
-        return
         """Profile to measure peak memory during forward pass."""
 
         # use an empty tensor instead of `None`` to force Dynamo to pass
@@ -2497,10 +2498,14 @@ class HPUModelRunner:
         if max_seq_len % self.block_size != 0:
             max_seq_len = ((max_seq_len + self.block_size - 1) //
                            self.block_size) * self.block_size
+        max_seq_len = min(max_seq_len, self.max_model_len)
 
-        prompt_cfg = (max_prefill_batch_size, max_seq_len, 0)
+        # different DP engine may have different config
+        max_seq_len += self.get_dp_padding(max_seq_len)
+        max_prefill_batch_size += self.get_dp_padding(max_prefill_batch_size)
+
+        prompt_cfg = (max_prefill_batch_size, max_seq_len - 1, 0)
         decode_cfg = None
-
         self._execute_dummy_scenario(prompt_cfg, decode_cfg)
 
         # # Run empty prefill forwards - prefill max batch and prefill max seq
