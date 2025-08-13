@@ -169,3 +169,52 @@ def create_vllm_config(model_name: str = "meta-llama/Meta-Llama-3-8B",
         load_config=load_config,
         compilation_config=compilation_config,
     )
+
+
+def spearman_correlation(x, y):
+    """Simple Spearman correlation without scipy dependency."""
+    n = len(x)
+    if n != len(y):
+        raise ValueError("Arrays must have same length")
+
+    # Rank the arrays
+    def rank_array(arr):
+        sorted_indices = torch.argsort(arr, descending=True)
+        ranks = torch.zeros_like(arr, dtype=torch.float)
+        for i, idx in enumerate(sorted_indices):
+            ranks[idx] = i + 1
+        return ranks
+
+    rank_x = rank_array(x)
+    rank_y = rank_array(y)
+
+    # Calculate correlation
+    mean_rank_x = torch.mean(rank_x)
+    mean_rank_y = torch.mean(rank_y)
+
+    numerator = torch.sum((rank_x - mean_rank_x) * (rank_y - mean_rank_y))
+    denominator_x = torch.sum((rank_x - mean_rank_x)**2)
+    denominator_y = torch.sum((rank_y - mean_rank_y)**2)
+
+    if denominator_x == 0 or denominator_y == 0:
+        return 0.0
+
+    correlation = numerator / torch.sqrt(denominator_x * denominator_y)
+    return correlation.item()
+
+
+def check_token_ordering_preservation(backend_tensor, sdpa_tensor):
+    batch_size, num_tokens, _ = backend_tensor.shape
+
+    all_correlations = []
+    for batch_idx in range(batch_size):
+        for token_idx in range(num_tokens):
+            # Extract values for this specific token
+            backend_vals = backend_tensor[batch_idx, token_idx, :]
+            sdpa_vals = sdpa_tensor[batch_idx, token_idx, :]
+
+            # Calculate Spearman correlation
+            correlation = spearman_correlation(backend_vals, sdpa_vals)
+            all_correlations.append(correlation)
+
+    return all_correlations

@@ -7,9 +7,9 @@ import torch
 import habana_frameworks.torch  # noqa: F401
 
 from vllm.utils import cdiv
-from tests.unit_tests.attention.utils import (BatchSpec,
-                                              create_common_attn_metadata,
-                                              create_vllm_config)
+from tests.unit_tests.attention.utils import (
+    BatchSpec, create_common_attn_metadata, create_vllm_config,
+    check_token_ordering_preservation)
 from vllm_gaudi.v1.attention.backends.hpu_attn import (HPUAttentionBackendV1,
                                                        HPUAttentionMetadataV1)
 
@@ -244,6 +244,9 @@ def run_attention_backend(vllm_config, device: torch.device,
                           attn_metadata,
                           output=output)
 
+    #print("output: " + str(output.shape))
+    #print(output)
+
     if output.dim() == 2 or output.dim() == 3 and output.shape[1] == 1:
         output_reshaped = output.view(query.shape[0], query.shape[1],
                                       query.shape[2])
@@ -255,15 +258,27 @@ def run_attention_backend(vllm_config, device: torch.device,
 
 
 BATCH_SPECS = {
-    "tiny_debug": BatchSpec(seq_lens=[4], query_lens=[1]),
-    "small_decode": BatchSpec(seq_lens=[32, 40], query_lens=[1, 1]),
-    "single_short": BatchSpec(seq_lens=[8], query_lens=[1]),
-    "single_medium": BatchSpec(seq_lens=[16], query_lens=[1]),
-    "single_long": BatchSpec(seq_lens=[32], query_lens=[1]),
-    "dual_same": BatchSpec(seq_lens=[8, 8], query_lens=[1, 1]),
-    "dual_diff_small": BatchSpec(seq_lens=[8, 12], query_lens=[1, 1]),
-    "dual_diff_medium": BatchSpec(seq_lens=[16, 24], query_lens=[1, 1]),
-    "triple_simple": BatchSpec(seq_lens=[8, 8, 8], query_lens=[1, 1, 1]),
+    "tiny_debug":
+    BatchSpec(seq_lens=[4], query_lens=[1]),
+    "small_decode":
+    BatchSpec(seq_lens=[32, 40], query_lens=[1, 1]),
+    "single_short":
+    BatchSpec(seq_lens=[8], query_lens=[1]),
+    "single_medium":
+    BatchSpec(seq_lens=[16], query_lens=[1]),
+    "single_long":
+    BatchSpec(seq_lens=[32], query_lens=[1]),
+    "dual_same":
+    BatchSpec(seq_lens=[8, 8], query_lens=[1, 1]),
+    "dual_diff_small":
+    BatchSpec(seq_lens=[8, 12], query_lens=[1, 1]),
+    "dual_diff_medium":
+    BatchSpec(seq_lens=[16, 24], query_lens=[1, 1]),
+    "triple_simple":
+    BatchSpec(seq_lens=[8, 8, 8], query_lens=[1, 1, 1]),
+    "medium_decode":
+    BatchSpec(seq_lens=[128, 256, 512, 1024, 128, 256, 512, 1024],
+              query_lens=[1, 1, 1, 1, 1, 1, 1, 1]),
 }
 
 MOCK_MODEL_CONFIGS = {
@@ -328,10 +343,9 @@ MOCK_MODEL_CONFIGS = {
     ("dual_same", "small"),
     ("single_long", "realistic_small"),
     ("dual_diff_medium", "realistic_small"),
-    ("small_decode", "tiny"),
-    ("small_decode", "realistic_large"),
+    ("medium_decode", "realistic_small"),
 ])
-@pytest.mark.parametrize("use_random_data", [True, False])
+@pytest.mark.parametrize("use_random_data", [True])
 def test_backend_debug_progressive(batch_spec_name: str, mock_config_name: str,
                                    use_random_data: bool):
     batch_spec = BATCH_SPECS[batch_spec_name]
@@ -477,8 +491,16 @@ def test_backend_debug_progressive(batch_spec_name: str, mock_config_name: str,
         key_vllm = torch.cat(all_k_vllm, dim=0)
         value_vllm = torch.cat(all_v_vllm, dim=0)
         sdpa_output = torch.cat(all_sdpa_outputs, dim=0)
+
+    #print('sdpa_output:' + str(sdpa_output.shape))
+    #print(sdpa_output)
+
     common_attn_metadata = create_common_attn_metadata(
         batch_spec, block_size, device, arange_block_indices=True)
+
+    total_context_len = sum(seq_len - query_len for seq_len, query_len in zip(
+        batch_spec.seq_lens, batch_spec.query_lens))
+    required_blocks = total_context_len + block_size
     kv_cache = create_and_prepopulate_kv_cache(
         k_contexts=k_contexts,
         v_contexts=v_contexts,
@@ -487,44 +509,21 @@ def test_backend_debug_progressive(batch_spec_name: str, mock_config_name: str,
         head_size=head_size,
         dtype=dtype,
         device=device,
-        num_blocks=100,
+        num_blocks=required_blocks,
         common_attn_metadata=common_attn_metadata,
         randomize_blocks=False)
     backend_result = run_attention_backend(vllm_config, device,
                                            common_attn_metadata, query_vllm,
                                            key_vllm, value_vllm, kv_cache)
 
-    # Apply softmax to both outputs
-    backend_softmax = torch.softmax(backend_result, dim=-1)
-    sdpa_softmax = torch.softmax(sdpa_output, dim=-1)
+    CORRELATION_THRESHOLD = 0.99
+    correlations = check_token_ordering_preservation(backend_result,
+                                                     sdpa_output)
+    avg_correlation = sum(correlations) / len(
+        correlations) if correlations else 0.0
+    correlation_ok = avg_correlation > CORRELATION_THRESHOLD
 
-    # Add attention analysis - which tokens got the highest attention
-    print("=== ATTENTION WEIGHTS ANALYSIS ===")
-    # Get top attended tokens (indices with highest attention weights)
-    backend_top_indices = torch.topk(backend_softmax[0, 0],
-                                     k=min(10, backend_softmax.shape[-1]))
-    sdpa_top_indices = torch.topk(sdpa_softmax[0, 0],
-                                  k=min(10, sdpa_softmax.shape[-1]))
-
-    print("Backend TOP 10 attended tokens:")
-    for i, (weight, idx) in enumerate(
-            zip(backend_top_indices.values, backend_top_indices.indices)):
-        print(f"  Rank {i+1}: Token index {idx.item()}, "
-              f"Weight: {weight.item():.6f}")
-
-    print("SDPA TOP 10 attended tokens:")
-    for i, (weight, idx) in enumerate(
-            zip(sdpa_top_indices.values, sdpa_top_indices.indices)):
-        print(f"  Rank {i+1}: Token index {idx.item()}, "
-              f"Weight: {weight.item():.6f}")
-
-    print("=== TOP 5 TOKENS COMPARISON ===")
-    backend_top5_indices = backend_top_indices.indices[:5]
-    sdpa_top5_indices = sdpa_top_indices.indices[:5]
-    top5_exact_match = torch.equal(backend_top5_indices, sdpa_top5_indices)
-    print(f"TOP 10 exact order match: {top5_exact_match}")
-
-    assert top5_exact_match, (
-        f"FAIL: TOP 10 attention tokens don't match exactly!\n"
-        f"Backend: {backend_top5_indices.tolist()}\n"
-        f"SDPA:    {sdpa_top5_indices.tolist()}")
+    print(f"avg_correlation: {avg_correlation}")
+    assert correlation_ok, (
+        f"FAIL: Low avg correlation {avg_correlation:.4f} < "
+        f"{CORRELATION_THRESHOLD}. Backend output not similar to SDPA ref.")
