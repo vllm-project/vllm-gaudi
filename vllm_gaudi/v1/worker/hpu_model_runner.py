@@ -1150,6 +1150,12 @@ class HPUModelRunner:
 
         target_bs, target_seq, target_blocks = self._get_prompt_bucketing_fn()(
             query_lens, num_context_blocks)
+
+        # dp aware padding
+        target_bs = self.get_dp_padding(target_bs)
+        target_seq = self.get_dp_padding(target_seq)
+        target_blocks = self.get_dp_padding(target_blocks)
+
         token_ids = self._align_and_pad(contents.token_ids,
                                         (target_bs, target_seq),
                                         itertools.repeat(-1))
@@ -1266,6 +1272,9 @@ class HPUModelRunner:
         padded_batch_size = self.bucketing_manager.find_decode_bucket(
             num_decodes, sum(num_blocks))[0]
 
+        # dp aware padding
+        padded_batch_size = self.get_dp_padding(padded_batch_size)
+
         block_tables_list = []
         for i, n in enumerate(num_blocks):
             seq_block_table = block_table_cpu_tensor[i, :n].tolist()
@@ -1365,8 +1374,6 @@ class HPUModelRunner:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
 
-        # TODO wuxun: consider dp aware padding for bs, block bucket, etc.
-
         num_reqs = num_prefills + num_decodes
 
         # Get the number of scheduled tokens for each request.
@@ -1406,7 +1413,6 @@ class HPUModelRunner:
                 "Configuration: (%s, %s, %s, %s) was not warmed-up!", phase,
                 batch_size, seq_len, num_blocks)
 
-    # TODO wuxun: dp padding for prefill/decode inputs
     def get_dp_padding(self,
                        num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
         dp_size = self.vllm_config.parallel_config.data_parallel_size
@@ -1426,11 +1432,11 @@ class HPUModelRunner:
         num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
             num_tokens, dp_size, dp_rank)
         max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp).item()
-        num_tokens_after_padding = torch.tensor([max_tokens_across_dp_cpu] *
-                                                dp_size,
-                                                device="cpu",
-                                                dtype=torch.int32)
-        return max_tokens_across_dp_cpu - num_tokens, num_tokens_after_padding
+        # num_tokens_after_padding = torch.tensor([max_tokens_across_dp_cpu] *
+        #                                         dp_size,
+        #                                         device="cpu",
+        #                                         dtype=torch.int32).item()
+        return max_tokens_across_dp_cpu
 
     def _execute_model_generic(self,
                                token_ids,
@@ -2481,36 +2487,40 @@ class HPUModelRunner:
         # it is important to create tensors inside the loop, rather than
         # multiplying the list, to avoid Dynamo from treating them as
         # tensor aliasing.
-        num_layers = self.model_config.get_num_layers(self.parallel_config)
-        kv_caches = [None] * num_layers
+        # num_layers = self.model_config.get_num_layers(self.parallel_config)
+        # kv_caches = [None] * num_layers
 
-        # Run empty prefill forwards - prefill max batch and prefill max seq
-        self.warmup_scenario(batch_size=1,
-                             seq_or_block=self.max_model_len,
-                             is_prompt=True,
-                             kv_caches=kv_caches)
-        max_seq_len = math.ceil(
-            (self.max_num_tokens // self.max_prefill_batch_size) /
-            self.block_size) * self.block_size
-        self.warmup_scenario(batch_size=self.max_prefill_batch_size,
-                             seq_or_block=max_seq_len,
-                             is_prompt=True,
-                             kv_caches=kv_caches)
+        max_num_batched_tokens = self.max_num_tokens
+        max_prefill_batch_size = self.max_prefill_batch_size
+        max_seq_len = (max_num_batched_tokens + max_prefill_batch_size -
+                       1) // max_prefill_batch_size
+        if max_seq_len % self.block_size != 0:
+            max_seq_len = ((max_seq_len + self.block_size - 1) //
+                           self.block_size) * self.block_size
+
+        prompt_cfg = (max_prefill_batch_size, max_seq_len, 0)
+        decode_cfg = None
+
+        self._execute_dummy_scenario(prompt_cfg, decode_cfg)
+
+        # # Run empty prefill forwards - prefill max batch and prefill max seq
+        # self.warmup_scenario(batch_size=1,
+        #                      seq_or_block=self.max_model_len,
+        #                      is_prompt=True,
+        #                      kv_caches=kv_caches)
+        # max_seq_len = math.ceil(
+        #     (self.max_num_tokens // self.max_prefill_batch_size) /
+        #     self.block_size) * self.block_size
+        # self.warmup_scenario(batch_size=self.max_prefill_batch_size,
+        #                      seq_or_block=max_seq_len,
+        #                      is_prompt=True,
+        #                      kv_caches=kv_caches)
 
     def _dummy_run(self, max_num_batched_tokens: int) -> None:
-        # TODO wuxun: dummy run implementation
         assert max_num_batched_tokens == 1
-        # self.warmup_scenario(max_num_batched_tokens,
-        #                      1,
-        #                      1,
-        #                      is_prompt=False,
-        #                      kv_caches=None,
-        #                      num_iters=1,
-        #                      is_pt_profiler_run=False,
-        #                      align_worker=True,
-        #                      is_dummy_run=True)
-        prompt_cfg = 1, 1, 0
-        decode_cfg = None
+        prompt_cfg = None
+        decode_cfg = 1, 1
+        # add dummy decode run
         self._execute_dummy_scenario(prompt_cfg, decode_cfg)
         return
 

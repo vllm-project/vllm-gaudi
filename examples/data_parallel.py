@@ -31,6 +31,7 @@ Multi-node:
 
 import os
 from time import sleep
+import torch
 
 from vllm import LLM, SamplingParams
 from vllm.utils import get_open_port
@@ -89,6 +90,20 @@ def parse_args():
     return parser.parse_args()
 
 
+def generate_random_token_ids(repeat=1) -> list[int]:
+    """
+    For testing different seuquence length in data parallel scenario
+    """
+    candidate_lens = [230, 560]
+    prompts = []
+    for num_tokens in candidate_lens:
+        tokens = torch.randint(
+            low=0, high=10000, size=(num_tokens,), dtype=torch.int32
+        )
+        [prompts.append(tokens.tolist()) for _ in range(repeat)]
+    return prompts
+
+
 def main(
     model,
     dp_size,
@@ -111,13 +126,8 @@ def main(
     # CUDA_VISIBLE_DEVICES for each DP rank is set automatically inside the
     # engine processes.
 
-    # Sample prompts.
-    prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-    ] * 100
+    # generate prompts with different length to demonstrate DP aware padding.
+    prompts = generate_random_token_ids()
 
     # with DP, each rank should process different prompts.
     # usually all the DP ranks process a full dataset,
@@ -134,7 +144,6 @@ def main(
         # if any rank has no prompts to process,
         # we need to set a placeholder prompt
         prompts = ["Placeholder"]
-    print(f"DP rank {global_dp_rank} needs to process {len(prompts)} prompts")
 
     # Create a sampling params object.
     # since we are doing data parallel, every rank can have different
@@ -154,7 +163,7 @@ def main(
         max_num_seqs=max_num_seqs,
         gpu_memory_utilization=gpu_memory_utilization,
     )
-    outputs = llm.generate(prompts, sampling_params)
+    outputs = llm.generate(None, sampling_params, prompts)
     # Print the outputs.
     for i, output in enumerate(outputs):
         if i >= 5:
