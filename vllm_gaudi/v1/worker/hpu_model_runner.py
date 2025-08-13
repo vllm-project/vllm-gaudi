@@ -63,8 +63,7 @@ from vllm.model_executor.models.interfaces_base import (
     is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 
-from .utils import (AttentionGroup, MultiModalBudget, bind_kv_cache,
-                    gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
+from .utils import (MultiModalBudget, gather_mm_placeholders, 
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 
 if TYPE_CHECKING:
