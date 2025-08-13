@@ -34,8 +34,8 @@ class HpuPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool,
-                             use_mla: bool) -> str:
+                             block_size: int, use_v1: bool, use_mla: bool,
+                             has_sink: bool) -> str:
         if use_v1 and not use_mla:
             logger.info("Using HPUAttentionV1 backend.")
             return "vllm_gaudi.attention.backends.hpu_attn.HPUAttentionBackend"
