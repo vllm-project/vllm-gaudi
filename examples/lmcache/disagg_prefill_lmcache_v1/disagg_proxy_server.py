@@ -28,7 +28,9 @@ async def lifespan(app: FastAPI):
     app.state.prefill_client = httpx.AsyncClient(
         timeout=None, base_url=prefiller_base_url
     )
-    app.state.decode_client = httpx.AsyncClient(timeout=None, base_url=decoder_base_url)
+    app.state.decode_client = httpx.AsyncClient(
+        timeout=None, base_url=decoder_base_url
+    )
 
     yield
 
@@ -147,14 +149,18 @@ async def handle_completions(request: Request):
             ):
                 yield chunk
 
-        return StreamingResponse(generate_stream(), media_type="text/event-stream")
+        return StreamingResponse(
+            generate_stream(), media_type="text/event-stream"
+        )
 
     except Exception as e:
         import sys
         import traceback
 
         exc_info = sys.exc_info()
-        print("Error occurred in disagg prefill proxy server - completions endpoint")
+        print(
+            "Error occurred in disagg prefill proxy server - completions endpoint"
+        )
         print(e)
         print("".join(traceback.format_exception(*exc_info)))
         raise

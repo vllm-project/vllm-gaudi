@@ -50,7 +50,9 @@ def run_store(store_done, prompts, tp_size):
     os.environ["RANK"] = "0"
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
 
-    ktc = KVTransferConfig(kv_connector="LMCacheConnectorV1", kv_role="kv_producer")
+    ktc = KVTransferConfig(
+        kv_connector="LMCacheConnectorV1", kv_role="kv_producer"
+    )
     # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
     # memory. Reduce the value if your GPU has less memory.
     llm = LLM(
@@ -79,7 +81,9 @@ def run_retrieve(store_done, prompts, tp_size, timeout=1):
     os.environ["RANK"] = decoder_rank
 
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=20)
-    ktc = KVTransferConfig(kv_connector="LMCacheConnectorV1", kv_role="kv_consumer")
+    ktc = KVTransferConfig(
+        kv_connector="LMCacheConnectorV1", kv_role="kv_consumer"
+    )
     # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
     # of memory. Reduce the value if your GPU has less memory.
     llm = LLM(
@@ -114,7 +118,9 @@ def run_lmcache_server(port):
 
 def run_redis_server(port):
     os.environ["LMCACHE_REMOTE_URL"] = f"redis://localhost:{port}"
-    redis_server_path = "/usr/bin/redis-server"  # Update this to the correct path
+    redis_server_path = (
+        "/usr/bin/redis-server"  # Update this to the correct path
+    )
 
     try:
         # Start the Redis server
@@ -140,7 +146,9 @@ def main():
     print(args)
 
     store_done = Event()
-    store_process = Process(target=run_store, args=(store_done, prompts, args.tp_size))
+    store_process = Process(
+        target=run_store, args=(store_done, prompts, args.tp_size)
+    )
     retrieve_process = Process(
         target=run_retrieve, args=(store_done, prompts, args.tp_size)
     )
@@ -176,11 +184,15 @@ def parse_args():
         default="lm",
         help="remote lmcache server type. 'lm' or 'redis'",
     )
-    parser.add_argument("--lm_port", type=int, default=8100, help="lm server port")
+    parser.add_argument(
+        "--lm_port", type=int, default=8100, help="lm server port"
+    )
     parser.add_argument(
         "--redis_port", type=int, default=6379, help="redis server port"
     )
-    parser.add_argument("--tp_size", type=int, default=1, help="tensor parallel size")
+    parser.add_argument(
+        "--tp_size", type=int, default=1, help="tensor parallel size"
+    )
 
     return parser.parse_args()
 

@@ -15,8 +15,8 @@ from vllm_gaudi.extension.profiler import HabanaMemoryProfiler, format_bytes
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.distributed import (init_distributed_environment, 
-                             ensure_model_parallel_initialized)
+from vllm.distributed import (init_distributed_environment,
+                              ensure_model_parallel_initialized)
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -298,6 +298,7 @@ def init_worker_distributed_environment(
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
     ensure_kv_transfer_initialized(vllm_config)
+
 
 @contextmanager
 def track_graph_compile(name: str):
