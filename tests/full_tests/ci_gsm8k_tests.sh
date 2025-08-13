@@ -61,6 +61,22 @@ if [ $? -ne 0 ]; then
 fi
 echo "Test with deepseek_v2 + inc dynamic quantization + tp 2 successful"
 
+# structured output
+echo "Testing structured output"
+echo HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/structured_outputs.py 
+HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/structured_outputs.py 
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for structured outputs" >&2
+    exit -1
+fi
+echo HABANA_VISIBLE_DEVICES=all VLLM_MERGED_PREFILL=True VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/structured_outputs.py 
+HABANA_VISIBLE_DEVICES=all VLLM_MERGED_PREFILL=True VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/structured_outputs.py 
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for structured outputs with merged prefill" >&2
+    exit -1
+fi
+echo "Test with structured outputs passed"
+
 # gsm8k test
 # used to check HPUattn + MLP
 echo "Testing GSM8K on ganite-8b"
