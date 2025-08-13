@@ -57,8 +57,7 @@ def launch_lm_eval(eval_config):
                  f"trust_remote_code={trust_remote_code}"
     if eval_config.get("fp8"):
         model_args += ",quantization=inc," \
-            "kv_cache_dtype=fp8_inc," \
-            "weights_load_device=cpu"
+            "kv_cache_dtype=fp8_inc,"
     kwargs = {}
     if 'fewshot_as_multiturn' in eval_config:
         kwargs['fewshot_as_multiturn'] = eval_config['fewshot_as_multiturn']
