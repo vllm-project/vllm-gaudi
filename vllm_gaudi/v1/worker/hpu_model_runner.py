@@ -39,6 +39,7 @@ from vllm.model_executor.sampling_metadata import SequenceGroupToSample
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
                                     PlaceholderRange)
+from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingType
@@ -61,6 +62,10 @@ from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.interfaces_base import (
     is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
+
+from .utils import (AttentionGroup, MultiModalBudget, bind_kv_cache,
+                    gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
+                    sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
@@ -428,11 +433,25 @@ class HpuModelAdapter(torch.nn.Module):
         if 'kv_caches' in kwargs:
             kwargs.pop('kv_caches')
         
+        # If multimodal inputs, update kwargs
+        model_mm_kwargs = kwargs.pop('model_mm_kwargs', None)
+        if model_mm_kwargs is not None:
+            kwargs.update(model_mm_kwargs)
+
         with set_forward_context(attn_meta, self.vllm_config):
             hidden_states = self.model(*args, **kwargs)
             if self._rotary_prepare_cos_sin is not None:
                 self._reset_rotary_cos_sin()
         return hidden_states
+
+    def get_input_embeddings(self, input_ids, multimodal_embeddings=None):
+        return self.model.get_input_embeddings(
+                            input_ids=input_ids,
+                            multimodal_embeddings=multimodal_embeddings
+                        )
+
+    def get_multimodal_embeddings(self, **batched_mm_inputs):
+        return self.model.get_multimodal_embeddings(**batched_mm_inputs)
 
     def compute_logits(self, *args, **kwargs):
         return self.model.compute_logits(*args, **kwargs)
@@ -608,14 +627,21 @@ class HPUModelRunner:
         )
 
         # Mult-modal-related.
+        self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
-        logger.info(f"Using mrope: {self.uses_mrope}")
+        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
+            model_config)
+        self.is_multimodal_raw_input_supported = (
+            model_config.is_multimodal_raw_input_supported)
 
         # Lazy initialization
         # self.model: nn.Module  # set after load_model
         self.kv_caches: list[torch.Tensor] = []
         self.inc_initialized_successfully = False
         self._is_inc_finalized = False
+
+        # req_id -> (input_id -> encoder_output)
+        self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
@@ -718,6 +744,8 @@ class HPUModelRunner:
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
+            self.encoder_cache.pop(req_id, None)
+
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -729,6 +757,14 @@ class HPUModelRunner:
             req_index = self.input_batch.remove_request(req_id)
             if req_index is not None:
                 removed_req_indices.append(req_index)
+
+        # Free the cached encoder outputs.
+        for req_id, input_id in scheduler_output.free_encoder_input_ids:
+            encoder_outputs = self.encoder_cache.get(req_id)
+            if encoder_outputs is not None:
+                encoder_outputs.pop(input_id, None)
+                if not encoder_outputs:
+                    self.encoder_cache.pop(req_id, None)
 
         # Remove the unscheduled requests from the persistent batch.
         # NOTE(woosuk): The unscheduled requests are either preempted requests
@@ -810,7 +846,7 @@ class HPUModelRunner:
                         audio_feature_lengths=audio_feature_lengths,
                         use_audio_in_video=use_audio_in_video,
                     )
-            logger.info(f"** Mrope positions size: {self.requests[req_id].mrope_positions.shape} **")
+
             req_ids_to_add.append(req_id)
         # Update the states of the running/resumed requests.
         is_last_rank = get_pp_group().is_last_rank
@@ -907,6 +943,130 @@ class HPUModelRunner:
         if batch_changed:
             self.input_batch.refresh_sampling_metadata()
         return batch_changed
+
+    def _extract_mm_kwargs(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> BatchedTensorInputs:
+        if self.is_multimodal_raw_input_supported:  # noqa: SIM102
+            if scheduler_output:
+                multi_modal_kwargs_list = list[MultiModalKwargs]()
+                for req in scheduler_output.scheduled_new_reqs:
+                    req_mm_inputs = req.mm_inputs
+                    if not isinstance(req_mm_inputs, list):
+                        req_mm_inputs = list(req_mm_inputs)
+                    multi_modal_kwargs_list.extend(req_mm_inputs)
+
+                return MultiModalKwargs.batch(multi_modal_kwargs_list)
+
+        return {}
+        
+    def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
+        scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
+        if not scheduled_encoder_inputs:
+            return
+
+        # Batch the multi-modal inputs.
+        mm_inputs = list[MultiModalKwargs]()
+        req_ids_pos = list[tuple[str, int, PlaceholderRange]]()
+        for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
+            req_state = self.requests[req_id]
+
+            for mm_input_id in encoder_input_ids:
+                mm_inputs.append(req_state.mm_inputs[mm_input_id])
+                req_ids_pos.append(
+                    (req_id, mm_input_id, req_state.mm_positions[mm_input_id]))
+
+        # Batch mm inputs as much as we can: if a request in the batch has
+        # multiple modalities or a different modality than the previous one,
+        # we process it separately to preserve item order.
+        # FIXME(ywang96): This is a hacky way to deal with multiple modalities
+        # in the same batch while still being able to benefit from batching
+        # multimodal inputs. The proper solution should be reordering the
+        # encoder outputs.
+        grouped_mm_inputs_list = group_mm_inputs_by_modality(mm_inputs)
+        encoder_outputs = []
+        for grouped_mm_inputs in grouped_mm_inputs_list:
+            batched_mm_inputs = MultiModalKwargs.batch(
+                grouped_mm_inputs, pin_memory=self.pin_memory)
+            batched_mm_inputs = MultiModalKwargs.as_kwargs(
+                batched_mm_inputs,
+                device=self.device,
+            )
+
+            # Run the encoder.
+            # `curr_group_outputs` is either of the following:
+            # 1. A tensor of shape (num_items, feature_size, hidden_size)
+            # in case feature_size is fixed across all multimodal items.
+            # 2. A list or tuple (length: num_items) of tensors, each of shape
+            # (feature_size, hidden_size) in case the feature size is dynamic
+            # depending on the input multimodal items.
+            curr_group_outputs = self.model.get_multimodal_embeddings(
+                **batched_mm_inputs)
+
+            for output in curr_group_outputs:
+                encoder_outputs.append(output)
+
+        # Cache the encoder outputs.
+        for (req_id, input_id, pos_info), output in zip(
+                req_ids_pos,
+                encoder_outputs,
+        ):
+            if req_id not in self.encoder_cache:
+                self.encoder_cache[req_id] = {}
+
+            self.encoder_cache[req_id][input_id] = scatter_mm_placeholders(
+                output,
+                is_embed=pos_info.is_embed,
+            )
+
+    def _gather_mm_embeddings(
+        self,
+        scheduler_output: "SchedulerOutput",
+        shift_computed_tokens: int = 0,
+    ) -> list[torch.Tensor]:
+        mm_embeds: list[torch.Tensor] = []
+        for req_id in self.input_batch.req_ids:
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
+                req_id]
+            req_state = self.requests[req_id]
+            num_computed_tokens = \
+                req_state.num_computed_tokens + shift_computed_tokens
+            mm_positions = req_state.mm_positions
+            for i, pos_info in enumerate(mm_positions):
+                start_pos = pos_info.offset
+                num_encoder_tokens = pos_info.length
+
+                # The encoder output is needed if the two ranges overlap:
+                # [num_computed_tokens,
+                #  num_computed_tokens + num_scheduled_tokens) and
+                # [start_pos, start_pos + num_encoder_tokens)
+                if start_pos >= num_computed_tokens + num_scheduled_tokens:
+                    # The encoder output is not needed in this step.
+                    break
+                if start_pos + num_encoder_tokens <= num_computed_tokens:
+                    # The encoder output is already processed and stored
+                    # in the decoder's KV cache.
+                    continue
+
+                start_idx = max(num_computed_tokens - start_pos, 0)
+                end_idx = min(
+                    num_computed_tokens - start_pos + num_scheduled_tokens,
+                    num_encoder_tokens)
+                assert start_idx < end_idx
+                assert req_id in self.encoder_cache
+                assert i in self.encoder_cache[req_id]
+                encoder_output = self.encoder_cache[req_id][i]
+
+                if (is_embed := pos_info.is_embed) is not None:
+                    is_embed = is_embed[start_idx:end_idx]
+
+                mm_embeds_item = gather_mm_placeholders(
+                    encoder_output[start_idx:end_idx],
+                    is_embed=is_embed,
+                )
+                mm_embeds.append(mm_embeds_item)
+        return mm_embeds
 
     def get_model(self) -> torch.nn.Module:
         assert self.model is not None
@@ -1287,7 +1447,6 @@ class HPUModelRunner:
             block_list=context_blocks_t,
             attn_bias=attn_bias,
             block_size=self.block_size)
-        logger.info(f"Token positions size: {token_positions.shape}")
         return PrefillInputData(request_ids=[req_ids],
                                 prompt_lens=[query_lens],
                                 token_ids=[token_ids],
@@ -1503,7 +1662,9 @@ class HPUModelRunner:
                                attn_metadata,
                                logits_indices,
                                kv_caches,
-                               warmup_mode=False):
+                               warmup_mode=False,
+                               inputs_embeds=None,
+                               model_mm_kwargs=None):
 
         # FORWARD.
         batch_size = token_ids.size(0)
@@ -1528,12 +1689,16 @@ class HPUModelRunner:
                                 f"graphs{'T' if use_graphs else 'F'}")
         else:
             model_event_name = 'model_executable'
+        
         with self.profiler.record_event('internal', model_event_name):
             hidden_states = self.model.forward(
                 input_ids=token_ids,
                 positions=position_ids,
                 attn_metadata=trimmed_attn_metadata,
-                kv_caches=kv_caches)
+                kv_caches=kv_caches,
+                inputs_embeds=inputs_embeds,
+                model_mm_kwargs=model_mm_kwargs
+            )
         # NOTE(kzawora): returning hidden_states is required in prompt logprobs
         # scenarios, as they will do logit processing on their own
         non_flattened_hidden_states = hidden_states
@@ -1707,13 +1872,40 @@ class HPUModelRunner:
                       attn_metadata, logits_indices,
                       logits_requests) in enumerate(
                           zip(*shallow_tuple(prefill_data))):
+
+                input_embeds=None
+                model_mm_kwargs = None
+                if self.supports_mm_inputs:
+                    # Run the multimodal encoder if any.
+                    # TODO (attafosu): Only gather for relevant requests (move to prepare_inputs as done for the mrope_positions)
+                    with self.profiler.record_event('internal', 'prepare_input_encoders'):
+                        self._execute_mm_encoder(scheduler_output)
+                    mm_embeds = self._gather_mm_embeddings(scheduler_output)
+
+                    with self.profiler.record_event('internal', 'prepare_mm_input_embeddings'):
+                        inputs_embeds_scheduled = self.model.get_input_embeddings(
+                            input_ids=token_ids,
+                            multimodal_embeddings=mm_embeds or None,
+                        )
+                    
+                    inputs_embeds = inputs_embeds_scheduled
+                    model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
+                    model_mm_kwargs = MultiModalKwargs.as_kwargs(
+                            model_mm_kwargs,
+                            device=self.device,
+                        )
+                else:
+                    mm_embeds = []
+
                 self.event_start = self.profiler.get_timestamp_us()
                 self.profiler.start("internal", "prefill")
                 htorch.core.mark_step()
                 prefill_hidden_states_ts, logits_device = \
                     self._execute_model_generic(
                         token_ids, position_ids, attn_metadata, logits_indices,
-                        self.kv_caches)
+                        self.kv_caches, 
+                        inputs_embeds=inputs_embeds, 
+                        model_mm_kwargs=model_mm_kwargs)
                 htorch.core.mark_step()
                 with self.profiler.record_event('internal', "sampler"):
                     sampling_metadata = self._prepare_sampling(
