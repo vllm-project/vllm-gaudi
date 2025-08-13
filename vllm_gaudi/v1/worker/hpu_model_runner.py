@@ -1710,8 +1710,8 @@ class HPUModelRunner:
                 # add the last token position
                 if structured_output and logits_indices.shape[0] < len(req_id):
                     logits_append = torch.tensor([torch.sum(prompt_len) - 1],
-                                                  device=token_ids.device,
-                                                  dtype=torch.int32)
+                                                 device=token_ids.device,
+                                                 dtype=torch.int32)
                     logits_indices = torch.cat([logits_indices, logits_append])
                 htorch.core.mark_step()
                 prefill_hidden_states_ts, logits_device = \
