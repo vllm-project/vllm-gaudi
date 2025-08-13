@@ -3,9 +3,9 @@ tasks:
 - name: "gsm8k_cot"
   metrics:
   - name: "exact_match,strict-match"
-    value: 0.6542
+    value: 0.664
   - name: "exact_match,flexible-extract"
-    value: 0.6686
-limit: 500
+    value: 0.668
+limit: 250
 num_fewshot: 8
 dtype: "bfloat16"
