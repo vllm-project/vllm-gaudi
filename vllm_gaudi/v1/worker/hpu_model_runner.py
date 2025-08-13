@@ -2421,6 +2421,26 @@ class HPUModelRunner:
             f"Warmup finished in {elapsed_time:.0f} secs, "
             f"allocated {format_bytes(end_mem - start_mem)} of device memory")
         logger.info(msg)
+        print("------------------------------------- dynamo compilations:")
+        compilation_metrics = torch._dynamo.utils.compilation_time_metrics
+        longest_key_length = max(len(key) for key in compilation_metrics)
+        time_comp = 0
+        for key, value in compilation_metrics.items():
+            # print(f"{key:<{longest_key_length}} ", end="")
+            time_comp += sum(value)
+            if key == "_compile.compile_inner":
+                number_comp = len(value) - 1
+            # else:
+            #     print(f" {'':6}", end="")
+            # for v in value:
+            #     print(f" {v:6.3f}", end="")
+            # print()
+        # print("----------------------------------------------------------")
+        print(torch._dynamo.utils.compile_times(aggregate=True))
+        print(f"Number of compilations: {number_comp} (+1)")
+        print(f"Compilations took {time_comp:.0f} s")
+        print("----------------------------------------------------------")
+
         self.profiler.end()
 
     def shutdown_inc(self):
