@@ -2207,7 +2207,10 @@ class HPUModelRunner:
         input_ids = torch.zeros((batch_size, query_seq_len),
                                 dtype=torch.int32,
                                 device='cpu')
-        position_ids = torch.zeros((batch_size, query_seq_len),
+        # Position ids shape different for mrope
+        pos_ids_shape = (3, batch_size * query_seq_len) if self.uses_mrope \
+                        else (batch_size, query_seq_len)
+        position_ids = torch.zeros(pos_ids_shape,
                                    dtype=torch.int32,
                                    device='cpu')
         slot_mapping = torch.zeros((batch_size, query_seq_len),
@@ -2229,7 +2232,7 @@ class HPUModelRunner:
         input_ids = torch.zeros((batch_size, query_seq_len),
                                 dtype=torch.int32,
                                 device='cpu')
-        position_ids = torch.zeros((batch_size, query_seq_len),
+        position_ids = torch.zeros(pos_ids_shape,
                                    dtype=torch.int32,
                                    device='cpu')
         slot_mapping = torch.zeros((batch_size, query_seq_len),
