@@ -352,8 +352,7 @@ def run_attention_backend(vllm_config, device: torch.device,
     ("small_prefill", "small"),
     ("medium_prefill", "realistic_large"),
 ])
-def test_backend_debug_progressive(batch_spec_name: str,
-                                   mock_config_name: str):
+def test_attention_correctness(batch_spec_name: str, mock_config_name: str):
     batch_spec = BATCH_SPECS[batch_spec_name]
     mock_config = MOCK_MODEL_CONFIGS[mock_config_name]
     vllm_config = create_vllm_config(model_name="Qwen/Qwen2.5-7B-Instruct",
