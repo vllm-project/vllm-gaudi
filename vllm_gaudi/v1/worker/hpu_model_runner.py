@@ -7,7 +7,7 @@ import math
 import os
 import time
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast, get_args
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -51,7 +51,7 @@ from vllm.distributed.parallel_state import get_pp_group
 
 from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.interfaces_base import (
-    is_pooling_model, is_text_generation_model)
+    VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 
 if TYPE_CHECKING:
@@ -598,6 +598,7 @@ class HPUModelRunner:
             self.parallel_config)
         self.head_size = self.model_config.get_head_size()
         self.hidden_size = self.model_config.get_hidden_size()
+        self.is_pooling_model = model_config.pooler_config is not None
 
         self.attn_backend = get_attn_backend(
             self.head_size,
@@ -683,17 +684,17 @@ class HPUModelRunner:
             # TODO: Support other attention modules, e.g., sliding window,
             # cross-attention
             assert isinstance(attn_module, Attention)
-            if attn_module.attn_type == AttentionType.DECODER:
+            if attn_module.attn_type in ( AttentionType.DECODER, AttentionType.ENCODER_ONLY):
                 kv_cache_spec[layer_name] = FullAttentionSpec(
                     block_size=block_size,
                     num_kv_heads=attn_module.num_kv_heads,
                     head_size=attn_module.head_size,
                     dtype=self.kv_cache_dtype,
                     use_mla=use_mla)
-            elif attn_module.attn_type in (AttentionType.ENCODER,
-                                           AttentionType.ENCODER_ONLY):
-                # encoder-only attention does not need KV cache.
-                continue
+            # elif attn_module.attn_type in (AttentionType.ENCODER,
+            #                                AttentionType.ENCODER_ONLY):
+            #     # encoder-only attention does not need KV cache.
+            #     continue
             elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
                 raise NotImplementedError
             else:
@@ -747,15 +748,27 @@ class HPUModelRunner:
         req_ids_to_add: list[str] = []
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
-            assert new_req_data.sampling_params is not None, \
-                "Pooling is not supported in HPU yet"
+            # assert new_req_data.sampling_params is not None, \
+            #     "Pooling is not supported in HPU yet"
             req_id = new_req_data.req_id
             sampling_params = new_req_data.sampling_params
-            if sampling_params.sampling_type == SamplingType.RANDOM_SEED:
+            pooling_params = new_req_data.pooling_params
+            if sampling_params and \
+                sampling_params.sampling_type == SamplingType.RANDOM_SEED:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
             else:
                 generator = None
+                
+            if pooling_params:
+                assert (task := pooling_params.task) is not None, (
+                    "You did not set `task` in the API")
+
+                model = cast(VllmModelForPooling, self.model)
+                to_update = model.pooler.get_pooling_updates(task)
+                assert to_update is not None, (
+                    f"{pooling_params.task=} is not supported by the model")
+                to_update.apply(pooling_params)
 
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
@@ -763,7 +776,7 @@ class HPUModelRunner:
                 mm_kwargs=new_req_data.mm_kwargs,
                 mm_positions=new_req_data.mm_positions,
                 sampling_params=sampling_params,
-                pooling_params=None,
+                pooling_params=pooling_params,
                 generator=generator,
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
@@ -871,6 +884,16 @@ class HPUModelRunner:
     def get_model(self) -> torch.nn.Module:
         assert self.model is not None
         return self.model
+
+    def get_supported_pooling_tasks(self) -> list[PoolingTask]:
+        model = self.get_model()
+        if not is_pooling_model(model):
+            return []
+
+        return [
+            task for task in get_args(PoolingTask)
+            if model.pooler.get_pooling_updates(task)
+        ]
 
     def _get_prompts_and_decodes(
         self,
@@ -1435,12 +1458,13 @@ class HPUModelRunner:
                                 f"graphs{'T' if use_graphs else 'F'}")
         else:
             model_event_name = 'model_executable'
-        with self.profiler.record_event('internal', model_event_name):
-            hidden_states = self.model.forward(
-                input_ids=token_ids,
-                positions=position_ids,
-                attn_metadata=trimmed_attn_metadata,
-                kv_caches=kv_caches)
+        with set_forward_context(attn_metadata, self.vllm_config):
+            with self.profiler.record_event('internal', model_event_name):
+                hidden_states = self.model.forward(
+                    input_ids=token_ids,
+                    positions=position_ids,)
+                # attn_metadata=trimmed_attn_metadata,
+                # kv_caches=kv_caches)
         # NOTE(kzawora): returning hidden_states is required in prompt logprobs
         # scenarios, as they will do logit processing on their own
         non_flattened_hidden_states = hidden_states
@@ -1954,9 +1978,9 @@ class HPUModelRunner:
             hidden_layer_markstep_interval)
         torch.hpu.synchronize()
 
-        with HabanaMemoryProfiler() as m:  # noqa: SIM117
-            self.model = _maybe_wrap_in_hpu_graph(self.model,
-                                                  vllm_config=self.vllm_config)
+        # with HabanaMemoryProfiler() as m:  # noqa: SIM117
+        #     self.model = _maybe_wrap_in_hpu_graph(self.model,
+        #                                           vllm_config=self.vllm_config)
         self.model_memory_usage = m.consumed_device_memory
         logger.info("Wrapping in HPUGraph took %.4f GB",
                     self.model_memory_usage / float(2**30))
@@ -2430,6 +2454,7 @@ class HPUModelRunner:
 
     def __del__(self):
         self.shutdown_inc()
+
 
     @torch.inference_mode()
     def profile_run(self) -> None:
