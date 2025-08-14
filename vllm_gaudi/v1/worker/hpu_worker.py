@@ -18,6 +18,7 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.model_executor import set_random_seed
+from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
@@ -120,6 +121,7 @@ class HPUWorker(WorkerBase):
         self.profiler.stop()
 
     def init_device(self):
+        current_platform.set_device(torch.device("hpu"))
         # Initialize the distributed environment.
         init_worker_distributed_environment(self.parallel_config, self.rank,
                                             self.distributed_init_method,
@@ -163,14 +165,16 @@ class HPUWorker(WorkerBase):
         single_kv_block_size_bytes = 0
         for layer_name, layer_spec in kv_cache_spec.items():
             if isinstance(layer_spec, FullAttentionSpec):
-                dtype = layer_spec.dtype
+                # dtype = layer_spec.dtype
 
                 # Use an empty tensor instead of `None`` to force Dynamo to pass
                 # it by reference, rather by specializing on the value ``None``.
-                hpu_k_cache = torch.tensor([], dtype=dtype, device='hpu')
-                hpu_v_cache = torch.tensor([], dtype=dtype, device='hpu')
+                # hpu_k_cache = torch.tensor([], dtype=dtype, device='hpu')
+                # hpu_v_cache = torch.tensor([], dtype=dtype, device='hpu')
 
-                kv_caches[layer_name] = (hpu_k_cache, hpu_v_cache)
+                # kv_caches[layer_name] = (hpu_k_cache, hpu_v_cache)
+                # avoid issue of reading kv cache during profiling
+                kv_caches[layer_name] = None
 
                 single_kv_block_size_bytes += layer_spec.page_size_bytes
 
@@ -273,6 +277,10 @@ class HPUWorker(WorkerBase):
         else:
             self.profiler.stop()
 
+    def execute_dummy_batch(self) -> None:
+        # TODO wuxun: add _dummy_run
+        self.model_runner._dummy_run(1)
+
 
 def init_worker_distributed_environment(
     parallel_config: ParallelConfig,
@@ -288,9 +296,34 @@ def init_worker_distributed_environment(
                                  backend='hccl')
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
+
+    if torch.distributed.is_initialized():
+        torch_world_size = torch.distributed.get_world_size()
+        expected_size = parallel_config.world_size *\
+            parallel_config.data_parallel_size
+        if torch_world_size != expected_size:
+            raise RuntimeError(
+                "torch.distributed is already initialized but the torch world "
+                "size does not match parallel_config.world_size * "
+                "parallel_config.data_parallel_size "
+                f"({torch_world_size} vs. {expected_size}).")
+    elif not distributed_init_method:
+        raise ValueError(
+            "distributed_init_method must be set if torch.distributed "
+            "is not already initialized")
+    else:
+        backend = 'hccl'
+        torch.distributed.init_process_group(
+            backend=backend,
+            world_size=parallel_config.world_size,
+            rank=rank,
+            init_method=distributed_init_method,
+        )
+
     dummy_tensor_hpu = torch.ones(1).to('hpu')
     torch.distributed.all_reduce(dummy_tensor_hpu)
-    assert dummy_tensor_hpu.item() == parallel_config.world_size
+    assert dummy_tensor_hpu.item(
+    ) == parallel_config.world_size * parallel_config.data_parallel_size
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
 

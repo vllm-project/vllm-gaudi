@@ -26,7 +26,7 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import (VllmConfig, update_config)
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import set_forward_context, DPMetadata
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import get_sampler
@@ -1150,6 +1150,12 @@ class HPUModelRunner:
 
         target_bs, target_seq, target_blocks = self._get_prompt_bucketing_fn()(
             query_lens, num_context_blocks)
+
+        # dp aware padding
+        target_bs += self.get_dp_padding(target_bs)
+        target_seq += self.get_dp_padding(target_seq)
+        target_blocks += self.get_dp_padding(target_blocks)
+
         token_ids = self._align_and_pad(contents.token_ids,
                                         (target_bs, target_seq),
                                         itertools.repeat(-1))
@@ -1265,6 +1271,9 @@ class HPUModelRunner:
         padded_batch_size: int
         padded_batch_size = self.bucketing_manager.find_decode_bucket(
             num_decodes, sum(num_blocks))[0]
+
+        # dp aware padding
+        padded_batch_size += self.get_dp_padding(padded_batch_size)
 
         block_tables_list = []
         for i, n in enumerate(num_blocks):
@@ -1403,6 +1412,31 @@ class HPUModelRunner:
             logger.warning(
                 "Configuration: (%s, %s, %s, %s) was not warmed-up!", phase,
                 batch_size, seq_len, num_blocks)
+
+    def get_dp_padding(self,
+                       num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
+        dp_size = self.vllm_config.parallel_config.data_parallel_size
+        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+
+        # For DP: Don't pad when setting enforce_eager.
+        # This lets us set enforce_eager on the prefiller in a P/D setup and
+        # still use CUDA graphs (enabled by this padding) on the decoder.
+        #
+        # TODO(tms) : There are many cases where padding is enabled for
+        # prefills, causing unnecessary and excessive padding of activations.
+
+        if dp_size == 1 or self.vllm_config.model_config.enforce_eager:
+            # Early exit.
+            return 0
+
+        num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
+            num_tokens, dp_size, dp_rank)
+        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp).item()
+        # num_tokens_after_padding = torch.tensor([max_tokens_across_dp_cpu] *
+        #                                         dp_size,
+        #                                         device="cpu",
+        #                                         dtype=torch.int32).item()
+        return max_tokens_across_dp_cpu - num_tokens
 
     def _execute_model_generic(self,
                                token_ids,
@@ -1609,10 +1643,9 @@ class HPUModelRunner:
             logits_cpu.to(self.device, non_blocking=True).to(logits.dtype))
 
     @torch.inference_mode()
-    def execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> ModelRunnerOutput:
+    def execute_model(self,
+                      scheduler_output: "SchedulerOutput",
+                      warmup_mode=False) -> ModelRunnerOutput:
         # NOTE(kzawora): Since scheduler doesn't differentiate between prefills
         # and decodes, we must handle mixed batches. In _update_states we make
         # sure that first self.input_batch.num_decodes requests are decodes,
@@ -1716,8 +1749,12 @@ class HPUModelRunner:
                 htorch.core.mark_step()
                 prefill_hidden_states_ts, logits_device = \
                     self._execute_model_generic(
-                        token_ids, position_ids, attn_metadata, logits_indices,
-                        self.kv_caches)
+                        token_ids,
+                        position_ids,
+                        attn_metadata,
+                        logits_indices,
+                        self.kv_caches,
+                        warmup_mode=warmup_mode)
                 htorch.core.mark_step()
                 # Skip separate sampling for structured output
                 if structured_output:
@@ -1760,9 +1797,12 @@ class HPUModelRunner:
             assert decode_data is not None
             htorch.core.mark_step()
             _, logits_device = self._execute_model_generic(
-                decode_data.token_ids, decode_data.position_ids,
-                decode_data.attn_metadata, decode_data.logits_indices,
-                self.kv_caches)
+                decode_data.token_ids,
+                decode_data.position_ids,
+                decode_data.attn_metadata,
+                decode_data.logits_indices,
+                self.kv_caches,
+                warmup_mode=warmup_mode)
             htorch.core.mark_step()
 
             if structured_output:
@@ -2045,7 +2085,10 @@ class HPUModelRunner:
                         num_blocks,
                         is_prompt,
                         kv_caches,
-                        is_pt_profiler_run=True) -> None:
+                        num_iters=3,
+                        is_pt_profiler_run=True,
+                        align_worker=False,
+                        is_dummy_run=False) -> None:
         """Dummy warmup run for memory usage and graph compilation."""
 
         query_seq_len = seq_or_block if is_prompt else 1
@@ -2063,7 +2106,7 @@ class HPUModelRunner:
         position_ids_device = _async_h2d_tensor_copy(position_ids, self.device)
         slot_mapping_device = _async_h2d_tensor_copy(slot_mapping, self.device)
 
-        use_graphs = self._use_graphs()
+        use_graphs = is_dummy_run or self._use_graphs()
         phase = "prompt" if is_prompt else "decode"
         scenario_name = ("warmup_"
                          f"{phase}_"
@@ -2086,7 +2129,10 @@ class HPUModelRunner:
         slot_mapping_device = _async_h2d_tensor_copy(slot_mapping, self.device)
         self.profiler.start('internal', scenario_name)
 
-        times = 3 if use_graphs or is_pt_profiler_run else 1
+        # TODO wuxun: consider dp aware padding for bs, block bucket, etc.
+        # should be similarly done in _prepare_inputs
+
+        times = num_iters if use_graphs or is_pt_profiler_run else 1
         for time_index in range(times):
             if is_prompt:
                 seq_lens = torch.zeros((batch_size),
@@ -2286,8 +2332,8 @@ class HPUModelRunner:
             structured_output_request_ids={},
             grammar_bitmask=None,
         )
-        self.execute_model(sched_output)
-        self.execute_model(cleanup)
+        self.execute_model(sched_output, warmup_mode=True)
+        self.execute_model(cleanup, warmup_mode=True)
 
     def _generate_profiling(self, prompt_cfg, decode_cfg):
         steps = 3
@@ -2433,7 +2479,6 @@ class HPUModelRunner:
 
     @torch.inference_mode()
     def profile_run(self) -> None:
-        return
         """Profile to measure peak memory during forward pass."""
 
         # use an empty tensor instead of `None`` to force Dynamo to pass
@@ -2443,21 +2488,46 @@ class HPUModelRunner:
         # it is important to create tensors inside the loop, rather than
         # multiplying the list, to avoid Dynamo from treating them as
         # tensor aliasing.
-        num_layers = self.model_config.get_num_layers(self.parallel_config)
-        kv_caches = [None] * num_layers
+        # num_layers = self.model_config.get_num_layers(self.parallel_config)
+        # kv_caches = [None] * num_layers
 
-        # Run empty prefill forwards - prefill max batch and prefill max seq
-        self.warmup_scenario(batch_size=1,
-                             seq_or_block=self.max_model_len,
-                             is_prompt=True,
-                             kv_caches=kv_caches)
-        max_seq_len = math.ceil(
-            (self.max_num_tokens // self.max_prefill_batch_size) /
-            self.block_size) * self.block_size
-        self.warmup_scenario(batch_size=self.max_prefill_batch_size,
-                             seq_or_block=max_seq_len,
-                             is_prompt=True,
-                             kv_caches=kv_caches)
+        max_num_batched_tokens = self.max_num_tokens
+        max_prefill_batch_size = self.max_prefill_batch_size
+        max_seq_len = (max_num_batched_tokens + max_prefill_batch_size -
+                       1) // max_prefill_batch_size
+        if max_seq_len % self.block_size != 0:
+            max_seq_len = ((max_seq_len + self.block_size - 1) //
+                           self.block_size) * self.block_size
+        max_seq_len = min(max_seq_len, self.max_model_len)
+
+        # different DP engine may have different config
+        max_seq_len += self.get_dp_padding(max_seq_len)
+        max_prefill_batch_size += self.get_dp_padding(max_prefill_batch_size)
+
+        prompt_cfg = (max_prefill_batch_size, max_seq_len - 1, 0)
+        decode_cfg = None
+        self._execute_dummy_scenario(prompt_cfg, decode_cfg)
+
+        # # Run empty prefill forwards - prefill max batch and prefill max seq
+        # self.warmup_scenario(batch_size=1,
+        #                      seq_or_block=self.max_model_len,
+        #                      is_prompt=True,
+        #                      kv_caches=kv_caches)
+        # max_seq_len = math.ceil(
+        #     (self.max_num_tokens // self.max_prefill_batch_size) /
+        #     self.block_size) * self.block_size
+        # self.warmup_scenario(batch_size=self.max_prefill_batch_size,
+        #                      seq_or_block=max_seq_len,
+        #                      is_prompt=True,
+        #                      kv_caches=kv_caches)
+
+    def _dummy_run(self, max_num_batched_tokens: int) -> None:
+        assert max_num_batched_tokens == 1
+        prompt_cfg = None
+        decode_cfg = 1, 1
+        # add dummy decode run
+        self._execute_dummy_scenario(prompt_cfg, decode_cfg)
+        return
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
