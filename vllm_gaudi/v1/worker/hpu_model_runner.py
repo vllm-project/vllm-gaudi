@@ -5,7 +5,6 @@ import functools
 import itertools
 import math
 import os
-import gc
 import time
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast, get_args
@@ -54,9 +53,6 @@ from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
-from vllm.pooling_params import PoolingParams, PoolingTask
-from vllm.v1.attention.backends.utils import (CommonAttentionMetadata)
-from vllm.forward_context import (DPMetadata)
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -688,7 +684,7 @@ class HPUModelRunner:
             # TODO: Support other attention modules, e.g., sliding window,
             # cross-attention
             assert isinstance(attn_module, Attention)
-            if attn_module.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.DECODER):
+            if attn_module.attn_type in ( AttentionType.DECODER, AttentionType.ENCODER_ONLY):
                 kv_cache_spec[layer_name] = FullAttentionSpec(
                     block_size=block_size,
                     num_kv_heads=attn_module.num_kv_heads,
@@ -1462,8 +1458,7 @@ class HPUModelRunner:
                                 f"graphs{'T' if use_graphs else 'F'}")
         else:
             model_event_name = 'model_executable'
-        attn_meta = None
-        with set_forward_context(attn_meta, self.vllm_config):
+        with set_forward_context(attn_metadata, self.vllm_config):
             with self.profiler.record_event('internal', model_event_name):
                 hidden_states = self.model.forward(
                     input_ids=token_ids,
