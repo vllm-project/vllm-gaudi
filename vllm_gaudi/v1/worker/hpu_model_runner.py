@@ -1208,21 +1208,20 @@ class HPUModelRunner:
         data = pad_list(data, target_bs, itertools.repeat(padding))
         return data
 
-    def _align_and_pad_mrope_positions(
-        self, input_mrope_positions : List[List[List[int]]], bucketing : Tuple[int, int], padding_gen : int) -> torch.Tensor:
+    def _align_and_pad_mrope_positions(self, req_ids : List[str], context_lens : List[int], query_lens : List[int], 
+                                    bucketing : Tuple[int, int], padding_gen : int) -> torch.Tensor:
         mrope_input_positions : List[List[int]] = [[] for _ in range(3)]
-        bs = len(input_mrope_positions)
+        bs = len(context_lens)
         target_bs, target_len = bucketing
-        # TODO(attafosu): Check how this applies to mrope positions
-        if target_bs == 1 and bs > 1:
-            input_mrope_positions = [list(itertools.chain(*input_mrope_positions))]
+        input_mrope_positions : List[List[List[int]]] = [[] for _ in range(3)]
 
         for idx in range(3):
-            for b_idx, input_mrope_position in enumerate(input_mrope_positions):
-                #TODO (attafosu): Check if mrope_input_positions[idx] is None. For mixed modality??
-                padding_size = target_len - len(input_mrope_position[idx])
-                assert padding_size >= 0
-                padded_positions = input_mrope_position[idx] \
+            for b_idx, req_id in enumerate(req_ids):
+                input_mrope_position = self.requests[req_id].mrope_positions[idx].tolist()
+                context_len = context_lens[b_idx]
+                query_len = query_lens[b_idx]
+                padding_size = target_len - query_len
+                padded_positions = input_mrope_position[context_len:context_len + query_len] \
                     + padding_size * [padding_gen]
                 mrope_input_positions[idx].extend(padded_positions)
         return torch.tensor(mrope_input_positions, dtype=torch.long, device='cpu').to('hpu', non_blocking=True)
@@ -1367,23 +1366,19 @@ class HPUModelRunner:
         num_context_blocks = [len(b) for b in context_blocks]
         context_groups = [[i] * b for i, b in enumerate(num_context_blocks)]
         has_context = sum(context_lens) > 0
-
         target_bs, target_seq, target_blocks = self._get_prompt_bucketing_fn()(
             query_lens, num_context_blocks)
+        
+        # If the model uses M-RoPE, we need to fill and pad the M-RoPE positions for the scheduled prefill tokens
+        if self.uses_mrope:
+            mrope_token_positions = self._align_and_pad_mrope_positions(contents.req_ids, context_lens, query_lens,
+                (target_bs, target_seq), -1, )
         token_ids = self._align_and_pad(contents.token_ids,
                                         (target_bs, target_seq),
                                         itertools.repeat(-1))
-
-        # If the model uses M-RoPE, we need to align and pad the M-RoPE positions.
-        if self.uses_mrope:
-            mrope_token_positions = [self.requests[req_id].mrope_positions.tolist()
-                               for req_id in contents.req_ids]
-            mrope_token_positions = self._align_and_pad_mrope_positions(
-                mrope_token_positions, (target_bs, target_seq), -1)
-        else:
-            token_positions = self._align_and_pad(token_positions,
-                                              (target_bs, target_seq),
-                                              itertools.repeat(-1))
+        token_positions = mrope_token_positions if self.uses_mrope else self._align_and_pad(token_positions,
+                                            (target_bs, target_seq),
+                                            itertools.repeat(-1))                
         token_slots = self._align_and_pad(token_slots, (target_bs, target_seq),
                                           itertools.repeat(-1))
         token_groups = self._align_and_pad(token_groups,
@@ -1512,12 +1507,11 @@ class HPUModelRunner:
         padded_index[:num_decodes] = index
         
         input_mrope_positions: List[List[int]] = [[] for _ in range(3)]
-        if self.uses_mrope:
-            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[:num_decodes]
+        if self.uses_mrope:        
             for idx, req_id in enumerate(self.input_batch.req_ids[:num_decodes]):
                 seq_data = self.requests[req_id]
-                context_len = num_computed_tokens[idx]
-                position = context_len-1
+                context_len = context_lens[idx]
+                position = context_len
                 if seq_data.mrope_position_delta is not None:
                     pos_for_mrope = MRotaryEmbedding \
                         .get_next_input_positions(
@@ -1533,6 +1527,11 @@ class HPUModelRunner:
                 input_mrope_positions,
                 dtype=torch.long,
                 device='cpu').to('hpu', non_blocking=True)
+
+            # Pad the right side of input_mrope_positions by padded_batch_size
+            pad_size = padded_batch_size - input_mrope_positions.size(1)
+            if pad_size > 0:
+                input_mrope_positions = F.pad(input_mrope_positions, (0, pad_size), value=-1, mode='constant')
 
         # TOKEN_IDS. [batch, 1]
         token_ids = torch.zeros((padded_batch_size, 1), dtype=torch.int32)
@@ -1872,7 +1871,7 @@ class HPUModelRunner:
                       logits_requests) in enumerate(
                           zip(*shallow_tuple(prefill_data))):
 
-                input_embeds=None
+                inputs_embeds=None
                 model_mm_kwargs = None
                 if self.supports_mm_inputs:
                     # Run the multimodal encoder if any.
