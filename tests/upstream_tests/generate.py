@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
+import sys
 
 from vllm import LLM, EngineArgs
 from vllm.utils import FlexibleArgumentParser
 
+llm = None
 
 def create_parser():
     parser = FlexibleArgumentParser()
@@ -29,6 +30,7 @@ def main(args: dict):
     top_k = args.pop("top_k")
 
     # Create an LLM
+    global llm
     llm = LLM(**args)
 
     # Create a sampling params object
@@ -59,14 +61,15 @@ def main(args: dict):
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
         print("-" * 50)
 
-    os._exit(0)
-
-
 if __name__ == "__main__":
     parser = create_parser()
     args: dict = vars(parser.parse_args())
     try:
         main(args)
+        sys.exit(0)
     except Exception as e:
         print(f"An error occurred: {e}")
-        os._exit(1)
+        sys.exit(1)
+    finally:
+        if llm:
+            del llm
