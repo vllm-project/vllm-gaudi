@@ -960,7 +960,7 @@ class HPUModelRunner:
 
         return {}
         
-    def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
+    def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput", req_ids : List[str]):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
             return
@@ -968,7 +968,8 @@ class HPUModelRunner:
         # Batch the multi-modal inputs.
         mm_inputs = list[MultiModalKwargs]()
         req_ids_pos = list[tuple[str, int, PlaceholderRange]]()
-        for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
+        for req_id in req_ids:
+            encoder_input_ids = scheduled_encoder_inputs[req_id]
             req_state = self.requests[req_id]
 
             for mm_input_id in encoder_input_ids:
@@ -1000,8 +1001,9 @@ class HPUModelRunner:
             # 2. A list or tuple (length: num_items) of tensors, each of shape
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
-            curr_group_outputs = self.model.get_multimodal_embeddings(
-                **batched_mm_inputs)
+            with self.profiler.record_event('internal', 'get_multimodal_embeddings'):
+                curr_group_outputs = self.model.get_multimodal_embeddings(
+                    **batched_mm_inputs)
 
             for output in curr_group_outputs:
                 encoder_outputs.append(output)
@@ -1022,10 +1024,11 @@ class HPUModelRunner:
     def _gather_mm_embeddings(
         self,
         scheduler_output: "SchedulerOutput",
+        req_ids : List[str],
         shift_computed_tokens: int = 0,
     ) -> list[torch.Tensor]:
         mm_embeds: list[torch.Tensor] = []
-        for req_id in self.input_batch.req_ids:
+        for req_id in req_ids: #self.input_batch.req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
             req_state = self.requests[req_id]
@@ -1881,8 +1884,9 @@ class HPUModelRunner:
                 if self.supports_mm_inputs:
                     # Run the multimodal encoder if any.
                     with self.profiler.record_event('internal', 'prepare_input_encoders'):
-                        self._execute_mm_encoder(scheduler_output)
-                    mm_embeds = self._gather_mm_embeddings(scheduler_output)
+                        self._execute_mm_encoder(scheduler_output, req_id)
+                    with self.profiler.record_event('internal', 'gather_mm_embeddings'):
+                        mm_embeds = self._gather_mm_embeddings(scheduler_output, req_id)
 
                     with self.profiler.record_event('internal', 'prepare_mm_input_embeddings'):
                         inputs_embeds = self.model.get_input_embeddings(
