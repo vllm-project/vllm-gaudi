@@ -1880,25 +1880,21 @@ class HPUModelRunner:
                 model_mm_kwargs = None
                 if self.supports_mm_inputs:
                     # Run the multimodal encoder if any.
-                    # TODO (attafosu): Only gather for relevant requests (move to prepare_inputs as done for the mrope_positions)
                     with self.profiler.record_event('internal', 'prepare_input_encoders'):
                         self._execute_mm_encoder(scheduler_output)
                     mm_embeds = self._gather_mm_embeddings(scheduler_output)
 
                     with self.profiler.record_event('internal', 'prepare_mm_input_embeddings'):
-                        inputs_embeds_scheduled = self.model.get_input_embeddings(
+                        inputs_embeds = self.model.get_input_embeddings(
                             input_ids=token_ids,
                             multimodal_embeddings=mm_embeds or None,
                         )
                     
-                    inputs_embeds = inputs_embeds_scheduled
                     model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
                     model_mm_kwargs = MultiModalKwargs.as_kwargs(
                             model_mm_kwargs,
                             device=self.device,
                         )
-                else:
-                    mm_embeds = []
 
                 self.event_start = self.profiler.get_timestamp_us()
                 self.profiler.start("internal", "prefill")
