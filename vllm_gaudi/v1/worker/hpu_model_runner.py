@@ -1263,7 +1263,7 @@ class HPUModelRunner:
             # with their seqlens=target_len
             if target_bs > bs:
                 mrope_input_positions[idx].extend([padding_gen] * (target_bs - bs) * target_len)
-        return torch.tensor(mrope_input_positions, dtype=torch.long, device='cpu').to('hpu', non_blocking=True)
+        return torch.tensor(mrope_input_positions, dtype=torch.int32, device='cpu').to('hpu', non_blocking=True)
 
     def _bucketize_merged_prompt(self, seq_lens, num_blocks):
         seq = sum(seq_lens)
@@ -1412,6 +1412,10 @@ class HPUModelRunner:
         if self.uses_mrope:
             mrope_token_positions = self._align_and_pad_mrope_positions(contents.req_ids, context_lens, query_lens,
                 (target_bs, target_seq), -1, )
+
+        # NOTE: If model does not support multimodal inputs, we pad here
+        # For models with multimodal support, we may want to get embeddings for the valid tokens before padding
+        # This will require getting multimodal input embeddings as well (required for getting tokens embeddings)
         token_ids = self._align_and_pad(contents.token_ids,
                                         (target_bs, target_seq),
                                         itertools.repeat(-1))
@@ -1565,7 +1569,7 @@ class HPUModelRunner:
             
             input_mrope_positions = torch.tensor(
                 input_mrope_positions,
-                dtype=torch.long,
+                dtype=torch.int32,
                 device='cpu').to('hpu', non_blocking=True)
 
             # Pad the right side of input_mrope_positions by padded_batch_size
@@ -2008,7 +2012,9 @@ class HPUModelRunner:
                         self._execute_mm_encoder(scheduler_output, req_id)
 
                     mm_embeds = self._gather_mm_embeddings(scheduler_output, req_id)
-
+                    #TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>]
+                    # This may require moving multimodal input preps into _prepare_inputs,
+                    # to avoid padding issues.
                     inputs_embeds = self.model.get_input_embeddings(
                         input_ids=token_ids,
                         multimodal_embeddings=mm_embeds or None,
