@@ -37,9 +37,9 @@ from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.sampling_metadata import SequenceGroupToSample
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
+from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,MultiModalKwargsItem,
                                     PlaceholderRange)
-from vllm.multimodal.utils import group_mm_inputs_by_modality
+from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingType
@@ -826,18 +826,19 @@ class HPUModelRunner:
                 second_per_grid_ts = []
                 audio_feature_lengths = []
                 use_audio_in_video = False
-                for mm_input in self.requests[req_id].mm_inputs:
+                for mm_item in self.requests[req_id].mm_kwargs:
+                    mm_input = mm_item.get_data()
                     if mm_input.get("image_grid_thw") is not None:
-                        image_grid_thw.extend(
+                        image_grid_thw.append(
                             mm_input["image_grid_thw"].tolist())
                     if mm_input.get("video_grid_thw") is not None:
-                        video_grid_thw.extend(
+                        video_grid_thw.append(
                             mm_input["video_grid_thw"].tolist())
                     if mm_input.get("second_per_grid_ts") is not None:
-                        second_per_grid_ts.extend(
+                        second_per_grid_ts.append(
                             mm_input["second_per_grid_ts"])
                     if mm_input.get("audio_feature_lengths") is not None:
-                        audio_feature_lengths.extend(
+                        audio_feature_lengths.append(
                             mm_input["audio_feature_lengths"])
                     if mm_input.get("use_audio_in_video") is True:
                         use_audio_in_video = True
@@ -959,14 +960,23 @@ class HPUModelRunner:
     ) -> BatchedTensorInputs:
         if self.is_multimodal_raw_input_supported:  # noqa: SIM102
             if scheduler_output:
-                multi_modal_kwargs_list = list[MultiModalKwargs]()
+                mm_kwargs = list[MultiModalKwargsItem]()
                 for req in scheduler_output.scheduled_new_reqs:
-                    req_mm_inputs = req.mm_inputs
-                    if not isinstance(req_mm_inputs, list):
-                        req_mm_inputs = list(req_mm_inputs)
-                    multi_modal_kwargs_list.extend(req_mm_inputs)
+                    req_mm_kwargs = req.mm_kwargs
+                    if not isinstance(req_mm_kwargs, list):
+                        req_mm_kwargs = list(req_mm_kwargs)
+                    mm_kwargs.extend(req_mm_kwargs)
 
-                return MultiModalKwargs.batch(multi_modal_kwargs_list)
+                # Input all modalities at once
+                mm_kwargs_combined: BatchedTensorInputs = {}
+                for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
+                        mm_kwargs,
+                        device=self.device,
+                        pin_memory=self.pin_memory,
+                ):
+                    mm_kwargs_combined.update(mm_kwargs_group)
+
+                return mm_kwargs_combined
 
         return {}
         
@@ -975,35 +985,40 @@ class HPUModelRunner:
         if not scheduled_encoder_inputs:
             return
 
+        # NOTE (attafosu): Utilize cached mm embeddings to speed up processing - after PR(#22711)
+        # mm_hashes for inputs will map to their cached embeddings which can be reused for reqs sharing same mm_hash
+
         # Batch the multi-modal inputs.
-        mm_inputs = list[MultiModalKwargs]()
+        mm_kwargs = list[MultiModalKwargsItem]()
         req_ids_pos = list[tuple[str, int, PlaceholderRange]]()
         for req_id in req_ids:
             encoder_input_ids = scheduled_encoder_inputs[req_id]
             req_state = self.requests[req_id]
 
             for mm_input_id in encoder_input_ids:
-                mm_inputs.append(req_state.mm_inputs[mm_input_id])
+                mm_kwargs.append(req_state.mm_kwargs[mm_input_id])
                 req_ids_pos.append(
                     (req_id, mm_input_id, req_state.mm_positions[mm_input_id]))
 
         # Batch mm inputs as much as we can: if a request in the batch has
         # multiple modalities or a different modality than the previous one,
         # we process it separately to preserve item order.
+
+        # TODO (attafosu): Follow-up on the resolution to this.
+        # The ordering of the encoder outputs needs to match the request ids after fetching the embeddings.
+        # For now, we'll restrict mm support to just a single prefill at a time -
+        # Or that requests in the batch should have distinct modalities,
+
         # FIXME(ywang96): This is a hacky way to deal with multiple modalities
         # in the same batch while still being able to benefit from batching
         # multimodal inputs. The proper solution should be reordering the
         # encoder outputs.
-        grouped_mm_inputs_list = group_mm_inputs_by_modality(mm_inputs)
         encoder_outputs = []
-        for grouped_mm_inputs in grouped_mm_inputs_list:
-            batched_mm_inputs = MultiModalKwargs.batch(
-                grouped_mm_inputs, pin_memory=self.pin_memory)
-            batched_mm_inputs = MultiModalKwargs.as_kwargs(
-                batched_mm_inputs,
+        for _, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
+                mm_kwargs,
                 device=self.device,
-            )
-
+                pin_memory=self.pin_memory,
+        ):
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
             # 1. A tensor of shape (num_items, feature_size, hidden_size)
@@ -1011,12 +1026,19 @@ class HPUModelRunner:
             # 2. A list or tuple (length: num_items) of tensors, each of shape
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
-            with self.profiler.record_event('internal', 'get_multimodal_embeddings'):
-                curr_group_outputs = self.model.get_multimodal_embeddings(
-                    **batched_mm_inputs)
+            curr_group_outputs = self.model.get_multimodal_embeddings(
+                **mm_kwargs_group)
+
+            sanity_check_mm_encoder_outputs(
+                curr_group_outputs,
+                expected_num_items=num_items,
+            )
 
             for output in curr_group_outputs:
                 encoder_outputs.append(output)
+
+        # FIXME (attafosu) Reorder the encoder outputs to match the request ids.
+        # This will be necessary after mm prefill batching constraints are removed
 
         # Cache the encoder outputs.
         for (req_id, input_id, pos_info), output in zip(
@@ -1038,7 +1060,7 @@ class HPUModelRunner:
         shift_computed_tokens: int = 0,
     ) -> list[torch.Tensor]:
         mm_embeds: list[torch.Tensor] = []
-        for req_id in req_ids: #self.input_batch.req_ids:
+        for req_id in req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
             req_state = self.requests[req_id]
@@ -1226,7 +1248,6 @@ class HPUModelRunner:
         mrope_input_positions : List[List[int]] = [[] for _ in range(3)]
         bs = len(context_lens)
         target_bs, target_len = bucketing
-        input_mrope_positions : List[List[List[int]]] = [[] for _ in range(3)]
 
         for idx in range(3):
             for b_idx, req_id in enumerate(req_ids):
@@ -1441,7 +1462,8 @@ class HPUModelRunner:
 
         query_lens = _async_h2d_tensor(query_lens, torch.int32)
         token_ids = _async_h2d_tensor(token_ids, torch.int32)
-        token_positions = mrope_token_positions if self.uses_mrope else _async_h2d_tensor(token_positions, torch.int32)
+        if not self.uses_mrope:
+            token_positions = _async_h2d_tensor(token_positions, torch.int32)
         token_slots = _async_h2d_tensor(token_slots, torch.int64)
         logits_indices = _async_h2d_tensor(logits_indices, torch.int32)
         context_lens = _async_h2d_tensor(context_lens, torch.int32)
@@ -1984,15 +2006,14 @@ class HPUModelRunner:
                     # Run the multimodal encoder if any.
                     with self.profiler.record_event('internal', 'prepare_input_encoders'):
                         self._execute_mm_encoder(scheduler_output, req_id)
-                    with self.profiler.record_event('internal', 'gather_mm_embeddings'):
-                        mm_embeds = self._gather_mm_embeddings(scheduler_output, req_id)
 
-                    with self.profiler.record_event('internal', 'prepare_mm_input_embeddings'):
-                        inputs_embeds = self.model.get_input_embeddings(
-                            input_ids=token_ids,
-                            multimodal_embeddings=mm_embeds or None,
-                        )
-                    
+                    mm_embeds = self._gather_mm_embeddings(scheduler_output, req_id)
+
+                    inputs_embeds = self.model.get_input_embeddings(
+                        input_ids=token_ids,
+                        multimodal_embeddings=mm_embeds or None,
+                    )
+
                     model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
                     model_mm_kwargs = MultiModalKwargs.as_kwargs(
                             model_mm_kwargs,
