@@ -35,7 +35,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.model_executor.models import supports_multimodal
-from vllm.model_executor.sampling_metadata import SequenceGroupToSample
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
                                 MultiModalKwargsItem, PlaceholderRange)
