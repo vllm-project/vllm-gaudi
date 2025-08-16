@@ -9,48 +9,6 @@ from typing import List, Tuple
 from vllm_gaudi.extension.logger import logger as logger
 from vllm_gaudi.extension.runtime import get_config
 
-class VisionBuckets:
-    '''
-    This class is used to bucket image tokens
-    '''
-
-    def __init__(self, is_batch_based):
-        self.is_batch_based = is_batch_based
-        envvar = os.environ.get('VLLM_MULTIMODAL_BUCKETS', "")
-        if envvar == 'None':
-            self.multimodal_buckets = None
-        else:
-            if envvar == "":
-                if is_batch_based:
-                    multimodal_buckets = [1, 2, 4, 8]  # batch sizes for gemma3
-                else:
-                    multimodal_buckets = [
-                        1600, 3136, 4096, 6400, 7744, 9216, 12544
-                    ]
-            else:
-                multimodal_buckets = [int(i) for i in envvar.split(',')]
-            self.multimodal_buckets = self._process_buckets(multimodal_buckets)
-
-    def _process_buckets(self, buckets):
-        if not self.is_batch_based:
-            for bucket in buckets:
-                assert bucket % 8 == 0, (
-                    'Buckets needs to be multiples 8 (slices of 64)')
-        return sorted(buckets)
-
-    def get_multimodal_bucket(self, curr_num_image_patches):
-        if self.multimodal_buckets is not None:
-            for mm_bucket in self.multimodal_buckets:
-                if curr_num_image_patches <= mm_bucket:
-                    return mm_bucket
-            return curr_num_image_patches
-        else:
-            return 0
-
-    def __repr__(self):
-        return str(self.multimodal_buckets)
-        
-
 def calc_fallback_value(n: int, base_step: int):
     """ Calculate next bucket for yet unbucketized value"""
     if n <= 1:

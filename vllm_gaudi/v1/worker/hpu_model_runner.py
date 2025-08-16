@@ -7,7 +7,7 @@ import math
 import os
 import time
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, List, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -16,7 +16,7 @@ import torch
 import torch.distributed
 import torch.nn.functional as F
 import vllm_gaudi.extension.environment as environment
-from vllm_gaudi.extension.bucketing.common import HPUBucketingManager, VisionBuckets
+from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler,
                                            HabanaMemoryProfiler,
                                            HabanaProfilerCounterHelper,
@@ -37,8 +37,8 @@ from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.sampling_metadata import SequenceGroupToSample
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,MultiModalKwargsItem,
-                                    PlaceholderRange)
+from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
+                                MultiModalKwargsItem, PlaceholderRange)
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
@@ -63,7 +63,7 @@ from vllm.model_executor.models.interfaces_base import (
     is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 
-from .utils import (MultiModalBudget, gather_mm_placeholders, 
+from .utils import (gather_mm_placeholders, 
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 
 if TYPE_CHECKING:
@@ -980,13 +980,15 @@ class HPUModelRunner:
 
         return {}
         
-    def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput", req_ids : List[str]):
+    # source: vllm/v1/worker/gpu_model_runner.py
+    def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput", req_ids : list[str]):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
             return
 
-        # NOTE (attafosu): Utilize cached mm embeddings to speed up processing - after PR(#22711)
-        # mm_hashes for inputs will map to their cached embeddings which can be reused for reqs sharing same mm_hash
+        # NOTE (attafosu): Utilize cached mm embeddings to speed up processing
+        # After PR(#22711) mm_hashes for inputs will map to their cached embeddings,
+        # which can be reused for reqs sharing same mm_hash
 
         # Batch the multi-modal inputs.
         mm_kwargs = list[MultiModalKwargsItem]()
@@ -1005,7 +1007,8 @@ class HPUModelRunner:
         # we process it separately to preserve item order.
 
         # TODO (attafosu): Follow-up on the resolution to this.
-        # The ordering of the encoder outputs needs to match the request ids after fetching the embeddings.
+        # The ordering of the encoder outputs needs to match the request ids
+        # after fetching the embeddings.
         # For now, we'll restrict mm support to just a single prefill at a time -
         # Or that requests in the batch should have distinct modalities,
 
@@ -1053,10 +1056,11 @@ class HPUModelRunner:
                 is_embed=pos_info.is_embed,
             )
 
+    # modified from: vllm/v1/worker/gpu_model_runner.py
     def _gather_mm_embeddings(
         self,
         scheduler_output: "SchedulerOutput",
-        req_ids : List[str],
+        req_ids : list[str],
         shift_computed_tokens: int = 0,
     ) -> list[torch.Tensor]:
         mm_embeds: list[torch.Tensor] = []
@@ -1243,27 +1247,33 @@ class HPUModelRunner:
         data = pad_list(data, target_bs, itertools.repeat(padding))
         return data
 
-    def _align_and_pad_mrope_positions(self, req_ids : List[str], context_lens : List[int], query_lens : List[int], 
-                                    bucketing : Tuple[int, int], padding_gen : int) -> torch.Tensor:
-        mrope_input_positions : List[List[int]] = [[] for _ in range(3)]
+    def _align_and_pad_mrope_positions(self, req_ids : list[str], 
+                                        context_lens : list[int],
+                                        query_lens : list[int],
+                                        bucketing : tuple[int, int],
+                                        padding_gen : int ) -> torch.Tensor:
+        mrope_input_positions : list[list[int]] = [[] for _ in range(3)]
         bs = len(context_lens)
         target_bs, target_len = bucketing
 
         for idx in range(3):
             for b_idx, req_id in enumerate(req_ids):
-                input_mrope_position = self.requests[req_id].mrope_positions[idx].tolist()
-                context_len = context_lens[b_idx]
-                query_len = query_lens[b_idx]
-                padding_size = target_len - query_len
-                padded_positions = input_mrope_position[context_len:context_len + query_len] \
+                input_mrope_position = self.requests[req_id].mrope_positions[idx].tolist() # noqa E501
+                cl = context_lens[b_idx]
+                qsl = query_lens[b_idx]
+                padding_size = target_len - qsl
+                padded_positions = input_mrope_position[cl:cl + qsl] \
                     + padding_size * [padding_gen]
                 mrope_input_positions[idx].extend(padded_positions)
 
-            # If padding in batch dim, we should add dummy ("padding_gen") mrope_pos_ids for each of the extra (bs_bucket - actual_bs) reqs,
+            # If padding in batch dim, we should add dummy ("padding_gen") mrope_pos_ids # noqa E501
+            # for each of the extra (bs_bucket - actual_bs) reqs,
             # with their seqlens=target_len
             if target_bs > bs:
-                mrope_input_positions[idx].extend([padding_gen] * (target_bs - bs) * target_len)
-        return torch.tensor(mrope_input_positions, dtype=torch.int32, device='cpu').to('hpu', non_blocking=True)
+                mrope_input_positions[idx].extend([padding_gen] \
+                * (target_bs - bs) * target_len)
+        return torch.tensor(mrope_input_positions, dtype=torch.int32,
+                            device='cpu').to('hpu', non_blocking=True)
 
     def _bucketize_merged_prompt(self, seq_lens, num_blocks):
         seq = sum(seq_lens)
@@ -1408,20 +1418,30 @@ class HPUModelRunner:
         target_bs, target_seq, target_blocks = self._get_prompt_bucketing_fn()(
             query_lens, num_context_blocks)
         
-        # If the model uses M-RoPE, we need to fill and pad the M-RoPE positions for the scheduled prefill tokens
+        # If the model uses M-RoPE, we need to fill
+        # and pad the M-RoPE positions for the scheduled prefill tokens
         if self.uses_mrope:
-            mrope_token_positions = self._align_and_pad_mrope_positions(contents.req_ids, context_lens, query_lens,
-                (target_bs, target_seq), -1, )
+            mrope_token_positions = self._align_and_pad_mrope_positions(
+                    contents.req_ids,
+                    context_lens,
+                    query_lens,
+                    (target_bs, target_seq),
+                    -1,
+            )
 
-        # NOTE: If model does not support multimodal inputs, we pad here
-        # For models with multimodal support, we may want to get embeddings for the valid tokens before padding
-        # This will require getting multimodal input embeddings as well (required for getting tokens embeddings)
+        # NOTE: If model does not support multimodal inputs, we pad here.
+        # For models with multimodal support, we may want to get embeddings 
+        # for the valid tokens before padding. 
+        # This would require getting multimodal input embeddings here as well
         token_ids = self._align_and_pad(contents.token_ids,
                                         (target_bs, target_seq),
                                         itertools.repeat(-1))
-        token_positions = mrope_token_positions if self.uses_mrope else self._align_and_pad(token_positions,
-                                            (target_bs, target_seq),
-                                            itertools.repeat(-1))                
+        if self.uses_mrope:
+            token_positions = mrope_token_positions
+        else:
+            token_positions = self._align_and_pad(token_positions,
+                                                (target_bs, target_seq),
+                                                itertools.repeat(-1))
         token_slots = self._align_and_pad(token_slots, (target_bs, target_seq),
                                           itertools.repeat(-1))
         token_groups = self._align_and_pad(token_groups,
@@ -1550,9 +1570,9 @@ class HPUModelRunner:
         index = positions.to(torch.int64)[:num_decodes]
         padded_index[:num_decodes] = index
         
-        input_mrope_positions: List[List[int]] = [[] for _ in range(3)]
+        input_mrope_positions: list[list[int]] = [[] for _ in range(3)]
         if self.uses_mrope:        
-            for idx, req_id in enumerate(self.input_batch.req_ids[:num_decodes]):
+            for idx, req_id in enumerate(self.input_batch.req_ids[:num_decodes]): # noqa E501
                 seq_data = self.requests[req_id]
                 context_len = context_lens[idx]
                 position = context_len
@@ -1575,7 +1595,9 @@ class HPUModelRunner:
             # Pad the right side of input_mrope_positions by padded_batch_size
             pad_size = padded_batch_size - input_mrope_positions.size(1)
             if pad_size > 0:
-                input_mrope_positions = F.pad(input_mrope_positions, (0, pad_size), value=-1, mode='constant')
+                input_mrope_positions = F.pad(input_mrope_positions, 
+                                        (0, pad_size), 
+                                        value=-1, mode='constant')
 
         # TOKEN_IDS. [batch, 1]
         token_ids = torch.zeros((padded_batch_size, 1), dtype=torch.int32)
