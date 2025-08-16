@@ -981,14 +981,15 @@ class HPUModelRunner:
         return {}
         
     # source: vllm/v1/worker/gpu_model_runner.py
-    def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput", req_ids : list[str]):
+    def _execute_mm_encoder(self, 
+                            scheduler_output: "SchedulerOutput",
+                            req_ids: list[str]):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
             return
 
         # NOTE (attafosu): Utilize cached mm embeddings to speed up processing
-        # After PR(#22711) mm_hashes for inputs will map to their cached embeddings,
-        # which can be reused for reqs sharing same mm_hash
+        # After PR(#22711) mm_hashes for inputs will map to their cached embeddings, which can be reused for reqs sharing same mm_hash # noqa E501
 
         # Batch the multi-modal inputs.
         mm_kwargs = list[MultiModalKwargsItem]()
@@ -1258,7 +1259,8 @@ class HPUModelRunner:
 
         for idx in range(3):
             for b_idx, req_id in enumerate(req_ids):
-                input_mrope_position = self.requests[req_id].mrope_positions[idx].tolist() # noqa E501
+                input_mrope_position = self.requests[req_id].mrope_positions[
+                    idx].tolist()
                 cl = context_lens[b_idx]
                 qsl = query_lens[b_idx]
                 padding_size = target_len - qsl
@@ -1572,7 +1574,8 @@ class HPUModelRunner:
         
         input_mrope_positions: list[list[int]] = [[] for _ in range(3)]
         if self.uses_mrope:        
-            for idx, req_id in enumerate(self.input_batch.req_ids[:num_decodes]): # noqa E501
+            for idx, req_id in enumerate(
+                    self.input_batch.req_ids[:num_decodes]):
                 seq_data = self.requests[req_id]
                 context_len = context_lens[idx]
                 position = context_len
@@ -1593,7 +1596,7 @@ class HPUModelRunner:
                 device='cpu').to('hpu', non_blocking=True)
 
             # Pad the right side of input_mrope_positions by padded_batch_size
-            pad_size = padded_batch_size - input_mrope_positions.size(1)
+            pad_size = padded_batch_size - input_mrope_positions.size(1) # noqa
             if pad_size > 0:
                 input_mrope_positions = F.pad(input_mrope_positions, 
                                         (0, pad_size), 
