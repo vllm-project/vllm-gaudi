@@ -32,6 +32,29 @@ def calc_fallback_value(n: int, base_step: int):
     return math.ceil(n / bucket_size) * bucket_size
 
 
+def calc_fallback_value(n: int, base_step: int):
+    """ Calculate next bucket for yet unbucketized value"""
+    if n <= 1:
+        return n
+    power = 1/3
+    # The basic idea is that we first estimate bucket size based
+    # on exponent of the number, so higher numbers will generate
+    # bigger gaps between individual buckets, but it's not as steep
+    # as exponential bucketing. Additionally this has a nice
+    # property that generated values are guaranteed to be divisible
+    # by base_step
+    #
+    # examples:
+    # n=31, base_step=32
+    #   => bucket_size = ceil(31^1/3) * 32 = 4 * 32 = 128
+    #   => next_value = round_up(31, 128) = 128
+    # n=4001, base_step=32
+    #   => bucket_size = ceil(4001^1/3) * 32 = 16 * 32 = 512
+    #   => next_value = round_up(4001, 512) = 4096
+    bucket_size = math.ceil(math.pow(n, power)) * base_step
+    return math.ceil(n / bucket_size) * bucket_size
+
+
 class HPUBucketingManager():
     _instance = None
     prompt_buckets: List[Tuple[int, int, int]] = []

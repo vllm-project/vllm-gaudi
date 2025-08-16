@@ -61,7 +61,6 @@ from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.interfaces_base import (
     is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
-
 from .utils import (gather_mm_placeholders, 
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 
@@ -1755,7 +1754,6 @@ class HPUModelRunner:
                                 f"graphs{'T' if use_graphs else 'F'}")
         else:
             model_event_name = 'model_executable'
-        
         with self.profiler.record_event('internal', model_event_name):
             hidden_states = self.model.forward(
                 input_ids=token_ids,
