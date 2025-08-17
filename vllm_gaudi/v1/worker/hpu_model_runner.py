@@ -48,11 +48,11 @@ from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.distributed.parallel_state import get_pp_group
-
 from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
+from vllm.v1.sample.logits_processor import build_logitsprocs
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -582,6 +582,7 @@ class HPUModelRunner:
         else:
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
+        self.is_pooling_model = model_config.pooler_config is not None
 
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
@@ -625,7 +626,12 @@ class HPUModelRunner:
             device=self.device,
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
-            block_sizes=[self.block_size])
+            block_sizes=[self.block_size],
+            logitsprocs=build_logitsprocs(
+                self.vllm_config, self.device, self.pin_memory,
+                self.is_pooling_model,
+                self.vllm_config.model_config.logits_processors),
+        )
         self.mem_margin = None
 
         self.use_hpu_graph = not self.model_config.enforce_eager
