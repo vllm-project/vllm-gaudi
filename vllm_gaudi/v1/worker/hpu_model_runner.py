@@ -1251,29 +1251,34 @@ class HPUModelRunner:
                                         query_lens : list[int],
                                         bucketing : tuple[int, int],
                                         padding_gen : int ) -> torch.Tensor:
-        mrope_input_positions : list[list[int]] = [[] for _ in range(3)]
         bs = len(context_lens)
         target_bs, target_len = bucketing
+        out_shape = (3, target_len) if target_bs == 1 \
+                    else (target_bs, target_len)
+        
+        mrope_position_tensor = torch.full(
+                                    out_shape, 
+                                    padding_gen, 
+                                    dtype=torch.int32, 
+                                    device='hpu')
+        dst_start = 0
+        dst_end = dst_start
+        for b_idx, req_id in enumerate(req_ids):
+            cl = context_lens[b_idx]
+            qsl = query_lens[b_idx]
+            input_mrope_position = \
+                    self.requests[req_id].mrope_positions[:,cl:cl+qsl]
+            dst_end = dst_start + qsl
+            mrope_position_tensor[:,dst_start:dst_end].copy_(
+                                            input_mrope_position, 
+                                            non_blocking=True)
 
-        for idx in range(3):
-            for b_idx, req_id in enumerate(req_ids):
-                input_mrope_position = self.requests[req_id].mrope_positions[
-                    idx].tolist()
-                cl = context_lens[b_idx]
-                qsl = query_lens[b_idx]
-                padding_size = target_len - qsl
-                padded_positions = input_mrope_position[cl:cl + qsl] \
-                    + padding_size * [padding_gen]
-                mrope_input_positions[idx].extend(padded_positions)
-
-            # If padding in batch dim, we should add dummy ("padding_gen") mrope_pos_ids # noqa E501
-            # for each of the extra (bs_bucket - actual_bs) reqs,
-            # with their seqlens=target_len
-            if target_bs > bs:
-                mrope_input_positions[idx].extend([padding_gen] \
-                * (target_bs - bs) * target_len)
-        return torch.tensor(mrope_input_positions, dtype=torch.int32,
-                            device='cpu').to('hpu', non_blocking=True)
+            # Update dst_start depending on if pos_ids of requests are meant to be adjacent # noqa 501
+            if target_bs == 1:
+                dst_start = dst_end
+            else:
+                dst_start += target_len
+        return mrope_position_tensor
 
     def _bucketize_merged_prompt(self, seq_lens, num_blocks):
         seq = sum(seq_lens)
