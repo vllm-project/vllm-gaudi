@@ -1,7 +1,8 @@
 from functools import cache
 import os
 from vllm.utils import make_tensor_with_pad, TORCH_DTYPE_TO_NUMPY_DTYPE
-from typing import (Optional, TypeVar, Union)
+from vllm_gaudi.extension.runtime import get_config
+from typing import (Any, Optional, TypeVar, Union)
 import torch
 import numpy as np
 import numpy.typing as npt
@@ -108,3 +109,45 @@ def make_tensor_with_pad_align(
         tensor = tensor.pin_memory()
 
     return tensor
+
+
+class HPUCompileConfig:
+    """
+    Configuration class, which holds arguments that will be
+    passed to torch compile with HPU backend.
+    """
+
+    def __init__(self,
+                 fullgraph: Optional[bool] = None,
+                 dynamic: Optional[bool] = None):
+        """
+        Allow to override the environment variables for corner case scenarios
+        when single functions are compiled with torch.compile decorator.
+        Env variables should not be overwritten when it comes to compilation
+        of the whole model.
+        """
+        self.fullgraph = fullgraph if fullgraph is not None else \
+            get_config().fullgraph_compilation
+        self.dynamic = dynamic if dynamic is not None else \
+            get_config().dynamic_shapes_compilation
+        self.regional_compilation = get_config().regional_compilation
+
+    def get_compile_args(self) -> dict[str, Any]:
+        """
+        Returns a dictionary of compile arguments that can be used
+        with torch.compile method or decorator
+        """
+        if self.dynamic:
+            return {
+                'backend': 'hpu_backend',
+                'fullgraph': self.fullgraph,
+                'options': {
+                    "force_static_compile": True
+                }
+            }
+        else:
+            return {
+                'backend': 'hpu_backend',
+                'fullgraph': self.fullgraph,
+                'dynamic': False
+            }
