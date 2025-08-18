@@ -45,7 +45,7 @@ from vllm.sampling_params import SamplingType
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
                         is_pin_memory_available, LazyLoader)
-from vllm_gaudi.utils import is_fake_hpu
+from vllm_gaudi.utils import HPUCompileConfig, is_fake_hpu
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
@@ -56,13 +56,13 @@ from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.distributed.parallel_state import get_pp_group
-
 from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.interfaces_base import (
     is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from .utils import (gather_mm_placeholders, 
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
+from vllm.v1.sample.logits_processor import build_logitsprocs
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -607,6 +607,7 @@ class HPUModelRunner:
         else:
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
+        self.is_pooling_model = model_config.pooler_config is not None
 
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
@@ -660,7 +661,12 @@ class HPUModelRunner:
             device=self.device,
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
-            block_sizes=[self.block_size])
+            block_sizes=[self.block_size],
+            logitsprocs=build_logitsprocs(
+                self.vllm_config, self.device, self.pin_memory,
+                self.is_pooling_model,
+                self.vllm_config.model_config.logits_processors),
+        )
         self.mem_margin = None
 
         self.use_hpu_graph = not self.model_config.enforce_eager
@@ -2320,17 +2326,12 @@ class HPUModelRunner:
                     self.model_memory_usage / float(2**30))
 
     def _maybe_compile(self, *args, **kwargs):
-        if not is_fake_hpu() and not htorch.utils.internal.is_lazy(
-        ) and not self.vllm_config.model_config.enforce_eager:
-            if os.getenv('VLLM_REGIONAL_COMPILATION',
-                         'true').strip().lower() in ("1", "true"):
-                compiled_methods = [
-                    '_update_metadata', '_rotary_prepare_cos_sin'
-                ]
-                for method_name in compiled_methods:
-                    method = getattr(self.model, method_name)
-                    if method is not None:
-                        self._compile_region(self.model, method_name, method)
+        """Entrypoint for a torch.compilation of the model"""
+        if (not is_fake_hpu() and not htorch.utils.internal.is_lazy()
+                and not self.vllm_config.model_config.enforce_eager):
+            self.compile_config = HPUCompileConfig()
+            if self.compile_config.regional_compilation:
+                self._compile_methods()
                 self.regional_compilation_layers_list = [
                     RMSNorm, VocabParallelEmbedding
                 ]
@@ -2338,10 +2339,27 @@ class HPUModelRunner:
             else:
                 self.model = self._compile(self.model)
 
+    def _compile_methods(self):
+        """
+        Compile methods which are not part of the compiled model i.e. those
+        which will not be compiled during model's compilation.
+        """
+        compiled_methods = ['_update_metadata', '_rotary_prepare_cos_sin']
+        for method_name in compiled_methods:
+            method = getattr(self.model, method_name)
+            if method is not None:
+                self._compile_region(self.model, method_name, method)
+
     def _regional_compilation(self,
                               module,
                               parent_module=None,
                               module_name=None):
+        """
+        Recursively traverses a PyTorch module and compiles its regions, which
+        can be one of two:
+        1. Children of the nn.ModuleList
+        2. Member of regional_compilation_layers_list
+        """
         if isinstance(module, torch.nn.ModuleList):
             for children_name, children_module in module.named_children():
                 self._compile_region(module, children_name, children_module)
@@ -2363,24 +2381,7 @@ class HPUModelRunner:
         setattr(model, name, module)
 
     def _compile(self, module):
-        if not hasattr(self, '_compile_config'):
-            fullgraph = os.getenv('VLLM_T_COMPILE_FULLGRAPH',
-                                  'false').strip().lower() in ("1", "true")
-            dynamic = os.getenv('VLLM_T_COMPILE_DYNAMIC_SHAPES',
-                                'false').strip().lower() in ("1", "true")
-            self._compile_config = {'fullgraph': fullgraph, 'dynamic': dynamic}
-        fullgraph = self._compile_config['fullgraph']
-        dynamic = self._compile_config['dynamic']
-        if dynamic:
-            return torch.compile(module,
-                                 backend='hpu_backend',
-                                 fullgraph=fullgraph,
-                                 options={"force_static_compile": True})
-        else:
-            return torch.compile(module,
-                                 backend='hpu_backend',
-                                 fullgraph=fullgraph,
-                                 dynamic=False)
+        return torch.compile(module, **self.compile_config.get_compile_args())
 
     def _use_graphs(self):
         return not self.model_config.enforce_eager
@@ -2701,8 +2702,7 @@ class HPUModelRunner:
 
         if not htorch.utils.internal.is_lazy(
         ) and not self.model_config.enforce_eager:
-            multiplier = 3 if os.getenv('VLLM_REGIONAL_COMPILATION',
-                                        'true').lower() in ('1', 'true') else 1
+            multiplier = 5 if self.compile_config.regional_compilation else 1
             cache_size_limit = 1 + multiplier * (
                 len(self.bucketing_manager.prompt_buckets) +
                 len(self.bucketing_manager.decode_buckets))
