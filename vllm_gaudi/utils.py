@@ -133,6 +133,10 @@ class HPUCompileConfig:
         self.regional_compilation = get_config().regional_compilation
 
     def get_compile_args(self) -> dict[str, Any]:
+        """
+        Returns a dictionary of compile arguments that can be used
+        with torch.compile method or decorator
+        """
         if self.dynamic:
             return {
                 'backend': 'hpu_backend',

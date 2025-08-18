@@ -676,17 +676,18 @@ def test_init_kv_cache_with_kv_sharing_valid():
 def test_model_torch_regional_compilation(dist_init, model_runner):
     from vllm_gaudi.utils import HPUCompileConfig
     from vllm.model_executor.models.opt import OPTDecoderLayer
-    from vllm.model_executor.layers.vocab_parallel_embedding import \
-        VocabParallelEmbedding
+    from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding  # noqa
     from torch.nn.modules.normalization import LayerNorm
     from torch._dynamo.eval_frame import OptimizedModule
 
-    def assert_layer_compilation(model, layer_name, module):
+    def assert_compilation(model, layer_name, module):
         submodule = model.get_submodule(layer_name)
-        assert isinstance(submodule, OptimizedModule), \
-        f"Layer: '{module.__name__}' was not wrapped with OptimizedModule"
-        assert isinstance(submodule._orig_mod, module), \
-        f"_orig_mod is different from the original module: '{module.__name__}'"
+        assert isinstance(submodule, OptimizedModule), (
+            f"Layer: '{module.__name__}' was not wrapped with OptimizedModule"  # noqa
+        )
+        assert isinstance(submodule._orig_mod, module), (
+            f"_orig_mod is different from the original module: '{module.__name__}'"  # noqa
+        )
 
     vllm_config = get_vllm_config()
     model = get_model(vllm_config=vllm_config)
@@ -698,10 +699,8 @@ def test_model_torch_regional_compilation(dist_init, model_runner):
     model_runner._regional_compilation(model)
 
     for i in range(len(model.get_submodule("model.decoder.layers"))):
-        assert_layer_compilation(model, f"model.decoder.layers.{i}",
-                                 OPTDecoderLayer)
-    assert_layer_compilation(model, "lm_head", VocabParallelEmbedding)
-    assert_layer_compilation(model, "model.decoder.embed_tokens",
-                             VocabParallelEmbedding)
-    assert_layer_compilation(model, "model.decoder.final_layer_norm",
-                             LayerNorm)
+        assert_compilation(model, f"model.decoder.layers.{i}", OPTDecoderLayer)
+    assert_compilation(model, "lm_head", VocabParallelEmbedding)
+    assert_compilation(model, "model.decoder.final_layer_norm", LayerNorm)
+    assert_compilation(model, "model.decoder.embed_tokens",
+                       VocabParallelEmbedding)

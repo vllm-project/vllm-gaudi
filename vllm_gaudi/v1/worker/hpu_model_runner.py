@@ -2341,7 +2341,7 @@ class HPUModelRunner:
 
         if not htorch.utils.internal.is_lazy(
         ) and not self.model_config.enforce_eager:
-            multiplier = 3 if self.compile_config.regional_compilation else 1
+            multiplier = 5 if self.compile_config.regional_compilation else 1
             cache_size_limit = 1 + multiplier * (
                 len(self.bucketing_manager.prompt_buckets) +
                 len(self.bucketing_manager.decode_buckets))
