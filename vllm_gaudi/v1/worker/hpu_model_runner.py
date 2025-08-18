@@ -684,17 +684,17 @@ class HPUModelRunner:
             # TODO: Support other attention modules, e.g., sliding window,
             # cross-attention
             assert isinstance(attn_module, Attention)
-            if attn_module.attn_type in ( AttentionType.DECODER, AttentionType.ENCODER_ONLY):
+            if attn_module.attn_type == AttentionType.DECODER:
                 kv_cache_spec[layer_name] = FullAttentionSpec(
                     block_size=block_size,
                     num_kv_heads=attn_module.num_kv_heads,
                     head_size=attn_module.head_size,
                     dtype=self.kv_cache_dtype,
                     use_mla=use_mla)
-            # elif attn_module.attn_type in (AttentionType.ENCODER,
-            #                                AttentionType.ENCODER_ONLY):
-            #     # encoder-only attention does not need KV cache.
-            #     continue
+            elif attn_module.attn_type in (AttentionType.ENCODER,
+                                           AttentionType.ENCODER_ONLY):
+                # encoder-only attention does not need KV cache.
+                continue
             elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
                 raise NotImplementedError
             else:
@@ -1458,13 +1458,13 @@ class HPUModelRunner:
                                 f"graphs{'T' if use_graphs else 'F'}")
         else:
             model_event_name = 'model_executable'
-        with set_forward_context(attn_metadata, self.vllm_config):
-            with self.profiler.record_event('internal', model_event_name):
-                hidden_states = self.model.forward(
-                    input_ids=token_ids,
-                    positions=position_ids,)
-                # attn_metadata=trimmed_attn_metadata,
-                # kv_caches=kv_caches)
+        # with set_forward_context(attn_metadata, self.vllm_config):
+        with self.profiler.record_event('internal', model_event_name):
+            hidden_states = self.model.forward(
+                input_ids=token_ids,
+                positions=position_ids,
+                attn_metadata=trimmed_attn_metadata,
+                kv_caches=kv_caches)
         # NOTE(kzawora): returning hidden_states is required in prompt logprobs
         # scenarios, as they will do logit processing on their own
         non_flattened_hidden_states = hidden_states
@@ -1632,6 +1632,51 @@ class HPUModelRunner:
         logits.copy_(
             logits_cpu.to(self.device, non_blocking=True).to(logits.dtype))
 
+    def _pool(
+        self,
+        hidden_states: torch.Tensor,
+        num_scheduled_tokens: int,
+        num_scheduled_tokens_np: np.ndarray,
+        finished_sending: Optional[set[str]],
+        finished_recving: Optional[set[str]],
+    ) -> ModelRunnerOutput:
+        assert self.input_batch.num_reqs ==\
+            len(self.input_batch.pooling_params), \
+        "Either all or none of the requests in" \
+        " a batch must be pooling request"
+
+        extracted_hidden_states = list(
+            torch.split(hidden_states[:num_scheduled_tokens],
+                        num_scheduled_tokens_np.tolist()))
+
+        pooling_metadata = self.input_batch.pooling_metadata
+
+        raw_pooler_output = self.model.pooler(
+            hidden_states=extracted_hidden_states,
+            pooling_metadata=pooling_metadata)
+
+        pooler_output: list[Optional[torch.Tensor]] = []
+        seq_lens = self.seq_lens[:self.input_batch.num_reqs]
+        for raw_output, seq_len, prompt_len in zip(
+                raw_pooler_output, seq_lens, pooling_metadata.prompt_lens):
+
+            if seq_len == prompt_len:
+                pooler_output.append(raw_output.data.cpu())
+            else:
+                pooler_output.append(None)
+
+        return ModelRunnerOutput(
+            req_ids=self.input_batch.req_ids,
+            req_id_to_index=self.input_batch.req_id_to_index,
+            sampled_token_ids=[],
+            spec_token_ids=None,
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=pooler_output,
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
+        )
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1696,6 +1741,34 @@ class HPUModelRunner:
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOuptut if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
+        if self.input_batch.pooling_params:
+            # Prepare inputs directly from scheduler_output
+            # Move tokens to device
+            token_ids = self.input_batch.token_ids_cpu_tensor.to(self.device)
+            # For encoder-only models, KV cache is None
+            kv_cache = None
+            # Position IDs may not exist; some models just rely on token positions
+            position_ids = None  
+            # Attention mask: usually 1 for actual tokens, 0 for padding
+            attn_metadata = (token_ids != 0).to(self.device)
+
+            # Forward pass — no KV cache
+            hidden_states = self.model.bert.forward(
+            input_ids=input_ids,
+            positions=positions
+        )
+
+            # Pool the hidden states and return
+            num_scheduled_tokens_np = self.input_batch.num_tokens.copy()
+
+            # Pool the hidden states
+            return self._pool(
+                hidden_states,
+                num_scheduled_tokens=int(token_ids.size(1)),
+                num_scheduled_tokens_np=num_scheduled_tokens_np,
+                finished_sending=None,
+                finished_recving=None,
+            )
         # If necessary, swap decodes/prompts to have all decodes on the start
         ensure_decodes_first(self.input_batch)
         # Prepare prompts/decodes info
@@ -2483,6 +2556,35 @@ class HPUModelRunner:
                              seq_or_block=max_seq_len,
                              is_prompt=True,
                              kv_caches=kv_caches)
+ 
+    def may_reinitialize_input_batch(self,
+                                     kv_cache_config: KVCacheConfig) -> None:
+        """
+        Re-initialize the input batch if the block sizes are different from
+        `[self.cache_config.block_size]`. This usually happens when there
+        are multiple KV cache groups.
+
+        Args:
+            kv_cache_config: The KV cache configuration.
+        """
+        block_sizes = [self.block_size]
+        block_sizes = [
+            kv_cache_group.kv_cache_spec.block_size
+            for kv_cache_group in kv_cache_config.kv_cache_groups
+        ]
+        if block_sizes != [self.cache_config.block_size]:
+            assert self.cache_config.cpu_offload_gb == 0, (
+                "Cannot re-initialize the input batch when CPU weight "
+                "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
+                "for more details.")
+            self.input_batch = InputBatch(
+            max_num_reqs=self.scheduler_config.max_num_seqs,
+            max_model_len=self.max_model_len,
+            max_num_batched_tokens=self.max_num_tokens,
+            device=self.device,
+            pin_memory=self.pin_memory,
+            vocab_size=self.model_config.get_vocab_size(),
+            block_sizes=block_sizes)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -2495,9 +2597,9 @@ class HPUModelRunner:
             raise NotImplementedError(
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
-
+        self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches: dict[str, torch.Tensor] = {}
-
+        num_blocks = 1
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
