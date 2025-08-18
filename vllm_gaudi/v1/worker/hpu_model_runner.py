@@ -2127,7 +2127,6 @@ class HPUModelRunner:
             block_ids=[block_ids],
             num_computed_tokens=num_computed_tokens,
             lora_request=None,
-            pooling_params=None,
         )
         requests.append(req)
         num_scheduled_tokens[req_id] = scheduled_tokens
