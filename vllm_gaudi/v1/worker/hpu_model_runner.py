@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import collections
 import contextlib
+import copy
 import functools
 import itertools
 import math
@@ -541,6 +542,7 @@ class HPUModelRunner:
     ):
         # TODO: use ModelRunnerBase.__init__(self, vllm_config=vllm_config)
         environment.set_vllm_config(vllm_config)
+        self.count = 0
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -654,7 +656,7 @@ class HPUModelRunner:
         self.profiler_counter_helper = HabanaProfilerCounterHelper()
 
         # Lookahead decoding
-        self.use_lookahead_decoding = True
+        self.use_lookahead_decoding = get_config().lookahead_decoding
         # Storage for lookahead tokens that are computed but not yet scheduled
         self.lookahead_tokens: dict = {}
 
@@ -711,8 +713,9 @@ class HPUModelRunner:
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
-            # Pop stored lookahead tokens for finished requests - dummy tokens at the end
-            self.lookahead_tokens.pop(req_id, None)
+            if self.use_lookahead_decoding:
+                # Pop stored lookahead tokens for finished requests - dummy tokens at the end
+                self.lookahead_tokens.pop(req_id, None)
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -1284,8 +1287,7 @@ class HPUModelRunner:
         # Handle lookahead decodes
         if self.use_lookahead_decoding:
             # For lookahead decodes use the prompt length + 1 (the newly generated token)
-            prompt_start_idx = original_num_decodes
-            for i in range(prompt_start_idx, self.input_batch.num_reqs):
+            for i in range(original_num_decodes, num_decodes):
                 context_lens.append(self.input_batch.num_prompt_tokens[i] + 1)
         
         context_lens = np.array(context_lens)
@@ -1317,31 +1319,21 @@ class HPUModelRunner:
         
         # Handle lookahead decodes positions
         if self.use_lookahead_decoding:
-            prompt_start_idx = original_num_decodes
-            for i in range(prompt_start_idx, num_decodes):
-                batch_idx = original_num_decodes + (i - prompt_start_idx)
+            for i in range(original_num_decodes, num_decodes):
                 # Position should be at the newly generated token (prompt_len)
-                positions[i, 0] = self.input_batch.num_prompt_tokens[batch_idx]
+                positions[i, 0] = self.input_batch.num_prompt_tokens[i]
 
+        positions = positions[:padded_batch_size]
         padded_index = torch.zeros((padded_batch_size, 1), dtype=torch.int64)
         index = positions.to(torch.int64)[:num_decodes]
         padded_index[:num_decodes] = index
 
         # TOKEN_IDS. [batch, 1]
         token_ids = torch.zeros((padded_batch_size, 1), dtype=torch.int32)
-        
-        # Handle regular decodes
-        for i in range(original_num_decodes):
-            pos = int(positions[i, 0])
-            token_ids[i, 0] = self.input_batch.token_ids_cpu[i, pos]
-        
-        # Handle lookahead decode tokens (from prompts)
-        if self.use_lookahead_decoding:
-            prompt_start_idx = original_num_decodes
-            for i in range(prompt_start_idx, num_decodes):
-                batch_idx = original_num_decodes + (i - prompt_start_idx)
-                # For lookahead use the newly generated token from prefill phase
-                token_ids[i, 0] = self.input_batch.token_ids_cpu[batch_idx, prompt_start_idx]
+        token_ids[:num_decodes] = torch.gather(input=torch.from_numpy(
+            self.input_batch.token_ids_cpu),
+                                               dim=1,
+                                               index=index)
 
         # SLOT_MAPPING [batch, 1]
         # The "slot" is the "physical index" of a token in the KV cache.
@@ -1413,8 +1405,6 @@ class HPUModelRunner:
         Update decode_data for lookahead decoding to use newly generated tokens from prefill phase
         instead of stale prompt tokens as inputs.
         """
-        if not self.use_lookahead_decoding:
-            return
         
         # Get the original decode count (before lookahead decodes)
         original_num_decodes = num_decodes - num_prefills
@@ -1435,15 +1425,17 @@ class HPUModelRunner:
             if req_id in req_to_token:
                 # Update the decode input to use the newly generated token
                 new_token = req_to_token[req_id]
-                decode_data.token_ids[i, 0] = new_token
+                decode_data.token_ids[i] = new_token
                 # Update position to point to the correct location (after the generated token)
                 prompt_len = self.input_batch.num_prompt_tokens[batch_idx]
-                decode_data.position_ids[i, 0] = prompt_len
+                decode_data.position_ids[i, 0] = torch.tensor(prompt_len, dtype=torch.int, device=self.device)
 
         # Replace tokens in regular decodes with lookahead stored tokens
         for i in range(0, original_num_decodes):
             req_id = self.input_batch.req_ids[i]
-            decode_data.token_ids[i, 0] = self.lookahead_tokens.get(req_id, 0)[0]
+            decode_data.token_ids[i] = self.lookahead_tokens.get(req_id, 0)[0]
+
+        return copy.deepcopy(decode_data)
 
     def _prepare_inputs(
         self,
@@ -1703,7 +1695,9 @@ class HPUModelRunner:
         pd_info = self._get_prompts_and_decodes(scheduler_output)
         num_decodes = len(pd_info.decode_req_ids)
         num_prefills = len(pd_info.prompt_req_ids)
-        original_num_decodes = num_decodes - num_prefills
+        original_num_decodes = num_decodes
+        if self.use_lookahead_decoding:
+            original_num_decodes = num_decodes - num_prefills
         num_reqs = original_num_decodes + num_prefills
         with self.profiler.record_event('internal', 'prepare_input_tensors'):
             prefill_data, decode_data = self._prepare_inputs(
@@ -1713,6 +1707,7 @@ class HPUModelRunner:
         prefill_sampled_token_ids = []
         prefill_sampled_requests = []
         decode_sampled_requests = []
+        decode_sampled_token_ids = []
         ######################### PREFILLS #########################
         if num_prefills > 0:
             htorch.core.mark_step()
@@ -1757,8 +1752,9 @@ class HPUModelRunner:
         ######################### DECODES #########################
         # Decodes run as one single batch with [padded_decode_bs, 1]
         if num_decodes > 0:
-            self.update_lookahead_decode_inputs(decode_data, num_prefills, num_decodes,
-                                               prefill_sampled_token_ids, prefill_sampled_requests)
+            if self.use_lookahead_decoding:
+                decode_data = self.update_lookahead_decode_inputs(decode_data, num_prefills, num_decodes,
+                                                prefill_sampled_token_ids, prefill_sampled_requests)
             self.event_start = self.profiler.get_timestamp_us()
             self.profiler.start("internal", "decode")
             assert decode_data is not None
@@ -1775,23 +1771,26 @@ class HPUModelRunner:
                     pad_to=logits_device.shape[0])
                 sampler_output = self.sampler(
                     logits=logits_device, sampling_metadata=sampling_metadata)
-                decode_sampled_token_ids = \
-                    sampler_output.sampled_token_ids.flatten()
-
+                if self.use_lookahead_decoding:
+                    decode_sampled_token_ids = \
+                        sampler_output.sampled_token_ids.flatten()
+                else:
+                    decode_sampled_token_ids.append(
+                        sampler_output.sampled_token_ids.flatten())
+                decode_sampled_requests.extend(
+                    self.input_batch.req_ids[:original_num_decodes])
+            htorch.core.mark_step()
+            if self.use_lookahead_decoding:
                 for req_id, token_ids in zip(
                         pd_info.decode_req_ids,
                         decode_sampled_token_ids[:num_decodes].split(1)):
                     if not self.is_chunked_prefill_dummy_output_token(req_id,
                                                                 prefill_sampled_requests,
-                                                                pd_info.prompt_req_ids):
+                                                            pd_info.prompt_req_ids):
                         if not req_id in self.lookahead_tokens:
                             self.lookahead_tokens[req_id] = []
                         self.lookahead_tokens[req_id].append(token_ids)
-                # TODO remove lookahead syncs with cpu
-                decode_sampled_requests.extend(
-                    self.input_batch.req_ids[:(num_decodes-num_prefills)])
 
-            htorch.core.mark_step()
             if self.is_driver_worker and self.profiler.enabled:
                 # Stop recording 'execute_model' event
                 self.profiler.end()
@@ -1811,25 +1810,43 @@ class HPUModelRunner:
         # We already have tokens. Let's copy the data to
         # CPU as is, and then discard padded tokens.
         with self.profiler.record_event('internal', "sampler_postprocessing"):
-            if num_prefills > 0:
-                prefill_sampled_token_ids = torch.cat([
-                    tensor.cpu() for tensor in prefill_sampled_token_ids
-                ]).tolist()
             max_req_index = max(self.input_batch.req_id_to_index.values())
             postprocessed_sampled_token_ids: list[list]
             postprocessed_sampled_token_ids = [[]
-                                               for _ in range(max_req_index +
-                                                              1)]
-            
-            for req_id in decode_sampled_requests:
-                req_index = self.input_batch.req_id_to_index[req_id]
-                tok_id = self.lookahead_tokens[req_id].pop(0).item()
-                postprocessed_sampled_token_ids[req_index].append(tok_id)
+                                            for _ in range(max_req_index +
+                                                            1)]
+            if self.use_lookahead_decoding:
+                if num_prefills > 0:
+                    prefill_sampled_token_ids = torch.cat([
+                        tensor.cpu() for tensor in prefill_sampled_token_ids
+                    ]).tolist()
 
-            for tok_id, req_id in zip(prefill_sampled_token_ids,
-                                      prefill_sampled_requests):
-                req_index = self.input_batch.req_id_to_index[req_id]
-                postprocessed_sampled_token_ids[req_index].append(tok_id)
+                for req_id in decode_sampled_requests:
+                    req_index = self.input_batch.req_id_to_index[req_id]
+                    tok_id = self.lookahead_tokens[req_id].pop(0).item()
+                    postprocessed_sampled_token_ids[req_index].append(tok_id)
+
+                for tok_id, req_id in zip(prefill_sampled_token_ids,
+                                        prefill_sampled_requests):
+                    req_index = self.input_batch.req_id_to_index[req_id]
+                    postprocessed_sampled_token_ids[req_index].append(tok_id)
+            else:
+                prefill_sampled_token_ids = [
+                    tensor.cpu() for tensor in prefill_sampled_token_ids
+                ]
+                decode_sampled_token_ids = [
+                    tensor.cpu()[:num_decodes]
+                    for tensor in decode_sampled_token_ids
+                ]
+                sampled_token_ids_list = torch.cat(
+                    decode_sampled_token_ids + prefill_sampled_token_ids).tolist()
+                sampled_token_requests = \
+                    decode_sampled_requests + prefill_sampled_requests
+
+                for tok_id, req_id in zip(sampled_token_ids_list,
+                                        sampled_token_requests):
+                    postprocessed_sampled_token_ids[
+                        self.input_batch.req_id_to_index[req_id]].append(tok_id)
                 
         # NOTE(kzawora): idk what happens if part of batch doesn't have logprobs
 

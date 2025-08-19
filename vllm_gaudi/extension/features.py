@@ -71,5 +71,6 @@ def get_features():
         Value('exponential_bucketing', True, env_var='VLLM_EXPONENTIAL_BUCKETING'), 
         Value('linear_bucketing', True),
         Value('bucketing_strategy', FirstEnabled(*bucketing_strategies), env_var_type=choice(*bucketing_strategies)),
+        Value('lookahead_decoding', False, env_var='VLLM_USE_LOOKAHEAD_DECODING')
     ]
     return split_values_and_flags(features)
