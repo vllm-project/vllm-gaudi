@@ -29,9 +29,11 @@ def hpu_backend_string():
     return backend_string
 
 
-def async_h2d_copy(from_tensor: torch.Tensor, to_tensor: torch.Tensor) -> torch.Tensor:
+def async_h2d_copy(from_tensor: torch.Tensor,
+                   to_tensor: torch.Tensor) -> torch.Tensor:
     """
-    Copy pinned CPU tensor data to pre-allocated device tensor in non-blocking manner.
+    Copy pinned CPU tensor data to pre-allocated device tensor in 
+    non-blocking manner.
     """
     return to_tensor.copy_(from_tensor, non_blocking=True)
 
@@ -46,8 +48,8 @@ def async_h2d_tensor(data, dtype, device='hpu'):
 
 def async_h2d_tensor_copy(source, device='hpu'):
     """
-    Copy a CPU tensor to device asynchronously by creating an empty target tensor 
-    and copying the source data into it.
+    Copy a CPU tensor to device asynchronously by creating an empty target
+    tensor and copying the source data into it.
     """
     assert source.device.type == 'cpu', \
         "Source tensor is not present in host memory!"

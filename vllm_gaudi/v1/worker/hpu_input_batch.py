@@ -538,7 +538,6 @@ class InputBatch:
         self.sampling_metadata = self._make_sampling_metadata()
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
-        num_reqs = self.num_reqs
         if not self.all_greedy:
             temperature = async_h2d_copy(self.temperature_cpu_tensor,
                                          self.temperature)
@@ -574,20 +573,20 @@ class InputBatch:
             assert self.allowed_token_ids_mask is not None
             async_h2d_copy(self.allowed_token_ids_mask_cpu_tensor,
                            self.allowed_token_ids_mask)
-            allowed_token_ids_mask = self.allowed_token_ids_mask[:num_reqs]
+            allowed_token_ids_mask = self.allowed_token_ids_mask
 
         return SamplingMetadata(
             temperature=temperature,
             all_greedy=self.all_greedy,
             all_random=self.all_random,
-            top_p=None if self.no_top_p else self.top_p[:num_reqs],
-            top_k=None if self.no_top_k else self.top_k[:num_reqs],
+            top_p=None if self.no_top_p else self.top_p,
+            top_k=None if self.no_top_k else self.top_k,
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
             prompt_token_ids=prompt_token_ids,
-            frequency_penalties=self.frequency_penalties[:num_reqs],
-            presence_penalties=self.presence_penalties[:num_reqs],
-            repetition_penalties=self.repetition_penalties[:num_reqs],
+            frequency_penalties=self.frequency_penalties,
+            presence_penalties=self.presence_penalties,
+            repetition_penalties=self.repetition_penalties,
             output_token_ids=cast(list[list[int]], self.req_output_token_ids),
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,

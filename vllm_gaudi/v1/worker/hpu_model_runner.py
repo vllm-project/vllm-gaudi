@@ -47,7 +47,8 @@ from vllm.sampling_params import SamplingType
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
                         is_pin_memory_available, LazyLoader)
-from vllm_gaudi.utils import HPUCompileConfig, is_fake_hpu, async_h2d_tensor, async_h2d_tensor_copy
+from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_tensor,
+                              async_h2d_tensor_copy)
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
@@ -1472,7 +1473,7 @@ class HPUModelRunner:
         context_blocks_t: Optional[torch.tensor]
         if has_context:
             context_blocks_t = async_h2d_tensor(context_blocks,
-                                                 torch.int32).flatten()
+                                                torch.int32).flatten()
         else:
             context_blocks_t = None
 
@@ -1630,7 +1631,7 @@ class HPUModelRunner:
         token_ids_device = async_h2d_tensor_copy(token_ids, self.device)
         positions_device = async_h2d_tensor_copy(positions, self.device)
         logits_indices_device = async_h2d_tensor_copy(logits_indices,
-                                                       self.device)
+                                                      self.device)
         block_list_device = async_h2d_tensor_copy(block_list, self.device)
         block_usage_device = async_h2d_tensor_copy(block_usage, self.device)
         block_groups_device = async_h2d_tensor_copy(block_groups, self.device)
