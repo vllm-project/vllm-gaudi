@@ -47,7 +47,7 @@ from vllm.sampling_params import SamplingType
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
                         is_pin_memory_available, LazyLoader)
-from vllm_gaudi.utils import HPUCompileConfig, is_fake_hpu
+from vllm_gaudi.utils import HPUCompileConfig, is_fake_hpu, async_h2d_tensor, async_h2d_tensor_copy
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
@@ -184,19 +184,6 @@ def flatten(in_list):
 def gather_list(input, indices, v):
     """Gather values from input using indices"""
     return [input[i] if i is not None else v for i in indices]
-
-
-def _async_h2d_tensor(data, dtype, device='hpu'):
-    return torch.tensor(data, dtype=dtype, device='cpu').to(device,
-                                                            non_blocking=True)
-
-
-def _async_h2d_tensor_copy(source, device='hpu'):
-    assert source.device.type == 'cpu', \
-        "Source tensor is not present in host memory!"
-    target = torch.empty(source.shape, dtype=source.dtype, device=device)
-    target.copy_(source, non_blocking=True)
-    return target
 
 
 def ensure_decodes_first(b: InputBatch):
@@ -1476,15 +1463,15 @@ class HPUModelRunner:
             round_up(len(logits_indices), self.logits_rounding),
             itertools.repeat(-1))
 
-        query_lens = _async_h2d_tensor(query_lens, torch.int32)
-        token_ids = _async_h2d_tensor(token_ids, torch.int32)
-        token_positions = _async_h2d_tensor(token_positions, torch.int32)
-        token_slots = _async_h2d_tensor(token_slots, torch.int64)
-        logits_indices = _async_h2d_tensor(logits_indices, torch.int32)
-        context_lens = _async_h2d_tensor(context_lens, torch.int32)
+        query_lens = async_h2d_tensor(query_lens, torch.int32)
+        token_ids = async_h2d_tensor(token_ids, torch.int32)
+        token_positions = async_h2d_tensor(token_positions, torch.int32)
+        token_slots = async_h2d_tensor(token_slots, torch.int64)
+        logits_indices = async_h2d_tensor(logits_indices, torch.int32)
+        context_lens = async_h2d_tensor(context_lens, torch.int32)
         context_blocks_t: Optional[torch.tensor]
         if has_context:
-            context_blocks_t = _async_h2d_tensor(context_blocks,
+            context_blocks_t = async_h2d_tensor(context_blocks,
                                                  torch.int32).flatten()
         else:
             context_blocks_t = None
@@ -1640,16 +1627,16 @@ class HPUModelRunner:
         num_decode_tokens = torch.tensor(np.sum(context_lens), device='cpu')
 
         # CPU<>HPU sync *should not* happen here.
-        token_ids_device = _async_h2d_tensor_copy(token_ids, self.device)
-        positions_device = _async_h2d_tensor_copy(positions, self.device)
-        logits_indices_device = _async_h2d_tensor_copy(logits_indices,
+        token_ids_device = async_h2d_tensor_copy(token_ids, self.device)
+        positions_device = async_h2d_tensor_copy(positions, self.device)
+        logits_indices_device = async_h2d_tensor_copy(logits_indices,
                                                        self.device)
-        block_list_device = _async_h2d_tensor_copy(block_list, self.device)
-        block_usage_device = _async_h2d_tensor_copy(block_usage, self.device)
-        block_groups_device = _async_h2d_tensor_copy(block_groups, self.device)
-        num_decode_tokens_device = _async_h2d_tensor_copy(
+        block_list_device = async_h2d_tensor_copy(block_list, self.device)
+        block_usage_device = async_h2d_tensor_copy(block_usage, self.device)
+        block_groups_device = async_h2d_tensor_copy(block_groups, self.device)
+        num_decode_tokens_device = async_h2d_tensor_copy(
             num_decode_tokens, self.device)
-        slot_mapping_device = _async_h2d_tensor_copy(slot_mapping, self.device)
+        slot_mapping_device = async_h2d_tensor_copy(slot_mapping, self.device)
         return DecodeInputData(
             num_decodes=num_decodes,
             token_ids=token_ids_device,

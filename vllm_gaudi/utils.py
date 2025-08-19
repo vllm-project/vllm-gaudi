@@ -29,6 +29,33 @@ def hpu_backend_string():
     return backend_string
 
 
+def async_h2d_copy(from_tensor: torch.Tensor, to_tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Copy pinned CPU tensor data to pre-allocated device tensor in non-blocking manner.
+    """
+    return to_tensor.copy_(from_tensor, non_blocking=True)
+
+
+def async_h2d_tensor(data, dtype, device='hpu'):
+    """
+    Create a tensor from data on CPU and transfer it asynchronously to device.
+    """
+    return torch.tensor(data, dtype=dtype, device='cpu').to(device,
+                                                            non_blocking=True)
+
+
+def async_h2d_tensor_copy(source, device='hpu'):
+    """
+    Copy a CPU tensor to device asynchronously by creating an empty target tensor 
+    and copying the source data into it.
+    """
+    assert source.device.type == 'cpu', \
+        "Source tensor is not present in host memory!"
+    target = torch.empty(source.shape, dtype=source.dtype, device=device)
+    target.copy_(source, non_blocking=True)
+    return target
+
+
 def make_ndarray_with_pad_align(
     x: list[list[T]],
     pad: T,
@@ -53,7 +80,7 @@ def make_ndarray_with_pad_align(
     return padded_x
 
 
-def make_mrope_positions_tensor_with_pad( \
+def make_mrope_positions_tensor_with_pad(
         input_positions: list[list[int]],
         input_mrope_positions: list[list[list[int]]],
         max_prompt_len: int,
