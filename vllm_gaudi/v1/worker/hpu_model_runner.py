@@ -2258,7 +2258,6 @@ class HPUModelRunner:
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=postprocessed_sampled_token_ids,
             logprobs=logprobs,
-            spec_token_ids=None,
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             pooler_output=[],
         )
