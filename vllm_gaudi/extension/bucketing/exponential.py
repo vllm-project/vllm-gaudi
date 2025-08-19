@@ -71,8 +71,7 @@ class ExponentialBucketingStrategy():
         decode_bs_bucket_cfg = [1, 2, max_num_seqs, decode_bs_limit]
         max_decode_block_limit = math.ceil(math.log2(num_max_blocks)) + 1
         max_decode_blocks = min((max_model_len // block_size * max_num_seqs), num_max_blocks)
-        min_decode_blocks = min(max_model_len // block_size, max_num_seqs)
-        decode_block_bucket_cfg = [min_decode_blocks, max_num_seqs, max_decode_blocks, max_decode_block_limit]
+        decode_block_bucket_cfg = [1, max_num_seqs, max_decode_blocks, max_decode_block_limit]
 
         msg = ("Decode bucket config (min, step, max_warmup, limit) "
                f"bs:{decode_bs_bucket_cfg}, "
@@ -185,18 +184,13 @@ def generate_decode_buckets(bs_bucket_config, blocks_bucket_config,
     return list(buckets)
 
 
-def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=False, fill=True):
+def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=False):
     """ 
     NOTE(kzawora): we'll use exponential spacing for buckets in which scaled 
     power will return bmin for first bucket iteration, and bmax for last 
     iteration, with elements between determined by the exponent, and base being 
-    unchanged. Note that after padding to bstep, duplicates may occur. 
-    Handling of duplicates is configured by fill parameter. 
-    If fill is False, duplicates are removed and less buckets are returned. 
-    
-    If fill is True, duplicates are resolved by selecting the closest (larger 
-    or smaller) bucket. If duplicate resolution is not possible, less buckets 
-    are returned. In that case, buckets are guaranteed to be linearly spaced.
+    unchanged. Note that after padding to bstep, duplicates may occur, and
+    then shall be removed.
     Example (bmin=128, bstep=128, bmax=2048, num_buckets=10):
     There are 16 possible buckets (2048/128), and we'll attempt to select 10 of 
     them with exponential spacing.
@@ -212,37 +206,13 @@ def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=Fals
     scaled_powers_unpadded     = [bmin*base^0(==bmin), bmin*base^1, bmin*base^2,       ...,     bmin*base^9(==bmax)]
     scaled_powers_unpadded     = [128.00, 174.18, 237.02, 322.54, 438.91, 597.26, 812.75, 1105.98, 1505.01, 2048.00]
  
-    if fill is False:
+    We then remove duplicate buckets:
         scaled_powers_padded   = [   128,    256,    256,    384,    512,    640,    896,    1152,    1536,    2048]
                                                ^_______^ 
                                                duplicates
         buckets                = [   128,    256,            384,    512,    640,    896,    1152,    1536,    2048]
                                                       ^ 
                                          duplicate bucket removed
-        len(buckets) = 9, num_buckets = 10
-    if fill is True:
-        buckets                = [   128,    256,    384,    512,    640,    768,    896,    1152,    1536,    2048]
-                                                      ^_______^_______^_______^ 
-                                                   closest unused buckets selected
-                                                              ^_______^_______^ 
-                                      these become duplicates once previous duplicates are resolved
-        
-        In this case we'll have four duplicated buckets:
-        174.18 -> 256, optimal bucket,
-        237.02 -> (256) -> 384, taking closest available bucket, 
-            as optimal bucket 256 was already captured by 174.18, 
-        322.54 -> (384) -> 512, taking closest available bucket, 
-            as optimal bucket 384 was already captured by 237.02,
-        438.91 -> (512) -> 640, taking closest available bucket, 
-            as optimal bucket 512 was already captured by 322.54,
-        597.26 -> (640) -> 768, taking closest available bucket, 
-            as optimal bucket 640 was already captured by 438.91,
-        812.75 -> 896, optimal bucket
-        len(buckets) = 10, num_buckets = 10
-        In this case, the end result has the same buckets as fill=False, 
-        but with additional bucket 768 added. 
-        The difference is more pronounced for larger ranges and larger number 
-        of buckets.
     """ # noqa: E501
 
     bmin, bstep, bmax, num_buckets = config
@@ -267,15 +237,7 @@ def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=Fals
             bucket = bmax
         else:
             bucket = math.ceil(power_unpadded / bstep) * bstep
-        if fill and bucket in buckets:
-            available_buckets = linear_buckets.difference(buckets)
-            if len(available_buckets) == 0:
-                break  # there are no more unique buckets, let's exit now
-            new_bucket = min(available_buckets,
-                             key=lambda x: abs(x - power_unpadded))
-            buckets.add(new_bucket)
-        else:
-            buckets.add(bucket)
+        buckets.add(bucket)
 
     if long_context:
         #tmp_step = bmax / num_buckets
