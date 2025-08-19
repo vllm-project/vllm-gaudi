@@ -1891,21 +1891,21 @@ class HPUModelRunner:
                     self.input_batch.req_ids[:num_decodes])
             else:
                 with self.profiler.record_event('internal', "sampler"):
-                  sampling_metadata = self._prepare_sampling(
-                      batch_changed,
-                      pd_info.decode_req_ids,
-                      pad_to=logits_device.shape[0])
-                  sampler_output = self.sampler(
-                      logits=logits_device, sampling_metadata=sampling_metadata)
-                  if self.use_lookahead_decoding:
-                      decode_sampled_token_ids = \
-                          sampler_output.sampled_token_ids.flatten()
-                  else:
-                      decode_sampled_token_ids.append(
-                          sampler_output.sampled_token_ids.flatten())
-                  decode_sampled_requests.extend(
-                      self.input_batch.req_ids[:original_num_decodes])
-                  htorch.core.mark_step()
+                    sampling_metadata = self._prepare_sampling(
+                        batch_changed,
+                        pd_info.decode_req_ids,
+                        pad_to=logits_device.shape[0])
+                    sampler_output = self.sampler(
+                        logits=logits_device, sampling_metadata=sampling_metadata)
+                    if self.use_lookahead_decoding:
+                        decode_sampled_token_ids = \
+                            sampler_output.sampled_token_ids.flatten()
+                    else:
+                        decode_sampled_token_ids.append(
+                            sampler_output.sampled_token_ids.flatten())
+                    decode_sampled_requests.extend(
+                        self.input_batch.req_ids[:original_num_decodes])
+                htorch.core.mark_step()
                 if self.use_lookahead_decoding:
                     for req_id, token_ids in zip(
                             pd_info.decode_req_ids,
