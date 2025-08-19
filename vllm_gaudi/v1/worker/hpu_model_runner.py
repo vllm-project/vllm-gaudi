@@ -2146,7 +2146,7 @@ class HPUModelRunner:
             prompt_bs, prompt_query_len, prompt_blocks = prompt_cfg
             prompt_ctx_len = prompt_blocks * self.block_size
             prompt_total_tokens = prompt_query_len + prompt_ctx_len
-            for i in range(prompt_bs):
+            for _ in range(prompt_bs):
                 self._add_dummy_request(requests,
                                         scheduled_tokens,
                                         num_computed_tokens=prompt_ctx_len,

@@ -70,8 +70,8 @@ class ExponentialBucketingStrategy():
         decode_bs_limit = math.ceil(math.log2(max_num_seqs)) + 1
         decode_bs_bucket_cfg = [1, 2, max_num_seqs, decode_bs_limit]
         max_decode_block_limit = math.ceil(math.log2(num_max_blocks)) + 1
-        max_decode_blocks = min(int((max_model_len // block_size) * max_num_seqs), num_max_blocks)
-        min_decode_blocks = min(int(max_model_len // block_size), max_num_seqs)
+        max_decode_blocks = min((max_model_len // block_size * max_num_seqs), num_max_blocks)
+        min_decode_blocks = min(max_model_len // block_size, max_num_seqs)
         decode_block_bucket_cfg = [min_decode_blocks, max_num_seqs, max_decode_blocks, max_decode_block_limit]
 
         msg = ("Decode bucket config (min, step, max_warmup, limit) "
@@ -178,13 +178,10 @@ def generate_decode_buckets(bs_bucket_config, blocks_bucket_config,
     # a combination of (batch_size, num_blocks), not separately.
     for bs in bs_buckets:
         max_blocks_per_bs = min(bs * math.ceil(max_model_len / block_size), max_blocks)
-        try:
-            upper_bucket_bound = max(x for x in sorted(block_buckets) if x <= max_blocks_per_bs)
-        except StopIteration:
-            continue
+        upper_bucket_bound = max(x for x in sorted(block_buckets) if x <= max_blocks_per_bs)
         valid_blocks = set((bs, 1, x) for x in sorted(block_buckets) if x <= upper_bucket_bound \
                           and bs <= x)
-        buckets.extend(list(valid_blocks))
+        buckets.extend(valid_blocks)
     return list(buckets)
 
 
