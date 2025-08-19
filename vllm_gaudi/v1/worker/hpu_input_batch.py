@@ -14,10 +14,11 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
                                              LogitsProcessors)
+
+from vllm_gaudi.utils import async_h2d_copy
 
 _SAMPLING_EPS = 1e-5
 
@@ -400,7 +401,7 @@ class InputBatch:
         old_id_i1 = self._req_ids[i1]
         old_id_i2 = self._req_ids[i2]
         self._req_ids[i1], self._req_ids[i2] =\
-            self._req_ids[i2], self._req_ids[i1] # noqa
+            self._req_ids[i2], self._req_ids[i1]  # noqa
         self.req_output_token_ids[i1], self.req_output_token_ids[i2] =\
             self.req_output_token_ids[i2], self.req_output_token_ids[i1]
         assert old_id_i1 is not None and old_id_i2 is not None
@@ -448,7 +449,7 @@ class InputBatch:
             self.allowed_token_ids_mask_cpu_tensor[i1], \
                 self.allowed_token_ids_mask_cpu_tensor[i2] =\
                 self.allowed_token_ids_mask_cpu_tensor[i2], \
-                    self.allowed_token_ids_mask_cpu_tensor[i1]
+                self.allowed_token_ids_mask_cpu_tensor[i1]
         self.block_table.swap_row(i1, i2)
 
     def condense(self, empty_req_indices: list[int]) -> None:
@@ -529,7 +530,6 @@ class InputBatch:
 
     def refresh_sampling_metadata(self):
         """Apply batch updates, reset input batch at end of step
-        
         * Apply batch add/remove/permute to logits procs' states
         * If batch state is modified, update sampling metadata
         """
@@ -540,27 +540,27 @@ class InputBatch:
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
         if not self.all_greedy:
-            temperature = copy_slice(self.temperature_cpu_tensor,
-                                     self.temperature, num_reqs)
+            temperature = async_h2d_copy(self.temperature_cpu_tensor,
+                                         self.temperature)
         else:
             temperature = None
         if not self.no_top_p:
-            copy_slice(self.top_p_cpu_tensor, self.top_p, num_reqs)
+            async_h2d_copy(self.top_p_cpu_tensor, self.top_p)
         if not self.no_top_k:
-            copy_slice(self.top_k_cpu_tensor, self.top_k, num_reqs)
+            async_h2d_copy(self.top_k_cpu_tensor, self.top_k)
         if not self.no_min_p:
-            copy_slice(self.min_p_cpu_tensor, self.min_p, num_reqs)
+            async_h2d_copy(self.min_p_cpu_tensor, self.min_p)
 
         if not self.no_penalties:
             # Since syncing these tensors is expensive only copy them
             # if necessary i.e. if there are requests which require
             # penalties to be applied during sampling.
-            copy_slice(self.frequency_penalties_cpu_tensor,
-                       self.frequency_penalties, num_reqs)
-            copy_slice(self.presence_penalties_cpu_tensor,
-                       self.presence_penalties, num_reqs)
-            copy_slice(self.repetition_penalties_cpu_tensor,
-                       self.repetition_penalties, num_reqs)
+            async_h2d_copy(self.frequency_penalties_cpu_tensor,
+                           self.frequency_penalties)
+            async_h2d_copy(self.presence_penalties_cpu_tensor,
+                           self.presence_penalties)
+            async_h2d_copy(self.repetition_penalties_cpu_tensor,
+                           self.repetition_penalties)
 
             # The prompt tokens are used only for applying penalties during
             # the sampling process. Hence copy these tensors only when
@@ -572,8 +572,8 @@ class InputBatch:
         allowed_token_ids_mask: Optional[torch.Tensor] = None
         if not self.no_allowed_token_ids:
             assert self.allowed_token_ids_mask is not None
-            copy_slice(self.allowed_token_ids_mask_cpu_tensor,
-                       self.allowed_token_ids_mask, num_reqs)
+            async_h2d_copy(self.allowed_token_ids_mask_cpu_tensor,
+                           self.allowed_token_ids_mask)
             allowed_token_ids_mask = self.allowed_token_ids_mask[:num_reqs]
 
         return SamplingMetadata(
