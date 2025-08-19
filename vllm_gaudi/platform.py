@@ -4,6 +4,7 @@ import os
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
+import habana_frameworks.torch as htorch
 
 from vllm import envs
 
@@ -144,7 +145,7 @@ class HpuPlatform(Platform):
         # Eager backend (PT_HPU_LAZY_MODE = 0) must be selected for
         # torch.compile support
         os.environ['PT_HPU_WEIGHT_SHARING'] = '0'
-        is_lazy = os.environ.get('PT_HPU_LAZY_MODE', '0') == '1'
+        is_lazy = htorch.utils.internal.is_lazy()
         if is_lazy:
             torch._dynamo.config.disable = True
             # NOTE multi-HPU inference with HPUGraphs (lazy-only)
