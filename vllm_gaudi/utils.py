@@ -82,11 +82,10 @@ def make_ndarray_with_pad_align(
     return padded_x
 
 
-def make_mrope_positions_tensor_with_pad(
-        input_positions: list[list[int]],
-        input_mrope_positions: list[list[list[int]]],
-        max_prompt_len: int,
-        pad: int) -> list[list[int]]:
+def make_mrope_positions_tensor_with_pad(input_positions: list[
+    list[int]], input_mrope_positions: list[list[list[int]]],
+                                         max_prompt_len: int,
+                                         pad: int) -> list[list[int]]:
     # If no mrope positions, returns a flatten (seq_len,)
     if all(mrope_position is None for mrope_position in input_mrope_positions):
         return make_tensor_with_pad(input_positions,
