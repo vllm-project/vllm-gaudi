@@ -425,7 +425,9 @@ class HpuModelAdapter(torch.nn.Module):
             kwargs.update(model_mm_kwargs)
 
         num_input_tokens = input_ids.size(0) * input_ids.size(1)
-        with set_forward_context(attn_meta, self.vllm_config, num_tokens=num_input_tokens):
+        with set_forward_context(attn_meta,
+                                 self.vllm_config,
+                                 num_tokens=num_input_tokens):
             hidden_states = self.model(*args, **kwargs)
             if self._rotary_prepare_cos_sin is not None:
                 self._reset_rotary_cos_sin()
@@ -3110,13 +3112,14 @@ class HPUModelRunner:
         max_seq_len = math.ceil(
             (self.max_num_tokens // self.max_prefill_batch_size) /
             self.block_size) * self.block_size
+        max_seq_len = min(max_seq_len, self.max_model_len)
         self._execute_dummy_scenario(
             (self.max_prefill_batch_size, max_seq_len, 0), None)
 
     def _dummy_run(self, max_num_batched_tokens: int) -> None:
         assert max_num_batched_tokens == 1
         prompt_cfg = None
-        decode_cfg = 1, 1
+        decode_cfg = 1, 1, 1
         # add dummy decode run
         self._execute_dummy_scenario(prompt_cfg, decode_cfg)
         return
