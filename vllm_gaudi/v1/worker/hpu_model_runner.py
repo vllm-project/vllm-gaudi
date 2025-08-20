@@ -26,7 +26,7 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import (VllmConfig, update_config)
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import (BatchDescriptor, set_forward_context)
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import get_sampler
@@ -53,6 +53,8 @@ from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.v1.sample.logits_processor import build_logitsprocs
+from vllm.v1.worker.kv_connector_model_runner_mixin import (
+    KVConnectorModelRunnerMixin, KVConnectorOutput)
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -1759,9 +1761,9 @@ class HPUModelRunner:
             attn_metadata = (token_ids != 0).to(self.device)
 
             # Forward pass — no KV cache
-            hidden_states = self.model.bert.forward(
-            input_ids=input_ids,
-            positions=positions
+            hidden_states = self.model.forward(
+            input_ids=token_ids,
+            positions=position_ids
         )
 
             # Pool the hidden states and return
@@ -2331,6 +2333,42 @@ class HPUModelRunner:
         seq_lengths = [b * block_size - 1 for b in blocks]
         return seq_lengths
 
+    def get_dp_padding(self,
+                       num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
+        dp_size = self.vllm_config.parallel_config.data_parallel_size
+        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+
+        # For DP: Don't pad when setting enforce_eager.
+        # This lets us set enforce_eager on the prefiller in a P/D setup and
+        # still use CUDA graphs (enabled by this padding) on the decoder.
+        #
+        # TODO(tms) : There are many cases where padding is enabled for
+        # prefills, causing unnecessary and excessive padding of activations.
+
+        if dp_size == 1 or self.vllm_config.model_config.enforce_eager:
+            # Early exit.
+            return 0, None
+
+        num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
+            num_tokens, dp_size, dp_rank)
+        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp).item()
+        num_tokens_after_padding = torch.tensor([max_tokens_across_dp_cpu] *
+                                                dp_size,
+                                                device="cpu",
+                                                dtype=torch.int32)
+        return max_tokens_across_dp_cpu - num_tokens, num_tokens_after_padding
+    
+    @torch.inference_mode()
+    def _dummy_run(
+        self,
+        num_tokens: int,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
+        num_tokens += num_pad
+        max_query_len = self.uniform_decode_query_len if uniform_decode else \
+                                                                num_tokens
+        return
+            
     def _execute_dummy_scenario(self, prompt_cfg, decode_cfg):
         from vllm.v1.core.sched.output import (NewRequestData, SchedulerOutput,
                                                CachedRequestData)

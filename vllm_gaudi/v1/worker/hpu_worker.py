@@ -15,6 +15,7 @@ from vllm_gaudi.extension.profiler import HabanaMemoryProfiler, format_bytes
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.model_executor import set_random_seed
@@ -250,6 +251,15 @@ class HPUWorker(WorkerBase):
     def compile_or_warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
             self.model_runner.warmup_model()
+        if self.model_runner.is_pooling_model:
+            # warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
+            if get_pp_group().is_last_rank:
+                max_num_reqs = min(self.scheduler_config.max_num_seqs,
+                                self.scheduler_config.max_num_batched_tokens)   
+                hidden_states, last_hidden_states = \
+                self.model_runner._dummy_run(
+                    num_tokens=max_num_reqs,
+                )
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
