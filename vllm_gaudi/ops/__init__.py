@@ -6,3 +6,5 @@ import vllm_gaudi.ops.hpu_compressed_tensors  # noqa
 import vllm_gaudi.ops.hpu_fp8  # noqa
 import vllm_gaudi.ops.hpu_gptq  # noqa
 import vllm_gaudi.ops.hpu_awq  # noqa
+import vllm_gaudi.ops.hpu_pooling_metadata  # noqa
+import vllm_gaudi.ops.hpu_pooler  # noqa
