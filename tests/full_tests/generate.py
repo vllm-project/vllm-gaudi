@@ -27,6 +27,8 @@ def main(args: dict):
     temperature = args.pop("temperature")
     top_p = args.pop("top_p")
     top_k = args.pop("top_k")
+    if "enable_prompt_adapter" in args:
+        args.pop("enable_prompt_adapter")
 
     # Create an LLM
     llm = LLM(**args)
