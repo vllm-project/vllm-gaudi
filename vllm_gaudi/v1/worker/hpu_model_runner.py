@@ -1331,7 +1331,9 @@ class HPUModelRunner:
         
         # Handle regular decodes
         for i in range(original_num_decodes):
-            positions[i, 0] = self.input_batch.num_computed_tokens_cpu[i]
+            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
+            positions[i, 0] = num_computed_tokens + 1 if self.use_lookahead_decoding \
+                else num_computed_tokens
         
         # Handle lookahead decodes positions
         if self.use_lookahead_decoding:
