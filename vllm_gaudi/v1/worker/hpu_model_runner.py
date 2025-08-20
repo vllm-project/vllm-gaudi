@@ -1427,7 +1427,7 @@ class HPUModelRunner:
         
         # Create a mapping from request_id to newly generated token
         req_to_token = {}
-        #### ACCURACY THREAT ?????????????
+
         tokens = [token for token in prefill_sampled_tokens if token.shape != torch.Size([0])]
         for token, req_id in zip(tokens, prefill_sampled_requests):
             req_to_token[req_id] = token
@@ -1451,7 +1451,13 @@ class HPUModelRunner:
             req_id = self.input_batch.req_ids[i]
             decode_data.token_ids[i] = self.lookahead_tokens.get(req_id, 0)[0]
 
-        return copy.deepcopy(decode_data)
+        return DecodeInputData(
+            num_decodes=decode_data.num_decodes,
+            token_ids=decode_data.token_ids.clone(),
+            position_ids=decode_data.position_ids.clone(),
+            logits_indices=decode_data.logits_indices,
+            attn_metadata=decode_data.attn_metadata,
+        )
 
     def _prepare_inputs(
         self,
