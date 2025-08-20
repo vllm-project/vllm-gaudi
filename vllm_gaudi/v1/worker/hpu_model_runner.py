@@ -1554,7 +1554,6 @@ class HPUModelRunner:
             num_decodes, sum(num_blocks))[0]
 
         # # dp aware padding
-        assert padded_batch_size is not None
         padded_batch_size += self.get_dp_padding(padded_batch_size)
 
         block_tables_list = []
@@ -2068,8 +2067,6 @@ class HPUModelRunner:
 
         ######################### PREFILLS #########################
         if num_prefills > 0:
-            # Wuxun: merged prefill forward if enabled
-            # 2D bucketing or merged prefill bucketing
             htorch.core.mark_step()
             for idx, (req_id, prompt_len, token_ids, position_ids,
                       attn_metadata, logits_indices,
