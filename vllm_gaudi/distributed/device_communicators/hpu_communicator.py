@@ -65,9 +65,6 @@ class HpuCommunicator(DeviceCommunicatorBase):
     def dispatch(
             self, hidden_states: torch.Tensor,
             router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        all-gather based dispatch for HPUCommunicator.
-        """
         cu_tokens_across_dp_cpu = get_forward_context(
         ).dp_metadata.cu_tokens_across_dp_cpu
         hidden_states_across_dp = naive_multicast(hidden_states,
