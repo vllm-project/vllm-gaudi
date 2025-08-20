@@ -2326,8 +2326,6 @@ class HPUModelRunner:
 
         ######################### PREFILLS #########################
         if num_prefills > 0:
-            # Wuxun: merged prefill forward if enabled
-            # 2D bucketing or merged prefill bucketing
             htorch.core.mark_step()
             for idx, (req_id, prompt_len, token_ids, position_ids,
                       attn_metadata, logits_indices,
