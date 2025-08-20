@@ -2365,9 +2365,42 @@ class HPUModelRunner:
         ) -> tuple[torch.Tensor, torch.Tensor]:
         num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
         num_tokens += num_pad
-        max_query_len = self.uniform_decode_query_len if uniform_decode else \
-                                                                num_tokens
-        return
+        assert num_tokens <= self.scheduler_config.max_num_batched_tokens
+
+        attn_metadata: Optional[dict[str, Any]] = None
+        input_ids = torch.zeros(self.max_num_tokens,
+                                     dtype=torch.int32,
+                                     device=self.device)
+        positions = torch.zeros(self.max_num_tokens,
+                                     dtype=torch.int64,
+                                     device=self.device)
+        input_ids = input_ids[:num_tokens]
+        inputs_embeds = None
+        positions = positions[:num_tokens]
+        if get_pp_group().is_first_rank:
+                intermediate_tensors = None
+        else:
+            if self.intermediate_tensors is None:
+                self.intermediate_tensors = (
+                    self.model.make_empty_intermediate_tensors(
+                        batch_size=self.max_num_tokens,
+                        dtype=self.model_config.dtype,
+                        device=self.device))
+
+            intermediate_tensors = self.sync_and_slice_intermediate_tensors(
+                num_tokens, None, False)
+        with set_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                num_tokens=num_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,):
+            outputs = self.model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                )
+        return outputs
             
     def _execute_dummy_scenario(self, prompt_cfg, decode_cfg):
         from vllm.v1.core.sched.output import (NewRequestData, SchedulerOutput,

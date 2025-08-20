@@ -256,7 +256,7 @@ class HPUWorker(WorkerBase):
             if get_pp_group().is_last_rank:
                 max_num_reqs = min(self.scheduler_config.max_num_seqs,
                                 self.scheduler_config.max_num_batched_tokens)   
-                hidden_states, last_hidden_states = \
+                hidden_states = \
                 self.model_runner._dummy_run(
                     num_tokens=max_num_reqs,
                 )
