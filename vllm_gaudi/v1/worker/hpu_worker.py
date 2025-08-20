@@ -15,6 +15,7 @@ from vllm_gaudi.extension.profiler import HabanaMemoryProfiler, format_bytes
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.model_executor import set_random_seed
@@ -28,7 +29,7 @@ from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, bool_helper
 from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_gaudi.extension.logger import logger as init_logger
-
+from vllm.pooling_params import PoolingTask
 logger = init_logger()
 
 if TYPE_CHECKING:
@@ -136,6 +137,9 @@ class HPUWorker(WorkerBase):
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
+    
+    def get_supported_pooling_tasks(self) -> list[PoolingTask]:
+        return self.model_runner.get_supported_pooling_tasks()
 
     def load_model(self) -> None:
         self.model_runner.load_model()
@@ -234,9 +238,10 @@ class HPUWorker(WorkerBase):
             torch.hpu.synchronize()
         msg = (f"Usable num_blocks: {kv_cache_config.num_blocks}, "
                f"actual allocated num_blocks: "
-               f"{self.model_runner.kv_caches[0][0].shape[0]} "
+               f"{('<no kv_caches>' if not self.model_runner.kv_caches else self.model_runner.kv_caches[0][0].shape[0])} "
                f"(_PAD_BLOCK_ID={self.model_runner._PAD_BLOCK_ID}, "
-               f"_PAD_SLOT_ID={self.model_runner._PAD_SLOT_ID})")
+               f"_PAD_SLOT_ID={self.model_runner._PAD_SLOT_ID})"
+        )
         logger.info(msg)
         msg = ("Initializing cache engine "
                f"took {m.get_summary_string()}")
@@ -246,6 +251,15 @@ class HPUWorker(WorkerBase):
     def compile_or_warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
             self.model_runner.warmup_model()
+        if self.model_runner.is_pooling_model:
+            # warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
+            if get_pp_group().is_last_rank:
+                max_num_reqs = min(self.scheduler_config.max_num_seqs,
+                                self.scheduler_config.max_num_batched_tokens)   
+                hidden_states = \
+                self.model_runner._dummy_run(
+                    num_tokens=max_num_reqs,
+                )
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
