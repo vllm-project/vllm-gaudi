@@ -177,7 +177,10 @@ def generate_decode_buckets(bs_bucket_config, blocks_bucket_config,
     # a combination of (batch_size, num_blocks), not separately.
     for bs in bs_buckets:
         max_blocks_per_bs = min(bs * math.ceil(max_model_len / block_size), max_blocks)
-        upper_bucket_bound = max(x for x in sorted(block_buckets) if x <= max_blocks_per_bs)
+        try:
+            upper_bucket_bound = max(x for x in sorted(block_buckets) if x <= max_blocks_per_bs)
+        except ValueError:
+            continue
         valid_blocks = set((bs, 1, x) for x in sorted(block_buckets) if x <= upper_bucket_bound \
                           and bs <= x)
         buckets.extend(valid_blocks)
