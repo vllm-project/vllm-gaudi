@@ -492,6 +492,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        if attn_metadata is None:
+            return
         assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         if self.attn_type == AttentionType.ENCODER_DECODER:
             return self.forward_encoder_decoder(
