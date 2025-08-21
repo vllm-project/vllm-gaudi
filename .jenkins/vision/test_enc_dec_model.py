@@ -28,12 +28,10 @@ def launch_enc_dec_model(config, question):
     enforce_eager = config.get('enforce_eager', False)
     enable_expert_parallel = config.get('enable_expert_parallel', False)
     tensor_parallel_size = TP_SIZE
-    num_scheduler_steps = config.get('num_scheduler_steps', 1)
     llm = LLM(
         model=model_name,
         dtype=dtype,
         tensor_parallel_size=tensor_parallel_size,
-        num_scheduler_steps=num_scheduler_steps,
         max_model_len=max_model_len,
         max_num_seqs=max_num_seqs,
         enable_expert_parallel=enable_expert_parallel,

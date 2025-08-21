@@ -27,6 +27,8 @@ def main(args: dict):
     temperature = args.pop("temperature")
     top_p = args.pop("top_p")
     top_k = args.pop("top_k")
+    if "enable_prompt_adapter" in args:
+        args.pop("enable_prompt_adapter")
 
     # Create an LLM
     llm = LLM(**args)
@@ -59,7 +61,7 @@ def main(args: dict):
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
         print("-" * 50)
 
-    os._exit(0)
+    #os._exit(0)
 
 
 if __name__ == "__main__":
@@ -68,5 +70,7 @@ if __name__ == "__main__":
     try:
         main(args)
     except Exception as e:
+        import traceback
         print(f"An error occurred: {e}")
+        traceback.print_exc()
         os._exit(1)
