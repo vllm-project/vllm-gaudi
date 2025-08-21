@@ -8,8 +8,8 @@
 import pytest
 
 import vllm_gaudi.extension.bucketing.linear as linear
-import vllm_gaudi.extension.bucketing.common as common
 from vllm_gaudi.extension.runtime import get_config, clear_config
+
 
 @pytest.fixture(autouse=True)
 def default_config():
@@ -22,12 +22,20 @@ def test_read_bucket_settings(monkeypatch):
     monkeypatch.setenv("VLLM_PROMPT_BS_BUCKET_MIN", "1")
     monkeypatch.setenv("VLLM_PROMPT_BS_BUCKET_STEP", "16")
     monkeypatch.setenv("VLLM_PROMPT_BS_BUCKET_MAX", "64")
-    config = linear.read_bucket_settings("prompt", "bs", min=1, step=32, max=128)
+    config = linear.read_bucket_settings("prompt",
+                                         "bs",
+                                         min=1,
+                                         step=32,
+                                         max=128)
     assert config == [1, 16, 64]
 
 
 def test_read_bucket_settings_empty_flags():
-    config = linear.read_bucket_settings("prompt", "bs", min=1, step=32, max=128)
+    config = linear.read_bucket_settings("prompt",
+                                         "bs",
+                                         min=1,
+                                         step=32,
+                                         max=128)
     assert config == [1, 32, 128]
 
 
@@ -44,8 +52,8 @@ def test_generate_prompt_buckets():
     block_size = 64
     prefix_caching = False
     buckets, omitted_buckets = linear.generate_prompt_buckets(
-        bs_bucket_config, seq_bucket_config, block_size, prefix_caching, max_num_batched_tokens
-    )
+        bs_bucket_config, seq_bucket_config, block_size, prefix_caching,
+        max_num_batched_tokens)
     assert len(buckets) == 5
     assert len(omitted_buckets) == 7
     assert all(bs * seq <= max_num_batched_tokens for bs, seq, _ in buckets)
@@ -55,8 +63,7 @@ def test_generate_decode_buckets():
     bs_bucket_config = [1, 32, 128]
     blocks_bucket_config = [128, 128, 2048]
     max_blocks = 1024
-    buckets = linear.generate_decode_buckets(
-        bs_bucket_config, blocks_bucket_config, max_blocks
-    )
+    buckets = linear.generate_decode_buckets(bs_bucket_config,
+                                             blocks_bucket_config, max_blocks)
     assert len(buckets) == 72
     assert all(blocks <= max_blocks for _, _, blocks in buckets)

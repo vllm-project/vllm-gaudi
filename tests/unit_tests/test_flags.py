@@ -12,15 +12,19 @@ from vllm_gaudi.extension.validation import choice, regex
 
 
 def with_cfg(fn):
+
     def sub_fn(**kwargs):
         return fn(Config(kwargs))
+
     return sub_fn
 
 
 def Cfg(constructor):
+
     def sub_constructor(*args, **kwargs):
         obj = constructor(*args, **kwargs)
         return with_cfg(obj)
+
     return sub_constructor
 
 
@@ -56,7 +60,8 @@ def test_two_ranges_same_release():
 
 
 def test_multiple_ranges_same_release():
-    ver_check = CfgVersionRange(">=1.19.0.100,<1.19.0.200", ">=1.19.0.300,<1.19.0.400")
+    ver_check = CfgVersionRange(">=1.19.0.100,<1.19.0.200",
+                                ">=1.19.0.300,<1.19.0.400")
     assert not ver_check(build="1.19.0.50")
     assert ver_check(build="1.19.0.100")
     assert ver_check(build="1.19.0.150")
@@ -110,10 +115,14 @@ def test_env_flag():
 
 
 def test_kernel():
+
     def loader(success):
+
         def load():
             return success if success else None
+
         return load
+
     assert Kernel(loader(True))(Config(hw='g2')) == True
     assert Kernel(loader(True))(Config(hw='cpu')) == False
     assert Kernel(loader(False))(Config(hw='g2')) == False
@@ -153,6 +162,7 @@ def test_combinators__eq():
     assert Eq('foo', 'bar')(Config(foo='dingo')) is False
     with pytest.raises(AssertionError):
         assert Eq('foo', 'bar')(Config(dingo='bar'))
+
 
 def test_combinators__active():
     with pytest.raises(AssertionError):
