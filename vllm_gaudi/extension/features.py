@@ -66,7 +66,6 @@ def get_features():
         Value('skip_warmup', False),
         Value('merged_prefill', False),
         Value('use_contiguous_pa', Disabled('prefix_caching'), env_var='VLLM_CONTIGUOUS_PA'),
-        Value('use_delayed_sampling', Engine('v0'), env_var='VLLM_DELAYED_SAMPLING'),
         Value('use_bucketing', True, env_var='VLLM_ENABLE_BUCKETING'),
         Value('exponential_bucketing', True, env_var='VLLM_EXPONENTIAL_BUCKETING'), 
         Value('linear_bucketing', True),
