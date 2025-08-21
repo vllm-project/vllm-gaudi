@@ -1612,6 +1612,15 @@ class HPUModelRunner:
         logits.copy_(
             logits_cpu.to(self.device, non_blocking=True).to(logits.dtype))
 
+    def run_sampling(self, batch_changed: bool, logits_device: torch.Tensor, request_ids: Optional[list[str]] = None, pad_to: Optional[int] = None):
+        sampling_metadata = self._prepare_sampling(
+            batch_changed,
+            request_ids,
+            pad_to)
+        return self.sampler(
+            logits=logits_device,
+            sampling_metadata=sampling_metadata)
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1730,17 +1739,11 @@ class HPUModelRunner:
                     prefill_sampled_requests.extend(logits_requests)
                 else:
                     with self.profiler.record_event('internal', "sampler"):
-                        sampling_metadata = self._prepare_sampling(
-                            batch_changed,
-                            req_id,
-                            pad_to=logits_device.shape[0])
-                        sampler_output = self.sampler(
-                            logits=logits_device,
-                            sampling_metadata=sampling_metadata)
+                        sampler_output = self.run_sampling(batch_changed, logits_device, req_id, logits_device.shape[0])
                         prefill_sampled_token_ids.append(
                             sampler_output.sampled_token_ids.flatten())
+                        htorch.core.mark_step()
                         prefill_sampled_requests.extend(logits_requests)
-                    htorch.core.mark_step()
                 if self.is_driver_worker and self.profiler.enabled:
                     # Stop recording 'execute_model_generic' event
                     self.profiler.end()
@@ -1779,18 +1782,12 @@ class HPUModelRunner:
                     self.input_batch.req_ids[:num_decodes])
             else:
                 with self.profiler.record_event('internal', "sampler"):
-                    sampling_metadata = self._prepare_sampling(
-                        batch_changed,
-                        pd_info.decode_req_ids,
-                        pad_to=logits_device.shape[0])
-                    sampler_output = self.sampler(
-                        logits=logits_device,
-                        sampling_metadata=sampling_metadata)
+                    sampler_output = self.run_sampling(batch_changed, logits_device, pd_info.decode_req_ids, logits_device.shape[0])
                     decode_sampled_token_ids.append(
                         sampler_output.sampled_token_ids.flatten())
+                    htorch.core.mark_step()
                     decode_sampled_requests.extend(
                         self.input_batch.req_ids[:num_decodes])
-                htorch.core.mark_step()
             if self.is_driver_worker and self.profiler.enabled:
                 # Stop recording 'execute_model' event
                 self.profiler.end()
@@ -2054,6 +2051,145 @@ class HPUModelRunner:
                f"num_blocks:{num_blocks} "
                f"free_mem:{free_mem}")
         logger.info(msg)
+    
+    def warmup_sampler(self):
+        """Warmup the sampler with different temperature, top-p, and top-k values."""
+        vocab_size = self.model_config.get_vocab_size()
+        sampler_outputs = []
+        
+        # Test different batch sizes that are commonly used
+        test_batch_sizes = [1, 2, 4, 8, 16]
+        if self.max_batch_size not in test_batch_sizes:
+            test_batch_sizes.append(self.max_batch_size)
+        
+        # Test different sampling configurations
+        sampling_configs = [
+            # (temperature, top_p, top_k, batch_changed)
+            (0.0, 1.0, 0, True),      # Greedy sampling
+            (1.0, 1.0, 0, True),      # Random sampling with temp=1.0
+            (0.7, 0.9, 50, True),      # Common creative settings
+            (0.3, 0.95, 20, True),     # Conservative settings
+            (1.2, 0.8, 100, True),     # High temperature settings
+            (0.8, 0.85, 0, True),     # Different top-p sampling
+            (0.0, 1.0, 0, False),      # Greedy sampling
+            (1.0, 1.0, 0, False),      # Random sampling with temp=1.0
+            (0.7, 0.9, 50, False),      # Common creative settings
+            (0.3, 0.95, 20, False),     # Conservative settings
+            (1.2, 0.8, 100, False),     # High temperature settings
+            (0.8, 0.85, 0, False),     # Different top-p sampling
+        ]
+        
+        logger.info("Starting sampler warmup...")
+        sampler_outputs = []
+        
+        for batch_size in test_batch_sizes:
+            logger.info(f"Warming up sampler with batch size: {batch_size}")
+            # Create dummy logits tensor [batch_size, vocab_size]
+            print(self.dtype)
+            dummy_logits = torch.randn(batch_size, vocab_size, 
+                                     dtype=self.dtype, device=self.device)
+            
+            for temp, top_p, top_k, batch_changed in sampling_configs:
+                logger.info(f"Warming up parameters: temp={temp}, top_p={top_p}, top_k={top_k}")
+                
+                # Create dummy requests for this specific configuration
+                dummy_req_ids = [f"warmup_req_{temp}_{top_p}_{top_k}_{i}" for i in range(batch_size)]
+                from vllm.sampling_params import SamplingParams
+                
+                # Add dummy requests to the cache with consistent sampling params
+                for i, req_id in enumerate(dummy_req_ids):
+                    self.requests[req_id] = CachedRequestState(
+                        req_id=req_id,
+                        prompt_token_ids=list(range(10)),  # Dummy prompt
+                        mm_kwargs=[],
+                        mm_positions=[],
+                        sampling_params=SamplingParams(
+                            temperature=temp,
+                            top_p=top_p,
+                            top_k=top_k,
+                        ),
+                        pooling_params=None,
+                        generator=None,
+                        block_ids=[[0]],
+                        num_computed_tokens=10,
+                        output_token_ids=[],
+                    )
+                
+                # Mark step before sampling to ensure proper graph boundaries
+                # htorch.core.mark_step()
+                
+                # Temporarily add dummy requests to input_batch req_id_to_index for _prepare_sampling
+                temp_req_mappings = {}
+                temp_greedy_reqs = set()
+                temp_random_reqs = set()
+                
+                for i, req_id in enumerate(dummy_req_ids):
+                    temp_req_mappings[req_id] = i
+                    self.input_batch.req_id_to_index[req_id] = i
+                    
+                    # Also classify requests as greedy or random for proper batch state
+                    if temp == 0.0:  # Greedy sampling
+                        temp_greedy_reqs.add(req_id)
+                        self.input_batch.greedy_reqs.add(req_id)
+                    else:  # Random sampling
+                        temp_random_reqs.add(req_id)
+                        self.input_batch.random_reqs.add(req_id)
+                
+                # try:
+                #     # Use _prepare_sampling to create sampling metadata like in actual inference
+                #     sampling_metadata = self._prepare_sampling(
+                #         batch_changed=True,  # Always treat as batch changed in warmup
+                #         request_ids=dummy_req_ids,
+                #         pad_to=batch_size
+                #     )
+                # finally:
+                #     # Clean up temporary mappings and classifications
+                #     for req_id in temp_req_mappings:
+                #         self.input_batch.req_id_to_index.pop(req_id, None)
+                #     for req_id in temp_greedy_reqs:
+                #         self.input_batch.greedy_reqs.discard(req_id)
+                #     for req_id in temp_random_reqs:
+                #         self.input_batch.random_reqs.discard(req_id)
+                
+                # Run sampler to warm it up
+                # sampler_output = self.sampler(
+                #     logits=dummy_logits,
+                #     sampling_metadata=sampling_metadata
+                # )
+                htorch.core.mark_step()
+                sampler_output = self.run_sampling(
+                    batch_changed=lambda _: True if batch_changed else False,
+                    logits_device=dummy_logits,
+                    request_ids=dummy_req_ids,
+                    pad_to=dummy_logits.shape[0]
+                )
+                # Store output to prevent compiler optimization and ensure execution
+                sampler_outputs.append(sampler_output.sampled_token_ids.flatten())
+                
+                # Essential: mark_step after sampling to capture HPU graphs
+                htorch.core.mark_step()
+                
+                # Ensure the output has the expected shape - it should be [batch_size, 1] or [batch_size]
+                expected_shapes = [(batch_size,), (batch_size, 1)]
+                assert sampler_output.sampled_token_ids.shape in expected_shapes, \
+                    f"Expected shape {expected_shapes}, got {sampler_output.sampled_token_ids.shape}"
+                
+                # Clean up dummy requests after each configuration
+                for req_id in dummy_req_ids:
+                    del self.requests[req_id]
+                
+                for req_id in temp_req_mappings:
+                    self.input_batch.req_id_to_index.pop(req_id, None)
+                for req_id in temp_greedy_reqs:
+                    self.input_batch.greedy_reqs.discard(req_id)
+                for req_id in temp_random_reqs:
+                    self.input_batch.random_reqs.discard(req_id)
+        
+        # Final synchronization to ensure all operations are completed
+        torch.hpu.synchronize()
+        
+        logger.info("Sampler warmup completed successfully")
+        return sampler_outputs
 
     def warmup_graphs(self,
                       buckets,
@@ -2287,6 +2423,9 @@ class HPUModelRunner:
                 assert self.mem_margin is not None, \
                     ("HabanaWorker.determine_num_available_blocks needs "
                     "to be called before warming up the model.")
+                
+                sampler_outputs = self.warmup_sampler()
+
                 #TODO(kzawora): align_workers
                 mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
                     self.warmup_graphs(
