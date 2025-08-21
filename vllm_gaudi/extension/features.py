@@ -71,5 +71,8 @@ def get_features():
         Value('exponential_bucketing', True, env_var='VLLM_EXPONENTIAL_BUCKETING'), 
         Value('linear_bucketing', True),
         Value('bucketing_strategy', FirstEnabled(*bucketing_strategies), env_var_type=choice(*bucketing_strategies)),
+        Value('regional_compilation', True, env_var='VLLM_T_COMPILE_REGIONAL_COMPILATION', env_var_type=boolean),
+        Value('dynamic_shapes_compilation', False, env_var='VLLM_T_COMPILE_DYNAMIC_SHAPES', env_var_type=boolean),
+        Value('fullgraph_compilation', False, env_var='VLLM_T_COMPILE_FULLGRAPH', env_var_type=boolean),
     ]
     return split_values_and_flags(features)
