@@ -34,11 +34,12 @@ def dump(prefix, values):
             logger().info(f'{padding}{key}: {value}')
 
 
-def get_config():
+def get_config(**overrides):
 
     global RUNTIME_CONFIG, USER_FLAGS, EXPERIMENTAL_FLAGS, ENVIRONMENT_VALUES, FEATURE_VALUES, HIDDEN_PARAMS
 
     if RUNTIME_CONFIG:
+        assert len(overrides) == 0, 'Overrides cannot be applied when config has been already created!'
         return RUNTIME_CONFIG
 
     user_flags = get_user_flags()
@@ -48,7 +49,7 @@ def get_config():
 
     experimental_flags = experimental_flags | environment_flags | feature_flags
 
-    detected = Config(user_flags | experimental_flags | environment_values | feature_values)
+    detected = Config(user_flags | experimental_flags | environment_values | feature_values | overrides)
 
     RUNTIME_CONFIG = detected
     USER_FLAGS = list(user_flags.keys())
@@ -82,3 +83,8 @@ def finalize_config():
     dump('Experimental flags', experimental_flags)
 
     return detected
+
+
+def clear_config():
+    global RUNTIME_CONFIG
+    RUNTIME_CONFIG = None
