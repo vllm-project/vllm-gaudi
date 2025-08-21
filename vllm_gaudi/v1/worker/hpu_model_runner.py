@@ -203,6 +203,8 @@ def gather_list(input, indices, v):
 
 
 def _async_h2d_tensor(data, dtype, device='hpu'):
+    if isinstance(data, torch.Tensor):
+        return data.to(device=device, dtype=dtype, non_blocking=True)
     return torch.tensor(data, dtype=dtype, device='cpu').to(device,
                                                             non_blocking=True)
 
@@ -1429,17 +1431,6 @@ class HPUModelRunner:
         target_bs, target_seq, target_blocks = self._get_prompt_bucketing_fn()(
             query_lens, num_context_blocks)
 
-        # If the model uses M-RoPE, we need to fill
-        # and pad the M-RoPE positions for the scheduled prefill tokens
-        if self.uses_mrope:
-            mrope_token_positions = self._align_and_pad_mrope_positions(
-                contents.req_ids,
-                context_lens,
-                query_lens,
-                (target_bs, target_seq),
-                -1,
-            )
-
         # NOTE: If model does not support multimodal inputs, we pad here.
         # For models with multimodal support, we may want to get embeddings
         # for the valid tokens before padding.
@@ -1447,8 +1438,17 @@ class HPUModelRunner:
         token_ids = self._align_and_pad(contents.token_ids,
                                         (target_bs, target_seq),
                                         itertools.repeat(-1))
+        # If the model uses M-RoPE, we need to fill
+        # and pad the M-RoPE positions for the scheduled prefill tokens
         if self.uses_mrope:
-            token_positions = mrope_token_positions
+            token_positions = self._align_and_pad_mrope_positions(
+                contents.req_ids,
+                context_lens,
+                query_lens,
+                (target_bs, target_seq),
+                -1,
+            )
+
         else:
             token_positions = self._align_and_pad(token_positions,
                                                   (target_bs, target_seq),
@@ -1497,8 +1497,7 @@ class HPUModelRunner:
 
         query_lens = _async_h2d_tensor(query_lens, torch.int32)
         token_ids = _async_h2d_tensor(token_ids, torch.int32)
-        if not self.uses_mrope:
-            token_positions = _async_h2d_tensor(token_positions, torch.int32)
+        token_positions = _async_h2d_tensor(token_positions, torch.int32)
         token_slots = _async_h2d_tensor(token_slots, torch.int64)
         logits_indices = _async_h2d_tensor(logits_indices, torch.int32)
         context_lens = _async_h2d_tensor(context_lens, torch.int32)
@@ -1599,19 +1598,16 @@ class HPUModelRunner:
                 for idx in range(3):
                     input_mrope_positions_list[idx].extend(pos_for_mrope[idx])
 
-            input_mrope_positions = torch.tensor(input_mrope_positions_list,
-                                                 dtype=torch.int32,
-                                                 device='cpu').to(
-                                                     'hpu', non_blocking=True)
+            positions = torch.tensor(input_mrope_positions_list,
+                                     dtype=torch.int32,
+                                     device='cpu')
 
             # Pad the right side of input_mrope_positions by padded_batch_size
-            pad_size = padded_batch_size - input_mrope_positions.size(
-                1)  # noqa
+            pad_size = padded_batch_size - positions.size(1)
             if pad_size > 0:
-                input_mrope_positions = F.pad(input_mrope_positions,
-                                              (0, pad_size),
-                                              value=-1,
-                                              mode='constant')
+                positions = F.pad(positions, (0, pad_size),
+                                  value=-1,
+                                  mode='constant')
 
         # TOKEN_IDS. [batch, 1]
         token_ids = torch.zeros((padded_batch_size, 1), dtype=torch.int32)
@@ -1660,8 +1656,7 @@ class HPUModelRunner:
 
         # CPU<>HPU sync *should not* happen here.
         token_ids_device = _async_h2d_tensor_copy(token_ids, self.device)
-        positions_device = input_mrope_positions if self.uses_mrope \
-            else _async_h2d_tensor_copy(positions, self.device)
+        positions_device = _async_h2d_tensor_copy(positions, self.device)
         logits_indices_device = _async_h2d_tensor_copy(logits_indices,
                                                        self.device)
         block_list_device = _async_h2d_tensor_copy(block_list, self.device)
