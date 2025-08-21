@@ -203,8 +203,6 @@ def gather_list(input, indices, v):
 
 
 def _async_h2d_tensor(data, dtype, device='hpu'):
-    if isinstance(data, torch.Tensor):
-        return data.to(device=device, dtype=dtype, non_blocking=True)
     return torch.tensor(data, dtype=dtype, device='cpu').to(device,
                                                             non_blocking=True)
 
@@ -1269,7 +1267,7 @@ class HPUModelRunner:
         mrope_position_tensor = torch.full(out_shape,
                                            padding_gen,
                                            dtype=torch.int32,
-                                           device='hpu')
+                                           device='cpu')
         dst_start = 0
         dst_end = dst_start
         for b_idx, req_id in enumerate(req_ids):
