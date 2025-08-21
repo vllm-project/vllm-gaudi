@@ -13,7 +13,7 @@ import torch.nn as nn
 from vllm.tasks import SupportedTask
 from vllm_gaudi.extension.debug import init_debug_logger
 from vllm_gaudi.extension.profiler import (HabanaMemoryProfiler, format_bytes,
-                                         setup_profiler)
+                                           setup_profiler)
 from vllm_gaudi.extension.runtime import get_config
 
 import vllm.envs as envs
@@ -28,7 +28,6 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.utils import is_fake_hpu
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, bool_helper
-from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_gaudi.extension.logger import logger as init_logger
 

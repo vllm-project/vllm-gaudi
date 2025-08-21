@@ -19,9 +19,9 @@ import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 from vllm_gaudi.extension.defragmentation import OnlineDefragmenter
 from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler,
-                                         HabanaMemoryProfiler,
-                                         HabanaProfilerCounterHelper,
-                                         format_bytes, setup_profiler)
+                                           HabanaMemoryProfiler,
+                                           HabanaProfilerCounterHelper,
+                                           format_bytes, setup_profiler)
 from vllm_gaudi.extension.runtime import finalize_config, get_config
 from vllm_gaudi.extension.utils import pad_list
 from vllm_gaudi.extension.debug import init_debug_logger
@@ -1711,8 +1711,7 @@ class HPUModelRunner:
         seen = cfg in self.seen_configs
         self.seen_configs.add(cfg)
         if not seen and not warmup_mode:
-            logger.warning(
-                "Configuration: %s was not warmed-up!", cfg)
+            logger.warning("Configuration: %s was not warmed-up!", cfg)
 
     def _execute_model_generic(self,
                                token_ids,
@@ -1991,8 +1990,9 @@ class HPUModelRunner:
             #TODO: Add support for preempted blocks
             cached = {
                 req_id: flatten(new_block_ids)
-                for req_id, new_block_ids in zip(scheduler_output.scheduled_cached_reqs.req_ids,
-                                                 scheduler_output.scheduled_cached_reqs.new_block_ids)
+                for req_id, new_block_ids in zip(
+                    scheduler_output.scheduled_cached_reqs.req_ids,
+                    scheduler_output.scheduled_cached_reqs.new_block_ids)
                 if new_block_ids
             }
             self.defragmenter.update_state(new | cached,
