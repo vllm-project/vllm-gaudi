@@ -7,7 +7,10 @@
 
 import os
 import pytest
-from vllm_gaudi.extension.config import VersionRange, Config, Kernel, Env, boolean, All, Not, Eq, Enabled, FirstEnabled
+
+from vllm_gaudi.extension.config import (VersionRange, Config, Kernel, Env,
+                                         boolean, All, Not, Eq, Enabled,
+                                         FirstEnabled)
 from vllm_gaudi.extension.validation import choice, regex
 
 
@@ -123,9 +126,9 @@ def test_kernel():
 
         return load
 
-    assert Kernel(loader(True))(Config(hw='g2')) == True
-    assert Kernel(loader(True))(Config(hw='cpu')) == False
-    assert Kernel(loader(False))(Config(hw='g2')) == False
+    assert Kernel(loader(True))(Config(hw='g2'))
+    assert not Kernel(loader(True))(Config(hw='cpu'))
+    assert not Kernel(loader(False))(Config(hw='g2'))
 
 
 def false(_):
@@ -199,4 +202,6 @@ def test_regex_empty_string():
 def test_regex_with_hint():
     check = regex(r'^[a-z]+$', hint='Only lowercase letters allowed')
     result = check('ABC')
-    assert result == "'ABC' doesn't match pattern '^[a-z]+$'! Only lowercase letters allowed"
+    expected = "'ABC' doesn't match pattern '^[a-z]+$'!"\
+               "Only lowercase letters allowed"
+    assert result == expected
