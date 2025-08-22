@@ -2,6 +2,7 @@
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
 ###############################################################################
 
+import contextlib
 import gc
 import gzip
 import json
@@ -166,6 +167,11 @@ class HabanaHighLevelProfiler:
             file_writer = FileWriter(self.filename,
                                      self.profiling_trace_events)
             file_writer.start()
+            self.gc_track_recompiles = bool(
+                "PT_HPU_METRICS_GC_DETAILS" in os.environ
+                and os.getenv("PT_HPU_METRICS_GC_DETAILS").lower() in ("y", "yes", "t", "true", "on", "1"))
+            self.num_graph_compilations = 0
+
         if os.getenv('VLLM_PROFILER_ENABLED') == 'full':
             self.enabled = True # don't save separate high-level traces
 
@@ -186,6 +192,19 @@ class HabanaHighLevelProfiler:
                 'ts': ts,
                 'args': counter
             })
+
+    def record_block(self, type, name, ts, dur, args=None):
+        if self.enabled:
+            event = {
+                'pid': self.pid,
+                'tid': self.event_tid[type],
+                'ph': 'X',
+                'name': name,
+                'ts': ts,
+                'dur': dur,
+                'args': args
+            }
+            self._dump_with_sep(event)
 
     def start(self, type, name, args=None):
         if self.enabled:
@@ -265,12 +284,32 @@ class HabanaHighLevelProfiler:
 
         return handler_fn
 
+    @contextmanager
+    def track_graph_compile(self, type, args=None):
+        start = self.get_timestamp_us()
+        import habana_frameworks.torch as htorch
+        from habana_frameworks.torch.hpu.metrics import metric_localcontext
+        with metric_localcontext("graph_compilation") as gc:
+            yield
+            htorch.hpu.synchronize()
+        if gc.stats()[0][1] != 0:
+            compile_start_time = start
+            for recipe in gc.stats()[3][1]:
+                recipe_name = recipe[0]
+                compile_time = recipe[1]
+                self.num_graph_compilations += 1
+                self.record_counter(compile_start_time, {'cumulative_graph_compilations': self.num_graph_compilations})
+                self.record_block(type, 'GRAPH COMPILE: ' + recipe_name, compile_start_time, compile_time, args)
+                compile_start_time += compile_time
 
     @contextmanager
     def record_event(self, type, name, args=None):
         if self.enabled:
             self.start(type, name, args)
-            yield
+            with self.track_graph_compile(type, args) \
+                if self.gc_track_recompiles \
+                else contextlib.nullcontext():
+                yield
             self.end()
         else:
             yield
