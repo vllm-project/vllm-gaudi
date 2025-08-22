@@ -260,6 +260,8 @@ class HPUWorker(WorkerBase):
                 self.model_runner._dummy_run(
                     num_tokens=max_num_reqs,
                 )
+                if self.model_runner.is_pooling_model:
+                    self.model_runner._dummy_pooler_run(hidden_states)
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
