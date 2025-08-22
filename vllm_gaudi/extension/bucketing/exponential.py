@@ -62,15 +62,17 @@ class ExponentialBucketingStrategy():
 
     def get_decode_buckets(self, max_num_seqs, block_size, 
                            max_num_batched_tokens, max_model_len,
-                           num_max_blocks):
+                           max_blocks):
         self.check_for_user_flags('decode')
         prefix_caching = get_config().prefix_caching
+        use_contiguous_pa = get_config().use_contiguous_pa
 
         # cfgs shape: [min, step, max, limit]
         decode_bs_limit = math.ceil(math.log2(max_num_seqs)) + 1
         decode_bs_bucket_cfg = [1, 2, max_num_seqs, decode_bs_limit]
         max_decode_block_limit = math.ceil(math.log2(num_max_blocks)) + 1
-        max_decode_blocks = min((max_model_len // block_size * max_num_seqs), num_max_blocks)
+        max_decode_blocks = max_blocks if use_contiguous_pa else \
+                            min((max_model_len // block_size * max_num_seqs), max_blocks)
         decode_block_bucket_cfg = [1, max_num_seqs, max_decode_blocks, max_decode_block_limit]
 
         msg = ("Decode bucket config (min, step, max_warmup, limit) "
@@ -80,7 +82,7 @@ class ExponentialBucketingStrategy():
 
         decode_buckets = generate_decode_buckets(
             decode_bs_bucket_cfg, decode_block_bucket_cfg,
-            num_max_blocks, max_model_len, block_size)
+            max_blocks, max_model_len, block_size)
 
         return sorted(decode_buckets)
 
