@@ -3,9 +3,9 @@
 
 # Parameterize base image components
 ARG DOCKER_URL=vault.habana.ai/gaudi-docker
-ARG VERSION=1.22.0
+ARG VERSION=1.21.2
 ARG BASE_NAME=ubuntu22.04
-ARG PT_VERSION=2.7.1
+ARG PT_VERSION=2.6.0
 ARG REVISION=latest
 ARG REPO_TYPE=habanalabs
 
@@ -32,8 +32,8 @@ RUN mkdir -p $VLLM_PATH && \
     cd $VLLM_PATH && \
     git remote add upstream https://github.com/vllm-project/vllm.git && \
     git fetch upstream --tags || true && \
-    git checkout ${VLLM_PROJECT_COMMIT} \
-    pip install -r <(sed '/^[torch]/d' requirements/build.txt) \
+    git checkout ${VLLM_PROJECT_COMMIT} && \
+    pip install -r <(sed '/^[torch]/d' requirements/build.txt) && \
     VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
 
 # Clone the vllm-gaudi repository and install inside the container
@@ -41,8 +41,8 @@ RUN mkdir -p $VLLM_PATH && \
 RUN mkdir -p $VLLM_PATH2 && \
     git clone https://github.com/vllm-project/vllm-gaudi $VLLM_PATH2 && \
     cd $VLLM_PATH2 && \
-    git checkout ${VLLM_GAUDI_COMMIT} \
-    ENV VLLM_TARGET_DEVICE=hpu \
+    git checkout ${VLLM_GAUDI_COMMIT} && \
+    ENV VLLM_TARGET_DEVICE=hpu && \
     pip install -v -e $VLLM_PATH2
 
     # to be enabled later PWolsza
