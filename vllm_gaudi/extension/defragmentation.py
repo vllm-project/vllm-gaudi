@@ -58,13 +58,13 @@ class OnlineDefragmenter:
     """ Keeps track of assigned block_ids and remaps them if necessary """
 
     def __init__(self):
-        self.threshold = get_config().VLLM_DEFRAG_THRESHOLD or 32
+        config = get_config()
+        self.threshold = with_default(config.VLLM_DEFRAG_THRESHOLD, 32)
         self.used_blocks = {}
         self.req_blocks = {}
         self.fwd_mapping_table = []
         self.bwd_mapping_table = []
-        config = get_config()
-        self.enabled = with_default(config.VLLM_DEFRAG, False)
+        self.enabled = config.defrag
         self.graphed = with_default(config.VLLM_DEFRAG_WITH_GRAPHS, config.bridge_mode == 'eager')
         self.cache_utils: Optional[CacheSwapUtils] = None
         self.debug = init_debug_logger('defrag')
@@ -191,5 +191,5 @@ class OnlineDefragmenter:
         if self.debug:
             max_used = max(self.used_blocks.keys())
             num_used = len(self.used_blocks)
-            post_status = f'max_id_used={pre_max_used}->{max_used} num_used={num_used} swapped={len(to_swap)}'
+            post_status = f'max_id_used={pre_max_used}->{max_used} num_used={num_used} swapped={len(to_swap)}/{self.threshold}'
             self.debug(f'defragmentation done {post_status}')
