@@ -28,6 +28,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.utils import is_fake_hpu
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, bool_helper
+from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_gaudi.extension.logger import logger as init_logger
 
@@ -45,7 +46,7 @@ def setup_step_profiler(steps):
     return setup_profiler(warmup=0, active=active)
 
 
-class HPUWorker:
+class HPUWorker(WorkerBase):
 
     def __init__(
         self,
