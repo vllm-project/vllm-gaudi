@@ -65,5 +65,6 @@ setup(
     entry_points={
         "vllm.platform_plugins": ["hpu = vllm_gaudi:register"],
         "vllm.general_plugins": ["hpu_custom_ops = vllm_gaudi:register_ops"],
+        "vllm.general_plugins": ["hpu_custom_connectors = vllm_gaudi:register_connector"],
     },
 )
