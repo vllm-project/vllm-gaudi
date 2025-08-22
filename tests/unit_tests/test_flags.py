@@ -203,5 +203,5 @@ def test_regex_with_hint():
     check = regex(r'^[a-z]+$', hint='Only lowercase letters allowed')
     result = check('ABC')
     expected = "'ABC' doesn't match pattern '^[a-z]+$'!"\
-               "Only lowercase letters allowed"
+               " Only lowercase letters allowed"
     assert result == expected
