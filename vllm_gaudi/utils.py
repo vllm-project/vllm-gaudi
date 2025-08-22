@@ -29,33 +29,36 @@ def hpu_backend_string():
     return backend_string
 
 
-def async_h2d_copy(from_tensor: torch.Tensor,
-                   to_tensor: torch.Tensor) -> torch.Tensor:
+def async_h2d_copy(source, dest_tensor=None, dtype=None, device='hpu'):
     """
-    Copy pinned CPU tensor data to pre-allocated device tensor in 
-    non-blocking manner.
-    """
-    return to_tensor.copy_(from_tensor, non_blocking=True)
+    Asynchronously transfer data from host to device.
 
+    Args:
+        source: CPU tensor or raw data to transfer
+        dest_tensor: Optional pre-allocated destination tensor
+        dtype: Required if source is raw data
+        device: Target device
 
-def async_h2d_tensor(data, dtype, device='hpu'):
+    Returns:
+        torch.Tensor on target device
     """
-    Create a tensor from data on CPU and transfer it asynchronously to device.
-    """
-    return torch.tensor(data, dtype=dtype, device='cpu').to(device,
-                                                            non_blocking=True)
-
-
-def async_h2d_tensor_copy(source, device='hpu'):
-    """
-    Copy a CPU tensor to device asynchronously by creating an empty target
-    tensor and copying the source data into it.
-    """
-    assert source.device.type == 'cpu', \
-        "Source tensor is not present in host memory!"
-    target = torch.empty(source.shape, dtype=source.dtype, device=device)
-    target.copy_(source, non_blocking=True)
-    return target
+    if isinstance(source, torch.Tensor):
+        if dest_tensor is not None:
+            # Copy into pre-allocated destination tensor
+            return dest_tensor.copy_(source, non_blocking=True)
+        else:
+            # Create new device tensor and copy
+            assert source.device.type == 'cpu', \
+                "Source tensor must be on CPU for asynchronous transfer"
+            target = torch.empty_like(source, device=device)
+            return target.copy_(source, non_blocking=True)
+    else:
+        # Create tensor from data and transfer to device
+        if dtype is None:
+            raise ValueError(
+                "dtype must be specified when source is not a tensor")
+        cpu_tensor = torch.tensor(source, dtype=dtype, device='cpu')
+        return cpu_tensor.to(device, non_blocking=True)
 
 
 def make_ndarray_with_pad_align(
