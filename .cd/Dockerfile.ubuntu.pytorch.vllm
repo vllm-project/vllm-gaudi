@@ -25,6 +25,10 @@ WORKDIR /root
 ENV VLLM_PATH=/workspace/vllm-project
 ENV VLLM_PATH2=/workspace/vllm-gaudi
 
+RUN echo "dash dash/sh boolean false" | debconf-set-selections && \
+    DEBIAN_FRONTEND=noninteractive dpkg-reconfigure dash
+ENV ENV=~/.profile
+
 # Clone the vllm-project repository and install inside the container
 
 RUN mkdir -p $VLLM_PATH && \
@@ -39,11 +43,10 @@ RUN mkdir -p $VLLM_PATH && \
 # Clone the vllm-gaudi repository and install inside the container
 
 RUN mkdir -p $VLLM_PATH2 && \
-    git clone https://github.com/vllm-project/vllm-gaudi $VLLM_PATH2 && \
+    git clone https://github.com/vllm-project/vllm-gaudi.git $VLLM_PATH2 && \
     cd $VLLM_PATH2 && \
     git checkout ${VLLM_GAUDI_COMMIT} && \
-    ENV VLLM_TARGET_DEVICE=hpu && \
-    pip install -v -e $VLLM_PATH2
+    VLLM_TARGET_DEVICE=hpu && pip install -v -e $VLLM_PATH2 --no-build-isolation
 
     # to be enabled later PWolsza
     # pip install -v -e $VLLM_PATH2/tests/vllm_test_utils
