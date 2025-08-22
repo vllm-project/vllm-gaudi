@@ -75,7 +75,7 @@ class LinearBucketingStrategy:
 
         decode_buckets = generate_decode_buckets(
             decode_bs_bucket_cfg,
-            decode_block_bucket_cfg, num_max_blocks)
+            decode_block_bucket_cfg, num_max_blocks, max_model_len, block_size)
 
         return sorted(decode_buckets)
 
@@ -190,22 +190,28 @@ def generate_prompt_buckets(bs_bucket_config,
 
 
 def generate_decode_buckets(bs_bucket_config, blocks_bucket_config,
-                            max_blocks):
+                            max_blocks, max_model_len, block_size):
     buckets = []
     bs_buckets = warmup_range(bs_bucket_config)
     use_contiguous_pa = get_config().use_contiguous_pa
+    user_max = get_config().VLLM_DECODE_BLOCK_BUCKET_MAX
     if os.environ.get('VLLM_DECODE_BLOCK_BUCKET_MAX') is None\
        and use_contiguous_pa:
         blocks_bucket_config[2] = max_blocks
     block_buckets = warmup_range(blocks_bucket_config)
-    if os.environ.get('VLLM_DECODE_BLOCK_BUCKET_MAX') is None\
+    if user_max is None\
        and max_blocks not in block_buckets and use_contiguous_pa:
         block_buckets.append(max_blocks)
     last_bucket = max_blocks
     for bs in bs_buckets:
+        max_blocks_including_max_model_len = bs * max_model_len / block_size
         for blocks in block_buckets:
             if bs > blocks:
                 # Skip a dummy case when bs > blocks, which cannot occur in real execution
+                continue
+            if not use_contiguous_pa and blocks > max_blocks_including_max_model_len:
+                # Skip case when user wants to have bigger blocks than max model len
+                # case cn only occur with contiguous PA
                 continue
             if blocks >= last_bucket:
                 buckets.append((bs, 1, last_bucket))
