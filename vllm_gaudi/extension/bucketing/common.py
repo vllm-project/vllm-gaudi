@@ -58,9 +58,14 @@ class HPUBucketingManager():
         self.fallback_seq_base_step = 32
         self.fallback_blocks_base_step = 32
 
-    def get_bucketing_strategy(self):
+    def get_bucketing_strategy(self, file_path=None):
         strategy = None
         # TODO - we can use different strategies for decode and prompt
+        if file_path:
+            from vllm_gaudi.extension.bucketing.linear import (
+                FileBucketingStrategy)
+            strategy = FileBucketingStrategy()
+            return strategy
         use_exponential_bucketing = True if \
                 get_config().VLLM_EXPONENTIAL_BUCKETING == None else \
                 get_config().VLLM_EXPONENTIAL_BUCKETING
@@ -76,7 +81,8 @@ class HPUBucketingManager():
 
     def generate_prompt_buckets(self):
         if self.initialized:
-            strategy = self.get_bucketing_strategy()
+            prompt_buckets_file = get_context().VLLM_PROMPT_BUCKETING_FILE
+            strategy = self.get_bucketing_strategy(prompt_buckets_file)
 
             self.prompt_buckets = strategy.get_prompt_buckets(
                             max_num_prefill_seqs = self.max_num_prefill_seqs,
@@ -91,7 +97,8 @@ class HPUBucketingManager():
 
     def generate_decode_buckets(self):
         if self.initialized:
-            strategy = self.get_bucketing_strategy()
+            decode_buckets_file = get_context().VLLM_DECODE_BUCKETING_FILE
+            strategy = self.get_bucketing_strategy(decode_buckets_file)
 
             self.decode_buckets = strategy.get_decode_buckets(
                             max_num_seqs = self.max_num_seqs,

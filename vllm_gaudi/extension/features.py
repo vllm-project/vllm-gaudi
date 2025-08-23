@@ -14,6 +14,8 @@ def get_user_flags():
         Env('VLLM_USE_V1', boolean),
         Env('VLLM_ENABLE_EXPERIMENTAL_FLAGS', boolean),
         Env('VLLM_EXPONENTIAL_BUCKETING', boolean),
+        Env('VLLM_PROMPT_BUCKETING_FILE', str),
+        Env('VLLM_DECODE_BUCKETING_FILE', str),
         Env('VLLM_PROMPT_BS_BUCKET_MIN', int),
         Env('VLLM_PROMPT_BS_BUCKET_STEP', int),
         Env('VLLM_PROMPT_BS_BUCKET_MAX', int),
