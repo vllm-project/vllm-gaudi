@@ -1412,11 +1412,8 @@ class HPUModelRunner:
             # no real prefill batches
             num_prefill_batches = 0
 
-        num_pad = self.get_dp_padding(num_prefill_batches)
-        if num_pad > 0:
-            for _ in range(num_pad):
-                all_batch_contents.append(BatchContents())
-        return all_batch_contents
+        num_pad_across_dp = self.get_dp_padding(num_prefill_batches)
+        return all_batch_contents, num_pad_across_dp
 
     def _make_attn_bias(self, context_groups, token_groups):
         dtype = self.dtype
@@ -1483,11 +1480,6 @@ class HPUModelRunner:
         has_context = sum(context_lens) > 0
         target_bs, target_seq, target_blocks = self._get_prompt_bucketing_fn()(
             query_lens, num_context_blocks)
-
-        # dp aware padding
-        target_bs += self.get_dp_padding(target_bs)
-        target_seq += self.get_dp_padding(target_seq)
-        target_blocks += self.get_dp_padding(target_blocks)
 
         # NOTE: If model does not support multimodal inputs, we pad here.
         # For models with multimodal support, we may want to get embeddings
@@ -1581,35 +1573,49 @@ class HPUModelRunner:
                                 logits_indices=[logits_indices],
                                 logits_requests=[logits_requests])
 
+    def _create_dummy_prefill_batch_contents(
+            self, num_prefills: int) -> list[PrefillInputData]:
+        req_id = -1
+        context_len = 0
+        query_len = 128
+        prompt_tokens = 128
+        token_ids = list(int(i) for i in range(prompt_tokens))
+        num_blocks = round_up(context_len + query_len,
+                              self.block_size) // self.block_size
+        blocks = [0] * num_blocks
+        num_output_logits = context_len + query_len - prompt_tokens + 1
+        logits_positions = list(range(query_len - num_output_logits,
+                                      query_len))
+
+        new_batch_contents = BatchContents(
+            req_ids=[req_id],
+            token_ids=[token_ids],
+            context_lens=[context_len],
+            blocks=[blocks],
+            logits_positions=[logits_positions],
+        )
+
+        outputs = [
+            self._form_prefill_batch(new_batch_contents)
+            for _ in range(num_prefills)
+        ]
+        return outputs
+
     def _prepare_prefill_inputs(
             self, num_prefills, num_decodes,
-            num_scheduled_tokens: list[int]) -> PrefillInputData:
-        all_batch_contents = self._extract_prefill_batch_contents(
+            num_scheduled_tokens: list[int]) -> tuple[PrefillInputData, int]:
+        all_batch_contents, num_pad_across_dp = self._extract_prefill_batch_contents(
             num_prefills, num_decodes, num_scheduled_tokens)
         all_batches = [
             self._form_prefill_batch(bc) for bc in all_batch_contents
         ]
         merge_contents(all_batches[0], *all_batches[1:])
-        return all_batches[0]
+        return all_batches[0], num_pad_across_dp
 
-    def _prepare_decode_inputs(self,
-                               num_decodes,
-                               num_scheduled_tokens,
-                               scheduler_output=None) -> DecodeInputData:
-        # Decodes run as one single padded batch with shape [batch, 1]
-        #
-        # We need to set _PAD_SLOT_ID for the padding tokens in the
-        # slot_mapping, such that the attention KV cache insertion
-        # logic knows to ignore those indicies. Otherwise, the
-        # padding data can be dummy since we have a causal mask.
-
-        block_table_cpu_tensor = self.input_batch.block_table[
-            0].get_cpu_tensor()
-        if num_decodes == 0:
-            return DecodeInputData(num_decodes=0)
-        # BLOCK_TABLE [batch, max_num_blocks_per_req]
-        context_lens = self.input_batch.num_computed_tokens_cpu[:num_decodes]
-
+    def _create_decode_input_data(
+            self, num_decodes, num_scheduled_tokens, context_lens,
+            block_table_cpu_tensor, num_computed_tokens_cpu,
+            token_ids_cpu) -> tuple[DecodeInputData, int]:
         # NOTE(kzawora): the +1 is what causes this entire thing to work,
         # as in the paged attention, we don't fetch just the context from cache,
         # but also kvs for the current token
@@ -1622,7 +1628,8 @@ class HPUModelRunner:
             num_decodes, sum(num_blocks))[0]
 
         # dp aware padding
-        padded_batch_size += self.get_dp_padding(padded_batch_size)
+        num_pad_across_dp = self.get_dp_padding(padded_batch_size)
+        padded_batch_size += num_pad_across_dp
 
         num_tokens_per_req = num_scheduled_tokens[:num_decodes]
         num_tokens = max(num_tokens_per_req)
@@ -1812,7 +1819,42 @@ class HPUModelRunner:
                 block_size=self.block_size,
                 query_start_loc=query_start_loc,
             ),
-            spec_decode_metadata=spec_decode_metadata)
+            spec_decode_metadata=spec_decode_metadata), num_pad_across_dp
+
+    def _prepare_decode_inputs(
+            self, num_decodes,
+            num_scheduled_tokens) -> tuple[DecodeInputData, int]:
+        # Decodes run as one single padded batch with shape [batch, 1]
+        #
+        # We need to set _PAD_SLOT_ID for the padding tokens in the
+        # slot_mapping, such that the attention KV cache insertion
+        # logic knows to ignore those indicies. Otherwise, the
+        # padding data can be dummy since we have a causal mask.
+
+        num_pad_across_dp = self.get_dp_padding(num_decodes)
+        if num_decodes == 0:
+            return DecodeInputData(num_decodes=0), num_pad_across_dp
+        # BLOCK_TABLE [batch, max_num_blocks_per_req]
+        context_lens = self.input_batch.num_computed_tokens_cpu[:num_decodes]
+        block_table_cpu_tensor = self.input_batch.block_table[
+            0].get_cpu_tensor()
+        return self._create_decode_input_data(
+            num_decodes, num_scheduled_tokens, context_lens,
+            block_table_cpu_tensor, self.input_batch.num_computed_tokens_cpu,
+            self.input_batch.token_ids_cpu)
+
+    def _create_dummy_decode_input_data(self) -> DecodeInputData:
+        # create dummy decode input data with batch size 1
+        context_lens = [128]
+        block_table_cpu_tensor = torch.zeros([self._PAD_BLOCK_ID],
+                                             dtype=torch.int32).reshape(1, -1)
+        num_computed_tokens_cpu = np.array([128], dtype=np.int32)
+        token_ids = np.array(list(int(i) for i in range(context_lens[0])))
+
+        return self._create_decode_input_data(1, [1], context_lens,
+                                              block_table_cpu_tensor,
+                                              num_computed_tokens_cpu,
+                                              token_ids)[0]
 
     def _get_cumsum_and_arange(
         self,
@@ -1992,18 +2034,7 @@ class HPUModelRunner:
         dp_size = self.vllm_config.parallel_config.data_parallel_size
         dp_rank = self.vllm_config.parallel_config.data_parallel_rank
 
-        # For DP: Don't pad when setting enforce_eager.
-        # This lets us set enforce_eager on the prefiller in a P/D setup and
-        # still use CUDA graphs (enabled by this padding) on the decoder.
-        #
-        # TODO(tms) : There are many cases where padding is enabled for
-        # prefills, causing unnecessary and excessive padding of activations.
-
-        # skip padding for non PD disagg case to avoid padding on prefill batch
-        # size and decode batch size
-        if dp_size == 1 or self.vllm_config.model_config.enforce_eager or (
-                self.vllm_config.kv_transfer_config is None
-                or self.vllm_config.kv_transfer_config.kv_connector is None):
+        if dp_size == 1:
             return 0
 
         num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
@@ -2020,7 +2051,6 @@ class HPUModelRunner:
                                warmup_mode=False,
                                inputs_embeds=None,
                                model_mm_kwargs=None):
-
         # FORWARD.
         batch_size = token_ids.size(0)
         seq_len = self._seq_len(attn_metadata)
@@ -2309,9 +2339,11 @@ class HPUModelRunner:
         num_prefills = len(pd_info.prompt_req_ids)
         num_reqs = num_decodes + num_prefills
         with self.profiler.record_event('internal', 'prepare_input_tensors'):
-            prefill_data, decode_data = self._prepare_inputs(
+            prefill_input_data, decode_input_data = self._prepare_inputs(
                 scheduler_output, num_prefills, num_decodes)
-        # FIXME(kzawora): Currently there's no handling of logprobs. Fix that
+        prefill_data, num_pad_prefill_batch_across_dp = prefill_input_data
+        decode_data, num_pad_decode_batch_across_dp = decode_input_data
+        #FIXME(kzawora): Currently there's no handling of logprobs. Fix that
         # later.
         prefill_sampled_token_ids = []
         prefill_sampled_requests = []
@@ -2377,6 +2409,7 @@ class HPUModelRunner:
                         model_mm_kwargs=model_mm_kwargs,
                         warmup_mode=warmup_mode)
                 htorch.core.mark_step()
+
                 # Skip separate sampling for structured output
                 if structured_output:
                     logits_prompt.append(logits_device)
@@ -2407,8 +2440,26 @@ class HPUModelRunner:
                         prompt_batch_idx=idx,
                         is_prompt=True)
                     self.profiler.record_counter(self.event_start, counters)
+
             if self.is_driver_worker and self.profiler.enabled:
                 self.profiler_counter_helper.reset_prompt_seq_stats()
+
+        else:
+            if num_pad_prefill_batch_across_dp > 0:
+                htorch.core.mark_step()
+                dummy_prefill_input_data_list = self._create_dummy_prefill_batch_contents(
+                    num_pad_prefill_batch_across_dp)
+                for dummy_prefill_input_data in dummy_prefill_input_data_list:
+                    htorch.core.mark_step()
+                    _, dummy_logits_device = \
+                    self._execute_model_generic(
+                        dummy_prefill_input_data.token_ids[0],
+                        dummy_prefill_input_data.position_ids[0],
+                        dummy_prefill_input_data.attn_metadata[0],
+                        dummy_prefill_input_data.logits_indices[0],
+                        self.kv_caches,
+                        warmup_mode=warmup_mode)
+                    htorch.core.mark_step()
 
         ######################### DECODES #########################
         # Decodes run as one single batch with [padded_decode_bs, 1]
@@ -2486,6 +2537,19 @@ class HPUModelRunner:
                     prompt_batch_idx=None,
                     is_prompt=False)
                 self.profiler.record_counter(self.event_start, counters)
+        else:
+            if num_pad_decode_batch_across_dp > 0:
+                dummy_decode_input_data = self._create_dummy_decode_input_data(
+                )
+                htorch.core.mark_step()
+                _, dummy_logits_device = self._execute_model_generic(
+                    dummy_decode_input_data.token_ids,
+                    dummy_decode_input_data.position_ids,
+                    dummy_decode_input_data.attn_metadata,
+                    dummy_decode_input_data.logits_indices,
+                    self.kv_caches,
+                    warmup_mode=warmup_mode)
+                htorch.core.mark_step()
 
             ################## Spec Decode ##################
             # work on spec decode if max_gen_len > 1
@@ -2641,6 +2705,7 @@ class HPUModelRunner:
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             pooler_output=[],
         )
+
         return model_runner_output
 
     def load_model(self) -> None:
@@ -3097,8 +3162,8 @@ class HPUModelRunner:
 
     @torch.inference_mode()
     def profile_run(self) -> None:
+        return
         """Profile to measure peak memory during forward pass."""
-
         # use an empty tensor instead of `None`` to force Dynamo to pass
         # it by reference, rather by specializing on the value `None`.
         # the `dtype` argument does not matter, and we use `float32` as
@@ -3112,7 +3177,6 @@ class HPUModelRunner:
         max_seq_len = math.ceil(
             (self.max_num_tokens // self.max_prefill_batch_size) /
             self.block_size) * self.block_size
-        max_seq_len = min(max_seq_len, self.max_model_len)
         self._execute_dummy_scenario(
             (self.max_prefill_batch_size, max_seq_len, 0), None)
 

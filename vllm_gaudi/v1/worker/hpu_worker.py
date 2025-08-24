@@ -178,16 +178,14 @@ class HPUWorker(WorkerBase):
         single_kv_block_size_bytes = 0
         for layer_name, layer_spec in kv_cache_spec.items():
             if isinstance(layer_spec, FullAttentionSpec):
-                # dtype = layer_spec.dtype
+                dtype = layer_spec.dtype
 
                 # Use an empty tensor instead of `None`` to force Dynamo to pass
                 # it by reference, rather by specializing on the value ``None``.
-                # hpu_k_cache = torch.tensor([], dtype=dtype, device='hpu')
-                # hpu_v_cache = torch.tensor([], dtype=dtype, device='hpu')
+                hpu_k_cache = torch.tensor([], dtype=dtype, device='hpu')
+                hpu_v_cache = torch.tensor([], dtype=dtype, device='hpu')
 
-                # kv_caches[layer_name] = (hpu_k_cache, hpu_v_cache)
-                # avoid issue of reading kv cache during profiling
-                kv_caches[layer_name] = None
+                kv_caches[layer_name] = (hpu_k_cache, hpu_v_cache)
 
                 single_kv_block_size_bytes += layer_spec.page_size_bytes
 
