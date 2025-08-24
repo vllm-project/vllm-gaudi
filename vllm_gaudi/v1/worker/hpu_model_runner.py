@@ -1688,6 +1688,26 @@ class HPUModelRunner:
             finished_recving=finished_recving,
         )
 
+    def _get_cumsum_and_arange(
+        self,
+        num_tokens: np.ndarray,
+        cumsum_dtype: Optional[np.dtype] = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Get the cumulative sum and batched arange of the given array.
+        # E.g., [2, 5, 3] -> ([2, 7, 10], [0, 1, 0, 1, 2, 3, 4, 0, 1, 2])
+        # Equivalent to but faster than:
+        # np.concatenate([np.arange(n) for n in num_tokens])
+        """
+        # Step 1. [2, 5, 3] -> [2, 7, 10]
+        cu_num_tokens = np.cumsum(num_tokens, dtype=cumsum_dtype)
+        total_num_tokens = cu_num_tokens[-1]
+        # Step 2. [2, 7, 10] -> [0, 0, 2, 2, 2, 2, 2, 7, 7, 7]
+        cumsums_offsets = np.repeat(cu_num_tokens - num_tokens, num_tokens)
+        # Step 3. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        arange = self.arange_np[:total_num_tokens] - cumsums_offsets
+
+        return cu_num_tokens, arange
+    
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1753,21 +1773,52 @@ class HPUModelRunner:
             # Return empty ModelRunnerOuptut if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
         if self.input_batch.pooling_params:
-            # Prepare inputs directly from scheduler_output
-            # Move tokens to device
-            token_ids = self.input_batch.token_ids_cpu_tensor.to(self.device)
-            # For encoder-only models, KV cache is None
-            kv_cache = None
-            # Position IDs may not exist; some models just rely on token positions
-            position_ids = None  
-            # Attention mask: usually 1 for actual tokens, 0 for padding
-            attn_metadata = (token_ids != 0).to(self.device)
+            num_scheduled_tokens = []
+            input_ids_list = []
+            num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu
+            num_reqs = self.input_batch.num_reqs
 
-            # Forward pass — no KV cache
-            hidden_states = self.model.forward(
-            input_ids=token_ids,
-            positions=position_ids
-        )
+            # Step 1: gather input_ids and num_scheduled_tokens
+            for idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+                assert req_id is not None
+                seq_num_scheduled = scheduler_output.num_scheduled_tokens[req_id]
+                num_scheduled_tokens.append(seq_num_scheduled)
+                scheduled_req = scheduler_output.scheduled_new_reqs[int(req_id)]
+                token_ids = scheduled_req.prompt_token_ids
+                # Convert to torch tensor if not already
+                if not isinstance(token_ids, torch.Tensor):
+                    token_ids = torch.tensor(token_ids, dtype=torch.long)
+                # Flatten in case it's nested
+                token_ids = token_ids.flatten()
+                input_ids_list.append(token_ids)
+                    
+            # Step 2: concatenate input_ids across requests
+            input_ids = torch.cat(input_ids_list, dim=0).to(self.device)
+
+            # Step 3: build req_indices: [0,0,...,1,1,...,2,2,...] for each token
+            req_indices = np.repeat(np.arange(num_reqs, dtype=np.int64), num_scheduled_tokens)
+
+            # Step 4: arange: [0, 1, 2, ..., total_tokens-1]
+            total_tokens = sum(num_scheduled_tokens)
+            token_offset_within_request = np.arange(total_tokens, dtype=np.int64)
+
+            # Step 5: add prefix lengths to get absolute positions
+            absolute_positions_np = num_computed_tokens_cpu[req_indices] + token_offset_within_request
+
+            # Step 6: convert to torch tensor
+            position_ids = torch.from_numpy(absolute_positions_np).to(self.device)
+
+            # (Optional) Attention mask
+            attn_metadata = None
+
+            # Forward pass
+            with set_forward_context(
+                attn_metadata,
+                self.vllm_config,):
+                hidden_states = self.model.forward(
+                    input_ids=input_ids,
+                    positions=position_ids
+                )
 
             # Pool the hidden states and return
             num_scheduled_tokens_np = self.input_batch.num_tokens.copy()
@@ -1775,7 +1826,7 @@ class HPUModelRunner:
             # Pool the hidden states
             return self._pool(
                 hidden_states,
-                num_scheduled_tokens=int(token_ids.size(1)),
+                num_scheduled_tokens=int(token_ids.size(0)),
                 num_scheduled_tokens_np=num_scheduled_tokens_np,
                 finished_sending=None,
                 finished_recving=None,
