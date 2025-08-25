@@ -221,20 +221,23 @@ class HPUWorker(WorkerBase):
         self.model_runner.mem_margin = hpu_memory_margin
         cache_size_bytes = available_hpu_memory * graph_headroom
         graph_headroom_bytes = available_hpu_memory * (1 - graph_headroom)
-        dummy_block_headroom = single_kv_block_size_bytes
+        num_dummy_blocks = 1
+        if self.model_runner.use_lookahead_decoding:
+            num_dummy_blocks += self.scheduler_config.max_num_seqs
+        dummy_blocks_headroom = single_kv_block_size_bytes * num_dummy_blocks
         msg = (
             f"Free device memory: {format_bytes(free_hpu_memory)}, "
             f"{format_bytes(available_hpu_memory)} usable "
             f"(gpu_memory_utilization={self.cache_config.gpu_memory_utilization}),"
             f" {format_bytes(graph_headroom_bytes)} reserved for HPUGraphs "
             f"(VLLM_GRAPH_RESERVED_MEM={graph_reserved_mem}), "
-            f"{format_bytes(dummy_block_headroom)} reserved for KV cache dummy "
-            f"block {format_bytes(cache_size_bytes-dummy_block_headroom)} "
+            f"{format_bytes(dummy_blocks_headroom)} reserved for KV cache dummy blocks"
+            f"block {format_bytes(cache_size_bytes-dummy_blocks_headroom)} "
             "reserved for usable KV cache")
 
         logger.info(msg)
         gc.collect()
-        return cache_size_bytes - dummy_block_headroom
+        return cache_size_bytes - dummy_blocks_headroom
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:

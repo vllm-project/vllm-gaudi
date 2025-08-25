@@ -32,6 +32,7 @@ from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import (VllmConfig, update_config)
 from vllm.forward_context import set_forward_context
+from vllm.model_executor import set_random_seed
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import get_sampler
@@ -681,11 +682,12 @@ class HPUModelRunner:
         # High-level profiler
         self.profiler = HabanaHighLevelProfiler()
         self.profiler_counter_helper = HabanaProfilerCounterHelper()
-
         # Lookahead decoding
         self.use_lookahead_decoding = get_config().lookahead_decoding
         # Storage for lookahead tokens that are computed but not yet scheduled
         self.lookahead_tokens: dict = {}
+        self.borrowed_blocks_mapping_fwd = {}
+        self.borrowed_blocks_mapping_bwd = {}
 
         self.defragmenter = OnlineDefragmenter()
         self.debug_fwd = init_debug_logger('fwd')
@@ -1307,6 +1309,28 @@ class HPUModelRunner:
         else:
             return self._bucketize_2d_prompt
 
+    def borrow_block(self, block_ids_key):
+        # Borrow a block from the free block pool
+        for block_id, req_hash in self.borrowed_blocks_mapping_fwd.items():
+            # Take first free block
+            if len(req_hash) == 0:
+                self.borrowed_blocks_mapping_fwd[block_id] = block_ids_key
+                self.borrowed_blocks_mapping_bwd[tuple(block_ids_key)] = block_id
+                return block_id
+
+    def free_borrowed_block(self, block_ids):
+        # Free a borrowed block
+        block_ids_hash = block_ids[:-1]
+        new_block = block_ids[-1]
+        borrowed_block_id = self.borrowed_blocks_mapping_bwd[tuple(block_ids_hash)]
+        self.borrowed_blocks_mapping_fwd[borrowed_block_id] = []
+        del self.borrowed_blocks_mapping_bwd[tuple(block_ids_hash)]
+        self.attn_backend.copy_blocks(self.kv_caches, torch.tensor([[borrowed_block_id * self.block_size,
+                                                                     new_block * self.block_size]],
+                                                                   dtype=torch.long,
+                                                                   device='hpu'))
+
+
     def _can_merge_prefill_contents(self, lhs, rhs):
         combined_num_tokens = lhs.get_num_tokens() + rhs.get_num_tokens()
         bucketing_fn = self._get_prompt_bucketing_fn()
@@ -1564,16 +1588,15 @@ class HPUModelRunner:
         
         # BLOCK_TABLE [batch, max_num_blocks_per_req]
         context_lens = []
-        
         # Handle regular decodes
         for i in range(original_num_decodes):
-            context_lens.append(self.input_batch.num_computed_tokens_cpu[i])
+            context_lens.append(self.input_batch.num_computed_tokens_cpu[i] + int(self.use_lookahead_decoding))
         
         # Handle lookahead decodes
         if self.use_lookahead_decoding:
             # For lookahead decodes use the prompt length + 1 (the newly generated token)
             for i in range(original_num_decodes, num_decodes):
-                context_lens.append(self.input_batch.num_prompt_tokens[i] + 1)
+                context_lens.append(self.input_batch.num_prompt_tokens[i])
         
         context_lens = np.array(context_lens)
 
@@ -1591,6 +1614,12 @@ class HPUModelRunner:
         block_tables_list = []
         for i, n in enumerate(num_blocks):
             seq_block_table = block_table_cpu_tensor[i, :n].tolist()
+            if self.use_lookahead_decoding:
+                if seq_block_table[-1] == 0:
+                    seq_block_table[-1] = self.borrow_block(seq_block_table[:-1])
+                    block_table_cpu_tensor[i, n-1] = seq_block_table[-1]
+                elif tuple(seq_block_table[:-1]) in self.borrowed_blocks_mapping_bwd.keys():
+                    self.free_borrowed_block(seq_block_table)
             assert len(seq_block_table) == n
             block_tables_list.append(seq_block_table)
 
@@ -1720,10 +1749,10 @@ class HPUModelRunner:
             ))
 
     def update_lookahead_decode_inputs(self, decode_data, num_prefills, num_decodes, 
-                                       prefill_sampled_tokens, prefill_sampled_requests):
+                                       prefill_sampled_tokens, prefill_sampled_requests, pd_info):
         """
         Update decode_data for lookahead decoding to use newly generated tokens from prefill phase
-        instead of stale prompt tokens as inputs.
+        and lookahead stored tokens for originally scheduled decodes
         """
         
         # Get the original decode count (before lookahead decodes)
@@ -1749,11 +1778,19 @@ class HPUModelRunner:
                 # Update position to point to the correct location (after the generated token)
                 prompt_len = self.input_batch.num_prompt_tokens[batch_idx]
                 decode_data.position_ids[i, 0] = torch.tensor(prompt_len, dtype=torch.int, device=self.device)
+            # We need to update self.requests for preapre_sampling here
+            if not self.is_chunked_prefill_dummy_output_token(req_id, 
+                                                              prefill_sampled_requests, 
+                                                              pd_info.prompt_req_ids):
+                self.requests[req_id].output_token_ids.append(new_token.item())
 
         # Replace tokens in regular decodes with lookahead stored tokens
         for i in range(0, original_num_decodes):
             req_id = self.input_batch.req_ids[i]
-            decode_data.token_ids[i] = self.lookahead_tokens.get(req_id, 0)[0]
+            token = self.lookahead_tokens.get(req_id, 0)[0]
+            decode_data.token_ids[i] = token
+            # We need to update self.requests for preapre_sampling here
+            self.requests[req_id].output_token_ids.append(token.item())
 
         return DecodeInputData(
             num_decodes=decode_data.num_decodes,
@@ -2205,6 +2242,7 @@ class HPUModelRunner:
                             batch_changed,
                             req_id,
                             pad_to=logits_device.shape[0])
+                        set_random_seed(self.model_config.seed)
                         sampler_output = self.sampler(
                             logits=logits_device,
                             sampling_metadata=sampling_metadata)
@@ -2233,7 +2271,7 @@ class HPUModelRunner:
         if num_decodes > 0:
             if self.use_lookahead_decoding:
                 decode_data = self.update_lookahead_decode_inputs(decode_data, num_prefills, num_decodes,
-                                                prefill_sampled_token_ids, prefill_sampled_requests)
+                                                prefill_sampled_token_ids, prefill_sampled_requests, pd_info)
             self.event_start = self.profiler.get_timestamp_us()
             self.profiler.start("internal", "decode")
             assert decode_data is not None
@@ -2257,6 +2295,7 @@ class HPUModelRunner:
                         batch_changed,
                         pd_info.decode_req_ids,
                         pad_to=logits_device.shape[0])
+                    set_random_seed(self.model_config.seed)
                     sampler_output = self.sampler(
                         logits=logits_device, sampling_metadata=sampling_metadata)
                     if self.use_lookahead_decoding:
@@ -2362,7 +2401,7 @@ class HPUModelRunner:
 
 
         ######### UPDATE REQUEST STATE WITH GENERATED TOKENS #########
-        for req_id in self.input_batch.req_ids[:num_reqs]:
+        for n, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
             req_state = self.requests[req_id]
             i = self.input_batch.req_id_to_index[req_id]
             seq_len = (req_state.num_computed_tokens +
@@ -2372,7 +2411,13 @@ class HPUModelRunner:
             self.input_batch.token_ids_cpu[i, seq_len:seq_len +
                                            num_tokens] = token_ids
             self.input_batch.num_tokens[i] += len(token_ids)
-            req_state.output_token_ids.extend(token_ids)
+            # With lookahead decoding output token ids for decodes were already updated in 
+            # update_lookahead_decode_inputs()
+            if self.use_lookahead_decoding:
+                if n > num_decodes - 1:
+                    req_state.output_token_ids.extend(token_ids)
+            else:
+                req_state.output_token_ids.extend(token_ids)
 
         # NOTE(chendi): enable cache based on PR(#20291)
         # Cache the sampled tokens in the model runner, so that the scheduler
@@ -2402,7 +2447,6 @@ class HPUModelRunner:
             self.input_batch.num_tokens[req_idx] = end_idx
             req_id = self.input_batch.req_ids[req_idx]
             req_state = self.requests[req_id]
-            req_state.output_token_ids.extend(sampled_ids)
         ################## RETURN ##################
         # Create output.
         # Only return the originally scheduled requests, not the lookahead requests
@@ -2933,6 +2977,9 @@ class HPUModelRunner:
         self._PAD_SLOT_ID = num_blocks * self.block_size
 
         htorch.hpu.synchronize()
+        if self.use_lookahead_decoding:
+            self.borrowed_blocks_mapping_fwd = {block_id : [] for block_id in range(num_blocks-(self.max_num_seqs+2), num_blocks-2)}
+
 
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
         model = self.get_model()
