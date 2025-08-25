@@ -81,12 +81,28 @@ class HpuCommunicator(DeviceCommunicatorBase):
     def dispatch(
             self, hidden_states: torch.Tensor,
             router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        cu_tokens_across_dp_cpu = get_forward_context(
-        ).dp_metadata.cu_tokens_across_dp_cpu
-        hidden_states_across_dp = self.naive_multicast(
-            hidden_states, cu_tokens_across_dp_cpu)
-        router_logits_across_dp = self.naive_multicast(
-            router_logits, cu_tokens_across_dp_cpu)
+        input_size = hidden_states.size()
+        # Allocate output tensor.
+        output_size = list(input_size)
+        output_size[0] *= self.dp_world_size
+        hidden_states_across_dp = torch.empty(output_size,
+                                              dtype=hidden_states.dtype,
+                                              device=hidden_states.device)
+        torch.distributed.all_gather_into_tensor(
+            hidden_states_across_dp,
+            hidden_states,
+            group=self.dp_group.device_group)
+
+        router_logits_size = router_logits.size()
+        router_logits_output_size = list(router_logits_size)
+        router_logits_output_size[0] *= self.dp_world_size
+        router_logits_across_dp = torch.empty(router_logits_output_size,
+                                              dtype=router_logits.dtype,
+                                              device=router_logits.device)
+        torch.distributed.all_gather_into_tensor(
+            router_logits_across_dp,
+            router_logits,
+            group=self.dp_group.device_group)
         return hidden_states_across_dp, router_logits_across_dp
 
     def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
