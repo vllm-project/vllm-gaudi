@@ -6,7 +6,7 @@ import pytest
 import torch
 import habana_frameworks.torch  # noqa: F401
 
-from typing import Optional, Union
+from typing import Optional
 from itertools import cycle
 from unittest.mock import patch
 
@@ -258,7 +258,7 @@ def test_sampler_top_p_top_k_min_p(batch_size: int, top_k: int, top_p: float,
     # to a [[1023, 1024], [1022, 1023], ...]
     # to compare with expected result for each sample
     expected_nonzero_idx = [[] for _ in range(batch_size)
-                            ]  # type: list[list[Union[int, int]]]
+                            ]  # type: list[list[int]]
     for prompt_no, idx in idx_of_nonzero.to("cpu").tolist():
         expected_nonzero_idx[prompt_no].append(idx)
 
