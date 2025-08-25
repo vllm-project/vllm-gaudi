@@ -7,6 +7,7 @@ if TYPE_CHECKING:
     VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
     VLLM_HPU_USE_DELAYED_SAMPLING: bool = False
     VLLM_HPU_FORCE_CHANNEL_FP8: bool = True
+    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 120
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -30,6 +31,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_HPU_FORCE_CHANNEL_FP8":
     lambda: os.environ.get("VLLM_HPU_FORCE_CHANNEL_FP8", "true").lower() in
     ("1", "true"),
+
+    # Time (in seconds) after which the KV cache on the producer side is
+    # automatically cleared if no READ notification is received from the
+    # consumer. This is only applicable when using NixlConnector in a
+    # disaggregated decode-prefill setup.
+    "VLLM_NIXL_ABORT_REQUEST_TIMEOUT":
+    lambda: int(os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "120")),
 }
 
 # end-env-vars-definition
