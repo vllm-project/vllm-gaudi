@@ -1667,7 +1667,21 @@ class HPUModelRunner:
             pooling_metadata=pooling_metadata)
 
         pooler_output: list[Optional[torch.Tensor]] = []
-        seq_lens = self.seq_lens[:self.input_batch.num_reqs]
+        num_reqs = self.input_batch.num_reqs
+
+        # Sequence length = prompt tokens + already computed tokens
+        seq_lens = (
+            torch.tensor(
+                self.input_batch.num_prompt_tokens[:num_reqs],
+                dtype=torch.int32,
+                device=self.device
+            )
+            + torch.tensor(
+                self.input_batch.num_computed_tokens_cpu[:num_reqs],
+                dtype=torch.int32,
+                device=self.device
+            )
+        )
         for raw_output, seq_len, prompt_len in zip(
                 raw_pooler_output, seq_lens, pooling_metadata.prompt_lens):
 
@@ -1680,13 +1694,11 @@ class HPUModelRunner:
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=[],
-            spec_token_ids=None,
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
-            finished_sending=finished_sending,
-            finished_recving=finished_recving,
-        )
+            kv_connector_output=None,
+            )
 
     def _get_cumsum_and_arange(
         self,
