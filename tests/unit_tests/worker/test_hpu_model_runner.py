@@ -20,6 +20,7 @@ from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor)
 from vllm.v1.sample.metadata import SamplingMetadata
+import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
 
@@ -104,6 +105,8 @@ def model_runner():
     model_config = vllm_config.model_config
     num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
     head_size = model_config.get_head_size()
+    # We need to update the environment before creating Attention
+    environment.set_vllm_config(vllm_config)
     vllm_config.compilation_config.static_forward_context[
         "layer.0"] = Attention(num_heads, head_size, 0.1)
     runner = HPUModelRunner(vllm_config, DEVICE)
