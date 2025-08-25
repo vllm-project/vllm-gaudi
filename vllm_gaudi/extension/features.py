@@ -78,7 +78,7 @@ def get_features():
         ValueFromList('bucketing_strategy', bucketing_strategies),
         Value('defrag', False),
         Value('regional_compilation', True, env_var='VLLM_T_COMPILE_REGIONAL_COMPILATION', env_var_type=boolean),
-        Value('dynamic_shapes_compilation', False, env_var='VLLM_T_COMPILE_DYNAMIC_SHAPES', env_var_type=boolean),
+        Value('dynamic_shapes_compilation', True, env_var='VLLM_T_COMPILE_DYNAMIC_SHAPES', env_var_type=boolean),
         Value('fullgraph_compilation', False, env_var='VLLM_T_COMPILE_FULLGRAPH', env_var_type=boolean),
     ]
     return split_values_and_flags(features)

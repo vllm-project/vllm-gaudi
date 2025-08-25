@@ -2337,6 +2337,9 @@ class HPUModelRunner:
         """Entrypoint for a torch.compilation of the model"""
         if (not is_fake_hpu() and not htorch.utils.internal.is_lazy()
                 and not self.vllm_config.model_config.enforce_eager):
+            # force_parameter_static_shapes = False  alows to use dynamic
+            # shapes on tensors added to module via register_buffer()
+            torch._dynamo.config.force_parameter_static_shapes = False
             self.compile_config = HPUCompileConfig()
             if self.compile_config.regional_compilation:
                 self._compile_methods()
