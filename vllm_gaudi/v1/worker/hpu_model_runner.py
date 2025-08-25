@@ -624,8 +624,8 @@ class HPUModelRunner:
         self.inc_initialized_successfully = False
         self._is_inc_finalized = False
 
-        # req_id -> (input_id -> encoder_output)
-        self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
+        # mm_hash -> encoder_output
+        self.encoder_cache: dict[str, torch.Tensor] = {}
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
@@ -736,7 +736,6 @@ class HPUModelRunner:
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
-            self.encoder_cache.pop(req_id, None)
 
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
@@ -751,12 +750,8 @@ class HPUModelRunner:
                 removed_req_indices.append(req_index)
 
         # Free the cached encoder outputs.
-        for req_id, input_id in scheduler_output.free_encoder_input_ids:
-            encoder_outputs = self.encoder_cache.get(req_id)
-            if encoder_outputs is not None:
-                encoder_outputs.pop(input_id, None)
-                if not encoder_outputs:
-                    self.encoder_cache.pop(req_id, None)
+        for mm_hash in scheduler_output.free_encoder_mm_hashes:
+            self.encoder_cache.pop(mm_hash, None)
 
         # Remove the unscheduled requests from the persistent batch.
         # NOTE(woosuk): The unscheduled requests are either preempted requests
@@ -792,6 +787,7 @@ class HPUModelRunner:
                 prompt_token_ids=new_req_data.prompt_token_ids,
                 mm_kwargs=new_req_data.mm_kwargs,
                 mm_positions=new_req_data.mm_positions,
+                mm_hashes=new_req_data.mm_hashes,
                 sampling_params=sampling_params,
                 pooling_params=None,
                 generator=generator,
@@ -981,15 +977,17 @@ class HPUModelRunner:
 
         # Batch the multi-modal inputs.
         mm_kwargs = list[MultiModalKwargsItem]()
-        req_ids_pos = list[tuple[str, int, PlaceholderRange]]()
+        # List of tuple (mm_hash, pos_info)
+        mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
         for req_id in req_ids:
             encoder_input_ids = scheduled_encoder_inputs[req_id]
             req_state = self.requests[req_id]
 
             for mm_input_id in encoder_input_ids:
+                mm_hash = req_state.mm_hashes[mm_input_id]
                 mm_kwargs.append(req_state.mm_kwargs[mm_input_id])
-                req_ids_pos.append(
-                    (req_id, mm_input_id, req_state.mm_positions[mm_input_id]))
+                mm_hashes_pos.append(
+                    (mm_hash, req_state.mm_positions[mm_input_id]))
 
         # Batch mm inputs as much as we can: if a request in the batch has
         # multiple modalities or a different modality than the previous one,
@@ -1033,14 +1031,14 @@ class HPUModelRunner:
         # This will be necessary after mm prefill batching constraints are removed # noqa E501
 
         # Cache the encoder outputs.
-        for (req_id, input_id, pos_info), output in zip(
-                req_ids_pos,
+        for (mm_hash, pos_info), output in zip(
+                mm_hashes_pos,
                 encoder_outputs,
         ):
             if req_id not in self.encoder_cache:
                 self.encoder_cache[req_id] = {}
 
-            self.encoder_cache[req_id][input_id] = scatter_mm_placeholders(
+            self.encoder_cache[mm_hash] = scatter_mm_placeholders(
                 output,
                 is_embed=pos_info.is_embed,
             )
@@ -1060,6 +1058,7 @@ class HPUModelRunner:
             num_computed_tokens = \
                 req_state.num_computed_tokens + shift_computed_tokens
             mm_positions = req_state.mm_positions
+            mm_hashes = req_state.mm_hashes
             for i, pos_info in enumerate(mm_positions):
                 start_pos = pos_info.offset
                 num_encoder_tokens = pos_info.length
@@ -1081,9 +1080,11 @@ class HPUModelRunner:
                     num_computed_tokens - start_pos + num_scheduled_tokens,
                     num_encoder_tokens)
                 assert start_idx < end_idx
-                assert req_id in self.encoder_cache
-                assert i in self.encoder_cache[req_id]
-                encoder_output = self.encoder_cache[req_id][i]
+                mm_hash = mm_hashes[i]
+                encoder_output = self.encoder_cache.get(mm_hash, None)
+                assert encoder_output is not None,\
+                      f"Encoder cache miss for {mm_hash}."
+                encoder_output = self.encoder_cache[mm_hash]
 
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
