@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import collections
 import contextlib
-import copy
 import functools
 import itertools
 import math
@@ -1330,7 +1329,6 @@ class HPUModelRunner:
                                                                    dtype=torch.long,
                                                                    device='hpu'))
 
-
     def _can_merge_prefill_contents(self, lhs, rhs):
         combined_num_tokens = lhs.get_num_tokens() + rhs.get_num_tokens()
         bucketing_fn = self._get_prompt_bucketing_fn()
@@ -2134,6 +2132,7 @@ class HPUModelRunner:
         # Transfer [tokD0, tokD1, tokD2, 0, tokP0, tokP1, tokP2, 0] to CPU
         # On CPU, sanitize [tokD0, tokD1, tokD2, 0, tokP0, tokP1, tokP2, 0] -> [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2] # noqa
         # Return [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2]
+
         if self.defragmenter.enabled and self.kv_caches:
             new = {
                 req.req_id: flatten(req.block_ids)
@@ -2150,6 +2149,7 @@ class HPUModelRunner:
             self.defragmenter.update_state(new | cached,
                                            scheduler_output.finished_req_ids)
             self.defragmenter.defragment()
+  
         batch_changed = self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOuptut if there's no work to do.
@@ -2171,8 +2171,8 @@ class HPUModelRunner:
         # later.
         prefill_sampled_token_ids = []
         prefill_sampled_requests = []
-        decode_sampled_requests = []
         decode_sampled_token_ids = []
+        decode_sampled_requests = []
         # NOTE(tianmu-li): For structured output, combine logits before
         # postprocessing. Should it be done for all requests?
         structured_output = False
@@ -2180,7 +2180,7 @@ class HPUModelRunner:
             logits_prompt = []
             logits_decode = []
             structured_output = True
- 
+
         ######################### PREFILLS #########################
         if num_prefills > 0:
             htorch.core.mark_step()
@@ -2398,7 +2398,6 @@ class HPUModelRunner:
                         self.input_batch.req_id_to_index[req_id]].append(tok_id)
                 
         # NOTE(kzawora): idk what happens if part of batch doesn't have logprobs
-
 
         ######### UPDATE REQUEST STATE WITH GENERATED TOKENS #########
         for n, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
