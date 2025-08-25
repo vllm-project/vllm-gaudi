@@ -2526,6 +2526,7 @@ class HPUModelRunner:
             scheduled_encoder_inputs={},
             num_common_prefix_blocks=0,
             finished_req_ids=set(),
+            free_encoder_mm_hashes=[],
             structured_output_request_ids={},
             grammar_bitmask=None,
         )
@@ -2538,6 +2539,7 @@ class HPUModelRunner:
             scheduled_encoder_inputs={},
             num_common_prefix_blocks=0,
             finished_req_ids=set(req.req_id for req in requests),
+            free_encoder_mm_hashes=[],
             structured_output_request_ids={},
             grammar_bitmask=None,
         )
