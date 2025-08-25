@@ -114,6 +114,8 @@ def _construct_expected_sampling_metadata(
         if req.req_id not in req_ids_retained:
             continue
         index_in_input_batch = req_id_index_in_input_batch[req.req_id]
+        if index_in_input_batch >= num_reqs:
+            continue
         output_token_ids[index_in_input_batch] = req.output_token_ids
         prompt_token_ids[index_in_input_batch] = req.prompt_token_ids
         presence_penalties[
@@ -205,6 +207,7 @@ def _construct_cached_request_state(req_id_suffix: int):
         pooling_params=None,
         mm_kwargs=[],
         mm_positions=[],
+        mm_hashes=[],
         block_ids=([], ),
         generator=None,
         num_computed_tokens=len(output_token_ids),

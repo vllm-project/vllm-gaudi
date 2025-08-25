@@ -1,4 +1,4 @@
-model_name: "/mnt/weka/llm/Qwen3/Qwen3-30B-A3B/"
+model_name: "/mnt/weka/data/pytorch/Qwen/Qwen3-30B-A3B/"
 tasks:
 - name: "gsm8k"
   metrics:

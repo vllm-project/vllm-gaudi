@@ -154,7 +154,8 @@ class HpuPlatform(Platform):
             os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
 
     @classmethod
-    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: ModelConfig) -> bool:
         return kv_cache_dtype == "fp8_inc"
 
     @classmethod
