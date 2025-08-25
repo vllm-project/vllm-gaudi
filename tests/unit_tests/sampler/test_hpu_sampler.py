@@ -6,7 +6,7 @@ import pytest
 import torch
 import habana_frameworks.torch  # noqa: F401
 
-from typing import Optional
+from typing import Optional, List
 from itertools import cycle
 from unittest.mock import patch
 
@@ -29,9 +29,9 @@ SEED = 42
 
 
 def _create_sampling_params(temperature: float = 0,
-                            top_k: int = None,
-                            top_p: float = None,
-                            min_p: float = None,
+                            top_k: int = -1,
+                            top_p: float = 1,
+                            min_p: float = 0,
                             presence_penalty: float = 0,
                             repetition_penalty: float = 1,
                             frequency_penalty: float = 0,
@@ -42,9 +42,9 @@ def _create_sampling_params(temperature: float = 0,
     https://docs.vllm.ai/en/stable/api/vllm/sampling_params.html#vllm.sampling_params.SamplingParams 
     for params'''
     return SamplingParams(temperature=temperature,
-                          top_k=top_k if top_k is not None else -1,
-                          top_p=top_p if top_p is not None else 1,
-                          min_p=min_p if min_p is not None else 0,
+                          top_k=top_k,
+                          top_p=top_p,
+                          min_p=min_p,
                           presence_penalty=presence_penalty,
                           repetition_penalty=repetition_penalty,
                           frequency_penalty=frequency_penalty,
@@ -257,7 +257,7 @@ def test_sampler_top_p_top_k_min_p(batch_size: int, top_k: int, top_p: float,
     # Change [[0, 1023], [0, 1024], [1, 1022], ...]
     # to a [[1023, 1024], [1022, 1023], ...]
     # to compare with expected result for each sample
-    expected_nonzero_idx = [[] for _ in range(batch_size)]
+    expected_nonzero_idx = [[] for _ in range(batch_size)] # type: List[List[int]]
     for prompt_no, idx in idx_of_nonzero.to("cpu").tolist():
         expected_nonzero_idx[prompt_no].append(idx)
 
