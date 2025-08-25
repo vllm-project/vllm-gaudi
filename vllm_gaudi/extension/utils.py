@@ -7,9 +7,11 @@
 
 import os
 from functools import lru_cache, wraps
+from typing import Optional, Any
 
 import habana_frameworks.torch as htorch
 import torch
+import itertools
 
 from vllm_gaudi.extension.runtime import get_config
 
@@ -17,20 +19,6 @@ from vllm_gaudi.extension.runtime import get_config
 @lru_cache(maxsize=None)
 def is_fake_hpu() -> bool:
     return os.environ.get('VLLM_USE_FAKE_HPU', '0') != '0'
-
-
-def with_mark_steps(fn):
-
-    @wraps(fn)
-    def wrapped(*args, **kwargs):
-        htorch.core.mark_step()
-        result = fn(*args, **kwargs)
-        del args
-        del kwargs
-        htorch.core.mark_step()
-        return result
-
-    return wrapped
 
 
 class Matmul(torch.nn.Module):
@@ -176,3 +164,14 @@ class ModuleFusedSDPA(torch.nn.Module):
         )
 
 
+def pad_list(input, target_len, val_generator):
+    padding = target_len - len(input)
+    if padding > 0:
+        input.extend(itertools.islice(val_generator, padding))
+    return input
+
+
+def with_default(value: Optional[Any], default: Any) -> Any:
+    if value is not None:
+        return value
+    return default
