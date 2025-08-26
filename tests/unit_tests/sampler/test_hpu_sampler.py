@@ -204,8 +204,10 @@ def test_sampler_random_seeded(batch_size: int) -> None:
     assert torch.equal(sampler_output_first, sampler_output_second)
 
 
-@pytest.mark.parametrize("batch_size", [1, 32])
-@pytest.mark.parametrize("top_k", [-1, 1, 4])
+# beware of using higher BS, it will multiply the time of the test
+# and CI will run on G2 so it will be even slower in actual run (~4x)
+@pytest.mark.parametrize("batch_size", [1, 4])
+@pytest.mark.parametrize("top_k", [-1, 1, 2])
 @pytest.mark.parametrize("top_p", [0.1, 1])
 @pytest.mark.parametrize("min_p", [0, 0.1])
 def test_sampler_top_p_top_k_min_p(batch_size: int, top_k: int, top_p: float,
