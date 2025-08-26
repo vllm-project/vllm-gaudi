@@ -521,7 +521,6 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
     # input_hash(torch.tensor(123)) == input_hash(torch.tensor(321))
     # input_hash(123) != input_hash(321)
     # input_hash("abc") != input_hash("cba")
-    logger.info(f"Pre-trim metads {type(metadata)} {metadata}")
     attention_metadata = subtuple(metadata, 'TrimmedAttentionMetadata', [
         'attn_bias', 'seq_lens_tensor', 'context_lens_tensor', 'block_list',
         'block_mapping', 'block_usage', 'slot_mapping', 'is_prompt',
@@ -618,6 +617,15 @@ class HPUModelRunner:
             self.parallel_config)
         self.head_size = self.model_config.get_head_size()
         self.hidden_size = self.model_config.get_hidden_size()
+
+        self.attn_backend = get_attn_backend(
+            self.head_size,
+            self.dtype,
+            self.kv_cache_dtype,
+            self.block_size,
+            self.model_config.is_attention_free,
+            use_mla=self.model_config.use_mla,
+        )
 
         # Mult-modal-related.
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -2013,6 +2021,7 @@ class HPUModelRunner:
         else:
             # no hpu graphs for t.compile?
             use_graphs = False
+        logger.info(f"Pretrim metadata {attn_metadata}")
         trimmed_attn_metadata = trim_attn_metadata(attn_metadata)
         if self.is_driver_worker:
             model_event_name = ("model_forward_"
@@ -3157,11 +3166,13 @@ class HPUModelRunner:
                 raise ValueError(
                     f"Unknown KV cache spec type: {type(kv_cache_spec)}")
 
+            logger.info(f"Got attn_backends {attn_backends}")
             self.attn_groups.append(
                 create_attn_groups(attn_backends, kv_cache_spec))
 
         # Calculate reorder batch threshold (if neeeded)
-        self.calculate_reorder_batch_threshold()
+        # Not implemented
+        # self.calculate_reorder_batch_threshold()
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -3170,11 +3181,13 @@ class HPUModelRunner:
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
+        # TODO(tianmu-li): this needs to be changed for hybrid SSM models
         if len(kv_cache_config.kv_cache_groups) > 1:
             raise NotImplementedError(
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
 
+        self.initialize_attn_backend(kv_cache_config)
         kv_caches: dict[str, torch.Tensor] = {}
 
         for kv_cache_group in kv_cache_config.kv_cache_groups:
@@ -3192,6 +3205,7 @@ class HPUModelRunner:
                 # the min of all `num_blocks`. Verify it here.
                 assert num_blocks >= kv_cache_config.num_blocks
                 if isinstance(kv_cache_spec, FullAttentionSpec):
+                    logger.info(f"Attention spec {kv_cache_spec}")
                     kv_cache_shape = self.attn_backend.get_kv_cache_shape(
                         num_blocks + 1, kv_cache_spec.block_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
