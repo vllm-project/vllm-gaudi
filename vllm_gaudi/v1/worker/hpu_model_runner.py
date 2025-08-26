@@ -41,6 +41,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
                         is_pin_memory_available, LazyLoader)
 from vllm_gaudi.utils import HPUCompileConfig, is_fake_hpu
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.pool.metadata import PoolingMetadata
@@ -1469,7 +1470,6 @@ class HPUModelRunner:
                                 f"graphs{'T' if use_graphs else 'F'}")
         else:
             model_event_name = 'model_executable'
-        # with set_forward_context(attn_metadata, self.vllm_config):
         with self.profiler.record_event('internal', model_event_name):
             hidden_states = self.model.forward(
                 input_ids=token_ids,
@@ -1648,8 +1648,6 @@ class HPUModelRunner:
         hidden_states: torch.Tensor,
         num_scheduled_tokens: int,
         num_scheduled_tokens_np: np.ndarray,
-        finished_sending: Optional[set[str]],
-        finished_recving: Optional[set[str]],
     ) -> ModelRunnerOutput:
         assert self.input_batch.num_reqs ==\
             len(self.input_batch.pooling_params), \
@@ -1691,7 +1689,7 @@ class HPUModelRunner:
                 pooler_output.append(None)
 
         return ModelRunnerOutput(
-            req_ids=self.input_batch.req_ids,
+            req_ids=[self.input_batch.req_ids],
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=[],
             logprobs=None,
@@ -1795,7 +1793,7 @@ class HPUModelRunner:
                 assert req_id is not None
                 seq_num_scheduled = scheduler_output.num_scheduled_tokens[req_id]
                 num_scheduled_tokens.append(seq_num_scheduled)
-                scheduled_req = scheduler_output.scheduled_new_reqs[int(req_id)]
+                scheduled_req = scheduler_output.scheduled_new_reqs[idx]
                 token_ids = scheduled_req.prompt_token_ids
                 # Convert to torch tensor if not already
                 if not isinstance(token_ids, torch.Tensor):
@@ -1807,21 +1805,33 @@ class HPUModelRunner:
             # Step 2: concatenate input_ids across requests
             input_ids = torch.cat(input_ids_list, dim=0).to(self.device)
 
-            # Step 3: build req_indices: [0,0,...,1,1,...,2,2,...] for each token
-            req_indices = np.repeat(np.arange(num_reqs, dtype=np.int64), num_scheduled_tokens)
+            # Step 3: add prefix lengths to get absolute positions
+            absolute_positions = []
+            for i, n in enumerate(num_scheduled_tokens):
+                prefix = num_computed_tokens_cpu[i]
+                absolute_positions.append(prefix + np.arange(n, dtype=np.int64))
 
-            # Step 4: arange: [0, 1, 2, ..., total_tokens-1]
-            total_tokens = sum(num_scheduled_tokens)
-            token_offset_within_request = np.arange(total_tokens, dtype=np.int64)
-
-            # Step 5: add prefix lengths to get absolute positions
-            absolute_positions_np = num_computed_tokens_cpu[req_indices] + token_offset_within_request
-
-            # Step 6: convert to torch tensor
+            absolute_positions_np = np.concatenate(absolute_positions)
+            
+            # Step 7: convert to torch tensor
             position_ids = torch.from_numpy(absolute_positions_np).to(self.device)
 
             # (Optional) Attention mask
             attn_metadata = None
+            # attn_metadata: dict[str, Any] = {}
+            
+            # per_layer_metadata = \
+            #     self._build_encoder_only_attn_metadata(
+            #     scheduler_output)
+
+            # # Add encoder attention metadata for all encoder layers
+            # attention_layers = get_layers_from_vllm_config(
+            #     self.vllm_config, Attention)
+            # for layer_name, attn_module in attention_layers.items():
+            #     if attn_module.attn_type == AttentionType.ENCODER_ONLY:
+            #         common_attn_metadata, encoder_attn_metadata =\
+            #             per_layer_metadata[layer_name]
+            #         attn_metadata[layer_name] = encoder_attn_metadata
 
             # Forward pass
             with set_forward_context(
@@ -1833,15 +1843,17 @@ class HPUModelRunner:
                 )
 
             # Pool the hidden states and return
-            num_scheduled_tokens_np = self.input_batch.num_tokens.copy()
+            if isinstance(num_scheduled_tokens, list):
+                num_scheduled_tokens_np = np.array(num_scheduled_tokens, dtype=np.int32)
+            else:
+                num_scheduled_tokens_np = num_scheduled_tokens
+            num_scheduled_tokens = int(num_scheduled_tokens_np.sum())
 
             # Pool the hidden states
             return self._pool(
                 hidden_states,
-                num_scheduled_tokens=int(token_ids.size(0)),
+                num_scheduled_tokens=num_scheduled_tokens,
                 num_scheduled_tokens_np=num_scheduled_tokens_np,
-                finished_sending=None,
-                finished_recving=None,
             )
         # If necessary, swap decodes/prompts to have all decodes on the start
         ensure_decodes_first(self.input_batch)
@@ -1853,7 +1865,8 @@ class HPUModelRunner:
         with self.profiler.record_event('internal', 'prepare_input_tensors'):
             prefill_data, decode_data = self._prepare_inputs(
                 scheduler_output, num_prefills, num_decodes)
-        #FIXME(kzawora): Currently there's no handling of logprobs. Fix that
+
+        # #FIXME(kzawora): Currently there's no handling of logprobs. Fix that
         # later.
         prefill_sampled_token_ids = []
         prefill_sampled_requests = []
@@ -2912,3 +2925,66 @@ class HPUModelRunner:
         logger.info("Reloading weights inplace...")
         model_loader.load_weights(self.model, model_config=self.model_config)
         torch.hpu.synchronize()
+    
+    def _build_encoder_only_attn_metadata(
+            self, scheduler_output: "SchedulerOutput") -> \
+                dict[str, tuple[CommonAttentionMetadata, Any]]:
+        """Prepare encoder attention metadata for encoder-only models.
+
+        Args:
+            scheduler_output: Scheduler output
+
+        Returns:
+            dict[str, Any]: Encoder attention metadata
+        """
+        num_reqs = self.input_batch.num_reqs
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
+        # Get the number of scheduled tokens for each request.
+        req_ids = self.input_batch.req_ids
+        tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+        max_num_scheduled_tokens = max(tokens)
+
+        dummy_block_table = torch.zeros((num_reqs, 1),
+                                        dtype=torch.int32,
+                                        device=self.device)
+        dummy_slot_mapping = torch.zeros((total_num_scheduled_tokens, ),
+                                         dtype=torch.int32,
+                                         device=self.device)
+
+        group_metadata = dict[str, tuple[CommonAttentionMetadata, Any]]()
+
+        for attn_group_list in self.attn_groups:
+
+            assert len(attn_group_list) == 1
+            attn_group = attn_group_list[0]
+
+            # Use the first attention metadata builder
+            # to create encoder attention metadata
+            builder = attn_group.metadata_builder
+
+            common_metadata = CommonAttentionMetadata(
+                query_start_loc=self.query_start_loc[:num_reqs + 1],
+                query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
+                seq_lens=self.seq_lens[:num_reqs],
+                seq_lens_cpu=self.seq_lens_cpu[:num_reqs],
+                num_computed_tokens_cpu=self.input_batch.
+                num_computed_tokens_cpu_tensor[:num_reqs],
+                num_reqs=num_reqs,
+                num_actual_tokens=total_num_scheduled_tokens,
+                max_query_len=max_num_scheduled_tokens,
+                max_seq_len=self.seq_lens_cpu[:num_reqs].max().item(),
+                block_table_tensor=dummy_block_table,
+                slot_mapping=dummy_slot_mapping,
+                causal=False,
+            )
+
+            metadata = builder.build(
+                common_prefix_len=0,  # No cascade for encoder
+                common_attn_metadata=common_metadata,
+            )
+
+            for layer_name in attn_group.layer_names:
+                group_metadata[layer_name] = (common_metadata, metadata)
+
+        return group_metadata
