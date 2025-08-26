@@ -2,18 +2,8 @@ from typing import Optional
 
 from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
 from vllm.lora.request import LoRARequest
-import os
 
-# Need to create symlink to avoid long path error
-# thrown by HF Hub validation check. Downloading
-# model directly from Hub can be done but will need
-# adding HF token to repo secrets
-src = "/mnt/weka/data/pytorch/llama2/Llama-2-7b-hf"
-dst = "test_model"
-if os.path.islink(dst):
-    os.remove(dst)
-os.symlink(src, dst)
-MODEL_PATH = dst
+MODEL_PATH = "/mnt/weka/data/pytorch/llama2/Llama-2-7b-hf"
 
 
 def create_test_prompts(
