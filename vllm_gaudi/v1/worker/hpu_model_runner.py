@@ -2444,8 +2444,11 @@ class HPUModelRunner:
 
             ################## Spec Decode ##################
             # work on spec decode if max_gen_len > 1
-            sampled_token_ids = sampler_output.sampled_token_ids
-            max_gen_len = sampled_token_ids.shape[-1]
+            if not structured_output:
+                sampled_token_ids = sampler_output.sampled_token_ids
+                max_gen_len = sampled_token_ids.shape[-1]
+            else:
+                max_gen_len = 1
             if max_gen_len > 1:
                 decode_sampled_token_ids = self.rejection_sampler.parse_output(
                     sampler_output.sampled_token_ids,
