@@ -39,7 +39,8 @@ class HpuPlatform(Platform):
                              has_sink: bool) -> str:
         if use_v1 and not use_mla:
             logger.info("Using HPUAttentionV1 backend.")
-            return "vllm_gaudi.v1.attention.backends.hpu_attn.HPUAttentionBackendV1"
+            return ("vllm_gaudi.v1.attention.backends."
+                    "hpu_attn.HPUAttentionBackendV1")
         if use_v1 and use_mla:
             logger.info("Using HPUAttentionMLA backend.")
             return ("vllm_gaudi.attention.backends.hpu_attn."

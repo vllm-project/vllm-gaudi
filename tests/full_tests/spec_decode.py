@@ -227,8 +227,8 @@ if __name__ == "__main__":
                                      max_tokens=args.osl,
                                      ignore_eos=True)
 
-    task_queue = {}
-    result_queue = multiprocessing.Queue()
+    task_queue: dict[str, dict] = {}
+    result_queue: multiprocessing.Queue = multiprocessing.Queue()
     task = args.task
     if task == "ngram":
         if args.run_base:

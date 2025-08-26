@@ -3217,8 +3217,8 @@ class HPUModelRunner:
         sample_hidden_states: torch.Tensor,
         aux_hidden_states: Optional[torch.Tensor],
         spec_decode_metadata: Optional[SpecDecodeMetadata],
-        common_attn_metadata: HPUAttentionMetadataV1,
-        decode_data: DecodeData = None,
+        common_attn_metadata: Optional[HPUAttentionMetadataV1],
+        decode_data: Optional[DecodeInputData] = None,
     ) -> Union[list[list[int]], torch.Tensor]:
         if self.speculative_config.method == "ngram":
             assert isinstance(self.drafter, NgramProposer)
@@ -3230,6 +3230,9 @@ class HPUModelRunner:
                 # The input to the target model does not include draft tokens.
                 hidden_states = sample_hidden_states
             else:
+                assert spec_decode_metadata is not None, \
+                    ("spec_decode_metadata is required when the input to the "
+                     "target model includes draft tokens.")
                 indices = []
                 offset = 0
                 for num_draft, tokens in zip(
@@ -3246,15 +3249,29 @@ class HPUModelRunner:
             )
         elif self.speculative_config.use_eagle():
             assert isinstance(self.drafter, EagleProposer)
+            assert decode_data is not None, \
+                "decode_data is required for Eagle proposer."
+            assert common_attn_metadata is not None, \
+                "common_attn_metadata is required for Eagle proposer."
+            assert decode_data.token_ids is not None, \
+                "decode_data.token_ids is required when " \
+                "spec_decode_metadata is None."
+            assert decode_data.position_ids is not None, \
+                "decode_data.position_ids is required when " \
+                "spec_decode_metadata is None."
             if spec_decode_metadata is None:
                 # input_ids can be None for multimodal models.
                 target_token_ids = decode_data.token_ids.squeeze()
                 target_positions = decode_data.position_ids.squeeze()
-                if self.use_aux_hidden_state_outputs:
+                if self.use_aux_hidden_state_outputs and \
+                    aux_hidden_states is not None:
                     target_hidden_states = torch.cat(
                         [h for h in aux_hidden_states], dim=-1)
                 else:
                     target_hidden_states = hidden_states
+                assert common_attn_metadata.query_start_loc is not None, \
+                    ("common_attn_metadata.query_start_loc is required "
+                     "when spec_decode_metadata is None.")
                 last_token_indices = common_attn_metadata.query_start_loc[
                     1:] - 1
             else:
@@ -3295,7 +3312,8 @@ class HPUModelRunner:
                 target_positions += 1
                 common_attn_metadata.slot_mapping += 1
 
-                if self.use_aux_hidden_state_outputs:
+                if self.use_aux_hidden_state_outputs and \
+                    aux_hidden_states is not None:
                     target_hidden_states = torch.cat(
                         [h[hidden_states_indices] for h in aux_hidden_states],
                         dim=-1)
@@ -3316,7 +3334,8 @@ class HPUModelRunner:
 
             # Early exit if there is only one draft token to be generated.
             # [batch_size, 1]
-            return draft_token_ids.view(-1, 1)
+            if self.speculative_config.num_speculative_tokens == 1:
+                return draft_token_ids.view(-1, 1)  # type: ignore
 
         return draft_token_ids
 
