@@ -20,6 +20,7 @@ import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
+from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -136,7 +137,7 @@ class HPUWorker(WorkerBase):
 
     def init_device(self):
         # Initialize the distributed environment.
-        init_worker_distributed_environment(self.parallel_config, self.rank,
+        init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
                                             self.local_rank)
         # Set random seed.
@@ -305,11 +306,12 @@ class HPUWorker(WorkerBase):
 
 
 def init_worker_distributed_environment(
-    parallel_config: ParallelConfig,
+    vllm_config: ParallelConfig,
     rank: int,
     distributed_init_method: Optional[str] = None,
     local_rank: int = -1,
 ) -> None:
+    parallel_config = vllm_config.parallel_config
     """Initialize the distributed environment."""
     init_distributed_environment(parallel_config.world_size,
                                  rank,
@@ -324,6 +326,7 @@ def init_worker_distributed_environment(
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
 
+    ensure_kv_transfer_initialized(vllm_config)
 
 @contextmanager
 def track_graph_compile(name: str):
