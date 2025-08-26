@@ -3138,6 +3138,10 @@ class HPUModelRunner:
         ) -> list[AttentionGroup]:
             attn_groups: list[AttentionGroup] = []
             for attn_backend, layer_names in attn_backends_map.items():
+                # Bypass issue with mamba attention expecting
+                # non-empty max_capture_size
+                if self.vllm_config.compilation_config.max_capture_size is None:
+                    self.vllm_config.compilation_config.max_capture_size = 1
                 attn_metadata_builder_i = attn_backend.get_builder_cls()(
                     kv_cache_spec,
                     layer_names,
