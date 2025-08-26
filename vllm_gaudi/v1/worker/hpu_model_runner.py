@@ -2583,6 +2583,9 @@ class HPUModelRunner:
                 prompt_cfg = (bs, seq_or_blocks, 0)
             else:
                 decode_cfg = (bs, seq_or_blocks)
+        # align with current bucketing
+        if decode_cfg:
+            decode_cfg = (decode_cfg[0], 1, decode_cfg[1])
         return prompt_cfg, decode_cfg
 
     @torch.inference_mode()
