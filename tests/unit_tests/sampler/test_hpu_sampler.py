@@ -71,7 +71,7 @@ def _construct_cached_request_state(
         pooling_params=None,
         mm_kwargs=[],
         mm_positions=[],
-        mm_hashes=[]
+        mm_hashes=[],
         block_ids=([], ),
         generator=generator,
         num_computed_tokens=len(output_token_ids),
