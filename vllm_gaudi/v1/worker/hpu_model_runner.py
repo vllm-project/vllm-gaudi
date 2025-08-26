@@ -854,6 +854,7 @@ class HPUModelRunner:
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         removed_req_indices = sorted(removed_req_indices, reverse=True)
+        print("req_ids_to_add", req_ids_to_add)
         for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
             if removed_req_indices:
@@ -2260,7 +2261,7 @@ class HPUModelRunner:
                 cache_size_limit * 8,
                 torch._dynamo.config.accumulated_cache_size_limit)
 
-        if self.skip_warmup or self.use_merged_prefill:
+        if self.skip_warmup:
             logger.info("Skipping warmup...")
             return
 

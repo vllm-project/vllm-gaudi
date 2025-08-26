@@ -19,6 +19,8 @@ from vllm.v1.worker.block_table import MultiGroupBlockTable
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
                                              LogitsProcessors)
 
+from vllm_gaudi.extension.runtime import get_config
+
 _SAMPLING_EPS = 1e-5
 
 
@@ -243,6 +245,7 @@ class InputBatch:
         self,
         request: "CachedRequestState",
         req_index: Optional[int] = None,
+        bs: Optional[int] = None,
     ) -> int:
         if req_index is None:
             req_index = self.num_reqs
@@ -261,12 +264,24 @@ class InputBatch:
         # Copy the prompt token ids and output token ids.
         num_prompt_tokens = len(request.prompt_token_ids)
         self.num_prompt_tokens[req_index] = num_prompt_tokens
-        self.token_ids_cpu[
-            req_index, :num_prompt_tokens] = request.prompt_token_ids
+        print(self.token_ids_cpu.shape, self.token_ids_cpu.flatten().shape)
         start_idx = num_prompt_tokens
         end_idx = start_idx + len(request.output_token_ids)
-        self.token_ids_cpu[req_index,
+        
+        if get_config().merged_prefill:
+            self.token_ids_cpu = self.token_ids_cpu.flatten()
+            print("tutaj", "request.prompt_token_ids len", len(request.prompt_token_ids))
+            print(request)
+            #req_length = request.prompt_token_ids
+            #self.token_ids_cpu.index_put_((bs_idx, req_length), request.prompt_token_ids)
+            self.token_ids_cpu[:num_prompt_tokens] = request.prompt_token_ids
+            self.token_ids_cpu[start_idx:end_idx] = request.output_token_ids
+        else: #if True:
+            self.token_ids_cpu[
+                req_index, :num_prompt_tokens] = request.prompt_token_ids
+            self.token_ids_cpu[req_index,
                            start_idx:end_idx] = request.output_token_ids
+        
         # Number of token ids in token_ids_cpu.
         # NOTE(woosuk): This may include spec decode tokens.
         self.num_tokens[req_index] = request.num_tokens
