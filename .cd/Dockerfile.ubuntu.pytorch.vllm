@@ -37,7 +37,7 @@ RUN mkdir -p $VLLM_PATH && \
     git remote add upstream https://github.com/vllm-project/vllm.git && \
     git fetch upstream --tags || true && \
     git checkout ${VLLM_PROJECT_COMMIT} && \
-    pip install -r <(sed '/^[torch]/d' requirements/build.txt) && \
+    bash -c "pip install -r <(sed '/^[torch]/d' requirements/build.txt)" && \
     VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
 
 # Clone the vllm-gaudi repository and install inside the container
@@ -55,13 +55,13 @@ RUN mkdir -p $VLLM_PATH2 && \
 RUN pip install datasets && \
     pip install pandas
 
-# Copy utility scripts and configuration /// to be enabled later PWolsza
-# RUN mkdir -p /root/scripts/
-# COPY templates /root/scripts/templates/
-# COPY entrypoints /root/scripts/entrypoints/
-# COPY server /root/scripts/server/
-# COPY benchmark /root/scripts/benchmark/
-# WORKDIR /root/scripts
+# Copy utility scripts and configuration
+RUN mkdir -p /root/scripts/
+COPY templates /root/scripts/templates/
+COPY entrypoints /root/scripts/entrypoints/
+COPY server /root/scripts/server/
+COPY benchmark /root/scripts/benchmark/
+WORKDIR /root/scripts
 
 # Set entrypoint script
 ENTRYPOINT ["python3", "-m", "entrypoints.entrypoint_main"]
