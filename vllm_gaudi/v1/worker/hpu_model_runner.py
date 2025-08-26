@@ -2591,7 +2591,8 @@ class HPUModelRunner:
         self.bucketing_manager.generate_prompt_buckets()
         self.bucketing_manager.generate_decode_buckets()
 
-        if self.bucketing_manager.decode_buckets[-1][0] > self.input_batch.max_num_reqs:
+        max_bucket = max(self.bucketing_manager.decode_buckets[-1][0], self.bucketing_manager.prompt_buckets[-1][0])
+        if max_bucket > self.input_batch.max_num_reqs:
             input_batch_bkp = self.input_batch
             self.input_batch = InputBatch(
             max_num_reqs=self.bucketing_manager.decode_buckets[-1][0],
@@ -2687,7 +2688,7 @@ class HPUModelRunner:
         logger.info(msg)
         self.profiler.end()
       
-        if self.bucketing_manager.decode_buckets[-1][0] > self.input_batch.max_num_reqs:
+        if max_bucket > self.input_batch.max_num_reqs:
             self.input_batch = input_batch_bkp
     
     def shutdown_inc(self):
