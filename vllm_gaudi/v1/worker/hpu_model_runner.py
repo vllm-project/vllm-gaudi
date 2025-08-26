@@ -2460,6 +2460,7 @@ class HPUModelRunner:
         )
         logits.copy_(
             logits_cpu.to(self.device, non_blocking=True).to(logits.dtype))
+
     def _configure_lora(self, input, requests, req_ids, is_prompt):
         lora_mask = None
         lora_logits_mask = None
@@ -2844,7 +2845,7 @@ class HPUModelRunner:
                 decode_data.attn_metadata,
                 decode_data.logits_indices,
                 self.kv_caches,
-                lora_logits_mask, 
+                lora_logits_mask,
                 lora_mask,
                 warmup_mode=warmup_mode)
             htorch.core.mark_step()
