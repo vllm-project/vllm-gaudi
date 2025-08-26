@@ -81,6 +81,7 @@ class HpuCommunicator(DeviceCommunicatorBase):
     def dispatch(
             self, hidden_states: torch.Tensor,
             router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        assert hidden_states.dim() == 2, "Input hidden states must be 2D"
         input_size = hidden_states.size()
         # Allocate output tensor.
         output_size = list(input_size)
@@ -108,13 +109,22 @@ class HpuCommunicator(DeviceCommunicatorBase):
     def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if htorch.utils.internal.is_lazy():
             htorch.core.mark_step()
+        assert hidden_states.dim() == 2, "Input hidden states must be 2D"
         cu_tokens_across_dp_cpu = get_forward_context(
         ).dp_metadata.cu_tokens_across_dp_cpu
 
-        start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
-            self.dp_rank - 1]
-        end = cu_tokens_across_dp_cpu[self.dp_rank]
+        # assume num tokens is padded across DP ranks
+        assert cu_tokens_across_dp_cpu[
+            0] * self.dp_world_size == cu_tokens_across_dp_cpu[-1]
 
-        all_hidden_states = self.dp_group.all_reduce(hidden_states)
-        hidden_states = all_hidden_states[start:end, :]
+        local_hidden_states = torch.empty(
+            (cu_tokens_across_dp_cpu[0], hidden_states.size(-1)),
+            device=hidden_states.device,
+            dtype=hidden_states.dtype)
+
+        torch.distributed.reduce_scatter_tensor(
+            local_hidden_states,
+            hidden_states,
+            group=self.dp_group.device_group)
+        hidden_states = local_hidden_states
         return hidden_states
