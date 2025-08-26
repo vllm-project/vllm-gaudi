@@ -2587,29 +2587,30 @@ class HPUModelRunner:
     def warmup_model(self) -> None:
         if not self.enable_bucketing:
             return
-          
+
         self.bucketing_manager.generate_prompt_buckets()
         self.bucketing_manager.generate_decode_buckets()
 
-        max_bucket = max(self.bucketing_manager.decode_buckets[-1][0], self.bucketing_manager.prompt_buckets[-1][0])
+        max_bucket = max(self.bucketing_manager.decode_buckets[-1][0],
+                         self.bucketing_manager.prompt_buckets[-1][0])
         if max_bucket > self.input_batch.max_num_reqs:
             input_batch_bkp = self.input_batch
             self.input_batch = InputBatch(
-            max_num_reqs=self.bucketing_manager.decode_buckets[-1][0],
-            max_model_len=self.max_model_len,
-            max_num_batched_tokens=self.max_num_tokens,
-            device=self.device,
-            pin_memory=self.pin_memory,
-            vocab_size=self.model_config.get_vocab_size(),
-            block_sizes=[self.block_size],
-            logitsprocs=build_logitsprocs(
-                self.vllm_config, self.device, self.pin_memory,
-                self.is_pooling_model,
-                self.vllm_config.model_config.logits_processors),
-        )
-      
+                max_num_reqs=self.bucketing_manager.decode_buckets[-1][0],
+                max_model_len=self.max_model_len,
+                max_num_batched_tokens=self.max_num_tokens,
+                device=self.device,
+                pin_memory=self.pin_memory,
+                vocab_size=self.model_config.get_vocab_size(),
+                block_sizes=[self.block_size],
+                logitsprocs=build_logitsprocs(
+                    self.vllm_config, self.device, self.pin_memory,
+                    self.is_pooling_model,
+                    self.vllm_config.model_config.logits_processors),
+            )
+
         self.defragmenter.initialize(self.kv_caches, self.block_size)
-      
+
         prompt_profile_cfg, decode_profile_cfg = self._read_profiling_cfg()
         if prompt_profile_cfg or decode_profile_cfg:
             self._generate_profiling(prompt_profile_cfg, decode_profile_cfg)
@@ -2687,10 +2688,10 @@ class HPUModelRunner:
             f"allocated {format_bytes(end_mem - start_mem)} of device memory")
         logger.info(msg)
         self.profiler.end()
-      
+
         if max_bucket > self.input_batch.max_num_reqs:
             self.input_batch = input_batch_bkp
-    
+
     def shutdown_inc(self):
         can_finalize_inc = self._is_quant_with_inc() and \
             (self.model.model is not None) and \
