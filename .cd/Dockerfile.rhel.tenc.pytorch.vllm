@@ -3,9 +3,9 @@
 
 # Parameterize base image components for RHEL 9.4/9.6 and TencentOS 3.1
 ARG DOCKER_URL=vault.habana.ai/gaudi-docker
-ARG VERSION=1.22.0
+ARG VERSION=1.21.2
 ARG BASE_NAME=rhel9.2
-ARG PT_VERSION=2.7.1
+ARG PT_VERSION=2.6.0
 ARG REVISION=latest
 ARG REPO_TYPE=habanalabs
 
@@ -44,31 +44,29 @@ RUN mkdir -p $VLLM_PATH && \
     git remote add upstream https://github.com/vllm-project/vllm.git && \
     git fetch upstream --tags || true && \
     git checkout ${VLLM_PROJECT_COMMIT} && \
-    pip install -r <(sed '/^[torch]/d' requirements/build.txt) && \
+    bash -c "pip install -r <(sed '/^[torch]/d' requirements/build.txt)" && \
     VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
 
 # Clone the vllm-gaudi repository and install inside the container
 RUN mkdir -p $VLLM_PATH2 && \
-    git clone https://github.com/vllm-project/vllm-gaudi $VLLM_PATH2 && \
+    git clone https://github.com/vllm-project/vllm-gaudi.git $VLLM_PATH2 && \
     cd $VLLM_PATH2 && \
     git checkout ${VLLM_GAUDI_COMMIT} && \
-    VLLM_TARGET_DEVICE=hpu && pip install -v -e $VLLM_PATH2 --no-build-isolation
+    VLLM_TARGET_DEVICE=hpu && pip install -v -e $VLLM_PATH2
 
     # to be enabled later PWolsza
-# ENV VLLM_TARGET_DEVICE=hpu
-# RUN pip3 install -v -e $VLLM_PATH
 # RUN pip3 install -v -e $VLLM_PATH/tests/vllm_test_utils
 
 # Install additional Python packages
 RUN pip3 install datasets pandas
 
 # Copy utility scripts and configuration /// to be enabled later PWolsza
-# RUN mkdir -p /root/scripts/
-# COPY templates /root/scripts/templates/
-# COPY entrypoints /root/scripts/entrypoints/
-# COPY server /root/scripts/server/
-# COPY benchmark /root/scripts/benchmark/
-# WORKDIR /root/scripts
+RUN mkdir -p /root/scripts/
+COPY templates /root/scripts/templates/
+COPY entrypoints /root/scripts/entrypoints/
+COPY server /root/scripts/server/
+COPY benchmark /root/scripts/benchmark/
+WORKDIR /root/scripts
 
 # Set entrypoint script
 ENTRYPOINT ["python3", "-m", "entrypoints.entrypoint_main"]
