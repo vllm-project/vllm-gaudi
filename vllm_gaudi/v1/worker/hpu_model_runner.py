@@ -31,7 +31,6 @@ from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import (VllmConfig, update_config)
 from vllm.forward_context import set_forward_context
-from vllm.model_executor import set_random_seed
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import get_sampler
@@ -1615,7 +1614,7 @@ class HPUModelRunner:
         for i, n in enumerate(num_blocks):
             seq_block_table = block_table_cpu_tensor[i, :n].tolist()
             if self.use_lookahead_decoding:
-                if seq_block_table[-1] == 0:
+                if (context_lens[i] + 1) % self.block_size == 1:
                     seq_block_table[-1] = self.borrow_block(seq_block_table[:-1])
                     block_table_cpu_tensor[i, n-1] = seq_block_table[-1]
                 elif tuple(seq_block_table[:-1]) in self.borrowed_blocks_mapping_bwd.keys():
@@ -2306,7 +2305,6 @@ class HPUModelRunner:
                         batch_changed,
                         pd_info.decode_req_ids,
                         pad_to=logits_device.shape[0])
-                    torch.manual_seed(self.model_config.seed)
                     sampler_output = self.sampler(
                         logits=logits_device, sampling_metadata=sampling_metadata)
                     if self.use_lookahead_decoding:
