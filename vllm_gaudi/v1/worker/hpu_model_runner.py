@@ -972,15 +972,14 @@ class HPUModelRunner:
         if not scheduled_encoder_inputs:
             return
 
-        # NOTE (attafosu): Utilize cached mm embeddings to speed up processing
-        # After PR(#22711) mm_hashes for inputs will map to their cached embeddings, which can be reused for reqs sharing same mm_hash # noqa E501
-
         # Batch the multi-modal inputs.
         mm_kwargs = list[MultiModalKwargsItem]()
         # List of tuple (mm_hash, pos_info)
         mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
         for req_id in req_ids:
-            encoder_input_ids = scheduled_encoder_inputs[req_id]
+            encoder_input_ids = scheduled_encoder_inputs.get(req_id, None)
+            if not encoder_input_ids:
+                continue
             req_state = self.requests[req_id]
 
             for mm_input_id in encoder_input_ids:
@@ -988,6 +987,9 @@ class HPUModelRunner:
                 mm_kwargs.append(req_state.mm_kwargs[mm_input_id])
                 mm_hashes_pos.append(
                     (mm_hash, req_state.mm_positions[mm_input_id]))
+
+        if not mm_kwargs:
+            return
 
         # Batch mm inputs as much as we can: if a request in the batch has
         # multiple modalities or a different modality than the previous one,
