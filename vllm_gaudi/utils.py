@@ -53,8 +53,7 @@ def async_h2d_copy(source, dest_tensor=None, dtype=None, device='hpu'):
         return target.copy_(source, non_blocking=True)
     # Create tensor from data and transfer to device
     if dtype is None:
-        raise ValueError(
-            "dtype must be specified when source is not a tensor")
+        raise ValueError("dtype must be specified when source is not a tensor")
     cpu_tensor = torch.tensor(source, dtype=dtype, device='cpu')
     return cpu_tensor.to(device, non_blocking=True)
 
