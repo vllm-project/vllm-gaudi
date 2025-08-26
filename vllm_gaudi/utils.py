@@ -46,19 +46,17 @@ def async_h2d_copy(source, dest_tensor=None, dtype=None, device='hpu'):
         if dest_tensor is not None:
             # Copy into pre-allocated destination tensor
             return dest_tensor.copy_(source, non_blocking=True)
-        else:
-            # Create new device tensor and copy
-            assert source.device.type == 'cpu', \
-                "Source tensor must be on CPU for asynchronous transfer"
-            target = torch.empty_like(source, device=device)
-            return target.copy_(source, non_blocking=True)
-    else:
-        # Create tensor from data and transfer to device
-        if dtype is None:
-            raise ValueError(
-                "dtype must be specified when source is not a tensor")
-        cpu_tensor = torch.tensor(source, dtype=dtype, device='cpu')
-        return cpu_tensor.to(device, non_blocking=True)
+        # Create new device tensor and copy
+        assert source.device.type == 'cpu', \
+            "Source tensor must be on CPU for asynchronous transfer"
+        target = torch.empty_like(source, device=device)
+        return target.copy_(source, non_blocking=True)
+    # Create tensor from data and transfer to device
+    if dtype is None:
+        raise ValueError(
+            "dtype must be specified when source is not a tensor")
+    cpu_tensor = torch.tensor(source, dtype=dtype, device='cpu')
+    return cpu_tensor.to(device, non_blocking=True)
 
 
 def make_ndarray_with_pad_align(
