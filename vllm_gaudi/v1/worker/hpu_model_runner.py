@@ -603,7 +603,7 @@ class HPUModelRunner:
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config)
         self.is_multimodal_raw_input_supported = (
-            model_config.is_multimodal_raw_input_supported)
+            model_config.is_multimodal_raw_input_only_model)
 
         # Lazy initialization
         # self.model: nn.Module  # set after load_model
