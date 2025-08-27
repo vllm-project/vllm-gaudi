@@ -1613,13 +1613,16 @@ class HPUModelRunner:
             logits_cpu.to(self.device, non_blocking=True).to(logits.dtype))
 
     def run_sampling(self, batch_changed: bool, logits_device: torch.Tensor, request_ids: Optional[list[str]] = None, pad_to: Optional[int] = None):
+        htorch.core.mark_step()
         sampling_metadata = self._prepare_sampling(
             batch_changed,
             request_ids,
             pad_to)
-        return self.sampler(
+        sampler_output = self.sampler(
             logits=logits_device,
             sampling_metadata=sampling_metadata)
+        htorch.core.mark_step()
+        return sampler_output
 
     @torch.inference_mode()
     def execute_model(
@@ -1742,7 +1745,6 @@ class HPUModelRunner:
                         sampler_output = self.run_sampling(batch_changed, logits_device, req_id, logits_device.shape[0])
                         prefill_sampled_token_ids.append(
                             sampler_output.sampled_token_ids.flatten())
-                        htorch.core.mark_step()
                         prefill_sampled_requests.extend(logits_requests)
                 if self.is_driver_worker and self.profiler.enabled:
                     # Stop recording 'execute_model_generic' event
@@ -1785,7 +1787,6 @@ class HPUModelRunner:
                     sampler_output = self.run_sampling(batch_changed, logits_device, pd_info.decode_req_ids, logits_device.shape[0])
                     decode_sampled_token_ids.append(
                         sampler_output.sampled_token_ids.flatten())
-                    htorch.core.mark_step()
                     decode_sampled_requests.extend(
                         self.input_batch.req_ids[:num_decodes])
             if self.is_driver_worker and self.profiler.enabled:
@@ -1810,13 +1811,8 @@ class HPUModelRunner:
             # Apply structured output bitmasks if present
             if scheduler_output.grammar_bitmask is not None:
                 self.apply_grammar_bitmask(scheduler_output, logits)
-            sampling_metadata = self._prepare_sampling(batch_changed,
-                                                       pd_info.prompt_req_ids +
-                                                       pd_info.decode_req_ids,
-                                                       pad_to=logits.shape[0])
-            # sampling_metadata = self.input_batch.sampling_metadata
-            sampler_output = self.sampler(logits=logits,
-                                          sampling_metadata=sampling_metadata)
+            sampler_output = self.run_sampling(batch_changed, logits, pd_info.prompt_req_ids +
+                                                       pd_info.decode_req_ids, logits.shape[0])
             # Deal with the case of incomplete prompt
             for i in range(logits.shape[0] - num_decodes):
                 prefill_sampled_token_ids.append(
@@ -2058,7 +2054,7 @@ class HPUModelRunner:
         sampler_outputs = []
         
         # Test different batch sizes that are commonly used
-        test_batch_sizes = [1, 2, 4, 8, 16]
+        test_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128]
         if self.max_batch_size not in test_batch_sizes:
             test_batch_sizes.append(self.max_batch_size)
         
@@ -2084,10 +2080,6 @@ class HPUModelRunner:
         
         for batch_size in test_batch_sizes:
             logger.info(f"Warming up sampler with batch size: {batch_size}")
-            # Create dummy logits tensor [batch_size, vocab_size]
-            print(self.dtype)
-            dummy_logits = torch.randn(batch_size, vocab_size, 
-                                     dtype=self.dtype, device=self.device)
             
             for temp, top_p, top_k, batch_changed in sampling_configs:
                 logger.info(f"Warming up parameters: temp={temp}, top_p={top_p}, top_k={top_k}")
@@ -2115,9 +2107,6 @@ class HPUModelRunner:
                         output_token_ids=[],
                     )
                 
-                # Mark step before sampling to ensure proper graph boundaries
-                # htorch.core.mark_step()
-                
                 # Temporarily add dummy requests to input_batch req_id_to_index for _prepare_sampling
                 temp_req_mappings = {}
                 temp_greedy_reqs = set()
@@ -2134,40 +2123,21 @@ class HPUModelRunner:
                     else:  # Random sampling
                         temp_random_reqs.add(req_id)
                         self.input_batch.random_reqs.add(req_id)
-                
-                # try:
-                #     # Use _prepare_sampling to create sampling metadata like in actual inference
-                #     sampling_metadata = self._prepare_sampling(
-                #         batch_changed=True,  # Always treat as batch changed in warmup
-                #         request_ids=dummy_req_ids,
-                #         pad_to=batch_size
-                #     )
-                # finally:
-                #     # Clean up temporary mappings and classifications
-                #     for req_id in temp_req_mappings:
-                #         self.input_batch.req_id_to_index.pop(req_id, None)
-                #     for req_id in temp_greedy_reqs:
-                #         self.input_batch.greedy_reqs.discard(req_id)
-                #     for req_id in temp_random_reqs:
-                #         self.input_batch.random_reqs.discard(req_id)
-                
-                # Run sampler to warm it up
-                # sampler_output = self.sampler(
-                #     logits=dummy_logits,
-                #     sampling_metadata=sampling_metadata
-                # )
-                htorch.core.mark_step()
+
+                dummy_hidden_states = torch.randn(
+                    batch_size, self.hidden_size,
+                    dtype=self.dtype, device=self.device
+                )
+                dummy_logits = self.model.compute_logits(dummy_hidden_states, None)
+
                 sampler_output = self.run_sampling(
-                    batch_changed=lambda _: True if batch_changed else False,
+                    batch_changed=batch_changed,
                     logits_device=dummy_logits,
                     request_ids=dummy_req_ids,
                     pad_to=dummy_logits.shape[0]
                 )
                 # Store output to prevent compiler optimization and ensure execution
                 sampler_outputs.append(sampler_output.sampled_token_ids.flatten())
-                
-                # Essential: mark_step after sampling to capture HPU graphs
-                htorch.core.mark_step()
                 
                 # Ensure the output has the expected shape - it should be [batch_size, 1] or [batch_size]
                 expected_shapes = [(batch_size,), (batch_size, 1)]
