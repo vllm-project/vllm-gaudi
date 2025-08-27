@@ -133,6 +133,14 @@ class BatchContents:
     def get_num_tokens(self):
         return [len(t) for t in self.token_ids]
 
+    def clone(self):
+        return BatchContents(
+            req_ids=self.req_ids.copy(),
+            token_ids=[t.copy() for t in self.token_ids],
+            context_lens=self.context_lens.copy(),
+            blocks=[b.copy() for b in self.blocks],
+            logits_positions=[lp.copy() for lp in self.logits_positions])
+
 
 # TODO(kzawora): remove this
 @dataclass
@@ -1600,7 +1608,7 @@ class HPUModelRunner:
         )
 
         outputs = [
-            self._form_prefill_batch(new_batch_contents)
+            self._form_prefill_batch(new_batch_contents.clone())
             for _ in range(num_prefills)
         ]
         return outputs
