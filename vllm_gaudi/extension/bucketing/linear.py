@@ -1,6 +1,7 @@
 import itertools
 import operator
 import os
+import math
 from dataclasses import dataclass, field
 from typing import List, Tuple
 
@@ -15,14 +16,12 @@ class LinearBucketingStrategy:
         use_merged_prefill = get_config().merged_prefill
         prefix_caching = get_config().prefix_caching
 
-        max_prompt_seq = max_model_len
-
         prompt_bs_bucket_cfg = read_bucket_settings(
             'prompt', 'bs', min=1, step=32,
             max=max_num_prefill_seqs)
         prompt_seq_bucket_cfg = read_bucket_settings(
             'prompt', 'seq', min=block_size,
-            step=block_size, max=max_prompt_seq)
+            step=block_size, max=max_model_len)
 
         if use_merged_prefill:
             prev_prompt_bs_bucket_cfg = tuple(prompt_bs_bucket_cfg)
@@ -56,10 +55,8 @@ class LinearBucketingStrategy:
 
     def get_decode_buckets(self, max_num_seqs, block_size, 
                            max_num_batched_tokens, max_model_len, 
-                           num_max_blocks):
+                           max_blocks):
         prefix_caching = get_config().prefix_caching
-        
-        max_blocks = num_max_blocks
 
         decode_bs_bucket_cfg = read_bucket_settings(
             'decode', 'bs', min=1, step=32,
@@ -75,7 +72,7 @@ class LinearBucketingStrategy:
 
         decode_buckets = generate_decode_buckets(
             decode_bs_bucket_cfg,
-            decode_block_bucket_cfg, num_max_blocks)
+            decode_block_bucket_cfg, max_blocks, max_model_len, block_size)
 
         return sorted(decode_buckets)
 
@@ -190,22 +187,23 @@ def generate_prompt_buckets(bs_bucket_config,
 
 
 def generate_decode_buckets(bs_bucket_config, blocks_bucket_config,
-                            max_blocks):
+                            max_blocks, max_model_len, block_size):
     buckets = []
     bs_buckets = warmup_range(bs_bucket_config)
     use_contiguous_pa = get_config().use_contiguous_pa
-    if os.environ.get('VLLM_DECODE_BLOCK_BUCKET_MAX') is None\
-       and use_contiguous_pa:
-        blocks_bucket_config[2] = max_blocks
     block_buckets = warmup_range(blocks_bucket_config)
-    if os.environ.get('VLLM_DECODE_BLOCK_BUCKET_MAX') is None\
-       and max_blocks not in block_buckets and use_contiguous_pa:
+    if max_blocks not in block_buckets and use_contiguous_pa:
         block_buckets.append(max_blocks)
     last_bucket = max_blocks
     for bs in bs_buckets:
+        max_blocks_including_max_model_len = bs * math.ceil(max_model_len / block_size) 
         for blocks in block_buckets:
             if bs > blocks:
                 # Skip a dummy case when bs > blocks, which cannot occur in real execution
+                continue
+            if not use_contiguous_pa and blocks > max_blocks_including_max_model_len:
+                # Skip case when user wants to have bigger blocks than max model len
+                # case cn only occur with contiguous PA
                 continue
             if blocks >= last_bucket:
                 buckets.append((bs, 1, last_bucket))
