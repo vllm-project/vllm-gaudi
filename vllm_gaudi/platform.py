@@ -22,7 +22,7 @@ logger = init_logger()
 
 
 class HpuPlatform(Platform):
-    _enum = PlatformEnum.OOT if envs.VLLM_USE_V1 else PlatformEnum.HPU
+    _enum = PlatformEnum.OOT
     device_name: str = "hpu"
     device_type: str = "hpu"
     dispatch_key: str = "HPU"
