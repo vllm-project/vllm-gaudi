@@ -231,8 +231,8 @@ class HPUWorker(WorkerBase):
             f"(gpu_memory_utilization={self.cache_config.gpu_memory_utilization}),"
             f" {format_bytes(graph_headroom_bytes)} reserved for HPUGraphs "
             f"(VLLM_GRAPH_RESERVED_MEM={graph_reserved_mem}), "
-            f"{format_bytes(dummy_blocks_headroom)} reserved for KV cache dummy blocks"
-            f"block {format_bytes(cache_size_bytes-dummy_blocks_headroom)} "
+            f"{format_bytes(dummy_blocks_headroom)} reserved for KV cache dummy blocks "
+            f"{format_bytes(cache_size_bytes-dummy_blocks_headroom)} "
             "reserved for usable KV cache")
 
         logger.info(msg)
@@ -278,8 +278,8 @@ class HPUWorker(WorkerBase):
         if self.step_profiler and self.step == self.profile_steps[0]:
             self.step_profiler.start()
         with track_graph_compile('HPUWorker.execute_model') \
-            if self.gc_track_recompiles \
-            else contextlib.nullcontext():
+                if self.gc_track_recompiles \
+                else contextlib.nullcontext():
             output = self.model_runner.execute_model(scheduler_output)
         # TODO(woosuk): Send the output to the engine process.
         if self.step_profiler:
