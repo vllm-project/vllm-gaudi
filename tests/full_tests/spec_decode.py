@@ -20,13 +20,14 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 def time_generation(llm: LLM,
                     prompts: list[str],
                     sampling_params: SamplingParams,
-                    num_spec_tokens=5):
+                    num_spec_tokens=5,
+                    num_warmups=1):
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
     # Warmup first
     logging.info("Warming up the model...")
-    llm.generate(prompts, sampling_params)
-    llm.generate(prompts, sampling_params)
+    for _ in range(num_warmups):
+        llm.generate(prompts, sampling_params)
     logging.info("Starting generation...")
     start = time.time()
     outputs = llm.generate(prompts, sampling_params)
@@ -103,7 +104,7 @@ def test_ngram(is_enable, args, prompts, sampling_params, task_key,
         )
 
     result_dict = time_generation(llm, prompts, sampling_params,
-                                  args.num_spec_tokens)
+                                  args.num_spec_tokens, args.num_warmups)
 
     result_queue.put((task_key, result_dict))
 
@@ -128,7 +129,7 @@ def test_eagle_model(is_enable, args, prompts, sampling_params, task_key,
         )
 
     result_dict = time_generation(llm, prompts, sampling_params,
-                                  args.num_spec_tokens)
+                                  args.num_spec_tokens, args.num_warmups)
     result_queue.put((task_key, result_dict))
 
 
@@ -152,7 +153,7 @@ def test_medusa_model(is_enable, args, prompts, sampling_params, task_key,
         )
 
     result_dict = time_generation(llm, prompts, sampling_params,
-                                  args.num_spec_tokens)
+                                  args.num_spec_tokens, args.num_warmups)
     result_queue.put((task_key, result_dict))
 
 
@@ -175,7 +176,7 @@ def test_mtp_model(is_enable, args, prompts, sampling_params, task_key,
         )
 
     result_dict = time_generation(llm, prompts, sampling_params,
-                                  args.num_spec_tokens)
+                                  args.num_spec_tokens, args.num_warmups)
     result_queue.put((task_key, result_dict))
 
 
@@ -199,6 +200,10 @@ if __name__ == "__main__":
     parser.add_argument("--enforce_eager",
                         action="store_true",
                         help="Enforce eager execution for Eagle model.")
+    parser.add_argument("--num_warmups",
+                        type=int,
+                        default=1,
+                        help="Number of warmup runs before timing.")
 
     # 'ngram', 'eagle', 'eagle3', 'medusa', 'mlp_speculator',
     # 'draft_model' or 'deepseek_mtp

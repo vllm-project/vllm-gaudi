@@ -1629,14 +1629,18 @@ class HPUModelRunner:
         # self.input_batch.num_computed_tokens_cpu[req_indices]
         positions = torch.zeros((padded_batch_size, num_tokens),
                                 dtype=torch.int32)
-        # per request using universal self.positions_cpu then pad
-        position_split_tensors = torch.split(
-            self.positions_cpu[:total_num_scheduled_tokens],
-            num_tokens_per_req)
-        positions[:num_decodes] = \
-            pad_sequence(list(position_split_tensors),
-                            batch_first=True,
-                            padding_value=0)[:num_decodes]
+        if num_tokens == 1:
+            positions[:num_decodes] = self.positions_cpu[:num_decodes].view(
+                -1, 1)
+        else:
+            # per request using universal self.positions_cpu then pad
+            position_split_tensors = torch.split(
+                self.positions_cpu[:total_num_scheduled_tokens],
+                num_tokens_per_req)
+            positions[:num_decodes] = \
+                pad_sequence(list(position_split_tensors),
+                                batch_first=True,
+                                padding_value=0)[:num_decodes]
 
         padded_index = torch.zeros((padded_batch_size, num_tokens),
                                    dtype=torch.int64)
@@ -1680,13 +1684,17 @@ class HPUModelRunner:
         # self.input_batch.token_ids_cpu[:total_num_scheduled_tokens]
         token_ids = torch.zeros((padded_batch_size, num_tokens),
                                 dtype=torch.int32)
-        token_ids_split_tensors = torch.split(
-            self.input_ids_cpu[:total_num_scheduled_tokens],
-            num_tokens_per_req)
-        token_ids[:num_decodes] = \
-            pad_sequence(list(token_ids_split_tensors),
-                            batch_first=True,
-                            padding_value=0)[:num_decodes]
+        if num_tokens == 1:
+            token_ids[:num_decodes] = self.input_ids_cpu[:num_decodes].view(
+                -1, 1)
+        else:
+            token_ids_split_tensors = torch.split(
+                self.input_ids_cpu[:total_num_scheduled_tokens],
+                num_tokens_per_req)
+            token_ids[:num_decodes] = \
+                pad_sequence(list(token_ids_split_tensors),
+                                batch_first=True,
+                                padding_value=0)[:num_decodes]
 
         ###################################
         # SLOT_MAPPING [batch, 1]
@@ -1714,9 +1722,9 @@ class HPUModelRunner:
         # NOTE(Chendi): Since we can't actually do num_tokens = 2,
         # convert to [batch_size * num_tokens, 1]
         if num_tokens > 1:
-            token_ids = token_ids.reshape(-1, 1)
-            positions = padded_index.reshape(-1, 1)
-            slot_mapping = slot_mapping.reshape(-1, 1)
+            token_ids = token_ids.view(-1, 1)
+            positions = padded_index.view(-1, 1)
+            slot_mapping = slot_mapping.view(-1, 1)
 
         block_tables_list = self.defragmenter.resolve_all(block_tables_list)
 

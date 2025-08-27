@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from vllm.v1.sample import rejection_sampler
 import torch
 from typing import Optional
@@ -68,7 +70,9 @@ def rejection_greedy_sample_pytorch(
         # This loop is a direct translation of the Triton kernel's core logic.
         rejected = False
         for pos in range(num_draft_tokens):
-            if not rejected:
+            if rejected:
+                break
+            else:
                 draft_token = draft_token_ids[start_idx + pos]
                 target_token = target_argmax[start_idx + pos]
 
@@ -79,11 +83,6 @@ def rejection_greedy_sample_pytorch(
                 # all subsequent tokens.
                 if draft_token != target_token:
                     rejected = True
-            else:
-                # This `break` is a Pythonic optimization. The original Triton
-                # kernel continues the loop but the `if not rejected` check
-                # prevents further operations. Breaking is more efficient here.
-                break
 
         # If the entire draft sequence was accepted without any rejection,
         # append the bonus token.
@@ -148,8 +147,7 @@ def rejection_sample(
         bonus_token_ids,
         is_greedy,
     )
-    if sampling_metadata.all_greedy:
-        return output_token_ids
+    return output_token_ids
 
 
 rejection_sampler.rejection_sample = rejection_sample
