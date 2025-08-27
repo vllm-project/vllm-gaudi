@@ -54,6 +54,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
 from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy)
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
 from vllm.v1.attention.backends.mamba_selectors import get_mamba_attn_backend
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, MambaSpec)
@@ -1585,6 +1586,31 @@ class HPUModelRunner:
             block_list=context_blocks_t,
             attn_bias=attn_bias,
             block_size=self.block_size)
+
+        # TODO: Change to correct values if needed
+        query_start_loc_cpu = None
+        seq_lens_cpu = None
+        total_num_scheduled_tokens = 0
+        max_num_scheduled_tokens = 1
+        max_seq_len = 1
+        slot_mapping = None
+        # Correct values
+        
+        common_attn_metadata = CommonAttentionMetadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            seq_lens=seq_lens,
+            seq_lens_cpu=seq_lens_cpu,
+            num_computed_tokens_cpu=num_computed_tokens_cpu,
+            num_reqs=num_reqs,
+            num_actual_tokens=total_num_scheduled_tokens,
+            max_query_len=max_num_scheduled_tokens,
+            max_seq_len=max_seq_len,
+            block_table_tensor=blk_table_tensor,
+            slot_mapping=slot_mapping,
+            causal=True,
+        )
+
         return PrefillInputData(request_ids=[req_ids],
                                 prompt_lens=[query_lens],
                                 token_ids=[token_ids],
@@ -3138,16 +3164,46 @@ class HPUModelRunner:
         ) -> list[AttentionGroup]:
             attn_groups: list[AttentionGroup] = []
             for attn_backend, layer_names in attn_backends_map.items():
-                # Bypass issue with mamba attention expecting
-                # non-empty max_capture_size
-                if self.vllm_config.compilation_config.max_capture_size is None:
-                    self.vllm_config.compilation_config.max_capture_size = 1
-                attn_metadata_builder_i = attn_backend.get_builder_cls()(
-                    kv_cache_spec,
-                    layer_names,
-                    self.vllm_config,
-                    self.device,
-                )
+                # Some Mamba builders expect `vllm_config.compilation_config` to
+                # have `max_capture_size`. On certain HPU setups this may be
+                # missing, causing a TypeError during builder __init__.
+                # Try normal instantiation first; on failure, temporarily inject
+                # a conservative `max_capture_size` and retry.
+                BuilderCls = attn_backend.get_builder_cls()
+                try:
+                    attn_metadata_builder_i = BuilderCls(
+                        kv_cache_spec,
+                        layer_names,
+                        self.vllm_config,
+                        self.device,
+                    )
+                except TypeError as e:
+                    # Only handle the specific case where max_capture_size is
+                    # None/missing and leads to a comparison TypeError. If it's
+                    # another error, re-raise.
+                    msg = str(e)
+                    if "<' not supported between instances of 'NoneType'" in msg or "max_capture_size" in msg:
+                        logger.warning(
+                            "Builder init failed due to missing compilation_config.max_capture_size; "
+                            "injecting conservative fallback and retrying.")
+                        orig_comp = getattr(self.vllm_config, 'compilation_config', None)
+                        from types import SimpleNamespace
+                        fake_comp = SimpleNamespace(max_capture_size=1,
+                                                    static_forward_context=(getattr(orig_comp, 'static_forward_context', {}) if orig_comp is not None else {}))
+                        # Temporarily set and retry
+                        self.vllm_config.compilation_config = fake_comp
+                        try:
+                            attn_metadata_builder_i = BuilderCls(
+                                kv_cache_spec,
+                                layer_names,
+                                self.vllm_config,
+                                self.device,
+                            )
+                        finally:
+                            # restore original compilation_config
+                            self.vllm_config.compilation_config = orig_comp
+                    else:
+                        raise
                 attn_group = AttentionGroup(attn_backend,
                                             attn_metadata_builder_i,
                                             layer_names)
