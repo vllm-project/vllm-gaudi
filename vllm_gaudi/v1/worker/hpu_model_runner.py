@@ -1774,9 +1774,6 @@ class HPUModelRunner:
                         self.requests[req_id].output_token_ids.append(new_token.cpu().tolist())
                 else:
                     decode_data.token_ids[i] = new_token
-                    # Update position to point to the correct location (after the generated token)
-                    prompt_len = self.input_batch.num_prompt_tokens[batch_idx]
-                    decode_data.position_ids[i, 0] = torch.tensor(prompt_len, dtype=torch.int, device=self.device)
 
         # Replace tokens in regular decodes with lookahead stored tokens
         for i in range(0, original_num_decodes):
@@ -1794,7 +1791,7 @@ class HPUModelRunner:
         return DecodeInputData(
             num_decodes=decode_data.num_decodes,
             token_ids=decode_data.token_ids.clone(),
-            position_ids=decode_data.position_ids.clone(),
+            position_ids=decode_data.position_ids,
             logits_indices=decode_data.logits_indices,
             attn_metadata=decode_data.attn_metadata,
         ) if not sampling_preparation else None
@@ -2310,12 +2307,12 @@ class HPUModelRunner:
                         self.input_batch.req_ids[:original_num_decodes])
                 htorch.core.mark_step()
                 if self.use_lookahead_decoding:
-                    for req_id, token_ids in zip(
+                    for i, (req_id, token_ids) in enumerate(zip(
                             pd_info.decode_req_ids,
-                            decode_sampled_token_ids[:num_decodes].split(1)):
+                            decode_sampled_token_ids.split(1))):
                         if not self.is_chunked_prefill_dummy_output_token(req_id,
                                                                     prefill_sampled_requests,
-                                                                pd_info.prompt_req_ids):
+                                                                pd_info.prompt_req_ids) and i < num_decodes:
                             if not req_id in self.lookahead_tokens_tensors:
                                 self.lookahead_tokens_tensors[req_id] = []
                             self.lookahead_tokens_tensors[req_id].append(token_ids)
