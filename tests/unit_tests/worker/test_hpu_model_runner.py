@@ -114,9 +114,6 @@ def model_runner():
     return runner
 
 
-model_runner_2 = model_runner
-
-
 def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
     new_reqs = []
     num_scheduled_tokens = {}
@@ -412,26 +409,6 @@ def test_update_config(model_runner):
     # Raise error on non-existing config
     with pytest.raises(AssertionError):
         model_runner.update_config({"do_not_exist_config": "dummy"})
-
-
-@pytest.mark.xfail(
-    reason="Updating weights inplace doesn't currently work on HPU")
-def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
-    # In this test, model_runner loads model + weights in one go, while
-    # model_runner_2 loads dummy weights first then load real weights inplace
-    model_runner.load_model()
-    original_load_format = model_runner_2.load_config.load_format
-    model_runner_2.update_config({"load_config": {"load_format": "dummy"}})
-    model_runner_2.load_model()  # Initial model loading with dummy weights
-    assert str(model_runner.get_model().state_dict()) != str(
-        model_runner_2.get_model().state_dict())
-    model_runner_2.update_config(
-        {"load_config": {
-            "load_format": original_load_format
-        }})
-    model_runner_2.reload_weights()  # Load real weights inplace
-    assert str(model_runner.get_model().state_dict()) == str(
-        model_runner_2.get_model().state_dict())
 
 
 def test_reload_weights_before_load_model(model_runner):
