@@ -54,7 +54,8 @@ class Fp8LinearMethod(OrigFp8LinearMethod):
 @CustomOp.register_oot(name='Fp8MoEMethod')
 class HPUFp8MoEMethod(Fp8MoEMethod):
 
-    def __init__(self, quant_config: Fp8Config):
+    def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
+        self.layer = layer
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
 

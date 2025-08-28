@@ -52,7 +52,7 @@ echo "Test with deepseek_v2 + inc passed"
 
 # deepseek v2 + inc + dynamic quantization + tp2
 echo "Testing deepseek_v2 + inc dynamic quantization + tp2"
-echo QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_dynamic_quant.json HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code  --quantization inc --kv_cache_dtype fp8_inc
+echo QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_dynamic_quant.json HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code  --quantization inc --tensor-parallel-size 2
 QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_dynamic_quant.json \
 HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --tensor-parallel-size 2
 if [ $? -ne 0 ]; then
@@ -60,6 +60,29 @@ if [ $? -ne 0 ]; then
     exit -1
 fi
 echo "Test with deepseek_v2 + inc dynamic quantization + tp 2 successful"
+
+# Chendi: commenting out dyamic scaling test, as it is only works on G3 and failed on G2
+# Don't delete them, once we have G3 CI node, we can enable it.
+
+# # QWEN3 + blockfp8 + dynamic scaling
+# echo "Testing Qwen3-8B-FP8 + blockfp8 + dynamic scaling"
+# echo HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model Qwen/Qwen3-8B-FP8 --trust-remote-code
+# HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model Qwen/Qwen3-8B-FP8 --trust-remote-code
+# if [ $? -ne 0 ]; then
+#     echo "Error: Test failed for Qwen3-8B-FP8 + blockfp8 + dynamic scaling" >&2
+#     exit -1
+# fi
+# echo "Test with Qwen3-8B-FP8 + blockfp8 + dynamic scaling successful"
+
+# # QWEN3 compressed tensor + dynamic scaling
+# echo "Testing Qwen3-8B-FP8-dynamic + compressed-tensor + dynamic scaling"
+# echo HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model RedHatAI/Qwen3-8B-FP8-dynamic --trust-remote-code
+# HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model RedHatAI/Qwen3-8B-FP8-dynamic --trust-remote-code
+# if [ $? -ne 0 ]; then
+#     echo "Error: Test failed for Qwen3-8B-FP8-dynamic + compressed-tensor + dynamic scaling" >&2
+#     exit -1
+# fi
+# echo "Test with Qwen3-8B-FP8-dynamic + compressed-tensor + dynamic scaling successful"
 
 # structured output
 echo "Testing structured output"
