@@ -58,6 +58,8 @@ class HPUBucketingManager():
         self.fallback_seq_base_step = 32
         self.fallback_blocks_base_step = 32
 
+    ### GENERATE BUCKETS FUNCTIONS ###
+
     def get_bucketing_strategy(self):
         strategy = None
         # TODO - we can use different strategies for decode and prompt
@@ -78,11 +80,17 @@ class HPUBucketingManager():
         if self.initialized:
             strategy = self.get_bucketing_strategy()
 
-            self.prompt_buckets = strategy.get_prompt_buckets(
+            bs_cfg, query_cfg, ctx_cfg = strategy.get_prompt_cfgs(
                             max_num_prefill_seqs = self.max_num_prefill_seqs,
                             block_size = self.block_size,
                             max_num_batched_tokens = self.max_num_batched_tokens,
                             max_model_len = self.max_model_len)
+
+            bs_range = strategy.get_range(bs_cfg)
+            query_range = strategy.get_range(query_cfg)
+            ctx_range = strategy.get_range(ctx_cfg)
+
+            self.prompt_buckets = self.generate_buckets(bs_range, query_range, ctx_range, True)
             self.log_generate_info(True)
         else:
             logger().info("Bucketing is off - skipping prompt buckets generation")
@@ -93,12 +101,18 @@ class HPUBucketingManager():
         if self.initialized:
             strategy = self.get_bucketing_strategy()
 
-            self.decode_buckets = strategy.get_decode_buckets(
+            bs_cfg, query_cfg, ctx_cfg = strategy.get_decode_cfgs(
                             max_num_seqs = self.max_num_seqs,
                             block_size = self.block_size, 
                             max_num_batched_tokens = self.max_num_batched_tokens,
                             max_model_len = self.max_model_len, 
                             num_max_blocks = self.num_hpu_blocks)
+
+            bs_range = strategy.get_range(bs_cfg)
+            query_range = strategy.get_range(query_cfg)
+            ctx_range = strategy.get_range(ctx_cfg)
+
+            self.decode_buckets = self.generate_buckets(bs_range, query_range, ctx_range, False)
             self.log_generate_info(False)
         else:
             logger().info("Bucketing is off - skipping decode buckets generation")
@@ -112,6 +126,76 @@ class HPUBucketingManager():
                f"{phase} buckets [bs, query, num_blocks]: "
                f"{list(buckets)}")
         logger().info(msg)
+
+    def generate_buckets(self, bs_range, query_range, ctx_range, is_prompt):
+        use_merged_prefill = get_config().merged_prefill
+        use_contiguous_pa = get_config().use_contiguous_pa
+
+        def expand_to_neighbor_buckets(bs_idx, bs_range, query_idx, query_range, ctx):
+            '''
+            Expand bucket (bs, query, ctx) to include:
+            - itself
+            - next bs value (if any)
+            - next query value (if any)
+            - next bs and query values together (if both exists)
+            This cover case when our configuration is in budget but between
+            values that are in and out of budget:
+            bs < edge_case_bs < next bs and query < edge_case_query < next query
+            '''
+            neighbors = {(bs_range[bs_idx], query_range[query_idx], ctx)}
+            next_bs_exists = bs_idx + 1 < len(bs_range)
+            next_query_exists = query_idx + 1 < len(query_range)
+            if next_bs_exists:
+                neighbors.add((bs_range[bs_idx+1], query_range[query_idx], ctx))
+            if next_query_exists:
+                neighbors.add((bs_range[bs_idx], query_range[query_idx+1], ctx))
+            if next_bs_exists and next_query_exists:
+                neighbors.add((bs_range[bs_idx+1], query_range[query_idx], ctx))
+            return neighbors
+
+        # filter rules for buckets
+        # prompt
+        def under_max_batched_tokens(bs, query, ctx): return bs * query <= self.max_num_batched_tokens
+        def not_over_max_model_len(bs, query, ctx): return query + ctx * self.block_size <= self.max_model_len
+        def ctx_not_over_max_ctx_for_merged_prefill(bs, query, ctx): return ctx <= self.max_num_prefill_seqs * math.ceil((self.max_model_len - math.floor(query / self.max_num_prefill_seqs)) // self.block_size)
+        # decode
+        def block_not_greater_than_max_model_len(bs, query, ctx): return ctx <= bs * math.ceil(self.max_model_len / self.block_size)
+        def batch_size_smaller_than_blocks(bs, query, ctx): return bs <= ctx
+
+        filters_map = {
+            "prompt": {
+                # depends only on merged_prefill
+                True: [under_max_batched_tokens, ctx_not_over_max_ctx_for_merged_prefill],
+                False: [under_max_batched_tokens, not_over_max_model_len],
+            },
+            "decode": {
+                # depends only on contiguous PA
+                True: [batch_size_smaller_than_blocks],
+                False: [block_not_greater_than_max_model_len, batch_size_smaller_than_blocks],
+            }
+        }
+        
+        def get_filters(is_prompt, use_merged_prefill, use_contiguous_pa):
+            phase = "prompt" if is_prompt else "decode"
+            if is_prompt:
+                return filters_map[phase][use_merged_prefill]
+            else:
+                print(filters_map[phase][use_contiguous_pa])
+                return filters_map[phase][use_contiguous_pa]
+            return []
+            
+        buckets = set()
+        filters = get_filters(is_prompt, use_merged_prefill, use_contiguous_pa)
+        print(bs_range, query_range, ctx_range)
+        for bs_idx, bs in enumerate(bs_range):
+            for query_idx, query in enumerate(query_range):
+                for ctx in ctx_range:
+                    if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
+                        buckets.update(expand_to_neighbor_buckets(bs_idx, bs_range, query_idx, query_range, ctx))
+
+        return sorted(buckets)
+
+    ### RETRIEVE BUCKETS FUNCTIONS ###
 
     def generate_fallback_bucket(self, batch_size, seq_len, ctx):
         assert self.max_num_batched_tokens is not None

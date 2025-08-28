@@ -1,6 +1,7 @@
 import itertools
 import operator
 import os
+import math
 from dataclasses import dataclass, field
 from typing import List, Tuple
 
@@ -10,7 +11,7 @@ from vllm_gaudi.extension.runtime import get_config
 
 
 class LinearBucketingStrategy:
-    def get_prompt_buckets(self, max_num_prefill_seqs, block_size, 
+    def get_prompt_cfgs(self, max_num_prefill_seqs, block_size, 
                            max_num_batched_tokens, max_model_len):
         use_merged_prefill = get_config().merged_prefill
         prefix_caching = get_config().prefix_caching
@@ -20,40 +21,38 @@ class LinearBucketingStrategy:
         prompt_bs_bucket_cfg = read_bucket_settings(
             'prompt', 'bs', min=1, step=32,
             max=max_num_prefill_seqs)
-        prompt_seq_bucket_cfg = read_bucket_settings(
+        prompt_query_bucket_cfg = read_bucket_settings(
             'prompt', 'seq', min=block_size,
             step=block_size, max=max_prompt_seq)
+        max_ctx = math.ceil((max_model_len - prompt_query_bucket_cfg[0]) // block_size)
+        prompt_ctx_bucket_cfg = [0, 1, max_ctx]
 
         if use_merged_prefill:
             prev_prompt_bs_bucket_cfg = tuple(prompt_bs_bucket_cfg)
-            prev_prompt_seq_bucket_cfg = tuple(prompt_seq_bucket_cfg)
+            prev_prompt_query_bucket_cfg = tuple(prompt_query_bucket_cfg)
+            prev_prompt_ctx_bucket_cfg = tuple(prompt_ctx_bucket_cfg)
 
             prompt_bs_bucket_cfg = (1, 1, 1)
-            seq_min, seq_step, seq_max = prev_prompt_seq_bucket_cfg
-            prompt_seq_bucket_cfg = (seq_min, seq_step, max_num_batched_tokens)
+            query_min, query_step, _ = prev_prompt_query_bucket_cfg
+            prompt_query_bucket_cfg = (query_min, query_step*4, max_num_batched_tokens)
+            prompt_ctx_bucket_cfg = (0, 1, max_ctx * max_num_prefill_seqs)
 
             msg = ('Merged prefill is enabled!\n'
                   'Overriding prompt bucketing settings!\n'
                   f'prompt bs cfg: {prev_prompt_bs_bucket_cfg} -> {prompt_bs_bucket_cfg}\n'
-                  f'prompt seq cfg: {prev_prompt_seq_bucket_cfg} -> {prompt_seq_bucket_cfg}\n')
+                  f'prompt query cfg: {prev_prompt_query_bucket_cfg} -> {prompt_query_bucket_cfg}\n'
+                  f'prompt ctx cfg: {prev_prompt_ctx_bucket_cfg} -> {prompt_ctx_bucket_cfg}\n')
             logger().info(msg)
 
         msg = ("Prompt bucket config (min, step, max_warmup) "
                f"bs:{prompt_bs_bucket_cfg}, "
-               f"seq:{prompt_seq_bucket_cfg}")
+               f"query:{prompt_query_bucket_cfg}, "
+               f"blocks:{prompt_ctx_bucket_cfg}")
         logger().info(msg)
 
-        prompt_buckets, prompt_omitted_buckets = \
-            generate_prompt_buckets(
-            prompt_bs_bucket_cfg,
-            prompt_seq_bucket_cfg,
-            block_size,
-            prefix_caching,
-            max_num_batched_tokens)
+        return prompt_bs_bucket_cfg, prompt_query_bucket_cfg, prompt_ctx_bucket_cfg
 
-        return sorted(prompt_buckets)
-
-    def get_decode_buckets(self, max_num_seqs, block_size, 
+    def get_decode_cfgs(self, max_num_seqs, block_size, 
                            max_num_batched_tokens, max_model_len, 
                            num_max_blocks):
         prefix_caching = get_config().prefix_caching
@@ -63,6 +62,7 @@ class LinearBucketingStrategy:
         decode_bs_bucket_cfg = read_bucket_settings(
             'decode', 'bs', min=1, step=32,
             max=max_num_seqs)
+        decode_query_bucket_cfg = [1, 1, 1]
         decode_block_bucket_cfg = read_bucket_settings(
             'decode', 'block', min=block_size,
             step=block_size, max=max_blocks)
@@ -72,11 +72,11 @@ class LinearBucketingStrategy:
                f"blocks:{decode_block_bucket_cfg}")
         logger().info(msg)
 
-        decode_buckets = generate_decode_buckets(
-            decode_bs_bucket_cfg,
-            decode_block_bucket_cfg, num_max_blocks)
+        return decode_bs_bucket_cfg, decode_query_bucket_cfg, decode_block_bucket_cfg
 
-        return sorted(decode_buckets)
+    def get_range(self, cfg):
+        range_for_cfg = warmup_range(cfg)
+        return sorted(range_for_cfg)
 
 
 def read_bucket_settings(phase: str, dim: str, **defaults):
@@ -112,6 +112,9 @@ def warmup_range(config: Tuple[int, int, int]):
     => return ramp_up + stable => (2, 4, 8, 16, 32, 64)
     """
     bmin, bstep, bmax = config
+    add_zero_bucket = bmin == 0
+    if add_zero_bucket:
+        bmin = bstep
     assert bmin <= bmax, ("Min. batch size cannot be greater than max. "
                           "batch size. If you want to skip warmup, "
                           "set VLLM_SKIP_WARMUP=true")
@@ -121,7 +124,9 @@ def warmup_range(config: Tuple[int, int, int]):
         ramp_up_acc)
     stable = range(bstep, bmax + 1, bstep)
     buckets = list(ramp_up_tw) + list(stable)
-    return list(filter(lambda bucket: bucket >= bmin, buckets))
+    if add_zero_bucket:
+        buckets.append(0)
+    return list(buckets)
 
 
 def generate_prompt_buckets(bs_bucket_config,
@@ -132,6 +137,8 @@ def generate_prompt_buckets(bs_bucket_config,
     _, _, bmax = seq_bucket_config
     batch_size_buckets = warmup_range(bs_bucket_config)
     seq_bucket_config = warmup_range(seq_bucket_config)
+
+    '''
 
     if prefix_caching:
         buckets_3d = []
@@ -186,6 +193,7 @@ def generate_prompt_buckets(bs_bucket_config,
     omitted_buckets = list(
         sorted([x for x in buckets if x not in filtered_buckets]))
     return captured_buckets, omitted_buckets
+    '''
 
 
 def generate_decode_buckets(bs_bucket_config, blocks_bucket_config,

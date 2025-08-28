@@ -644,6 +644,7 @@ class HPUModelRunner:
         self.use_prefix_caching = (
             self.vllm_config.cache_config.enable_prefix_caching)
         self.bucketing_manager = HPUBucketingManager()
+        max_num_prefill_seqs = self.max_num_seqs if self.use_merged_prefill else self.max_prefill_batch_size
         if self.enable_bucketing:
             logger.info("Bucketing is ON.")
             self.bucketing_manager.initialize(
@@ -664,7 +665,7 @@ class HPUModelRunner:
 
         # TODO(madamczyk-intel): add a knob for that
         # TODO(madamczyk-intel): debug why increasing it lowers acc
-        self.logits_rounding = 1
+        self.logits_rounding = 1 # max prefil seqs / max num seqs
         # High-level profiler
         self.profiler = HabanaHighLevelProfiler()
         self.profiler_counter_helper = HabanaProfilerCounterHelper()
@@ -854,7 +855,6 @@ class HPUModelRunner:
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         removed_req_indices = sorted(removed_req_indices, reverse=True)
-        print("req_ids_to_add", req_ids_to_add)
         for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
             if removed_req_indices:
@@ -1086,6 +1086,7 @@ class HPUModelRunner:
             )
             if self._can_merge_prefill_contents(all_batch_contents[-1],
                                                 new_batch_contents):
+                print("MERGED PREFILL")
                 merge_contents(all_batch_contents[-1], new_batch_contents)
             else:
                 all_batch_contents.append(new_batch_contents)
@@ -1236,6 +1237,8 @@ class HPUModelRunner:
             self, num_prefills, num_decodes,
             num_scheduled_tokens: list[int]) -> PrefillInputData:
 
+        print("num_scheduled_tokens", num_scheduled_tokens)
+
         all_batch_contents = self._extract_prefill_batch_contents(
             num_prefills, num_decodes, num_scheduled_tokens)
         all_batches = [
@@ -1380,6 +1383,7 @@ class HPUModelRunner:
             assert req_id is not None
             seq_num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
+            print("s", seq_num_scheduled_tokens)
             seq_num_prompt_tokens = self.input_batch.num_prompt_tokens[idx]
             num_scheduled_tokens.append(seq_num_scheduled_tokens)
             num_prompt_tokens.append(seq_num_prompt_tokens)
@@ -1864,6 +1868,7 @@ class HPUModelRunner:
                        scheduler_output.num_scheduled_tokens[req_id])
             token_ids = postprocessed_sampled_token_ids[i]
             num_tokens = len(token_ids)
+            print("a", self.input_batch.token_ids_cpu.shape, i, seq_len, num_tokens, (seq_len + num_tokens), len(token_ids))
             self.input_batch.token_ids_cpu[i, seq_len:seq_len +
                                            num_tokens] = token_ids
             self.input_batch.num_tokens[i] += len(token_ids)
@@ -2124,7 +2129,7 @@ class HPUModelRunner:
             lora_request=None,
         )
         requests.append(req)
-        num_scheduled_tokens[req_id] = scheduled_tokens
+        num_scheduled_tokens[req_id] = len(prompt_token_ids) - num_computed_tokens #scheduled_tokens
 
     @staticmethod
     def _generate_seq_lengths(num_samples, num_blocks, block_size):
@@ -2145,12 +2150,22 @@ class HPUModelRunner:
         if prompt_cfg:
             prompt_bs, prompt_query_len, prompt_blocks = prompt_cfg
             prompt_ctx_len = prompt_blocks * self.block_size
-            prompt_total_tokens = prompt_query_len + prompt_ctx_len
-            for _ in range(prompt_bs):
+            prompt_total_tokens = [prompt_query_len + prompt_ctx_len]
+            if self.max_model_len < sum(prompt_total_tokens):
+                total_requests = sum(prompt_total_tokens) // self.max_model_len
+                missing_request = sum(prompt_total_tokens) % self.max_model_len
+                print("ttuuuu", self.max_model_len, prompt_total_tokens)
+                print("reqs:", total_requests, "extra", missing_request)
+                print("reqs:", requests)
+                prompt_total_tokens = [self.max_model_len] * total_requests
+                if missing_request > 0:
+                    prompt_total_tokens.append(missing_request)
+                print("a", prompt_total_tokens)
+            for tokens in prompt_total_tokens:
                 self._add_dummy_request(requests,
                                         scheduled_tokens,
                                         num_computed_tokens=prompt_ctx_len,
-                                        total_tokens=prompt_total_tokens,
+                                        total_tokens=tokens,
                                         scheduled_tokens=prompt_query_len)
         if decode_cfg:
             decode_bs, decode_query_len, decode_blocks = decode_cfg
@@ -2162,7 +2177,7 @@ class HPUModelRunner:
                                         num_computed_tokens=dsl,
                                         total_tokens=dsl,
                                         scheduled_tokens=1)
-
+        print("sch", scheduled_tokens)
         sched_output = SchedulerOutput(
             scheduled_new_reqs=requests,
             scheduled_cached_reqs=CachedRequestData.make_empty(),
