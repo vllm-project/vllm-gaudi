@@ -282,7 +282,7 @@ if __name__ == "__main__":
         }
     elif task == "medusa":
         if args.run_base:
-            task_queue['baseline_eagle'] = {
+            task_queue['baseline_medusa'] = {
                 'proc':
                 multiprocessing.Process(target=test_medusa_model,
                                         args=(False, args, prompts,

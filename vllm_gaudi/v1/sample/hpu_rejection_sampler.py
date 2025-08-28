@@ -28,7 +28,7 @@ def rejection_greedy_sample_pytorch(
                              for each request. Shape: [batch_size].
         draft_token_ids: A flattened tensor of all draft token IDs.
                          Shape: [total_num_draft_tokens].
-        target_argmax: A flattened tensor of the target model's argmax 
+        target_argmax: A flattened tensor of the target model's argmax
                        predictions for each draft token. 
                        Shape: [total_num_draft_tokens].
         bonus_token_ids: A token to append if all draft tokens in a request

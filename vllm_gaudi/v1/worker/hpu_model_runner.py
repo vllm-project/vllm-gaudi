@@ -1618,8 +1618,7 @@ class HPUModelRunner:
         for i, n in enumerate(num_blocks):
             seq_block_table = block_table_cpu_tensor[i, :n].tolist()
             assert len(seq_block_table) == n
-            for _ in range(num_tokens):
-                block_tables_list.append(seq_block_table)
+            block_tables_list.extend([seq_block_table] * num_tokens)
 
         ###################################
         # initialize positions with padding
