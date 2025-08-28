@@ -150,7 +150,7 @@ class HPUBucketingManager():
             if next_query_exists:
                 neighbors.add((bs_range[bs_idx], query_range[query_idx+1], ctx))
             if next_bs_exists and next_query_exists:
-                neighbors.add((bs_range[bs_idx+1], query_range[query_idx], ctx))
+                neighbors.add((bs_range[bs_idx+1], query_range[query_idx+1], ctx))
             return neighbors
 
         # filter rules for buckets
