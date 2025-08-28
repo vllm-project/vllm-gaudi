@@ -30,7 +30,7 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import (VllmConfig, update_config)
-from vllm.forward_context import (BatchDescriptor, set_forward_context)
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import get_sampler
@@ -51,7 +51,6 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
                         is_pin_memory_available, LazyLoader)
 from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy)
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.pool.metadata import PoolingMetadata
@@ -607,8 +606,8 @@ class HPUModelRunner:
         self.uses_mrope = model_config.uses_mrope
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config)
-        self.is_multimodal_raw_input_supported = (
-            model_config.is_multimodal_raw_input_only_model)
+        self.is_multimodal_raw_input_supported = getattr(
+            model_config, "is_multimodal_raw_input_only_model", None)
 
         # Lazy initialization
         # self.model: nn.Module  # set after load_model
@@ -742,8 +741,8 @@ class HPUModelRunner:
                 removed_req_indices.append(req_index)
 
         # Free the cached encoder outputs.
-        for mm_hash in scheduler_output.free_encoder_mm_hashes:
-            self.encoder_cache.pop(mm_hash, None)
+        # for mm_hash in scheduler_output.free_encoder_mm_hashes:
+        #     self.encoder_cache.pop(mm_hash, None)
 
         # Remove the unscheduled requests from the persistent batch.
         # NOTE(woosuk): The unscheduled requests are either preempted requests
@@ -792,7 +791,7 @@ class HPUModelRunner:
                 prompt_token_ids=new_req_data.prompt_token_ids,
                 mm_kwargs=new_req_data.mm_kwargs,
                 mm_positions=new_req_data.mm_positions,
-                mm_hashes=new_req_data.mm_hashes,
+                # mm_hashes=new_req_data.mm_hashes,
                 sampling_params=sampling_params,
                 pooling_params=pooling_params,
                 generator=generator,
@@ -2662,75 +2661,6 @@ class HPUModelRunner:
         seq_lengths = [b * block_size - 1 for b in blocks]
         return seq_lengths
 
-    def get_dp_padding(self,
-                       num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
-        dp_size = self.vllm_config.parallel_config.data_parallel_size
-        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
-
-        # For DP: Don't pad when setting enforce_eager.
-        # This lets us set enforce_eager on the prefiller in a P/D setup and
-        # still use CUDA graphs (enabled by this padding) on the decoder.
-        #
-        # TODO(tms) : There are many cases where padding is enabled for
-        # prefills, causing unnecessary and excessive padding of activations.
-
-        if dp_size == 1 or self.vllm_config.model_config.enforce_eager:
-            # Early exit.
-            return 0, None
-
-        num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
-            num_tokens, dp_size, dp_rank)
-        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp).item()
-        num_tokens_after_padding = torch.tensor([max_tokens_across_dp_cpu] *
-                                                dp_size,
-                                                device="cpu",
-                                                dtype=torch.int32)
-        return max_tokens_across_dp_cpu - num_tokens, num_tokens_after_padding
-    
-    @torch.inference_mode()
-    def _dummy_run(
-        self,
-        num_tokens: int,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-        num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
-        num_tokens += num_pad
-        assert num_tokens <= self.scheduler_config.max_num_batched_tokens
-
-        attn_metadata: Optional[dict[str, Any]] = None
-        input_ids = torch.zeros(self.max_num_tokens,
-                                     dtype=torch.int32,
-                                     device=self.device)
-        positions = torch.zeros(self.max_num_tokens,
-                                     dtype=torch.int64,
-                                     device=self.device)
-        input_ids = input_ids[:num_tokens]
-        inputs_embeds = None
-        positions = positions[:num_tokens]
-        if get_pp_group().is_first_rank:
-                intermediate_tensors = None
-        else:
-            if self.intermediate_tensors is None:
-                self.intermediate_tensors = (
-                    self.model.make_empty_intermediate_tensors(
-                        batch_size=self.max_num_tokens,
-                        dtype=self.model_config.dtype,
-                        device=self.device))
-
-            intermediate_tensors = self.sync_and_slice_intermediate_tensors(
-                num_tokens, None, False)
-        with set_forward_context(
-                attn_metadata,
-                self.vllm_config,
-                num_tokens=num_tokens,
-                num_tokens_across_dp=num_tokens_across_dp,):
-            outputs = self.model(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-                )
-        return outputs
-            
     def _execute_dummy_scenario(self, prompt_cfg, decode_cfg):
         from vllm.v1.core.sched.output import (NewRequestData, SchedulerOutput,
                                                CachedRequestData)
@@ -2932,61 +2862,6 @@ class HPUModelRunner:
     def __del__(self):
         self.shutdown_inc()
 
-    def _dummy_pooler_run_task(
-        self,
-        hidden_states: torch.Tensor,
-        task: PoolingTask,
-    ) -> PoolerOutput:
-        num_tokens = hidden_states.shape[0]
-        max_num_reqs = self.scheduler_config.max_num_seqs
-        num_reqs = min(num_tokens, max_num_reqs)
-        min_tokens_per_req = num_tokens // num_reqs
-        num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
-        num_scheduled_tokens_list[-1] += num_tokens % num_reqs
-        assert sum(num_scheduled_tokens_list) == num_tokens
-        assert len(num_scheduled_tokens_list) == num_reqs
-
-        hidden_states_list = list(
-            torch.split(hidden_states, num_scheduled_tokens_list))
-        req_num_tokens = num_tokens // num_reqs
-
-        dummy_prompt_lens = torch.tensor(
-            [h.shape[0] for h in hidden_states_list],
-            device=self.device,
-        )
-        dummy_token_ids = torch.zeros((num_reqs, req_num_tokens),
-                                      dtype=torch.int32,
-                                      device=self.device)
-
-        model = cast(VllmModelForPooling, self.get_model())
-        dummy_pooling_params = PoolingParams(task=task)
-        to_update = model.pooler.get_pooling_updates(task)
-        to_update.apply(dummy_pooling_params)
-
-        dummy_metadata = PoolingMetadata(
-            prompt_lens=dummy_prompt_lens,
-            prompt_token_ids=dummy_token_ids,
-            pooling_params=[dummy_pooling_params] * num_reqs,
-        )
-        return model.pooler(hidden_states=hidden_states_list,
-                            pooling_metadata=dummy_metadata)
-
-    @torch.inference_mode()
-    def _dummy_pooler_run(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> PoolerOutput:
-        # Find the task that has the largest output for subsequent steps
-        output_size = dict[PoolingTask, float]()
-        for task in self.get_supported_pooling_tasks():
-            # Run a full batch with each task to ensure none of them OOMs
-            output = self._dummy_pooler_run_task(hidden_states, task)
-            output_size[task] = output.get_data_nbytes()
-            del output  # Allow GC
-
-        max_task = max(output_size.items(), key=lambda x: x[1])[0]
-        return self._dummy_pooler_run_task(hidden_states, max_task)
-
     @torch.inference_mode()
     def profile_run(self) -> None:
         return
@@ -3019,7 +2894,6 @@ class HPUModelRunner:
             raise NotImplementedError(
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
-        self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches: dict[str, torch.Tensor] = {}
         num_blocks = 1
         for kv_cache_group in kv_cache_config.kv_cache_groups:
