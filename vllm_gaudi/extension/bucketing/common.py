@@ -159,8 +159,12 @@ class HPUBucketingManager():
         def not_over_max_model_len(bs, query, ctx): return query + ctx * self.block_size <= self.max_model_len
         def ctx_not_over_max_ctx_for_merged_prefill(bs, query, ctx): return ctx <= self.max_num_prefill_seqs * math.ceil((self.max_model_len - math.floor(query / self.max_num_prefill_seqs)) // self.block_size)
         # decode
-        def block_not_greater_than_max_model_len(bs, query, ctx): return ctx <= bs * math.ceil(self.max_model_len / self.block_size)
-        def batch_size_smaller_than_blocks(bs, query, ctx): return bs <= ctx
+        def block_not_greater_than_max_model_len(bs, query, ctx): 
+            #print("1", bs, query, ctx, (ctx <= bs * math.ceil(self.max_model_len / self.block_size)), self.max_model_len, self.block_size)
+            return ctx <= bs * math.ceil(self.max_model_len / self.block_size)
+        def batch_size_smaller_than_blocks(bs, query, ctx): 
+            #print("2", bs, query, ctx, (bs <= ctx))
+            return bs <= ctx
 
         filters_map = {
             "prompt": {
