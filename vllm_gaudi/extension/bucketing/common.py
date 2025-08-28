@@ -106,7 +106,7 @@ class HPUBucketingManager():
                             block_size = self.block_size, 
                             max_num_batched_tokens = self.max_num_batched_tokens,
                             max_model_len = self.max_model_len, 
-                            num_max_blocks = self.num_hpu_blocks)
+                            max_blocks = self.num_hpu_blocks)
 
             bs_range = strategy.get_range(bs_cfg)
             query_range = strategy.get_range(query_cfg)
