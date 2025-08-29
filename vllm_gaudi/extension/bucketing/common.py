@@ -131,7 +131,7 @@ class HPUBucketingManager():
         use_merged_prefill = get_config().merged_prefill
         use_contiguous_pa = get_config().use_contiguous_pa
 
-        def expand_to_neighbor_buckets(bs_idx, bs_range, query_idx, query_range, ctx):
+        def expand_to_neighbor_buckets(bs_idx, bs_range, query_idx, query_range, ctx, filters):
             '''
             Expand bucket (bs, query, ctx) to include:
             - itself
@@ -141,16 +141,20 @@ class HPUBucketingManager():
             This cover case when our configuration is in budget but between
             values that are in and out of budget:
             bs < edge_case_bs < next bs and query < edge_case_query < next query
+            All neighboring buckets need to be filtered as well.
             '''
             neighbors = {(bs_range[bs_idx], query_range[query_idx], ctx)}
             next_bs_exists = bs_idx + 1 < len(bs_range)
             next_query_exists = query_idx + 1 < len(query_range)
             if next_bs_exists:
-                neighbors.add((bs_range[bs_idx+1], query_range[query_idx], ctx))
+                if all(bucket_filter(bs_range[bs_idx+1],  query_range[query_idx], ctx) for bucket_filter in filters):
+                    neighbors.add((bs_range[bs_idx+1], query_range[query_idx], ctx))
             if next_query_exists:
-                neighbors.add((bs_range[bs_idx], query_range[query_idx+1], ctx))
+                if all(bucket_filter(bs_range[bs_idx], query_range[query_idx+1], ctx) for bucket_filter in filters):
+                    neighbors.add((bs_range[bs_idx], query_range[query_idx+1], ctx))
             if next_bs_exists and next_query_exists:
-                neighbors.add((bs_range[bs_idx+1], query_range[query_idx+1], ctx))
+                if all(bucket_filter(bs_range[bs_idx+1],  query_range[query_idx+1], ctx) for bucket_filter in filters):
+                    neighbors.add((bs_range[bs_idx+1], query_range[query_idx+1], ctx))
             return neighbors
 
         # filter rules for buckets
@@ -180,7 +184,6 @@ class HPUBucketingManager():
             if is_prompt:
                 return filters_map[phase][use_merged_prefill]
             else:
-                print(filters_map[phase][use_contiguous_pa])
                 return filters_map[phase][use_contiguous_pa]
             return []
             
@@ -190,7 +193,9 @@ class HPUBucketingManager():
             for query_idx, query in enumerate(query_range):
                 for ctx in ctx_range:
                     if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
-                        buckets.update(expand_to_neighbor_buckets(bs_idx, bs_range, query_idx, query_range, ctx))
+                        buckets.update(expand_to_neighbor_buckets(bs_idx, bs_range, 
+                                                                  query_idx, query_range, 
+                                                                  ctx, filters))
 
         return sorted(buckets)
 
