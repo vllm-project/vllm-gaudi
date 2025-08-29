@@ -2451,8 +2451,8 @@ class HPUModelRunner:
         return total_mem, total_batch_seq, captured_all
 
     def _add_dummy_request(self, requests, num_scheduled_tokens,
-                           num_computed_tokens, total_tokens,
-                           scheduled_tokens, is_prompt):
+                           num_computed_tokens, total_tokens, scheduled_tokens,
+                           is_prompt):
         from vllm.sampling_params import SamplingParams
         from vllm.v1.core.sched.output import NewRequestData
 
@@ -2477,7 +2477,8 @@ class HPUModelRunner:
         )
         requests.append(req)
         if is_prompt:
-            num_scheduled_tokens[req_id] = len(prompt_token_ids) - num_computed_tokens #scheduled_tokens
+            num_scheduled_tokens[req_id] = len(
+                prompt_token_ids) - num_computed_tokens  #scheduled_tokens
         else:
             num_scheduled_tokens[req_id] = scheduled_tokens
 
@@ -2496,7 +2497,7 @@ class HPUModelRunner:
         Split total value evenly, so that no value would be greater than max.
         Optionaly define how many part to split this value.
         '''
-        parts = target_parts if target_parts else math.ceil((total / max_value))
+        parts = target_parts if target_parts else math.ceil(total / max_value)
         base = total // parts
         remainder = total % parts
         result = [base] * parts
@@ -2518,13 +2519,17 @@ class HPUModelRunner:
             if self.max_model_len < sum(prompt_total_tokens) \
                 and self.use_merged_prefill:
                 # split query and ctx in merged prefill case
-                prompt_total_tokens = self.split_evenly(sum(prompt_total_tokens), self.max_model_len)
+                prompt_total_tokens = self.split_evenly(
+                    sum(prompt_total_tokens), self.max_model_len)
                 context_parts = len(prompt_total_tokens)
-                prompt_context_blocks = self.split_evenly(prompt_blocks, prompt_blocks, context_parts)
-            for tokens, context in zip(prompt_total_tokens, prompt_context_blocks):
+                prompt_context_blocks = self.split_evenly(
+                    prompt_blocks, prompt_blocks, context_parts)
+            for tokens, context in zip(prompt_total_tokens,
+                                       prompt_context_blocks):
                 self._add_dummy_request(requests,
                                         scheduled_tokens,
-                                        num_computed_tokens=(context * self.block_size),
+                                        num_computed_tokens=(context *
+                                                             self.block_size),
                                         total_tokens=tokens,
                                         scheduled_tokens=prompt_query_len,
                                         is_prompt=True)
