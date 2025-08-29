@@ -204,6 +204,11 @@ if __name__ == "__main__":
                         type=int,
                         default=1,
                         help="Number of warmup runs before timing.")
+    parser.add_argument(
+        "--assert_acc_rate",
+        type=float,
+        default=0.15,
+        help="Assert that the acceptance rate is at least this value.")
 
     # 'ngram', 'eagle', 'eagle3', 'medusa', 'mlp_speculator',
     # 'draft_model' or 'deepseek_mtp
@@ -325,4 +330,8 @@ if __name__ == "__main__":
             if proc['proc'].is_alive():
                 proc['proc'].terminate()
                 proc['proc'].join(timeout=2)
+            if args.assert_acc_rate > 0 and 'spec' in key:
+                assert proc['result']['acc_rate'] >= args.assert_acc_rate, \
+                    f"Acceptance rate {proc['result']['acc_rate']} is lower" \
+                    f"than the threshold {args.assert_acc_rate}"
         logging.info("Benchmark finished.")

@@ -3365,14 +3365,14 @@ class HPUModelRunner:
             # Skip requests that require sampling parameters that are not
             # supported with speculative decoding.
             if i >= len(self.input_batch.req_ids):
-                logger.info(
+                logger.debug(
                     "Skipping speculative decoding for padding request %s, ",
                     i)
                 continue
             req_id = self.input_batch.req_ids[i]
             if req_id in self.input_batch.spec_decode_unsupported_reqs:
-                logger.info("Skipping speculative decoding for request %s",
-                            req_id)
+                logger.debug("Skipping speculative decoding for request %s",
+                             req_id)
                 draft_token_ids.append([])
                 continue
 
@@ -3385,7 +3385,7 @@ class HPUModelRunner:
             drafter_output = self.drafter.propose(
                 self.input_batch.token_ids_cpu[i, :num_tokens])
             if drafter_output is None or len(drafter_output) == 0:
-                logger.info(
+                logger.debug(
                     "Skipping speculative decoding for request %s, "
                     "drafter output is empty", req_id)
                 draft_token_ids.append([])
