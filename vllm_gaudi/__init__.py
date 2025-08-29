@@ -13,5 +13,11 @@ def register():
 
 def register_ops():
     """Register custom ops for the HPU platform."""
-    import vllm_gaudi.ops  # noqa: F401
-    vllm_gaudi.ops.register_ops()
+    import vllm_gaudi.ops.hpu_fused_moe  # noqa
+    import vllm_gaudi.ops.hpu_layernorm  # noqa
+    import vllm_gaudi.ops.hpu_lora  # noqa
+    import vllm_gaudi.ops.hpu_rotary_embedding  # noqa
+    import vllm_gaudi.ops.hpu_compressed_tensors  # noqa
+    import vllm_gaudi.ops.hpu_fp8  # noqa
+    import vllm_gaudi.ops.hpu_gptq  # noqa
+    import vllm_gaudi.ops.hpu_awq  # noqa

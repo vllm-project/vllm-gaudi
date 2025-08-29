@@ -49,7 +49,7 @@ def test_dummy_custom_op_registration():
     assert result == expected_value_after_registration
 
 
-@patch("vllm_gaudi.ops.register_ops")
+@patch("vllm_gaudi.register_ops")
 def test_custom_ops_registration(mock_register_ops):
     """
     Checks whether the custom ops are registered 
