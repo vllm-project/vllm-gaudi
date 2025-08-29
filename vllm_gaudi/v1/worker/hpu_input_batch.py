@@ -18,7 +18,6 @@ from vllm.v1.worker.block_table import MultiGroupBlockTable
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
                                              LogitsProcessors)
 
-from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.utils import async_h2d_copy
 
 _SAMPLING_EPS = 1e-5
@@ -264,12 +263,11 @@ class InputBatch:
         num_prompt_tokens = len(request.prompt_token_ids)
         self.num_prompt_tokens[req_index] = num_prompt_tokens
         self.token_ids_cpu[
-                req_index, :num_prompt_tokens] = request.prompt_token_ids
+            req_index, :num_prompt_tokens] = request.prompt_token_ids
         start_idx = num_prompt_tokens
         end_idx = start_idx + len(request.output_token_ids)
         self.token_ids_cpu[req_index,
                            start_idx:end_idx] = request.output_token_ids
-        
         # Number of token ids in token_ids_cpu.
         # NOTE(woosuk): This may include spec decode tokens.
         self.num_tokens[req_index] = request.num_tokens

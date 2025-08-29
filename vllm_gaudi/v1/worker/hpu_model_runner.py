@@ -643,7 +643,8 @@ class HPUModelRunner:
         self.use_prefix_caching = (
             self.vllm_config.cache_config.enable_prefix_caching)
         self.bucketing_manager = HPUBucketingManager()
-        max_num_prefill_seqs = self.max_num_seqs if self.use_merged_prefill else self.max_prefill_batch_size
+        max_num_prefill_seqs = self.max_num_seqs if self.use_merged_prefill \
+                               else self.max_prefill_batch_size
         if self.enable_bucketing:
             logger.info("Bucketing is ON.")
             self.bucketing_manager.initialize(
@@ -664,7 +665,7 @@ class HPUModelRunner:
 
         # TODO(madamczyk-intel): add a knob for that
         # TODO(madamczyk-intel): debug why increasing it lowers acc
-        self.logits_rounding = 1 # max prefil seqs / max num seqs
+        self.logits_rounding = 1
         # High-level profiler
         self.profiler = HabanaHighLevelProfiler()
         self.profiler_counter_helper = HabanaProfilerCounterHelper()
@@ -2475,12 +2476,10 @@ class HPUModelRunner:
             lora_request=None,
         )
         requests.append(req)
-        print(scheduled_tokens, "scheduled_tokens", (len(prompt_token_ids) - num_computed_tokens))
         if is_prompt:
             num_scheduled_tokens[req_id] = len(prompt_token_ids) - num_computed_tokens #scheduled_tokens
         else:
             num_scheduled_tokens[req_id] = scheduled_tokens
-        print(num_scheduled_tokens[req_id])
 
     @staticmethod
     def _generate_seq_lengths(num_samples, num_blocks, block_size):
@@ -2516,7 +2515,8 @@ class HPUModelRunner:
             prompt_ctx_len = prompt_blocks * self.block_size
             prompt_total_tokens = [prompt_query_len + prompt_ctx_len]
             prompt_context_blocks = [prompt_blocks]
-            if self.max_model_len < sum(prompt_total_tokens):
+            if self.max_model_len < sum(prompt_total_tokens) \
+                and self.use_merged_prefill:
                 # split query and ctx in merged prefill case
                 prompt_total_tokens = self.split_evenly(sum(prompt_total_tokens), self.max_model_len)
                 context_parts = len(prompt_total_tokens)
@@ -2529,12 +2529,10 @@ class HPUModelRunner:
                                         scheduled_tokens=prompt_query_len,
                                         is_prompt=True)
         if decode_cfg:
-            print(decode_cfg)
             decode_bs, decode_query_len, decode_blocks = decode_cfg
             decode_seq_lengths = self._generate_seq_lengths(
                 decode_bs, decode_blocks, self.block_size)
             for dsl in decode_seq_lengths:
-                print(dsl)
                 self._add_dummy_request(requests,
                                         scheduled_tokens,
                                         num_computed_tokens=dsl,
