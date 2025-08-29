@@ -60,6 +60,8 @@ class CompressedTensorsLinearMethod(OrigCompressedTensorsLinearMethod):
         details
         """
         weight_loader = extra_weight_attrs.get("weight_loader")
+        if hpu_ops.is_hpu_gaudi2:
+            weight_loader = hpu_ops.gaudi_weight_wrapper(weight_loader)
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
@@ -127,6 +129,12 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         torch.hpu.synchronize()
+
+    def create_weights(self, *args, **kwargs) -> None:
+        if hpu_ops.is_hpu_gaudi2:
+            kwargs['weight_loader'] = hpu_ops.gaudi_weight_wrapper(
+                kwargs.get('weight_loader'))
+        super().create_weights(*args, **kwargs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         #NOTE: This method is called after the weights are loaded.
