@@ -1147,11 +1147,7 @@ class HPUModelRunner:
         return PromptDecodeInfo(prompt_req_ids, decode_req_ids,
                                 prompt_scheduled_tokens)
 
-    def _prepare_sampling(self,
-                          batch_changed: bool,
-                          request_ids: Union[None, list[str]] = None,
-                          pad_to: Optional[int] = None) -> SamplingMetadata:
-        # Create the sampling metadata.
+    def generate_req_id_output_token_ids_lst(self, request_ids: Optional[list[str]] = None, pad_to: Optional[int] = None):
         req_id_output_token_ids: dict[str, list[int]] = \
             {req_id: req.output_token_ids
                 for req_id, req in self.requests.items()}
@@ -1165,6 +1161,16 @@ class HPUModelRunner:
             while len(req_id_output_token_ids_lst) < pad_to:
                 req_id_output_token_ids_lst.append(
                     req_id_output_token_ids_lst[0])
+        return req_id_output_token_ids_lst
+
+    def _prepare_sampling(self,
+                          batch_changed: bool,
+                          request_ids: Union[None, list[str]] = None,
+                          pad_to: Optional[int] = None) -> SamplingMetadata:
+        # Create the sampling metadata.
+        # TODO: maybe call this method?
+        req_id_output_token_ids_lst = self.generate_req_id_output_token_ids_lst(
+            request_ids, pad_to)
         sampling_metadata = self.input_batch.make_selective_sampling_metadata(
             req_id_output_token_ids_lst, skip_copy=not batch_changed)
         return sampling_metadata
@@ -2405,7 +2411,7 @@ class HPUModelRunner:
         sampler_outputs = []
         
         # Test different batch sizes that are commonly used
-        test_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128]
+        test_batch_sizes = [0, 1, 2, 4, 8, 16, 32, 64, 128] # TODO: if user passes max num seqs 16 these batches will fail - take it from the model?
         if self.max_batch_size not in test_batch_sizes:
             test_batch_sizes.append(self.max_batch_size)
         
@@ -2426,85 +2432,97 @@ class HPUModelRunner:
             (0.8, 0.85, 0, False),     # Different top-p sampling
         ]
         
+        
+        # print summary of what batch sizes and sampling configs are warmed up
+        # TODO: mention warmup of smaller req_id_sizes
+        logger.info(f"Warming up sampler with batch sizes: {test_batch_sizes} and following configs:")
+        for temp, top_p, top_k, batch_changed in sampling_configs:
+            logger.info(f"Warming up with temp={temp}, top_p={top_p}, top_k={top_k}, batch_changed={batch_changed}")
         logger.info("Starting sampler warmup...")
+        
         sampler_outputs = []
         
         for batch_size in test_batch_sizes:
-            logger.info(f"Warming up sampler with batch size: {batch_size}")
-            
-            for temp, top_p, top_k, batch_changed in sampling_configs:
-                logger.info(f"Warming up parameters: temp={temp}, top_p={top_p}, top_k={top_k}")
+            for chopped_req_id_size in range(-1, batch_size):
+                req_ids_list = [0] + list(range(1, chopped_req_id_size + 1))
+                for temp, top_p, top_k, batch_changed in sampling_configs:
                 
-                # Create dummy requests for this specific configuration
-                dummy_req_ids = [f"warmup_req_{temp}_{top_p}_{top_k}_{i}" for i in range(batch_size)]
-                from vllm.sampling_params import SamplingParams
-                
-                # Add dummy requests to the cache with consistent sampling params
-                for i, req_id in enumerate(dummy_req_ids):
-                    self.requests[req_id] = CachedRequestState(
-                        req_id=req_id,
-                        prompt_token_ids=list(range(10)),  # Dummy prompt
-                        mm_kwargs=[],
-                        mm_positions=[],
-                        sampling_params=SamplingParams(
-                            temperature=temp,
-                            top_p=top_p,
-                            top_k=top_k,
-                        ),
-                        pooling_params=None,
-                        generator=None,
-                        block_ids=[[0]],
-                        num_computed_tokens=10,
-                        output_token_ids=[],
-                    )
-                
-                # Temporarily add dummy requests to input_batch req_id_to_index for _prepare_sampling
-                temp_req_mappings = {}
-                temp_greedy_reqs = set()
-                temp_random_reqs = set()
-                
-                for i, req_id in enumerate(dummy_req_ids):
-                    temp_req_mappings[req_id] = i
-                    self.input_batch.req_id_to_index[req_id] = i
+                    # Create dummy requests for this specific configuration
+                    dummy_req_ids = [f"warmup_req_{temp}_{top_p}_{top_k}_{i}" for i in req_ids_list]
+                    from vllm.sampling_params import SamplingParams
                     
-                    # Also classify requests as greedy or random for proper batch state
-                    if temp == 0.0:  # Greedy sampling
-                        temp_greedy_reqs.add(req_id)
-                        self.input_batch.greedy_reqs.add(req_id)
-                    else:  # Random sampling
-                        temp_random_reqs.add(req_id)
-                        self.input_batch.random_reqs.add(req_id)
+                    # Add dummy requests to the cache with consistent sampling params
+                    for i, req_id in enumerate(dummy_req_ids):
+                        self.requests[req_id] = CachedRequestState(
+                            req_id=req_id,
+                            prompt_token_ids=list(range(10)),  # Dummy prompt
+                            mm_kwargs=[],
+                            mm_positions=[],
+                            mm_hashes=[],
+                            sampling_params=SamplingParams(
+                                temperature=temp,
+                                top_p=top_p,
+                                top_k=top_k,
+                            ),
+                            pooling_params=None,
+                            generator=None,
+                            block_ids=[[0]],
+                            num_computed_tokens=10,
+                            output_token_ids=[],
+                        )
+                    
+                    # Temporarily add dummy requests to input_batch req_id_to_index for _prepare_sampling
+                    temp_req_mappings = {}
+                    temp_greedy_reqs = set()
+                    temp_random_reqs = set()
+                    
+                    for i, req_id in enumerate(dummy_req_ids):
+                        temp_req_mappings[req_id] = i
+                        self.input_batch.req_id_to_index[req_id] = i
+                        
+                        # Also classify requests as greedy or random for proper batch state
+                        if temp == 0.0:  # Greedy sampling
+                            temp_greedy_reqs.add(req_id)
+                            self.input_batch.greedy_reqs.add(req_id)
+                        else:  # Random sampling
+                            temp_random_reqs.add(req_id)
+                            self.input_batch.random_reqs.add(req_id)
 
-                dummy_hidden_states = torch.randn(
-                    batch_size, self.hidden_size,
-                    dtype=self.dtype, device=self.device
-                )
-                dummy_logits = self.model.compute_logits(dummy_hidden_states, None)
+                    self.input_batch.req_output_token_ids = [item[1] for item in self.generate_req_id_output_token_ids_lst(dummy_req_ids, pad_to=chopped_req_id_size)]
 
-                sampler_output = self.run_sampling(
-                    batch_changed=batch_changed,
-                    logits_device=dummy_logits,
-                    request_ids=dummy_req_ids,
-                    pad_to=dummy_logits.shape[0]
-                )
-                # Store output to prevent compiler optimization and ensure execution
-                sampler_outputs.append(sampler_output.sampled_token_ids.flatten())
-                
-                # Ensure the output has the expected shape - it should be [batch_size, 1] or [batch_size]
-                expected_shapes = [(batch_size,), (batch_size, 1)]
-                assert sampler_output.sampled_token_ids.shape in expected_shapes, \
-                    f"Expected shape {expected_shapes}, got {sampler_output.sampled_token_ids.shape}"
-                
-                # Clean up dummy requests after each configuration
-                for req_id in dummy_req_ids:
-                    del self.requests[req_id]
-                
-                for req_id in temp_req_mappings:
-                    self.input_batch.req_id_to_index.pop(req_id, None)
-                for req_id in temp_greedy_reqs:
-                    self.input_batch.greedy_reqs.discard(req_id)
-                for req_id in temp_random_reqs:
-                    self.input_batch.random_reqs.discard(req_id)
+                    self.input_batch.refresh_sampling_metadata()
+
+                    dummy_hidden_states = torch.randn(
+                        batch_size, self.hidden_size,
+                        dtype=self.dtype, device=self.device
+                    )
+                    dummy_logits = self.model.compute_logits(dummy_hidden_states, None)
+                    # print("POPIPP", len(self.input_batch.random_reqs) == 0)
+                    sampler_output = self.run_sampling(
+                        batch_changed=batch_changed,
+                        logits_device=dummy_logits,
+                        request_ids=dummy_req_ids,
+                        pad_to=dummy_logits.shape[0]
+                    )
+                    # Store output to prevent compiler optimization and ensure execution
+                    sampler_outputs.append(sampler_output.sampled_token_ids.flatten())
+                    
+                    # Ensure the output has the expected shape - it should be [batch_size, 1] or [batch_size]
+                    expected_shapes = [(batch_size,), (batch_size, 1)]
+                    assert sampler_output.sampled_token_ids.shape in expected_shapes, \
+                        f"Expected shape {expected_shapes}, got {sampler_output.sampled_token_ids.shape}"
+                    
+                    # Clean up dummy requests after each configuration
+                    for req_id in dummy_req_ids:
+                        del self.requests[req_id]
+                    
+                    for req_id in temp_req_mappings:
+                        self.input_batch.req_id_to_index.pop(req_id, None)
+                    for req_id in temp_greedy_reqs:
+                        self.input_batch.greedy_reqs.discard(req_id)
+                    for req_id in temp_random_reqs:
+                        self.input_batch.random_reqs.discard(req_id)
+                    self.input_batch.req_output_token_ids = []
         
         # Final synchronization to ensure all operations are completed
         torch.hpu.synchronize()
