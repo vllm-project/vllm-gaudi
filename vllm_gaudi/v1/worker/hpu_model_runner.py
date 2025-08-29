@@ -7,7 +7,7 @@ import math
 import os
 import time
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast, get_args
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -37,6 +37,7 @@ from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model, get_model_loader
+from vllm.pooling_params import PoolingParams
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
                                     MultiModalKwargsItem)
@@ -44,6 +45,7 @@ from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingType
+from vllm.sequence import PoolerOutput
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
                         is_pin_memory_available, LazyLoader)
@@ -51,6 +53,7 @@ from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy)
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
+from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -60,7 +63,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.interfaces_base import (
-    is_pooling_model, is_text_generation_model)
+    VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.v1.worker.utils import (gather_mm_placeholders,
                                   sanity_check_mm_encoder_outputs,
@@ -587,6 +590,7 @@ class HPUModelRunner:
             self.parallel_config)
         self.head_size = self.model_config.get_head_size()
         self.hidden_size = self.model_config.get_hidden_size()
+        self.is_pooling_model = model_config.pooler_config is not None
 
         self.attn_backend = get_attn_backend(
             self.head_size,
@@ -602,8 +606,8 @@ class HPUModelRunner:
         self.uses_mrope = model_config.uses_mrope
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config)
-        self.is_multimodal_raw_input_supported = (
-            model_config.is_multimodal_raw_input_only_model)
+        self.is_multimodal_raw_input_supported = getattr(
+            model_config, "is_multimodal_raw_input_only_model", None)
 
         # Lazy initialization
         # self.model: nn.Module  # set after load_model
@@ -737,8 +741,8 @@ class HPUModelRunner:
                 removed_req_indices.append(req_index)
 
         # Free the cached encoder outputs.
-        for mm_hash in scheduler_output.free_encoder_mm_hashes:
-            self.encoder_cache.pop(mm_hash, None)
+        # for mm_hash in scheduler_output.free_encoder_mm_hashes:
+        #     self.encoder_cache.pop(mm_hash, None)
 
         # Remove the unscheduled requests from the persistent batch.
         # NOTE(woosuk): The unscheduled requests are either preempted requests
@@ -760,23 +764,36 @@ class HPUModelRunner:
         req_ids_to_add: list[str] = []
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
-            assert new_req_data.sampling_params is not None, \
-                "Pooling is not supported in HPU yet"
+            # assert new_req_data.sampling_params is not None, \
+            #     "Pooling is not supported in HPU yet"
             req_id = new_req_data.req_id
             sampling_params = new_req_data.sampling_params
-            if sampling_params.sampling_type == SamplingType.RANDOM_SEED:
+            pooling_params = new_req_data.pooling_params
+            if sampling_params and \
+                sampling_params.sampling_type == SamplingType.RANDOM_SEED:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
             else:
                 generator = None
+                
+            if pooling_params:
+                assert (task := pooling_params.task) is not None, (
+                    "You did not set `task` in the API")
+
+                model = cast(VllmModelForPooling, self.model)
+                to_update = model.pooler.get_pooling_updates(task)
+                assert to_update is not None, (
+                    f"{pooling_params.task=} is not supported by the model")
+                to_update.apply(pooling_params)
+
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
                 mm_kwargs=new_req_data.mm_kwargs,
                 mm_positions=new_req_data.mm_positions,
-                mm_hashes=new_req_data.mm_hashes,
+                # mm_hashes=new_req_data.mm_hashes,
                 sampling_params=sampling_params,
-                pooling_params=None,
+                pooling_params=pooling_params,
                 generator=generator,
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
@@ -1088,6 +1105,16 @@ class HPUModelRunner:
     def get_model(self) -> torch.nn.Module:
         assert self.model is not None
         return self.model
+
+    def get_supported_pooling_tasks(self) -> list[PoolingTask]:
+        model = self.get_model()
+        if not is_pooling_model(model):
+            return []
+
+        return [
+            task for task in get_args(PoolingTask)
+            if model.pooler.get_pooling_updates(task)
+        ]
 
     def _get_prompts_and_decodes(
         self,
@@ -1915,6 +1942,61 @@ class HPUModelRunner:
         logits.copy_(
             logits_cpu.to(self.device, non_blocking=True).to(logits.dtype))
 
+    def _pool(
+        self,
+        hidden_states: torch.Tensor,
+        num_scheduled_tokens: int,
+        num_scheduled_tokens_np: np.ndarray,
+    ) -> ModelRunnerOutput:
+        assert self.input_batch.num_reqs ==\
+            len(self.input_batch.pooling_params), \
+        "Either all or none of the requests in" \
+        " a batch must be pooling request"
+
+        extracted_hidden_states = list(
+            torch.split(hidden_states[:num_scheduled_tokens],
+                        num_scheduled_tokens_np.tolist()))
+
+        pooling_metadata = self.input_batch.pooling_metadata
+
+        raw_pooler_output = self.model.pooler(
+            hidden_states=extracted_hidden_states,
+            pooling_metadata=pooling_metadata)
+
+        pooler_output: list[Optional[torch.Tensor]] = []
+        num_reqs = self.input_batch.num_reqs
+
+        # Sequence length = prompt tokens + already computed tokens
+        seq_lens = (
+            torch.tensor(
+                self.input_batch.num_prompt_tokens[:num_reqs],
+                dtype=torch.int32,
+                device=self.device
+            )
+            + torch.tensor(
+                self.input_batch.num_computed_tokens_cpu[:num_reqs],
+                dtype=torch.int32,
+                device=self.device
+            )
+        )
+        for raw_output, seq_len, prompt_len in zip(
+                raw_pooler_output, seq_lens, pooling_metadata.prompt_lens):
+
+            if seq_len == prompt_len:
+                pooler_output.append(raw_output.data.cpu())
+            else:
+                pooler_output.append(None)
+
+        return ModelRunnerOutput(
+            req_ids=[self.input_batch.req_ids],
+            req_id_to_index=self.input_batch.req_id_to_index,
+            sampled_token_ids=[],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=pooler_output,
+            kv_connector_output=None,
+            )
+    
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1997,6 +2079,93 @@ class HPUModelRunner:
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOuptut if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
+        if self.input_batch.pooling_params:
+            num_scheduled_tokens = []
+            input_ids_list = []
+            num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu
+            num_reqs = self.input_batch.num_reqs
+
+            # Step 1: gather input_ids and num_scheduled_tokens
+            for idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+                assert req_id is not None
+                seq_num_scheduled = scheduler_output.num_scheduled_tokens[req_id]
+                num_scheduled_tokens.append(seq_num_scheduled)
+                scheduled_req = scheduler_output.scheduled_new_reqs[idx]
+                token_ids = scheduled_req.prompt_token_ids
+                # Convert to torch tensor if not already
+                if not isinstance(token_ids, torch.Tensor):
+                    token_ids = torch.tensor(token_ids, dtype=torch.long)
+                # Flatten in case it's nested
+                token_ids = token_ids.flatten()
+                input_ids_list.append(token_ids)
+                    
+            # Step 2: concatenate input_ids across requests
+            input_ids = torch.cat(input_ids_list, dim=0).to(self.device)
+
+            # Step 3: add prefix lengths to get absolute positions
+            absolute_positions = []
+            for i, n in enumerate(num_scheduled_tokens):
+                prefix = num_computed_tokens_cpu[i]
+                absolute_positions.append(prefix + np.arange(n, dtype=np.int64))
+
+            absolute_positions_np = np.concatenate(absolute_positions)
+            
+            # Step 7: convert to torch tensor
+            position_ids = torch.from_numpy(absolute_positions_np).to(self.device)
+
+            # Slot mapping: place your tokens in the first slots of the block, pad rest with -1
+            seq_lens = list(scheduler_output.num_scheduled_tokens.values())  # get actual scheduled tokens
+            block_size = self.block_size
+            slot_mapping = torch.zeros((num_reqs, block_size), dtype=torch.long)
+            # slot_mapping = torch.arange(block_size, block_size + seq_lens[0], device='hpu:0').unsqueeze(0)
+            # slot_mapping = torch.cat([slot_mapping, torch.full((1, block_size - seq_lens[0]), -1, device='hpu:0')], dim=1)
+            slot_mapping = slot_mapping[0, :seq_lens[0]]  # slice to match num_scheduled_tokens
+            # slot_mapping = torch.full((n, block_size), -1, device='hpu:0', dtype=torch.int64)
+
+            # for i, seq_len in enumerate(seq_lens):
+            #     # Place tokens in the first seq_len slots of the block
+            #     slot_mapping[i, :seq_len] = torch.arange(block_size, block_size + seq_len, device='hpu:0')
+
+
+            # Seq and context lengths
+            seq_lens_tensor = torch.tensor(seq_lens, device='hpu:0', dtype=torch.int32)
+            context_lens_tensor = torch.tensor([0], device='hpu:0', dtype=torch.int32)
+
+            # Create attention metadata
+            attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
+                seq_lens_tensor=seq_lens_tensor,
+                context_lens_tensor=context_lens_tensor,
+                slot_mapping=slot_mapping,
+                block_list=None,
+                attn_bias=None,
+                block_size=block_size
+            )
+
+            # Forward pass
+            with set_forward_context(attn_metadata, self.vllm_config):
+                hidden_states = self.model.forward(
+                    input_ids=input_ids,
+                    positions=position_ids
+                )
+
+            # Prepare num_scheduled_tokens for pooling
+            total_scheduled_tokens = sum(num_scheduled_tokens)
+            if isinstance(num_scheduled_tokens, list):
+                num_scheduled_tokens_np = np.array(num_scheduled_tokens, dtype=np.int32)
+            else:
+                num_scheduled_tokens_np = np.array([num_scheduled_tokens], dtype=np.int32)
+
+            flattened = hidden_states.view(-1, hidden_states.shape[-1])
+
+            # Pooling
+            pooled_output = self._pool(
+                flattened,
+                total_scheduled_tokens,
+                num_scheduled_tokens_np
+            )
+
+            return pooled_output
+
         # If necessary, swap decodes/prompts to have all decodes on the start
         ensure_decodes_first(self.input_batch)
         # Prepare prompts/decodes info
@@ -2313,9 +2482,9 @@ class HPUModelRunner:
             hidden_layer_markstep_interval)
         torch.hpu.synchronize()
 
-        with HabanaMemoryProfiler() as m:  # noqa: SIM117
-            self.model = _maybe_wrap_in_hpu_graph(self.model,
-                                                  vllm_config=self.vllm_config)
+        # with HabanaMemoryProfiler() as m:  # noqa: SIM117
+        #     self.model = _maybe_wrap_in_hpu_graph(self.model,
+        #                                           vllm_config=self.vllm_config)
         self.model_memory_usage = m.consumed_device_memory
         logger.info("Wrapping in HPUGraph took %.4f GB",
                     self.model_memory_usage / float(2**30))
@@ -2719,9 +2888,8 @@ class HPUModelRunner:
             raise NotImplementedError(
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
-
         kv_caches: dict[str, torch.Tensor] = {}
-
+        num_blocks = 1
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
@@ -2844,3 +3012,4 @@ class HPUModelRunner:
         logger.info("Reloading weights inplace...")
         model_loader.load_weights(self.model, model_config=self.model_config)
         torch.hpu.synchronize()
+   
