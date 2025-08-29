@@ -13,6 +13,37 @@ from .validation import choice, regex
 _VLLM_VALUES = {}
 
 
+def _get_habana_devices_and_driver_info(_):
+    try:
+        command = ["hl-smi", "-q", "-d", "PRODUCT"]
+        lines = subprocess.Popen(command, stdout=subprocess.PIPE, universal_newlines=True).stdout.readlines()
+        lines = [l.strip('\t') for l in lines]
+        hpu_count = None
+        hpu_model = None
+        hpu_driver = None
+        model_re = re.compile(r'Product Name.+?: (.+)')
+        count_re = re.compile(r'Attached AIPs.+?: (\d+)')
+        driver_re = re.compile(r'Driver Version.+?: (.+)')
+        for line in lines:
+            if hpu_c := count_re.match(line):
+                hpu_count = hpu_c.group(1)
+
+            if hpu_m := model_re.match(line):
+                hpu_model = hpu_m.group(1)
+
+            if hpu_d := driver_re.match(line):
+                hpu_driver = hpu_d.group(1)
+
+            if hpu_model and hpu_count and hpu_driver:
+                break
+
+        if hpu_model is None:
+            return f'Habana Gaudi unknown model, driver {hpu_driver}'
+        return f'Habana Gaudi {hpu_count}x {hpu_model}, driver {hpu_driver}'
+    except:
+        return ''
+
+
 def _get_hw(_):
     import habana_frameworks.torch.utils.experimental as htexp
     device_type = htexp._get_device_type()
@@ -82,6 +113,7 @@ def get_environment():
         Value('build', _get_build, env_var_type=str, check=regex(r'^\d+\.\d+\.\d+\.\d+$', hint='You can override detected build by specifying VLLM_BUILD env variable')),
         Value('engine_version', _get_vllm_engine_version, env_var_type=str),
         Value('bridge_mode', _get_pt_bridge_mode, env_var_type=str, check=choice('eager', 'lazy')),
+        Value('hlsmi_info', _get_habana_devices_and_driver_info, env_var_type=str),
         VllmValue('model_type', str),
         VllmValue('prefix_caching', boolean),
     ]
