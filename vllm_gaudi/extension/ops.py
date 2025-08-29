@@ -717,6 +717,15 @@ def gaudi_weight_wrapper(weight_loader):
 
     return wrapper
 
+def synced_weight_loader(weight_loader):
+    """Wrapper for Gaudi weight conversion."""
+
+    def wrapper(*args, **kwargs):
+        weight_loader(*args, **kwargs)
+        torch.hpu.synchronize()
+
+    return wrapper
+
 def fp8_block_linear_postprocess_weights(layer, force_channel_fp8=False):
     weight, orig_M, orig_N = pad_block_fp8_weight_naive(
         layer.weight.data,
