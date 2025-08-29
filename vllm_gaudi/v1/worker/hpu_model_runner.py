@@ -643,11 +643,13 @@ class HPUModelRunner:
         self.use_prefix_caching = (
             self.vllm_config.cache_config.enable_prefix_caching)
         self.bucketing_manager = HPUBucketingManager()
+        max_num_prefill_seqs = self.max_num_seqs if self.use_merged_prefill \
+                               else self.max_prefill_batch_size
         if self.enable_bucketing:
             logger.info("Bucketing is ON.")
             self.bucketing_manager.initialize(
                 max_num_seqs=self.max_num_seqs,
-                max_num_prefill_seqs=self.max_prefill_batch_size,
+                max_num_prefill_seqs=max_num_prefill_seqs,
                 block_size=self.block_size,
                 max_num_batched_tokens=self.max_num_batched_tokens,
                 max_model_len=self.max_model_len)
@@ -2449,8 +2451,8 @@ class HPUModelRunner:
         return total_mem, total_batch_seq, captured_all
 
     def _add_dummy_request(self, requests, num_scheduled_tokens,
-                           num_computed_tokens, total_tokens,
-                           scheduled_tokens):
+                           num_computed_tokens, total_tokens, scheduled_tokens,
+                           is_prompt):
         from vllm.sampling_params import SamplingParams
         from vllm.v1.core.sched.output import NewRequestData
 
@@ -2474,7 +2476,11 @@ class HPUModelRunner:
             lora_request=None,
         )
         requests.append(req)
-        num_scheduled_tokens[req_id] = scheduled_tokens
+        if is_prompt:
+            num_scheduled_tokens[req_id] = len(
+                prompt_token_ids) - num_computed_tokens  #scheduled_tokens
+        else:
+            num_scheduled_tokens[req_id] = scheduled_tokens
 
     @staticmethod
     def _generate_seq_lengths(num_samples, num_blocks, block_size):
@@ -2486,6 +2492,27 @@ class HPUModelRunner:
         seq_lengths = [b * block_size - 1 for b in blocks]
         return seq_lengths
 
+    def split_list_to_max(self, total_sum, values, max_val):
+        base = total_sum // values
+        remain = total_sum % values
+        result = [base] * values
+
+        for i in range(remain):
+            result[i] += 1
+
+        return result
+
+    def unmerge_prefills_to_bs(self, query_len, ctx_blocks):
+        query_per_sample = math.ceil(query_len / self.max_num_seqs)
+        ctx_per_sample = math.ceil(ctx_blocks / self.max_num_seqs)
+ 
+        max_ctx_per_sample = math.ceil((self.max_model_len - query_per_sample) // self.block_size)
+        
+        ctx_list = self.split_list_to_max(ctx_blocks, self.max_num_seqs, max_ctx_per_sample)
+        query_list = self.split_list_to_max(query_len, self.max_num_seqs, query_per_sample)
+        prompt_list = [q + c * self.block_size for q, c in zip(query_list, ctx_list)]
+        return prompt_list, ctx_list
+
     def _execute_dummy_scenario(self, prompt_cfg, decode_cfg):
         from vllm.v1.core.sched.output import (NewRequestData, SchedulerOutput,
                                                CachedRequestData)
@@ -2495,13 +2522,22 @@ class HPUModelRunner:
         if prompt_cfg:
             prompt_bs, prompt_query_len, prompt_blocks = prompt_cfg
             prompt_ctx_len = prompt_blocks * self.block_size
-            prompt_total_tokens = prompt_query_len + prompt_ctx_len
-            for _ in range(prompt_bs):
+            prompt_total_tokens = [prompt_query_len + prompt_ctx_len]
+            prompt_context_blocks = [prompt_blocks]
+            if self.max_model_len < sum(prompt_total_tokens) \
+                and self.use_merged_prefill:
+                # split query and ctx in merged prefill case
+                prompt_total_tokens, prompt_context_blocks = \
+                     self.unmerge_prefills_to_bs(prompt_query_len, prompt_blocks)
+            for tokens, context in zip(prompt_total_tokens,
+                                       prompt_context_blocks):
                 self._add_dummy_request(requests,
                                         scheduled_tokens,
-                                        num_computed_tokens=prompt_ctx_len,
-                                        total_tokens=prompt_total_tokens,
-                                        scheduled_tokens=prompt_query_len)
+                                        num_computed_tokens=(context *
+                                                             self.block_size),
+                                        total_tokens=tokens,
+                                        scheduled_tokens=prompt_query_len,
+                                        is_prompt=True)
         if decode_cfg:
             decode_bs, decode_query_len, decode_blocks = decode_cfg
             decode_seq_lengths = self._generate_seq_lengths(
@@ -2511,8 +2547,8 @@ class HPUModelRunner:
                                         scheduled_tokens,
                                         num_computed_tokens=dsl,
                                         total_tokens=dsl,
-                                        scheduled_tokens=1)
-
+                                        scheduled_tokens=1,
+                                        is_prompt=False)
         sched_output = SchedulerOutput(
             scheduled_new_reqs=requests,
             scheduled_cached_reqs=CachedRequestData.make_empty(),
@@ -2615,7 +2651,7 @@ class HPUModelRunner:
                 cache_size_limit * 8,
                 torch._dynamo.config.accumulated_cache_size_limit)
 
-        if self.skip_warmup or self.use_merged_prefill:
+        if self.skip_warmup:
             logger.info("Skipping warmup...")
             return
 
