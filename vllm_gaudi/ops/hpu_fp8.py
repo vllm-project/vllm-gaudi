@@ -63,6 +63,7 @@ class Fp8LinearMethod(OrigFp8LinearMethod):
         )
         return dequant_weight
 
+
 @CustomOp.register_oot(name='Fp8MoEMethod')
 class HPUFp8MoEMethod(Fp8MoEMethod):
 
