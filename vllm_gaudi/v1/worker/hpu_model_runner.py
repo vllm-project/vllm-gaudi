@@ -2492,18 +2492,25 @@ class HPUModelRunner:
         seq_lengths = [b * block_size - 1 for b in blocks]
         return seq_lengths
 
-    def split_evenly(self, total, max_value, target_parts=None):
+    def split_two_evenly(self, total1, max_value1, total2, max_value2):
         '''
-        Split total value evenly, so that no value would be greater than max.
-        Optionaly define how many part to split this value.
+        Evenly split two values into even parts, including their max values.
         '''
-        parts = target_parts if target_parts else math.ceil(total / max_value)
-        base = total // parts
-        remainder = total % parts
-        result = [base] * parts
-        for i in range(remainder):
-            result[i] += 1
-        return result
+        # Calculate minimum parts
+        parts1 = math.ceil(total1 / max_value1)
+        parts2 = math.ceil(total2 / max_value2)
+        parts = max(parts1, parts2)
+
+        base1 = total1 // parts
+        rem1 = total1 % parts
+        list1 = [base1 + 1 if i < rem1 else base1 for i in range(parts)]
+
+        base2 = total2 // parts
+        rem2 = total2 % parts
+        list2 = [base2 + 1 if i < rem2 else base2 for i in range(parts)]
+
+        return list1, list2
+        
 
     def _execute_dummy_scenario(self, prompt_cfg, decode_cfg):
         from vllm.v1.core.sched.output import (NewRequestData, SchedulerOutput,
@@ -2519,11 +2526,14 @@ class HPUModelRunner:
             if self.max_model_len < sum(prompt_total_tokens) \
                 and self.use_merged_prefill:
                 # split query and ctx in merged prefill case
-                prompt_total_tokens = self.split_evenly(
-                    sum(prompt_total_tokens), self.max_model_len)
-                context_parts = len(prompt_total_tokens)
-                prompt_context_blocks = self.split_evenly(
-                    prompt_blocks, prompt_blocks, context_parts)
+                max_context_per_sample = \
+                    math.ceil(self.max_model_len // self.block_size) - 1
+                prompt_total_tokens, prompt_context_blocks = \
+                                                 self.split_two_evenly(
+                                                 total1=sum(prompt_total_tokens), 
+                                                 max_value1=self.max_model_len,
+                                                 total2=prompt_blocks,
+                                                 max_value2=max_context_per_sample)
             for tokens, context in zip(prompt_total_tokens,
                                        prompt_context_blocks):
                 self._add_dummy_request(requests,

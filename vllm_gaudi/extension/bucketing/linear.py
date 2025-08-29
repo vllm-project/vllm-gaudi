@@ -33,7 +33,7 @@ class LinearBucketingStrategy:
             prompt_bs_bucket_cfg = (1, 1, 1)
             query_min, query_step, _ = prev_prompt_query_bucket_cfg
             prompt_query_bucket_cfg = (query_min, query_step*4, max_num_batched_tokens)
-            prompt_ctx_bucket_cfg = (0, 1, max_ctx * max_num_prefill_seqs)
+            prompt_ctx_bucket_cfg = (0, 4, max_ctx * max_num_prefill_seqs)
 
             msg = ('Merged prefill is enabled!\n'
                   'Overriding prompt bucketing settings!\n'
