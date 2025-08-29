@@ -2492,24 +2492,52 @@ class HPUModelRunner:
         seq_lengths = [b * block_size - 1 for b in blocks]
         return seq_lengths
 
-    def split_two_evenly(self, total1, max_value1, total2, max_value2):
-        '''
-        Evenly split two values into even parts, including their max values.
-        '''
-        # Calculate minimum parts
-        parts1 = math.ceil(total1 / max_value1)
-        parts2 = math.ceil(total2 / max_value2)
-        parts = max(parts1, parts2)
+    def split_prompt_context(split, total_prompt_tokens, total_context, max_value):
+        def calculate_chunks(num_chunks):
+            # Split total_prompt_tokens into num_chunks as evenly as possible
+            base = total_prompt_tokens // num_chunks
+            remainder = total_prompt_tokens % num_chunks
+            return [base + (1 if i < remainder else 0) for i in range(num_chunks)]
 
-        base1 = total1 // parts
-        rem1 = total1 % parts
-        list1 = [base1 + 1 if i < rem1 else base1 for i in range(parts)]
+        num_chunks = math.ceil(total_prompt_tokens / max_value)
+    
+        while True:
+            prompt_list = calculate_chunks(num_chunks)
+        
+            if any(p > max_value or p <= 1 for p in prompt_list):
+                num_chunks += 1
+                continue
 
-        base2 = total2 // parts
-        rem2 = total2 % parts
-        list2 = [base2 + 1 if i < rem2 else base2 for i in range(parts)]
+            max_contexts = []
+            for p in prompt_list:
+                max_ctx = min(math.ceil(p / 128) - 1, (p - 2) // 128)
+                max_ctx = max(0, max_ctx)
+                max_contexts.append(max_ctx)
 
-        return list1, list2
+            total_slots = sum(max_contexts)
+
+            if total_context <= total_slots:
+                break  # Valid split found
+            num_chunks += 1  # Try more chunks
+
+        context_list = [0] * len(prompt_list)
+        i = 0
+        while total_context > 0:
+            if context_list[i] < max_contexts[i]:
+                context_list[i] += 1
+                total_context -= 1
+            i = (i + 1) % len(prompt_list)
+
+        # Sanity checks
+        for p, c in zip(prompt_list, context_list):
+            assert p - c * 128 > 1
+            assert c <= math.ceil(p / 128) - 1
+            assert p <= max_value
+            assert p > 1
+            assert c >= 0
+
+        return prompt_list, context_list
+
         
 
     def _execute_dummy_scenario(self, prompt_cfg, decode_cfg):
@@ -2526,16 +2554,13 @@ class HPUModelRunner:
             if self.max_model_len < sum(prompt_total_tokens) \
                 and self.use_merged_prefill:
                 # split query and ctx in merged prefill case
-                max_context_per_sample = \
-                    math.ceil(self.max_model_len // self.block_size) - 1
                 prompt_total_tokens, prompt_context_blocks = \
-                                                 self.split_two_evenly(
-                                                 total1=sum(prompt_total_tokens), 
-                                                 max_value1=self.max_model_len,
-                                                 total2=prompt_blocks,
-                                                 max_value2=max_context_per_sample)
+                     self.split_prompt_context(sum(prompt_total_tokens), 
+                                               prompt_blocks, 
+                                               self.max_model_len)
             for tokens, context in zip(prompt_total_tokens,
                                        prompt_context_blocks):
+                suma += tokens - context * self.block_size
                 self._add_dummy_request(requests,
                                         scheduled_tokens,
                                         num_computed_tokens=(context *
