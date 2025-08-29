@@ -164,3 +164,14 @@ if [ $? -ne 0 ]; then
     exit -1
 fi
 echo "Test with multimodal-support with qwen2.5-vl-7b passed"
+
+# spec decode with ngram
+# For G3, acc rate is 0.18, but for G2, it is 0.09
+echo "Testing Spec-decode with ngram"
+echo VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python vllm-gaudi/tests/full_tests/spec_decode.py --task ngram --assert_acc_rate 0.09 --osl 1024
+VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python vllm-gaudi/tests/full_tests/spec_decode.py --task ngram --assert_acc_rate 0.09 --osl 1024
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for spec decode with ngram" >&2
+    exit -1
+fi
+echo "Test with spec decode with ngram passed"
