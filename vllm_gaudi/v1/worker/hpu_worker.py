@@ -306,7 +306,7 @@ class HPUWorker(WorkerBase):
 
 
 def init_worker_distributed_environment(
-    vllm_config: ParallelConfig,
+    vllm_config: VllmConfig,
     rank: int,
     distributed_init_method: Optional[str] = None,
     local_rank: int = -1,
