@@ -14,3 +14,4 @@ def register():
 def register_ops():
     """Register custom ops for the HPU platform."""
     import vllm_gaudi.ops  # noqa: F401
+    import vllm_gaudi.distributed.kv_transfer.kv_connector.v1.hpu_nixl_connector  # noqa: F401
