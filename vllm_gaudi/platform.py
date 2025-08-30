@@ -78,6 +78,7 @@ class HpuPlatform(Platform):
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 128
+        #vllm_config.kv_transfer_config.kv_buffer_device = 'hpu'
         if (parallel_config.distributed_executor_backend in ['mp', 'uni']
                 and envs.VLLM_WORKER_MULTIPROC_METHOD == 'fork'):
             if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD",
@@ -215,3 +216,4 @@ class HpuPlatform(Platform):
         logger.warning(msg)
         import vllm.model_executor.utils as utils
         utils.set_weight_attrs = set_weight_attrs
+
