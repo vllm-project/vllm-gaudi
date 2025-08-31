@@ -516,9 +516,22 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
     # input_hash(123) != input_hash(321)
     # input_hash("abc") != input_hash("cba")
     attention_metadata = subtuple(metadata, 'TrimmedAttentionMetadata', [
-        'attn_bias', 'seq_lens_tensor', 'context_lens_tensor', 'block_list',
-        'block_mapping', 'block_usage', 'slot_mapping', 'is_prompt',
-        'block_size', 'block_groups'
+        'attn_bias',
+        'seq_lens_tensor',
+        'context_lens_tensor',
+        'block_list',
+        'block_mapping',
+        'block_usage',
+        'slot_mapping',
+        'is_prompt',
+        'block_size',
+        'block_groups',
+        'window_block_list',
+        'window_block_mapping',
+        'window_block_usage',
+        'window_block_groups',
+        'window_attn_bias',
+        'use_window_sdpa',
     ])
     return attention_metadata
 
@@ -582,6 +595,9 @@ class HPUModelRunner:
         self.is_pooling_model = model_config.pooler_config is not None
 
         self.sliding_window = model_config.get_sliding_window()
+        self.interleaved_sliding_window = getattr(
+            self.model_config.hf_text_config, "interleaved_sliding_window",
+            None)
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
