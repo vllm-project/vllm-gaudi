@@ -698,12 +698,35 @@ def dynamic_quant(data, single_scale = False):
         data, 1.0 / scale, False, False, torch.float8_e4m3fn)[0]
     return data_fp8, scale.float()
 
+def gaudi_weight_wrapper(weight_loader):
+    """Wrapper for Gaudi weight conversion."""
+
+    def wrapper(*args, **kwargs):
+        # args[0] is parameter, args[1] is loaded_weight
+        # weights will be always in fp8, but scales will be in fp32,
+        # so we can detect it by dtype
+        loaded_weight = args[1]
+        if loaded_weight.dtype == torch.float8_e4m3fn:
+            loaded_weight = (loaded_weight.float() * 0.5).to(
+                torch.float8_e4m3fn)
+        else:
+            loaded_weight = (loaded_weight.data * 2.0)
+        args = (args[0], loaded_weight) + args[2:]
+
+        weight_loader(*args, **kwargs)
+
+    return wrapper
+
+def synced_weight_loader(weight_loader):
+    """Wrapper for Gaudi weight conversion."""
+
+    def wrapper(*args, **kwargs):
+        weight_loader(*args, **kwargs)
+        torch.hpu.synchronize()
+
+    return wrapper
 
 def fp8_block_linear_postprocess_weights(layer, force_channel_fp8=False):
-    torch.hpu.synchronize()
-    if torch.isnan(layer.weight.data).any():
-        raise ValueError("NaN detected in weights. Please use the flag VLLM_HPU_CONVERT_TO_FP8UZ to convert it at runtime or" \
-        " convert the weights using scripts/deepseek_gaudi2 from vllm-hpu-extension")
     weight, orig_M, orig_N = pad_block_fp8_weight_naive(
         layer.weight.data,
         layer.weight_scale_inv.data,
