@@ -6,16 +6,22 @@ import pytest
 
 from vllm import LLM
 
-if os.getenv("VLLM_USE_V1", "0") != "1":
-    pytest.skip("Test package requires V1", allow_module_level=True)
-
 MODEL = "facebook/opt-125m"
 PROMPT = "Hello my name is Robert and I"
 BLOCK_SIZE = 128
 
 
+@pytest.fixture(params=[True, False], scope="module")
+def oot_scheduler(request):
+    yield request.param
+
+
 @pytest.fixture(scope="module")
-def llm() -> LLM:
+def llm(oot_scheduler: bool) -> LLM:
+    if oot_scheduler:
+        os.environ["VLLM_HPU_OOT_SCHEDULER"] = "1"
+    else:
+        os.environ["VLLM_HPU_OOT_SCHEDULER"] = "0"
     return LLM(MODEL,
                enforce_eager=True,
                enable_prefix_caching=True,
@@ -25,6 +31,7 @@ def llm() -> LLM:
                block_size=BLOCK_SIZE)
 
 
+#@pytest.mark.parametrize("oot_scheduler", [True, False], indirect=True)
 def test_concurrent_partial_prefill(llm):
     outputs = llm.generate([PROMPT] * 3)
     assert len(outputs) == 3
@@ -32,6 +39,7 @@ def test_concurrent_partial_prefill(llm):
         assert len(output.outputs) == 1
 
 
+#@pytest.mark.parametrize("oot_scheduler", [True, False], indirect=True)
 def test_prefix_cache_stats_is_recorded(llm):
     # 129 tokens will make sure first 128 tokens are cached in a block
     input_tokens = {"prompt_token_ids": [101] * (BLOCK_SIZE + 1)}
