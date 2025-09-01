@@ -66,6 +66,7 @@ from vllm.v1.worker.utils import (gather_mm_placeholders,
                                   sanity_check_mm_encoder_outputs,
                                   scatter_mm_placeholders)
 from vllm.v1.sample.logits_processor import build_logitsprocs
+from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -2406,14 +2407,9 @@ class HPUModelRunner:
         logger.info(msg)
     
     def warmup_sampler(self):
-        """Warmup the sampler with different temperature, top-p, and top-k values."""
-        vocab_size = self.model_config.get_vocab_size()
-        sampler_outputs = []
-        
-        # Test different batch sizes that are commonly used
-        test_batch_sizes = [0, 1, 2, 4, 8, 16, 32, 64, 128] # TODO: if user passes max num seqs 16 these batches will fail - take it from the model?
-        if self.max_batch_size not in test_batch_sizes:
-            test_batch_sizes.append(self.max_batch_size)
+        """Warmup the sampler with different temperature, top-p, and top-k values."""        
+        # Choose batch sizes for warmup based on bucketing
+        test_batch_sizes = list(dict.fromkeys([0, 1] + [bucket[0] for bucket in self.bucketing_manager.decode_buckets]))
         
         # Test different sampling configurations
         sampling_configs = [
@@ -2431,104 +2427,78 @@ class HPUModelRunner:
             (1.2, 0.8, 100, False),     # High temperature settings
             (0.8, 0.85, 0, False),     # Different top-p sampling
         ]
-        
-        
-        # print summary of what batch sizes and sampling configs are warmed up
-        # TODO: mention warmup of smaller req_id_sizes
+
         logger.info(f"Warming up sampler with batch sizes: {test_batch_sizes} and following configs:")
         for temp, top_p, top_k, batch_changed in sampling_configs:
-            logger.info(f"Warming up with temp={temp}, top_p={top_p}, top_k={top_k}, batch_changed={batch_changed}")
+            logger.info(f"temp={temp}, top_p={top_p}, top_k={top_k}, batch_changed={batch_changed}")
         logger.info("Starting sampler warmup...")
-        
-        sampler_outputs = []
-        
-        for batch_size in test_batch_sizes:
-            for chopped_req_id_size in range(-1, batch_size):
-                req_ids_list = [0] + list(range(1, chopped_req_id_size + 1))
-                for temp, top_p, top_k, batch_changed in sampling_configs:
                 
-                    # Create dummy requests for this specific configuration
-                    dummy_req_ids = [f"warmup_req_{temp}_{top_p}_{top_k}_{i}" for i in req_ids_list]
-                    from vllm.sampling_params import SamplingParams
-                    
-                    # Add dummy requests to the cache with consistent sampling params
-                    for i, req_id in enumerate(dummy_req_ids):
-                        self.requests[req_id] = CachedRequestState(
-                            req_id=req_id,
-                            prompt_token_ids=list(range(10)),  # Dummy prompt
-                            mm_kwargs=[],
-                            mm_positions=[],
-                            mm_hashes=[],
-                            sampling_params=SamplingParams(
-                                temperature=temp,
-                                top_p=top_p,
-                                top_k=top_k,
-                            ),
-                            pooling_params=None,
-                            generator=None,
-                            block_ids=[[0]],
-                            num_computed_tokens=10,
-                            output_token_ids=[],
-                        )
-                    
-                    # Temporarily add dummy requests to input_batch req_id_to_index for _prepare_sampling
-                    temp_req_mappings = {}
-                    temp_greedy_reqs = set()
-                    temp_random_reqs = set()
-                    
-                    for i, req_id in enumerate(dummy_req_ids):
-                        temp_req_mappings[req_id] = i
-                        self.input_batch.req_id_to_index[req_id] = i
-                        
-                        # Also classify requests as greedy or random for proper batch state
-                        if temp == 0.0:  # Greedy sampling
-                            temp_greedy_reqs.add(req_id)
-                            self.input_batch.greedy_reqs.add(req_id)
-                        else:  # Random sampling
-                            temp_random_reqs.add(req_id)
-                            self.input_batch.random_reqs.add(req_id)
+        for batch_size in test_batch_sizes:
+            dummy_hidden_states = torch.randn(
+                batch_size, self.hidden_size,
+                dtype=self.dtype, device=self.device
+            )
+            dummy_logits = self.model.compute_logits(dummy_hidden_states, None)
 
-                    self.input_batch.req_output_token_ids = [item[1] for item in self.generate_req_id_output_token_ids_lst(dummy_req_ids, pad_to=chopped_req_id_size)]
+            # for sub_req_id_size in [batch_size - 1]:
+            req_ids_list = [0] + list(range(1, batch_size)) # every sub batch will have len(req_ids_list) == (1 or sub_req_id_size)
+            
+            # Create dummy requests for this specific configuration
+            dummy_req_ids = [f"warmup_req_{batch_size}_{i}" for i in req_ids_list]
 
-                    self.input_batch.refresh_sampling_metadata()
+            for i, req_id in enumerate(dummy_req_ids):
+                self.requests[req_id] = CachedRequestState(
+                    req_id=req_id,
+                    prompt_token_ids=list(range(10)),  # Dummy prompt
+                    mm_kwargs=[],
+                    mm_positions=[],
+                    mm_hashes=[],
+                    sampling_params=SamplingParams(),
+                    pooling_params=None,
+                    generator=None,
+                    block_ids=[[0]],
+                    num_computed_tokens=10,
+                    output_token_ids=[],
+                )
+                self.input_batch.req_id_to_index[req_id] = i
 
-                    dummy_hidden_states = torch.randn(
-                        batch_size, self.hidden_size,
-                        dtype=self.dtype, device=self.device
+            for temp, top_p, top_k, batch_changed in sampling_configs:                    
+                # Add dummy requests to the cache with consistent sampling params
+                for i, req_id in enumerate(dummy_req_ids):
+                    self.requests[req_id].sampling_params = SamplingParams(
+                        temperature=temp,
+                        top_p=top_p,
+                        top_k=top_k,
                     )
-                    dummy_logits = self.model.compute_logits(dummy_hidden_states, None)
-                    # print("POPIPP", len(self.input_batch.random_reqs) == 0)
-                    sampler_output = self.run_sampling(
-                        batch_changed=batch_changed,
-                        logits_device=dummy_logits,
-                        request_ids=dummy_req_ids,
-                        pad_to=dummy_logits.shape[0]
-                    )
-                    # Store output to prevent compiler optimization and ensure execution
-                    sampler_outputs.append(sampler_output.sampled_token_ids.flatten())
                     
-                    # Ensure the output has the expected shape - it should be [batch_size, 1] or [batch_size]
-                    expected_shapes = [(batch_size,), (batch_size, 1)]
-                    assert sampler_output.sampled_token_ids.shape in expected_shapes, \
-                        f"Expected shape {expected_shapes}, got {sampler_output.sampled_token_ids.shape}"
-                    
-                    # Clean up dummy requests after each configuration
-                    for req_id in dummy_req_ids:
-                        del self.requests[req_id]
-                    
-                    for req_id in temp_req_mappings:
-                        self.input_batch.req_id_to_index.pop(req_id, None)
-                    for req_id in temp_greedy_reqs:
-                        self.input_batch.greedy_reqs.discard(req_id)
-                    for req_id in temp_random_reqs:
-                        self.input_batch.random_reqs.discard(req_id)
-                    self.input_batch.req_output_token_ids = []
+                    # Also classify requests as greedy or random for proper batch state
+                    if temp == 0.0:  # Greedy sampling
+                        self.input_batch.greedy_reqs.add(req_id)
+                    else:  # Random sampling
+                        self.input_batch.random_reqs.add(req_id)
+
+                self.input_batch.req_output_token_ids = [item[1] for item in self.generate_req_id_output_token_ids_lst(dummy_req_ids, pad_to=batch_size)]
+                self.input_batch.refresh_sampling_metadata()
+
+                _sampler_output = self.run_sampling(
+                    batch_changed=batch_changed,
+                    logits_device=dummy_logits,
+                    request_ids=dummy_req_ids,
+                    pad_to=dummy_logits.shape[0]
+                )
+                
+                # Cleanup after sampling
+                self.input_batch.greedy_reqs = set()
+                self.input_batch.random_reqs = set()
+                self.input_batch.req_output_token_ids = []
+
+                # Cleanup after batch has been warmed up
+            self.input_batch.req_id_to_index = {}
         
         # Final synchronization to ensure all operations are completed
         torch.hpu.synchronize()
         
         logger.info("Sampler warmup completed successfully")
-        return sampler_outputs
 
     def warmup_graphs(self,
                       buckets,
@@ -2575,7 +2545,6 @@ class HPUModelRunner:
     def _add_dummy_request(self, requests, num_scheduled_tokens,
                            num_computed_tokens, total_tokens,
                            scheduled_tokens):
-        from vllm.sampling_params import SamplingParams
         from vllm.v1.core.sched.output import NewRequestData
 
         num_blocks = round_up(total_tokens, self.block_size) // self.block_size
@@ -2764,7 +2733,8 @@ class HPUModelRunner:
                     ("HabanaWorker.determine_num_available_blocks needs "
                      "to be called before warming up the model.")
                 
-                sampler_outputs = self.warmup_sampler()
+                self.warmup_sampler()
+
                 # TODO(kzawora): align_workers
                 mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
                     self.warmup_graphs(
