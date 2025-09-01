@@ -12,5 +12,6 @@ logger = init_logger()
 class HPUScheduler(Scheduler):
 
     def __init__(self, *args, **kwargs):
-        logger.info("Using HPUScheduler")
+        msg = f"Using {type(self).__name__}"
+        logger.info(msg)
         super().__init__(*args, **kwargs)

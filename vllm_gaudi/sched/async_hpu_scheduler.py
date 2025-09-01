@@ -13,10 +13,6 @@ logger = init_logger(__name__)
 
 class AsyncHPUScheduler(HPUScheduler):
 
-    def __init__(self, *args, **kwargs):
-        logger.info("Using AsyncHPUScheduler")
-        super().__init__(*args, **kwargs)
-
     def _update_after_schedule(
         self,
         scheduler_output: SchedulerOutput,
