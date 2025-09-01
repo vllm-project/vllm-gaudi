@@ -2197,21 +2197,14 @@ class HPUModelRunner:
             len(self.input_batch.pooling_params), \
         "Either all or none of the requests in" \
         " a batch must be pooling request"
-
-        extracted_hidden_states = list(
-            torch.split(hidden_states[:num_scheduled_tokens],
-                        num_scheduled_tokens_np.tolist()))
+        hidden_states = hidden_states[:num_scheduled_tokens]
 
         pooling_metadata = self.input_batch.pooling_metadata
+        pooling_metadata.build_pooling_cursor(num_scheduled_tokens_np.tolist(),
+                                              device=hidden_states.device)
 
-        raw_pooler_output = self.model.pooler(
-            hidden_states=extracted_hidden_states,
-            pooling_metadata=pooling_metadata)
-
-        pooler_output: list[Optional[torch.Tensor]] = []
         num_reqs = self.input_batch.num_reqs
 
-        # Sequence length = prompt tokens + already computed tokens
         seq_lens = (
             torch.tensor(
                 self.input_batch.num_prompt_tokens[:num_reqs],
@@ -2224,11 +2217,15 @@ class HPUModelRunner:
                 device=self.device
             )
         )
+        raw_pooler_output = self.model.pooler(
+            hidden_states=hidden_states, pooling_metadata=pooling_metadata)
+        
+        pooler_output: list[Optional[torch.Tensor]] = []
         for raw_output, seq_len, prompt_len in zip(
                 raw_pooler_output, seq_lens, pooling_metadata.prompt_lens):
 
             if seq_len == prompt_len:
-                pooler_output.append(raw_output.data.cpu())
+                pooler_output.append(raw_output.data)
             else:
                 pooler_output.append(None)
 
@@ -2361,7 +2358,7 @@ class HPUModelRunner:
             # Slot mapping: place your tokens in the first slots of the block, pad rest with -1
             seq_lens = list(scheduler_output.num_scheduled_tokens.values())  # get actual scheduled tokens
             block_size = self.block_size
-            slot_mapping = torch.zeros((num_reqs, block_size), dtype=torch.long)
+            slot_mapping = torch.zeros((num_reqs, block_size), dtype=torch.long, device="hpu:0")
             # slot_mapping = torch.arange(block_size, block_size + seq_lens[0], device='hpu:0').unsqueeze(0)
             # slot_mapping = torch.cat([slot_mapping, torch.full((1, block_size - seq_lens[0]), -1, device='hpu:0')], dim=1)
             slot_mapping = slot_mapping[0, :seq_lens[0]]  # slice to match num_scheduled_tokens
