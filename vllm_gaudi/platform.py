@@ -117,6 +117,15 @@ class HpuPlatform(Platform):
                 compilation_config.level = CompilationLevel.NO_COMPILATION
 
             print(f"========={compilation_config.custom_ops=}===========")
+        if os.environ.get("VLLM_HPU_OOT_SCHEDULER",
+                          '').lower() in ("y", "yes", "t", "true", "on", "1"):
+            logger.info("Using out-of-tree HPU scheduler.")
+            if vllm_config.scheduler_config.async_scheduling:
+                vllm_config.scheduler_config.scheduler_cls = \
+                    'vllm_gaudi.sched.hpu_scheduler.HPUScheduler'
+            else:
+                vllm_config.scheduler_config.scheduler_cls = \
+                    'vllm_gaudi.sched.async_hpu_scheduler.AsyncHPUScheduler'
 
     @classmethod
     def is_pin_memory_available(cls):
