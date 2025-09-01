@@ -2865,13 +2865,16 @@ class HPUModelRunner:
 
     def unmerge_prefills_to_bs(self, query_len, ctx_blocks):
         query_per_sample = math.ceil(query_len / self.max_num_seqs)
-        ctx_per_sample = math.ceil(ctx_blocks / self.max_num_seqs)
- 
-        max_ctx_per_sample = math.ceil((self.max_model_len - query_per_sample) // self.block_size)
-        
-        ctx_list = self.split_list_to_max(ctx_blocks, self.max_num_seqs, max_ctx_per_sample)
-        query_list = self.split_list_to_max(query_len, self.max_num_seqs, query_per_sample)
-        prompt_list = [q + c * self.block_size for q, c in zip(query_list, ctx_list)]
+        max_ctx_per_sample = math.ceil(
+            (self.max_model_len - query_per_sample) // self.block_size)
+
+        ctx_list = self.split_list_to_max(ctx_blocks, self.max_num_seqs,
+                                          max_ctx_per_sample)
+        query_list = self.split_list_to_max(query_len, self.max_num_seqs,
+                                            query_per_sample)
+        prompt_list = [
+            q + c * self.block_size for q, c in zip(query_list, ctx_list)
+        ]
         return prompt_list, ctx_list
 
     def _execute_dummy_scenario(self, prompt_cfg, decode_cfg):
@@ -2889,7 +2892,8 @@ class HPUModelRunner:
                 and self.use_merged_prefill:
                 # split query and ctx in merged prefill case
                 prompt_total_tokens, prompt_context_blocks = \
-                     self.unmerge_prefills_to_bs(prompt_query_len, prompt_blocks)
+                     self.unmerge_prefills_to_bs(prompt_query_len,
+                                                 prompt_blocks)
             for tokens, context in zip(prompt_total_tokens,
                                        prompt_context_blocks):
                 self._add_dummy_request(requests,

@@ -165,6 +165,7 @@ class HPUBucketingManager():
         # decode
         def block_not_greater_than_max_model_len(bs, query, ctx): return ctx <= bs * math.ceil(self.max_model_len / self.block_size)
         def batch_size_smaller_than_blocks(bs, query, ctx): return bs <= ctx
+        def max_context_for_batch_size(bs, query, ctx): return math.ceil((ctx * self.block_size) // bs) <= self.max_model_len
 
         filters_map = {
             "prompt": {
@@ -174,7 +175,7 @@ class HPUBucketingManager():
             },
             "decode": {
                 # depends only on contiguous PA
-                True: [batch_size_smaller_than_blocks],
+                True: [batch_size_smaller_than_blocks, max_context_for_batch_size],
                 False: [block_not_greater_than_max_model_len, batch_size_smaller_than_blocks],
             }
         }
