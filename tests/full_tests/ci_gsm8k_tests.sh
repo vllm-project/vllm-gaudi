@@ -50,6 +50,72 @@ if [ $? -ne 0 ]; then
 fi
 echo "Test with deepseek_v2 + inc passed"
 
+# deepseek v2 + inc + dynamic quantization + tp2
+echo "Testing deepseek_v2 + inc dynamic quantization + tp2"
+echo QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_dynamic_quant.json HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code  --quantization inc --tensor-parallel-size 2
+QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_dynamic_quant.json \
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --tensor-parallel-size 2
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for deepseek_v2 + inc dynamic quantization + tp2" >&2
+    exit -1
+fi
+echo "Test with deepseek_v2 + inc dynamic quantization + tp 2 successful"
+
+# QWEN3 + blockfp8 + dynamic scaling
+echo "Testing Qwen3-8B-FP8 + blockfp8 + dynamic scaling"
+echo HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model Qwen/Qwen3-8B-FP8 --trust-remote-code
+HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model Qwen/Qwen3-8B-FP8 --trust-remote-code
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for Qwen3-8B-FP8 + blockfp8 + dynamic scaling" >&2
+    exit -1
+fi
+echo "Test with Qwen3-8B-FP8 + blockfp8 + dynamic scaling successful"
+
+# QWEN3 compressed tensor + dynamic scaling
+echo "Testing Qwen3-8B-FP8-dynamic + compressed-tensor + dynamic scaling"
+echo HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model RedHatAI/Qwen3-8B-FP8-dynamic --trust-remote-code
+HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model RedHatAI/Qwen3-8B-FP8-dynamic --trust-remote-code
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for Qwen3-8B-FP8-dynamic + compressed-tensor + dynamic scaling" >&2
+    exit -1
+fi
+echo "Test with Qwen3-8B-FP8-dynamic + compressed-tensor + dynamic scaling successful"
+
+# structured output
+echo "Testing structured output"
+echo HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/structured_outputs.py 
+HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/structured_outputs.py 
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for structured outputs" >&2
+    exit -1
+fi
+echo HABANA_VISIBLE_DEVICES=all VLLM_MERGED_PREFILL=True VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/structured_outputs.py 
+HABANA_VISIBLE_DEVICES=all VLLM_MERGED_PREFILL=True VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/structured_outputs.py 
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for structured outputs with merged prefill" >&2
+    exit -1
+fi
+echo "Test with structured outputs passed"
+# awq
+echo "Testing awq inference with vllm-hpu plugin v1"
+echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model TheBloke/Llama-2-7B-Chat-AWQ --dtype bfloat16 --quantization awq_hpu
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model TheBloke/Llama-2-7B-Chat-AWQ --dtype bfloat16 --quantization awq_hpu
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for awq" >&2
+    exit -1
+fi
+echo "Test with awq passed"
+
+# gptq
+echo "Testing gptq inference with vllm-hpu plugin v1"
+echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model TheBloke/Llama-2-7B-Chat-GPTQ --dtype bfloat16 --quantization gptq_hpu
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model TheBloke/Llama-2-7B-Chat-GPTQ --dtype bfloat16 --quantization gptq_hpu
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for gptq" >&2
+    exit -1
+fi
+echo "Test with gptq passed"
+
 # gsm8k test
 # used to check HPUattn + MLP
 echo "Testing GSM8K on ganite-8b"
@@ -86,3 +152,26 @@ if [ $? -ne 0 ]; then
     exit -1
 fi
 echo "Test with QWEN3-30B-A3B passed"
+
+# multimodal-support with qwen2.5-vl
+echo "Testing Qwen2.5-VL-7B"
+echo "VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
+python -u vllm-gaudi/tests/models/language/generation/generation_mm.py --model-card-path vllm-gaudi/tests/full_tests/model_cards/qwen2.5-vl-7b.yaml"
+VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
+python -u vllm-gaudi/tests/models/language/generation/generation_mm.py --model-card-path vllm-gaudi/tests/full_tests/model_cards/qwen2.5-vl-7b.yaml
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for multimodal-support with qwen2.5-vl-7b" >&2
+    exit -1
+fi
+echo "Test with multimodal-support with qwen2.5-vl-7b passed"
+
+# spec decode with ngram
+# For G3, acc rate is 0.18, but for G2, it is 0.09
+echo "Testing Spec-decode with ngram"
+echo VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python vllm-gaudi/tests/full_tests/spec_decode.py --task ngram --assert_acc_rate 0.09 --osl 1024
+VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python vllm-gaudi/tests/full_tests/spec_decode.py --task ngram --assert_acc_rate 0.09 --osl 1024
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for spec decode with ngram" >&2
+    exit -1
+fi
+echo "Test with spec decode with ngram passed"

@@ -1,7 +1,8 @@
 from functools import cache
 import os
 from vllm.utils import make_tensor_with_pad, TORCH_DTYPE_TO_NUMPY_DTYPE
-from typing import (Optional, TypeVar, Union)
+from vllm_gaudi.extension.runtime import get_config
+from typing import (Any, Optional, TypeVar, Union)
 import torch
 import numpy as np
 import numpy.typing as npt
@@ -28,6 +29,35 @@ def hpu_backend_string():
     return backend_string
 
 
+def async_h2d_copy(source, dest_tensor=None, dtype=None, device='hpu'):
+    """
+    Asynchronously transfer data from host to device.
+
+    Args:
+        source: CPU tensor or raw data to transfer
+        dest_tensor: Optional pre-allocated destination tensor
+        dtype: Required if source is raw data
+        device: Target device
+
+    Returns:
+        torch.Tensor on target device
+    """
+    if isinstance(source, torch.Tensor):
+        if dest_tensor is not None:
+            # Copy into pre-allocated destination tensor
+            return dest_tensor.copy_(source, non_blocking=True)
+        # Create new device tensor and copy
+        assert source.device.type == 'cpu', \
+            "Source tensor must be on CPU for asynchronous transfer"
+        target = torch.empty_like(source, device=device)
+        return target.copy_(source, non_blocking=True)
+    # Create tensor from data and transfer to device
+    if dtype is None:
+        raise ValueError("dtype must be specified when source is not a tensor")
+    cpu_tensor = torch.tensor(source, dtype=dtype, device='cpu')
+    return cpu_tensor.to(device, non_blocking=True)
+
+
 def make_ndarray_with_pad_align(
     x: list[list[T]],
     pad: T,
@@ -52,11 +82,10 @@ def make_ndarray_with_pad_align(
     return padded_x
 
 
-def make_mrope_positions_tensor_with_pad( \
-        input_positions: list[list[int]],
-        input_mrope_positions: list[list[list[int]]],
-        max_prompt_len: int,
-        pad: int) -> list[list[int]]:
+def make_mrope_positions_tensor_with_pad(input_positions: list[
+    list[int]], input_mrope_positions: list[list[list[int]]],
+                                         max_prompt_len: int,
+                                         pad: int) -> list[list[int]]:
     # If no mrope positions, returns a flatten (seq_len,)
     if all(mrope_position is None for mrope_position in input_mrope_positions):
         return make_tensor_with_pad(input_positions,
@@ -108,3 +137,45 @@ def make_tensor_with_pad_align(
         tensor = tensor.pin_memory()
 
     return tensor
+
+
+class HPUCompileConfig:
+    """
+    Configuration class, which holds arguments that will be
+    passed to torch compile with HPU backend.
+    """
+
+    def __init__(self,
+                 fullgraph: Optional[bool] = None,
+                 dynamic: Optional[bool] = None):
+        """
+        Allow to override the environment variables for corner case scenarios
+        when single functions are compiled with torch.compile decorator.
+        Env variables should not be overwritten when it comes to compilation
+        of the whole model.
+        """
+        self.fullgraph = fullgraph if fullgraph is not None else \
+            get_config().fullgraph_compilation
+        self.dynamic = dynamic if dynamic is not None else \
+            get_config().dynamic_shapes_compilation
+        self.regional_compilation = get_config().regional_compilation
+
+    def get_compile_args(self) -> dict[str, Any]:
+        """
+        Returns a dictionary of compile arguments that can be used
+        with torch.compile method or decorator
+        """
+        if self.dynamic:
+            return {
+                'backend': 'hpu_backend',
+                'fullgraph': self.fullgraph,
+                'options': {
+                    "force_static_compile": True
+                }
+            }
+        else:
+            return {
+                'backend': 'hpu_backend',
+                'fullgraph': self.fullgraph,
+                'dynamic': False
+            }

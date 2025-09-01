@@ -4,6 +4,8 @@
 import pytest
 import torch
 import habana_frameworks.torch  # noqa: F401
+from habana_frameworks.torch.utils.internal import is_lazy
+from vllm.model_executor.model_loader import get_model
 
 from vllm.attention import Attention
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
@@ -18,6 +20,7 @@ from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor)
 from vllm.v1.sample.metadata import SamplingMetadata
+import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
 
@@ -102,6 +105,8 @@ def model_runner():
     model_config = vllm_config.model_config
     num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
     head_size = model_config.get_head_size()
+    # We need to update the environment before creating Attention
+    environment.set_vllm_config(vllm_config)
     vllm_config.compilation_config.static_forward_context[
         "layer.0"] = Attention(num_heads, head_size, 0.1)
     runner = HPUModelRunner(vllm_config, DEVICE)
@@ -118,7 +123,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
             NewRequestData(
                 req_id=req_id,
                 prompt_token_ids=[1, 2, 3],
-                mm_inputs=[],
+                mm_kwargs=[],
                 mm_hashes=[],
                 mm_positions=[],
                 sampling_params=SamplingParams(),
@@ -139,7 +144,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -205,7 +210,7 @@ def test_update_states_request_finished(model_runner, dist_init):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids={req_id},
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -237,7 +242,7 @@ def test_update_states_request_resumed(model_runner, dist_init):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -264,7 +269,7 @@ def test_update_states_request_resumed(model_runner, dist_init):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -345,7 +350,7 @@ def test_update_states_no_changes(model_runner, dist_init):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -382,7 +387,7 @@ def test_update_states_request_unscheduled(model_runner, dist_init):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -644,3 +649,38 @@ def test_init_kv_cache_with_kv_sharing_valid():
     assert len(kv_cache_config.kv_cache_groups[0].layer_names) == 2
     assert kv_cache_config.kv_cache_groups[0].layer_names[0] == layer_0
     assert kv_cache_config.kv_cache_groups[0].layer_names[1] == layer_1
+
+
+@pytest.mark.skipif(is_lazy(),
+                    reason="Test skipped because lazy mode is enabled.")
+def test_model_torch_regional_compilation(dist_init, model_runner):
+    from vllm_gaudi.utils import HPUCompileConfig
+    from vllm.model_executor.models.opt import OPTDecoderLayer
+    from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding  # noqa
+    from torch.nn.modules.normalization import LayerNorm
+    from torch._dynamo.eval_frame import OptimizedModule
+
+    def assert_compilation(model, layer_name, module):
+        submodule = model.get_submodule(layer_name)
+        assert isinstance(submodule, OptimizedModule), (
+            f"Layer: '{module.__name__}' was not wrapped with OptimizedModule"  # noqa
+        )
+        assert isinstance(submodule._orig_mod, module), (
+            f"_orig_mod is different from the original module: '{module.__name__}'"  # noqa
+        )
+
+    vllm_config = get_vllm_config()
+    model = get_model(vllm_config=vllm_config)
+    model_runner.compile_config = HPUCompileConfig()
+    model_runner.regional_compilation_layers_list = [
+        LayerNorm, VocabParallelEmbedding
+    ]
+
+    model_runner._regional_compilation(model)
+
+    for i in range(len(model.get_submodule("model.decoder.layers"))):
+        assert_compilation(model, f"model.decoder.layers.{i}", OPTDecoderLayer)
+    assert_compilation(model, "lm_head", VocabParallelEmbedding)
+    assert_compilation(model, "model.decoder.final_layer_norm", LayerNorm)
+    assert_compilation(model, "model.decoder.embed_tokens",
+                       VocabParallelEmbedding)

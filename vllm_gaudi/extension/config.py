@@ -7,7 +7,8 @@
 
 from packaging.version import Version
 from packaging.specifiers import SpecifierSet
-from typing import Optional, Callable, TypeAlias, Any, Union, Tuple, Dict, List
+from typing import Optional, Callable, TypeAlias, Any, TypeVar
+from vllm_gaudi.extension.validation import skip_validation, choice, Checker
 import os
 import itertools
 
@@ -15,8 +16,8 @@ import itertools
 class Config:
     """ Contains pairs of key/value that can be calculated on demand"""
 
-    def __init__(self, *sources: List[Dict[str, Any]], **extra: Dict[str, Any]):
-        self._data = dict(itertools.chain(*[v.items() for v in sources] + [extra.items()]))
+    def __init__(self, *sources: dict[str, Any], **extra: Any):
+        self._data = dict(itertools.chain(*[v.items() for v in sources], extra.items()))
 
     def __getattr__(self, key: str):
         """Allow conveniently querying keys by using dot notation"""
@@ -35,9 +36,9 @@ class Config:
             self._data[key] = value
         return value
 
-    def get_all(self, keys: Optional[List[str]] = None) -> Dict[str, Any]:
+    def get_all(self, keys: Optional[list[str]] = None) -> dict[str, Any]:
         """Return a dict with a subset of keys"""
-        keys = keys or self._data.keys()
+        keys = keys or list(self._data.keys())
         return {k: self.get(k) for k in keys}
 
     def finalize(self) -> None:
@@ -45,10 +46,11 @@ class Config:
         self.get_all()
 
 
-ValueFn: TypeAlias = Callable[Config, Any]
+ValueFn: TypeAlias = Callable[[Config], Any]
+T = TypeVar('T')
+Constructor: TypeAlias = Callable[[str], Any]
 
-
-def All(*parts: List[ValueFn]) -> ValueFn:
+def All(*parts: ValueFn) -> ValueFn:
     """Return True if all functions return True"""
     return lambda cfg: all(p(cfg) for p in parts)
 
@@ -73,7 +75,7 @@ def Disabled(key: str) -> ValueFn:
     return Not(Enabled(key))
 
 
-def FirstEnabled(*keys: List[str]) -> ValueFn:
+def FirstEnabled(*keys: str) -> ValueFn:
     """Return first key for which config[key] is True"""
     return lambda cfg: next((k for k in keys if cfg.get(k)), None)
 
@@ -105,37 +107,40 @@ def Engine(target_engine_version: str) -> ValueFn:
     return Eq('engine_version', target_engine_version)
 
 
-def VersionRange(*specifiers: List[str]) -> ValueFn:
+def VersionRange(*specifiers_str: str) -> ValueFn:
     """Return True if any of the version specifiers matches current build"""
-    specifiers = [SpecifierSet(s) for s in specifiers]
+    specifiers = [SpecifierSet(s) for s in specifiers_str]
     return lambda cfg: any(Version(cfg.build) in s for s in specifiers)
 
 
-def choice(*options: List[Any]) -> Callable[Any, Any]:
-    """Validates if input is one of the available choices and returns it unchanged"""
-    def choice_impl(x):
-        assert x in options, f'{x} is not in allowed options: {options}!'
-        return x
-    return choice_impl
-
-
-def boolean(x: str) -> Callable[str, bool]:
+def boolean(x: str) -> bool:
     """Converts string representation of a bool to its value"""
     return x.lower() in ['true', 't', '1', 'yes', 'y', 'on']
+
+
+def list_of(t: Constructor):
+    """Converts a comma seperated string representation of a list of values"""
+    def list_of_impl(x: str) -> list[Any]:
+        return [t(v) for v in x.split(',')]
+    return list_of_impl
 
 
 class Env:
     """A callable that fetches values from env variables, applying conversions if necessary"""
 
-    def __init__(self, name: str, value_type: Callable[Any, Any]):
+    def __init__(self, name: str, value_type: Constructor, check: Checker = skip_validation):
         self.name = name
         self.value_type = value_type
+        self.check = check
 
     def __call__(self, _):
         value = os.environ.get(self.name)
         if value is not None:
             try:
-                return self.value_type(value)
+                value = self.value_type(value)
+                if error := self.check(value):
+                    raise RuntimeError(error)
+                return value
             except Exception as e:
                 msg = f'{self.name}: exception during construction: {e}'
                 raise RuntimeError(msg)
@@ -145,35 +150,53 @@ class Env:
 class Value:
     """A callable that returns the value calculated through its dependencies or overriden by an associated experimental flag"""
 
-    def __init__(self, name: str, dependencies: Any, env_var: str = None, env_var_type: Callable[Any, Any] = boolean):
+    def __init__(self, name: str, dependencies: Any, env_var: Optional[str] = None, env_var_type: Constructor = boolean, check: Checker = skip_validation):
         self.name = name
         self.env_var = env_var if env_var is not None else 'VLLM_' + name.upper()
         self.env_var_type = env_var_type
         self.dependencies = dependencies
+        self.check = check
 
-    def to_env_flag(self) -> ValueFn:
-        """ Return associated experimental flag"""
+    def to_env_flag(self) -> Env:
+        """ Return associated experimental flag """
         return Env(self.env_var, self.env_var_type)
 
+    def _validate(self, value):
+        """ Check for errors and throw if any found"""
+        if error := self.check(value):
+            raise RuntimeError(f'{self.name}: {error}')
+        return value
+
     def __call__(self, config):
-        """ Return value from experimental flag if provided by user or calculate it based on dependencies"""
+        """ Return value from experimental flag if provided by user or calculate it based on dependencies """
         if (override := config.get(self.env_var)) is not None:
-            return override
-        if callable(self.dependencies):
-            return self.dependencies(config)
-        return self.dependencies
+            result = override
+        elif callable(self.dependencies):
+            result = self.dependencies(config)
+        else:
+            result = self.dependencies
+        return self._validate(result)
 
 
-def to_dict(collection: List[Union[Value, Env]]) -> Dict[str, Union[Value, Env]]:
+class ValueFromList(Value):
+    """ Helper class to create a value with a limited list of possible options """
+    def __init__(self, name: str, options: list[str]):
+        super().__init__(name, FirstEnabled(*options), env_var_type=str, check=choice(*options))
+
+
+HasName = TypeVar('HasName', bound=Value|Env)
+
+
+def to_dict(collection: list[HasName]) -> dict[str, HasName]:
     """Convert a list values/envs to a dict"""
     return {c.name: c for c in collection}
 
 
-def env_flags(values: List[Value]) -> List[Env]:
+def env_flags(values: list[Value]) -> list[Env]:
     """Extract associated env flags from values"""
     return [v.to_env_flag() for v in values]
 
 
-def split_values_and_flags(values: List[Value]) -> Tuple[Dict[str, Value], Dict[str, Env]]:
+def split_values_and_flags(values: list[Value]) -> tuple[dict[str, Value], dict[str, Env]]:
     """Converts a list of values and returns dicts for both values and envs"""
     return to_dict(values), to_dict(env_flags(values))
