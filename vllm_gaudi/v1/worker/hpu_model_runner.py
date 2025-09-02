@@ -2239,6 +2239,52 @@ class HPUModelRunner:
             kv_connector_output=None,
             )
 
+    def _prepare_inputs_for_pooling(self, scheduler_output):
+        """Gather inputs, positions, slot mapping, and build attn_metadata for pooling mode."""
+        num_scheduled_tokens = []
+        input_ids_list = []
+        num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu
+        num_reqs = self.input_batch.num_reqs
+
+        # Collect token ids and scheduled lengths
+        for idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            seq_num_scheduled = scheduler_output.num_scheduled_tokens[req_id]
+            num_scheduled_tokens.append(seq_num_scheduled)
+
+            scheduled_req = scheduler_output.scheduled_new_reqs[idx]
+            token_ids = torch.as_tensor(
+                scheduled_req.prompt_token_ids, dtype=torch.long
+            ).flatten()
+            input_ids_list.append(token_ids)
+
+        input_ids = torch.cat(input_ids_list, dim=0).to(self.device)
+
+        # Absolute positions
+        absolute_positions = []
+        for i, n in enumerate(num_scheduled_tokens):
+            prefix = num_computed_tokens_cpu[i]
+            absolute_positions.append(prefix + np.arange(n, dtype=np.int64))
+        position_ids = torch.from_numpy(np.concatenate(absolute_positions)).to(self.device)
+
+        # Slot mapping + metadata
+        total_scheduled_tokens = sum(num_scheduled_tokens)
+        slot_mapping = torch.arange(
+            total_scheduled_tokens, dtype=torch.long, device="hpu:0"
+        )
+        seq_lens_tensor = torch.tensor([total_scheduled_tokens], device='hpu:0', dtype=torch.int32)
+        context_lens_tensor = torch.tensor([0], device='hpu:0', dtype=torch.int32)
+
+        attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
+            seq_lens_tensor=seq_lens_tensor,
+            context_lens_tensor=context_lens_tensor,
+            slot_mapping=slot_mapping,
+            block_list=None,
+            attn_bias=None,
+            block_size=self.block_size,
+        )
+
+        return input_ids, position_ids, num_scheduled_tokens, attn_metadata, total_scheduled_tokens
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -2322,90 +2368,22 @@ class HPUModelRunner:
             # Return empty ModelRunnerOuptut if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
         if self.input_batch.pooling_params:
-            num_scheduled_tokens = []
-            input_ids_list = []
-            num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu
-            num_reqs = self.input_batch.num_reqs
+            (input_ids,
+            position_ids,
+            num_scheduled_tokens,
+            attn_metadata,
+            total_scheduled_tokens) = self._prepare_inputs_for_pooling(scheduler_output)
 
-            # Step 1: gather input_ids and num_scheduled_tokens
-            for idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
-                assert req_id is not None
-                seq_num_scheduled = scheduler_output.num_scheduled_tokens[req_id]
-                num_scheduled_tokens.append(seq_num_scheduled)
-                scheduled_req = scheduler_output.scheduled_new_reqs[idx]
-                token_ids = scheduled_req.prompt_token_ids
-                # Convert to torch tensor if not already
-                if not isinstance(token_ids, torch.Tensor):
-                    token_ids = torch.tensor(token_ids, dtype=torch.long)
-                # Flatten in case it's nested
-                token_ids = token_ids.flatten()
-                input_ids_list.append(token_ids)
-
-            # Step 2: concatenate input_ids across requests
-            input_ids = torch.cat(input_ids_list, dim=0).to(self.device)
-
-            # Step 3: add prefix lengths to get absolute positions
-            absolute_positions = []
-            for i, n in enumerate(num_scheduled_tokens):
-                prefix = num_computed_tokens_cpu[i]
-                absolute_positions.append(prefix + np.arange(n, dtype=np.int64))
-
-            absolute_positions_np = np.concatenate(absolute_positions)
-
-            # Step 7: convert to torch tensor
-            position_ids = torch.from_numpy(absolute_positions_np).to(self.device)
-
-            # Slot mapping: place your tokens in the first slots of the block, pad rest with -1
-            seq_lens = list(scheduler_output.num_scheduled_tokens.values())  # get actual scheduled tokens
-            block_size = self.block_size
-            slot_mapping = torch.zeros((num_reqs, block_size), dtype=torch.long, device="hpu:0")
-            # slot_mapping = torch.arange(block_size, block_size + seq_lens[0], device='hpu:0').unsqueeze(0)
-            # slot_mapping = torch.cat([slot_mapping, torch.full((1, block_size - seq_lens[0]), -1, device='hpu:0')], dim=1)
-            slot_mapping = slot_mapping[0, :seq_lens[0]]  # slice to match num_scheduled_tokens
-            # slot_mapping = torch.full((n, block_size), -1, device='hpu:0', dtype=torch.int64)
-
-            # for i, seq_len in enumerate(seq_lens):
-            #     # Place tokens in the first seq_len slots of the block
-            #     slot_mapping[i, :seq_len] = torch.arange(block_size, block_size + seq_len, device='hpu:0')
-
-
-            # Seq and context lengths
-            seq_lens_tensor = torch.tensor(seq_lens, device='hpu:0', dtype=torch.int32)
-            context_lens_tensor = torch.tensor([0], device='hpu:0', dtype=torch.int32)
-
-            # Create attention metadata
-            attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
-                seq_lens_tensor=seq_lens_tensor,
-                context_lens_tensor=context_lens_tensor,
-                slot_mapping=slot_mapping,
-                block_list=None,
-                attn_bias=None,
-                block_size=block_size
-            )
-
-            # Forward pass
             with set_forward_context(attn_metadata, self.vllm_config):
                 hidden_states = self.model.forward(
                     input_ids=input_ids,
-                    positions=position_ids
+                    positions=position_ids,
                 )
 
-            # Prepare num_scheduled_tokens for pooling
-            total_scheduled_tokens = sum(num_scheduled_tokens)
-            if isinstance(num_scheduled_tokens, list):
-                num_scheduled_tokens_np = np.array(num_scheduled_tokens, dtype=np.int32)
-            else:
-                num_scheduled_tokens_np = np.array([num_scheduled_tokens], dtype=np.int32)
-
             flattened = hidden_states.view(-1, hidden_states.shape[-1])
-
-            # Pooling
-            pooled_output = self._pool(
-                flattened,
-                total_scheduled_tokens,
-                num_scheduled_tokens_np
-            )
-
+            pooled_output = self._pool(flattened,
+                                    total_scheduled_tokens,
+                                    np.array(num_scheduled_tokens, dtype=np.int32))
             return pooled_output
         # If necessary, swap decodes/prompts to have all decodes on the start
         ensure_decodes_first(self.input_batch)
