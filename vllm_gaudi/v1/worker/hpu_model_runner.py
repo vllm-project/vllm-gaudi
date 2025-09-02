@@ -2811,15 +2811,14 @@ class HPUModelRunner:
 
     def _add_dummy_request(self, requests, num_scheduled_tokens,
                            num_computed_tokens, total_tokens,
-                           scheduled_tokens):
+                           scheduled_tokens, block_id=0):
         from vllm.sampling_params import SamplingParams
         from vllm.v1.core.sched.output import NewRequestData
-
         num_blocks = round_up(total_tokens, self.block_size) // self.block_size
         prompt_token_ids = list(range(total_tokens))
 
         req_id = f'{len(requests)}'
-        block_ids = [0] * num_blocks
+        block_ids = [block_id] * num_blocks
         sampling_params = SamplingParams(temperature=0.0)
 
         req = NewRequestData(
@@ -2865,14 +2864,18 @@ class HPUModelRunner:
                                         scheduled_tokens=prompt_query_len)
         if decode_cfg:
             decode_bs, decode_query_len, decode_blocks = decode_cfg
-            decode_seq_lengths = self._generate_seq_lengths(
+            if self.use_contiguous_pa:
+                decode_seq_lengths = [self.block_size]
+            else:
+                decode_seq_lengths = self._generate_seq_lengths(
                 decode_bs, decode_blocks, self.block_size)
             for dsl in decode_seq_lengths:
                 self._add_dummy_request(requests,
                                         scheduled_tokens,
                                         num_computed_tokens=dsl,
                                         total_tokens=dsl,
-                                        scheduled_tokens=1)
+                                        scheduled_tokens=1,
+                                        block_id=decode_blocks-1)
 
         sched_output = SchedulerOutput(
             scheduled_new_reqs=requests,
