@@ -2865,7 +2865,7 @@ class HPUModelRunner:
         if decode_cfg:
             decode_bs, decode_query_len, decode_blocks = decode_cfg
             if self.use_contiguous_pa:
-                decode_seq_lengths = [self.block_size]
+                decode_seq_lengths = [self.block_size] * decode_bs
             else:
                 decode_seq_lengths = self._generate_seq_lengths(
                 decode_bs, decode_blocks, self.block_size)
