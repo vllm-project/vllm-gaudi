@@ -1148,7 +1148,10 @@ class HPUModelRunner:
         return PromptDecodeInfo(prompt_req_ids, decode_req_ids,
                                 prompt_scheduled_tokens)
 
-    def generate_req_id_output_token_ids_lst(self, request_ids: Optional[list[str]] = None, pad_to: Optional[int] = None):
+    def generate_req_id_output_token_ids_lst(
+            self,
+            request_ids: Optional[list[str]] = None,
+            pad_to: Optional[int] = None):
         req_id_output_token_ids: dict[str, list[int]] = \
             {req_id: req.output_token_ids
                 for req_id, req in self.requests.items()}
@@ -1922,15 +1925,16 @@ class HPUModelRunner:
         logits.copy_(
             logits_cpu.to(self.device, non_blocking=True).to(logits.dtype))
 
-    def run_sampling(self, batch_changed: bool, logits_device: torch.Tensor, request_ids: Optional[list[str]] = None, pad_to: Optional[int] = None):
+    def run_sampling(self,
+                     batch_changed: bool,
+                     logits_device: torch.Tensor,
+                     request_ids: Optional[list[str]] = None,
+                     pad_to: Optional[int] = None):
         htorch.core.mark_step()
-        sampling_metadata = self._prepare_sampling(
-            batch_changed,
-            request_ids,
-            pad_to)
-        sampler_output = self.sampler(
-            logits=logits_device,
-            sampling_metadata=sampling_metadata)
+        sampling_metadata = self._prepare_sampling(batch_changed, request_ids,
+                                                   pad_to)
+        sampler_output = self.sampler(logits=logits_device,
+                                      sampling_metadata=sampling_metadata)
         htorch.core.mark_step()
         return sampler_output
 
@@ -2097,7 +2101,9 @@ class HPUModelRunner:
                     prefill_sampled_requests.extend(logits_requests)
                 else:
                     with self.profiler.record_event('internal', "sampler"):
-                        sampler_output = self.run_sampling(batch_changed, logits_device, req_id, logits_device.shape[0])
+                        sampler_output = self.run_sampling(
+                            batch_changed, logits_device, req_id,
+                            logits_device.shape[0])
                         prefill_sampled_token_ids.append(
                             sampler_output.sampled_token_ids.flatten())
                         prefill_sampled_requests.extend(logits_requests)
@@ -2139,7 +2145,10 @@ class HPUModelRunner:
                     self.input_batch.req_ids[:num_decodes])
             else:
                 with self.profiler.record_event('internal', "sampler"):
-                    sampler_output = self.run_sampling(batch_changed, logits_device, pd_info.decode_req_ids, logits_device.shape[0])
+                    sampler_output = self.run_sampling(batch_changed,
+                                                       logits_device,
+                                                       pd_info.decode_req_ids,
+                                                       logits_device.shape[0])
                     decode_sampled_token_ids.append(
                         sampler_output.sampled_token_ids.flatten())
                     decode_sampled_requests.extend(
@@ -2166,8 +2175,10 @@ class HPUModelRunner:
             # Apply structured output bitmasks if present
             if scheduler_output.grammar_bitmask is not None:
                 self.apply_grammar_bitmask(scheduler_output, logits)
-            sampler_output = self.run_sampling(batch_changed, logits, pd_info.prompt_req_ids +
-                                                       pd_info.decode_req_ids, logits.shape[0])
+            sampler_output = self.run_sampling(
+                batch_changed, logits,
+                pd_info.prompt_req_ids + pd_info.decode_req_ids,
+                logits.shape[0])
             # Deal with the case of incomplete prompt
             for i in range(logits.shape[0] - num_decodes):
                 prefill_sampled_token_ids.append(
@@ -2405,46 +2416,54 @@ class HPUModelRunner:
                f"num_blocks:{num_blocks} "
                f"free_mem:{free_mem}")
         logger.info(msg)
-    
+
     def warmup_sampler(self):
-        """Warmup the sampler with different temperature, top-p, and top-k values."""        
+        """
+        Warmup the sampler with different temperature, top-p, and top-k values.
+        """
         # Choose batch sizes for warmup based on bucketing
-        test_batch_sizes = list(dict.fromkeys([0, 1] + [bucket[0] for bucket in self.bucketing_manager.decode_buckets]))
-        
+        test_batch_sizes = list(
+            dict.fromkeys([0, 1] + [
+                bucket[0] for bucket in self.bucketing_manager.decode_buckets
+            ]))
+
         # Test different sampling configurations
         sampling_configs = [
             # (temperature, top_p, top_k, batch_changed)
-            (0.0, 1.0, 0, True),      # Greedy sampling
-            (1.0, 1.0, 0, True),      # Random sampling with temp=1.0
-            (0.7, 0.9, 50, True),      # Common creative settings
-            (0.3, 0.95, 20, True),     # Conservative settings
-            (1.2, 0.8, 100, True),     # High temperature settings
-            (0.8, 0.85, 0, True),     # Different top-p sampling
-            (0.0, 1.0, 0, False),      # Greedy sampling
-            (1.0, 1.0, 0, False),      # Random sampling with temp=1.0
-            (0.7, 0.9, 50, False),      # Common creative settings
-            (0.3, 0.95, 20, False),     # Conservative settings
-            (1.2, 0.8, 100, False),     # High temperature settings
-            (0.8, 0.85, 0, False),     # Different top-p sampling
+            (0.0, 1.0, 0, True),  # Greedy sampling
+            (1.0, 1.0, 0, True),  # Random sampling with temp=1.0
+            (0.7, 0.9, 50, True),  # Common creative settings
+            (0.3, 0.95, 20, True),  # Conservative settings
+            (1.2, 0.8, 100, True),  # High temperature settings
+            (0.8, 0.85, 0, True),  # Different top-p sampling
+            (0.0, 1.0, 0, False),  # Greedy sampling
+            (1.0, 1.0, 0, False),  # Random sampling with temp=1.0
+            (0.7, 0.9, 50, False),  # Common creative settings
+            (0.3, 0.95, 20, False),  # Conservative settings
+            (1.2, 0.8, 100, False),  # High temperature settings
+            (0.8, 0.85, 0, False),  # Different top-p sampling
         ]
 
-        logger.info(f"Warming up sampler with batch sizes: {test_batch_sizes} and following configs:")
+        logger.info(
+            "Warming up sampler with batch sizes: %s and following configs:",
+            test_batch_sizes)
         for temp, top_p, top_k, batch_changed in sampling_configs:
-            logger.info(f"temp={temp}, top_p={top_p}, top_k={top_k}, batch_changed={batch_changed}")
+            logger.info("temp=%s, top_p=%s, top_k=%s, batch_changed=%s", temp,
+                        top_p, top_k, batch_changed)
         logger.info("Starting sampler warmup...")
-                
+
         for batch_size in test_batch_sizes:
-            dummy_hidden_states = torch.randn(
-                batch_size, self.hidden_size,
-                dtype=self.dtype, device=self.device
-            )
+            dummy_hidden_states = torch.randn(batch_size,
+                                              self.hidden_size,
+                                              dtype=self.dtype,
+                                              device=self.device)
             dummy_logits = self.model.compute_logits(dummy_hidden_states, None)
 
-            # for sub_req_id_size in [batch_size - 1]:
-            req_ids_list = [0] + list(range(1, batch_size)) # every sub batch will have len(req_ids_list) == (1 or sub_req_id_size)
-            
             # Create dummy requests for this specific configuration
-            dummy_req_ids = [f"warmup_req_{batch_size}_{i}" for i in req_ids_list]
+            dummy_req_ids = [
+                f"warmup_req_{batch_size}_{i}"
+                for i in [0] + list(range(1, batch_size))
+            ]
 
             for i, req_id in enumerate(dummy_req_ids):
                 self.requests[req_id] = CachedRequestState(
@@ -2462,31 +2481,33 @@ class HPUModelRunner:
                 )
                 self.input_batch.req_id_to_index[req_id] = i
 
-            for temp, top_p, top_k, batch_changed in sampling_configs:                    
-                # Add dummy requests to the cache with consistent sampling params
+            for temp, top_p, top_k, batch_changed in sampling_configs:
+                # Add dummy requests to cache with consistent sampling params
                 for i, req_id in enumerate(dummy_req_ids):
                     self.requests[req_id].sampling_params = SamplingParams(
                         temperature=temp,
                         top_p=top_p,
                         top_k=top_k,
                     )
-                    
-                    # Also classify requests as greedy or random for proper batch state
+
                     if temp == 0.0:  # Greedy sampling
                         self.input_batch.greedy_reqs.add(req_id)
                     else:  # Random sampling
                         self.input_batch.random_reqs.add(req_id)
 
-                self.input_batch.req_output_token_ids = [item[1] for item in self.generate_req_id_output_token_ids_lst(dummy_req_ids, pad_to=batch_size)]
+                self.input_batch.req_output_token_ids = [
+                    item[1]
+                    for item in self.generate_req_id_output_token_ids_lst(
+                        dummy_req_ids, pad_to=batch_size)
+                ]
                 self.input_batch.refresh_sampling_metadata()
 
                 _sampler_output = self.run_sampling(
                     batch_changed=batch_changed,
                     logits_device=dummy_logits,
                     request_ids=dummy_req_ids,
-                    pad_to=dummy_logits.shape[0]
-                )
-                
+                    pad_to=dummy_logits.shape[0])
+
                 # Cleanup after sampling
                 self.input_batch.greedy_reqs = set()
                 self.input_batch.random_reqs = set()
@@ -2494,10 +2515,10 @@ class HPUModelRunner:
 
                 # Cleanup after batch has been warmed up
             self.input_batch.req_id_to_index = {}
-        
+
         # Final synchronization to ensure all operations are completed
         torch.hpu.synchronize()
-        
+
         logger.info("Sampler warmup completed successfully")
 
     def warmup_graphs(self,
@@ -2732,7 +2753,7 @@ class HPUModelRunner:
                 assert self.mem_margin is not None, \
                     ("HabanaWorker.determine_num_available_blocks needs "
                      "to be called before warming up the model.")
-                
+
                 self.warmup_sampler()
 
                 # TODO(kzawora): align_workers
