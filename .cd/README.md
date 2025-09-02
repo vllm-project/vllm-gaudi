@@ -11,8 +11,6 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
 | meta-llama/Llama-3.1-70B-Instruct         | 4 |
 | meta-llama/Llama-3.1-405B-Instruct        | 8 |
 | meta-llama/Llama-3.1-8B-Instruct          | 1 |
-| meta-llama/Llama-3.2-1B-Instruct          | 1 |
-| meta-llama/Llama-3.2-3B-Instruct          | 1 |
 | meta-llama/Llama-3.3-70B-Instruct         | 4 |
 | mistralai/Mistral-7B-Instruct-v0.2        | 1 |
 | mistralai/Mixtral-8x7B-Instruct-v0.1      | 2 |
@@ -22,8 +20,6 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
 | Qwen/Qwen2.5-14B-Instruct                 | 1 |
 | Qwen/Qwen2.5-32B-Instruct                 | 1 |
 | Qwen/Qwen2.5-72B-Instruct                 | 4 |
-| meta-llama/Llama-3.2-11B-Vision-Instruct  | 1 |
-| meta-llama/Llama-3.2-90B-Vision-Instruct  | 4 |
 | ibm-granite/granite-8b-code-instruct-4k   | 1 |
 | ibm-granite/granite-20b-code-instruct-8k  | 1 |
 
