@@ -2866,16 +2866,18 @@ class HPUModelRunner:
             decode_bs, decode_query_len, decode_blocks = decode_cfg
             if self.use_contiguous_pa:
                 decode_seq_lengths = [self.block_size] * decode_bs
+                block_id = decode_blocks-1
             else:
                 decode_seq_lengths = self._generate_seq_lengths(
                 decode_bs, decode_blocks, self.block_size)
+                block_id = 0
             for dsl in decode_seq_lengths:
                 self._add_dummy_request(requests,
                                         scheduled_tokens,
                                         num_computed_tokens=dsl,
                                         total_tokens=dsl,
                                         scheduled_tokens=1,
-                                        block_id=decode_blocks-1)
+                                        block_id=block_id)
 
         sched_output = SchedulerOutput(
             scheduled_new_reqs=requests,
