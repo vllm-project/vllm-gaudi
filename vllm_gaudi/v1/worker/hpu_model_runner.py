@@ -1172,7 +1172,6 @@ class HPUModelRunner:
                           request_ids: Union[None, list[str]] = None,
                           pad_to: Optional[int] = None) -> SamplingMetadata:
         # Create the sampling metadata.
-        # TODO: maybe call this method?
         req_id_output_token_ids_lst = self.generate_req_id_output_token_ids_lst(
             request_ids, pad_to)
         sampling_metadata = self.input_batch.make_selective_sampling_metadata(
@@ -2513,7 +2512,7 @@ class HPUModelRunner:
                 self.input_batch.random_reqs = set()
                 self.input_batch.req_output_token_ids = []
 
-                # Cleanup after batch has been warmed up
+            # Cleanup after batch has been warmed up
             self.input_batch.req_id_to_index = {}
 
         # Final synchronization to ensure all operations are completed
