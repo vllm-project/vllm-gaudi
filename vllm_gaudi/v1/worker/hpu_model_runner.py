@@ -589,12 +589,6 @@ class HPUModelRunner:
         # Cached outputs.
         ## universal buffer for input_ids and positions ##
         ## necessary being used by spec decode by following GPU impl ##
-        self.input_ids = torch.zeros(self.max_num_tokens,
-                                     dtype=torch.int32,
-                                     device=self.device)
-        self.positions = torch.zeros(self.max_num_tokens,
-                                     dtype=torch.int64,
-                                     device=self.device)
         self._draft_token_ids: Optional[Union[list[list[int]],
                                               torch.Tensor]] = None
         self.input_ids_cpu = torch.zeros(self.max_num_tokens,
@@ -1864,11 +1858,14 @@ class HPUModelRunner:
             self.device, non_blocking=True)
         bonus_logits_indices = torch.from_numpy(bonus_logits_indices).to(
             self.device, non_blocking=True)
-        draft_token_ids = self.input_ids[logits_indices]
-        draft_token_ids = draft_token_ids[target_logits_indices + 1]
+        draft_token_ids = self.input_ids_cpu[logits_indices]
+        draft_token_ids_device = async_h2d_copy(draft_token_ids,
+                                                device=self.device)
+        draft_token_ids_device = draft_token_ids_device[target_logits_indices +
+                                                        1]
 
         metadata = SpecDecodeMetadata(
-            draft_token_ids=draft_token_ids,
+            draft_token_ids=draft_token_ids_device,
             num_draft_tokens=num_draft_tokens.tolist(),
             cu_num_draft_tokens=cu_num_draft_tokens,
             target_logits_indices=target_logits_indices,
@@ -1930,11 +1927,6 @@ class HPUModelRunner:
                            0,
                            torch.from_numpy(token_indices),
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
-        self.input_ids[:total_num_scheduled_tokens].copy_(
-            self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
-        # Common case (1D positions)
-        self.positions[:total_num_scheduled_tokens].copy_(
-            self.positions_cpu[:total_num_scheduled_tokens], non_blocking=True)
         ###############################################
 
         # Get the number of scheduled tokens for each request.
