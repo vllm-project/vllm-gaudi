@@ -320,10 +320,6 @@ class InputBatch:
                 req_index] = sampling_params.repetition_penalty
             if sampling_params.repetition_penalty != 1.0:
                 self.repetition_penalties_reqs.add(req_id)
-            if sampling_params.min_tokens:
-                self.min_tokens[req_index] = (
-                    sampling_params.min_tokens,
-                    sampling_params.all_stop_token_ids)
 
             # NOTE(woosuk): self.generators should not include the requests that
             # do not have their own generator.
