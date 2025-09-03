@@ -1633,13 +1633,12 @@ class HPUModelRunner:
         return all_batches[0], dummy_prefill_input_batches[
             0] if dummy_prefill_input_batches else None
 
-    def _create_decode_input_data(
-            self,
-            num_decodes,
-            num_scheduled_tokens,
-            context_lens,
-            block_table_cpu_tensor,
-            scheduler_output=None) -> tuple[DecodeInputData, int]:
+    def _create_decode_input_data(self,
+                                  num_decodes,
+                                  num_scheduled_tokens,
+                                  context_lens,
+                                  block_table_cpu_tensor,
+                                  scheduler_output=None) -> DecodeInputData:
         # NOTE(kzawora): the +1 is what causes this entire thing to work,
         # as in the paged attention, we don't fetch just the context from cache,
         # but also kvs for the current token
@@ -1652,8 +1651,7 @@ class HPUModelRunner:
             num_decodes, sum(num_blocks))[0]
 
         # dp aware padding
-        num_pad_across_dp = self.get_dp_padding(padded_batch_size)
-        padded_batch_size += num_pad_across_dp
+        padded_batch_size += self.get_dp_padding(padded_batch_size)
 
         num_tokens_per_req = num_scheduled_tokens[:num_decodes]
         num_tokens = max(num_tokens_per_req)
@@ -1843,7 +1841,7 @@ class HPUModelRunner:
                 block_size=self.block_size,
                 query_start_loc=query_start_loc,
             ),
-            spec_decode_metadata=spec_decode_metadata), num_pad_across_dp
+            spec_decode_metadata=spec_decode_metadata)
 
     def _prepare_decode_inputs(
         self,
@@ -1868,7 +1866,8 @@ class HPUModelRunner:
         return self._create_decode_input_data(
             num_decodes, num_scheduled_tokens,
             self.input_batch.num_computed_tokens_cpu[:num_decodes],
-            self.input_batch.block_table[0].get_cpu_tensor(), scheduler_output)
+            self.input_batch.block_table[0].get_cpu_tensor(),
+            scheduler_output), None
 
     def _create_dummy_decode_input_data(self) -> DecodeInputData:
         # create dummy decode input data with batch size 1
@@ -1877,13 +1876,10 @@ class HPUModelRunner:
         context_lens = [128]
         block_table_cpu_tensor = torch.zeros([self._PAD_BLOCK_ID],
                                              dtype=torch.int32).reshape(1, -1)
-        # num_computed_tokens_cpu = np.array([128], dtype=np.int32)
-        # token_ids = np.array(list(int(i) for i in range(context_lens[0])))
-
         return self._create_decode_input_data(num_dummy_decodes,
                                               num_dummy_scheduled_tokens,
                                               context_lens,
-                                              block_table_cpu_tensor)[0]
+                                              block_table_cpu_tensor)
 
     def _get_cumsum_and_arange(
         self,
@@ -2570,17 +2566,6 @@ class HPUModelRunner:
                     prompt_batch_idx=None,
                     is_prompt=False)
                 self.profiler.record_counter(self.event_start, counters)
-        else:
-            if dummy_decode_input_data_across_dp is not None:
-                htorch.core.mark_step()
-                _, _, dummy_logits_device = self._execute_model_generic(
-                    dummy_decode_input_data_across_dp.token_ids,
-                    dummy_decode_input_data_across_dp.position_ids,
-                    dummy_decode_input_data_across_dp.attn_metadata,
-                    dummy_decode_input_data_across_dp.logits_indices,
-                    self.kv_caches,
-                    warmup_mode=warmup_mode)
-                htorch.core.mark_step()
 
             ################## Spec Decode ##################
             # work on spec decode if max_gen_len > 1
@@ -2617,6 +2602,17 @@ class HPUModelRunner:
                     spec_decode_metadata, spec_decode_common_attn_metadata,
                     decode_data)[:num_decodes]
             ################## Spec Decode end ##################
+        else:
+            if dummy_decode_input_data_across_dp is not None:
+                htorch.core.mark_step()
+                _, _, dummy_logits_device = self._execute_model_generic(
+                    dummy_decode_input_data_across_dp.token_ids,
+                    dummy_decode_input_data_across_dp.position_ids,
+                    dummy_decode_input_data_across_dp.attn_metadata,
+                    dummy_decode_input_data_across_dp.logits_indices,
+                    self.kv_caches,
+                    warmup_mode=warmup_mode)
+                htorch.core.mark_step()
 
         if structured_output:
             # Scheduler places cached before prompt
