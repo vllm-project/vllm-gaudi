@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
 from typing import Union
 
 import vllm
@@ -101,6 +102,7 @@ def generate_and_test(llm,
 
 
 #@create_new_process_for_each_test()
+@pytest.mark.xfail(reason="Weka not available")
 def test_llama_lora(sql_lora_files):
 
     llm = vllm.LLM(

@@ -1,3 +1,4 @@
+import pytest
 from typing import Optional
 
 from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
@@ -115,6 +116,7 @@ def _test_llama_multilora(sql_lora_files, tp_size):
     assert generated_texts == expected_output
 
 
+@pytest.mark.xfail(reason="Weka not available")
 def test_llama_multilora_1x(sql_lora_files):
     _test_llama_multilora(sql_lora_files, 1)
 
