@@ -215,4 +215,3 @@ class HpuPlatform(Platform):
         logger.warning(msg)
         import vllm.model_executor.utils as utils
         utils.set_weight_attrs = set_weight_attrs
-

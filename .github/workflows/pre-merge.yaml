@@ -115,7 +115,8 @@ jobs:
             hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
             /bin/bash -c "
                 pip install nixl==0.4.1 lm-eval[api] &&
-                /workspace/vllm-gaudi/tests/v1/kv_connector/nixl_integration/run_accuracy_test.sh
+                cd /workspace/vllm-gaudi/tests/v1/kv_connector/nixl_integration/ &&
+                ./run_accuracy_test.sh
             "
 
           EXITCODE=$?
