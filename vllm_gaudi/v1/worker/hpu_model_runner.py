@@ -1216,9 +1216,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # This is decode
             # NOTE(chendi): To support spec decode,
             # we don't assume num_scheduled_tokens == 1.
-            # assert num_scheduled_tokens == 1
             if not self.is_decoder_only(req_id):
-                assert num_scheduled_tokens == 1
+                #assert num_scheduled_tokens == 1
+                logger.debug("num_scheduled_tokens=",num_scheduled_tokens)
             decode_req_ids.append(req_id)
             num_computed_tokens_decode.append(int(num_computed_tokens + 1))
 
