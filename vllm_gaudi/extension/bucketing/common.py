@@ -93,7 +93,7 @@ class HPUBucketingManager():
             self.prompt_buckets = generate_buckets(bs_range, query_range,
                      ctx_range, True, self.max_model_len, self.max_num_seqs,
                      self.max_num_prefill_seqs, self.max_num_batched_tokens,
-                     self.block_size)
+                     self.block_size, self.num_hpu_blocks)
             self.log_generate_info(True)
         else:
             logger().info("Bucketing is off - skipping prompt buckets generation")
@@ -118,7 +118,7 @@ class HPUBucketingManager():
             self.decode_buckets = generate_buckets(bs_range, query_range, 
                      ctx_range, False, self.max_model_len, self.max_num_seqs,
                      self.max_num_prefill_seqs, self.max_num_batched_tokens, 
-                     self.block_size)
+                     self.block_size, self.num_hpu_blocks)
             self.log_generate_info(False)
         else:
             logger().info("Bucketing is off - skipping decode buckets generation")
@@ -192,7 +192,7 @@ def get_bucketing_manager():
 
 def generate_buckets(bs_range, query_range, ctx_range, is_prompt,
                      max_model_len, max_num_seqs, max_num_prefill_seqs,
-                     max_num_batched_tokens, block_size):
+                     max_num_batched_tokens, block_size, max_blocks):
     use_merged_prefill = get_config().merged_prefill
     use_contiguous_pa = get_config().use_contiguous_pa
 
@@ -230,7 +230,8 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt,
     # decode
     def block_not_greater_than_max_model_len(bs, query, ctx): return ctx <= bs * math.ceil(max_model_len / block_size)
     def batch_size_smaller_than_blocks(bs, query, ctx): return bs <= ctx
-    def max_context_for_batch_size(bs, query, ctx): return math.ceil((ctx * block_size) // bs) <= max_model_len
+    def contiguous_pa_dont_filter_out_max(bs, query, ctx):
+        return (ctx == vmax_blocks) or math.ceil((ctx * block_size) // bs) <= max_model_len
 
     filters_map = {
         "prompt": {
@@ -240,7 +241,7 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt,
         },
         "decode": {
             # depends only on contiguous PA
-            True: [batch_size_smaller_than_blocks, max_context_for_batch_size],
+            True: [contiguous_pa_dont_filter_out_max],
             False: [block_not_greater_than_max_model_len, batch_size_smaller_than_blocks],
         }
     }

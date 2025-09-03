@@ -50,6 +50,7 @@ def test_generate_prompt_buckets():
     max_num_batched_tokens = 2048
     block_size = 64
     max_model_len = 2048
+    max_blocks = 1024
     bs = 16
     prompt_bs = 16
     bs_range = [1, 2, 4, 8, 16]
@@ -57,7 +58,7 @@ def test_generate_prompt_buckets():
     ctx_range = [0, 1, 2, 3, 4]
     buckets = generate_buckets(bs_range, query_range, ctx_range, True,
                                max_model_len, bs, prompt_bs,
-                               max_num_batched_tokens, block_size)
+                               max_num_batched_tokens, block_size, max_blocks)
     assert len(buckets) == 25
     assert all(bs * seq <= max_num_batched_tokens for bs, seq, _ in buckets)
 
@@ -65,6 +66,7 @@ def test_generate_prompt_buckets():
 def test_generate_decode_buckets():
     max_num_batched_tokens = 131072
     max_model_len = 2048
+    max_blocks = 1024
     block_size = 128
     bs = 64
     prompt_bs = 64
@@ -75,7 +77,7 @@ def test_generate_decode_buckets():
     ]
     buckets = generate_buckets(bs_range, [1, 1, 1], blocks_range, False,
                                max_model_len, bs, prompt_bs,
-                               max_num_batched_tokens, block_size)
+                               max_num_batched_tokens, block_size, max_blocks)
     assert len(buckets) == 15
     assert all(ctx <= bs * (max_model_len // block_size)
                for bs, _, ctx in buckets)
