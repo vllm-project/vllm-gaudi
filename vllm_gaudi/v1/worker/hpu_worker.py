@@ -17,7 +17,7 @@ from vllm_gaudi.extension.profiler import (HabanaMemoryProfiler, format_bytes,
 from vllm_gaudi.extension.runtime import get_config
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
@@ -327,6 +327,7 @@ def init_worker_distributed_environment(
                                       parallel_config.pipeline_parallel_size)
 
     ensure_kv_transfer_initialized(vllm_config)
+
 
 @contextmanager
 def track_graph_compile(name: str):

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import collections
 import contextlib
-import copy
 import functools
 import itertools
 import math
@@ -53,11 +52,11 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
 from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy)
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec)
+                                        KVCacheSpec, KVCacheTensor)
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
-                             DraftTokenIds, ModelRunnerOutput, 
+                             DraftTokenIds, ModelRunnerOutput,
                              KVConnectorOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import bind_kv_cache
@@ -101,6 +100,7 @@ logger = init_logger()
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
 hpu_buffer = None
+
 
 class BucketingFailedException(Exception):
     pass
@@ -432,10 +432,7 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         if model_mm_kwargs is not None:
             kwargs.update(model_mm_kwargs)
 
-        with set_forward_context(
-                attn_meta,
-                self.vllm_config):
-
+        with set_forward_context(attn_meta, self.vllm_config):
             hidden_states = self.model(*args, **kwargs)
             if self._rotary_prepare_cos_sin is not None:
                 self._reset_rotary_cos_sin()
@@ -453,6 +450,7 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
 
     # def sample(self, *args, **kwargs):
     #    return self.sampler(*args, **kwargs)
+
 
     def generate_proposals(self, *args, **kwargs):
         return self.model.generate_proposals(*args, **kwargs)
@@ -1170,9 +1168,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         req_index = self.input_batch.req_id_to_index[req_id]
         return bool(req_id in self.input_batch._req_ids and \
             self.input_batch._req_ids[req_index] == "decode")
-    #def is_prefill_only(self, req_id) -> bool:
-    #    return bool(req_id in self.input_batch.req_type and \
-    #        self.input_batch.req_type[req_id] == "prefill")
 
     def _get_prompts_and_decodes(
         self,
@@ -1204,7 +1199,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if requests is not None and req_id not in self.input_batch.req_ids:
                 for request in requests:
                     if request == req_id:
-                        self.input_batch.req_ids[req_id] = requests_type[req_id]
+                        self.input_batch.req_ids[req_id] = requests_type[
+                            req_id]
                         break
 
             num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
@@ -1245,7 +1241,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # Must be prompt
             assert num_computed_tokens < num_prompt_tokens
             num_output_tokens = len(self.requests[req_id].output_token_ids)
-            if not has_kv_transfer_group(): #P case num_output_tokens has non 0
+            if not has_kv_transfer_group(): 
+                #P case num_output_tokens has non 0
                 assert num_output_tokens == 0, \
                     f'req_id: {req_id}, {num_output_tokens}'
 
@@ -2311,7 +2308,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 return EMPTY_MODEL_RUNNER_OUTPUT
             #logger.debug(f'before kv_connector_no_forward |{os.getpid()=}|{scheduler_output.total_num_scheduled_tokens=}|{scheduler_output=}')
             # For D case, wait until kv finish load here
-            return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+            return self.kv_connector_no_forward(scheduler_output, 
+                                                self.vllm_config)
         # If necessary, swap decodes/prompts to have all decodes on the start
         ensure_decodes_first(self.input_batch)
         # Prepare prompts/decodes info
@@ -2661,11 +2659,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             logprobs=logprobs,
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             pooler_output=[],
-            kv_connector_output = KVConnectorOutput(
+            kv_connector_output=KVConnectorOutput(
                 finished_sending=finished_sending,
                 finished_recving=finished_recving,
-            )
-        )
+            ))
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()
         return model_runner_output
@@ -2882,7 +2879,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                            scheduled_tokens,
                            block_id=0):
         from vllm.sampling_params import SamplingParams
-        from vllm.v1.core.sched.output import NewRequestData
         num_blocks = round_up(total_tokens, self.block_size) // self.block_size
         prompt_token_ids = list(range(total_tokens))
 
@@ -2916,7 +2912,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         return seq_lengths
 
     def _execute_dummy_scenario(self, prompt_cfg, decode_cfg):
-        from vllm.v1.core.sched.output import (NewRequestData, SchedulerOutput,
+        from vllm.v1.core.sched.output import (SchedulerOutput,
                                                CachedRequestData)
         requests: list[NewRequestData] = []
         scheduled_tokens: dict[str, int] = {}
@@ -3511,6 +3507,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 draft_token_ids.append(drafter_output.tolist())
         return draft_token_ids
 
+
 def _make_src_and_dst_indices(
     block_size: int,
     src_block_ids: list[int],
@@ -3519,16 +3516,23 @@ def _make_src_and_dst_indices(
     dst_device: Union[torch.device, str],
 ) -> tuple[torch.Tensor, torch.Tensor]:
     #convert to slot mapping
-    src_slot_mapping = np.concatenate([np.arange(start=s*block_size, stop=(s+1)*block_size) for s in src_block_ids])
-    dst_slot_mapping = np.concatenate([np.arange(start=d*block_size, stop=(d+1)*block_size) for d in dst_block_ids])
+    src_slot_mapping = np.concatenate([
+        np.arange(start=s*block_size, stop=(s+1)*block_size)
+        for s in src_block_ids
+    ])
+    dst_slot_mapping = np.concatenate([
+        np.arange(start=d*block_size, stop=(d+1)*block_size)
+        for d in dst_block_ids
+    ])
 
     src_slot_mapping = torch.tensor(src_slot_mapping,
-                               device=src_device,
-                               dtype=torch.int64)
+                                    device=src_device,
+                                    dtype=torch.int64)
     dst_slot_mapping = torch.tensor(dst_slot_mapping,
-                               device=dst_device,
-                               dtype=torch.int64)
+                                    device=dst_device,
+                                    dtype=torch.int64)
     return src_slot_mapping, dst_slot_mapping
+
 
 def copy_kv_blocks(
     src_kv_caches: dict[str, torch.Tensor],
@@ -3559,20 +3563,25 @@ def copy_kv_blocks(
 
     i = 0
     global hpu_buffer
-    use_hpu_buffer = False # (len(src_slot_mapping) == hpu_buffer[0][0].size(0)) and (hpu_buffer is not None)
+    use_hpu_buffer = False  # (len(src_slot_mapping) == hpu_buffer[0][0].size(0)) and (hpu_buffer is not None)
     for layer_name in src_kv_caches:
         key_cache = src_kv_caches[layer_name][0]
         value_cache = src_kv_caches[layer_name][1]
 
         if direction == "d2h" and use_hpu_buffer:
-            hpu_buffer[i][0]=key_cache.index_select_(0,  src_slot_mapping)
-            hpu_buffer[i][1]=value_cache.index_select_(0,  src_slot_mapping)
+            hpu_buffer[i][0] = key_cache.index_select_(0,  src_slot_mapping)
+            hpu_buffer[i][1] = value_cache.index_select_(0,  src_slot_mapping)
         else:
             #import remote_pdb;remote_pdb.set_trace()
-            dst_kv_caches[layer_name][0].index_put_((dst_slot_mapping,), key_cache.index_select(0, src_slot_mapping).to(target_device))
-            dst_kv_caches[layer_name][1].index_put_((dst_slot_mapping,), value_cache.index_select(0, src_slot_mapping).to(target_device))
+            dst_kv_caches[layer_name][0].index_put_(
+                    (dst_slot_mapping,), 
+                    key_cache.index_select(0, src_slot_mapping).to(target_device))
+            dst_kv_caches[layer_name][1].index_put_(
+                    (dst_slot_mapping,), 
+                    value_cache.index_select(0, 
+                                             src_slot_mapping).to(target_device))
 
-        i = i+1
+        i = i + 1
 
         #dst_kv_caches[layer_name][0][dst_slot_mapping] = key_cache[src_slot_mapping].to(target_device)
         #dst_kv_caches[layer_name][1][dst_slot_mapping] = value_cache[src_slot_mapping].to(target_device)
@@ -3582,4 +3591,6 @@ def copy_kv_blocks(
 
     torch.hpu.synchronize()
 
-    logger.info(f"copy_kv_blocks: copy takes {time.perf_counter() - start}|{direction=}|{os.getpid()=}|{block_size=}|{len(src_block_ids)=}|{len(dst_block_ids)=}")
+    logger.info(
+        f"copy_kv_blocks: copy takes {time.perf_counter() - start}|{direction=}|{os.getpid()=}|{block_size=}|{len(src_block_ids)=}|{len(dst_block_ids)=}"
+    )
