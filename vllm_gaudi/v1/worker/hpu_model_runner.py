@@ -97,6 +97,40 @@ _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 class BucketingFailedException(Exception):
     pass
 
+# Wrapper for ModelRunnerOutput to support overlapped execution.
+class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
+    def __init__(
+        self,
+        model_runner_output: ModelRunnerOutput,
+        sampled_token_ids: torch.Tensor,
+        invalid_req_indices: list[int]=[],
+    ):
+        self._model_runner_output = model_runner_output
+        self._invalid_req_indices = invalid_req_indices
+
+        # Keep a reference to the device tensor to avoid it being
+        # deallocated until we finish copying it to the host.
+        self._sampled_token_ids = sampled_token_ids
+
+        self._sampled_token_ids_cpu = self._sampled_token_ids.to(
+            'cpu', non_blocking=True)
+
+    def get_output(self) -> ModelRunnerOutput:
+        """Copy the device tensors to the host and return a ModelRunnerOutput.
+        
+        This function blocks until the copy is finished.
+        """
+
+        # Release the device tensor once the copy has completed
+        del self._sampled_token_ids
+
+        valid_sampled_token_ids = self._sampled_token_ids_cpu.tolist()
+        for i in self._invalid_req_indices:
+            valid_sampled_token_ids[i].clear()
+
+        output = self._model_runner_output
+        output.sampled_token_ids = valid_sampled_token_ids
+        return output
 
 @dataclass
 class PromptDecodeInfo:
@@ -1946,18 +1980,14 @@ class HPUModelRunner:
                 else:
                     # Upload the index tensors asynchronously
                     # so the scatter can be non-blocking
-                    # raise NotImplementedError(
-                    #     "This part is not yet implemented")
                     input_ids_index_tensor = torch.tensor(
                         flattened_indices,
-                        dtype=torch.int64,
-                        pin_memory=self.pin_memory).to(self.device,
-                                                       non_blocking=True)
+                        dtype=torch.int64).to(self.device,
+                                              non_blocking=True)
                     prev_common_req_indices_tensor = torch.tensor(
                         prev_common_req_indices,
-                        dtype=torch.int64,
-                        pin_memory=self.pin_memory).to(self.device,
-                                                       non_blocking=True)
+                        dtype=torch.int64).to(self.device,
+                                              non_blocking=True)
                     self.input_ids.scatter_(
                         dim=0,
                         index=input_ids_index_tensor,
@@ -2356,7 +2386,6 @@ class HPUModelRunner:
             logits_decode = []
             structured_output = True
 
-        logger.info("1")
         ######################### PREFILLS #########################
         if num_prefills > 0:
             htorch.core.mark_step()
@@ -2554,7 +2583,6 @@ class HPUModelRunner:
                     decode_data)[:num_decodes]
             ################## Spec Decode end ##################
 
-        logger.info("2")
         if structured_output:
             # Scheduler places cached before prompt
             logits_combined = logits_decode + logits_prompt
@@ -2577,18 +2605,19 @@ class HPUModelRunner:
             decode_sampled_token_ids.append(
                 sampled_token_ids[:num_decodes].flatten())
         else:
+            # For async scheduling: keep tokens on HPU and avoid CPU sync
+            # Concatenate decode and prefill tokens on HPU
             if decode_sampled_token_ids or prefill_sampled_token_ids:
-                sampled_token_ids = torch.cat(decode_sampled_token_ids + 
-                                            prefill_sampled_token_ids)
+                sampled_token_ids = torch.cat(decode_sampled_token_ids +
+                                                  prefill_sampled_token_ids).view(-1,1)
             else:
                 sampled_token_ids = torch.empty((0, 1),
                                                     dtype=torch.int32,
                                                     device=self.device)
-
-        logger.info("3")        
+      
         if self.use_async_scheduling:
             self.input_batch.prev_sampled_token_ids = \
-                sampled_token_ids
+                sampled_token_ids.flatten()
             # May need to handle invalid tokens?
             # self.input_batch.prev_sampled_token_ids_invalid_indices
             self.input_batch.prev_req_id_to_index = {
@@ -2636,7 +2665,6 @@ class HPUModelRunner:
                             start_idx:start_idx + num_tokens]
                     start_idx += num_tokens
 
-        logger.info("4")  
         ################## RETURN ##################
         # NOTE(kzawora): idk what happens if part of batch doesn't have logprobs
 
@@ -2700,9 +2728,9 @@ class HPUModelRunner:
             pooler_output=[],
         )
 
-        logger.info("5")  
         if self.use_async_scheduling:
-            return AsyncModelRunnerOutput(
+        # if False:
+            return AsyncHPUModelRunnerOutput(
                 model_runner_output=model_runner_output,
                 sampled_token_ids=sampled_token_ids
             )
