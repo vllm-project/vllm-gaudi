@@ -22,12 +22,10 @@ import yaml
 import vllm
 
 RTOL = 0.06
-TEST_DATA_FILE = os.environ.get(
-    "LM_EVAL_TEST_DATA_FILE",
-    ".jenkins/lm-eval-harness/configs/Meta-Llama-3-8B-Instruct.yaml")
+TEST_DATA_FILE = os.environ.get("LM_EVAL_TEST_DATA_FILE",
+                                ".jenkins/lm-eval-harness/configs/Meta-Llama-3-8B-Instruct.yaml")
 
-REPORT_PERFORMANCE = os.environ.get("LM_EVAL_REPORT_PERFORMANCE",
-                                    "false") in ['1', 'true']
+REPORT_PERFORMANCE = os.environ.get("LM_EVAL_REPORT_PERFORMANCE", "false") in ['1', 'true']
 
 TP_SIZE = os.environ.get("LM_EVAL_TP_SIZE", 1)
 APC_ENABLED = os.environ.get("LM_EVAL_APC_ENABLED", 'false')
@@ -63,14 +61,13 @@ def launch_lm_eval(eval_config):
         kwargs['fewshot_as_multiturn'] = eval_config['fewshot_as_multiturn']
     if 'apply_chat_template' in eval_config:
         kwargs['apply_chat_template'] = eval_config['apply_chat_template']
-    results = lm_eval.simple_evaluate(
-        model="vllm",
-        model_args=model_args,
-        tasks=[task["name"] for task in eval_config["tasks"]],
-        num_fewshot=eval_config["num_fewshot"],
-        limit=eval_config["limit"],
-        batch_size="auto",
-        **kwargs)
+    results = lm_eval.simple_evaluate(model="vllm",
+                                      model_args=model_args,
+                                      tasks=[task["name"] for task in eval_config["tasks"]],
+                                      num_fewshot=eval_config["num_fewshot"],
+                                      limit=eval_config["limit"],
+                                      batch_size="auto",
+                                      **kwargs)
 
     return results
 
@@ -80,14 +77,10 @@ def report_performance(task, input_lens, output_lens, time, record_property):
     context_lens = [i + o for i, o in zip(input_lens, output_lens)]
     gen_tput = sum(output_lens) / time
     all_lens = [input_lens, output_lens, context_lens]
-    min_input_tokens, min_output_tokens, min_context_tokens = (
-        min(x) for x in all_lens)
-    max_input_tokens, max_output_tokens, max_context_tokens = (
-        max(x) for x in all_lens)
-    mean_input_tokens, mean_output_tokens, mean_context_tokens = (
-        statistics.mean(x) for x in all_lens)
-    stddev_input_tokens, stddev_output_tokens, stddev_context_tokens = (
-        statistics.stdev(x) for x in all_lens)
+    min_input_tokens, min_output_tokens, min_context_tokens = (min(x) for x in all_lens)
+    max_input_tokens, max_output_tokens, max_context_tokens = (max(x) for x in all_lens)
+    mean_input_tokens, mean_output_tokens, mean_context_tokens = (statistics.mean(x) for x in all_lens)
+    stddev_input_tokens, stddev_output_tokens, stddev_context_tokens = (statistics.stdev(x) for x in all_lens)
     msg = (
         f'{task} | estimated average generation throughput: {gen_tput:.2f} tokens/s \n'  # noqa: G004, E501
         f'{task} | input_tokens   | min: {min_input_tokens} | max: {max_input_tokens} | mean: {mean_input_tokens:.2f} | stddev: {stddev_input_tokens:.2f}\n'  # noqa: E501
@@ -130,14 +123,12 @@ def get_current_gaudi_platform():
     elif device_type == htexp.synDeviceType.synDeviceGaudi3:
         return "Gaudi3"
     else:
-        raise ValueError(
-            f"Unsupported device: the device type is {device_type}.")
+        raise ValueError(f"Unsupported device: the device type is {device_type}.")
 
 
 def test_lm_eval_correctness(record_xml_attribute, record_property):
     try:
-        eval_config = yaml.safe_load(
-            Path(TEST_DATA_FILE).read_text(encoding="utf-8"))
+        eval_config = yaml.safe_load(Path(TEST_DATA_FILE).read_text(encoding="utf-8"))
 
         # Record JUnitXML test name
         tasks_str = '_'.join([t['name'] for t in eval_config["tasks"]])
@@ -154,48 +145,35 @@ def test_lm_eval_correctness(record_xml_attribute, record_property):
         results = launch_lm_eval(eval_config)
         total_time = time.perf_counter() - start_time
 
-        tokenizer = vllm.transformers_utils.tokenizer.get_tokenizer(
-            eval_config['model_name'])
+        tokenizer = vllm.transformers_utils.tokenizer.get_tokenizer(eval_config['model_name'])
 
         # Confirm scores match ground truth.
         for task in eval_config["tasks"]:
 
             samples = results['samples'][task["name"]]
-            tokenized_inputs = [
-                tokenizer(x['arguments'][0][0])['input_ids'] for x in samples
-            ]
+            tokenized_inputs = [tokenizer(x['arguments'][0][0])['input_ids'] for x in samples]
             tokenized_inputs_lens = [len(x) for x in tokenized_inputs]
             tokenized_outputs = [
                 list(
                     itertools.chain.from_iterable(
-                        tokenizer(
-                            list(itertools.chain.from_iterable(
-                                x['resps'])))['input_ids'])) for x in samples
+                        tokenizer(list(itertools.chain.from_iterable(x['resps'])))['input_ids'])) for x in samples
             ]
             tokenized_outputs_lens = [len(x) for x in tokenized_outputs]
             if REPORT_PERFORMANCE:
-                report_performance(task['name'], tokenized_inputs_lens,
-                                   tokenized_outputs_lens, total_time,
+                report_performance(task['name'], tokenized_inputs_lens, tokenized_outputs_lens, total_time,
                                    record_property)
 
             for metric in task["metrics"]:
                 ground_truth = metric["value"]
-                measured_value = results["results"][task["name"]][
-                    metric["name"]]
-                print(
-                    f'{task["name"]} | {metric["name"]}: '
-                    f'ground_truth={ground_truth} | measured={measured_value}')
+                measured_value = results["results"][task["name"]][metric["name"]]
+                print(f'{task["name"]} | {metric["name"]}: '
+                      f'ground_truth={ground_truth} | measured={measured_value}')
 
                 # Record ground truth and measured value to JUnitXML
-                record_property(
-                    f"{task['name']}_{metric['name']}_ground_truth",
-                    ground_truth)
-                record_property(f"{task['name']}_{metric['name']}_measured",
-                                measured_value)
+                record_property(f"{task['name']}_{metric['name']}_ground_truth", ground_truth)
+                record_property(f"{task['name']}_{metric['name']}_measured", measured_value)
                 if measured_value < ground_truth:
-                    assert numpy.isclose(ground_truth,
-                                         measured_value,
-                                         rtol=RTOL)
+                    assert numpy.isclose(ground_truth, measured_value, rtol=RTOL)
     except Exception as exc:
         # nasty workaround for a nasty HPU PT bridge bug (SW-204785)
         atexit.register(fail_on_exit)
