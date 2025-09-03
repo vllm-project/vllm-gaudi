@@ -22,7 +22,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.mla.common import MLACommonImpl
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention,
-                                                     HPUPagedAttentionMetadata)
+                                                     HPUPagedAttentionMetadata, HPUPagedAttentionMetadataBuilder)
 
 from vllm_gaudi.extension.logger import logger as init_logger
 
@@ -48,8 +48,8 @@ class HPUAttentionBackend(AttentionBackend):
         return CommonAttentionState
 
     @staticmethod
-    def get_builder_cls() -> Type["AttentionMetadataBuilder"]:
-        return HPUAttentionMetadataBuilder
+    def get_builder_cls() -> type["AttentionMetadataBuilder"]:
+        return HPUPagedAttentionMetadataBuilder
 
     @staticmethod
     def get_kv_cache_shape(
