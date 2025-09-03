@@ -47,7 +47,8 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv, is_pin_m
 from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy)
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec)
-from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds, LogprobsTensors, ModelRunnerOutput)
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds,
+                             LogprobsTensors, ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
@@ -93,6 +94,44 @@ _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
 class BucketingFailedException(Exception):
     pass
+
+
+# Wrapper for ModelRunnerOutput to support overlapped execution.
+class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
+
+    def __init__(
+        self,
+        model_runner_output: ModelRunnerOutput,
+        sampled_token_ids: torch.Tensor,
+        invalid_req_indices: list[int],
+    ):
+        self._model_runner_output = model_runner_output
+        self._invalid_req_indices = invalid_req_indices
+
+        # Keep a reference to the device tensor to avoid it being
+        # deallocated until we finish copying it to the host.
+        self._sampled_token_ids = sampled_token_ids
+
+        self._sampled_token_ids_cpu = self._sampled_token_ids.to(
+            'cpu', non_blocking=True)
+
+    def get_output(self) -> ModelRunnerOutput:
+        """Copy the device tensors to the host and return a ModelRunnerOutput.
+        
+        This function blocks until the copy is finished.
+        """
+
+        # Release the device tensor once the copy has completed
+        torch.hpu.synchronize()
+        del self._sampled_token_ids
+
+        valid_sampled_token_ids = self._sampled_token_ids_cpu.tolist()
+        for i in self._invalid_req_indices:
+            valid_sampled_token_ids[i].clear()
+
+        output = self._model_runner_output
+        output.sampled_token_ids = valid_sampled_token_ids
+        return output
 
 
 @dataclass
@@ -637,6 +676,8 @@ class HPUModelRunner:
             logitsprocs=build_logitsprocs(self.vllm_config, self.device, self.pin_memory, self.is_pooling_model,
                                           self.vllm_config.model_config.logits_processors),
         )
+
+        self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.mem_margin = None
         self.unified_attn = get_config().unified_attn
         self.use_merged_prefill = get_config().merged_prefill
@@ -1981,6 +2022,60 @@ class HPUModelRunner:
             logits_indices=logits_indices_t,
             attn_metadata=attn_metadata,
         )
+    def _prepare_input_ids(self, total_num_scheduled_tokens: int,
+                           cu_num_tokens: np.ndarray) -> None:
+        """Prepare the input IDs for the current batch.
+        
+        Carefully handles the `prev_sampled_token_ids` which can be cached
+        from the previous engine iteration, in which case those tokens on the
+        GPU need to be copied into the corresponding slots into input_ids."""
+
+        if self.input_batch.prev_sampled_token_ids is not None:
+            # Async scheduling case, we need to copy the sampled token ids
+            # from the previous iteration.
+            prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+            current_req_id_to_index = self.input_batch.req_id_to_index
+            assert prev_req_id_to_index is not None
+            common_req_ids = set(prev_req_id_to_index.keys()).intersection(
+                set(current_req_id_to_index.keys()))
+            if common_req_ids:
+                current_common_req_indices = [
+                    current_req_id_to_index[req_id]
+                    for req_id in common_req_ids
+                ]
+                prev_common_req_indices = [
+                    prev_req_id_to_index[req_id] for req_id in common_req_ids
+                ]
+                # We need to compute the flattened input_ids index of the
+                # last token in each common request.
+                flattened_indices = [
+                    int(cu_num_tokens[idx]) - 1
+                    for idx in current_common_req_indices
+                ]
+                if flattened_indices == prev_common_req_indices and \
+                    set(flattened_indices) == \
+                        set(range(len(flattened_indices))):
+                    # Common-case optimization: the batch is unchanged
+                    # and no reordering happened.
+                    # The indices are both the same permutation of 0..N-1
+                    self.input_ids_cpu[:len(flattened_indices)].copy_(
+                        self.input_batch.
+                        prev_sampled_token_ids[:len(flattened_indices)])
+                else:
+                    # Upload the index tensors asynchronously
+                    # so the scatter can be non-blocking
+                    input_ids_index_tensor = torch.tensor(flattened_indices,
+                                                          dtype=torch.int64,
+                                                          device="cpu")
+                    prev_common_req_indices_tensor = torch.tensor(
+                        prev_common_req_indices,
+                        dtype=torch.int64,
+                        device="cpu")
+                    self.input_ids_cpu.scatter_(
+                        dim=0,
+                        index=input_ids_index_tensor,
+                        src=self.input_batch.
+                        prev_sampled_token_ids[prev_common_req_indices_tensor])
 
     def _prepare_inputs(
         self,
@@ -2002,13 +2097,17 @@ class HPUModelRunner:
         num_scheduled_tokens = np.array(tokens, dtype=np.int32)
         req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
         positions_np = self.positions_np[:total_num_scheduled_tokens]
-        _, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
+        cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices], arange, out=positions_np)
         token_indices = (positions_np + req_indices * self.input_batch.token_ids_cpu.shape[1])
+        cu_num_tokens, arange = self._get_cumsum_and_arange(
+            num_scheduled_tokens)
         torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
                            0,
                            torch.from_numpy(token_indices),
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
+        # Copy the tensors to the GPU.
+        self._prepare_input_ids(total_num_scheduled_tokens, cu_num_tokens)
         ###############################################
 
         # Get the number of scheduled tokens for each request.
@@ -2395,7 +2494,7 @@ class HPUModelRunner:
         self,
         scheduler_output: "SchedulerOutput",
         warmup_mode: bool = False,
-    ) -> ModelRunnerOutput:
+    ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput]:
         # NOTE(kzawora): Since scheduler doesn't differentiate between prefills
         # and decodes, we must handle mixed batches. In _update_states we make
         # sure that first self.input_batch.num_decodes requests are decodes,
@@ -2726,28 +2825,54 @@ class HPUModelRunner:
             for i in range(logits.shape[0] - num_decodes):
                 prefill_sampled_token_ids.append(sampler_output.sampled_token_ids[num_decodes + i].flatten())
             decode_sampled_token_ids.append(sampler_output.sampled_token_ids[:num_decodes].flatten())
+        else:
+            # For async scheduling: keep tokens on HPU and avoid CPU sync
+            # Concatenate decode and prefill tokens on HPU
+            if decode_sampled_token_ids or prefill_sampled_token_ids:
+                sampled_token_ids = torch.cat(decode_sampled_token_ids +
+                                              prefill_sampled_token_ids).view(
+                                                  -1, 1)
+            else:
+                sampled_token_ids = torch.empty((0, 1),
+                                                dtype=torch.int32,
+                                                device=self.device)
 
-        # From this point onward, all operations are done on CPU.
-        # We already have tokens. Let's copy the data to
-        # CPU as is, and then discard padded tokens.
-        with self.profiler.record_event('internal', "sampler_postprocessing"):
-            prefill_sampled_token_ids = [tensor.cpu() for tensor in prefill_sampled_token_ids]
-            decode_sampled_token_ids = [tensor.cpu()[:num_decodes] for tensor in decode_sampled_token_ids]
-            sampled_token_ids_list = torch.cat(decode_sampled_token_ids + prefill_sampled_token_ids).tolist()
-            sampled_token_requests = \
-                decode_sampled_requests + prefill_sampled_requests
-            max_req_index = max(self.input_batch.req_id_to_index.values())
-            postprocessed_sampled_token_ids: list[list]
-            postprocessed_sampled_token_ids = [[] for _ in range(max_req_index + 1)]
-            # NOTE(Chendi): in post-processing, spec_decode might
-            # return more than 1 token during decode.
-            start_idx = 0
-            for i, req_id in enumerate(sampled_token_requests):
-                num_tokens = spec_decode_num_tokens[i] if spec_decode_num_tokens is not None else 1
-                postprocessed_sampled_token_ids[
-                    self.input_batch.req_id_to_index[req_id]] += sampled_token_ids_list[start_idx:start_idx +
-                                                                                        num_tokens]
-                start_idx += num_tokens
+        if self.use_async_scheduling:
+            self.input_batch.prev_sampled_token_ids = \
+                sampled_token_ids.flatten().to("cpu", non_blocking=True)
+            # May need to handle invalid tokens?
+            # self.input_batch.prev_sampled_token_ids_invalid_indices
+            self.input_batch.prev_req_id_to_index = {
+                req_id: i
+                for i, req_id in enumerate(self.input_batch.req_ids)
+            }
+
+            # For the output, create placeholder sampled_token_ids
+            # (will be filled during serialization)
+
+            postprocessed_sampled_token_ids = [[-1] for _ in range(num_reqs)]
+        else:
+            # From this point onward, all operations are done on CPU.
+            # We already have tokens. Let's copy the data to
+            # CPU as is, and then discard padded tokens.
+            with self.profiler.record_event('internal', "sampler_postprocessing"):
+                prefill_sampled_token_ids = [tensor.cpu() for tensor in prefill_sampled_token_ids]
+                decode_sampled_token_ids = [tensor.cpu()[:num_decodes] for tensor in decode_sampled_token_ids]
+                sampled_token_ids_list = torch.cat(decode_sampled_token_ids + prefill_sampled_token_ids).tolist()
+                sampled_token_requests = \
+                    decode_sampled_requests + prefill_sampled_requests
+                max_req_index = max(self.input_batch.req_id_to_index.values())
+                postprocessed_sampled_token_ids: list[list]
+                postprocessed_sampled_token_ids = [[] for _ in range(max_req_index + 1)]
+                # NOTE(Chendi): in post-processing, spec_decode might
+                # return more than 1 token during decode.
+                start_idx = 0
+                for i, req_id in enumerate(sampled_token_requests):
+                    num_tokens = spec_decode_num_tokens[i] if spec_decode_num_tokens is not None else 1
+                    postprocessed_sampled_token_ids[
+                        self.input_batch.req_id_to_index[req_id]] += sampled_token_ids_list[start_idx:start_idx +
+                                                                                            num_tokens]
+                    start_idx += num_tokens
 
         ################## RETURN ##################
         # NOTE(kzawora): idk what happens if part of batch doesn't have logprobs
@@ -2807,6 +2932,11 @@ class HPUModelRunner:
             pooler_output=[],
         )
 
+        if self.use_async_scheduling:
+            return AsyncHPUModelRunnerOutput(
+                model_runner_output=model_runner_output,
+                sampled_token_ids=sampled_token_ids,
+                invalid_req_indices=[])
         return model_runner_output
 
     def load_model(self) -> None:
