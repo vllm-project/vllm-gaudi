@@ -21,7 +21,8 @@ def time_generation(llm: LLM,
                     prompts: list[str],
                     sampling_params: SamplingParams,
                     num_spec_tokens=5,
-                    num_warmups=1):
+                    num_warmups=1,
+                    do_profile=False):
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
     # Warmup first
@@ -29,14 +30,32 @@ def time_generation(llm: LLM,
     for _ in range(num_warmups):
         llm.generate(prompts, sampling_params)
     logging.info("Starting generation...")
+    ret = []
+    acceptance_counts = [0] * (num_spec_tokens + 1)
     start = time.time()
-    outputs = llm.generate(prompts, sampling_params)
+    if do_profile:
+        llm.start_profile()
+    try:
+        outputs = llm.generate(prompts, sampling_params)
+    except Exception as e:
+        logging.error("Error getting metrics: %s", e)
+        end = time.time()
+        latency = end - start
+        result_dict = {
+            'ret_spec': ret,
+            'latency': latency,
+            'acc_counts': acceptance_counts,
+            'acc_rate': 0.0,
+            'num_draft_tokens': 0,
+            'num_drafts': 0,
+        }
+        return result_dict
+    if do_profile:
+        llm.stop_profile()
     end = time.time()
     latency = end - start
     logging.info("Generation completed in %.2f seconds.", latency)
     # Print the outputs.
-    ret = []
-    acceptance_counts = [0] * (num_spec_tokens + 1)
     for output in outputs:
         generated_text = output.outputs[0].text
         ret.append(generated_text)
@@ -104,7 +123,8 @@ def test_ngram(is_enable, args, prompts, sampling_params, task_key,
         )
 
     result_dict = time_generation(llm, prompts, sampling_params,
-                                  args.num_spec_tokens, args.num_warmups)
+                                  args.num_spec_tokens, args.num_warmups,
+                                  args.do_profile)
 
     result_queue.put((task_key, result_dict))
 
@@ -129,7 +149,33 @@ def test_eagle_model(is_enable, args, prompts, sampling_params, task_key,
         )
 
     result_dict = time_generation(llm, prompts, sampling_params,
-                                  args.num_spec_tokens, args.num_warmups)
+                                  args.num_spec_tokens, args.num_warmups,
+                                  args.do_profile)
+    result_queue.put((task_key, result_dict))
+
+
+def test_eagle3_model(is_enable, args, prompts, sampling_params, task_key,
+                      result_queue):
+    if not is_enable:
+        llm = LLM(
+            model="meta-llama/Meta-Llama-3-8B-Instruct",
+            disable_log_stats=False,
+            enforce_eager=args.enforce_eager,
+        )
+    else:
+        llm = LLM(
+            model="meta-llama/Meta-Llama-3-8B-Instruct",
+            speculative_config={
+                "model": "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
+                "num_speculative_tokens": args.num_spec_tokens,
+            },
+            disable_log_stats=False,
+            enforce_eager=args.enforce_eager,
+        )
+
+    result_dict = time_generation(llm, prompts, sampling_params,
+                                  args.num_spec_tokens, args.num_warmups,
+                                  args.do_profile)
     result_queue.put((task_key, result_dict))
 
 
@@ -153,7 +199,8 @@ def test_medusa_model(is_enable, args, prompts, sampling_params, task_key,
         )
 
     result_dict = time_generation(llm, prompts, sampling_params,
-                                  args.num_spec_tokens, args.num_warmups)
+                                  args.num_spec_tokens, args.num_warmups,
+                                  args.do_profile)
     result_queue.put((task_key, result_dict))
 
 
@@ -176,7 +223,8 @@ def test_mtp_model(is_enable, args, prompts, sampling_params, task_key,
         )
 
     result_dict = time_generation(llm, prompts, sampling_params,
-                                  args.num_spec_tokens, args.num_warmups)
+                                  args.num_spec_tokens, args.num_warmups,
+                                  args.do_profile)
     result_queue.put((task_key, result_dict))
 
 
@@ -209,12 +257,19 @@ if __name__ == "__main__":
         type=float,
         default=0.15,
         help="Assert that the acceptance rate is at least this value.")
+    parser.add_argument("--do_profile",
+                        action="store_true",
+                        help="Enable profiling during generation.")
 
     # 'ngram', 'eagle', 'eagle3', 'medusa', 'mlp_speculator',
     # 'draft_model' or 'deepseek_mtp
     # V1 does not support draft_model yet.
     # MLP speculator => https://github.com/vllm-project/vllm/pull/21276
     args = parser.parse_args()
+    if args.do_profile:
+        logging.info('Profiling is enabled. Results will be saved to '
+                     './vllm_profile_spec_decode')
+        os.environ["VLLM_TORCH_PROFILER_DIR"] = "./vllm_profile_spec_decode"
 
     # Sample prompts.
     prompts = [
@@ -284,6 +339,21 @@ if __name__ == "__main__":
             multiprocessing.Process(target=test_eagle_model,
                                     args=(True, args, prompts, sampling_params,
                                           'spec_eagle', result_queue))
+        }
+    elif task == "eagle3":
+        if args.run_base:
+            task_queue['baseline_eagle3'] = {
+                'proc':
+                multiprocessing.Process(target=test_eagle3_model,
+                                        args=(False, args, prompts,
+                                              sampling_params,
+                                              'baseline_eagle3', result_queue))
+            }
+        task_queue['spec_eagle3'] = {
+            'proc':
+            multiprocessing.Process(target=test_eagle3_model,
+                                    args=(True, args, prompts, sampling_params,
+                                          'spec_eagle3', result_queue))
         }
     elif task == "medusa":
         if args.run_base:

@@ -1758,13 +1758,13 @@ class HPUModelRunner:
                                                            1] - 1
         num_decode_tokens = torch.tensor(np.sum(context_lens), device='cpu')
 
-        # call prepare_spec_decode_inputs to get the logits indices and
-        logits_indices, spec_decode_metadata \
-            = self._prepare_spec_decode_inputs(scheduler_output, logits_indices)
-
-        # CPU<>HPU sync *should not* happen here.
         token_ids_device = async_h2d_copy(token_ids, device=self.device)
         positions_device = async_h2d_copy(positions, device=self.device)
+        # call prepare_spec_decode_inputs to get the logits indices and
+        logits_indices, spec_decode_metadata = self._prepare_spec_decode_inputs(
+            scheduler_output, logits_indices, token_ids_device, num_tokens)
+
+        # CPU<>HPU sync *should not* happen here.
         logits_indices_device = async_h2d_copy(logits_indices,
                                                device=self.device)
         block_list_device = async_h2d_copy(block_list, device=self.device)
@@ -1812,69 +1812,8 @@ class HPUModelRunner:
 
         return cu_num_tokens, arange
 
-    # NOTE(Chendi): different from gpu_model_runner since we don't have
-    # prefill and decode in same batch
-    def _calc_spec_decode_metadata(
-        self,
-        num_draft_tokens: np.ndarray,
-    ) -> SpecDecodeMetadata:
-        # Inputs:
-        # num_draft_tokens:         [3, 0, 2, 0, 1]
-        #
-        # Outputs
-        # cu_num_draft_tokens       [3, 3, 5, 5, 6]
-        # logits_indices:           [0, 1, 2, 3],[4],[8, 9, 10],[12],[16, 17]
-        # target_logits_indices:    [0, 1, 2],[], [5, 6], [], [9]
-        # bonus_logits_indices:     [3], [4], [7], [8], [10]
-
-        num_sampled_tokens = num_draft_tokens + 1
-        max_num_sampled_tokens = np.max(num_sampled_tokens)
-
-        cu_num_sampled_tokens, arange = self._get_cumsum_and_arange(
-            num_sampled_tokens, cumsum_dtype=np.int32)
-        logits_indices = [
-            batch_id * max_num_sampled_tokens + i
-            for batch_id, n_tokens in enumerate(num_sampled_tokens)
-            for i in range(n_tokens)
-        ]
-        logits_indices = np.array(logits_indices, dtype=np.int32)
-
-        bonus_logits_indices = cu_num_sampled_tokens - 1
-
-        cu_num_draft_tokens, arange = self._get_cumsum_and_arange(
-            num_draft_tokens, cumsum_dtype=np.int32)
-
-        target_logits_indices = np.repeat(
-            cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens)
-        target_logits_indices += arange
-
-        # TODO: Optimize the CPU -> GPU copy.
-        cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).to(
-            self.device, non_blocking=True)
-
-        ##################################################
-        logits_indices = torch.from_numpy(logits_indices)
-        target_logits_indices = torch.from_numpy(target_logits_indices).to(
-            self.device, non_blocking=True)
-        bonus_logits_indices = torch.from_numpy(bonus_logits_indices).to(
-            self.device, non_blocking=True)
-        draft_token_ids = self.input_ids_cpu[logits_indices]
-        draft_token_ids_device = async_h2d_copy(draft_token_ids,
-                                                device=self.device)
-        draft_token_ids_device = draft_token_ids_device[target_logits_indices +
-                                                        1]
-
-        metadata = SpecDecodeMetadata(
-            draft_token_ids=draft_token_ids_device,
-            num_draft_tokens=num_draft_tokens.tolist(),
-            cu_num_draft_tokens=cu_num_draft_tokens,
-            target_logits_indices=target_logits_indices,
-            bonus_logits_indices=bonus_logits_indices,
-            logits_indices=logits_indices,
-        )
-        return metadata
-
-    def _prepare_spec_decode_inputs(self, scheduler_output, logits_indices):
+    def _prepare_spec_decode_inputs(self, scheduler_output, logits_indices,
+                                    token_ids_device, max_num_sampled_tokens):
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
@@ -1884,16 +1823,63 @@ class HPUModelRunner:
             # Iterate over the dictionary rather than all requests since not all
             # requests have draft tokens.
             num_draft_tokens = np.zeros(logits_indices.numel(), dtype=np.int32)
-            draft_token_ids = []
             for req_id, draft_token_ids_in_req in (
                     scheduler_output.scheduled_spec_decode_tokens.items()):
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 num_draft_tokens[req_idx] = len(draft_token_ids_in_req)
-                draft_token_ids += draft_token_ids_in_req
 
-            spec_decode_metadata = self._calc_spec_decode_metadata(
-                num_draft_tokens)
-            logits_indices = spec_decode_metadata.logits_indices
+            num_sampled_tokens = num_draft_tokens + 1
+
+            cu_num_sampled_tokens, arange = self._get_cumsum_and_arange(
+                num_sampled_tokens, cumsum_dtype=np.int32)
+
+            logits_indices = []
+            bonus_logits_indices = []
+            target_logits_indices = []
+            for batch_id, n_tokens in enumerate(num_sampled_tokens):
+                for i in range(n_tokens - 1):
+                    logits_indices.append(batch_id * max_num_sampled_tokens +
+                                          i)
+                    target_logits_indices.append(batch_id *
+                                                 max_num_sampled_tokens + i)
+                bonus_logits_indices.append(batch_id * max_num_sampled_tokens +
+                                            n_tokens - 1)
+                logits_indices.append(batch_id * max_num_sampled_tokens +
+                                      n_tokens - 1)
+                if n_tokens < max_num_sampled_tokens:
+                    logits_indices.extend([-1] *
+                                          (max_num_sampled_tokens - n_tokens))
+                    target_logits_indices.extend(
+                        [-1] * (max_num_sampled_tokens - n_tokens))
+            logits_indices = np.array(logits_indices, dtype=np.int32)
+            bonus_logits_indices = np.array(bonus_logits_indices,
+                                            dtype=np.int32)
+            target_logits_indices = np.array(target_logits_indices,
+                                             dtype=np.int32)
+
+            cu_num_draft_tokens, arange = self._get_cumsum_and_arange(
+                num_draft_tokens, cumsum_dtype=np.int32)
+
+            # TODO: Optimize the CPU -> GPU copy.
+            cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).to(
+                self.device, non_blocking=True)
+
+            ##################################################
+            logits_indices = torch.from_numpy(logits_indices)
+            target_logits_indices = torch.from_numpy(target_logits_indices).to(
+                self.device, non_blocking=True)
+            bonus_logits_indices = torch.from_numpy(bonus_logits_indices).to(
+                self.device, non_blocking=True)
+            draft_token_ids = token_ids_device[target_logits_indices + 1]
+
+            spec_decode_metadata = SpecDecodeMetadata(
+                draft_token_ids=draft_token_ids,
+                num_draft_tokens=num_draft_tokens.tolist(),
+                cu_num_draft_tokens=cu_num_draft_tokens,
+                target_logits_indices=target_logits_indices,
+                bonus_logits_indices=bonus_logits_indices,
+                logits_indices=logits_indices,
+            )
         return logits_indices, spec_decode_metadata
 
     def _prepare_inputs(
@@ -2420,7 +2406,21 @@ class HPUModelRunner:
                             bonus_token_ids,
                             sampling_metadata,
                         )
-                        sampler_output.sampled_token_ids = output_token_ids
+                        decode_sampled_token_ids = \
+                            self.rejection_sampler.parse_output(
+                                output_token_ids,
+                                self.input_batch.vocab_size,
+                        )
+                        # convert decode_sampled_token_ids as list of tensor
+                        spec_decode_num_tokens = [
+                            len(v) for v in decode_sampled_token_ids
+                        ]
+                        decode_sampled_token_ids = [
+                            torch.tensor(v, device='cpu').int()
+                            for v in decode_sampled_token_ids
+                        ]
+                        sampler_output.sampled_token_ids = output_token_ids.to(
+                            'hpu', non_blocking=True)
                     decode_sampled_requests.extend(
                         self.input_batch.req_ids[:num_decodes])
                     ##### Sampling End #####
@@ -2442,25 +2442,6 @@ class HPUModelRunner:
                 self.profiler.record_counter(self.event_start, counters)
 
             ################## Spec Decode ##################
-            # work on spec decode if max_gen_len > 1
-            if not structured_output:
-                sampled_token_ids = sampler_output.sampled_token_ids
-                max_gen_len = sampled_token_ids.shape[-1]
-            else:
-                max_gen_len = 1
-            if max_gen_len > 1:
-                decode_sampled_token_ids = self.rejection_sampler.parse_output(
-                    sampler_output.sampled_token_ids,
-                    self.input_batch.vocab_size,
-                )
-                # convert decode_sampled_token_ids as list of tensor
-                spec_decode_num_tokens = [
-                    len(v) for v in decode_sampled_token_ids
-                ]
-                decode_sampled_token_ids = [
-                    torch.tensor(v, device='cpu').int()
-                    for v in decode_sampled_token_ids
-                ]
             # Now, we will call drafter to propose draft token ids
             if self.speculative_config:
                 spec_decode_metadata = decode_data.spec_decode_metadata
@@ -3272,8 +3253,8 @@ class HPUModelRunner:
                 "spec_decode_metadata is None."
             if spec_decode_metadata is None:
                 # input_ids can be None for multimodal models.
-                target_token_ids = decode_data.token_ids.squeeze()
-                target_positions = decode_data.position_ids.squeeze()
+                target_token_ids = decode_data.token_ids
+                target_positions = decode_data.position_ids
                 if self.use_aux_hidden_state_outputs and \
                     aux_hidden_states is not None:
                     target_hidden_states = torch.cat(
@@ -3286,7 +3267,6 @@ class HPUModelRunner:
                 last_token_indices = common_attn_metadata.query_start_loc[
                     1:] - 1
             else:
-                # TODO(woosuk): Refactor this.
                 num_draft_tokens = spec_decode_metadata.num_draft_tokens
                 max_num_draft_tokens = max(num_draft_tokens)
                 num_rejected_tokens = [
@@ -3311,15 +3291,10 @@ class HPUModelRunner:
                 last_token_indices = torch.tensor(last_token_indices,
                                                   device=self.device)
 
-                empty_tensor = torch.tensor([0], device=self.device)
-                target_token_ids = torch.cat([
-                    sampled_token_ids_tensor.reshape(-1, 1).squeeze(),
-                    empty_tensor
-                ])[hidden_states_indices]
-
-                target_positions = torch.cat(
-                    [decode_data.position_ids.squeeze(),
-                     empty_tensor])[hidden_states_indices]
+                target_token_ids = sampled_token_ids_tensor.reshape(
+                    -1, 1)[hidden_states_indices]
+                target_positions = decode_data.position_ids[
+                    hidden_states_indices]
                 target_positions += 1
                 common_attn_metadata.slot_mapping += 1
 
@@ -3332,8 +3307,8 @@ class HPUModelRunner:
                     target_hidden_states = hidden_states[hidden_states_indices]
 
             last_hidden_states, hidden_states = self.drafter.model(
-                input_ids=target_token_ids.unsqueeze(1),
-                positions=target_positions.unsqueeze(1),
+                input_ids=target_token_ids,
+                positions=target_positions,
                 hidden_states=target_hidden_states.unsqueeze(1),
                 inputs_embeds=None,
                 attn_metadata=common_attn_metadata,
