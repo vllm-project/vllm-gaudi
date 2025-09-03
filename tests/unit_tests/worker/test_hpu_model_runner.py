@@ -20,6 +20,7 @@ from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor)
 from vllm.v1.sample.metadata import SamplingMetadata
+import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
 
@@ -104,14 +105,13 @@ def model_runner():
     model_config = vllm_config.model_config
     num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
     head_size = model_config.get_head_size()
+    # We need to update the environment before creating Attention
+    environment.set_vllm_config(vllm_config)
     vllm_config.compilation_config.static_forward_context[
         "layer.0"] = Attention(num_heads, head_size, 0.1)
     runner = HPUModelRunner(vllm_config, DEVICE)
     initialize_kv_cache(runner)
     return runner
-
-
-model_runner_2 = model_runner
 
 
 def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
@@ -144,7 +144,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -210,7 +210,7 @@ def test_update_states_request_finished(model_runner, dist_init):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids={req_id},
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -242,7 +242,7 @@ def test_update_states_request_resumed(model_runner, dist_init):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -269,7 +269,7 @@ def test_update_states_request_resumed(model_runner, dist_init):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -350,7 +350,7 @@ def test_update_states_no_changes(model_runner, dist_init):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -387,7 +387,7 @@ def test_update_states_request_unscheduled(model_runner, dist_init):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -409,26 +409,6 @@ def test_update_config(model_runner):
     # Raise error on non-existing config
     with pytest.raises(AssertionError):
         model_runner.update_config({"do_not_exist_config": "dummy"})
-
-
-@pytest.mark.xfail(
-    reason="Updating weights inplace doesn't currently work on HPU")
-def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
-    # In this test, model_runner loads model + weights in one go, while
-    # model_runner_2 loads dummy weights first then load real weights inplace
-    model_runner.load_model()
-    original_load_format = model_runner_2.load_config.load_format
-    model_runner_2.update_config({"load_config": {"load_format": "dummy"}})
-    model_runner_2.load_model()  # Initial model loading with dummy weights
-    assert str(model_runner.get_model().state_dict()) != str(
-        model_runner_2.get_model().state_dict())
-    model_runner_2.update_config(
-        {"load_config": {
-            "load_format": original_load_format
-        }})
-    model_runner_2.reload_weights()  # Load real weights inplace
-    assert str(model_runner.get_model().state_dict()) == str(
-        model_runner_2.get_model().state_dict())
 
 
 def test_reload_weights_before_load_model(model_runner):

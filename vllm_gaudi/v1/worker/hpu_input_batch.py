@@ -14,10 +14,12 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
                                              LogitsProcessors)
+from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
+
+from vllm_gaudi.utils import async_h2d_copy
 
 _SAMPLING_EPS = 1e-5
 
@@ -67,7 +69,9 @@ class InputBatch:
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
         logitsprocs: Optional[LogitsProcessors] = None,
+        is_spec_decode: bool = False,
     ):
+        self.is_spec_decode = is_spec_decode
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
         self.max_num_batched_tokens = max_num_batched_tokens
@@ -152,6 +156,9 @@ class InputBatch:
                                             pin_memory=pin_memory)
         self.min_p_cpu = self.min_p_cpu_tensor.numpy()
         self.min_p_reqs: set[str] = set()
+
+        # IDs of requests which do not support spec decoding
+        self.spec_decode_unsupported_reqs: set[str] = set()
 
         # Frequency penalty related data structures
         self.frequency_penalties = torch.empty((max_num_reqs, ),
@@ -278,6 +285,9 @@ class InputBatch:
 
         sampling_params = request.sampling_params
         assert sampling_params is not None, "pooling requests not supported yet"
+        if (self.is_spec_decode
+                and is_spec_decode_unsupported(sampling_params)):
+            self.spec_decode_unsupported_reqs.add(req_id)
         if sampling_params.sampling_type == SamplingType.GREEDY:
             # Avoid later division by zero.
             self.temperature_cpu[req_index] = -1.0
@@ -372,6 +382,7 @@ class InputBatch:
         self.top_p_reqs.discard(req_id)
         self.top_k_reqs.discard(req_id)
         self.min_p_reqs.discard(req_id)
+        self.spec_decode_unsupported_reqs.discard(req_id)
         self.frequency_penalties_reqs.discard(req_id)
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
@@ -400,7 +411,7 @@ class InputBatch:
         old_id_i1 = self._req_ids[i1]
         old_id_i2 = self._req_ids[i2]
         self._req_ids[i1], self._req_ids[i2] =\
-            self._req_ids[i2], self._req_ids[i1] # noqa
+            self._req_ids[i2], self._req_ids[i1]  # noqa
         self.req_output_token_ids[i1], self.req_output_token_ids[i2] =\
             self.req_output_token_ids[i2], self.req_output_token_ids[i1]
         assert old_id_i1 is not None and old_id_i2 is not None
@@ -448,7 +459,7 @@ class InputBatch:
             self.allowed_token_ids_mask_cpu_tensor[i1], \
                 self.allowed_token_ids_mask_cpu_tensor[i2] =\
                 self.allowed_token_ids_mask_cpu_tensor[i2], \
-                    self.allowed_token_ids_mask_cpu_tensor[i1]
+                self.allowed_token_ids_mask_cpu_tensor[i1]
         self.block_table.swap_row(i1, i2)
 
     def condense(self, empty_req_indices: list[int]) -> None:
@@ -529,7 +540,6 @@ class InputBatch:
 
     def refresh_sampling_metadata(self):
         """Apply batch updates, reset input batch at end of step
-        
         * Apply batch add/remove/permute to logits procs' states
         * If batch state is modified, update sampling metadata
         """
@@ -540,27 +550,27 @@ class InputBatch:
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
         if not self.all_greedy:
-            temperature = copy_slice(self.temperature_cpu_tensor,
-                                     self.temperature, num_reqs)
+            temperature = async_h2d_copy(self.temperature_cpu_tensor,
+                                         self.temperature)[:num_reqs]
         else:
             temperature = None
         if not self.no_top_p:
-            copy_slice(self.top_p_cpu_tensor, self.top_p, num_reqs)
+            async_h2d_copy(self.top_p_cpu_tensor, self.top_p)
         if not self.no_top_k:
-            copy_slice(self.top_k_cpu_tensor, self.top_k, num_reqs)
+            async_h2d_copy(self.top_k_cpu_tensor, self.top_k)
         if not self.no_min_p:
-            copy_slice(self.min_p_cpu_tensor, self.min_p, num_reqs)
+            async_h2d_copy(self.min_p_cpu_tensor, self.min_p)
 
         if not self.no_penalties:
             # Since syncing these tensors is expensive only copy them
             # if necessary i.e. if there are requests which require
             # penalties to be applied during sampling.
-            copy_slice(self.frequency_penalties_cpu_tensor,
-                       self.frequency_penalties, num_reqs)
-            copy_slice(self.presence_penalties_cpu_tensor,
-                       self.presence_penalties, num_reqs)
-            copy_slice(self.repetition_penalties_cpu_tensor,
-                       self.repetition_penalties, num_reqs)
+            async_h2d_copy(self.frequency_penalties_cpu_tensor,
+                           self.frequency_penalties)
+            async_h2d_copy(self.presence_penalties_cpu_tensor,
+                           self.presence_penalties)
+            async_h2d_copy(self.repetition_penalties_cpu_tensor,
+                           self.repetition_penalties)
 
             # The prompt tokens are used only for applying penalties during
             # the sampling process. Hence copy these tensors only when
@@ -572,8 +582,8 @@ class InputBatch:
         allowed_token_ids_mask: Optional[torch.Tensor] = None
         if not self.no_allowed_token_ids:
             assert self.allowed_token_ids_mask is not None
-            copy_slice(self.allowed_token_ids_mask_cpu_tensor,
-                       self.allowed_token_ids_mask, num_reqs)
+            async_h2d_copy(self.allowed_token_ids_mask_cpu_tensor,
+                           self.allowed_token_ids_mask)
             allowed_token_ids_mask = self.allowed_token_ids_mask[:num_reqs]
 
         return SamplingMetadata(

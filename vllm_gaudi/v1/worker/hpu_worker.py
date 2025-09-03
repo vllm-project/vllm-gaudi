@@ -11,7 +11,10 @@ import torch
 import torch.distributed
 import torch.nn as nn
 from vllm.tasks import SupportedTask
-from vllm_gaudi.extension.profiler import HabanaMemoryProfiler, format_bytes
+from vllm_gaudi.extension.debug import init_debug_logger
+from vllm_gaudi.extension.profiler import (HabanaMemoryProfiler, format_bytes,
+                                           setup_profiler)
+from vllm_gaudi.extension.runtime import get_config
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
@@ -21,7 +24,7 @@ from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.utils import is_fake_hpu
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, bool_helper
@@ -33,6 +36,14 @@ logger = init_logger()
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
+
+
+def setup_step_profiler(steps):
+    if steps is None:
+        return None
+    step_start, step_end = steps
+    active = step_end - step_start + 1
+    return setup_profiler(warmup=0, active=active)
 
 
 class HPUWorker(WorkerBase):
@@ -77,6 +88,10 @@ class HPUWorker(WorkerBase):
         self.gc_track_recompiles = bool(
             "PT_HPU_METRICS_GC_DETAILS" in os.environ
             and bool_helper(os.getenv("PT_HPU_METRICS_GC_DETAILS")))
+        self.step = 0
+        self.profile_steps = get_config().VLLM_PROFILE_STEPS
+        self.step_profiler = setup_step_profiler(self.profile_steps)
+        self.step_debug = init_debug_logger('steps')
 
     def init_profiler(self):
         """Initialize the profiler."""
@@ -214,7 +229,7 @@ class HPUWorker(WorkerBase):
             f" {format_bytes(graph_headroom_bytes)} reserved for HPUGraphs "
             f"(VLLM_GRAPH_RESERVED_MEM={graph_reserved_mem}), "
             f"{format_bytes(dummy_block_headroom)} reserved for KV cache dummy "
-            f"block {format_bytes(cache_size_bytes-dummy_block_headroom)} "
+            f"block {format_bytes(cache_size_bytes - dummy_block_headroom)} "
             "reserved for usable KV cache")
 
         logger.info(msg)
@@ -255,15 +270,30 @@ class HPUWorker(WorkerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
+        if self.step_debug:
+            self.step_debug(f'step={self.step}')
+        if self.step_profiler and self.step == self.profile_steps[0]:
+            self.step_profiler.start()
         with track_graph_compile('HPUWorker.execute_model') \
-            if self.gc_track_recompiles \
-            else contextlib.nullcontext():
+                if self.gc_track_recompiles \
+                else contextlib.nullcontext():
             output = self.model_runner.execute_model(scheduler_output)
         # TODO(woosuk): Send the output to the engine process.
+        if self.step_profiler:
+            if self.step >= self.profile_steps[0]:
+                self.step_profiler.step()
+            if self.step == self.profile_steps[1]:
+                self.step_profiler.stop()
+                self.step_profiler = None
+                raise RuntimeError('Step profiling finished!')
+        self.step += 1
         return output if self.rank == 0 else None
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
+
+    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        return self.model_runner.take_draft_token_ids()
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:
