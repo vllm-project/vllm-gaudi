@@ -1697,7 +1697,7 @@ class HPUModelRunner:
         positions = torch.zeros((padded_batch_size, num_tokens),
                                 dtype=torch.int32)
         if num_tokens == 1:
-            positions[:original_num_decodes] = self.positions_cpu[:num_decodes].view(
+            positions[:original_num_decodes] = self.positions_cpu[:original_num_decodes].view(
                 -1, 1)
 
             if self.use_lookahead_decoding:
@@ -2526,8 +2526,13 @@ class HPUModelRunner:
         # Decodes run as one single batch with [padded_decode_bs, 1]
         if num_decodes > 0:
             if self.use_lookahead_decoding:
-                decode_data = self.update_lookahead_decode_inputs(decode_data, num_prefills, num_decodes,
-                                                prefill_sampled_token_ids, prefill_sampled_requests, pd_info, False)
+                decode_data = self.update_lookahead_decode_inputs(decode_data, 
+                                                                  num_prefills, 
+                                                                  num_decodes,
+                                                                  prefill_sampled_token_ids,
+                                                                  prefill_sampled_requests,
+                                                                  pd_info,
+                                                                  False)
             self.event_start = self.profiler.get_timestamp_us()
             self.profiler.start("internal", "decode")
             assert decode_data is not None
@@ -2548,9 +2553,18 @@ class HPUModelRunner:
                     self.input_batch.req_ids[:num_decodes])
             else:
                 with self.profiler.record_event('internal', "sampler"):
-                    if self.use_lookahead_decoding:
-                        _ = self.update_lookahead_decode_inputs(decode_data, num_prefills, num_decodes,
-                                                                prefill_sampled_token_ids, prefill_sampled_requests, pd_info, True)
+                    # For lookahead decoding we need to update requests.output_ids 
+                    # before sampler forward when using penalties or bad words
+                    lookahead_sampling_preparation = not self.input_batch.no_penalties or \
+                        self.input_batch.bad_words_token_ids
+                    if self.use_lookahead_decoding and lookahead_sampling_preparation:
+                        _ = self.update_lookahead_decode_inputs(decode_data, 
+                                                                num_prefills, 
+                                                                num_decodes,
+                                                                prefill_sampled_token_ids, 
+                                                                prefill_sampled_requests, 
+                                                                pd_info,
+                                                                True)
                     sampling_metadata = self._prepare_sampling(
                         batch_changed,
                         pd_info.decode_req_ids,
@@ -2695,8 +2709,11 @@ class HPUModelRunner:
 
                 for req_id in decode_sampled_requests:
                     req_index = self.input_batch.req_id_to_index[req_id]
-                    tok_id = self.lookahead_tokens[req_id].pop(0)
-                    _ = self.lookahead_tokens_tensors[req_id].pop(0)
+                    if lookahead_sampling_preparation:
+                        tok_id = self.lookahead_tokens[req_id].pop(0)
+                        _ = self.lookahead_tokens_tensors[req_id].pop(0)
+                    else:
+                        tok_id = self.lookahead_tokens_tensors[req_id].pop(0)[0].item()
                     postprocessed_sampled_token_ids[req_index].append(tok_id)
 
                 for tok_id, req_id in zip(prefill_sampled_token_ids,
@@ -2746,8 +2763,8 @@ class HPUModelRunner:
             self.input_batch.num_tokens[i] += len(token_ids)
 
             # With lookahead decoding output token ids for decodes were already updated in
-            # update_lookahead_decode_inputs()
-            if self.use_lookahead_decoding:
+            # update_lookahead_decode_inputs() if sampling preparation was performed
+            if self.use_lookahead_decoding and lookahead_sampling_preparation:
                 if n > num_decodes - 1:
                     req_state.output_token_ids.extend(token_ids)
             else:
