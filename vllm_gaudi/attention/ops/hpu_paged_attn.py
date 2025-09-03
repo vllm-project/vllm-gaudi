@@ -26,7 +26,7 @@ class HPUPagedAttentionMetadata:
 
 
 @dataclass
-class HPUPagedAttentionMetadataBuilder(AttentionMetadataBuilder[HPUPagedAttentionMetadata]):
+class HPUPagedAttentionMetadataBuilder:
 
     def __init__(self, input_builder: "ModelRunnerInputBuilderBase") -> None:
         """Create the builder, remember some configuration and parameters."""
