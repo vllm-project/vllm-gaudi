@@ -7,7 +7,8 @@ import math
 import os
 import time
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast
+from typing import (TYPE_CHECKING, Any,
+    Callable, Optional, TypeAlias, Union, cast)
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -43,8 +44,6 @@ from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
-from vllm.pooling_params import PoolingParams
-from vllm.sequence import PoolerOutput
 from vllm.sampling_params import SamplingType
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
@@ -2240,7 +2239,7 @@ class HPUModelRunner:
             )
 
     def _prepare_inputs_for_pooling(self, scheduler_output):
-        """Gather inputs, positions, slot mapping, and build attn_metadata for pooling mode."""
+        """Gather inputs, positions, slot mapping, and build attn_metadata"""
         num_scheduled_tokens = []
         input_ids_list = []
         num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu
@@ -2264,15 +2263,21 @@ class HPUModelRunner:
         for i, n in enumerate(num_scheduled_tokens):
             prefix = num_computed_tokens_cpu[i]
             absolute_positions.append(prefix + np.arange(n, dtype=np.int64))
-        position_ids = torch.from_numpy(np.concatenate(absolute_positions)).to(self.device)
+        position_ids = torch.from_numpy(
+                np.concatenate(absolute_positions)
+            ).to(self.device)
 
         # Slot mapping + metadata
         total_scheduled_tokens = sum(num_scheduled_tokens)
         slot_mapping = torch.arange(
             total_scheduled_tokens, dtype=torch.long, device="hpu:0"
         )
-        seq_lens_tensor = torch.tensor([total_scheduled_tokens], device='hpu:0', dtype=torch.int32)
-        context_lens_tensor = torch.tensor([0], device='hpu:0', dtype=torch.int32)
+        seq_lens_tensor = torch.tensor(
+                [total_scheduled_tokens], device='hpu:0', dtype=torch.int32
+            )
+        context_lens_tensor = torch.tensor(
+                [0], device='hpu:0', dtype=torch.int32
+            )
 
         attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
             seq_lens_tensor=seq_lens_tensor,
@@ -2282,7 +2287,8 @@ class HPUModelRunner:
             attn_bias=None,
             block_size=self.block_size,)
 
-        return input_ids, position_ids, num_scheduled_tokens, attn_metadata, total_scheduled_tokens
+        return input_ids, position_ids, num_scheduled_tokens, attn_metadata, \
+            total_scheduled_tokens
 
     @torch.inference_mode()
     def execute_model(
@@ -2371,7 +2377,10 @@ class HPUModelRunner:
             position_ids,
             num_scheduled_tokens,
             attn_metadata,
-            total_scheduled_tokens) = self._prepare_inputs_for_pooling(scheduler_output)
+            total_scheduled_tokens
+            ) = self._prepare_inputs_for_pooling(
+                scheduler_output
+            )
 
             with set_forward_context(attn_metadata, self.vllm_config):
                 hidden_states = self.model.forward(
@@ -2380,9 +2389,11 @@ class HPUModelRunner:
                 )
 
             flattened = hidden_states.view(-1, hidden_states.shape[-1])
-            pooled_output = self._pool(flattened,
-                                    total_scheduled_tokens,
-                                    np.array(num_scheduled_tokens, dtype=np.int32))
+            pooled_output = self._pool(
+                    flattened,
+                    total_scheduled_tokens,
+                    np.array(num_scheduled_tokens, dtype=np.int32),
+                )
             return pooled_output
         # If necessary, swap decodes/prompts to have all decodes on the start
         ensure_decodes_first(self.input_batch)
