@@ -71,14 +71,15 @@ def get_features():
         Value('skip_warmup', False),
         Value('merged_prefill', False),
         Value('use_contiguous_pa', Disabled('prefix_caching'), env_var='VLLM_CONTIGUOUS_PA'),
-        Value('use_delayed_sampling', Engine('v0'), env_var='VLLM_DELAYED_SAMPLING'),
         Value('use_bucketing', True, env_var='VLLM_ENABLE_BUCKETING'),
         Value('exponential_bucketing', True),
         Value('linear_bucketing', True),
+        Value('lookahead_decoding', False, env_var='VLLM_USE_LOOKAHEAD_DECODING'),
         ValueFromList('bucketing_strategy', bucketing_strategies),
         Value('defrag', False),
         Value('regional_compilation', True, env_var='VLLM_T_COMPILE_REGIONAL_COMPILATION', env_var_type=boolean),
         Value('dynamic_shapes_compilation', True, env_var='VLLM_T_COMPILE_DYNAMIC_SHAPES', env_var_type=boolean),
         Value('fullgraph_compilation', False, env_var='VLLM_T_COMPILE_FULLGRAPH', env_var_type=boolean),
+
     ]
     return split_values_and_flags(features)
