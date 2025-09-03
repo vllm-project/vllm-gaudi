@@ -52,7 +52,7 @@ echo "Test with deepseek_v2 + inc passed"
 
 # deepseek v2 + inc + dynamic quantization + tp2
 echo "Testing deepseek_v2 + inc dynamic quantization + tp2"
-echo QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_dynamic_quant.json HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code  --quantization inc --kv_cache_dtype fp8_inc
+echo QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_dynamic_quant.json HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code  --quantization inc --tensor-parallel-size 2
 QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_dynamic_quant.json \
 HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --tensor-parallel-size 2
 if [ $? -ne 0 ]; then
@@ -60,6 +60,26 @@ if [ $? -ne 0 ]; then
     exit -1
 fi
 echo "Test with deepseek_v2 + inc dynamic quantization + tp 2 successful"
+
+# QWEN3 + blockfp8 + dynamic scaling
+echo "Testing Qwen3-8B-FP8 + blockfp8 + dynamic scaling"
+echo HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model Qwen/Qwen3-8B-FP8 --trust-remote-code
+HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model Qwen/Qwen3-8B-FP8 --trust-remote-code
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for Qwen3-8B-FP8 + blockfp8 + dynamic scaling" >&2
+    exit -1
+fi
+echo "Test with Qwen3-8B-FP8 + blockfp8 + dynamic scaling successful"
+
+# QWEN3 compressed tensor + dynamic scaling
+echo "Testing Qwen3-8B-FP8-dynamic + compressed-tensor + dynamic scaling"
+echo HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model RedHatAI/Qwen3-8B-FP8-dynamic --trust-remote-code
+HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model RedHatAI/Qwen3-8B-FP8-dynamic --trust-remote-code
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for Qwen3-8B-FP8-dynamic + compressed-tensor + dynamic scaling" >&2
+    exit -1
+fi
+echo "Test with Qwen3-8B-FP8-dynamic + compressed-tensor + dynamic scaling successful"
 
 # structured output
 echo "Testing structured output"
@@ -122,19 +142,16 @@ fi
 echo "Test with deepseek R1 passed"
 
 # used to check HPUATTN + MOE + ExpertParallel
-#NOTE(adobrzyn): CI broked, to be brought back after fix
-echo "Skipping GSM8K on QWEN3-30B-A3B"
-
-# echo "Testing GSM8K on QWEN3-30B-A3B"
-# echo VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 TP_SIZE=2 \
-# pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/Qwen3-30B-A3B.yaml
-# VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 TP_SIZE=2 \
-# pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/Qwen3-30B-A3B.yaml
-# if [ $? -ne 0 ]; then
-#     echo "Error: Test failed for QWEN3-30B-A3B" >&2
-#     exit -1
-# fi
-# echo "Test with QWEN3-30B-A3B passed"
+echo "Testing GSM8K on QWEN3-30B-A3B"
+echo VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 TP_SIZE=2 \
+pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/Qwen3-30B-A3B.yaml
+VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 TP_SIZE=2 \
+pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/Qwen3-30B-A3B.yaml
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for QWEN3-30B-A3B" >&2
+    exit -1
+fi
+echo "Test with QWEN3-30B-A3B passed"
 
 # multimodal-support with qwen2.5-vl
 echo "Testing Qwen2.5-VL-7B"
@@ -147,3 +164,14 @@ if [ $? -ne 0 ]; then
     exit -1
 fi
 echo "Test with multimodal-support with qwen2.5-vl-7b passed"
+
+# spec decode with ngram
+# For G3, acc rate is 0.18, but for G2, it is 0.09
+echo "Testing Spec-decode with ngram"
+echo VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python vllm-gaudi/tests/full_tests/spec_decode.py --task ngram --assert_acc_rate 0.09 --osl 1024
+VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python vllm-gaudi/tests/full_tests/spec_decode.py --task ngram --assert_acc_rate 0.09 --osl 1024
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for spec decode with ngram" >&2
+    exit -1
+fi
+echo "Test with spec decode with ngram passed"

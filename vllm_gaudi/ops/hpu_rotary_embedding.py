@@ -60,7 +60,7 @@ class HPURotaryEmbedding(RotaryEmbedding):
         if hasattr(self, "scaling_factors") or hasattr(
                 self, "scaling_factor") or self.sin is None:
             self.prepare_cos_sin(positions, offsets)
-        num_tokens = positions.shape[0] * positions.shape[1]
+        num_tokens = positions.numel()
         # HPU RoPE kernel requires hidden dimension for cos and sin to be equal
         # to query hidden dimension, so the original tensors need to be
         # expanded
