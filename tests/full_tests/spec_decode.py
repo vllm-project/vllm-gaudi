@@ -17,11 +17,7 @@ os.environ["VLLM_CONTIGUOUS_PA"] = "false"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
-def time_generation(llm: LLM,
-                    prompts: list[str],
-                    sampling_params: SamplingParams,
-                    num_spec_tokens=5,
-                    num_warmups=1):
+def time_generation(llm: LLM, prompts: list[str], sampling_params: SamplingParams, num_spec_tokens=5, num_warmups=1):
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
     # Warmup first
@@ -85,8 +81,7 @@ def time_generation(llm: LLM,
     return result_dict
 
 
-def test_ngram(is_enable, args, prompts, sampling_params, task_key,
-               result_queue):
+def test_ngram(is_enable, args, prompts, sampling_params, task_key, result_queue):
     if not is_enable:
         llm = LLM(
             model="Qwen/Qwen3-4B",
@@ -103,14 +98,12 @@ def test_ngram(is_enable, args, prompts, sampling_params, task_key,
             disable_log_stats=False,
         )
 
-    result_dict = time_generation(llm, prompts, sampling_params,
-                                  args.num_spec_tokens, args.num_warmups)
+    result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups)
 
     result_queue.put((task_key, result_dict))
 
 
-def test_eagle_model(is_enable, args, prompts, sampling_params, task_key,
-                     result_queue):
+def test_eagle_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
     if not is_enable:
         llm = LLM(
             model="meta-llama/Meta-Llama-3-8B-Instruct",
@@ -128,13 +121,11 @@ def test_eagle_model(is_enable, args, prompts, sampling_params, task_key,
             enforce_eager=args.enforce_eager,
         )
 
-    result_dict = time_generation(llm, prompts, sampling_params,
-                                  args.num_spec_tokens, args.num_warmups)
+    result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups)
     result_queue.put((task_key, result_dict))
 
 
-def test_medusa_model(is_enable, args, prompts, sampling_params, task_key,
-                      result_queue):
+def test_medusa_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
     if not is_enable:
         llm = LLM(
             model="JackFram/llama-68m",
@@ -152,13 +143,11 @@ def test_medusa_model(is_enable, args, prompts, sampling_params, task_key,
             enforce_eager=args.enforce_eager,
         )
 
-    result_dict = time_generation(llm, prompts, sampling_params,
-                                  args.num_spec_tokens, args.num_warmups)
+    result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups)
     result_queue.put((task_key, result_dict))
 
 
-def test_mtp_model(is_enable, args, prompts, sampling_params, task_key,
-                   result_queue):
+def test_mtp_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
     if not is_enable:
         llm = LLM(
             model="Qwen/Qwen3-4B",
@@ -175,8 +164,7 @@ def test_mtp_model(is_enable, args, prompts, sampling_params, task_key,
             disable_log_stats=False,
         )
 
-    result_dict = time_generation(llm, prompts, sampling_params,
-                                  args.num_spec_tokens, args.num_warmups)
+    result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups)
     result_queue.put((task_key, result_dict))
 
 
@@ -185,30 +173,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test spec decode.")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--osl", type=int, default=50)
-    parser.add_argument("--num_spec_tokens",
-                        type=int,
-                        default=1,
-                        help="Number of speculative tokens to generate.")
-    parser.add_argument("--task",
-                        type=str,
-                        default="eagle",
-                        help="Tasks to run the evaluation on.")
-    parser.add_argument(
-        "--run_base",
-        action="store_true",
-        help="Run the baseline tasks without speculative decoding.")
-    parser.add_argument("--enforce_eager",
-                        action="store_true",
-                        help="Enforce eager execution for Eagle model.")
-    parser.add_argument("--num_warmups",
-                        type=int,
-                        default=1,
-                        help="Number of warmup runs before timing.")
-    parser.add_argument(
-        "--assert_acc_rate",
-        type=float,
-        default=0.15,
-        help="Assert that the acceptance rate is at least this value.")
+    parser.add_argument("--num_spec_tokens", type=int, default=1, help="Number of speculative tokens to generate.")
+    parser.add_argument("--task", type=str, default="eagle", help="Tasks to run the evaluation on.")
+    parser.add_argument("--run_base", action="store_true", help="Run the baseline tasks without speculative decoding.")
+    parser.add_argument("--enforce_eager", action="store_true", help="Enforce eager execution for Eagle model.")
+    parser.add_argument("--num_warmups", type=int, default=1, help="Number of warmup runs before timing.")
+    parser.add_argument("--assert_acc_rate",
+                        type=float,
+                        default=0.15,
+                        help="Assert that the acceptance rate is at least this value.")
 
     # 'ngram', 'eagle', 'eagle3', 'medusa', 'mlp_speculator',
     # 'draft_model' or 'deepseek_mtp
@@ -230,12 +203,9 @@ if __name__ == "__main__":
     if args.batch_size < len(prompts):
         prompts = prompts[:args.batch_size]
     else:
-        prompts = prompts * (args.batch_size // len(prompts)
-                             ) + prompts[:args.batch_size % len(prompts)]
+        prompts = prompts * (args.batch_size // len(prompts)) + prompts[:args.batch_size % len(prompts)]
 
-    sampling_params = SamplingParams(temperature=0,
-                                     max_tokens=args.osl,
-                                     ignore_eos=True)
+    sampling_params = SamplingParams(temperature=0, max_tokens=args.osl, ignore_eos=True)
 
     task_queue: dict[str, dict] = {}
     result_queue: multiprocessing.Queue = multiprocessing.Queue()
@@ -245,70 +215,56 @@ if __name__ == "__main__":
             task_queue['baseline_ngram'] = {
                 'proc':
                 multiprocessing.Process(target=test_ngram,
-                                        args=(False, args, prompts,
-                                              sampling_params,
-                                              'baseline_ngram', result_queue))
+                                        args=(False, args, prompts, sampling_params, 'baseline_ngram', result_queue))
             }
         task_queue['spec_ngram'] = {
             'proc':
             multiprocessing.Process(target=test_ngram,
-                                    args=(True, args, prompts, sampling_params,
-                                          'spec_ngram', result_queue))
+                                    args=(True, args, prompts, sampling_params, 'spec_ngram', result_queue))
         }
     elif task == "deepseek_mtp":
         if args.run_base:
             task_queue['baseline_mtp'] = {
                 'proc':
                 multiprocessing.Process(target=test_mtp_model,
-                                        args=(False, args, prompts,
-                                              sampling_params, 'baseline_mtp',
-                                              result_queue))
+                                        args=(False, args, prompts, sampling_params, 'baseline_mtp', result_queue))
             }
         task_queue['spec_mtp'] = {
             'proc':
             multiprocessing.Process(target=test_mtp_model,
-                                    args=(True, args, prompts, sampling_params,
-                                          'spec_mtp', result_queue))
+                                    args=(True, args, prompts, sampling_params, 'spec_mtp', result_queue))
         }
     elif task == "eagle":
         if args.run_base:
             task_queue['baseline_eagle'] = {
                 'proc':
                 multiprocessing.Process(target=test_eagle_model,
-                                        args=(False, args, prompts,
-                                              sampling_params,
-                                              'baseline_eagle', result_queue))
+                                        args=(False, args, prompts, sampling_params, 'baseline_eagle', result_queue))
             }
         task_queue['spec_eagle'] = {
             'proc':
             multiprocessing.Process(target=test_eagle_model,
-                                    args=(True, args, prompts, sampling_params,
-                                          'spec_eagle', result_queue))
+                                    args=(True, args, prompts, sampling_params, 'spec_eagle', result_queue))
         }
     elif task == "medusa":
         if args.run_base:
             task_queue['baseline_medusa'] = {
                 'proc':
                 multiprocessing.Process(target=test_medusa_model,
-                                        args=(False, args, prompts,
-                                              sampling_params,
-                                              'baseline_medusa', result_queue))
+                                        args=(False, args, prompts, sampling_params, 'baseline_medusa', result_queue))
             }
         task_queue['spec_medusa'] = {
             'proc':
             multiprocessing.Process(target=test_medusa_model,
-                                    args=(True, args, prompts, sampling_params,
-                                          'spec_medusa', result_queue))
+                                    args=(True, args, prompts, sampling_params, 'spec_medusa', result_queue))
         }
 
     try:
         for key, task in task_queue.items():
-            logging.info(
-                "=============== Starting task: %s ====================", key)
+            logging.info("=============== Starting task: %s ====================", key)
             task['proc'].start()
             task['proc'].join()
-            logging.info(
-                "=============== Task %s completed. ====================", key)
+            logging.info("=============== Task %s completed. ====================", key)
         for _ in range(len(task_queue)):
             key, result_data = result_queue.get()
             task_queue[key]['result'] = result_data

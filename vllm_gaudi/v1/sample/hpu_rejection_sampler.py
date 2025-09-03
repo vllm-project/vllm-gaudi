@@ -47,8 +47,7 @@ def rejection_greedy_sample_pytorch(
         if i == 0:
             num_draft_tokens_list.append((0, cu_num_draft_tokens_list[i]))
         else:
-            num_draft_tokens_list.append(
-                (cu_num_draft_tokens_list[i - 1], cu_num_draft_tokens_list[i]))
+            num_draft_tokens_list.append((cu_num_draft_tokens_list[i - 1], cu_num_draft_tokens_list[i]))
 
     # Iterate over each request in the batch, which corresponds to the
     # parallel execution of the Triton kernel.
@@ -88,8 +87,7 @@ def rejection_greedy_sample_pytorch(
         # append the bonus token.
         if not rejected:
             # Ensure we don't write out of bounds.
-            output_token_ids[req_idx,
-                             num_draft_tokens] = bonus_token_ids[req_idx]
+            output_token_ids[req_idx, num_draft_tokens] = bonus_token_ids[req_idx]
 
     return output_token_ids
 
@@ -133,10 +131,7 @@ def rejection_sample(
     )
     output_token_ids.fill_(PLACEHOLDER_TOKEN_ID)
 
-    if sampling_metadata.all_greedy:
-        is_greedy = None
-    else:
-        is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
+    is_greedy = None if sampling_metadata.all_greedy else sampling_metadata.temperature == GREEDY_TEMPERATURE
     # Rejection sampling for greedy sampling requests.
     target_argmax = target_probs.argmax(dim=-1)
     output_token_ids = rejection_greedy_sample_pytorch(

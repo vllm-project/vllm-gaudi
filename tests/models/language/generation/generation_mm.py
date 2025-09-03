@@ -17,26 +17,18 @@ logger = init_logger()
 class PROMPT_DATA:
     _questions = {
         "image": [
-            "What is the most prominent object in this image?",
-            "Describe the scene in the image.",
-            "What is the weather like in the image?",
-            "Write a short poem about this image."
+            "What is the most prominent object in this image?", "Describe the scene in the image.",
+            "What is the weather like in the image?", "Write a short poem about this image."
         ],
-        "video": [
-            "Describe this video",
-            "Which movie would you associate this video with?"
-        ]
+        "video": ["Describe this video", "Which movie would you associate this video with?"]
     }
 
     _data = {
         "image":
         lambda source: convert_image_mode(
-            ImageAsset("cherry_blossom").pil_image
-            if source == "default" else Image.open(source), "RGB"),
+            ImageAsset("cherry_blossom").pil_image if source == "default" else Image.open(source), "RGB"),
         "video":
-        lambda source: VideoAsset(name="baby_reading"
-                                  if source == "default" else source,
-                                  num_frames=16).np_ndarrays
+        lambda source: VideoAsset(name="baby_reading" if source == "default" else source, num_frames=16).np_ndarrays
     }
 
     def __post_init__(self):
@@ -56,12 +48,10 @@ class PROMPT_DATA:
             raise ValueError(f"Unsupported modality: {modality}."
                              " Supported modality: [image, video]")
         questions = self._questions[modality]
-        prompts = [
-            ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-             f"<|im_start|>user\n<|vision_start|>{pholder}<|vision_end|>"
-             f"{question}<|im_end|>\n"
-             "<|im_start|>assistant\n") for question in questions
-        ]
+        prompts = [("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+                    f"<|im_start|>user\n<|vision_start|>{pholder}<|vision_end|>"
+                    f"{question}<|im_end|>\n"
+                    "<|im_start|>assistant\n") for question in questions]
 
         data = self._data[modality](media_source)
         inputs = [{
@@ -76,21 +66,18 @@ class PROMPT_DATA:
         return inputs
 
 
-def run_model(model_name: str, inputs: Union[dict, list[dict]], modality: str,
-              **extra_engine_args):
+def run_model(model_name: str, inputs: Union[dict, list[dict]], modality: str, **extra_engine_args):
     # Default mm_processor_kwargs
     # mm_processor_kwargs={
     #    "min_pixels": 28 * 28,
     #    "max_pixels": 1280 * 28 * 28,
     #    "fps": 1,
     # }
-    passed_mm_processor_kwargs = extra_engine_args.get("mm_processor_kwargs",
-                                                       {})
+    passed_mm_processor_kwargs = extra_engine_args.get("mm_processor_kwargs", {})
     passed_mm_processor_kwargs.setdefault("min_pixels", 28 * 28)
     passed_mm_processor_kwargs.setdefault("max_pixels", 1280 * 28 * 28)
     passed_mm_processor_kwargs.setdefault("fps", 1)
-    extra_engine_args.update(
-        {"mm_processor_kwargs": passed_mm_processor_kwargs})
+    extra_engine_args.update({"mm_processor_kwargs": passed_mm_processor_kwargs})
 
     extra_engine_args.setdefault("max_model_len", 32768)
     extra_engine_args.setdefault("max_num_seqs", 5)
@@ -140,35 +127,26 @@ def start_test(model_card_path: str):
                 "input_data_config: %(input_data_config)s\n"
                 "extra_engine_args: %(extra_engine_args)s\n"
                 "================================================",
-                dict(modality=modality,
-                     input_data_config=input_data_config,
-                     extra_engine_args=extra_engine_args))
+                dict(modality=modality, input_data_config=input_data_config, extra_engine_args=extra_engine_args))
 
             data = PROMPT_DATA()
-            inputs = data.get_prompts(modality=modality,
-                                      media_source=media_source,
-                                      num_prompts=num_prompts)
+            inputs = data.get_prompts(modality=modality, media_source=media_source, num_prompts=num_prompts)
 
-            logger.info(
-                "*** Questions for modality %(modality)s: %(questions)s",
-                dict(modality=modality, questions=data._questions[modality]))
-            responses = run_model(model_name, inputs, modality,
-                                  **extra_engine_args)
+            logger.info("*** Questions for modality %(modality)s: %(questions)s",
+                        dict(modality=modality, questions=data._questions[modality]))
+            responses = run_model(model_name, inputs, modality, **extra_engine_args)
             for response in responses:
                 print(f"{response.outputs[0].text}")
                 print("=" * 80)
         except Exception as e:
-            logger.error("Error during test with modality %(modality)s: %(e)s",
-                         dict(modality=modality, e=e))
+            logger.error("Error during test with modality %(modality)s: %(e)s", dict(modality=modality, e=e))
 
             raise
 
 
 def main():
     parser = ArgumentParser()
-    parser.add_argument("--model-card-path",
-                        required=True,
-                        help="Path to .yaml file describing model parameters")
+    parser.add_argument("--model-card-path", required=True, help="Path to .yaml file describing model parameters")
     args = parser.parse_args()
     start_test(args.model_card_path)
 

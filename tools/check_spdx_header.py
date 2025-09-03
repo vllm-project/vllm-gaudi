@@ -3,9 +3,8 @@
 
 import sys
 
-SPDX_HEADER = (
-    "# SPDX-License-Identifier: Apache-2.0\n"
-    "# SPDX-FileCopyrightText: Copyright contributors to the vLLM project")
+SPDX_HEADER = ("# SPDX-License-Identifier: Apache-2.0\n"
+               "# SPDX-FileCopyrightText: Copyright contributors to the vLLM project")
 SPDX_HEADER_PREFIX = "# SPDX-License-Identifier:"
 
 

@@ -8,17 +8,13 @@ from habana_frameworks.torch.utils.internal import is_lazy
 from vllm.model_executor.model_loader import get_model
 
 from vllm.attention import Attention
-from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, VllmConfig, set_current_vllm_config)
+from vllm.config import (CacheConfig, ModelConfig, ParallelConfig, SchedulerConfig, VllmConfig, set_current_vllm_config)
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils import GiB_bytes
-from vllm.v1.core.kv_cache_utils import (estimate_max_model_len,
-                                         get_kv_cache_config)
-from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
-                                       SchedulerOutput)
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheGroupSpec, KVCacheTensor)
+from vllm.v1.core.kv_cache_utils import (estimate_max_model_len, get_kv_cache_config)
+from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData, SchedulerOutput)
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor)
 from vllm.v1.sample.metadata import SamplingMetadata
 import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
@@ -35,8 +31,7 @@ def initialize_kv_cache(runner: HPUModelRunner):
     """
     attn_spec = FullAttentionSpec(
         block_size=BLOCK_SIZE,
-        num_kv_heads=runner.model_config.get_num_kv_heads(
-            runner.parallel_config),
+        num_kv_heads=runner.model_config.get_num_kv_heads(runner.parallel_config),
         head_size=runner.model_config.get_head_size(),
         dtype=runner.kv_cache_dtype,
         use_mla=False,
@@ -47,9 +42,7 @@ def initialize_kv_cache(runner: HPUModelRunner):
         kv_cache_tensors=[
             KVCacheTensor(size=tensor_size, shared_by=["layer.0"]),
         ],
-        kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=attn_spec)
-        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=attn_spec)],
     )
     runner.kv_cache_config = kv_cache_config
     runner.input_batch = InputBatch(
@@ -59,9 +52,7 @@ def initialize_kv_cache(runner: HPUModelRunner):
         device=runner.device,
         pin_memory=runner.pin_memory,
         vocab_size=runner.model_config.get_vocab_size(),
-        block_sizes=[
-            kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
-        ],
+        block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
     )
 
 
@@ -107,8 +98,7 @@ def model_runner():
     head_size = model_config.get_head_size()
     # We need to update the environment before creating Attention
     environment.set_vllm_config(vllm_config)
-    vllm_config.compilation_config.static_forward_context[
-        "layer.0"] = Attention(num_heads, head_size, 0.1)
+    vllm_config.compilation_config.static_forward_context["layer.0"] = Attention(num_heads, head_size, 0.1)
     runner = HPUModelRunner(vllm_config, DEVICE)
     initialize_kv_cache(runner)
     return runner
@@ -158,22 +148,18 @@ def _is_req_added(model_runner, req_id: str) -> bool:
     return req_id in model_runner.requests
 
 
-def _is_sampling_metadata_changed(model_runner,
-                                  sampling_metadata_before: SamplingMetadata):
-    return model_runner.input_batch.sampling_metadata is not (
-        sampling_metadata_before)
+def _is_sampling_metadata_changed(model_runner, sampling_metadata_before: SamplingMetadata):
+    return model_runner.input_batch.sampling_metadata is not (sampling_metadata_before)
 
 
 def _is_req_state_block_table_match(model_runner, req_id: str) -> bool:
     req_index = model_runner.input_batch.req_id_to_index[req_id]
     block_table = model_runner.input_batch.block_table[0]
     req_state = model_runner.requests[req_id]
-    if block_table.num_blocks_per_row[req_index] != len(
-            req_state.block_ids[0]):
+    if block_table.num_blocks_per_row[req_index] != len(req_state.block_ids[0]):
         return False
     num_blocks = block_table.num_blocks_per_row[req_index]
-    return (block_table.block_table_np[req_index, :num_blocks] ==
-            req_state.block_ids[0]).all()
+    return (block_table.block_table_np[req_index, :num_blocks] == req_state.block_ids[0]).all()
 
 
 def test_update_states_new_request(model_runner, dist_init):
@@ -298,16 +284,14 @@ def test_get_nans_in_logits(model_runner, dist_init):
     logits = torch.tensor([
         [1.0, float('nan'), 3.0],
         [4.0, float('nan'), float('nan')],
-    ],
-                          device=DEVICE)
+    ], device=DEVICE)
     result = model_runner._get_nans_in_logits(logits)
     assert result == {"req_0": 1, "req_1": 2}
 
     logits = torch.tensor([
         [1.0, 2.0, 3.0],
         [4.0, float('nan'), float('nan')],
-    ],
-                          device=DEVICE)
+    ], device=DEVICE)
     result = model_runner._get_nans_in_logits(logits)
     assert result == {"req_0": 0, "req_1": 2}
 
@@ -426,16 +410,14 @@ def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
         fwd_context = {
             # initialization below will fail because target layer is invalid;
             # the target layer needs to come before layer 1
-            layer_0:
-            Attention(
+            layer_0: Attention(
                 num_heads=8,
                 head_size=64,
                 scale=1.0,
                 prefix=layer_0,
                 kv_sharing_target_layer_name=layer_1,
             ),
-            layer_1:
-            Attention(
+            layer_1: Attention(
                 num_heads=8,
                 head_size=64,
                 scale=1.0,
@@ -486,15 +468,13 @@ def test_init_kv_cache_with_kv_sharing_target_same_as_current():
         fwd_context = {
             # initialization below will fail because target layer is invalid;
             # the target layer needs to come before layer 1
-            layer_0:
-            Attention(
+            layer_0: Attention(
                 num_heads=8,
                 head_size=64,
                 scale=1.0,
                 prefix=layer_0,
             ),
-            layer_1:
-            Attention(
+            layer_1: Attention(
                 num_heads=8,
                 head_size=64,
                 scale=1.0,
@@ -513,15 +493,13 @@ def test_init_kv_cache_without_kv_sharing():
     vllm_config = get_vllm_config()
     with set_current_vllm_config(vllm_config):
         fwd_context = {
-            layer_0:
-            Attention(
+            layer_0: Attention(
                 num_heads=8,
                 head_size=64,
                 scale=1.0,
                 prefix=layer_0,
             ),
-            layer_1:
-            Attention(
+            layer_1: Attention(
                 num_heads=8,
                 head_size=64,
                 scale=1.0,
@@ -545,8 +523,7 @@ def test_init_kv_cache_without_kv_sharing():
     assert page_size == 262144
     num_expected_blocks = 40960  # 20GB / 256KB (page_size) / 2 (num layers)
     assert num_expected_blocks == available_memory // page_size // 2
-    kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
-                                          available_memory)
+    kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec, available_memory)
     assert kv_cache_config.num_blocks == num_expected_blocks
     assert len(kv_cache_config.kv_cache_tensors) == 2
     assert kv_cache_config.kv_cache_tensors[0].size == available_memory // 2
@@ -561,8 +538,7 @@ def test_init_kv_cache_without_kv_sharing():
     # this will only allocate 2 block worth of memory (2 * 32kb)
     kv_cache_config.num_blocks = 1
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-        kv_cache_tensor.size = (
-            kv_cache_spec[kv_cache_tensor.shared_by[0]].page_size_bytes)
+        kv_cache_tensor.size = (kv_cache_spec[kv_cache_tensor.shared_by[0]].page_size_bytes)
 
     runner.initialize_kv_cache(kv_cache_config)
 
@@ -618,8 +594,7 @@ def test_init_kv_cache_with_kv_sharing_valid():
     # with KV sharing, we can allocate (available_mem//page_size//1) blocks
     # which is twice as many as without KV sharing
     num_expected_blocks = 655360  # 20GB / 32KB
-    kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
-                                          available_memory)
+    kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec, available_memory)
     assert kv_cache_config.num_blocks == num_expected_blocks
     assert len(kv_cache_config.kv_cache_tensors) == 1
     # Each layer now has twice the available memory for KV cache
@@ -651,8 +626,7 @@ def test_init_kv_cache_with_kv_sharing_valid():
     assert kv_cache_config.kv_cache_groups[0].layer_names[1] == layer_1
 
 
-@pytest.mark.skipif(is_lazy(),
-                    reason="Test skipped because lazy mode is enabled.")
+@pytest.mark.skipif(is_lazy(), reason="Test skipped because lazy mode is enabled.")
 def test_model_torch_regional_compilation(dist_init, model_runner):
     from vllm_gaudi.utils import HPUCompileConfig
     from vllm.model_executor.models.opt import OPTDecoderLayer
@@ -672,9 +646,7 @@ def test_model_torch_regional_compilation(dist_init, model_runner):
     vllm_config = get_vllm_config()
     model = get_model(vllm_config=vllm_config)
     model_runner.compile_config = HPUCompileConfig()
-    model_runner.regional_compilation_layers_list = [
-        LayerNorm, VocabParallelEmbedding
-    ]
+    model_runner.regional_compilation_layers_list = [LayerNorm, VocabParallelEmbedding]
 
     model_runner._regional_compilation(model)
 
@@ -682,5 +654,4 @@ def test_model_torch_regional_compilation(dist_init, model_runner):
         assert_compilation(model, f"model.decoder.layers.{i}", OPTDecoderLayer)
     assert_compilation(model, "lm_head", VocabParallelEmbedding)
     assert_compilation(model, "model.decoder.final_layer_norm", LayerNorm)
-    assert_compilation(model, "model.decoder.embed_tokens",
-                       VocabParallelEmbedding)
+    assert_compilation(model, "model.decoder.embed_tokens", VocabParallelEmbedding)

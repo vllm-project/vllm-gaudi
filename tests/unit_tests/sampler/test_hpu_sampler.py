@@ -52,18 +52,11 @@ def _create_sampling_params(temperature: float = 0,
                           seed=seed)
 
 
-def _construct_cached_request_state(
-        req_id_suffix: int,
-        sampling_params: SamplingParams,
-        generator: Optional[torch.Generator] = None) -> CachedRequestState:
-    prompt_token_ids = [
-        np.random.randint(0, VOCAB_SIZE)
-        for _ in range(np.random.randint(0, MAX_PROMPT_SIZE))
-    ]
-    output_token_ids = [
-        np.random.randint(0, VOCAB_SIZE)
-        for _ in range(np.random.randint(0, NUM_OUTPUT_TOKENS))
-    ]
+def _construct_cached_request_state(req_id_suffix: int,
+                                    sampling_params: SamplingParams,
+                                    generator: Optional[torch.Generator] = None) -> CachedRequestState:
+    prompt_token_ids = [np.random.randint(0, VOCAB_SIZE) for _ in range(np.random.randint(0, MAX_PROMPT_SIZE))]
+    output_token_ids = [np.random.randint(0, VOCAB_SIZE) for _ in range(np.random.randint(0, NUM_OUTPUT_TOKENS))]
     return CachedRequestState(
         req_id=f"req_id_{req_id_suffix}",
         prompt_token_ids=prompt_token_ids,
@@ -80,10 +73,7 @@ def _construct_cached_request_state(
 
 
 def _create_logits(batch_size: int, init_value: float = 1e-2) -> torch.Tensor:
-    logits = torch.full((batch_size, VOCAB_SIZE),
-                        init_value,
-                        device=DEVICE,
-                        dtype=torch.bfloat16)
+    logits = torch.full((batch_size, VOCAB_SIZE), init_value, device=DEVICE, dtype=torch.bfloat16)
     for i in range(batch_size):
         max_token_id = i % VOCAB_SIZE  # Different max token for each batch
         logits[i, max_token_id] = 1e2  # Clear maximum
@@ -110,8 +100,7 @@ def _prepare_metadata(batch_size: int,
 
     # Add requests
     for req_index in range(batch_size):
-        req: CachedRequestState = _construct_cached_request_state(
-            req_index, sampling_params, generator)
+        req: CachedRequestState = _construct_cached_request_state(req_index, sampling_params, generator)
         input_batch.add_request(req)
 
     # Generate the sampling metadata
@@ -185,9 +174,7 @@ def test_sampler_random_seeded(batch_size: int) -> None:
     logits = _create_logits(batch_size, init_value=1e-2)
     sampler = get_sampler()
     sampling_params = _create_sampling_params(temperature=1.0, seed=SEED)
-    sampling_metadata = _prepare_metadata(batch_size,
-                                          sampling_params,
-                                          is_seeded_random=True)
+    sampling_metadata = _prepare_metadata(batch_size, sampling_params, is_seeded_random=True)
 
     # Perform sampling
     sampler_output_first = sampler(
@@ -210,16 +197,11 @@ def test_sampler_random_seeded(batch_size: int) -> None:
 @pytest.mark.parametrize("top_k", [-1, 1, 2])
 @pytest.mark.parametrize("top_p", [0.1, 1])
 @pytest.mark.parametrize("min_p", [0, 0.1])
-def test_sampler_top_p_top_k_min_p(batch_size: int, top_k: int, top_p: float,
-                                   min_p: float) -> None:
+def test_sampler_top_p_top_k_min_p(batch_size: int, top_k: int, top_p: float, min_p: float) -> None:
     set_random_seed(SEED)
     logits = _create_offset_logits(batch_size)
     sampler = get_sampler()
-    sampling_params = _create_sampling_params(temperature=1.0,
-                                              seed=SEED,
-                                              top_k=top_k,
-                                              top_p=top_p,
-                                              min_p=min_p)
+    sampling_params = _create_sampling_params(temperature=1.0, seed=SEED, top_k=top_k, top_p=top_p, min_p=min_p)
     sampling_metadata = _prepare_metadata(batch_size, sampling_params)
 
     sample_probs = None
@@ -239,8 +221,7 @@ def test_sampler_top_p_top_k_min_p(batch_size: int, top_k: int, top_p: float,
                 q[i].exponential_(generator=generator)
         return probs.div_(q).argmax(dim=-1).view(-1)
 
-    with patch("vllm.v1.sample.ops.topk_topp_sampler.random_sample",
-               _mock_random_sample):
+    with patch("vllm.v1.sample.ops.topk_topp_sampler.random_sample", _mock_random_sample):
         sampler_output = sampler(
             logits=logits,
             sampling_metadata=sampling_metadata,
@@ -248,8 +229,7 @@ def test_sampler_top_p_top_k_min_p(batch_size: int, top_k: int, top_p: float,
 
     sampled_ids = sampler_output.sampled_token_ids.flatten()
     idx_of_nonzero = torch.nonzero(sample_probs, as_tuple=False)
-    no_of_nonzero_probs_to_sample = torch.count_nonzero(sample_probs,
-                                                        dim=None).item()
+    no_of_nonzero_probs_to_sample = torch.count_nonzero(sample_probs, dim=None).item()
 
     # only in top_k we know how many samples we can expect
     if top_p == 1 and min_p == 0:
@@ -260,8 +240,7 @@ def test_sampler_top_p_top_k_min_p(batch_size: int, top_k: int, top_p: float,
     # Change [[0, 1023], [0, 1024], [1, 1022], ...]
     # to a [[1023, 1024], [1022, 1023], ...]
     # to compare with expected result for each sample
-    expected_nonzero_idx = [[] for _ in range(batch_size)
-                            ]  # type: list[list[int]]
+    expected_nonzero_idx = [[] for _ in range(batch_size)]  # type: list[list[int]]
     for prompt_no, idx in idx_of_nonzero.to("cpu").tolist():
         expected_nonzero_idx[prompt_no].append(idx)
 
