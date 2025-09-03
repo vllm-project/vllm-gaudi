@@ -331,8 +331,6 @@ class InputBatch:
             if sampling_params.prompt_logprobs is not None:
                 self.num_prompt_logprobs[
                     req_id] = sampling_params.prompt_logprobs
-            if sampling_params.logit_bias is not None:
-                self.logit_bias[req_index] = sampling_params.logit_bias
 
             if sampling_params.allowed_token_ids:
                 self.has_allowed_token_ids.add(req_id)

@@ -42,7 +42,6 @@ def main(args: dict):
         print(f"Prompt: {prompt!r}\nEmbedding: {trimmed} (length={len(embedding)})")
         print("-" * 50)
 
-
 if __name__ == "__main__":
     parser = create_parser()
     args: dict = vars(parser.parse_args())

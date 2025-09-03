@@ -7,7 +7,7 @@ import math
 import os
 import time
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast, get_args
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -2287,8 +2287,7 @@ class HPUModelRunner:
             slot_mapping=slot_mapping,
             block_list=None,
             attn_bias=None,
-            block_size=self.block_size,
-        )
+            block_size=self.block_size,)
 
         return input_ids, position_ids, num_scheduled_tokens, attn_metadata, total_scheduled_tokens
 
@@ -2950,6 +2949,7 @@ class HPUModelRunner:
                            scheduled_tokens,
                            block_id=0):
         from vllm.sampling_params import SamplingParams
+        from vllm.pooling_params import PoolingParams
         from vllm.v1.core.sched.output import NewRequestData
         num_blocks = round_up(total_tokens, self.block_size) // self.block_size
         prompt_token_ids = list(range(total_tokens))
@@ -2957,6 +2957,7 @@ class HPUModelRunner:
         req_id = f'{len(requests)}'
         block_ids = [block_id] * num_blocks
         sampling_params = SamplingParams(temperature=0.0)
+        pooling_params = PoolingParams(task='embed')
 
         req = NewRequestData(
             req_id=req_id,
