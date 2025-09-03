@@ -73,43 +73,7 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
     # will only affects the strides. For MLA instead, we make require no
     # such thing and resort to the standard layout.
     use_mla = len(first_kv_cache.shape) == 3 if self.device_type != "hpu" else False
-    if self.device_type == "tpu":
-        assert not use_mla, f"{self.kv_buffer_device} does not support MLA."
-        assert self._use_pallas_v1, f"attn backend: {self.backend_name}"
-        # tpu (v1) kv shape per layer:
-        # (num_blocks, block_size, num_kv_heads * 2, head_size)
-        self.num_blocks = first_kv_cache.shape[0]
-        block_rank = 3  # [block_size, kv_heads, head_dim]
-        block_shape = first_kv_cache.shape[-block_rank:]
-        block_size, n_kv_heads_x_2, head_dim = block_shape
-        self.slot_size_bytes = kv_elem_size * n_kv_heads_x_2 * head_dim
-    elif self.device_type == "cuda":
-        assert use_mla == self.use_mla
-        # TODO (NickLucche) not compatible with hybrid allocator.
-        # Enforce check once it goes live, as a single kv layout
-        # is expected for xfers.
-        if use_mla:
-            # MLA case.
-            self.num_blocks = first_kv_cache.shape[0]
-            block_rank = 2  # [block_size, latent_dim]
-            block_shape = first_kv_cache.shape[-block_rank:]
-            block_size, kv_latent_dim = block_shape
-            self.slot_size_bytes = kv_elem_size * kv_latent_dim
-        else:
-            # [2 (k and v), num_blocks, ...]
-            if self._use_flashinfer:
-                # FlashInfer swaps 2<->num_blocks dimensions.
-                self.num_blocks = first_kv_cache.shape[0]
-                block_rank = 4  # [2, block_size, kv_heads, head_dim]
-            else:
-                self.num_blocks = first_kv_cache.shape[1]
-                block_rank = 3  # [block_size, kv_heads, head_dim]
-            block_shape = first_kv_cache.shape[-block_rank:]
-            block_size, n_kv_heads, head_dim = block_shape[-3:]
-            # head size in bytes.
-            self.slot_size_bytes = kv_elem_size * n_kv_heads * head_dim
-        assert block_size == self.block_size
-    elif self.device_type == "hpu":
+    if self.device_type == "hpu":
         # habana kv_cache: [2, num_blocks*block_size, kv_heads, head_dim]
         #from remote_pdb import RemotePdb; RemotePdb('0.0.0.0', 4444).set_trace()
         self.num_blocks = first_kv_cache[0].shape[0] // self.block_size
