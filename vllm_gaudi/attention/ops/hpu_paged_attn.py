@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
+from vllm.attention.backends.abstract import AttentionMetadataBuilder
 from vllm_gaudi.extension import cache_ops, ops
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
@@ -22,6 +23,23 @@ class HPUPagedAttentionMetadata:
     block_usage: Optional[torch.Tensor]
     block_groups: Optional[torch.Tensor]
     alibi_blocks: Optional[torch.Tensor]
+
+
+@dataclass
+class HPUPagedAttentionMetadataBuilder(AttentionMetadataBuilder[HPUPagedAttentionMetadata]):
+
+    def __init__(self, input_builder: "ModelRunnerInputBuilderBase") -> None:
+        """Create the builder, remember some configuration and parameters."""
+        self.input_builder = input_builder
+
+    def prepare(self) -> None:
+        """Prepare for one batch."""
+        pass
+
+    def build(self, seq_lens: list[int], query_lens: list[int],
+              cuda_graph_pad_size: int, batch_size: int) -> HPUPagedAttentionMetadata:
+        """Build attention metadata with on-device tensors."""
+        return HPUPagedAttentionMetadata
 
 
 class HPUPagedAttention:
