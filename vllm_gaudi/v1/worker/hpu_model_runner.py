@@ -565,6 +565,11 @@ class HPUModelRunner:
         # hpu-extension which selects fetch_from_cache implementation based
         # on env vars... this should be fixed in the future
         self.enable_bucketing = get_config().use_bucketing
+        self.profiling_run = get_config().VLLM_PROFILE_PROMPT or \
+                             get_config().VLLM_PROFILE_DECODE or \
+                             get_config().VLLM_PT_PROFILE
+        self.enable_bucketing = False if self.profiling_run else \
+                                self.enable_bucketing
         self.use_contiguous_pa = get_config().use_contiguous_pa
         self.skip_warmup = get_config().skip_warmup
 
