@@ -622,7 +622,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.parallel_config)
         self.head_size = self.model_config.get_head_size()
         self.hidden_size = self.model_config.get_hidden_size()
-        logger.debug(f'buke model config: {self.model_config=}')
+        logger.debug(f'model config: {self.model_config=}')
         self.attn_backend = get_attn_backend(
             self.head_size,
             self.dtype,
@@ -2309,7 +2309,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if not has_kv_transfer_group():
                 # Return empty ModelRunnerOuptut if there's no work to do.
                 return EMPTY_MODEL_RUNNER_OUTPUT
-            #logger.info(f'buke before kv_connector_no_forward |{os.getpid()=}|{scheduler_output.total_num_scheduled_tokens=}|{scheduler_output=}')
+            #logger.debug(f'before kv_connector_no_forward |{os.getpid()=}|{scheduler_output.total_num_scheduled_tokens=}|{scheduler_output=}')
             # For D case, wait until kv finish load here
             return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
         # If necessary, swap decodes/prompts to have all decodes on the start
@@ -2666,7 +2666,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 finished_recving=finished_recving,
             )
         )
-        #logger.debug(f"buke hpu_model_runner.py: {model_runner_output=}")
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()
         return model_runner_output
@@ -3213,7 +3212,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     v_cache_shape = None if self.model_config.use_mla \
                         else kv_cache_shape
                     dtype = kv_cache_spec.dtype
-                    #logger.debug(f'buke: |{os.getpid()=}|{kv_cache_shape=}')
+                    logger.debug(f'|{os.getpid()=}|{kv_cache_shape=}')
                     key_cache = torch.zeros(kv_cache_shape,
                                             dtype=dtype,
                                             device=self.device)

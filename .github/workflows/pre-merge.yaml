@@ -47,9 +47,8 @@ jobs:
           RUN git checkout main
 
           # Pinning versions in requirements might be good practice for CI consistency
-          RUN pip install pytest pytest_asyncio nixl==0.4.1
+          RUN pip install pytest pytest_asyncio
           RUN pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git
-          RUN pip install lm-eval[api]
 
           ENV no_proxy=localhost,127.0.0.1
           ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
@@ -114,7 +113,10 @@ jobs:
             -e HF_HOME=/workspace/hf_cache \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
-            /bin/bash "/workspace/vllm-gaudi/tests/v1/kv_connector/nixl_integration/run_accuracy_test.sh"
+            /bin/bash -c "
+                pip install nixl==0.4.1 lm-eval[api] &&
+                /workspace/vllm-gaudi/tests/v1/kv_connector/nixl_integration/run_accuracy_test.sh
+            "
 
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
