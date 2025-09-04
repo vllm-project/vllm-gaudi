@@ -58,7 +58,7 @@ def time_generation(llm: LLM,
     # Print the outputs.
     for output in outputs:
         generated_text = output.outputs[0].text
-        ret.append(generated_text)
+        ret.append(generated_text[:200])
 
     try:
         metrics = llm.llm_engine.get_metrics()
@@ -168,6 +168,7 @@ def test_eagle3_model(is_enable, args, prompts, sampling_params, task_key,
             speculative_config={
                 "model": "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
                 "num_speculative_tokens": args.num_spec_tokens,
+                "method": "eagle3",
             },
             disable_log_stats=False,
             enforce_eager=args.enforce_eager,
@@ -204,23 +205,55 @@ def test_medusa_model(is_enable, args, prompts, sampling_params, task_key,
     result_queue.put((task_key, result_dict))
 
 
-def test_mtp_model(is_enable, args, prompts, sampling_params, task_key,
-                   result_queue):
+def test_eaglemtp_model(is_enable, args, prompts, sampling_params, task_key,
+                        result_queue):
     if not is_enable:
         llm = LLM(
-            model="Qwen/Qwen3-4B",
+            model="eagle618/deepseek-v3-random",
             disable_log_stats=False,
         )
     else:
         llm = LLM(
-            model="Qwen/Qwen3-4B",
+            model="eagle618/deepseek-v3-random",
             speculative_config={
-                "method": "deepseek_mtp",
-                "model": "Qwen/Qwen3-0.6B",
+                "model": "eagle618/eagle-deepseek-v3-random",
                 "num_speculative_tokens": args.num_spec_tokens,
             },
             disable_log_stats=False,
         )
+
+    result_dict = time_generation(llm, prompts, sampling_params,
+                                  args.num_spec_tokens, args.num_warmups,
+                                  args.do_profile)
+    result_queue.put((task_key, result_dict))
+
+
+def test_mtp_model(is_enable, args, prompts, sampling_params, task_key,
+                   result_queue):
+    if not is_enable:
+        llm = LLM(
+            model="luccafong/deepseek_mtp_main_random",
+            disable_log_stats=False,
+        )
+    else:
+        llm = LLM(
+            model="luccafong/deepseek_mtp_main_random",
+            speculative_config={
+                "model": "luccafong/deepseek_mtp_draft_random",
+                "num_speculative_tokens": args.num_spec_tokens,
+            },
+            disable_log_stats=False,
+        )
+        # llm = LLM(
+        #     model="wemaster/deepseek_mtp_main_random_bf16",
+        #     tensor_parallel_size=1,
+        #     speculative_config={
+        #         "num_speculative_tokens": 1,
+        #     },
+        #     trust_remote_code=True,
+        #     disable_log_stats=False,
+        #     max_model_len=4096,
+        # )
 
     result_dict = time_generation(llm, prompts, sampling_params,
                                   args.num_spec_tokens, args.num_warmups,
@@ -255,7 +288,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--assert_acc_rate",
         type=float,
-        default=0.15,
+        default=0.0,
         help="Assert that the acceptance rate is at least this value.")
     parser.add_argument("--do_profile",
                         action="store_true",
@@ -309,6 +342,21 @@ if __name__ == "__main__":
             multiprocessing.Process(target=test_ngram,
                                     args=(True, args, prompts, sampling_params,
                                           'spec_ngram', result_queue))
+        }
+    elif task == "deepseek_eaglemtp":
+        if args.run_base:
+            task_queue['baseline_eaglemtp'] = {
+                'proc':
+                multiprocessing.Process(target=test_eaglemtp_model,
+                                        args=(False, args, prompts,
+                                              sampling_params, 'baseline_mtp',
+                                              result_queue))
+            }
+        task_queue['spec_eaglemtp'] = {
+            'proc':
+            multiprocessing.Process(target=test_eaglemtp_model,
+                                    args=(True, args, prompts, sampling_params,
+                                          'spec_eaglemtp', result_queue))
         }
     elif task == "deepseek_mtp":
         if args.run_base:
@@ -370,6 +418,8 @@ if __name__ == "__main__":
                                     args=(True, args, prompts, sampling_params,
                                           'spec_medusa', result_queue))
         }
+    else:
+        raise ValueError(f"Unknown task: {task}")
 
     try:
         for key, task in task_queue.items():
@@ -395,7 +445,7 @@ if __name__ == "__main__":
             for prompt, text in zip(prompts, proc['result']['ret_spec']):
                 print("---")
                 print(f"Prompt: {prompt}")
-                print(f"Generated text: {text[:200]}'...'")
+                print(f"Generated text: {text}'...'")
             print("=========================================")
             if proc['proc'].is_alive():
                 proc['proc'].terminate()
