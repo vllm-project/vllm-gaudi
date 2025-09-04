@@ -232,17 +232,22 @@ def test_mtp_model(is_enable, args, prompts, sampling_params, task_key,
                    result_queue):
     if not is_enable:
         llm = LLM(
-            model="luccafong/deepseek_mtp_main_random",
+            model="/mnt/weka/data/pytorch/DeepSeek-R1",
+            tensor_parallel_size=8,
+            enable_expert_parallel=True,
             disable_log_stats=False,
+            trust_remote_code=True,
         )
     else:
         llm = LLM(
-            model="luccafong/deepseek_mtp_main_random",
+            model="/mnt/weka/data/pytorch/DeepSeek-R1",
+            tensor_parallel_size=8,
+            enable_expert_parallel=True,
             speculative_config={
-                "model": "luccafong/deepseek_mtp_draft_random",
                 "num_speculative_tokens": args.num_spec_tokens,
             },
             disable_log_stats=False,
+            trust_remote_code=True,
         )
         # llm = LLM(
         #     model="wemaster/deepseek_mtp_main_random_bf16",

@@ -68,9 +68,6 @@ def rejection_sample_pytorch(
     valid_token_mask = pos < num_draft_tokens_per_seq.unsqueeze(-1)
 
     matches = (padded_draft_token_ids == padded_target_token_ids)
-    # Treat padding positions as matches so they don't incorrectly trigger
-    # a mismatch
-    matches = matches | (~valid_token_mask)
 
     mismatches = ~matches
     any_mismatch = mismatches.any(dim=1)
@@ -95,6 +92,7 @@ def rejection_sample_pytorch(
     # Create a mask that is True for all positions up to the number of
     # accepted tokens.
     acceptance_mask = pos < num_accepted.unsqueeze(-1)
+    acceptance_mask = acceptance_mask & valid_token_mask
 
     # Use the mask to copy the accepted target tokens into the output tensor.
     output_slice = output_tokens[:, :max_draft_tokens]

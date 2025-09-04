@@ -58,7 +58,8 @@ from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.model_executor.models.interfaces import supports_transcription
+from vllm.model_executor.models.interfaces import (supports_eagle3,
+                                                   supports_transcription)
 from vllm.model_executor.models.interfaces_base import (
     is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
@@ -72,6 +73,7 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from torch.nn.utils.rnn import pad_sequence
+from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -641,6 +643,10 @@ class HPUModelRunner:
         # NOTE(Chendi): Speculative decoding is only enabled for the last rank
         # in the pipeline parallel group.
         if self.speculative_config:
+            if self.speculative_config.num_speculative_tokens > 1:
+                raise NotImplementedError(
+                    "Speculative decoding with num_speculative_tokens > 1 is "
+                    "not supported on HPU.")
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
@@ -652,9 +658,6 @@ class HPUModelRunner:
                 self.drafter = EagleProposer(self.vllm_config, self.device,
                                              self)  # type: ignore
                 if self.speculative_config.method == "eagle3":
-                    raise NotImplementedError(
-                        "Eagle-3 speculative decoding is not supported on HPU."
-                    )
                     self.use_aux_hidden_state_outputs = True
             elif self.speculative_config.method == "medusa":
                 raise NotImplementedError(
@@ -1773,8 +1776,7 @@ class HPUModelRunner:
         num_decode_tokens_device = async_h2d_copy(num_decode_tokens,
                                                   device=self.device)
         slot_mapping_device = async_h2d_copy(slot_mapping, device=self.device)
-        query_start_loc = async_h2d_copy(query_start_loc_cpu,
-                                         device=self.device)
+
         return DecodeInputData(
             num_decodes=num_decodes,
             token_ids=token_ids_device,
@@ -1788,7 +1790,6 @@ class HPUModelRunner:
                 num_decode_tokens=num_decode_tokens_device,
                 slot_mapping=slot_mapping_device,
                 block_size=self.block_size,
-                query_start_loc=query_start_loc,
             ),
             spec_decode_metadata=spec_decode_metadata)
 
@@ -1994,7 +1995,12 @@ class HPUModelRunner:
                 model_mm_kwargs=model_mm_kwargs)
         # NOTE(kzawora): returning hidden_states is required in prompt logprobs
         # scenarios, as they will do logit processing on their own
-        non_flattened_hidden_states = hidden_states
+        if self.use_aux_hidden_state_outputs:
+            non_flattened_hidden_states, aux_hidden_states = hidden_states
+            hidden_states = non_flattened_hidden_states
+        else:
+            non_flattened_hidden_states = hidden_states
+            aux_hidden_states = None
 
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         hidden_states = hidden_states[logits_indices]
@@ -2003,7 +2009,8 @@ class HPUModelRunner:
                                                      f'seq{seq_len}_ctx'
                                                      f'{num_blocks}')):
             logits = self.model.compute_logits(hidden_states, None)
-        return non_flattened_hidden_states, hidden_states, logits
+        return non_flattened_hidden_states, aux_hidden_states, \
+            hidden_states, logits
 
     def _get_prompt_logprobs_dict(
         self,
@@ -2257,6 +2264,12 @@ class HPUModelRunner:
         prefill_sampled_requests = []
         decode_sampled_token_ids = []
         decode_sampled_requests = []
+        # NOTE(Chendi): used by spec decode draft model, since we are doing
+        # prefill one by one, so save hidden states as list
+        non_flattened_hidden_states_prefills = []
+        aux_hidden_states_prefills = []
+        sample_hidden_states_prefills = []
+        decode_sampled_token_ids_device = None
         # NOTE(tianmu-li): For structured output, combine logits before
         # postprocessing. Should it be done for all requests?
         structured_output = False
@@ -2309,7 +2322,8 @@ class HPUModelRunner:
                                                  dtype=torch.int32)
                     logits_indices = torch.cat([logits_indices, logits_append])
                 htorch.core.mark_step()
-                _, sample_hidden_states, logits_device = \
+                non_flattened_hidden_states, aux_hidden_states, \
+                    sample_hidden_states, logits_device = \
                     self._execute_model_generic(
                         token_ids, position_ids, attn_metadata, logits_indices,
                         self.kv_caches,
@@ -2317,6 +2331,11 @@ class HPUModelRunner:
                         model_mm_kwargs=model_mm_kwargs,
                         warmup_mode=warmup_mode)
                 htorch.core.mark_step()
+                non_flattened_hidden_states_prefills.append(
+                    non_flattened_hidden_states)
+                if self.use_aux_hidden_state_outputs:
+                    aux_hidden_states_prefills.append(aux_hidden_states)
+                sample_hidden_states_prefills.append(sample_hidden_states)
                 # Skip separate sampling for structured output
                 if structured_output:
                     logits_prompt.append(logits_device)
@@ -2357,8 +2376,9 @@ class HPUModelRunner:
             self.profiler.start("internal", "decode")
             assert decode_data is not None
             htorch.core.mark_step()
-            non_flattened_hidden_states, sample_hidden_states, logits_device = \
-            self._execute_model_generic(
+            non_flattened_hidden_states, aux_hidden_states, \
+                sample_hidden_states, logits_device = \
+                    self._execute_model_generic(
                 decode_data.token_ids,
                 decode_data.position_ids,
                 decode_data.attn_metadata,
@@ -2419,8 +2439,8 @@ class HPUModelRunner:
                             torch.tensor(v, device='cpu').int()
                             for v in decode_sampled_token_ids
                         ]
-                        sampler_output.sampled_token_ids = output_token_ids.to(
-                            'hpu', non_blocking=True)
+                        decode_sampled_token_ids_device = \
+                            output_token_ids.to('hpu', non_blocking=True)
                     decode_sampled_requests.extend(
                         self.input_batch.req_ids[:num_decodes])
                     ##### Sampling End #####
@@ -2440,23 +2460,6 @@ class HPUModelRunner:
                     prompt_batch_idx=None,
                     is_prompt=False)
                 self.profiler.record_counter(self.event_start, counters)
-
-            ################## Spec Decode ##################
-            # Now, we will call drafter to propose draft token ids
-            if self.speculative_config:
-                spec_decode_metadata = decode_data.spec_decode_metadata
-                spec_decode_common_attn_metadata = \
-                    decode_data.attn_metadata
-                hidden_states = non_flattened_hidden_states.view(
-                    -1, non_flattened_hidden_states.shape[-1])
-                aux_hidden_states = None
-                self._draft_token_ids = self.propose_draft_token_ids(
-                    scheduler_output, decode_sampled_token_ids,
-                    sampler_output.sampled_token_ids, sampling_metadata,
-                    hidden_states, sample_hidden_states, aux_hidden_states,
-                    spec_decode_metadata, spec_decode_common_attn_metadata,
-                    decode_data)[:num_decodes]
-            ################## Spec Decode end ##################
 
         if structured_output:
             # Scheduler places cached before prompt
@@ -2480,6 +2483,7 @@ class HPUModelRunner:
             decode_sampled_token_ids.append(
                 sampler_output.sampled_token_ids[:num_decodes].flatten())
 
+        prefill_sampled_token_ids_device = prefill_sampled_token_ids
         # From this point onward, all operations are done on CPU.
         # We already have tokens. Let's copy the data to
         # CPU as is, and then discard padded tokens.
@@ -2487,10 +2491,15 @@ class HPUModelRunner:
             prefill_sampled_token_ids = [
                 tensor.cpu() for tensor in prefill_sampled_token_ids
             ]
-            decode_sampled_token_ids = [
-                tensor.cpu()[:num_decodes]
-                for tensor in decode_sampled_token_ids
-            ]
+            if spec_decode_num_tokens is not None:
+                decode_sampled_token_ids = [
+                    tensor.cpu() for tensor in decode_sampled_token_ids
+                ]
+            else:
+                decode_sampled_token_ids = [
+                    tensor.cpu()[:num_decodes]
+                    for tensor in decode_sampled_token_ids
+                ]
             sampled_token_ids_list = torch.cat(
                 decode_sampled_token_ids + prefill_sampled_token_ids).tolist()
             sampled_token_requests = \
@@ -2504,7 +2513,7 @@ class HPUModelRunner:
             # return more than 1 token during decode.
             start_idx = 0
             for i, req_id in enumerate(sampled_token_requests):
-                if spec_decode_num_tokens is not None:
+                if spec_decode_num_tokens is not None and i < num_decodes:
                     num_tokens = spec_decode_num_tokens[i]
                 else:
                     num_tokens = 1
@@ -2558,6 +2567,23 @@ class HPUModelRunner:
             req_id = self.input_batch.req_ids[req_idx]
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
+
+        ################## Spec Decode ##################
+        # Now, we will call drafter to propose draft token ids
+        if self.speculative_config:
+            self._draft_token_ids = self.propose_draft_token_ids(
+                scheduler_output, postprocessed_sampled_token_ids,
+                prefill_sampled_token_ids_device,
+                decode_sampled_token_ids_device, sampling_metadata,
+                non_flattened_hidden_states, sample_hidden_states,
+                aux_hidden_states, non_flattened_hidden_states_prefills,
+                sample_hidden_states_prefills, aux_hidden_states_prefills,
+                num_decodes, prefill_data if num_prefills > 0 else None,
+                decode_data if num_decodes > 0 else None)
+            # logger.info(
+            #     f"{postprocessed_sampled_token_ids=}"
+            #     f" {self._draft_token_ids=}")
+        ################## Spec Decode end ##################
 
         # Create output.
         all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
@@ -2640,6 +2666,15 @@ class HPUModelRunner:
                     "Loading drafter model %s...",
                     self.vllm_config.speculative_config.draft_model_config)
                 self.drafter.load_model(self.model.model)
+                if self.use_aux_hidden_state_outputs:
+                    if supports_eagle3(self.model.model):
+                        self.model.model.set_aux_hidden_state_layers(
+                            self.model.model.
+                            get_eagle3_aux_hidden_state_layers())
+                    else:
+                        raise RuntimeError(
+                            "Model does not support EAGLE3 interface but "
+                            "aux_hidden_state_outputs was requested")
             self.model_memory_usage = m.consumed_device_memory
             logger.info("Loading drafter model weights took %.4f GB",
                         self.model_memory_usage / float(2**30))
@@ -3203,80 +3238,74 @@ class HPUModelRunner:
         self,
         scheduler_output: "SchedulerOutput",
         sampled_token_ids: list[list[int]],
-        sampled_token_ids_tensor: torch.Tensor,
+        prefill_sampled_token_ids_tensor: torch.Tensor,
+        decode_sampled_token_ids_tensor: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         hidden_states: torch.Tensor,
         sample_hidden_states: torch.Tensor,
         aux_hidden_states: Optional[torch.Tensor],
-        spec_decode_metadata: Optional[SpecDecodeMetadata],
-        common_attn_metadata: Optional[HPUAttentionMetadataV1],
+        hidden_states_prefills: list[torch.Tensor],
+        sample_hidden_states_prefills: list[torch.Tensor],
+        aux_hidden_states_prefills: list[Optional[torch.Tensor]],
+        num_decodes: int,
+        prefill_data: Optional[PrefillInputData] = None,
         decode_data: Optional[DecodeInputData] = None,
     ) -> Union[list[list[int]], torch.Tensor]:
         if self.speculative_config.method == "ngram":
             assert isinstance(self.drafter, NgramProposer)
             draft_token_ids = self.propose_ngram_draft_token_ids(
                 sampled_token_ids)
-        elif self.speculative_config.method == "medusa":
-            assert isinstance(self.drafter, MedusaProposer)
-            if sample_hidden_states.shape[0] == len(sampled_token_ids):
-                # The input to the target model does not include draft tokens.
-                hidden_states = sample_hidden_states
-            else:
-                assert spec_decode_metadata is not None, \
-                    ("spec_decode_metadata is required when the input to the "
-                     "target model includes draft tokens.")
-                indices = []
-                offset = 0
-                for num_draft, tokens in zip(
-                        spec_decode_metadata.num_draft_tokens,
-                        sampled_token_ids):
-                    indices.append(offset + len(tokens) - 1)
-                    offset += num_draft + 1
-                indices = torch.tensor(indices, device=self.device)
-                hidden_states = sample_hidden_states[indices]
-
-            draft_token_ids = self.drafter.propose(
-                target_hidden_states=hidden_states,
-                sampling_metadata=sampling_metadata,
-            )
         elif self.speculative_config.use_eagle():
             assert isinstance(self.drafter, EagleProposer)
-            assert decode_data is not None, \
-                "decode_data is required for Eagle proposer."
-            assert common_attn_metadata is not None, \
-                "common_attn_metadata is required for Eagle proposer."
-            assert decode_data.token_ids is not None, \
-                "decode_data.token_ids is required when " \
-                "spec_decode_metadata is None."
-            assert decode_data.position_ids is not None, \
-                "decode_data.position_ids is required when " \
-                "spec_decode_metadata is None."
-            if spec_decode_metadata is None:
-                # input_ids can be None for multimodal models.
-                target_token_ids = decode_data.token_ids
-                target_positions = decode_data.position_ids
-                if self.use_aux_hidden_state_outputs and \
-                    aux_hidden_states is not None:
-                    target_hidden_states = torch.cat(
-                        [h for h in aux_hidden_states], dim=-1)
+
+            def execute_drafter_model(target_token_ids, target_positions,
+                                      target_hidden_states, last_token_indices,
+                                      common_attn_metadata):
+                if self.drafter.method == "eagle3":
+                    assert isinstance(self.drafter.model.model,
+                                      Eagle3LlamaForCausalLM)
+                    target_hidden_states = \
+                        self.drafter.model.model.combine_hidden_states(
+                        target_hidden_states)
+                    assert target_hidden_states.shape[-1] == self.hidden_size
+                #htorch.core.mark_step()
+                ret_hidden_states = self.drafter.model(
+                    input_ids=target_token_ids,
+                    positions=target_positions,
+                    hidden_states=target_hidden_states,
+                    inputs_embeds=None,
+                    attn_metadata=common_attn_metadata,
+                )
+                #htorch.core.mark_step()
+                if self.drafter.method in ("deepseek_mtp", "ernie_mtp"):
+                    last_hidden_states = ret_hidden_states
+                    hidden_states = last_hidden_states
                 else:
-                    target_hidden_states = hidden_states
-                assert common_attn_metadata.query_start_loc is not None, \
-                    ("common_attn_metadata.query_start_loc is required "
-                     "when spec_decode_metadata is None.")
-                last_token_indices = common_attn_metadata.query_start_loc[
-                    1:] - 1
-            else:
-                num_draft_tokens = spec_decode_metadata.num_draft_tokens
+                    last_hidden_states, hidden_states = ret_hidden_states
+                last_hidden_states = last_hidden_states.view(
+                    -1, last_hidden_states.shape[-1])
+                sample_hidden_states = last_hidden_states[last_token_indices]
+                logits = self.drafter.model.compute_logits(
+                    sample_hidden_states, None)
+                draft_token_ids = logits.argmax(dim=-1)
+                return draft_token_ids, hidden_states
+
+            draft_token_ids = None
+            if decode_data is not None:
+                num_draft_tokens = \
+                    decode_data.spec_decode_metadata.num_draft_tokens
                 max_num_draft_tokens = max(num_draft_tokens)
+                common_attn_metadata = decode_data.attn_metadata
+
+                num_picked_token_indices = []
+                last_token_indices = []
+                starting_index = 0
                 num_rejected_tokens = [
                     n + 1 - len(sampled_token_ids[i]) if n > 0 else 0
                     for i, n in enumerate(num_draft_tokens)
                 ]
-                num_picked_token_indices = []
-                last_token_indices = []
-                starting_index = 0
-                for n, r in zip(num_draft_tokens, num_rejected_tokens):
+                for i, n in enumerate(num_draft_tokens):
+                    r = num_rejected_tokens[i]
                     step = max_num_draft_tokens + 1
                     for j in range(step):
                         if j == n - r:
@@ -3291,12 +3320,10 @@ class HPUModelRunner:
                 last_token_indices = torch.tensor(last_token_indices,
                                                   device=self.device)
 
-                target_token_ids = sampled_token_ids_tensor.reshape(
+                target_token_ids = decode_sampled_token_ids_tensor.reshape(
                     -1, 1)[hidden_states_indices]
                 target_positions = decode_data.position_ids[
                     hidden_states_indices]
-                target_positions += 1
-                common_attn_metadata.slot_mapping += 1
 
                 if self.use_aux_hidden_state_outputs and \
                     aux_hidden_states is not None:
@@ -3306,20 +3333,60 @@ class HPUModelRunner:
                 else:
                     target_hidden_states = hidden_states[hidden_states_indices]
 
-            last_hidden_states, hidden_states = self.drafter.model(
-                input_ids=target_token_ids,
-                positions=target_positions,
-                hidden_states=target_hidden_states.unsqueeze(1),
-                inputs_embeds=None,
-                attn_metadata=common_attn_metadata,
-            )
-            sample_hidden_states = last_hidden_states[last_token_indices]
-            logits = self.drafter.model.compute_logits(sample_hidden_states,
-                                                       None)
-            draft_token_ids = logits.argmax(dim=-1)
+                if target_hidden_states.dim() == 2:
+                    target_hidden_states = target_hidden_states.unsqueeze(1)
+                draft_token_ids, hidden_states = execute_drafter_model(
+                    target_token_ids, target_positions, target_hidden_states,
+                    last_token_indices, common_attn_metadata)
+
+                draft_token_ids = draft_token_ids[:num_decodes]
+            # handle prefill
+            if prefill_data is not None:
+                # Currently, prefill is done one by one
+                draft_token_ids_prefill = []
+                hidden_states_prefill = []
+
+                for idx, (req_id, prompt_len, token_ids, position_ids,
+                          attn_metadata, logits_indices,
+                          logits_requests) in enumerate(
+                              zip(*shallow_tuple(prefill_data))):
+                    hidden_states = hidden_states_prefills[idx]
+                    if self.use_aux_hidden_state_outputs:
+                        aux_hidden_states = aux_hidden_states_prefills[idx]
+                        target_hidden_states = torch.cat(aux_hidden_states,
+                                                         dim=-1)
+                    else:
+                        target_hidden_states = hidden_states
+                    next_token_ids = prefill_sampled_token_ids_tensor[idx]
+                    # Follow GPU to shift input_tokens by one to the left
+                    # to match hidden_states
+                    token_ids = token_ids.squeeze()
+                    target_token_ids = token_ids.clone()
+                    target_token_ids[:-1].copy_(token_ids[1:])
+                    target_token_ids[logits_indices] = next_token_ids
+                    target_token_ids = target_token_ids.unsqueeze(0)
+                    if target_hidden_states.dim() == 2:
+                        target_hidden_states = target_hidden_states.unsqueeze(
+                            0)
+                    _draft_token_ids, _hidden_states = execute_drafter_model(
+                        target_token_ids, position_ids, target_hidden_states,
+                        logits_indices, attn_metadata)
+                    draft_token_ids_prefill.append(_draft_token_ids)
+                    hidden_states_prefill.append(_hidden_states)
+                if draft_token_ids is None:
+                    draft_token_ids = torch.cat(draft_token_ids_prefill, dim=0)
+                    hidden_states = torch.cat(hidden_states_prefill, dim=0)
+                else:
+                    draft_token_ids = torch.cat([draft_token_ids] +
+                                                draft_token_ids_prefill,
+                                                dim=0)
+                    hidden_states = torch.cat([hidden_states] +
+                                              hidden_states_prefill,
+                                              dim=0)
 
             # Early exit if there is only one draft token to be generated.
             # [batch_size, 1]
+
             if self.speculative_config.num_speculative_tokens == 1:
                 return draft_token_ids.view(-1, 1)  # type: ignore
 
@@ -3335,6 +3402,9 @@ class HPUModelRunner:
             num_sampled_ids = len(sampled_ids)
             if not num_sampled_ids:
                 # Skip speculative decoding.
+                logger.debug(
+                    "Skipping speculative decoding for request %s, "
+                    "no sampled tokens", i)
                 draft_token_ids.append([])
                 continue
 
@@ -3364,7 +3434,7 @@ class HPUModelRunner:
                 logger.debug(
                     "Skipping speculative decoding for request %s, "
                     "drafter output is empty", req_id)
-                draft_token_ids.append([])
+                draft_token_ids.append([-1])
             else:
                 draft_token_ids.append(drafter_output.tolist())
         return draft_token_ids
