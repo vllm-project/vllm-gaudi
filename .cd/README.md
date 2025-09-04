@@ -30,17 +30,17 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
 Before proceeding with any of the steps below, make sure to clone the vLLM fork repository and navigate to the `.cd` directory. This ensures you have all necessary files and scripts for running the server or benchmarks.
 
 ```bash
-git clone https://github.com/HabanaAI/vllm-fork.git
-cd vllm-fork/.cd/
+git clone https://github.com/vllm-project/vllm-gaudi.git
+cd vllm-gaudi/.cd/
 ```
 
 ### 1. Run the server using Docker Compose
 
    The recommended and easiest way to start the vLLM server is with Docker Compose. At a minimum, set the following environment variables:
 
-   - `MODEL` - Select a model from the table above.
-   - `HF_TOKEN` - Your Hugging Face token (generate one at <https://huggingface.co>).
-   - `DOCKER_IMAGE` - The vLLM Docker image URL from Gaudi or local repository.
+- `MODEL` - Select a model from the table above.
+- `HF_TOKEN` - Your Hugging Face token (generate one at <https://huggingface.co>).
+- `DOCKER_IMAGE` - The vLLM Docker image URL from Gaudi or local repository.
 
    **Example usage:**
 
@@ -68,16 +68,16 @@ cd vllm-fork/.cd/
 
    To override default settings, you can provide additional parameters when starting the server. This is a more advanced approach:
 
-   - `PT_HPU_LAZY_MODE` - Enables lazy execution mode for HPU (Habana Processing Unit), which may improve performance by batching operations.
-   - `VLLM_SKIP_WARMUP` - If enabled, skips the model warmup phase, which can reduce startup time but may affect initial performance.
-   - `MAX_MODEL_LEN` - Specifies the maximum sequence length the model can handle.
-   - `MAX_NUM_SEQS` - Sets the maximum number of sequences that can be processed simultaneously.
-   - `TENSOR_PARALLEL_SIZE` - Defines the number of parallel tensor partitions.
-   - `VLLM_EXPONENTIAL_BUCKETING` - Controls enabling/disabling of exponential bucketing warmup strategy.
-   - `VLLM_DECODE_BLOCK_BUCKET_STEP` - Sets the step size for allocating decode blocks during inference, affecting memory allocation granularity.
-   - `VLLM_DECODE_BS_BUCKET_STEP` - Determines the batch size step for decode operations, influencing how batches are grouped and processed.
-   - `VLLM_PROMPT_BS_BUCKET_STEP` - Sets the batch size step for prompt processing, impacting how prompt batches are handled.
-   - `VLLM_PROMPT_SEQ_BUCKET_STEP` - Controls the step size for prompt sequence allocation, affecting how sequences are bucketed for processing.
+- `PT_HPU_LAZY_MODE` - Enables lazy execution mode for HPU (Habana Processing Unit), which may improve performance by batching operations.
+- `VLLM_SKIP_WARMUP` - If enabled, skips the model warmup phase, which can reduce startup time but may affect initial performance.
+- `MAX_MODEL_LEN` - Specifies the maximum sequence length the model can handle.
+- `MAX_NUM_SEQS` - Sets the maximum number of sequences that can be processed simultaneously.
+- `TENSOR_PARALLEL_SIZE` - Defines the number of parallel tensor partitions.
+- `VLLM_EXPONENTIAL_BUCKETING` - Controls enabling/disabling of exponential bucketing warmup strategy.
+- `VLLM_DECODE_BLOCK_BUCKET_STEP` - Sets the step size for allocating decode blocks during inference, affecting memory allocation granularity.
+- `VLLM_DECODE_BS_BUCKET_STEP` - Determines the batch size step for decode operations, influencing how batches are grouped and processed.
+- `VLLM_PROMPT_BS_BUCKET_STEP` - Sets the batch size step for prompt processing, impacting how prompt batches are handled.
+- `VLLM_PROMPT_SEQ_BUCKET_STEP` - Controls the step size for prompt sequence allocation, affecting how sequences are bucketed for processing.
 
    **Example usage:**
 
@@ -94,10 +94,10 @@ cd vllm-fork/.cd/
 
    You can customize benchmark parameters using:
 
-   - `INPUT_TOK` – Number of input tokens per prompt.
-   - `OUTPUT_TOK` – Number of output tokens to generate per prompt.
-   - `CON_REQ` – Number of concurrent requests to send during benchmarking.
-   - `NUM_PROMPTS` – Total number of prompts to use in the benchmark.
+- `INPUT_TOK` – Number of input tokens per prompt.
+- `OUTPUT_TOK` – Number of output tokens to generate per prompt.
+- `CON_REQ` – Number of concurrent requests to send during benchmarking.
+- `NUM_PROMPTS` – Total number of prompts to use in the benchmark.
 
    **Example usage:**
 
@@ -139,10 +139,10 @@ cd vllm-fork/.cd/
 
    You can also configure the server and benchmark by specifying parameters in configuration files. To do this, set the following environment variables:
 
-   - `VLLM_SERVER_CONFIG_FILE` – Path to the server configuration file inside the Docker container.
-   - `VLLM_SERVER_CONFIG_NAME` – Name of the server configuration section.
-   - `VLLM_BENCHMARK_CONFIG_FILE` – Path to the benchmark configuration file inside the Docker container.
-   - `VLLM_BENCHMARK_CONFIG_NAME` – Name of the benchmark configuration section.
+- `VLLM_SERVER_CONFIG_FILE` – Path to the server configuration file inside the Docker container.
+- `VLLM_SERVER_CONFIG_NAME` – Name of the server configuration section.
+- `VLLM_BENCHMARK_CONFIG_FILE` – Path to the benchmark configuration file inside the Docker container.
+- `VLLM_BENCHMARK_CONFIG_NAME` – Name of the benchmark configuration section.
 
    **Example:**
 
