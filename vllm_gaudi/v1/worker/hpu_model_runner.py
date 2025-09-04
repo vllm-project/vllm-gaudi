@@ -7,7 +7,8 @@ import math
 import os
 import time
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union
+from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union,
+                    cast)
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -60,7 +61,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.interfaces_base import (
-    is_pooling_model, is_text_generation_model)
+    VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.v1.worker.utils import (gather_mm_placeholders,
                                   sanity_check_mm_encoder_outputs,
@@ -611,6 +612,7 @@ class HPUModelRunner:
             self.parallel_config)
         self.head_size = self.model_config.get_head_size()
         self.hidden_size = self.model_config.get_hidden_size()
+        self.is_pooling_model = model_config.pooler_config is not None
 
         self.attn_backend = get_attn_backend(
             self.head_size,
@@ -820,15 +822,25 @@ class HPUModelRunner:
         req_ids_to_add: list[str] = []
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
-            assert new_req_data.sampling_params is not None, \
-                "Pooling is not supported in HPU yet"
             req_id = new_req_data.req_id
             sampling_params = new_req_data.sampling_params
-            if sampling_params.sampling_type == SamplingType.RANDOM_SEED:
+            pooling_params = new_req_data.pooling_params
+            if sampling_params and \
+                sampling_params.sampling_type == SamplingType.RANDOM_SEED:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
             else:
                 generator = None
+            if pooling_params:
+                assert (task := pooling_params.task) is not None, (
+                    "You did not set `task` in the API")
+
+                model = cast(VllmModelForPooling, self.model)
+                to_update = model.pooler.get_pooling_updates(task)
+                assert to_update is not None, (
+                    f"{pooling_params.task=} is not supported by the model")
+                to_update.apply(pooling_params)
+
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
@@ -836,7 +848,7 @@ class HPUModelRunner:
                 mm_positions=new_req_data.mm_positions,
                 mm_hashes=new_req_data.mm_hashes,
                 sampling_params=sampling_params,
-                pooling_params=None,
+                pooling_params=pooling_params,
                 generator=generator,
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
@@ -2173,6 +2185,104 @@ class HPUModelRunner:
         logits.copy_(
             logits_cpu.to(self.device, non_blocking=True).to(logits.dtype))
 
+    def _pool(
+        self,
+        hidden_states: torch.Tensor,
+        num_scheduled_tokens: int,
+        num_scheduled_tokens_np: np.ndarray,
+    ) -> ModelRunnerOutput:
+        assert self.input_batch.num_reqs ==\
+            len(self.input_batch.pooling_params), \
+        "Either all or none of the requests in" \
+        " a batch must be pooling request"
+        hidden_states = hidden_states[:num_scheduled_tokens]
+
+        pooling_metadata = self.input_batch.pooling_metadata
+        pooling_metadata.build_pooling_cursor(num_scheduled_tokens_np.tolist(),
+                                              device=hidden_states.device)
+
+        num_reqs = self.input_batch.num_reqs
+
+        seq_lens = (
+            torch.tensor(self.input_batch.num_prompt_tokens[:num_reqs],
+                         dtype=torch.int32,
+                         device=self.device) +
+            torch.tensor(self.input_batch.num_computed_tokens_cpu[:num_reqs],
+                         dtype=torch.int32,
+                         device=self.device))
+        raw_pooler_output = self.model.pooler(
+            hidden_states=hidden_states, pooling_metadata=pooling_metadata)
+
+        pooler_output: list[Optional[torch.Tensor]] = []
+        for raw_output, seq_len, prompt_len in zip(
+                raw_pooler_output, seq_lens, pooling_metadata.prompt_lens):
+
+            if seq_len == prompt_len:
+                pooler_output.append(raw_output.data)
+            else:
+                pooler_output.append(None)
+
+        return ModelRunnerOutput(
+            req_ids=[self.input_batch.req_ids],
+            req_id_to_index=self.input_batch.req_id_to_index,
+            sampled_token_ids=[],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=pooler_output,
+            kv_connector_output=None,
+        )
+
+    def _prepare_inputs_for_pooling(self, scheduler_output):
+        """Gather inputs, positions, slot mapping, and build attn_metadata"""
+        num_scheduled_tokens = []
+        input_ids_list = []
+        num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu
+        num_reqs = self.input_batch.num_reqs
+
+        # Collect token ids and scheduled lengths
+        for idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            seq_num_scheduled = scheduler_output.num_scheduled_tokens[req_id]
+            num_scheduled_tokens.append(seq_num_scheduled)
+
+            scheduled_req = scheduler_output.scheduled_new_reqs[idx]
+            token_ids = torch.as_tensor(scheduled_req.prompt_token_ids,
+                                        dtype=torch.long).flatten()
+            input_ids_list.append(token_ids)
+
+        input_ids = torch.cat(input_ids_list, dim=0).to(self.device)
+
+        # Absolute positions
+        absolute_positions = []
+        for i, n in enumerate(num_scheduled_tokens):
+            prefix = num_computed_tokens_cpu[i]
+            absolute_positions.append(prefix + np.arange(n, dtype=np.int64))
+        position_ids = torch.from_numpy(np.concatenate(absolute_positions)).to(
+            self.device)
+
+        # Slot mapping + metadata
+        total_scheduled_tokens = sum(num_scheduled_tokens)
+        slot_mapping = torch.arange(total_scheduled_tokens,
+                                    dtype=torch.long,
+                                    device="hpu:0")
+        seq_lens_tensor = torch.tensor([total_scheduled_tokens],
+                                       device='hpu:0',
+                                       dtype=torch.int32)
+        context_lens_tensor = torch.tensor([0],
+                                           device='hpu:0',
+                                           dtype=torch.int32)
+
+        attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
+            seq_lens_tensor=seq_lens_tensor,
+            context_lens_tensor=context_lens_tensor,
+            slot_mapping=slot_mapping,
+            block_list=None,
+            attn_bias=None,
+            block_size=self.block_size,
+        )
+
+        return input_ids, position_ids, num_scheduled_tokens, attn_metadata, \
+            total_scheduled_tokens
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -2255,6 +2365,24 @@ class HPUModelRunner:
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOuptut if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
+        if self.input_batch.pooling_params:
+            (input_ids, position_ids, num_scheduled_tokens, attn_metadata,
+             total_scheduled_tokens
+             ) = self._prepare_inputs_for_pooling(scheduler_output)
+
+            with set_forward_context(attn_metadata, self.vllm_config):
+                hidden_states = self.model.forward(
+                    input_ids=input_ids,
+                    positions=position_ids,
+                )
+
+            flattened = hidden_states.view(-1, hidden_states.shape[-1])
+            pooled_output = self._pool(
+                flattened,
+                total_scheduled_tokens,
+                np.array(num_scheduled_tokens, dtype=np.int32),
+            )
+            return pooled_output
         # If necessary, swap decodes/prompts to have all decodes on the start
         ensure_decodes_first(self.input_batch)
         # Prepare prompts/decodes info
@@ -2645,9 +2773,12 @@ class HPUModelRunner:
             hidden_layer_markstep_interval)
         torch.hpu.synchronize()
 
-        with HabanaMemoryProfiler() as m:  # noqa: SIM117
-            self.model = _maybe_wrap_in_hpu_graph(self.model,
-                                                  vllm_config=self.vllm_config)
+        if not self.is_pooling_model:
+            with HabanaMemoryProfiler() as m:
+                self.model = _maybe_wrap_in_hpu_graph(
+                    self.model,
+                    vllm_config=self.vllm_config,
+                )
         self.model_memory_usage = m.consumed_device_memory
         logger.info("Wrapping in HPUGraph took %.4f GB",
                     self.model_memory_usage / float(2**30))
@@ -2809,6 +2940,7 @@ class HPUModelRunner:
                            scheduled_tokens,
                            block_id=0):
         from vllm.sampling_params import SamplingParams
+        from vllm.pooling_params import PoolingParams
         from vllm.v1.core.sched.output import NewRequestData
         num_blocks = round_up(total_tokens, self.block_size) // self.block_size
         prompt_token_ids = list(range(total_tokens))
@@ -2816,6 +2948,7 @@ class HPUModelRunner:
         req_id = f'{len(requests)}'
         block_ids = [block_id] * num_blocks
         sampling_params = SamplingParams(temperature=0.0)
+        pooling_params = PoolingParams(task='embed')
 
         req = NewRequestData(
             req_id=req_id,
@@ -2824,7 +2957,7 @@ class HPUModelRunner:
             mm_hashes=[],
             mm_positions=[],
             sampling_params=sampling_params,
-            pooling_params=None,
+            pooling_params=pooling_params,
             block_ids=[block_ids],
             num_computed_tokens=num_computed_tokens,
             lora_request=None,

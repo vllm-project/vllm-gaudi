@@ -175,3 +175,13 @@ if [ $? -ne 0 ]; then
     exit -1
 fi
 echo "Test with spec decode with ngram passed"
+
+# Embedding-model-support for v1
+echo "Testing Embedding-model-support for v1"
+echo HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/pooling.py --model intfloat/e5-mistral-7b-instruct --trust-remote-code
+HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/pooling.py --model intfloat/e5-mistral-7b-instruct --trust-remote-code
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for Embedding-model-support for v1" >&2
+    exit -1
+fi
+echo "Embedding-model-support for v1 successful"
