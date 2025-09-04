@@ -589,12 +589,6 @@ class HPUModelRunner:
         # Cached outputs.
         ## universal buffer for input_ids and positions ##
         ## necessary being used by spec decode by following GPU impl ##
-        self.input_ids = torch.zeros(self.max_num_tokens,
-                                     dtype=torch.int32,
-                                     device=self.device)
-        self.positions = torch.zeros(self.max_num_tokens,
-                                     dtype=torch.int64,
-                                     device=self.device)
         self._draft_token_ids: Optional[Union[list[list[int]],
                                               torch.Tensor]] = None
         self.input_ids_cpu = torch.zeros(self.max_num_tokens,
@@ -1869,11 +1863,14 @@ class HPUModelRunner:
             self.device, non_blocking=True)
         bonus_logits_indices = torch.from_numpy(bonus_logits_indices).to(
             self.device, non_blocking=True)
-        draft_token_ids = self.input_ids[logits_indices]
-        draft_token_ids = draft_token_ids[target_logits_indices + 1]
+        draft_token_ids = self.input_ids_cpu[logits_indices]
+        draft_token_ids_device = async_h2d_copy(draft_token_ids,
+                                                device=self.device)
+        draft_token_ids_device = draft_token_ids_device[target_logits_indices +
+                                                        1]
 
         metadata = SpecDecodeMetadata(
-            draft_token_ids=draft_token_ids,
+            draft_token_ids=draft_token_ids_device,
             num_draft_tokens=num_draft_tokens.tolist(),
             cu_num_draft_tokens=cu_num_draft_tokens,
             target_logits_indices=target_logits_indices,
@@ -1935,11 +1932,6 @@ class HPUModelRunner:
                            0,
                            torch.from_numpy(token_indices),
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
-        self.input_ids[:total_num_scheduled_tokens].copy_(
-            self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
-        # Common case (1D positions)
-        self.positions[:total_num_scheduled_tokens].copy_(
-            self.positions_cpu[:total_num_scheduled_tokens], non_blocking=True)
         ###############################################
 
         # Get the number of scheduled tokens for each request.
@@ -2815,17 +2807,20 @@ class HPUModelRunner:
 
         return total_mem, total_batch_seq, captured_all
 
-    def _add_dummy_request(self, requests, num_scheduled_tokens,
-                           num_computed_tokens, total_tokens,
-                           scheduled_tokens):
+    def _add_dummy_request(self,
+                           requests,
+                           num_scheduled_tokens,
+                           num_computed_tokens,
+                           total_tokens,
+                           scheduled_tokens,
+                           block_id=0):
         from vllm.sampling_params import SamplingParams
         from vllm.v1.core.sched.output import NewRequestData
-
         num_blocks = round_up(total_tokens, self.block_size) // self.block_size
         prompt_token_ids = list(range(total_tokens))
 
         req_id = f'{len(requests)}'
-        block_ids = [0] * num_blocks
+        block_ids = [block_id] * num_blocks
         sampling_params = SamplingParams(temperature=0.0)
 
         req = NewRequestData(
@@ -2871,14 +2866,20 @@ class HPUModelRunner:
                                         scheduled_tokens=prompt_query_len)
         if decode_cfg:
             decode_bs, decode_query_len, decode_blocks = decode_cfg
-            decode_seq_lengths = self._generate_seq_lengths(
-                decode_bs, decode_blocks, self.block_size)
+            if self.use_contiguous_pa:
+                decode_seq_lengths = [self.block_size] * decode_bs
+                block_id = decode_blocks - 1
+            else:
+                decode_seq_lengths = self._generate_seq_lengths(
+                    decode_bs, decode_blocks, self.block_size)
+                block_id = 0
             for dsl in decode_seq_lengths:
                 self._add_dummy_request(requests,
                                         scheduled_tokens,
                                         num_computed_tokens=dsl,
                                         total_tokens=dsl,
-                                        scheduled_tokens=1)
+                                        scheduled_tokens=1,
+                                        block_id=block_id)
 
         sched_output = SchedulerOutput(
             scheduled_new_reqs=requests,
