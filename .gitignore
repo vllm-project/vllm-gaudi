@@ -173,7 +173,7 @@ cython_debug/
 .DS_Store
 
 # Results
-*.csv
+# *.csv to add vllm container scripts element / PatrykWo
 
 # Python pickle files
 *.pkl
