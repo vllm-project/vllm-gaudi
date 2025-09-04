@@ -1212,7 +1212,7 @@ class HPUModelRunner:
         return PromptDecodeInfo(prompt_req_ids, decode_req_ids,
                                 prompt_scheduled_tokens)
 
-    def generate_req_id_output_token_ids_lst(
+    def _generate_req_id_output_token_ids_lst(
             self,
             request_ids: Optional[list[str]] = None,
             pad_to: Optional[int] = None):
@@ -1236,8 +1236,8 @@ class HPUModelRunner:
                           request_ids: Union[None, list[str]] = None,
                           pad_to: Optional[int] = None) -> SamplingMetadata:
         # Create the sampling metadata.
-        req_id_output_token_ids_lst = self.generate_req_id_output_token_ids_lst(
-            request_ids, pad_to)
+        req_id_output_token_ids_lst = \
+            self._generate_req_id_output_token_ids_lst(request_ids, pad_to)
         sampling_metadata = self.input_batch.make_selective_sampling_metadata(
             req_id_output_token_ids_lst, skip_copy=not batch_changed)
         return sampling_metadata
@@ -2182,7 +2182,7 @@ class HPUModelRunner:
         logits.copy_(
             logits_cpu.to(self.device, non_blocking=True).to(logits.dtype))
 
-    def run_sampling(
+    def _run_sampling(
             self,
             batch_changed: bool,
             logits_device: torch.Tensor,
@@ -2361,7 +2361,7 @@ class HPUModelRunner:
                     prefill_sampled_requests.extend(logits_requests)
                 else:
                     with self.profiler.record_event('internal', "sampler"):
-                        sampler_output, _sampling_metadata = self.run_sampling(
+                        sampler_output, _sampling_metadata = self._run_sampling(
                             batch_changed, logits_device, req_id,
                             logits_device.shape[0])
                         prefill_sampled_token_ids.append(
@@ -2407,11 +2407,10 @@ class HPUModelRunner:
             else:
                 with self.profiler.record_event('internal', "sampler"):
                     ##### Sampling Start #####
-                    sampler_output, sampling_metadata = self.run_sampling(
-                        batch_changed, logits_device if
-                        (spec_decode_metadata :=
-                         decode_data.spec_decode_metadata) is None else
-                        logits_device[
+                    spec_decode_metadata = decode_data.spec_decode_metadata
+                    sampler_output, sampling_metadata = self._run_sampling(
+                        batch_changed, logits_device
+                        if spec_decode_metadata is None else logits_device[
                             spec_decode_metadata.bonus_logits_indices],
                         pd_info.decode_req_ids, logits_device.shape[0])
 
@@ -2495,7 +2494,7 @@ class HPUModelRunner:
             # Apply structured output bitmasks if present
             if scheduler_output.grammar_bitmask is not None:
                 self.apply_grammar_bitmask(scheduler_output, logits)
-            sampler_output, _sampling_metadata = self.run_sampling(
+            sampler_output, _sampling_metadata = self._run_sampling(
                 batch_changed, logits,
                 pd_info.prompt_req_ids + pd_info.decode_req_ids,
                 logits.shape[0])
@@ -2847,12 +2846,12 @@ class HPUModelRunner:
 
                 self.input_batch.req_output_token_ids = [
                     item[1]
-                    for item in self.generate_req_id_output_token_ids_lst(
+                    for item in self._generate_req_id_output_token_ids_lst(
                         dummy_req_ids, pad_to=batch_size)
                 ]
                 self.input_batch.refresh_sampling_metadata()
 
-                _sampler_output, _sampling_metadata = self.run_sampling(
+                _sampler_output, _sampling_metadata = self._run_sampling(
                     batch_changed=batch_changed,
                     logits_device=dummy_logits,
                     request_ids=dummy_req_ids,
