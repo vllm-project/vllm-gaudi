@@ -7,8 +7,8 @@ import math
 import os
 import time
 from dataclasses import dataclass, field, fields
-from typing import (TYPE_CHECKING, Any,
-    Callable, Optional, TypeAlias, Union, cast)
+from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union,
+                    cast)
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -55,7 +55,6 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds,
                              LogprobsTensors, ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
-# from vllm_gaudi.v1.pool.pooling_metadata import PoolingMetadata
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
@@ -841,7 +840,7 @@ class HPUModelRunner:
                 assert to_update is not None, (
                     f"{pooling_params.task=} is not supported by the model")
                 to_update.apply(pooling_params)
-                
+
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
@@ -2212,20 +2211,15 @@ class HPUModelRunner:
         num_reqs = self.input_batch.num_reqs
 
         seq_lens = (
-            torch.tensor(
-                self.input_batch.num_prompt_tokens[:num_reqs],
-                dtype=torch.int32,
-                device=self.device
-            )
-            + torch.tensor(
-                self.input_batch.num_computed_tokens_cpu[:num_reqs],
-                dtype=torch.int32,
-                device=self.device
-            )
-        )
+            torch.tensor(self.input_batch.num_prompt_tokens[:num_reqs],
+                         dtype=torch.int32,
+                         device=self.device) +
+            torch.tensor(self.input_batch.num_computed_tokens_cpu[:num_reqs],
+                         dtype=torch.int32,
+                         device=self.device))
         raw_pooler_output = self.model.pooler(
             hidden_states=hidden_states, pooling_metadata=pooling_metadata)
-        
+
         pooler_output: list[Optional[torch.Tensor]] = []
         for raw_output, seq_len, prompt_len in zip(
                 raw_pooler_output, seq_lens, pooling_metadata.prompt_lens):
@@ -2243,7 +2237,7 @@ class HPUModelRunner:
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
             kv_connector_output=None,
-            )
+        )
 
     def _prepare_inputs_for_pooling(self, scheduler_output):
         """Gather inputs, positions, slot mapping, and build attn_metadata"""
@@ -2258,9 +2252,8 @@ class HPUModelRunner:
             num_scheduled_tokens.append(seq_num_scheduled)
 
             scheduled_req = scheduler_output.scheduled_new_reqs[idx]
-            token_ids = torch.as_tensor(
-                scheduled_req.prompt_token_ids, dtype=torch.long
-            ).flatten()
+            token_ids = torch.as_tensor(scheduled_req.prompt_token_ids,
+                                        dtype=torch.long).flatten()
             input_ids_list.append(token_ids)
 
         input_ids = torch.cat(input_ids_list, dim=0).to(self.device)
@@ -2270,21 +2263,20 @@ class HPUModelRunner:
         for i, n in enumerate(num_scheduled_tokens):
             prefix = num_computed_tokens_cpu[i]
             absolute_positions.append(prefix + np.arange(n, dtype=np.int64))
-        position_ids = torch.from_numpy(
-                np.concatenate(absolute_positions)
-            ).to(self.device)
+        position_ids = torch.from_numpy(np.concatenate(absolute_positions)).to(
+            self.device)
 
         # Slot mapping + metadata
         total_scheduled_tokens = sum(num_scheduled_tokens)
-        slot_mapping = torch.arange(
-            total_scheduled_tokens, dtype=torch.long, device="hpu:0"
-        )
-        seq_lens_tensor = torch.tensor(
-                [total_scheduled_tokens], device='hpu:0', dtype=torch.int32
-            )
-        context_lens_tensor = torch.tensor(
-                [0], device='hpu:0', dtype=torch.int32
-            )
+        slot_mapping = torch.arange(total_scheduled_tokens,
+                                    dtype=torch.long,
+                                    device="hpu:0")
+        seq_lens_tensor = torch.tensor([total_scheduled_tokens],
+                                       device='hpu:0',
+                                       dtype=torch.int32)
+        context_lens_tensor = torch.tensor([0],
+                                           device='hpu:0',
+                                           dtype=torch.int32)
 
         attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
             seq_lens_tensor=seq_lens_tensor,
@@ -2292,7 +2284,8 @@ class HPUModelRunner:
             slot_mapping=slot_mapping,
             block_list=None,
             attn_bias=None,
-            block_size=self.block_size,)
+            block_size=self.block_size,
+        )
 
         return input_ids, position_ids, num_scheduled_tokens, attn_metadata, \
             total_scheduled_tokens
@@ -2380,14 +2373,9 @@ class HPUModelRunner:
             # Return empty ModelRunnerOuptut if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
         if self.input_batch.pooling_params:
-            (input_ids,
-            position_ids,
-            num_scheduled_tokens,
-            attn_metadata,
-            total_scheduled_tokens
-            ) = self._prepare_inputs_for_pooling(
-                scheduler_output
-            )
+            (input_ids, position_ids, num_scheduled_tokens, attn_metadata,
+             total_scheduled_tokens
+             ) = self._prepare_inputs_for_pooling(scheduler_output)
 
             with set_forward_context(attn_metadata, self.vllm_config):
                 hidden_states = self.model.forward(
@@ -2397,10 +2385,10 @@ class HPUModelRunner:
 
             flattened = hidden_states.view(-1, hidden_states.shape[-1])
             pooled_output = self._pool(
-                    flattened,
-                    total_scheduled_tokens,
-                    np.array(num_scheduled_tokens, dtype=np.int32),
-                )
+                flattened,
+                total_scheduled_tokens,
+                np.array(num_scheduled_tokens, dtype=np.int32),
+            )
             return pooled_output
         # If necessary, swap decodes/prompts to have all decodes on the start
         ensure_decodes_first(self.input_batch)
