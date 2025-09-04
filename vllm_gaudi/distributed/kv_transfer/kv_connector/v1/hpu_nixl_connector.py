@@ -6,7 +6,7 @@ import torch
 from vllm_gaudi.extension.logger import logger as init_logger
 from vllm.distributed.kv_transfer.kv_connector.v1 import (nixl_connector)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
-    NixlAgentMetadata)
+    NixlAgentMetadata, NixlConnectorWorker)
 
 logger = init_logger()
 
@@ -75,7 +75,6 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         first_kv_cache.shape) == 3 if self.device_type != "hpu" else False
     if self.device_type == "hpu":
         # habana kv_cache: [2, num_blocks*block_size, kv_heads, head_dim]
-        #from remote_pdb import RemotePdb; RemotePdb('0.0.0.0', 4444).set_trace()
         self.num_blocks = first_kv_cache[0].shape[0] // self.block_size
         block_rank = 3  # [block_size, kv_heads, head_dim]
         block_shape = first_kv_cache[0].shape[-block_rank:]
@@ -195,6 +194,5 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
     self._nixl_handshake_listener_t.start()
     ready_event.wait()  # Wait for listener ZMQ socket to be ready.
 
-
-nixl_connector.NixlConnectorWorker.initialize_host_xfer_buffer = initialize_host_xfer_buffer
-nixl_connector.NixlConnectorWorker.register_kv_caches = register_kv_caches
+NixlConnectorWorker.initialize_host_xfer_buffer = initialize_host_xfer_buffer
+NixlConnectorWorker.register_kv_caches = register_kv_caches
