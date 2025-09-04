@@ -12,6 +12,7 @@ PROMPTS = [
     "The future of AI is",
 ]
 
+
 def create_parser():
     parser = FlexibleArgumentParser()
     # Add engine args
@@ -38,16 +39,12 @@ def main(args: dict):
     print("-" * 50)
     for prompt, output in zip(PROMPTS, outputs):
         embedding = output.outputs.embedding
-        trimmed = (
-                embedding[:16] + ["..."]
-                if len(embedding) > 16
-                else embedding
-            )
-        print(
-            f"Prompt: {prompt!r}\nEmbedding: {trimmed} "
-            f"(length={len(embedding)})"
-        )
+        trimmed = (embedding[:16] +
+                   ["..."] if len(embedding) > 16 else embedding)
+        print(f"Prompt: {prompt!r}\nEmbedding: {trimmed} "
+              f"(length={len(embedding)})")
         print("-" * 50)
+
 
 if __name__ == "__main__":
     parser = create_parser()

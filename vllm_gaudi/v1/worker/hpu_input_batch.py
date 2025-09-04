@@ -289,7 +289,7 @@ class InputBatch:
 
         if sampling_params := request.sampling_params:
             if (self.is_spec_decode
-                and is_spec_decode_unsupported(sampling_params)):
+                    and is_spec_decode_unsupported(sampling_params)):
                 self.spec_decode_unsupported_reqs.add(req_id)
             if sampling_params.sampling_type == SamplingType.GREEDY:
                 # Avoid later division by zero.
@@ -333,8 +333,7 @@ class InputBatch:
                 self.num_logprobs[req_id] = sampling_params.logprobs
             if sampling_params.prompt_logprobs is not None:
                 self.num_prompt_logprobs[req_id] = (
-                        sampling_params.prompt_logprobs
-                    )
+                    sampling_params.prompt_logprobs)
 
             if sampling_params.allowed_token_ids:
                 self.has_allowed_token_ids.add(req_id)
@@ -354,7 +353,7 @@ class InputBatch:
                 self.allowed_token_ids_mask_cpu_tensor[req_index] = True
                 # False means we don't fill with -inf.
                 self.allowed_token_ids_mask_cpu_tensor[req_index][
-                sampling_params.allowed_token_ids] = False
+                    sampling_params.allowed_token_ids] = False
             if sampling_params.bad_words_token_ids:
                 self.bad_words_token_ids[
                     req_index] = sampling_params.bad_words_token_ids
