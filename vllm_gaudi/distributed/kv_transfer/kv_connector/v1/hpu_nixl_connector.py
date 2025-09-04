@@ -16,6 +16,7 @@ nixl_connector._NIXL_SUPPORTED_XPUS = {
     "hpu": ("cpu", )
 }
 
+
 def initialize_host_xfer_buffer(self, kv_caches: dict[str,
                                                       torch.Tensor]) -> None:
     """
