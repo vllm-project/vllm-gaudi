@@ -1978,10 +1978,9 @@ class HPUModelRunner:
                 else:
                     # Upload the index tensors asynchronously
                     # so the scatter can be non-blocking
-                    input_ids_index_tensor = torch.tensor(
-                        flattened_indices,
-                        dtype=torch.int64,
-                        device="cpu")
+                    input_ids_index_tensor = torch.tensor(flattened_indices,
+                                                          dtype=torch.int64,
+                                                          device="cpu")
                     prev_common_req_indices_tensor = torch.tensor(
                         prev_common_req_indices,
                         dtype=torch.int64,
@@ -2622,7 +2621,7 @@ class HPUModelRunner:
             # For the output, create placeholder sampled_token_ids
             # (will be filled during serialization)
 
-            postprocessed_sampled_token_ids = [[] for _ in range(num_reqs)]
+            postprocessed_sampled_token_ids = [[-1] for _ in range(num_reqs)]
 
         else:
             # From this point onward, all operations are done on CPU.
