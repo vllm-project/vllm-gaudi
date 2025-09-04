@@ -7,7 +7,8 @@ import math
 import os
 import time
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, Literal
+from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union,
+    Literal)
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -79,7 +80,6 @@ from vllm.v1.sample.logits_processor import build_logitsprocs
 from torch.nn.utils.rnn import pad_sequence
 from vllm.v1.core.sched.output import NewRequestData
 
-#from vllm_gaudi.distributed.kv_transfer.kv_connector.v1 import HPUKVConnectorBase_V1
 if TYPE_CHECKING:
     import xgrammar as xgr
     import xgrammar.kernels.apply_token_bitmask_inplace_torch_compile as xgr_torch_compile  # noqa: E501
@@ -99,7 +99,7 @@ logger = init_logger()
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
-hpu_buffer = None
+hpu_buffer = {}
 
 
 class BucketingFailedException(Exception):
@@ -620,7 +620,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.parallel_config)
         self.head_size = self.model_config.get_head_size()
         self.hidden_size = self.model_config.get_hidden_size()
-        logger.debug(f'model config: {self.model_config=}')
+        logger.debug("model config: ", self.model_config)
         self.attn_backend = get_attn_backend(
             self.head_size,
             self.dtype,
@@ -1186,7 +1186,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 requests_type[req] = 'prefill'
             for req in scheduler_output.kv_connector_metadata.reqs_to_recv:
                 requests_type[req] = 'decode'
-            requests = scheduler_output.kv_connector_metadata.reqs_to_save | scheduler_output.kv_connector_metadata.reqs_to_recv
+            requests = scheduler_output.kv_connector_metadata.reqs_to_save | \
+                        scheduler_output.kv_connector_metadata.reqs_to_recv
         else:
             requests = None
 
@@ -2307,7 +2308,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if not has_kv_transfer_group():
                 # Return empty ModelRunnerOuptut if there's no work to do.
                 return EMPTY_MODEL_RUNNER_OUTPUT
-            #logger.debug(f'before kv_connector_no_forward |{os.getpid()=}|{scheduler_output.total_num_scheduled_tokens=}|{scheduler_output=}')
             # For D case, wait until kv finish load here
             return self.kv_connector_no_forward(scheduler_output,
                                                 self.vllm_config)
@@ -3209,7 +3209,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     v_cache_shape = None if self.model_config.use_mla \
                         else kv_cache_shape
                     dtype = kv_cache_spec.dtype
-                    logger.debug(f'|{os.getpid()=}|{kv_cache_shape=}')
                     key_cache = torch.zeros(kv_cache_shape,
                                             dtype=dtype,
                                             device=self.device)
@@ -3241,14 +3240,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self._PAD_SLOT_ID = num_blocks * self.block_size
 
         if has_kv_transfer_group():
-            #kv_caches = { layer: torch.stack((tup[0], tup[1])) for layer,tup in kv_caches.items()}
             get_kv_transfer_group().register_kv_caches(kv_caches)
             get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
             global hpu_buffer
-            #if hpu_buffer is None:
-            #    _, num_kv_heads, head_size = kv_cache_shape
-            #    shape =[len(kv_caches), 2, 8192  , num_kv_heads, head_size]
-            #    hpu_buffer = torch.empty(shape, dtype=kv_cache_spec.dtype, device=self.device)
         htorch.hpu.synchronize()
 
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
@@ -3518,11 +3512,11 @@ def _make_src_and_dst_indices(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     #convert to slot mapping
     src_slot_mapping = np.concatenate([
-        np.arange(start=s * block_size, stop=(s+1) * block_size)
+        np.arange(start=s * block_size, stop=(s + 1) * block_size)
         for s in src_block_ids
     ])
     dst_slot_mapping = np.concatenate([
-        np.arange(start=d * block_size, stop=(d+1) * block_size)
+        np.arange(start=d * block_size, stop=(d + 1) * block_size)
         for d in dst_block_ids
     ])
 
@@ -3564,7 +3558,7 @@ def copy_kv_blocks(
 
     i = 0
     global hpu_buffer
-    use_hpu_buffer = False  # (len(src_slot_mapping) == hpu_buffer[0][0].size(0)) and (hpu_buffer is not None)
+    use_hpu_buffer = False  
     for layer_name in src_kv_caches:
         key_cache = src_kv_caches[layer_name][0]
         value_cache = src_kv_caches[layer_name][1]
@@ -3575,23 +3569,25 @@ def copy_kv_blocks(
         else:
             #import remote_pdb;remote_pdb.set_trace()
             dst_kv_caches[layer_name][0].index_put_(
-                (dst_slot_mapping,), 
+                (dst_slot_mapping, ),
                 key_cache.index_select(0, src_slot_mapping).to(target_device))
             dst_kv_caches[layer_name][1].index_put_(
-                (dst_slot_mapping,), 
-                value_cache.index_select(0, 
+                (dst_slot_mapping, ),
+                value_cache.index_select(0,
                                          src_slot_mapping).to(target_device))
 
         i = i + 1
 
-        #dst_kv_caches[layer_name][0][dst_slot_mapping] = key_cache[src_slot_mapping].to(target_device)
-        #dst_kv_caches[layer_name][1][dst_slot_mapping] = value_cache[src_slot_mapping].to(target_device)
-    #if use_hpu_buffer:
-    #tmp = hpu_buffer.to('cpu')
-    #dst_kv_caches = hpu_buffer.to('cpu')
-
     torch.hpu.synchronize()
 
     logger.info(
-        f"copy_kv_blocks: copy takes {time.perf_counter() - start}|{direction=}|{os.getpid()=}|{block_size=}|{len(src_block_ids)=}|{len(dst_block_ids)=}"
+        "copy_kv_blocks: copy takes %s"
+        "|direction=%s|pid=%s|block_size=%s"
+        "|src_blocks=%s|dst_blocks=%s",
+        time.perf_counter() - start,
+        direction,
+        os.getpid(),
+        block_size,
+        len(src_block_ids),
+        len(dst_block_ids)
     )
