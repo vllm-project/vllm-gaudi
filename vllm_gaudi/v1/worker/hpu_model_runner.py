@@ -1215,7 +1215,7 @@ class HPUModelRunner:
                           batch_changed: bool,
                           request_ids: Union[None, list[str]] = None,
                           pad_to: Optional[int] = None,
-                          logits_reqs = None) -> SamplingMetadata:
+                          logits_reqs=None) -> SamplingMetadata:
         # Create the sampling metadata.
         req_id_output_token_ids: dict[str, list[int]] = \
             {req_id: req.output_token_ids
@@ -1228,7 +1228,9 @@ class HPUModelRunner:
         req_id_output_token_ids_lst = list(req_id_output_token_ids.items())
         if logits_reqs and len(req_id_output_token_ids_lst) > len(logits_reqs):
             # Merged prefill case: remove requests without logits
-            req_id_output_token_ids_lst = [r for r in req_id_output_token_ids_lst if r[0] in logits_reqs]
+            req_id_output_token_ids_lst = [
+                r for r in req_id_output_token_ids_lst if r[0] in logits_reqs
+            ]
         else:
             if pad_to is not None:
                 while len(req_id_output_token_ids_lst) < pad_to:
@@ -2346,7 +2348,7 @@ class HPUModelRunner:
                             batch_changed,
                             req_id,
                             pad_to=logits_device.shape[0],
-                            logits_reqs = logits_requests)
+                            logits_reqs=logits_requests)
                         sampler_output = self.sampler(
                             logits=logits_device,
                             sampling_metadata=sampling_metadata)
