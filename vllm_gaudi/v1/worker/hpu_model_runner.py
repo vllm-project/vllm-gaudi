@@ -2234,7 +2234,7 @@ class HPUModelRunner:
         # On CPU, sanitize [tokD0, tokD1, tokD2, 0, tokP0, tokP1, tokP2, 0] -> [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2] # noqa
         # Return [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2]
 
-        if self.defragmenter.enabled and self.kv_caches:
+        if self.defragmenter.enabled and self.kv_caches and not warmup_mode:
             new = {
                 req.req_id: flatten(req.block_ids)
                 for req in scheduler_output.scheduled_new_reqs if req.block_ids
