@@ -787,6 +787,17 @@ class HPUModelRunner:
         The SamplingMetadata is updated and copied to the GPU if there is a
         new/resumed/paused/finished request in the batch.
         """
+        new_req_block_dict = {
+                req.req_id: flatten(req.block_ids)
+                for req in scheduler_output.scheduled_new_reqs if req.block_ids
+            }
+        cached_req_block_dict = {
+                req_id: flatten(new_block_ids)
+                for req_id, new_block_ids in zip(
+                    scheduler_output.scheduled_cached_reqs.req_ids,
+                    scheduler_output.scheduled_cached_reqs.new_block_ids)
+                if new_block_ids
+            }
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
@@ -945,8 +956,28 @@ class HPUModelRunner:
             self.input_batch.num_computed_tokens_cpu[req_index] = (
                 num_computed_tokens)
             if new_block_ids is not None:
+                if self.use_lookahead_decoding:
+                    #Free borrowed block if new is given by scheduler
+                    if tuple(req_state.block_ids[0][:-1]) in self.borrowed_blocks_mapping_bwd.keys():
+                        self.free_borrowed_block(req_state.block_ids[0])
+                        # Make defragmenter aware of the freed block
+                        if self.defragmenter.enabled:
+                            self.defragmenter.free_block(self.defragmenter.resolve(
+                                self.defragmenter.req_blocks[req_id].pop(-1)))
+                        # Update block_table - remove borrowed block from last position, replacing it with block 0
+                        for block_table in self.input_batch.block_table.block_tables:
+                            block_table.num_blocks_per_row[req_index] -= 1
+                            start = block_table.num_blocks_per_row[req_index]
+                            block_table.block_table_np[req_index, start:start + 1] = 0
                 self.input_batch.block_table.append_row(
                     new_block_ids, req_index)
+            elif self.use_lookahead_decoding:
+                if (self.input_batch.num_computed_tokens_cpu[req_index] + 1) % self.block_size == 0:
+                    additional_block_id = self.borrow_block(
+                        flatten(req_state.block_ids))
+                    self.input_batch.block_table.append_row(
+                        ([additional_block_id],), req_index)
+                    cached_req_block_dict[req_state.req_id] = [additional_block_id]
 
             # For the last rank, we don't need to update the token_ids_cpu
             # because the sampled tokens are already cached.
@@ -990,6 +1021,13 @@ class HPUModelRunner:
                 # Append to the end.
                 req_index = None
             self.input_batch.add_request(req_state, req_index)
+            if self.use_lookahead_decoding:
+                # Borrow block for lookahead decode associated with prompt if needed
+                if len(req_state.prompt_token_ids) % self.block_size == 0:
+                    additional_block_id = self.borrow_block(flatten(req_state.block_ids))
+                    self.input_batch.block_table.append_row(([additional_block_id],),
+                                                            self.input_batch.req_id_to_index[req_id])
+                    new_req_block_dict[req_state.req_id].append(additional_block_id)
 
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
@@ -997,6 +1035,13 @@ class HPUModelRunner:
 
         if batch_changed:
             self.input_batch.refresh_sampling_metadata()
+
+        # Update the defragmenter state.
+        if self.defragmenter.enabled and self.kv_caches:
+            self.defragmenter.update_state(new_req_block_dict | cached_req_block_dict,
+                                           scheduler_output.finished_req_ids)
+            self.defragmenter.defragment()
+
         return batch_changed
 
     def _extract_mm_kwargs(
@@ -1382,10 +1427,14 @@ class HPUModelRunner:
         borrowed_block_id = self.borrowed_blocks_mapping_bwd[tuple(block_ids_hash)]
         self.borrowed_blocks_mapping_fwd[borrowed_block_id] = []
         del self.borrowed_blocks_mapping_bwd[tuple(block_ids_hash)]
+        if self.defragmenter.enabled:
+            borrowed_block_id = self.defragmenter.resolve(borrowed_block_id)
+            new_block = self.defragmenter.resolve(new_block)
         self.attn_backend.copy_blocks(self.kv_caches, torch.tensor([[borrowed_block_id * self.block_size,
                                                                      new_block * self.block_size]],
                                                                    dtype=torch.long,
                                                                    device='hpu'))
+        htorch.core.mark_step()
 
     def _can_merge_prefill_contents(self, lhs, rhs):
         combined_num_tokens = lhs.get_num_tokens() + rhs.get_num_tokens()
@@ -1679,12 +1728,6 @@ class HPUModelRunner:
         block_tables_list = []
         for i, n in enumerate(num_blocks):
             seq_block_table = block_table_cpu_tensor[i, :n].tolist()
-            if self.use_lookahead_decoding:
-                if (context_lens[i] + 1) % self.block_size == 1:
-                    seq_block_table[-1] = self.borrow_block(seq_block_table[:-1])
-                    block_table_cpu_tensor[i, n-1] = seq_block_table[-1]
-                elif tuple(seq_block_table[:-1]) in self.borrowed_blocks_mapping_bwd.keys():
-                    self.free_borrowed_block(seq_block_table)
             assert len(seq_block_table) == n
             block_tables_list.extend([seq_block_table] * num_tokens)
 
@@ -2388,24 +2431,6 @@ class HPUModelRunner:
         # Transfer [tokD0, tokD1, tokD2, 0, tokP0, tokP1, tokP2, 0] to CPU
         # On CPU, sanitize [tokD0, tokD1, tokD2, 0, tokP0, tokP1, tokP2, 0] -> [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2] # noqa
         # Return [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2]
-
-        if self.defragmenter.enabled and self.kv_caches:
-            new = {
-                req.req_id: flatten(req.block_ids)
-                for req in scheduler_output.scheduled_new_reqs if req.block_ids
-            }
-            #TODO: Add support for preempted blocks
-            cached = {
-                req_id: flatten(new_block_ids)
-                for req_id, new_block_ids in zip(
-                    scheduler_output.scheduled_cached_reqs.req_ids,
-                    scheduler_output.scheduled_cached_reqs.new_block_ids)
-                if new_block_ids
-            }
-            self.defragmenter.update_state(new | cached,
-                                           scheduler_output.finished_req_ids)
-            self.defragmenter.defragment()
-  
         batch_changed = self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOuptut if there's no work to do.
@@ -2526,8 +2551,8 @@ class HPUModelRunner:
         # Decodes run as one single batch with [padded_decode_bs, 1]
         if num_decodes > 0:
             if self.use_lookahead_decoding:
-                decode_data = self.update_lookahead_decode_inputs(decode_data, 
-                                                                  num_prefills, 
+                decode_data = self.update_lookahead_decode_inputs(decode_data,
+                                                                  num_prefills,
                                                                   num_decodes,
                                                                   prefill_sampled_token_ids,
                                                                   prefill_sampled_requests,
@@ -2553,16 +2578,16 @@ class HPUModelRunner:
                     self.input_batch.req_ids[:num_decodes])
             else:
                 with self.profiler.record_event('internal', "sampler"):
-                    # For lookahead decoding we need to update requests.output_ids 
+                    # For lookahead decoding we need to update requests.output_ids
                     # before sampler forward when using penalties or bad words
                     lookahead_sampling_preparation = not self.input_batch.no_penalties or \
                         self.input_batch.bad_words_token_ids
                     if self.use_lookahead_decoding and lookahead_sampling_preparation:
-                        _ = self.update_lookahead_decode_inputs(decode_data, 
-                                                                num_prefills, 
+                        _ = self.update_lookahead_decode_inputs(decode_data,
+                                                                num_prefills,
                                                                 num_decodes,
-                                                                prefill_sampled_token_ids, 
-                                                                prefill_sampled_requests, 
+                                                                prefill_sampled_token_ids,
+                                                                prefill_sampled_requests,
                                                                 pd_info,
                                                                 True)
                     sampling_metadata = self._prepare_sampling(
