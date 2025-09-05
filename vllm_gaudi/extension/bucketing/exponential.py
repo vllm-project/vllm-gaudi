@@ -62,7 +62,7 @@ class ExponentialBucketingStrategy():
 
         msg = ("Prompt bucket config (min, step, max_warmup, limit) "
                f"bs:{prompt_bs_bucket_cfg}, "
-               f"query:{prompt_query_bucket_cfg}"
+               f"query:{prompt_query_bucket_cfg}, "
                f"blocks:{prompt_ctx_bucket_cfg}")
         logger().info(msg)
 

@@ -231,7 +231,7 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt,
     def block_not_greater_than_max_model_len(bs, query, ctx): return ctx <= bs * math.ceil(max_model_len / block_size)
     def batch_size_smaller_than_blocks(bs, query, ctx): return bs <= ctx
     def contiguous_pa_dont_filter_out_max(bs, query, ctx):
-        return (ctx == vmax_blocks) or math.ceil((ctx * block_size) // bs) <= max_model_len
+        return (ctx == max_blocks) or math.ceil((ctx * block_size) // bs) <= max_model_len
 
     filters_map = {
         "prompt": {

@@ -2973,7 +2973,7 @@ class HPUModelRunner:
         requests.append(req)
         if is_prompt:
             num_scheduled_tokens[req_id] = len(
-                prompt_token_ids) - num_computed_tokens  #scheduled_tokens
+                prompt_token_ids) - num_computed_tokens
         else:
             num_scheduled_tokens[req_id] = scheduled_tokens
 
