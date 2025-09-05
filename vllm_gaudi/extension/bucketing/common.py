@@ -196,7 +196,7 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt,
     use_merged_prefill = get_config().merged_prefill
     use_contiguous_pa = get_config().use_contiguous_pa
 
-    def expand_to_neighbor_buckets(bs_idx, bs_range, query_idx, query_range, ctx, filters):
+    def expand_to_neighbor_buckets(bs_idx, bs_range, query_idx, query_range, ctx, max_num_batched_tokens):
         '''
         Expand bucket (bs, query, ctx) to include:
         - itself
@@ -212,19 +212,18 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt,
         next_bs_exists = bs_idx + 1 < len(bs_range)
         next_query_exists = query_idx + 1 < len(query_range)
         if next_bs_exists:
-            if all(bucket_filter(bs_range[bs_idx+1],  query_range[query_idx], ctx) for bucket_filter in filters):
+            if bs_range[bs_idx+1] * query_range[query_idx] <= max_num_batched_tokens:
                 neighbors.add((bs_range[bs_idx+1], query_range[query_idx], ctx))
         if next_query_exists:
-            if all(bucket_filter(bs_range[bs_idx], query_range[query_idx+1], ctx) for bucket_filter in filters):
+            if bs_range[bs_idx] * query_range[query_idx+1] <= max_num_batched_tokens:
                 neighbors.add((bs_range[bs_idx], query_range[query_idx+1], ctx))
         if next_bs_exists and next_query_exists:
-            if all(bucket_filter(bs_range[bs_idx+1],  query_range[query_idx+1], ctx) for bucket_filter in filters):
+            if bs_range[bs_idx+1] * query_range[query_idx+1] <= max_num_batched_tokens:
                 neighbors.add((bs_range[bs_idx+1], query_range[query_idx+1], ctx))
         return neighbors
 
     # filter rules for buckets
     # prompt
-    def under_max_batched_tokens(bs, query, ctx): return bs * query <= max_num_batched_tokens
     def not_over_max_model_len(bs, query, ctx): return query + ctx * block_size <= max_model_len
     def ctx_not_over_max_ctx_for_merged_prefill(bs, query, ctx): return ctx <= max_num_prefill_seqs * math.ceil((max_model_len - math.floor(query / max_num_prefill_seqs)) // block_size)
     # decode
@@ -236,8 +235,8 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt,
     filters_map = {
         "prompt": {
             # depends only on merged_prefill
-            True: [under_max_batched_tokens, ctx_not_over_max_ctx_for_merged_prefill],
-            False: [under_max_batched_tokens, not_over_max_model_len],
+            True: [ctx_not_over_max_ctx_for_merged_prefill],
+            False: [not_over_max_model_len],
         },
         "decode": {
             # depends only on contiguous PA
@@ -255,14 +254,18 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt,
         return []
 
     buckets = set()
+    2d_buckets = set()
     filters = get_filters(is_prompt, use_merged_prefill, use_contiguous_pa)
     for bs_idx, bs in enumerate(bs_range):
         for query_idx, query in enumerate(query_range):
-            for ctx in ctx_range:
-                if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
-                    buckets.update(expand_to_neighbor_buckets(bs_idx, bs_range, 
-                                                              query_idx, query_range, 
-                                                              ctx, filters))
+            buckets.update(expand_to_neighbor_buckets(bs_idx, bs_range,
+                                                      query_idx, query_range,
+                                                      ctx, max_num_batched_tokens))
+
+   for bs, query in 2d_buckets:
+       for ctx in ctx_range:
+           if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
+               buckets.add(bs, query, ctx)
     return sorted(buckets)
 
 
