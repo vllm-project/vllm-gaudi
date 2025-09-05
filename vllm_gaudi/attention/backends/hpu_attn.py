@@ -18,11 +18,11 @@ from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, ModuleFusedSDPA,
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
-                                              AttentionMetadata, AttentionType)
+                                              AttentionMetadata, AttentionType, AttentionMetadataBuilder)
 from vllm.attention.backends.mla.common import MLACommonImpl
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention,
-                                                     HPUPagedAttentionMetadata)
+                                                     HPUPagedAttentionMetadata, HPUPagedAttentionMetadataBuilder)
 
 from vllm_gaudi.extension.logger import logger as init_logger
 
@@ -46,6 +46,10 @@ class HPUAttentionBackend(AttentionBackend):
     @staticmethod
     def get_state_cls() -> type["CommonAttentionState"]:
         return CommonAttentionState
+
+    @staticmethod
+    def get_builder_cls() -> type["AttentionMetadataBuilder"]:
+        return HPUPagedAttentionMetadataBuilder
 
     @staticmethod
     def get_kv_cache_shape(
