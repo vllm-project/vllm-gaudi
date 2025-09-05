@@ -89,6 +89,15 @@ class HPUMLAAttentionBackend(HPUAttentionBackend):
     def get_metadata_cls() -> type["AttentionMetadata"]:
         return HPUMLAMetadata
 
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+    ) -> tuple[int, ...]:
+        return (num_blocks * block_size, head_size)
+
 
 class HPUUnifiedAttentionBackend(HPUAttentionBackend):
 
