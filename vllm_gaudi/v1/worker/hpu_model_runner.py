@@ -2948,7 +2948,6 @@ class HPUModelRunner:
                            scheduled_tokens,
                            block_id=0):
         from vllm.sampling_params import SamplingParams
-        from vllm.pooling_params import PoolingParams
         from vllm.v1.core.sched.output import NewRequestData
         num_blocks = round_up(total_tokens, self.block_size) // self.block_size
         prompt_token_ids = list(range(total_tokens))
@@ -2956,7 +2955,6 @@ class HPUModelRunner:
         req_id = f'{len(requests)}'
         block_ids = [block_id] * num_blocks
         sampling_params = SamplingParams(temperature=0.0)
-        pooling_params = PoolingParams(task='embed')
 
         req = NewRequestData(
             req_id=req_id,
@@ -2965,7 +2963,7 @@ class HPUModelRunner:
             mm_hashes=[],
             mm_positions=[],
             sampling_params=sampling_params,
-            pooling_params=pooling_params,
+            pooling_params=None,
             block_ids=[block_ids],
             num_computed_tokens=num_computed_tokens,
             lora_request=None,
