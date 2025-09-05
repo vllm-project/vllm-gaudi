@@ -9,6 +9,7 @@ import habana_frameworks.torch as htorch
 from vllm import envs
 
 from vllm.platforms import Platform, PlatformEnum, _Backend
+from vllm_gaudi.extension.runtime import get_config
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -37,21 +38,19 @@ class HpuPlatform(Platform):
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
                              has_sink: bool) -> str:
-        if use_v1 and not use_mla:
-            logger.info("Using HPUAttentionV1 backend.")
-            return ("vllm_gaudi.v1.attention.backends."
-                    "hpu_attn.HPUAttentionBackendV1")
-        if use_v1 and use_mla:
+        assert use_v1, 'Only V1 is supported!'
+        if use_mla:
             logger.info("Using HPUAttentionMLA backend.")
             return ("vllm_gaudi.attention.backends.hpu_attn."
                     "HPUMLAAttentionBackend")
-
-        # Fall back to in-tree HPUAttention backend
-        if use_mla:
-            logger.info("Using HPUAttentionMLA backend.")
-            return "vllm.attention.backends.hpu_attn.HPUMLAAttentionBackend"
-        logger.info("Using HPUAttention backend.")
-        return "vllm.attention.backends.hpu_attn.HPUAttentionBackend"
+        elif get_config().unified_attn:
+            logger.info("Using UnifiedAttention backend.")
+            return ("vllm_gaudi.attention.backends."
+                    "hpu_attn.HPUUnifiedAttentionBackend")
+        else:
+            logger.info("Using HPUAttentionV1 backend.")
+            return ("vllm_gaudi.v1.attention.backends."
+                    "hpu_attn.HPUAttentionBackendV1")
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:

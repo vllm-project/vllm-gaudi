@@ -25,6 +25,8 @@ from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention,
                                                      HPUPagedAttentionMetadata)
 
 from vllm_gaudi.extension.logger import logger as init_logger
+from vllm_gaudi.extension.unified import (unified_attn,
+                                          HPUUnifiedAttentionMetadata)
 
 logger = init_logger()
 
@@ -33,19 +35,19 @@ class HPUAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "HPU_ATTN"
+        raise NotImplementedError()
 
     @staticmethod
-    def get_impl_cls() -> type["HPUAttentionImpl"]:
-        return HPUAttentionImpl
+    def get_impl_cls() -> type["AttentionImpl"]:
+        raise NotImplementedError()
 
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
-        return HPUAttentionMetadata
+        raise NotImplementedError()
 
     @staticmethod
     def get_state_cls() -> type["CommonAttentionState"]:
-        return CommonAttentionState
+        raise NotImplementedError()
 
     @staticmethod
     def get_kv_cache_shape(
@@ -73,23 +75,19 @@ class HPUAttentionBackend(AttentionBackend):
         HPUPagedAttention.copy_blocks(kv_caches, src_to_dsts)
 
 
-class HPUMLAAttentionBackend(AttentionBackend):
+class HPUMLAAttentionBackend(HPUAttentionBackend):
 
     @staticmethod
     def get_name() -> str:
         return "HPU_MLA"
 
     @staticmethod
-    def get_impl_cls() -> type["HPUMLAImpl"]:
+    def get_impl_cls() -> type["AttentionImpl"]:
         return HPUMLAImpl
 
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
         return HPUMLAMetadata
-
-    @staticmethod
-    def get_state_cls() -> type["CommonAttentionState"]:
-        return CommonAttentionState
 
     @staticmethod
     def get_kv_cache_shape(
@@ -100,20 +98,20 @@ class HPUMLAAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         return (num_blocks * block_size, head_size)
 
-    @staticmethod
-    def swap_blocks(
-        src_kv_cache: torch.Tensor,
-        dst_kv_cache: torch.Tensor,
-        src_to_dsts: torch.Tensor,
-    ) -> None:
-        HPUPagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dsts)
+
+class HPUUnifiedAttentionBackend(HPUAttentionBackend):
 
     @staticmethod
-    def copy_blocks(
-        kv_caches: list[torch.Tensor],
-        src_to_dsts: torch.Tensor,
-    ) -> None:
-        HPUPagedAttention.copy_blocks(kv_caches, src_to_dsts)
+    def get_name() -> str:
+        return "HPU_UA"
+
+    @staticmethod
+    def get_impl_cls() -> type["AttentionImpl"]:
+        return HPUUnifiedAttentionImpl
+
+    @staticmethod
+    def get_metadata_cls() -> type["AttentionMetadata"]:
+        return HPUUnifiedAttentionMetadata
 
 
 @dataclass
@@ -818,3 +816,92 @@ def _make_decode_alibi_bias(
     per_head_bias.mul_(alibi_slopes[None, :, None])
 
     return per_head_bias
+
+
+class HPUUnifiedAttentionImpl(AttentionImpl):
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: Optional[list[float]],
+        sliding_window: Optional[int],
+        kv_cache_dtype: str,
+        logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
+        use_irope: bool = False,
+    ) -> None:
+        super(AttentionImpl, self).__init__()
+
+        supported_head_sizes = HPUPagedAttention.get_supported_head_sizes()
+        if head_size not in supported_head_sizes:
+            raise ValueError(
+                f"Head size {head_size} is not supported by PagedAttention. "
+                f"Supported head sizes are: {supported_head_sizes}.")
+
+        unsupported_features = {
+            'KV sharing': kv_sharing_target_layer_name is not None,
+            'Alibi': alibi_slopes is not None,
+            'Sliding window': sliding_window is not None,
+            'non-GQA attention': num_kv_heads is None,
+            'Encoder attn': attn_type != AttentionType.DECODER,
+            'fp32 softmax': get_config().fp32_softmax,
+            'fp8': kv_cache_dtype == 'fp8_inc',
+        }
+        for feature, check in unsupported_features.items():
+            if check:
+                raise NotImplementedError(
+                    feature + ' is not implemented for HPU unified attn')
+
+        if use_irope:
+            logger.warning_once(
+                "Using irope in HPU is not supported yet, it will fall back "
+                "to global attention for long context.")
+
+        self.kv_cache_dtype = kv_cache_dtype
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.scale = float(scale)
+        self.num_kv_heads = num_kv_heads
+        assert self.num_heads % self.num_kv_heads == 0
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+        self.k_cache = VLLMKVCache()
+        self.v_cache = VLLMKVCache()
+
+    def forward(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, torch.Tensor],
+        attn_metadata: HPUUnifiedAttentionMetadata,
+        output: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        key_cache, value_cache = kv_cache
+        query_shape = query.shape
+        if query.dim() == 3:
+            query = query.flatten(0, 1)
+            key = key.flatten(0, 1)
+            value = value.flatten(0, 1)
+        query = query.unflatten(-1, (-1, self.head_size))
+        key = key.unflatten(-1, (-1, self.head_size))
+        value = value.unflatten(-1, (-1, self.head_size))
+        key_cache = self.k_cache(key, key_cache, attn_metadata.slot_mapping)
+        value_cache = self.v_cache(value, value_cache,
+                                   attn_metadata.slot_mapping)
+        output = unified_attn(
+            query=query,
+            key=key,
+            value=value,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            scale=self.scale,
+            metadata=attn_metadata,
+        )
+        output = output.unflatten(0, (query_shape[0], query_shape[1])).flatten(
+            -2, -1)
+        return output
