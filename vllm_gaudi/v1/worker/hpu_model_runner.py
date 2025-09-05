@@ -1214,7 +1214,8 @@ class HPUModelRunner:
     def _prepare_sampling(self,
                           batch_changed: bool,
                           request_ids: Union[None, list[str]] = None,
-                          pad_to: Optional[int] = None) -> SamplingMetadata:
+                          pad_to: Optional[int] = None,
+                          logits_reqs=None) -> SamplingMetadata:
         # Create the sampling metadata.
         req_id_output_token_ids: dict[str, list[int]] = \
             {req_id: req.output_token_ids
@@ -1225,10 +1226,16 @@ class HPUModelRunner:
                 for req_id in request_ids
             }
         req_id_output_token_ids_lst = list(req_id_output_token_ids.items())
-        if pad_to is not None:
-            while len(req_id_output_token_ids_lst) < pad_to:
-                req_id_output_token_ids_lst.append(
-                    req_id_output_token_ids_lst[0])
+        if logits_reqs and len(req_id_output_token_ids_lst) > len(logits_reqs):
+            # Merged prefill case: remove requests without logits
+            req_id_output_token_ids_lst = [
+                r for r in req_id_output_token_ids_lst if r[0] in logits_reqs
+            ]
+        else:
+            if pad_to is not None:
+                while len(req_id_output_token_ids_lst) < pad_to:
+                    req_id_output_token_ids_lst.append(
+                        req_id_output_token_ids_lst[0])
         sampling_metadata = self.input_batch.make_selective_sampling_metadata(
             req_id_output_token_ids_lst, skip_copy=not batch_changed)
         return sampling_metadata
@@ -2340,7 +2347,8 @@ class HPUModelRunner:
                         sampling_metadata = self._prepare_sampling(
                             batch_changed,
                             req_id,
-                            pad_to=logits_device.shape[0])
+                            pad_to=logits_device.shape[0],
+                            logits_reqs=logits_requests)
                         sampler_output = self.sampler(
                             logits=logits_device,
                             sampling_metadata=sampling_metadata)
