@@ -17,9 +17,7 @@ EXPECTED_VALUES = {
     "deepseek-ai/deepseek-vl2-small": 0.59,
 }
 
-SIMPLE_PROMPT = (
-    "The best part about working on vLLM is that I got to meet so many people across various different organizations like UCB, Google, and Meta which means",
-)  # noqa: E501
+SIMPLE_PROMPT = "The best part about working on vLLM is that I got to meet so many people across various different organizations like UCB, Google, and Meta which means"  # noqa: E501
 
 # Get model name from environment variable
 MODEL_NAME = os.environ.get("TEST_MODEL", "Qwen/Qwen3-0.6B")

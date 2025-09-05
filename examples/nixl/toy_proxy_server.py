@@ -276,7 +276,7 @@ async def healthcheck():
     }
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     global global_args
     global_args = parse_args()
 
