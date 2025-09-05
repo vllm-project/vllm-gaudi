@@ -196,9 +196,9 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt,
     use_merged_prefill = get_config().merged_prefill
     use_contiguous_pa = get_config().use_contiguous_pa
 
-    def expand_to_neighbor_buckets(bs_idx, bs_range, query_idx, query_range, ctx, max_num_batched_tokens):
+    def expand_to_neighbor_buckets(bs_idx, bs_range, query_idx, query_range, max_num_batched_tokens):
         '''
-        Expand bucket (bs, query, ctx) to include:
+        Expand 2d bucket (bs, query) to include:
         - itself
         - next bs value (if any)
         - next query value (if any)
@@ -206,20 +206,19 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt,
         This cover case when our configuration is in budget but between
         values that are in and out of budget:
         bs < edge_case_bs < next bs and query < edge_case_query < next query
-        All neighboring buckets need to be filtered as well.
         '''
-        neighbors = {(bs_range[bs_idx], query_range[query_idx], ctx)}
+        neighbors = {(bs_range[bs_idx], query_range[query_idx])}
         next_bs_exists = bs_idx + 1 < len(bs_range)
         next_query_exists = query_idx + 1 < len(query_range)
         if next_bs_exists:
             if bs_range[bs_idx+1] * query_range[query_idx] <= max_num_batched_tokens:
-                neighbors.add((bs_range[bs_idx+1], query_range[query_idx], ctx))
+                neighbors.add((bs_range[bs_idx+1], query_range[query_idx]))
         if next_query_exists:
             if bs_range[bs_idx] * query_range[query_idx+1] <= max_num_batched_tokens:
-                neighbors.add((bs_range[bs_idx], query_range[query_idx+1], ctx))
+                neighbors.add((bs_range[bs_idx], query_range[query_idx+1]))
         if next_bs_exists and next_query_exists:
             if bs_range[bs_idx+1] * query_range[query_idx+1] <= max_num_batched_tokens:
-                neighbors.add((bs_range[bs_idx+1], query_range[query_idx+1], ctx))
+                neighbors.add((bs_range[bs_idx+1], query_range[query_idx+1]))
         return neighbors
 
     # filter rules for buckets
@@ -254,18 +253,18 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt,
         return []
 
     buckets = set()
-    2d_buckets = set()
+    buckets_2d = set()
     filters = get_filters(is_prompt, use_merged_prefill, use_contiguous_pa)
     for bs_idx, bs in enumerate(bs_range):
         for query_idx, query in enumerate(query_range):
-            buckets.update(expand_to_neighbor_buckets(bs_idx, bs_range,
+            buckets_2d.update(expand_to_neighbor_buckets(bs_idx, bs_range,
                                                       query_idx, query_range,
-                                                      ctx, max_num_batched_tokens))
+                                                      max_num_batched_tokens))
 
-   for bs, query in 2d_buckets:
-       for ctx in ctx_range:
-           if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
-               buckets.add(bs, query, ctx)
+    for bs, query in buckets_2d:
+        for ctx in ctx_range:
+            if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
+                buckets.add((bs, query, ctx))
     return sorted(buckets)
 
 

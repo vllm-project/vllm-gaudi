@@ -2814,7 +2814,7 @@ class HPUModelRunner:
                            num_computed_tokens,
                            total_tokens,
                            scheduled_tokens,
-                           is_prompt
+                           is_prompt,
                            block_id=0):
         from vllm.sampling_params import SamplingParams
         from vllm.v1.core.sched.output import NewRequestData
