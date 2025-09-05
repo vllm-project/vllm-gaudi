@@ -197,6 +197,7 @@ def generate_decode_buckets(bs_bucket_config, blocks_bucket_config,
     last_bucket = max_blocks
     for bs in bs_buckets:
         max_blocks_including_max_model_len = bs * math.ceil(max_model_len / block_size) 
+        print(f"{bs=} {max_model_len=} {block_size=} {max_blocks_including_max_model_len=}, {block_buckets=}")
         for blocks in block_buckets:
             if bs > blocks:
                 # Skip a dummy case when bs > blocks, which cannot occur in real execution
@@ -204,6 +205,7 @@ def generate_decode_buckets(bs_bucket_config, blocks_bucket_config,
             if not use_contiguous_pa and blocks > max_blocks_including_max_model_len:
                 # Skip case when user wants to have bigger blocks than max model len
                 # case cn only occur with contiguous PA
+                buckets.append((bs, 1, max_blocks_including_max_model_len))
                 continue
             if blocks >= last_bucket:
                 buckets.append((bs, 1, last_bucket))

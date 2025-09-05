@@ -10,7 +10,7 @@ from vllm_gaudi.extension.logger import logger as logger
 from vllm_gaudi.extension.runtime import get_config
 
 
-def calc_fallback_value(n: int, base_step: int):
+def calc_fallback_value(n: int, base_step: int, warmup_max: int = None) -> int:
     """ Calculate next bucket for yet unbucketized value"""
     if n <= 1:
         return n
@@ -30,6 +30,9 @@ def calc_fallback_value(n: int, base_step: int):
     #   => bucket_size = ceil(4001^1/3) * 32 = 16 * 32 = 512
     #   => next_value = round_up(4001, 512) = 4096
     bucket_size = math.ceil(math.pow(n, power)) * base_step
+    num_blocks = math.ceil(n / bucket_size) * bucket_size
+    if warmup_max is not None and num_blocks > warmup_max and warmup_max >= n:
+        bucket_size = warmup_max
     return math.ceil(n / bucket_size) * bucket_size
 
 
@@ -121,7 +124,8 @@ class HPUBucketingManager():
         if self.num_hpu_blocks is None:
             new_ctx = 0
         else:
-            new_ctx = min(calc_fallback_value(ctx, self.fallback_blocks_base_step),
+            decode_block_max = self.decode_buckets[-1][2] if len(self.decode_buckets) > 0 else self.decode_block_max
+            new_ctx = min(calc_fallback_value(ctx, self.fallback_blocks_base_step, decode_block_max),
                       self.num_hpu_blocks)
         return (new_batch_size, new_seq_len, new_ctx)
 
