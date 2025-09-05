@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import collections
+from collections import defaultdict
 import contextlib
 import functools
 import itertools
@@ -26,11 +27,14 @@ from vllm_gaudi.extension.runtime import finalize_config, get_config
 from vllm_gaudi.extension.utils import pad_list
 from vllm_gaudi.extension.debug import init_debug_logger
 
-from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.backends.abstract import (AttentionType,
+                                              AttentionBackend)
 from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
-from vllm.config import (VllmConfig, update_config)
+from vllm.config import (VllmConfig, update_config,
+                         get_layers_from_vllm_config)
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaBase
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import get_sampler
@@ -49,8 +53,11 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
                         is_pin_memory_available, LazyLoader)
 from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy)
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec)
+from vllm.v1.attention.backends.mamba_selectors import get_mamba_attn_backend
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.kv_cache_interface import (AttentionSpec,
+                                        FullAttentionSpec, KVCacheConfig,
+                                        KVCacheSpec, MambaSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds,
                              LogprobsTensors, ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -62,7 +69,7 @@ from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.interfaces_base import (
     is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
-from vllm.v1.worker.utils import (gather_mm_placeholders,
+from vllm.v1.worker.utils import (AttentionGroup, gather_mm_placeholders,
                                   sanity_check_mm_encoder_outputs,
                                   scatter_mm_placeholders)
 from vllm.v1.sample.rejection_sampler import RejectionSampler
@@ -634,6 +641,8 @@ class HPUModelRunner:
         self.kv_caches: list[torch.Tensor] = []
         self.inc_initialized_successfully = False
         self._is_inc_finalized = False
+        # indexes: [kv_cache_group_id][attn_group]
+        self.attn_groups: list[list[AttentionGroup]] = []
 
         # mm_hash -> encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
@@ -740,11 +749,11 @@ class HPUModelRunner:
             format. Layers that do not need KV cache are not included.
         """
 
-        forward_ctx = self.vllm_config.compilation_config.static_forward_context
         block_size = self.vllm_config.cache_config.block_size
         use_mla = self.vllm_config.model_config.use_mla
         kv_cache_spec: dict[str, KVCacheSpec] = {}
-        for layer_name, attn_module in forward_ctx.items():
+        attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+        for layer_name, attn_module in attn_layers.items():
             if isinstance(attn_module, FusedMoE):
                 continue
 
@@ -767,6 +776,30 @@ class HPUModelRunner:
             else:
                 raise ValueError(
                     f"Unknown attention type: {attn_module.attn_type}")
+        
+        mamba_layers = get_layers_from_vllm_config(self.vllm_config, MambaBase)
+        if len(mamba_layers) > 0:
+            if self.vllm_config.speculative_config is not None:
+                raise NotImplementedError(
+                    "Mamba with speculative decoding is not supported yet.")
+            if self.vllm_config.cache_config.enable_prefix_caching:
+                raise NotImplementedError(
+                    "Prefix caching is not supported for Mamba yet.")
+            max_model_len = self.vllm_config.model_config.max_model_len
+
+            page_size_padded = (
+                self.vllm_config.cache_config.mamba_page_size_padded)
+
+            # Set block_size to max_model_len, so that mamba model will always
+            # have only one block in the KV cache.
+            for layer_name, mamba_module in mamba_layers.items():
+                kv_cache_spec[layer_name] = MambaSpec(
+                    shapes=mamba_module.get_state_shape(),
+                    dtypes=mamba_module.get_state_dtype(),
+                    block_size=max_model_len,
+                    page_size_padded=page_size_padded,
+                    mamba_type=mamba_module.mamba_type)
+                logger.info(f"KV cache spec for Mamba layer {layer_name}: {kv_cache_spec[layer_name]}")
 
         return kv_cache_spec
 
@@ -1553,6 +1586,31 @@ class HPUModelRunner:
             block_list=context_blocks_t,
             attn_bias=attn_bias,
             block_size=self.block_size)
+
+        # TODO: Change to correct values if needed
+        query_start_loc_cpu = None
+        seq_lens_cpu = None
+        total_num_scheduled_tokens = 0
+        max_num_scheduled_tokens = 1
+        max_seq_len = 1
+        slot_mapping = None
+        # Correct values
+        
+        common_attn_metadata = CommonAttentionMetadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            seq_lens=seq_lens,
+            seq_lens_cpu=seq_lens_cpu,
+            num_computed_tokens_cpu=num_computed_tokens_cpu,
+            num_reqs=num_reqs,
+            num_actual_tokens=total_num_scheduled_tokens,
+            max_query_len=max_num_scheduled_tokens,
+            max_seq_len=max_seq_len,
+            block_table_tensor=blk_table_tensor,
+            slot_mapping=slot_mapping,
+            causal=True,
+        )
+
         return PrefillInputData(request_ids=[req_ids],
                                 prompt_lens=[query_lens],
                                 token_ids=[token_ids],
@@ -1989,6 +2047,7 @@ class HPUModelRunner:
         else:
             # no hpu graphs for t.compile?
             use_graphs = False
+        logger.info(f"Pretrim metadata {attn_metadata}")
         trimmed_attn_metadata = trim_attn_metadata(attn_metadata)
         if self.is_driver_worker:
             model_event_name = ("model_forward_"
@@ -3070,6 +3129,111 @@ class HPUModelRunner:
         self._execute_dummy_scenario(
             (self.max_prefill_batch_size, max_seq_len, 0), None)
 
+    # Copied from vllm/v1/worker/gpu_model_runner.py
+    def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
+        """
+        Initialize the attention backends and attention metadata builders.
+        """
+        assert len(self.attn_groups) == 0, \
+            "Attention backends are already initialized"
+        attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+
+        def get_attn_backends_for_layers(
+                layer_names: list[str]
+        ) -> dict[type[AttentionBackend], list[str]]:
+            attn_backends = {}
+            attn_backend_layers = defaultdict(list)
+            # Dedupe based on full class name; this is a bit safer than using
+            # using the class itself as the key because when we create dynamic
+            # attention backend subclasses (e.g. ChunkedLocalAttention) unless
+            # they are cached correctly, there will be different objects per
+            # layer.
+            for layer_name in layer_names:
+                attn_backend = attn_layers[layer_name].get_attn_backend()
+                key = attn_backend.full_cls_name()
+                attn_backends[key] = attn_backend
+                attn_backend_layers[key].append(layer_name)
+            return {
+                attn_backends[k]: v
+                for k, v in attn_backend_layers.items()
+            }
+
+        def create_attn_groups(
+            attn_backends_map: dict[AttentionBackend, list[str]],
+            kv_cache_spec: KVCacheSpec,
+        ) -> list[AttentionGroup]:
+            attn_groups: list[AttentionGroup] = []
+            for attn_backend, layer_names in attn_backends_map.items():
+                # Some Mamba builders expect `vllm_config.compilation_config` to
+                # have `max_capture_size`. On certain HPU setups this may be
+                # missing, causing a TypeError during builder __init__.
+                # Try normal instantiation first; on failure, temporarily inject
+                # a conservative `max_capture_size` and retry.
+                BuilderCls = attn_backend.get_builder_cls()
+                try:
+                    attn_metadata_builder_i = BuilderCls(
+                        kv_cache_spec,
+                        layer_names,
+                        self.vllm_config,
+                        self.device,
+                    )
+                except TypeError as e:
+                    # Only handle the specific case where max_capture_size is
+                    # None/missing and leads to a comparison TypeError. If it's
+                    # another error, re-raise.
+                    msg = str(e)
+                    if "<' not supported between instances of 'NoneType'" in msg or "max_capture_size" in msg:
+                        logger.warning(
+                            "Builder init failed due to missing compilation_config.max_capture_size; "
+                            "injecting conservative fallback and retrying.")
+                        orig_comp = getattr(self.vllm_config, 'compilation_config', None)
+                        from types import SimpleNamespace
+                        fake_comp = SimpleNamespace(max_capture_size=1,
+                                                    static_forward_context=(getattr(orig_comp, 'static_forward_context', {}) if orig_comp is not None else {}))
+                        # Temporarily set and retry
+                        self.vllm_config.compilation_config = fake_comp
+                        try:
+                            attn_metadata_builder_i = BuilderCls(
+                                kv_cache_spec,
+                                layer_names,
+                                self.vllm_config,
+                                self.device,
+                            )
+                        finally:
+                            # restore original compilation_config
+                            self.vllm_config.compilation_config = orig_comp
+                    else:
+                        raise
+                attn_group = AttentionGroup(attn_backend,
+                                            attn_metadata_builder_i,
+                                            layer_names)
+                attn_groups.append(attn_group)
+            return attn_groups
+
+        for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+            if isinstance(kv_cache_spec, AttentionSpec):
+                attn_backends = get_attn_backends_for_layers(
+                    kv_cache_group_spec.layer_names)
+            # TODO(lucas): move `get_mamba_attn_backend` into the mamba
+            # layers like above
+            elif isinstance(kv_cache_spec, MambaSpec):
+                attn_backends = {
+                    get_mamba_attn_backend(kv_cache_spec.mamba_type):
+                    kv_cache_group_spec.layer_names
+                }
+            else:
+                raise ValueError(
+                    f"Unknown KV cache spec type: {type(kv_cache_spec)}")
+
+            logger.info(f"Got attn_backends {attn_backends}")
+            self.attn_groups.append(
+                create_attn_groups(attn_backends, kv_cache_spec))
+
+        # Calculate reorder batch threshold (if neeeded)
+        # Not implemented
+        # self.calculate_reorder_batch_threshold()
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -3077,11 +3241,13 @@ class HPUModelRunner:
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
+        # TODO(tianmu-li): this needs to be changed for hybrid SSM models
         if len(kv_cache_config.kv_cache_groups) > 1:
             raise NotImplementedError(
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
 
+        self.initialize_attn_backend(kv_cache_config)
         kv_caches: dict[str, torch.Tensor] = {}
 
         for kv_cache_group in kv_cache_config.kv_cache_groups:
@@ -3099,6 +3265,7 @@ class HPUModelRunner:
                 # the min of all `num_blocks`. Verify it here.
                 assert num_blocks >= kv_cache_config.num_blocks
                 if isinstance(kv_cache_spec, FullAttentionSpec):
+                    logger.info(f"Attention spec {kv_cache_spec}")
                     kv_cache_shape = self.attn_backend.get_kv_cache_shape(
                         num_blocks + 1, kv_cache_spec.block_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
@@ -3116,6 +3283,16 @@ class HPUModelRunner:
                         value_cache = None
                     for layer_name in kv_cache_tensor.shared_by:
                         kv_caches[layer_name] = (key_cache, value_cache)
+                elif isinstance(kv_cache_spec, MambaSpec):
+                    state_tensors = []
+                    for (shape, dtype) in zip(kv_cache_spec.shapes,
+                                              kv_cache_spec.dtypes):
+                        tensor = torch.zeros(shape,
+                                             dtype=dtype,
+                                             device=self.device)
+                        state_tensors.append(tensor)
+                    for layer_name in kv_cache_tensor.shared_by:
+                        kv_caches[layer_name] = state_tensors
                 else:
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.
