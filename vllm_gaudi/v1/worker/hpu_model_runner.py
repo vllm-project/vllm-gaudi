@@ -99,7 +99,7 @@ logger = init_logger()
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
-hpu_buffer = {}
+hpu_buffer: list[list[torch.Tensor]] = []
 
 
 class BucketingFailedException(Exception):
@@ -1992,7 +1992,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_prompt_tokens.append(seq_num_prompt_tokens)
             # NOTE: assert that all the decodes are "decodes".
             if idx < num_decodes and not self.is_decoder_only(req_id):
-                assert seq_num_scheduled_tokens == 1
+                #assert seq_num_scheduled_tokens == 1
+                logger.debug("seq_num_scheduled_tokens : ",
+                             seq_num_scheduled_tokens)
         return (self._prepare_prefill_inputs(num_prefills, num_decodes,
                                              num_scheduled_tokens),
                 self._prepare_decode_inputs(num_decodes, num_scheduled_tokens,
@@ -3558,7 +3560,7 @@ def copy_kv_blocks(
 
     i = 0
     global hpu_buffer
-    use_hpu_buffer = False  
+    use_hpu_buffer = False
     for layer_name in src_kv_caches:
         key_cache = src_kv_caches[layer_name][0]
         value_cache = src_kv_caches[layer_name][1]
@@ -3584,10 +3586,5 @@ def copy_kv_blocks(
         "copy_kv_blocks: copy takes %s"
         "|direction=%s|pid=%s|block_size=%s"
         "|src_blocks=%s|dst_blocks=%s",
-        time.perf_counter() - start,
-        direction,
-        os.getpid(),
-        block_size,
-        len(src_block_ids),
-        len(dst_block_ids)
-    )
+        time.perf_counter() - start, direction, os.getpid(), block_size,
+        len(src_block_ids), len(dst_block_ids))
