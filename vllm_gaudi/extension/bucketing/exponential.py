@@ -27,7 +27,7 @@ class ExponentialBucketingStrategy():
             logger().warning("*******************************************************")
         
 
-    def get_prompt_buckets(self, max_num_prefill_seqs, block_size, 
+    def get_prompt_cfgs(self, max_num_prefill_seqs, block_size, 
                            max_num_batched_tokens, max_model_len):
         self.check_for_user_flags('prompt')
         use_merged_prefill = get_config().merged_prefill
@@ -38,29 +38,38 @@ class ExponentialBucketingStrategy():
         prompt_bs_limit = math.ceil(math.log2(max_num_prefill_seqs)) + 1
         prompt_bs_bucket_cfg = [1, 2, max_num_prefill_seqs, prompt_bs_limit]
         max_prompt_seq_limit = math.ceil(math.log2(max_prompt_seq)) + 1
-        prompt_seq_bucket_cfg = [block_size, block_size, max_prompt_seq, max_prompt_seq_limit]
+        prompt_query_bucket_cfg = [block_size, block_size, max_prompt_seq, max_prompt_seq_limit]
+        max_ctx = math.ceil((max_model_len - prompt_query_bucket_cfg[0]) // block_size)
+        max_prompt_ctx_limit = math.ceil(math.log2(max_ctx)) + 1
+        prompt_ctx_bucket_cfg = [0, 1, max_ctx, max_prompt_ctx_limit]
 
         if use_merged_prefill:
-            logger().info("Merged prefill warmup is not implemented for exponential bucketing yet")
+            prev_prompt_bs_bucket_cfg = tuple(prompt_bs_bucket_cfg)
+            prev_prompt_query_bucket_cfg = tuple(prompt_query_bucket_cfg)
+            prev_prompt_ctx_bucket_cfg = tuple(prompt_ctx_bucket_cfg)
+
+            prompt_bs_bucket_cfg = (1, 1, 1, 1)
+            query_min, query_step, _, query_limit = prev_prompt_query_bucket_cfg
+            prompt_query_bucket_cfg = (query_min, query_step*4, max_num_batched_tokens, query_limit)
+            prompt_ctx_bucket_cfg = (0, 4, max_ctx * max_num_prefill_seqs, max_prompt_ctx_limit)
+
+            msg = ('Merged prefill is enabled!\n'
+                  'Overriding prompt bucketing settings!\n'
+                  f'prompt bs cfg: {prev_prompt_bs_bucket_cfg} -> {prompt_bs_bucket_cfg}\n'
+                  f'prompt query cfg: {prev_prompt_query_bucket_cfg} -> {prompt_query_bucket_cfg}\n'
+                  f'prompt ctx cfg: {prev_prompt_ctx_bucket_cfg} -> {prompt_ctx_bucket_cfg}\n')
+            logger().info(msg)
 
         msg = ("Prompt bucket config (min, step, max_warmup, limit) "
                f"bs:{prompt_bs_bucket_cfg}, "
-               f"seq:{prompt_seq_bucket_cfg}")
+               f"query:{prompt_query_bucket_cfg}, "
+               f"blocks:{prompt_ctx_bucket_cfg}")
         logger().info(msg)
 
-        prompt_buckets, prompt_omitted_buckets = \
-            generate_prompt_buckets(
-            prompt_bs_bucket_cfg,
-            prompt_seq_bucket_cfg,
-            block_size,
-            prefix_caching,
-            max_num_batched_tokens,
-            max_model_len)
-
-        return sorted(prompt_buckets)
+        return prompt_bs_bucket_cfg, prompt_query_bucket_cfg, prompt_ctx_bucket_cfg
 
 
-    def get_decode_buckets(self, max_num_seqs, block_size, 
+    def get_decode_cfgs(self, max_num_seqs, block_size, 
                            max_num_batched_tokens, max_model_len,
                            max_blocks):
         self.check_for_user_flags('decode')
@@ -70,6 +79,7 @@ class ExponentialBucketingStrategy():
         # cfgs shape: [min, step, max, limit]
         decode_bs_limit = math.ceil(math.log2(max_num_seqs)) + 1
         decode_bs_bucket_cfg = [1, 2, max_num_seqs, decode_bs_limit]
+        decode_query_bucket_cfg = [1, 1, 1, 1]
         max_decode_block_limit = math.ceil(math.log2(max_blocks)) + 1
         max_decode_blocks = max_blocks if use_contiguous_pa else \
                             min((max_model_len // block_size * max_num_seqs), max_blocks)
@@ -80,113 +90,11 @@ class ExponentialBucketingStrategy():
                f"block:{decode_block_bucket_cfg}")
         logger().info(msg)
 
-        decode_buckets = generate_decode_buckets(
-            decode_bs_bucket_cfg, decode_block_bucket_cfg,
-            max_blocks, max_model_len, block_size)
+        return decode_bs_bucket_cfg, decode_query_bucket_cfg, decode_block_bucket_cfg
 
-        return sorted(decode_buckets)
-
-
-def generate_prompt_buckets(bs_bucket_config,
-                            seq_bucket_config,
-                            block_size,
-                            prefix_caching,
-                            max_num_batched_tokens=None,
-                            max_model_len=None):
-    _, _, bmax, _ = seq_bucket_config
-    batch_size_buckets = warmup_range_with_limit(bs_bucket_config)
-    long_context = False
-    if bmax >= 8192:
-        long_context = True
-    seq_bucket_config = warmup_range_with_limit(seq_bucket_config, long_context=True)
-
-    if prefix_caching:
-        buckets_3d = []
-        for bs in batch_size_buckets:
-            for b in seq_bucket_config:
-                buckets_3d.append((bs, b, 0))
-                max_blocks_range = (bmax - b) // block_size
-                if max_blocks_range == 0:
-                    continue
-                else:
-                    num_buckets_3d = math.ceil(math.log2(max_blocks_range)) + 1
-
-                for i in range(1, num_buckets_3d + 1):
-                    power_unpadded = 1 * np.float_power(
-                        max_blocks_range, (1 / float(num_buckets_3d)) * i)
-                    new_bucket = math.ceil(power_unpadded)
-                    buckets_3d.append((bs, b, new_bucket))
-
-        buckets = buckets_3d
-    else:
-        buckets = list(
-                itertools.product(batch_size_buckets,
-                                seq_bucket_config, [0]))
-
-    if len(buckets) == 0:
-        msg = ("No buckets could be captured with following config "
-               f"(min, step, max_warmup): "
-               f"bs:{bs_bucket_config}, "
-               f"seq:{seq_bucket_config}")
-        raise ValueError(msg)
-
-    filtered_buckets = buckets
-    if max_num_batched_tokens is not None and max_model_len is not None:
-        # Remove buckets exceeding batch token budget
-        filtered_buckets = list(
-            filter(
-                lambda bucket: bucket[0] * (bucket[1] +  bucket[2] * block_size) <= max_num_batched_tokens \
-                and bucket[1] <= max_model_len, buckets))
-
-        if len(filtered_buckets) == 0:
-            # we can handle this if we ignore max_num_batched_tokens
-            min_bucket_bs, min_bucket_seq, min_bucket_ctx = min(buckets,
-                                                key=lambda b: (b[0] * b[1]))
-            min_reqd_budget = min_bucket_bs * (min_bucket_seq + min_bucket_ctx * block_size)
-            msg = (
-                "The current bucketing configuration "
-                f"(min, step, max_warmup): "
-                f"bs:{bs_bucket_config}, "
-                f"seq:{seq_bucket_config} cannot be used with specified "
-                f"max_num_batched_tokens ({max_num_batched_tokens}), as the "
-                f"smallest bucket ({min_reqd_budget}) would exceed token "
-                "budget. Please increase max_num_batched_tokens or decrease "
-                "bucket minimum. Ignoring max_num_batched_tokens at risk of "
-                "out-of-memory errors.")
-            logger().warning(msg)
-            return list(
-                sorted(buckets, key=lambda b: (b[0] * b[1], b[1], b[0]))), []
-
-    captured_buckets = list(
-        sorted(filtered_buckets, key=lambda b: (b[0] * b[1], b[1], b[0])))
-    omitted_buckets = list(
-        sorted([x for x in buckets if x not in filtered_buckets]))
-    return captured_buckets, omitted_buckets
-
-
-def generate_decode_buckets(bs_bucket_config, blocks_bucket_config,
-                            max_blocks, max_model_len, block_size):
-    buckets = []
-    bs_buckets = warmup_range_with_limit(bs_bucket_config)
-    block_buckets = warmup_range_with_limit(blocks_bucket_config)
-    valid_blocks = set()
-    #NOTE(kzawora): generate only valid combinations of
-    # exponentially-spaced bs and blocks, where the product of bs and blocks
-    # is less than or equal to max_model_len. To handle corner cases 
-    # (e.g. longer context due to fragmentation), we're adding an additional
-    # bucket with max_blocks for each batch size.
-    # For this to work properly, bucket dimensions need be requested as 
-    # a combination of (batch_size, num_blocks), not separately.
-    for bs in bs_buckets:
-        max_blocks_per_bs = min(bs * math.ceil(max_model_len / block_size), max_blocks)
-        try:
-            upper_bucket_bound = max(x for x in sorted(block_buckets) if x <= max_blocks_per_bs)
-        except ValueError:
-            continue
-        valid_blocks = set((bs, 1, x) for x in sorted(block_buckets) if x <= upper_bucket_bound \
-                          and bs <= x)
-        buckets.extend(valid_blocks)
-    return list(buckets)
+    def get_range(self, cfg):
+        range_for_cfg = warmup_range_with_limit(cfg)
+        return sorted(range_for_cfg)
 
 
 def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=False):
@@ -221,6 +129,9 @@ def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=Fals
     """ # noqa: E501
 
     bmin, bstep, bmax, num_buckets = config
+    add_zero_bucket = bmin == 0
+    if add_zero_bucket:
+        bmin = bstep
     linear_buckets = set(np.arange(bmin, bmax + 1, step=bstep))
     assert num_buckets > 0, "num_buckets must be a positive integer"
     if num_buckets == 1:
@@ -269,4 +180,6 @@ def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=Fals
             '''
             if bucket not in buckets:
                 buckets.add(bucket)
+    if add_zero_bucket:
+        buckets.add(0)
     return list(sorted(buckets))
