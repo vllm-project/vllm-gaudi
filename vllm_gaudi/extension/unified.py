@@ -326,7 +326,7 @@ def create_unified_batch(token_ids: list[list[int]],
                          prompt_lengths: list[int],
                          dtype: torch.dtype,
                          contiguous_kv: bool,
-                         bucketing_fn: Callable[[int, int, int, int], tuple[int, int, int, int]]) -> tuple[torch.tensor, torch.tensor, torch.tensor, torch.tensor, HPUUnifiedAttentionMetadata]:
+                         bucketing_fn: Callable[[int, int, int, int], tuple[int, int, int, int]]) -> tuple[torch.tensor, torch.tensor, torch.tensor, list[int], HPUUnifiedAttentionMetadata]:
     """Create a batch that utilizes unified attention"""
     #TODO: this needs to be optimized
     slots = []

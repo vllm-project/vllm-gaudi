@@ -1613,15 +1613,15 @@ class HPUModelRunner:
             contiguous_kv=self.use_contiguous_pa,
             bucketing_fn=self.unified_bucketing_fn,
         )
-        (token_ids, token_positions, logits_indices, logits_groups,
+        (token_ids_t, token_positions_t, logits_indices_t, logits_groups,
          attn_metadata) = batch_data
         logits_requests = [req_ids[lg] for lg in logits_groups]
         return PrefillInputData(request_ids=[req_ids],
                                 prompt_lens=[None],
-                                token_ids=[token_ids.unsqueeze(0)],
+                                token_ids=[token_ids_t.unsqueeze(0)],
                                 attn_metadata=[attn_metadata],
-                                position_ids=[token_positions.unsqueeze(0)],
-                                logits_indices=[logits_indices],
+                                position_ids=[token_positions_t.unsqueeze(0)],
+                                logits_indices=[logits_indices_t],
                                 logits_requests=[logits_requests])
 
     def _prepare_prefill_inputs(
@@ -2006,13 +2006,13 @@ class HPUModelRunner:
             contiguous_kv=self.use_contiguous_pa,
             bucketing_fn=self.unified_bucketing_fn,
         )
-        (token_ids, token_positions, logits_indices, logits_groups,
+        (token_ids_t, token_positions_t, logits_indices_t, logits_groups,
          attn_metadata) = batch_data
         return DecodeInputData(
             num_decodes=num_decodes,
-            token_ids=token_ids.unsqueeze(-1),
-            position_ids=token_positions.unsqueeze(-1),
-            logits_indices=logits_indices,
+            token_ids=token_ids_t.unsqueeze(-1),
+            position_ids=token_positions_t.unsqueeze(-1),
+            logits_indices=logits_indices_t,
             attn_metadata=attn_metadata,
         )
 
