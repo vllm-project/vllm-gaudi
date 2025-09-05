@@ -143,7 +143,6 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     window_block_groups: Optional[torch.Tensor] = None
     window_block_usage: Optional[torch.Tensor] = None
     window_attn_bias: Optional[torch.Tensor] = None
-    use_window_sdpa: Optional[bool] = None
 
 
 @dataclass
@@ -581,12 +580,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                                      value_cache,
                                                      attn_metadata.block_size)
 
-            if self.sliding_window:
-                if hasattr(attn_metadata, 'window_attn_bias') and attn_metadata.window_attn_bias is not None:
+            if self.sliding_window and seq_len > self.sliding_window:
+                if hasattr(attn_metadata, 'window_attn_bias'
+                           ) and attn_metadata.window_attn_bias is not None:
                     attn_bias = attn_metadata.window_attn_bias
-
-                if attn_metadata.use_window_sdpa:
-                    attn_bias = attn_metadata.attn_bias
+                else:
+                    attn_bias = None
                     window_size = (self.sliding_window, 0)
                     common_args['window_size'] = window_size
                     # TODO: Currently HPU doesn't support GQA for FusedSDPA
@@ -613,7 +612,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         else:
             # Decoding run.
             if self.sliding_window and \
-            attn_metadata.window_block_list is not None:
+                attn_metadata.window_block_list is not None:
                 block_list = attn_metadata.window_block_list
                 block_groups = attn_metadata.window_block_groups
                 block_mapping = attn_metadata.window_block_mapping

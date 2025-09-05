@@ -62,6 +62,7 @@ from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.interfaces_base import (
     is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
+from vllm.transformers_utils.config import is_interleaved
 from vllm.v1.worker.utils import (gather_mm_placeholders,
                                   sanity_check_mm_encoder_outputs,
                                   scatter_mm_placeholders)
@@ -287,21 +288,16 @@ class HpuModelAdapter(torch.nn.Module):
             self.model)
         self._rotary_prepare_cos_sin = self._get_prepare_cos_sin()
         self.is_mm_optimized = is_mm_optimized(self.model)
-        text_config = vllm_config.model_config.hf_config.get_text_config()
-        self.interleaved_sliding_window = getattr(
-            text_config, "interleaved_sliding_window",
-            None) if text_config else None
-
-        self.use_window_sdpa = os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD",
-                                         "false").strip().lower() in ("1",
-                                                                      "true")
-        if self.use_window_sdpa:
-            self.slice_size = int(
-                os.getenv("PT_HPU_QKV_SLICE_SEQ_LEN_THLD", "1024"))
-
-            os.environ["PT_HPU_SDPA_BC_FACTOR"] = str(self.slice_size)
-            os.environ["PT_HPU_SDPA_BR_FACTOR"] = str(self.slice_size)
-            os.environ["PT_HPU_QKV_SLICE_SEQ_LEN_THLD"] = str(self.slice_size)
+        self.sliding_window = vllm_config.model_config.get_sliding_window()
+        self.interleaved_sliding_window = is_interleaved(
+            vllm_config.model_config.hf_text_config)
+        if self.interleaved_sliding_window:
+            self.use_window_sdpa = os.getenv(
+                "PT_HPU_SDPA_QKV_SLICE_MODE_FWD",
+                "false").strip().lower() in ("1", "true")
+            self.slice_size = int(os.getenv("PT_HPU_SDPA_BC_FACTOR", "1024"))
+            self.slice_thld = int(
+                os.environ.get('VLLM_FUSEDSDPA_SLIDE_THLD', '8192'))
 
     def _get_rotary_embedding_module(self, model: torch.nn.Module):
         """
@@ -378,12 +374,19 @@ class HpuModelAdapter(torch.nn.Module):
                                              "TrimmedAttentionMetadata",
                                              attn_bias=attn_bias)
         return attn_metadata
+
     def _set_attn_bias_for_sliding_window(self, attn_metadata, batch_size,
                                           seq_len, window_size, device, dtype):
 
-        if (seq_len <= window_size) or (not attn_metadata.is_prompt) or (
-                attn_metadata.use_window_sdpa):
-            # no need to set sliding window mask, just use built-in sdpa
+        if (attn_metadata is None
+                or not attn_metadata.is_prompt) or (seq_len <= window_size):
+            return attn_metadata
+
+        # FusedSDPA with window_size is only supported when the length
+        # of the input_token is multiple of the slice_size
+        if (self.use_window_sdpa and seq_len >= self.slice_thld
+                and self.slice_size != 0 and (seq_len % self.slice_size == 0)):
+            # no need to set sliding window mask, just use built-in window-sdpa
             return attn_metadata
 
         prefill_metadata = attn_metadata
@@ -401,8 +404,12 @@ class HpuModelAdapter(torch.nn.Module):
         attn_metadata = prefill_metadata._replace(window_attn_bias=attn_bias)
         return attn_metadata
 
-    def _set_block_mapping(self, metadata, batch_size, device, dtype,
-                           is_window_block):
+    def _set_block_mapping(self,
+                           metadata,
+                           batch_size,
+                           device,
+                           dtype,
+                           is_window_block=False):
         if is_window_block:
             block_usage = metadata.window_block_usage
             block_groups = metadata.window_block_groups
@@ -445,12 +452,13 @@ class HpuModelAdapter(torch.nn.Module):
         if is_window_block:
             metadata = custom_tuple_replace(metadata,
                                             "TrimmedAttentionMetadata",
-                                            block_groups=block_groups)
-        block_mapping = block_mapping.to(dtype)
-        metadata = custom_tuple_replace(metadata,
-                                        "TrimmedAttentionMetadata",
-                                        block_mapping=block_mapping,
-                                        attn_bias=attn_bias)
+                                            window_block_mapping=block_mapping,
+                                            window_attn_bias=attn_bias)
+        else:
+            metadata = custom_tuple_replace(metadata,
+                                            "TrimmedAttentionMetadata",
+                                            block_mapping=block_mapping,
+                                            attn_bias=attn_bias)
         return metadata
 
     def _update_metadata(self, attn_metadata, batch_size, seq_len, device,
@@ -458,9 +466,16 @@ class HpuModelAdapter(torch.nn.Module):
         if attn_metadata.is_prompt:
             attn_metadata = self._set_attn_bias(attn_metadata, batch_size,
                                                 seq_len, device, dtype)
+            if self.interleaved_sliding_window:
+                attn_metadata = self._set_attn_bias_for_sliding_window(
+                    attn_metadata, batch_size, seq_len, self.sliding_window,
+                    device, dtype)
         else:
             attn_metadata = self._set_block_mapping(attn_metadata, batch_size,
                                                     device, dtype)
+            if self.interleaved_sliding_window:
+                attn_metadata = self._set_block_mapping(
+                    attn_metadata, batch_size, device, dtype, True)
         return attn_metadata
 
     def forward(self, *args, **kwargs):
@@ -594,7 +609,6 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
         'window_block_usage',
         'window_block_groups',
         'window_attn_bias',
-        'use_window_sdpa',
     ])
     return attention_metadata
 
@@ -658,6 +672,8 @@ class HPUModelRunner:
         self.is_pooling_model = model_config.pooler_config is not None
 
         self.sliding_window = model_config.get_sliding_window()
+        self.interleaved_sliding_window = is_interleaved(
+            vllm_config.model_config.hf_text_config)
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
@@ -1797,6 +1813,13 @@ class HPUModelRunner:
 
         block_tables_list = self.defragmenter.resolve_all(block_tables_list)
 
+        if self.interleaved_sliding_window and self.sliding_window > 0:
+            sliding_block_size = (self.sliding_window // self.block_size)
+            window_block_tables = [
+                block_table[-sliding_block_size:]
+                for block_table in block_tables_list
+            ]
+
         # CONTEXT_LENS [batch_size]
         block_list, block_groups, block_usage = \
             self.get_habana_paged_attn_buffers(
@@ -1804,6 +1827,12 @@ class HPUModelRunner:
                 slot_mapping.tolist(),
                 padded_batch_size * num_tokens
             )
+
+        if self.interleaved_sliding_window:
+            window_block_list, window_block_groups, window_block_usage = \
+                self.get_habana_paged_attn_buffers(
+                    window_block_tables, slot_mapping.tolist(),
+                    padded_batch_size)
 
         logits_indices = torch.zeros(padded_batch_size,
                                      dtype=torch.int32,
@@ -1846,6 +1875,16 @@ class HPUModelRunner:
         block_list_device = async_h2d_copy(block_list, device=self.device)
         block_usage_device = async_h2d_copy(block_usage, device=self.device)
         block_groups_device = async_h2d_copy(block_groups, device=self.device)
+        window_block_list_device = async_h2d_copy(
+            window_block_list,
+            device=self.device) if self.interleaved_sliding_window else None
+        window_block_usage_device = async_h2d_copy(
+            window_block_usage,
+            device=self.device) if self.interleaved_sliding_window else None
+        window_block_groups_device = async_h2d_copy(
+            window_block_groups,
+            device=self.device) if self.interleaved_sliding_window else None
+
         num_decode_tokens_device = async_h2d_copy(num_decode_tokens,
                                                   device=self.device)
         slot_mapping_device = async_h2d_copy(slot_mapping, device=self.device)
@@ -1864,6 +1903,9 @@ class HPUModelRunner:
                 num_decode_tokens=num_decode_tokens_device,
                 slot_mapping=slot_mapping_device,
                 block_size=self.block_size,
+                window_block_list=window_block_list_device,
+                window_block_usage=window_block_usage_device,
+                window_block_groups=window_block_groups_device,
                 query_start_loc=query_start_loc,
             ),
             spec_decode_metadata=spec_decode_metadata)

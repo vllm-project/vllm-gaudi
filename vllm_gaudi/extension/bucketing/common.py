@@ -58,6 +58,13 @@ class HPUBucketingManager():
         self.fallback_seq_base_step = 32
         self.fallback_blocks_base_step = 32
 
+        self.use_sliding_window = get_config().PT_HPU_SDPA_QKV_SLICE_MODE_FWD
+        if self.use_sliding_window:
+            self.slice_size = get_config().PT_HPU_SDPA_BC_FACTOR if \
+                get_config().PT_HPU_SDPA_BC_FACTOR is not None else 1024
+            self.slice_thld = get_config().VLLM_FUSEDSDPA_SLIDE_THLD if \
+                get_config().VLLM_FUSEDSDPA_SLIDE_THLD is not None else 8192
+
     def get_bucketing_strategy(self):
         strategy = None
         # TODO - we can use different strategies for decode and prompt
@@ -83,6 +90,12 @@ class HPUBucketingManager():
                             block_size = self.block_size,
                             max_num_batched_tokens = self.max_num_batched_tokens,
                             max_model_len = self.max_model_len)
+
+            if self.use_sliding_window:
+                self.prompt_buckets = [t for t in self.prompt_buckets
+                    if t[1] < self.slice_thld or (
+                    t[1] >= self.slice_thld and t[1] % self.slice_size == 0)]
+
             self.log_generate_info(True)
         else:
             logger().info("Bucketing is off - skipping prompt buckets generation")
@@ -116,8 +129,12 @@ class HPUBucketingManager():
     def generate_fallback_bucket(self, batch_size, seq_len, ctx):
         assert self.max_num_batched_tokens is not None
         new_batch_size = calc_fallback_value(batch_size, self.fallback_bs_base_step)
-        new_seq_len = min(calc_fallback_value(seq_len, self.fallback_seq_base_step),
-                          self.max_num_batched_tokens)
+        if self.use_sliding_window and seq_len >= self.slice_thld:
+            new_seq_len = math.ceil(seq_len / self.slice_size) * self.slice_size
+        else:
+            new_seq_len = min(calc_fallback_value(seq_len, self.fallback_seq_base_step),
+                            self.max_num_batched_tokens)
+
         if self.num_hpu_blocks is None:
             new_ctx = 0
         else:
