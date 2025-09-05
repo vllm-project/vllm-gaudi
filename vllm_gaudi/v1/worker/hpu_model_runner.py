@@ -2942,7 +2942,7 @@ class HPUModelRunner:
             # Create dummy requests for this specific configuration
             dummy_req_ids = [
                 f"warmup_req_{batch_size}_{i}"
-                for i in [0] + list(range(1, batch_size))
+                for i in range(max(1, batch_size))
             ]
 
             for i, req_id in enumerate(dummy_req_ids):
@@ -2995,6 +2995,7 @@ class HPUModelRunner:
 
             # Cleanup after batch has been warmed up
             self.input_batch.req_id_to_index = {}
+            self.requests = {}
 
         # Final synchronization to ensure all operations are completed
         torch.hpu.synchronize()
