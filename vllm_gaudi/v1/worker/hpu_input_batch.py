@@ -10,11 +10,9 @@ import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
-from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
-from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
@@ -33,8 +31,7 @@ class CachedRequestState:
     prompt_token_ids: list[int]
     mm_kwargs: list[MultiModalKwargs]
     mm_positions: list[PlaceholderRange]
-    sampling_params: Optional[SamplingParams]
-    pooling_params: Optional[PoolingParams]
+    sampling_params: SamplingParams
     generator: Optional[torch.Generator]
 
     block_ids: list[list[int]]
@@ -242,7 +239,6 @@ class InputBatch:
 
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
-        self.pooling_params: dict[str, PoolingParams] = {}
 
     @property
     def req_ids(self) -> list[str]:
@@ -287,79 +283,76 @@ class InputBatch:
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
         self.block_table.add_row(request.block_ids, req_index)
 
-        if sampling_params := request.sampling_params:
-            if (self.is_spec_decode
-                    and is_spec_decode_unsupported(sampling_params)):
-                self.spec_decode_unsupported_reqs.add(req_id)
-            if sampling_params.sampling_type == SamplingType.GREEDY:
-                # Avoid later division by zero.
-                self.temperature_cpu[req_index] = -1.0
-                self.greedy_reqs.add(req_id)
-            else:
-                self.temperature_cpu[req_index] = sampling_params.temperature
-                self.random_reqs.add(req_id)
-
-            self.top_p_cpu[req_index] = sampling_params.top_p
-            if sampling_params.top_p < 1:
-                self.top_p_reqs.add(req_id)
-            top_k = sampling_params.top_k
-            if 0 < top_k < self.vocab_size:
-                self.top_k_reqs.add(req_id)
-            else:
-                top_k = self.vocab_size
-            self.top_k_cpu[req_index] = top_k
-            self.min_p_cpu[req_index] = sampling_params.min_p
-            self.frequency_penalties_cpu[
-                req_index] = sampling_params.frequency_penalty
-            if sampling_params.min_p > _SAMPLING_EPS:
-                self.min_p_reqs.add(req_id)
-            if sampling_params.frequency_penalty != 0.0:
-                self.frequency_penalties_reqs.add(req_id)
-            self.presence_penalties_cpu[
-                req_index] = sampling_params.presence_penalty
-            if sampling_params.presence_penalty != 0.0:
-                self.presence_penalties_reqs.add(req_id)
-            self.repetition_penalties_cpu[
-                req_index] = sampling_params.repetition_penalty
-            if sampling_params.repetition_penalty != 1.0:
-                self.repetition_penalties_reqs.add(req_id)
-
-            # NOTE(woosuk): self.generators should not include the requests that
-            # do not have their own generator.
-            if request.generator is not None:
-                self.generators[req_index] = request.generator
-
-            if sampling_params.logprobs is not None:
-                self.num_logprobs[req_id] = sampling_params.logprobs
-            if sampling_params.prompt_logprobs is not None:
-                self.num_prompt_logprobs[req_id] = (
-                    sampling_params.prompt_logprobs)
-
-            if sampling_params.allowed_token_ids:
-                self.has_allowed_token_ids.add(req_id)
-                if self.allowed_token_ids_mask_cpu_tensor is None:
-                    # Lazy allocation for this tensor, which can be large.
-                    # False means we don't fill with -inf.
-                    self.allowed_token_ids_mask = torch.zeros(
-                        self.max_num_reqs,
-                        self.vocab_size,
-                        dtype=torch.bool,
-                        device=self.device)
-                    self.allowed_token_ids_mask_cpu_tensor = torch.zeros(
-                        self.max_num_reqs,
-                        self.vocab_size,
-                        dtype=torch.bool,
-                        device="cpu")
-                self.allowed_token_ids_mask_cpu_tensor[req_index] = True
-                # False means we don't fill with -inf.
-                self.allowed_token_ids_mask_cpu_tensor[req_index][
-                    sampling_params.allowed_token_ids] = False
-            if sampling_params.bad_words_token_ids:
-                self.bad_words_token_ids[
-                    req_index] = sampling_params.bad_words_token_ids
+        sampling_params = request.sampling_params
+        assert sampling_params is not None, "pooling requests not supported yet"
+        if (self.is_spec_decode
+                and is_spec_decode_unsupported(sampling_params)):
+            self.spec_decode_unsupported_reqs.add(req_id)
+        if sampling_params.sampling_type == SamplingType.GREEDY:
+            # Avoid later division by zero.
+            self.temperature_cpu[req_index] = -1.0
+            self.greedy_reqs.add(req_id)
         else:
-            assert request.pooling_params is not None
-            self.pooling_params[req_id] = request.pooling_params
+            self.temperature_cpu[req_index] = sampling_params.temperature
+            self.random_reqs.add(req_id)
+
+        self.top_p_cpu[req_index] = sampling_params.top_p
+        if sampling_params.top_p < 1:
+            self.top_p_reqs.add(req_id)
+        top_k = sampling_params.top_k
+        if 0 < top_k < self.vocab_size:
+            self.top_k_reqs.add(req_id)
+        else:
+            top_k = self.vocab_size
+        self.top_k_cpu[req_index] = top_k
+        self.min_p_cpu[req_index] = sampling_params.min_p
+        self.frequency_penalties_cpu[
+            req_index] = sampling_params.frequency_penalty
+        if sampling_params.min_p > _SAMPLING_EPS:
+            self.min_p_reqs.add(req_id)
+        if sampling_params.frequency_penalty != 0.0:
+            self.frequency_penalties_reqs.add(req_id)
+        self.presence_penalties_cpu[
+            req_index] = sampling_params.presence_penalty
+        if sampling_params.presence_penalty != 0.0:
+            self.presence_penalties_reqs.add(req_id)
+        self.repetition_penalties_cpu[
+            req_index] = sampling_params.repetition_penalty
+        if sampling_params.repetition_penalty != 1.0:
+            self.repetition_penalties_reqs.add(req_id)
+
+        # NOTE(woosuk): self.generators should not include the requests that
+        # do not have their own generator.
+        if request.generator is not None:
+            self.generators[req_index] = request.generator
+
+        if sampling_params.logprobs is not None:
+            self.num_logprobs[req_id] = sampling_params.logprobs
+        if sampling_params.prompt_logprobs is not None:
+            self.num_prompt_logprobs[req_id] = sampling_params.prompt_logprobs
+
+        if sampling_params.allowed_token_ids:
+            self.has_allowed_token_ids.add(req_id)
+            if self.allowed_token_ids_mask_cpu_tensor is None:
+                # Lazy allocation for this tensor, which can be large.
+                # False means we don't fill with -inf.
+                self.allowed_token_ids_mask = torch.zeros(self.max_num_reqs,
+                                                          self.vocab_size,
+                                                          dtype=torch.bool,
+                                                          device=self.device)
+                self.allowed_token_ids_mask_cpu_tensor = torch.zeros(
+                    self.max_num_reqs,
+                    self.vocab_size,
+                    dtype=torch.bool,
+                    device="cpu")
+            self.allowed_token_ids_mask_cpu_tensor[req_index] = True
+            # False means we don't fill with -inf.
+            self.allowed_token_ids_mask_cpu_tensor[req_index][
+                sampling_params.allowed_token_ids] = False
+
+        if sampling_params.bad_words_token_ids:
+            self.bad_words_token_ids[
+                req_index] = sampling_params.bad_words_token_ids
 
         # Add request lora ID
         if request.lora_request:
@@ -412,7 +405,6 @@ class InputBatch:
             # False means we don't fill with -inf.
             self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
         self.bad_words_token_ids.pop(req_index, None)
-        self.pooling_params.pop(req_id, None)
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
@@ -692,25 +684,6 @@ class InputBatch:
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
             logitsprocs=self.logitsprocs,
-        )
-
-    @property
-    def pooling_metadata(self) -> PoolingMetadata:
-        if len(self.pooling_params) == 0:
-            pooling_params = []
-        else:
-            # Note, for now this assumes that all request in the batch
-            # are either sampling or pooling requests
-            assert len(self.req_ids) == len(self.pooling_params)
-            pooling_params = [
-                self.pooling_params[req_id] for req_id in self.req_ids
-            ]
-
-        return PoolingMetadata(
-            prompt_lens=torch.from_numpy(
-                self.num_prompt_tokens[:self.num_reqs]).to(self.device),
-            prompt_token_ids=self.sampling_metadata.prompt_token_ids,
-            pooling_params=pooling_params,
         )
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
