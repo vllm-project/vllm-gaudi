@@ -30,7 +30,7 @@ def time_generation(llm: LLM,
     for _ in range(num_warmups):
         llm.generate(prompts, sampling_params)
     logging.info("Starting generation...")
-    ret = []
+    ret: list[str] = []
     acceptance_counts = [0] * (num_spec_tokens + 1)
     start = time.time()
     if do_profile:

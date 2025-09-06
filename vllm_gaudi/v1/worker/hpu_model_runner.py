@@ -1867,18 +1867,21 @@ class HPUModelRunner:
 
             ##################################################
             logits_indices = torch.from_numpy(logits_indices)
-            target_logits_indices = torch.from_numpy(target_logits_indices).to(
+            target_logits_indices_device = \
+                torch.from_numpy(target_logits_indices).to(
                 self.device, non_blocking=True)
-            bonus_logits_indices = torch.from_numpy(bonus_logits_indices).to(
+            bonus_logits_indices_device = \
+                torch.from_numpy(bonus_logits_indices).to(
                 self.device, non_blocking=True)
-            draft_token_ids = token_ids_device[target_logits_indices + 1]
+            draft_token_ids = token_ids_device[target_logits_indices_device +
+                                               1]
 
             spec_decode_metadata = SpecDecodeMetadata(
                 draft_token_ids=draft_token_ids,
                 num_draft_tokens=num_draft_tokens.tolist(),
                 cu_num_draft_tokens=cu_num_draft_tokens,
-                target_logits_indices=target_logits_indices,
-                bonus_logits_indices=bonus_logits_indices,
+                target_logits_indices=target_logits_indices_device,
+                bonus_logits_indices=bonus_logits_indices_device,
                 logits_indices=logits_indices,
             )
         return logits_indices, spec_decode_metadata
@@ -3292,6 +3295,8 @@ class HPUModelRunner:
 
             draft_token_ids = None
             if decode_data is not None:
+                assert decode_data.spec_decode_metadata is not None
+                assert decode_data.position_ids is not None
                 num_draft_tokens = \
                     decode_data.spec_decode_metadata.num_draft_tokens
                 max_num_draft_tokens = max(num_draft_tokens)
