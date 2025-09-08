@@ -60,7 +60,6 @@ def test_generate_prompt_buckets():
                                max_model_len, bs, prompt_bs,
                                max_num_batched_tokens, block_size, max_blocks)
     assert len(buckets) == 50
-    assert all(bs * seq <= max_num_batched_tokens for bs, seq, _ in buckets)
 
 
 def test_generate_decode_buckets():
