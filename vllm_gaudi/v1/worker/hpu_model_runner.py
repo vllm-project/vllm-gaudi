@@ -1245,7 +1245,8 @@ class HPUModelRunner:
                           logits_reqs=None) -> SamplingMetadata:
         # Create the sampling metadata.
         req_id_output_token_ids_lst = \
-            self._generate_req_id_output_token_ids_lst(request_ids, pad_to, logits_reqs)
+            self._generate_req_id_output_token_ids_lst(request_ids, \
+                                                       pad_to, logits_reqs)
         sampling_metadata = self.input_batch.make_selective_sampling_metadata(
             req_id_output_token_ids_lst, skip_copy=not batch_changed)
         return sampling_metadata
@@ -2196,8 +2197,7 @@ class HPUModelRunner:
             logits_device: torch.Tensor,
             request_ids: Optional[list[str]] = None,
             pad_to: Optional[int] = None,
-            logits_requests = None
-    ) -> tuple[torch.Tensor, SamplingMetadata]:
+            logits_requests=None) -> tuple[torch.Tensor, SamplingMetadata]:
         htorch.core.mark_step()
         sampling_metadata = self._prepare_sampling(batch_changed, request_ids,
                                                    pad_to, logits_requests)
