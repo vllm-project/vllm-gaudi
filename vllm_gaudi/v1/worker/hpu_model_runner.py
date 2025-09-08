@@ -2854,24 +2854,34 @@ class HPUModelRunner:
         seq_lengths = [b * block_size - 1 for b in blocks]
         return seq_lengths
 
-    def split_list_to_max(self, total_sum, values, max_val):
-        base = total_sum // values
-        remain = total_sum % values
-        result = [base] * values
+    def distribute_sum_evenly(self, total_sum, max_length):
+        '''
+        Return a balanced list of ints that sums up to total_sum.
+        List cannot be longer than max_length.
+        '''
+        base = total_sum // max_length
+        remain = total_sum % max_length
+        result = [base] * max_length
 
         for i in range(remain):
             result[i] += 1
 
         return result
 
-    def unmerge_prefills_to_bs(self, query_len, ctx_blocks):
+    def get_merged_prefill_seq_lens(self, query_len, ctx_blocks):
+        '''
+        Get seperate sequence lengths from merged layout to individual 
+        samples.
+        Returns list of sequence length (including query and context) and
+        context lengths.
+        '''
         query_per_sample = math.ceil(query_len / self.max_num_seqs)
         max_ctx_per_sample = math.ceil(
             (self.max_model_len - query_per_sample) // self.block_size)
 
-        ctx_list = self.split_list_to_max(ctx_blocks, self.max_num_seqs,
+        ctx_list = self.distribute_sum_evenly(ctx_blocks, self.max_num_seqs,
                                           max_ctx_per_sample)
-        query_list = self.split_list_to_max(query_len, self.max_num_seqs,
+        query_list = self.distribute_sum_evenly(query_len, self.max_num_seqs,
                                             query_per_sample)
         prompt_list = [
             q + c * self.block_size for q, c in zip(query_list, ctx_list)
@@ -2885,33 +2895,33 @@ class HPUModelRunner:
         scheduled_tokens: dict[str, int] = {}
 
         if prompt_cfg:
-            prompt_bs, prompt_query_len, prompt_blocks = prompt_cfg
-            prompt_ctx_len = prompt_blocks * self.block_size
+            prompt_bs, prompt_query_len, prompt_num_blocks = prompt_cfg
+            prompt_ctx_len = prompt_num_blocks * self.block_size
             prompt_total_tokens = [prompt_query_len + prompt_ctx_len]
-            prompt_context_blocks = [prompt_blocks]
+            prompt_context_blocks = [prompt_num_blocks]
             if self.max_model_len < sum(prompt_total_tokens) \
                 and self.use_merged_prefill:
                 # split query and ctx in merged prefill case
-                prompt_total_tokens, prompt_context_blocks = \
-                     self.unmerge_prefills_to_bs(prompt_query_len,
-                                                 prompt_blocks)
-            for tokens, context in zip(prompt_total_tokens,
-                                       prompt_context_blocks):
+                prompt_total_tokens, prompt_num_context_blocks = \
+                     self.get_merged_prefill_seq_lens(prompt_query_len,
+                                                 prompt_num_blocks)
+            for tokens, context_len in zip(prompt_total_tokens,
+                                       prompt_num_context_blocks):
                 self._add_dummy_request(requests,
                                         scheduled_tokens,
-                                        num_computed_tokens=(context *
+                                        num_computed_tokens=(context_len *
                                                              self.block_size),
                                         total_tokens=tokens,
                                         scheduled_tokens=prompt_query_len,
                                         is_prompt=True)
         if decode_cfg:
-            decode_bs, decode_query_len, decode_blocks = decode_cfg
+            decode_bs, decode_query_len, decode_num_blocks = decode_cfg
             if self.use_contiguous_pa:
                 decode_seq_lengths = [self.block_size] * decode_bs
-                block_id = decode_blocks - 1
+                block_id = decode_num_blocks - 1
             else:
                 decode_seq_lengths = self._generate_seq_lengths(
-                    decode_bs, decode_blocks, self.block_size)
+                    decode_bs, decode_num_blocks, self.block_size)
                 block_id = 0
             for dsl in decode_seq_lengths:
                 self._add_dummy_request(requests,
