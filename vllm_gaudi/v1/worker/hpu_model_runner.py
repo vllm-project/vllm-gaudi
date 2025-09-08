@@ -1091,7 +1091,7 @@ class HPUModelRunner:
 
             self.encoder_cache[mm_hash] = scatter_mm_placeholders(
                 output,
-                is_embed=pos_info.is_embed,
+                is_embed=pos_info.is_embed.to(device=output.device),
             )
 
     # modified from: vllm/v1/worker/gpu_model_runner.py
