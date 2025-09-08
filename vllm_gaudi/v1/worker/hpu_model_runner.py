@@ -2908,7 +2908,7 @@ class HPUModelRunner:
                      self.get_merged_prefill_seq_lens(prompt_query_len,
                                                  prompt_num_blocks)
             for tokens, context_len in zip(prompt_total_tokens,
-                                       prompt_num_context_blocks):
+                                           prompt_num_context_blocks):
                 self._add_dummy_request(requests,
                                         scheduled_tokens,
                                         num_computed_tokens=(context_len *

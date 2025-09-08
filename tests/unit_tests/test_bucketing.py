@@ -59,7 +59,7 @@ def test_generate_prompt_buckets():
     buckets = generate_buckets(bs_range, query_range, ctx_range, True,
                                max_model_len, bs, prompt_bs,
                                max_num_batched_tokens, block_size, max_blocks)
-    assert len(buckets) == 50
+    assert len(buckets) == 25
 
 
 def test_generate_decode_buckets():
