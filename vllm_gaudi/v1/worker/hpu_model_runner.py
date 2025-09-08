@@ -1215,7 +1215,8 @@ class HPUModelRunner:
     def _generate_req_id_output_token_ids_lst(
             self,
             request_ids: Optional[list[str]] = None,
-            pad_to: Optional[int] = None):
+            pad_to: Optional[int] = None,
+            logits_reqs=None):
         req_id_output_token_ids: dict[str, list[int]] = \
             {req_id: req.output_token_ids
                 for req_id, req in self.requests.items()}
@@ -1225,19 +1226,26 @@ class HPUModelRunner:
                 for req_id in request_ids
             }
         req_id_output_token_ids_lst = list(req_id_output_token_ids.items())
-        if pad_to is not None:
-            while len(req_id_output_token_ids_lst) < pad_to:
-                req_id_output_token_ids_lst.append(
-                    req_id_output_token_ids_lst[0])
+        if logits_reqs and len(req_id_output_token_ids_lst) > len(logits_reqs):
+            # Merged prefill case: remove requests without logits
+            req_id_output_token_ids_lst = [
+                r for r in req_id_output_token_ids_lst if r[0] in logits_reqs
+            ]
+        else:
+            if pad_to is not None:
+                while len(req_id_output_token_ids_lst) < pad_to:
+                    req_id_output_token_ids_lst.append(
+                        req_id_output_token_ids_lst[0])
         return req_id_output_token_ids_lst
 
     def _prepare_sampling(self,
                           batch_changed: bool,
                           request_ids: Union[None, list[str]] = None,
-                          pad_to: Optional[int] = None) -> SamplingMetadata:
+                          pad_to: Optional[int] = None,
+                          logits_reqs=None) -> SamplingMetadata:
         # Create the sampling metadata.
         req_id_output_token_ids_lst = \
-            self._generate_req_id_output_token_ids_lst(request_ids, pad_to)
+            self._generate_req_id_output_token_ids_lst(request_ids, pad_to, logits_reqs)
         sampling_metadata = self.input_batch.make_selective_sampling_metadata(
             req_id_output_token_ids_lst, skip_copy=not batch_changed)
         return sampling_metadata
@@ -2187,11 +2195,12 @@ class HPUModelRunner:
             batch_changed: bool,
             logits_device: torch.Tensor,
             request_ids: Optional[list[str]] = None,
-            pad_to: Optional[int] = None
+            pad_to: Optional[int] = None,
+            logits_requests = None
     ) -> tuple[torch.Tensor, SamplingMetadata]:
         htorch.core.mark_step()
         sampling_metadata = self._prepare_sampling(batch_changed, request_ids,
-                                                   pad_to)
+                                                   pad_to, logits_requests)
         sampler_output = self.sampler(logits=logits_device,
                                       sampling_metadata=sampling_metadata)
         htorch.core.mark_step()
@@ -2363,7 +2372,7 @@ class HPUModelRunner:
                     with self.profiler.record_event('internal', "sampler"):
                         sampler_output, _sampling_metadata = self._run_sampling(
                             batch_changed, logits_device, req_id,
-                            logits_device.shape[0])
+                            logits_device.shape[0], logits_requests)
                         prefill_sampled_token_ids.append(
                             sampler_output.sampled_token_ids.flatten())
                         prefill_sampled_requests.extend(logits_requests)
