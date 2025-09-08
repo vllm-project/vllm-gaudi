@@ -2883,14 +2883,8 @@ class HPUModelRunner:
         Returns list of sequence length (including query and context) and
         context lengths.
         '''
-        query_per_sample = math.ceil(query_len / self.max_num_seqs)
-        max_ctx_per_sample = math.ceil(
-            (self.max_model_len - query_per_sample) // self.block_size)
-
-        ctx_list = self.distribute_sum_evenly(ctx_blocks, self.max_num_seqs,
-                                          max_ctx_per_sample)
-        query_list = self.distribute_sum_evenly(query_len, self.max_num_seqs,
-                                            query_per_sample)
+        ctx_list = self.distribute_sum_evenly(ctx_blocks, self.max_num_seqs)
+        query_list = self.distribute_sum_evenly(query_len, self.max_num_seqs)
         prompt_list = [
             q + c * self.block_size for q, c in zip(query_list, ctx_list)
         ]
