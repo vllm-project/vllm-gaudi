@@ -27,7 +27,7 @@ def run_simple_prompt():
     client = openai.OpenAI(api_key="EMPTY", base_url=BASE_URL)
     completion = client.completions.create(
         model=MODEL_NAME, prompt=SIMPLE_PROMPT
-    )
+    )  # yapf: disable
 
     print("-" * 50)
     print(f"Completion results for {MODEL_NAME}:")
@@ -43,7 +43,7 @@ def test_accuracy():
         f"model={MODEL_NAME},"
         f"base_url={BASE_URL}/completions,"
         f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False"
-    )
+    )  # yapf: disable
 
     results = lm_eval.simple_evaluate(
         model="local-completions",
@@ -58,11 +58,12 @@ def test_accuracy():
         print(
             f"Warning: No expected value found for {MODEL_NAME}. "
             "Skipping accuracy check."
-        )
+        )  # yapf: disable
         print(f"Measured value: {measured_value}")
         return
 
     assert (
         measured_value - RTOL < expected_value
         and measured_value + RTOL > expected_value
-    ), f"Expected: {expected_value} | Measured: {measured_value}"
+    ), \
+    f"Expected: {expected_value} | Measured: {measured_value}"  # yapf: disable

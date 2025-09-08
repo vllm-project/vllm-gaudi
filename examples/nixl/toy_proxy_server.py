@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
                 "port": port,
                 "id": i,
             }
-        )
+        )  # yapf: disable
 
     # Create decode clients
     for i, (host, port) in enumerate(global_args.decoder_instances):
@@ -51,20 +51,20 @@ async def lifespan(app: FastAPI):
                 "port": port,
                 "id": i,
             }
-        )
+        )  # yapf: disable
 
     # Initialize round-robin iterators
     app.state.prefill_iterator = itertools.cycle(
         range(len(app.state.prefill_clients))
-    )
+    )  # yapf: disable
     app.state.decode_iterator = itertools.cycle(
         range(len(app.state.decode_clients))
-    )
+    )  # yapf: disable
 
     print(
         f"Initialized {len(app.state.prefill_clients)} prefill clients "
         f"and {len(app.state.decode_clients)} decode clients."
-    )
+    )  # yapf: disable
 
     yield
 
@@ -111,7 +111,11 @@ def parse_args():
         default=["localhost"],
     )
     parser.add_argument(
-        "--decoder-ports", "--decoder-port", type=int, nargs="+", default=[8200]
+        "--decoder-ports",
+        "--decoder-port",
+        type=int,
+        nargs="+",
+        default=[8200],
     )
 
     args = parser.parse_args()
@@ -120,17 +124,17 @@ def parse_args():
     if len(args.prefiller_hosts) != len(args.prefiller_ports):
         raise ValueError(
             "Number of prefiller hosts must match number of prefiller ports"
-        )
+        )  # yapf: disable
 
     if len(args.decoder_hosts) != len(args.decoder_ports):
         raise ValueError(
             "Number of decoder hosts must match number of decoder ports"
-        )
+        )  # yapf: disable
 
     # Create tuples of (host, port) for each service type
     args.prefiller_instances = list(
         zip(args.prefiller_hosts, args.prefiller_ports)
-    )
+    )  # yapf: disable
     args.decoder_instances = list(zip(args.decoder_hosts, args.decoder_ports))
 
     return args
@@ -159,7 +163,7 @@ def get_next_client(app, service_type: str):
 
 async def send_request_to_service(
     client_info: dict, endpoint: str, req_data: dict, request_id: str
-):
+):  # yapf: disable
     """
     Send a request to a service using a client from the pool.
     """
@@ -185,7 +189,7 @@ async def send_request_to_service(
 
     response = await client_info["client"].post(
         endpoint, json=req_data, headers=headers
-    )
+    )  # yapf: disable
     response.raise_for_status()
 
     return response
@@ -193,7 +197,7 @@ async def send_request_to_service(
 
 async def stream_service_response(
     client_info: dict, endpoint: str, req_data: dict, request_id: str
-):
+):  # yapf: disable
     """
     Asynchronously stream response from a service using a client from the pool.
     """
@@ -204,7 +208,7 @@ async def stream_service_response(
 
     async with client_info["client"].stream(
         "POST", endpoint, json=req_data, headers=headers
-    ) as response:
+    ) as response:  # yapf: disable
         response.raise_for_status()
         async for chunk in response.aiter_bytes():
             yield chunk
@@ -221,7 +225,7 @@ async def _handle_completions(api: str, request: Request):
         # Send request to prefill service
         response = await send_request_to_service(
             prefill_client_info, api, req_data, request_id
-        )
+        )  # yapf: disable
 
         # Extract the needed fields
         response_json = response.json()
@@ -238,19 +242,21 @@ async def _handle_completions(api: str, request: Request):
         async def generate_stream():
             async for chunk in stream_service_response(
                 decode_client_info, api, req_data, request_id=request_id
-            ):
+            ):  # yapf: disable
                 yield chunk
 
         return StreamingResponse(
             generate_stream(), media_type="application/json"
-        )
+        )  # yapf: disable
 
     except Exception as e:
         import sys
         import traceback
 
         exc_info = sys.exc_info()
-        print(f"Error occurred in disagg prefill proxy server - {api} endpoint")
+        print(
+            f"Error occurred in disagg prefill proxy server - {api} endpoint"
+        )  # yapf: disable
         print(e)
         print("".join(traceback.format_exception(*exc_info)))
         raise
