@@ -1214,7 +1214,8 @@ class HPUModelRunner:
     def _prepare_sampling(self,
                           batch_changed: bool,
                           request_ids: Union[None, list[str]] = None,
-                          pad_to: Optional[int] = None) -> SamplingMetadata:
+                          pad_to: Optional[int] = None,
+                          logits_reqs=None) -> SamplingMetadata:
         # Create the sampling metadata.
         req_id_output_token_ids: dict[str, list[int]] = \
             {req_id: req.output_token_ids
@@ -1225,10 +1226,16 @@ class HPUModelRunner:
                 for req_id in request_ids
             }
         req_id_output_token_ids_lst = list(req_id_output_token_ids.items())
-        if pad_to is not None:
-            while len(req_id_output_token_ids_lst) < pad_to:
-                req_id_output_token_ids_lst.append(
-                    req_id_output_token_ids_lst[0])
+        if logits_reqs and len(req_id_output_token_ids_lst) > len(logits_reqs):
+            # Merged prefill case: remove requests without logits
+            req_id_output_token_ids_lst = [
+                r for r in req_id_output_token_ids_lst if r[0] in logits_reqs
+            ]
+        else:
+            if pad_to is not None:
+                while len(req_id_output_token_ids_lst) < pad_to:
+                    req_id_output_token_ids_lst.append(
+                        req_id_output_token_ids_lst[0])
         sampling_metadata = self.input_batch.make_selective_sampling_metadata(
             req_id_output_token_ids_lst, skip_copy=not batch_changed)
         return sampling_metadata
@@ -2234,7 +2241,7 @@ class HPUModelRunner:
         # On CPU, sanitize [tokD0, tokD1, tokD2, 0, tokP0, tokP1, tokP2, 0] -> [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2] # noqa
         # Return [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2]
 
-        if self.defragmenter.enabled and self.kv_caches:
+        if self.defragmenter.enabled and self.kv_caches and not warmup_mode:
             new = {
                 req.req_id: flatten(req.block_ids)
                 for req in scheduler_output.scheduled_new_reqs if req.block_ids
@@ -2340,7 +2347,8 @@ class HPUModelRunner:
                         sampling_metadata = self._prepare_sampling(
                             batch_changed,
                             req_id,
-                            pad_to=logits_device.shape[0])
+                            pad_to=logits_device.shape[0],
+                            logits_reqs=logits_requests)
                         sampler_output = self.sampler(
                             logits=logits_device,
                             sampling_metadata=sampling_metadata)
@@ -2952,16 +2960,37 @@ class HPUModelRunner:
 
     @torch.inference_mode()
     def warmup_model(self) -> None:
-        self.defragmenter.initialize(self.kv_caches, self.block_size)
         if not self.enable_bucketing:
             return
+
+        self.bucketing_manager.generate_prompt_buckets()
+        self.bucketing_manager.generate_decode_buckets()
+
+        max_bucket = max(self.bucketing_manager.decode_buckets[-1][0],
+                         self.bucketing_manager.prompt_buckets[-1][0])
+        if max_bucket > self.input_batch.max_num_reqs:
+            input_batch_bkp = self.input_batch
+            self.input_batch = InputBatch(
+                max_num_reqs=self.bucketing_manager.decode_buckets[-1][0],
+                max_model_len=self.max_model_len,
+                max_num_batched_tokens=self.max_num_tokens,
+                device=self.device,
+                pin_memory=self.pin_memory,
+                vocab_size=self.model_config.get_vocab_size(),
+                block_sizes=[self.block_size],
+                logitsprocs=build_logitsprocs(
+                    self.vllm_config, self.device, self.pin_memory,
+                    self.is_pooling_model,
+                    self.vllm_config.model_config.logits_processors),
+            )
+
+        self.defragmenter.initialize(self.kv_caches, self.block_size)
+
         prompt_profile_cfg, decode_profile_cfg = self._read_profiling_cfg()
         if prompt_profile_cfg or decode_profile_cfg:
             self._generate_profiling(prompt_profile_cfg, decode_profile_cfg)
             raise AssertionError("Finished profiling")
         kv_caches = self.kv_caches
-        self.bucketing_manager.generate_prompt_buckets()
-        self.bucketing_manager.generate_decode_buckets()
 
         if not htorch.utils.internal.is_lazy(
         ) and not self.model_config.enforce_eager:
@@ -3034,6 +3063,9 @@ class HPUModelRunner:
             f"allocated {format_bytes(end_mem - start_mem)} of device memory")
         logger.info(msg)
         self.profiler.end()
+
+        if max_bucket > self.input_batch.max_num_reqs:
+            self.input_batch = input_batch_bkp
 
     def shutdown_inc(self):
         can_finalize_inc = self._is_quant_with_inc() and \
