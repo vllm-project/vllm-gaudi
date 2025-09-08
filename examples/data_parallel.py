@@ -97,7 +97,7 @@ def parse_args():
 
 def generate_random_token_ids(repeat=1) -> list[int]:
     """
-    For testing different seuquence length in data parallel scenario
+    For testing different sequence length in data parallel scenario
     """
     candidate_lens = [130, 560]
     prompts = []
