@@ -1214,8 +1214,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # This is decode
             # NOTE(chendi): To support spec decode,
             # we don't assume num_scheduled_tokens == 1.
-            #if not self.is_decoder_only(req_id):
-                #assert num_scheduled_tokens == 1
+
             decode_req_ids.append(req_id)
             num_computed_tokens_decode.append(int(num_computed_tokens + 1))
 
@@ -1986,9 +1985,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_scheduled_tokens.append(seq_num_scheduled_tokens)
             num_prompt_tokens.append(seq_num_prompt_tokens)
             # NOTE: assert that all the decodes are "decodes".
-            # do not assert to support spec decode
-            #if idx < num_decodes and not self.is_decoder_only(req_id):
-                #assert seq_num_scheduled_tokens == 1
         return (self._prepare_prefill_inputs(num_prefills, num_decodes,
                                              num_scheduled_tokens),
                 self._prepare_decode_inputs(num_decodes, num_scheduled_tokens,
