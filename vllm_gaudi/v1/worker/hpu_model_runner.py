@@ -2867,8 +2867,7 @@ class HPUModelRunner:
         Return a balanced list of ints that sums up to total_sum.
         List cannot be longer than max_length.
         '''
-        base = total_sum // max_length
-        remain = total_sum % max_length
+        base, remain = divmod(total_sum, max_length)
         result = [base] * max_length
 
         for i in range(remain):
@@ -2888,6 +2887,7 @@ class HPUModelRunner:
         prompt_list = [
             q + c * self.block_size for q, c in zip(query_list, ctx_list)
         ]
+        ctx_list = ctx_list if len(ctx_list) > 0 else [0] * len(prompt_list)
         return prompt_list, ctx_list
 
     def _execute_dummy_scenario(self, prompt_cfg, decode_cfg):
@@ -2900,7 +2900,7 @@ class HPUModelRunner:
             prompt_bs, prompt_query_len, prompt_num_blocks = prompt_cfg
             prompt_ctx_len = prompt_num_blocks * self.block_size
             prompt_total_tokens = [prompt_query_len + prompt_ctx_len]
-            prompt_context_blocks = [prompt_num_blocks]
+            prompt_num_context_blocks = [prompt_num_blocks]
             if self.max_model_len < sum(prompt_total_tokens) \
                 and self.use_merged_prefill:
                 # split query and ctx in merged prefill case
