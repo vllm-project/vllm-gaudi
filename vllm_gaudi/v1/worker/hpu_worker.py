@@ -249,7 +249,7 @@ class HPUWorker(WorkerBase):
             torch.hpu.synchronize()
         msg = (f"Usable num_blocks: {kv_cache_config.num_blocks}, "
                f"actual allocated num_blocks: "
-               f"{self.model_runner.kv_caches[0][0].shape[0]} "
+            #    f"{self.model_runner.kv_caches[0][0].shape[0]} "
                f"(_PAD_BLOCK_ID={self.model_runner._PAD_BLOCK_ID}, "
                f"_PAD_SLOT_ID={self.model_runner._PAD_SLOT_ID})")
         logger.info(msg)

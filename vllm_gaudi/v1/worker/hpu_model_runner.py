@@ -3246,7 +3246,7 @@ class HPUModelRunner:
                 "supported yet.")
 
         kv_caches: dict[str, torch.Tensor] = {}
-
+        num_blocks=1
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:

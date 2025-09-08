@@ -149,6 +149,15 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
 class HPUMLAMetadata(HPUAttentionMetadata, AttentionMetadata):
     pass
 
+@dataclass
+class HPUEncoderOnlyAttentionMetadata:
+    num_actual_tokens: int
+    max_seq_len: int
+    seq_lens: torch.Tensor
+    block_size: int
+    num_heads: int
+    head_dim: int
+    causal: bool = False
 
 class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
 
@@ -492,6 +501,11 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        if attn_metadata is None:
+            output = torch.zeros(query.shape,
+                                 dtype=query.dtype,
+                                 device=query.device)
+            return output
         assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         if self.attn_type == AttentionType.ENCODER_DECODER:
             return self.forward_encoder_decoder(
