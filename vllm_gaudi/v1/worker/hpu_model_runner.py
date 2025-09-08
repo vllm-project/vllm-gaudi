@@ -2479,24 +2479,22 @@ class HPUModelRunner:
             if self.is_driver_worker and self.profiler.enabled:
                 self.profiler_counter_helper.reset_prompt_seq_stats()
 
-        else:
-            if num_pad_prefill_batch_across_dp > 0:
-                for idx, (
-                        req_id, prompt_len, token_ids, position_ids,
-                        attn_metadata, logits_indices,
-                        logits_requests) in enumerate(
-                            zip(*shallow_tuple(
-                                dummy_prefill_input_data_batches_across_dp))):
-                    htorch.core.mark_step()
-                    _, _, dummy_logits_device = \
-                    self._execute_model_generic(
-                        token_ids,
-                        position_ids,
-                        attn_metadata,
-                        logits_indices,
-                        self.kv_caches,
-                        warmup_mode=warmup_mode)
-                    htorch.core.mark_step()
+        elif num_pad_prefill_batch_across_dp > 0:
+            for idx, (req_id, prompt_len, token_ids, position_ids,
+                      attn_metadata, logits_indices,
+                      logits_requests) in enumerate(
+                          zip(*shallow_tuple(
+                              dummy_prefill_input_data_batches_across_dp))):
+                htorch.core.mark_step()
+                _, _, dummy_logits_device = \
+                self._execute_model_generic(
+                    token_ids,
+                    position_ids,
+                    attn_metadata,
+                    logits_indices,
+                    self.kv_caches,
+                    warmup_mode=warmup_mode)
+                htorch.core.mark_step()
 
         ######################### DECODES #########################
         # Decodes run as one single batch with [padded_decode_bs, 1]
@@ -2610,17 +2608,16 @@ class HPUModelRunner:
                     spec_decode_metadata, spec_decode_common_attn_metadata,
                     decode_data)[:num_decodes]
             ################## Spec Decode end ##################
-        else:
-            if dummy_decode_input_data_across_dp is not None:
-                htorch.core.mark_step()
-                _, _, dummy_logits_device = self._execute_model_generic(
-                    dummy_decode_input_data_across_dp.token_ids,
-                    dummy_decode_input_data_across_dp.position_ids,
-                    dummy_decode_input_data_across_dp.attn_metadata,
-                    dummy_decode_input_data_across_dp.logits_indices,
-                    self.kv_caches,
-                    warmup_mode=warmup_mode)
-                htorch.core.mark_step()
+        elif dummy_decode_input_data_across_dp is not None:
+            htorch.core.mark_step()
+            _, _, dummy_logits_device = self._execute_model_generic(
+                dummy_decode_input_data_across_dp.token_ids,
+                dummy_decode_input_data_across_dp.position_ids,
+                dummy_decode_input_data_across_dp.attn_metadata,
+                dummy_decode_input_data_across_dp.logits_indices,
+                self.kv_caches,
+                warmup_mode=warmup_mode)
+            htorch.core.mark_step()
 
         if structured_output:
             # Scheduler places cached before prompt
