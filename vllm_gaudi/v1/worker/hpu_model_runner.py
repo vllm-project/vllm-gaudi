@@ -112,8 +112,9 @@ class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
         # deallocated until we finish copying it to the host.
         self._sampled_token_ids = sampled_token_ids
 
+        # TODO: Change to non_blocking once it is working
         self._sampled_token_ids_cpu = self._sampled_token_ids.to(
-            'cpu', non_blocking=True)
+            'cpu', non_blocking=False)
 
     def get_output(self) -> ModelRunnerOutput:
         """Copy the device tensors to the host and return a ModelRunnerOutput.
@@ -122,7 +123,8 @@ class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
         """
 
         # Release the device tensor once the copy has completed
-        torch.hpu.synchronize()
+        # TODO: to be used with non_blocking send
+        # torch.hpu.synchronize()
         del self._sampled_token_ids
 
         valid_sampled_token_ids = self._sampled_token_ids_cpu.tolist()
@@ -2030,52 +2032,56 @@ class HPUModelRunner:
         from the previous engine iteration, in which case those tokens on the
         GPU need to be copied into the corresponding slots into input_ids."""
 
-        if self.input_batch.prev_sampled_token_ids is not None:
-            # Async scheduling case, we need to copy the sampled token ids
-            # from the previous iteration.
-            prev_req_id_to_index = self.input_batch.prev_req_id_to_index
-            current_req_id_to_index = self.input_batch.req_id_to_index
-            assert prev_req_id_to_index is not None
-            common_req_ids = set(prev_req_id_to_index.keys()).intersection(
-                set(current_req_id_to_index.keys()))
-            if common_req_ids:
-                current_common_req_indices = [
-                    current_req_id_to_index[req_id]
-                    for req_id in common_req_ids
-                ]
-                prev_common_req_indices = [
-                    prev_req_id_to_index[req_id] for req_id in common_req_ids
-                ]
+        if self.input_batch.prev_sampled_token_ids is None:
+            return
+
+        # Async scheduling case, where some decode requests from the previous
+        # iteration won't have entries in input_ids_cpu and need to be copied
+        # on the GPU from prev_sampled_token_ids.
+        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        assert prev_req_id_to_index is not None
+        flattened_indices = []
+        prev_common_req_indices = []
+        indices_match = True
+        max_flattened_index = -1
+        for req_id, cur_index in self.input_batch.req_id_to_index.items():
+            if (prev_index := prev_req_id_to_index.get(req_id)) is not None:
+                prev_common_req_indices.append(prev_index)
                 # We need to compute the flattened input_ids index of the
                 # last token in each common request.
-                flattened_indices = [
-                    int(cu_num_tokens[idx]) - 1
-                    for idx in current_common_req_indices
-                ]
-                if flattened_indices == prev_common_req_indices and \
-                    set(flattened_indices) == \
-                        set(range(len(flattened_indices))):
-                    # Common-case optimization: the batch is unchanged
-                    # and no reordering happened.
-                    # The indices are both the same permutation of 0..N-1
-                    self.input_ids_cpu[:len(flattened_indices)].copy_(
-                        self.input_batch.
-                        prev_sampled_token_ids[:len(flattened_indices)])
-                else:
-                    # Upload the index tensors asynchronously
-                    # so the scatter can be non-blocking
-                    input_ids_index_tensor = torch.tensor(flattened_indices,
-                                                          dtype=torch.int64,
-                                                          device="cpu")
-                    prev_common_req_indices_tensor = torch.tensor(
-                        prev_common_req_indices,
-                        dtype=torch.int64,
-                        device="cpu")
-                    self.input_ids_cpu.scatter_(
-                        dim=0,
-                        index=input_ids_index_tensor,
-                        src=self.input_batch.
-                        prev_sampled_token_ids[prev_common_req_indices_tensor])
+                flattened_index = cu_num_tokens[cur_index].item() - 1
+                flattened_indices.append(flattened_index)
+                indices_match &= (prev_index == flattened_index)
+                max_flattened_index = max(max_flattened_index, flattened_index)
+        num_commmon_tokens = len(flattened_indices)
+        if num_commmon_tokens == 0:
+            # No requests in common with the previous iteration
+            # So input_ids_cpu will have all the input ids.
+            return
+        if indices_match and max_flattened_index == (
+                num_commmon_tokens - 1):
+            # Common-case optimization: the batch is unchanged
+            # and no reordering happened.
+            # The indices are both the same permutation of 0..N-1
+            self.input_ids_cpu[:len(flattened_indices)].copy_(
+                self.input_batch.
+                prev_sampled_token_ids[:len(flattened_indices)])
+            return
+
+        # Upload the index tensors asynchronously
+        # so the scatter can be non-blocking
+        input_ids_index_tensor = torch.tensor(flattened_indices,
+                                                dtype=torch.int64,
+                                                device="cpu")
+        prev_common_req_indices_tensor = torch.tensor(
+            prev_common_req_indices,
+            dtype=torch.int64,
+            device="cpu")
+        self.input_ids_cpu.scatter_(
+            dim=0,
+            index=input_ids_index_tensor,
+            src=self.input_batch.
+            prev_sampled_token_ids[prev_common_req_indices_tensor])
 
     def _prepare_inputs(
         self,
@@ -2837,6 +2843,12 @@ class HPUModelRunner:
                                                 dtype=torch.int32,
                                                 device=self.device)
 
+        # Copy some objects so they don't get modified after returning.
+        # This is important when using async scheduling.
+        req_ids_output_copy = self.input_batch.req_ids.copy()
+        req_id_to_index_output_copy = \
+            self.input_batch.req_id_to_index.copy()
+
         if self.use_async_scheduling:
             self.input_batch.prev_sampled_token_ids = \
                 sampled_token_ids.flatten().to("cpu", non_blocking=True)
@@ -2894,6 +2906,8 @@ class HPUModelRunner:
         # the sampled tokens back, because there's no direct communication
         # between the first-stage worker and the last-stage worker.
         for req_idx, sampled_ids in enumerate(postprocessed_sampled_token_ids[:num_reqs]):
+            if self.use_async_scheduling:
+                sampled_ids = [-1] # placeholder
             if not sampled_ids:
                 continue
 
@@ -2924,8 +2938,8 @@ class HPUModelRunner:
         logprobs = None
 
         model_runner_output = ModelRunnerOutput(
-            req_ids=all_req_ids,
-            req_id_to_index=self.input_batch.req_id_to_index,
+            req_ids=req_ids_output_copy, # CHECK
+            req_id_to_index=req_id_to_index_output_copy,
             sampled_token_ids=postprocessed_sampled_token_ids,
             logprobs=logprobs,
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
