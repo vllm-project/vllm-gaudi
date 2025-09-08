@@ -738,10 +738,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.profiler_counter_helper = HabanaProfilerCounterHelper()
 
         self.defragmenter = OnlineDefragmenter()
-        from datetime import datetime
-        current_timestamp = datetime.now()
-        unix_timestamp = current_timestamp.timestamp()
-        self.modelrunnerid = unix_timestamp
         self.debug_fwd = init_debug_logger('fwd')
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
@@ -1218,9 +1214,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # This is decode
             # NOTE(chendi): To support spec decode,
             # we don't assume num_scheduled_tokens == 1.
-            if not self.is_decoder_only(req_id):
+            #if not self.is_decoder_only(req_id):
                 #assert num_scheduled_tokens == 1
-                logger.debug("num_scheduled_tokens=", num_scheduled_tokens)
             decode_req_ids.append(req_id)
             num_computed_tokens_decode.append(int(num_computed_tokens + 1))
 
@@ -1991,10 +1986,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_scheduled_tokens.append(seq_num_scheduled_tokens)
             num_prompt_tokens.append(seq_num_prompt_tokens)
             # NOTE: assert that all the decodes are "decodes".
-            if idx < num_decodes and not self.is_decoder_only(req_id):
+            # do not assert to support spec decode
+            #if idx < num_decodes and not self.is_decoder_only(req_id):
                 #assert seq_num_scheduled_tokens == 1
-                logger.debug("seq_num_scheduled_tokens : ",
-                             seq_num_scheduled_tokens)
         return (self._prepare_prefill_inputs(num_prefills, num_decodes,
                                              num_scheduled_tokens),
                 self._prepare_decode_inputs(num_decodes, num_scheduled_tokens,
@@ -2446,7 +2440,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 decode_data.attn_metadata,
                 decode_data.logits_indices,
                 self.kv_caches,
-                warmup_mode=warmup_mode)#, scheduler_output=scheduler_output)
+                warmup_mode=warmup_mode)
             htorch.core.mark_step()
 
             if structured_output:
