@@ -47,39 +47,23 @@ def parse_args():
         default="ibm-research/PowerMoE-3b",
         help="Model name or path",
     )
-    parser.add_argument(
-        "--dp-size", type=int, default=2, help="Data parallel size"
-    )
-    parser.add_argument(
-        "--tp-size", type=int, default=2, help="Tensor parallel size"
-    )
-    parser.add_argument(
-        "--node-size", type=int, default=1, help="Total number of nodes"
-    )
-    parser.add_argument(
-        "--node-rank", type=int, default=0, help="Rank of the current node"
-    )
-    parser.add_argument(
-        "--master-addr", type=str, default="", help="Master node IP address"
-    )
-    parser.add_argument(
-        "--master-port", type=int, default=0, help="Master node port"
-    )
+    parser.add_argument("--dp-size", type=int, default=2, help="Data parallel size")
+    parser.add_argument("--tp-size", type=int, default=2, help="Tensor parallel size")
+    parser.add_argument("--node-size", type=int, default=1, help="Total number of nodes")
+    parser.add_argument("--node-rank", type=int, default=0, help="Rank of the current node")
+    parser.add_argument("--master-addr", type=str, default="", help="Master node IP address")
+    parser.add_argument("--master-port", type=int, default=0, help="Master node port")
     parser.add_argument(
         "--enforce-eager",
         action="store_true",
         help="Enforce eager mode execution.",
     )
-    parser.add_argument(
-        "--trust-remote-code", action="store_true", help="Trust remote code."
-    )
+    parser.add_argument("--trust-remote-code", action="store_true", help="Trust remote code.")
     parser.add_argument(
         "--max-num-seqs",
         type=int,
         default=64,
-        help=(
-            "Maximum number of sequences to be processed in a single iteration."
-        ),
+        help=("Maximum number of sequences to be processed in a single iteration."),
     )
     parser.add_argument(
         "--gpu-memory-utilization",
@@ -102,9 +86,7 @@ def generate_random_token_ids(repeat=1) -> list[int]:
     candidate_lens = [130, 560]
     prompts = []
     for num_tokens in candidate_lens:
-        tokens = torch.randint(
-            low=0, high=10000, size=(num_tokens,), dtype=torch.int32
-        )
+        tokens = torch.randint(low=0, high=10000, size=(num_tokens,), dtype=torch.int32)
         [prompts.append(tokens.tolist()) for _ in range(repeat)]
     return prompts
 
@@ -163,9 +145,7 @@ def main(
     # since we are doing data parallel, every rank can have different
     # sampling params. here we set different max_tokens for different
     # ranks for demonstration.
-    sampling_params = SamplingParams(
-        temperature=0.8, top_p=0.95, max_tokens=[16, 20][global_dp_rank % 2]
-    )
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=[16, 20][global_dp_rank % 2])
 
     # Create an LLM.
     llm = LLM(
@@ -188,10 +168,7 @@ def main(
             break
         prompt = output.prompt
         generated_text = output.outputs[0].text
-        print(
-            f"DP rank {global_dp_rank}, Prompt: {prompt!r}, "
-            f"Generated text: {generated_text!r}"
-        )
+        print(f"DP rank {global_dp_rank}, Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
     # Give engines time to pause their processing loops before exiting.
     sleep(1)
@@ -218,9 +195,7 @@ if __name__ == "__main__":
     from multiprocessing import Process
 
     procs = []
-    for local_dp_rank, global_dp_rank in enumerate(
-        range(node_rank * dp_per_node, (node_rank + 1) * dp_per_node)
-    ):
+    for local_dp_rank, global_dp_rank in enumerate(range(node_rank * dp_per_node, (node_rank + 1) * dp_per_node)):
         proc = Process(
             target=main,
             args=(
@@ -243,9 +218,7 @@ if __name__ == "__main__":
     for proc in procs:
         proc.join(timeout=300)
         if proc.exitcode is None:
-            print(
-                f"Killing process {proc.pid} that didn't stop within 5 minutes."
-            )
+            print(f"Killing process {proc.pid} that didn't stop within 5 minutes.")
             proc.kill()
             exit_code = 1
         elif proc.exitcode:

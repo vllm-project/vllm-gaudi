@@ -20,6 +20,7 @@ from habana_frameworks.torch import torch
 from vllm_gaudi.extension.utils import is_fake_hpu
 from .logger import logger
 
+
 class FileWriter(threading.Thread):
 
     def __init__(self, filename, event_queue):
@@ -69,8 +70,7 @@ class HabanaProfilerCounterHelper:
     def reset_prompt_seq_stats(self):
         self.prompt_real_seq_lens = []
 
-    def get_counter_dict(self, cache_config, duration, seq_len,
-                         batch_size_padded, real_batch_size, prompt_batch_idx,
+    def get_counter_dict(self, cache_config, duration, seq_len, batch_size_padded, real_batch_size, prompt_batch_idx,
                          is_prompt):
         throughput = batch_size_padded / (duration / 1e6)
         throughput_effective = real_batch_size / (duration / 1e6)
@@ -85,9 +85,8 @@ class HabanaProfilerCounterHelper:
         if self.average_real_throughput is None:
             self.average_real_throughput = throughput_effective
         else:  # https://www.heikohoffmann.de/htmlthesis/node134.html
-            self.average_real_throughput = self.average_real_throughput + 1 / (
-                self.niter + 1) * (throughput_effective -
-                                   self.average_real_throughput)
+            self.average_real_throughput = self.average_real_throughput + 1 / (self.niter + 1) * (
+                throughput_effective - self.average_real_throughput)
         phase = "prompt" if is_prompt else "decode"
         counters = {
             f'{phase}_bucket_batch_size': batch_size_padded,
@@ -102,12 +101,9 @@ class HabanaProfilerCounterHelper:
         }
         self.niter += 1
         if is_prompt:
-            prompt_bucket_in_throughput = (seq_len * batch_size_padded) / (
-                duration / 1e6)
-            prompt_real_in_throughput = sum(
-                self.prompt_real_seq_lens[prompt_batch_idx]) / (duration / 1e6)
-            counters[
-                f'{phase}_bucket_in_throughput'] = prompt_bucket_in_throughput
+            prompt_bucket_in_throughput = (seq_len * batch_size_padded) / (duration / 1e6)
+            prompt_real_in_throughput = sum(self.prompt_real_seq_lens[prompt_batch_idx]) / (duration / 1e6)
+            counters[f'{phase}_bucket_in_throughput'] = prompt_bucket_in_throughput
             counters[f'{phase}_real_in_throughput'] = prompt_real_in_throughput
 
         # KV cache might not be created yet (e.g. for profiling run)
@@ -116,9 +112,7 @@ class HabanaProfilerCounterHelper:
             seq_lens = self.prompt_real_seq_lens[prompt_batch_idx] \
                 if is_prompt \
                 else self.decode_real_seq_lens
-            cache_num_blocks_used = [
-                math.ceil(sl / cache_config.block_size) for sl in seq_lens
-            ]
+            cache_num_blocks_used = [math.ceil(sl / cache_config.block_size) for sl in seq_lens]
             cache_total_num_blocks_used = sum(cache_num_blocks_used)
             num_cache_blocks = cache_config.num_gpu_blocks
             cache_total_num_free_blocks = \
@@ -126,13 +120,11 @@ class HabanaProfilerCounterHelper:
             cache_computed_utilization = \
                 cache_total_num_blocks_used / num_cache_blocks
             max_blocks_per_seq = math.ceil(seq_len / cache_config.block_size)
-            batch_block_utilization = cache_total_num_blocks_used / (
-                batch_size_padded * max_blocks_per_seq)
+            batch_block_utilization = cache_total_num_blocks_used / (batch_size_padded * max_blocks_per_seq)
             counters['cache_num_blocks_used'] = cache_total_num_blocks_used
             counters['cache_num_free_blocks'] = cache_total_num_free_blocks
             counters['cache_computed_utilization'] = cache_computed_utilization
-            counters[
-                f'{phase}_batch_block_utilization'] = batch_block_utilization
+            counters[f'{phase}_batch_block_utilization'] = batch_block_utilization
         if not self.logged_once:
             counters['const_cache_num_blocks'] = cache_config.num_gpu_blocks
             counters[
@@ -149,10 +141,9 @@ class HabanaHighLevelProfiler:
     event_tid = {'counter': 1, 'external': 2, 'internal': 3}
     event_cache: List[Any] = []
 
-    def __init__(self, vllm_instance_id = None):
-        self.enabled = os.getenv('VLLM_PROFILER_ENABLED',
-                                 'false').lower() == 'true' and int(
-                                     os.getenv('RANK', '0')) == 0
+    def __init__(self, vllm_instance_id=None):
+        self.enabled = os.getenv('VLLM_PROFILER_ENABLED', 'false').lower() == 'true' and int(os.getenv('RANK',
+                                                                                                       '0')) == 0
         self.pid = os.getpid()
         if self.enabled:
             self.vllm_instance_id = vllm_instance_id if vllm_instance_id is not None \
@@ -163,11 +154,10 @@ class HabanaHighLevelProfiler:
             # initialize the trace file (JSON Array Format)
             with open(self.filename, 'w') as outfile:
                 outfile.write('[')
-            file_writer = FileWriter(self.filename,
-                                     self.profiling_trace_events)
+            file_writer = FileWriter(self.filename, self.profiling_trace_events)
             file_writer.start()
         if os.getenv('VLLM_PROFILER_ENABLED') == 'full':
-            self.enabled = True # don't save separate high-level traces
+            self.enabled = True  # don't save separate high-level traces
 
     def _dump_with_sep(self, entry):
         entry = json.dumps(entry) + ','
@@ -208,15 +198,13 @@ class HabanaHighLevelProfiler:
         if self.enabled:
             ts = self.get_timestamp_us()
             if not self.event_cache:
-                logger().warning(
-                    'Profiler: end() call does not have matching start() call. '
-                    'Disabling profiler.')
+                logger().warning('Profiler: end() call does not have matching start() call. '
+                                 'Disabling profiler.')
                 self.enabled = False
                 return
             event = self.event_cache.pop()
             event['dur'] = ts - event['ts']
             self._dump_with_sep(event)
- 
 
     def full_trace_handler(self, dir_name, use_gzip=False):
 
@@ -225,8 +213,7 @@ class HabanaHighLevelProfiler:
                 try:
                     os.makedirs(dir_name, exist_ok=True)
                 except Exception as e:
-                    raise RuntimeError("Can't create directory: " +
-                                       dir_name) from e
+                    raise RuntimeError("Can't create directory: " + dir_name) from e
             file_name = f"vllm.{time.time_ns()}.pt.trace.json"
             file_path = os.path.join(dir_name, file_name)
             prof.export_chrome_trace(file_path)
@@ -264,7 +251,6 @@ class HabanaHighLevelProfiler:
             logger().info("Saved full profiling to %s", file_path)
 
         return handler_fn
-
 
     @contextmanager
     def record_event(self, type, name, args=None):
@@ -320,8 +306,7 @@ class HabanaMemoryProfiler:
     @staticmethod
     def current_host_memory_usage() -> float:
         # Return the host memory usage in bytes.
-        return HabanaMemoryProfiler.total_host_memory(
-        ) - HabanaMemoryProfiler.current_free_host_memory()
+        return HabanaMemoryProfiler.total_host_memory() - HabanaMemoryProfiler.current_free_host_memory()
 
     @staticmethod
     def current_free_host_memory() -> float:
@@ -334,18 +319,15 @@ class HabanaMemoryProfiler:
         return psutil.virtual_memory().total
 
     def get_summary_string(self):
-        if getattr(self, 'final_device_memory', None) is None or getattr(
-                self, 'final_host_memory', None) is None:
-            raise RuntimeError(
-                "HabanaMemoryProfiler.get_summary_string() can only be called "
-                "after closing context manager")
-        return (
-            f"{format_bytes(self.consumed_device_memory)} of device memory "
-            f"({format_bytes(self.final_device_memory)}/"
-            f"{format_bytes(HabanaMemoryProfiler.total_device_memory())} used)"
-            f" and {format_bytes(self.consumed_host_memory)} of host memory "
-            f"({format_bytes(self.final_host_memory)}/"
-            f"{format_bytes(HabanaMemoryProfiler.total_host_memory())} used)")
+        if getattr(self, 'final_device_memory', None) is None or getattr(self, 'final_host_memory', None) is None:
+            raise RuntimeError("HabanaMemoryProfiler.get_summary_string() can only be called "
+                               "after closing context manager")
+        return (f"{format_bytes(self.consumed_device_memory)} of device memory "
+                f"({format_bytes(self.final_device_memory)}/"
+                f"{format_bytes(HabanaMemoryProfiler.total_device_memory())} used)"
+                f" and {format_bytes(self.consumed_host_memory)} of host memory "
+                f"({format_bytes(self.final_host_memory)}/"
+                f"{format_bytes(HabanaMemoryProfiler.total_host_memory())} used)")
 
     def __enter__(self):
         # Force garbage collection
@@ -363,8 +345,7 @@ class HabanaMemoryProfiler:
         self.final_device_memory = \
             HabanaMemoryProfiler.current_device_memory_usage(
         )
-        self.final_host_memory = HabanaMemoryProfiler.current_host_memory_usage(
-        )
+        self.final_host_memory = HabanaMemoryProfiler.current_host_memory_usage()
         self.consumed_device_memory = \
             self.final_device_memory - self.initial_device_memory
         self.consumed_host_memory = \
@@ -372,19 +353,11 @@ class HabanaMemoryProfiler:
 
 
 def setup_profiler(warmup, active):
-    schedule = torch.profiler.schedule(wait=0,
-                                       warmup=warmup,
-                                       active=active,
-                                       repeat=1)
-    activities = [
-        torch.profiler.ProfilerActivity.CPU,
-        torch.profiler.ProfilerActivity.HPU
-    ]
-    profiler = torch.profiler.profile(
-        schedule=schedule,
-        activities=activities,
-        on_trace_ready=torch.profiler.tensorboard_trace_handler('.',
-                                                                use_gzip=True),
-        record_shapes=False,
-        with_stack=True)
+    schedule = torch.profiler.schedule(wait=0, warmup=warmup, active=active, repeat=1)
+    activities = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.HPU]
+    profiler = torch.profiler.profile(schedule=schedule,
+                                      activities=activities,
+                                      on_trace_ready=torch.profiler.tensorboard_trace_handler('.', use_gzip=True),
+                                      record_shapes=False,
+                                      with_stack=True)
     return profiler

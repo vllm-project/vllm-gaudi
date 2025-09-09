@@ -75,23 +75,20 @@ class OnlineDefragmenter:
         if self.graphed:
             config = get_config()
             if config.bridge_mode == 'lazy':
-                self.cache_utils = htorch.hpu.wrap_in_hpu_graph(
-                    self.cache_utils, disable_tensor_cache=True)
+                self.cache_utils = htorch.hpu.wrap_in_hpu_graph(self.cache_utils, disable_tensor_cache=True)
             elif config.bridge_mode == 'eager':
                 self.cache_utils.forward = torch.compile(self.cache_utils.forward,
-                                                        backend='hpu_backend',
-                                                        fullgraph=True,
-                                                        dynamic=False)
+                                                         backend='hpu_backend',
+                                                         fullgraph=True,
+                                                         dynamic=False)
         if self.debug:
             self.debug('initialized')
 
     def _extend_mapping_table(self, block_id: int):
         """ Make sure mapping_tables are big enough to hold block_id """
         if len(self.fwd_mapping_table) <= block_id:
-            self.fwd_mapping_table.extend(
-                range(len(self.fwd_mapping_table), block_id + 1))
-            self.bwd_mapping_table.extend(
-                range(len(self.bwd_mapping_table), block_id + 1))
+            self.fwd_mapping_table.extend(range(len(self.fwd_mapping_table), block_id + 1))
+            self.bwd_mapping_table.extend(range(len(self.bwd_mapping_table), block_id + 1))
 
     def use_block(self, block_id: int):
         """ Increase ref-count for block_id """

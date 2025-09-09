@@ -29,15 +29,12 @@ class HpuPlatform(Platform):
     dispatch_key: str = "HPU"
     ray_device_key: str = "HPU"
     device_control_env_var: str = "HABANA_VISIBLE_MODULES"
-    supported_quantization: list[str] = [
-        "compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu"
-    ]
+    supported_quantization: list[str] = ["compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu"]
     simple_compile_backend = "hpu_backend"
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
-                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool, use_mla: bool,
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int, dtype: torch.dtype,
+                             kv_cache_dtype: Optional[str], block_size: int, use_v1: bool, use_mla: bool,
                              has_sink: bool) -> str:
         assert use_v1, 'Only V1 is supported!'
         if use_mla:
@@ -80,27 +77,22 @@ class HpuPlatform(Platform):
             cache_config.block_size = 128
         if (parallel_config.distributed_executor_backend in ['mp', 'uni']
                 and envs.VLLM_WORKER_MULTIPROC_METHOD == 'fork'):
-            if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD",
-                              None) is not None:
+            if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD", None) is not None:
                 logger.warning("On HPU, VLLM_WORKER_MULTIPROC_METHOD=fork "
                                "might cause application hangs on exit. Using "
                                "VLLM_WORKER_MULTIPROC_METHOD=fork anyway, "
                                "as it was explicitly requested.")
             else:
-                logger.warning(
-                    "On HPU, VLLM_WORKER_MULTIPROC_METHOD=fork "
-                    "might cause application hangs on exit. Setting "
-                    "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
-                    "To override that behavior, please set "
-                    "VLLM_WORKER_MULTIPROC_METHOD=fork explicitly.")
+                logger.warning("On HPU, VLLM_WORKER_MULTIPROC_METHOD=fork "
+                               "might cause application hangs on exit. Setting "
+                               "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
+                               "To override that behavior, please set "
+                               "VLLM_WORKER_MULTIPROC_METHOD=fork explicitly.")
                 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-        if (vllm_config.model_config is not None
-                and vllm_config.model_config.dtype
-                in (torch.float16, torch.float32)):
-            logger.warning(
-                "The HPU backend currently does not support %s. "
-                "Using bfloat16 instead.", vllm_config.model_config.dtype)
+        if (vllm_config.model_config is not None and vllm_config.model_config.dtype in (torch.float16, torch.float32)):
+            logger.warning("The HPU backend currently does not support %s. "
+                           "Using bfloat16 instead.", vllm_config.model_config.dtype)
             vllm_config.model_config.dtype = torch.bfloat16
 
         if envs.VLLM_USE_V1:
@@ -156,8 +148,7 @@ class HpuPlatform(Platform):
             os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
 
     @classmethod
-    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
-                                    model_config: ModelConfig) -> bool:
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str, model_config: ModelConfig) -> bool:
         return kv_cache_dtype == "fp8_inc"
 
     @classmethod
@@ -180,8 +171,7 @@ class HpuPlatform(Platform):
             if weight_attrs is None:
                 return
             for key, value in weight_attrs.items():
-                assert not hasattr(weight, key), (
-                    f"Overwriting existing tensor attribute: {key}")
+                assert not hasattr(weight, key), (f"Overwriting existing tensor attribute: {key}")
 
                 # NOTE(woosuk): During weight loading, we often do something
                 # like:

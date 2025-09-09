@@ -1,6 +1,4 @@
-from vllm.distributed import (cleanup_dist_env_and_memory,
-                              init_distributed_environment,
-                              initialize_model_parallel)
+from vllm.distributed import (cleanup_dist_env_and_memory, init_distributed_environment, initialize_model_parallel)
 import pytest
 import tempfile
 from huggingface_hub import snapshot_download

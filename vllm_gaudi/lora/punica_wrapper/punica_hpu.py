@@ -4,8 +4,7 @@
 from typing import Optional, Union, final
 
 import torch
-from vllm_gaudi.extension.ops import (dispatch_bgmv_embedding,
-                                      dispatch_bgmv_linear)
+from vllm_gaudi.extension.ops import (dispatch_bgmv_embedding, dispatch_bgmv_linear)
 
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
@@ -13,13 +12,11 @@ from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 @final
 class PunicaWrapperHPU(PunicaWrapperBase):
 
-    def __init__(self, max_num_batched_tokens: int, max_batches: int,
-                 device: Union[torch.device, str], **kwargs):
+    def __init__(self, max_num_batched_tokens: int, max_batches: int, device: Union[torch.device, str], **kwargs):
         # Increasing max_num_batched_tokens by 3x to handle increase in
         # tensor size due to padding.
         # TODO: Need to check if this override is still required
-        PunicaWrapperBase.__init__(self, 3 * max_num_batched_tokens,
-                                   max_batches, device)
+        PunicaWrapperBase.__init__(self, 3 * max_num_batched_tokens, max_batches, device)
 
     def add_lora_embedding(self,
                            y: torch.Tensor,
@@ -44,9 +41,8 @@ class PunicaWrapperHPU(PunicaWrapperBase):
         offset_left = 0
 
         for slice_idx in range(len(output_slices)):
-            dispatch_bgmv_linear(
-                y[:, offset_left:offset_left + output_slices[slice_idx]], x,
-                lora_a_stacked[slice_idx], lora_b_stacked[slice_idx], 0, scale)
+            dispatch_bgmv_linear(y[:, offset_left:offset_left + output_slices[slice_idx]], x, lora_a_stacked[slice_idx],
+                                 lora_b_stacked[slice_idx], 0, scale)
             offset_left += output_slices[slice_idx]
 
     def add_lora_logits(self,

@@ -7,9 +7,7 @@ from vllm.lora.request import LoRARequest
 MODEL_PATH = "/mnt/weka/data/pytorch/llama2/Llama-2-7b-hf"
 
 
-def create_test_prompts(
-        lora_path: str
-) -> list[tuple[str, SamplingParams, Optional[LoRARequest]]]:
+def create_test_prompts(lora_path: str) -> list[tuple[str, SamplingParams, Optional[LoRARequest]]]:
     """Create a list of test prompts with their sampling parameters.
 
     2 requests for base model, 4 requests for the LoRA. We define 2
@@ -43,9 +41,7 @@ def create_test_prompts(
             LoRARequest("sql-lora", 1, lora_path)),
         (
             "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_11 (nationality VARCHAR, elector VARCHAR)\n\n question: When Anchero Pantaleone was the elector what is under nationality? [/user] [assistant]",  # noqa: E501
-            SamplingParams(temperature=0,
-                           max_tokens=128,
-                           stop_token_ids=[32003]),
+            SamplingParams(temperature=0, max_tokens=128, stop_token_ids=[32003]),
             LoRARequest("sql-lora", 1, lora_path)),
         (
             "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",  # noqa: E501
@@ -58,16 +54,12 @@ def create_test_prompts(
             LoRARequest("sql-lora2", 2, lora_path)),
         (
             "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_11 (nationality VARCHAR, elector VARCHAR)\n\n question: When Anchero Pantaleone was the elector what is under nationality? [/user] [assistant]",  # noqa: E501
-            SamplingParams(temperature=0,
-                           max_tokens=128,
-                           stop_token_ids=[32003]),
+            SamplingParams(temperature=0, max_tokens=128, stop_token_ids=[32003]),
             LoRARequest("sql-lora", 1, lora_path)),
     ]
 
 
-def process_requests(engine: LLMEngine,
-                     test_prompts: list[tuple[str, SamplingParams,
-                                              Optional[LoRARequest]]]):
+def process_requests(engine: LLMEngine, test_prompts: list[tuple[str, SamplingParams, Optional[LoRARequest]]]):
     """Continuously process a list of prompts and handle the outputs."""
     request_id = 0
     result = {}
@@ -75,18 +67,14 @@ def process_requests(engine: LLMEngine,
     while test_prompts or engine.has_unfinished_requests():
         if test_prompts:
             prompt, sampling_params, lora_request = test_prompts.pop(0)
-            engine.add_request(str(request_id),
-                               prompt,
-                               sampling_params,
-                               lora_request=lora_request)
+            engine.add_request(str(request_id), prompt, sampling_params, lora_request=lora_request)
             request_id += 1
 
         request_outputs: list[RequestOutput] = engine.step()
 
         for request_output in request_outputs:
             if request_output.finished:
-                result[
-                    request_output.request_id] = request_output.outputs[0].text
+                result[request_output.request_id] = request_output.outputs[0].text
     return result
 
 
