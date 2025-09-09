@@ -356,8 +356,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
+        sinks: Optional[int] = None,
     ) -> None:
         super(AttentionImpl, self).__init__()
+        self._sinks = sinks
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not currently supported on HPU.")
         if use_irope:
@@ -535,7 +537,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 and attn_metadata.block_list is not None else None
 
             if self.sliding_window \
-               and attn_metadata.window_attn_bias is not None:
+               and getattr(attn_metadata, "window_attn_bias", None) is not None:
                 attn_bias = attn_metadata.window_attn_bias
 
             out = ops.prompt_attention(impl=self.prefill_impl,
@@ -558,10 +560,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 block_mapping = attn_metadata.block_mapping
                 attn_bias = attn_metadata.attn_bias
             else:
-                block_list = attn_metadata.window_block_list
-                block_groups = attn_metadata.window_block_groups
-                block_mapping = attn_metadata.window_block_mapping
-                attn_bias = attn_metadata.window_attn_bias
+                block_list = attn_metadata.block_list
+                block_groups = attn_metadata.block_groups
+                block_mapping = attn_metadata.block_mapping
+                attn_bias = attn_metadata.attn_bias
 
             self.position_bias = None
             alibi_blocks = getattr(attn_metadata, 'alibi_blocks', None)
