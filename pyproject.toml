@@ -39,17 +39,19 @@ Homepage = "https://github.com/vllm-project/vllm-gaudi"
 where = ["."]
 include = ["vllm_gaudi"]
 
+[tool.yapf]
+column_limit = 120
+
 [tool.yapfignore]
 ignore_patterns = [
     "build/**",
     "examples/**",
-    "vllm_gaudi/extension/**"  # NOTE(kzawora): re-enable this once extension refactor is ready
 ]
 
 [tool.ruff]
-# Allow lines to be as long as 80.
+# Allow lines to be as long as 120.
 extend-exclude = ["vllm_gaudi/extension/**"]  # NOTE(kzawora): re-enable this once extension refactor is ready
-line-length = 80
+line-length = 120
 
 [tool.ruff.lint]
 select = [
