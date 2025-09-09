@@ -26,6 +26,7 @@ def launch_lm_eval(eval_config):
     model_args = {
         'pretrained': eval_config['model_name'],
         'tensor_parallel_size': tp_size,
+        'async_scheduling': True,
         'enforce_eager': enforce_eager,
         'enable_prefix_caching': enable_apc,
         'add_bos_token': True,
