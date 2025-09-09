@@ -39,8 +39,7 @@ def main(args: dict):
     print("-" * 50)
     for prompt, output in zip(PROMPTS, outputs):
         embedding = output.outputs.embedding
-        trimmed = (embedding[:16] +
-                   ["..."] if len(embedding) > 16 else embedding)
+        trimmed = (embedding[:16] + ["..."] if len(embedding) > 16 else embedding)
         print(f"Prompt: {prompt!r}\nEmbedding: {trimmed} "
               f"(length={len(embedding)})")
         print("-" * 50)

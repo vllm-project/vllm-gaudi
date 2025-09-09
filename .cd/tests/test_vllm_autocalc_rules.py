@@ -35,11 +35,7 @@ def test_calc_TOTAL_GPU_MEM():
 
 
 def test_calc_MODEL_MEM_IN_GB():
-    ctx = {
-        'MODEL_MEM_FROM_CONFIG': 2 * 1024**3,
-        'QUANT_DTYPE': 1,
-        'MODEL_DTYPE': 1
-    }
+    ctx = {'MODEL_MEM_FROM_CONFIG': 2 * 1024**3, 'QUANT_DTYPE': 1, 'MODEL_DTYPE': 1}
     assert rules.calc_MODEL_MEM_IN_GB(ctx) == 2.0
 
 
@@ -79,12 +75,7 @@ def test_calc_KV_CACHE_PER_SEQ():
 
 
 def test_calc_EST_MAX_NUM_SEQS():
-    ctx = {
-        'TENSOR_PARALLEL_SIZE': 4,
-        'USABLE_MEM': 100,
-        'GPU_MEM_UTILIZATION': 0.9,
-        'KV_CACHE_PER_SEQ': 0.5
-    }
+    ctx = {'TENSOR_PARALLEL_SIZE': 4, 'USABLE_MEM': 100, 'GPU_MEM_UTILIZATION': 0.9, 'KV_CACHE_PER_SEQ': 0.5}
     expected = (4 * 100 * 0.9) / 0.5
     assert rules.calc_EST_MAX_NUM_SEQS(ctx) == expected
 
@@ -108,10 +99,7 @@ def test_calc_DECODE_BS_STEP_GRAPHS():
 
 
 def test_calc_DECODE_BLOCK_RAMP_GRAPHS():
-    ctx = {
-        'VLLM_DECODE_BLOCK_BUCKET_STEP': 16,
-        'VLLM_DECODE_BLOCK_BUCKET_MIN': 2
-    }
+    ctx = {'VLLM_DECODE_BLOCK_BUCKET_STEP': 16, 'VLLM_DECODE_BLOCK_BUCKET_MIN': 2}
     expected = 1 + int(math.log(16 / 2, 2))
     assert rules.calc_DECODE_BLOCK_RAMP_GRAPHS(ctx) == expected
 
@@ -134,11 +122,7 @@ def test_calc_NUM_DECODE_GRAPHS():
 
 
 def test_calc_PROMPT_BS_RAMP_GRAPHS():
-    ctx = {
-        'MAX_NUM_PREFILL_SEQS': 16,
-        'VLLM_PROMPT_BS_BUCKET_STEP': 8,
-        'VLLM_PROMPT_BS_BUCKET_MIN': 2
-    }
+    ctx = {'MAX_NUM_PREFILL_SEQS': 16, 'VLLM_PROMPT_BS_BUCKET_STEP': 8, 'VLLM_PROMPT_BS_BUCKET_MIN': 2}
     expected = 1 + int(math.log(min(16, 8) / 2, 2))
     assert rules.calc_PROMPT_BS_RAMP_GRAPHS(ctx) == expected
 
@@ -191,12 +175,7 @@ def test_calc_DECODE_GRAPH_TARGET_GB():
 
 
 def test_calc_EST_GRAPH_RESERVE_MEM():
-    ctx = {
-        'DECODE_GRAPH_TARGET_GB': 5,
-        'USABLE_MEM': 10,
-        'GPU_MEM_UTILIZATION': 0.8,
-        'VLLM_GRAPH_PROMPT_RATIO': 0.2
-    }
+    ctx = {'DECODE_GRAPH_TARGET_GB': 5, 'USABLE_MEM': 10, 'GPU_MEM_UTILIZATION': 0.8, 'VLLM_GRAPH_PROMPT_RATIO': 0.2}
     expected = math.ceil(5 / (10 * 0.8 * (1 - 0.2)) * 100) / 100
     assert rules.calc_EST_GRAPH_RESERVE_MEM(ctx) == expected
 
@@ -208,11 +187,7 @@ def test_calc_VLLM_GRAPH_RESERVED_MEM():
 
 
 def test_calc_KV_CACHE_MEM():
-    ctx = {
-        'USABLE_MEM': 10,
-        'GPU_MEM_UTILIZATION': 0.8,
-        'VLLM_GRAPH_RESERVED_MEM': 0.2
-    }
+    ctx = {'USABLE_MEM': 10, 'GPU_MEM_UTILIZATION': 0.8, 'VLLM_GRAPH_RESERVED_MEM': 0.2}
     expected = 10 * 0.8 * (1 - 0.2)
     assert rules.calc_KV_CACHE_MEM(ctx) == expected
 

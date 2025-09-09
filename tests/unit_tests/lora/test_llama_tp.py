@@ -49,18 +49,12 @@ def do_sample(llm: vllm.LLM,
         outputs = llm.generate(
             prompts,
             sampling_params,
-            lora_request=LoRARequest(
-                str(lora_id),
-                lora_id,
-                lora_path,
-                tensorizer_config_dict=tensorizer_config_dict)
+            lora_request=LoRARequest(str(lora_id), lora_id, lora_path, tensorizer_config_dict=tensorizer_config_dict)
             if lora_id else None)
     else:
-        outputs = llm.generate(
-            prompts,
-            sampling_params,
-            lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
-            if lora_id else None)
+        outputs = llm.generate(prompts,
+                               sampling_params,
+                               lora_request=LoRARequest(str(lora_id), lora_id, lora_path) if lora_id else None)
     # Print the outputs.
     generated_texts: list[str] = []
     for output in outputs:
@@ -71,31 +65,21 @@ def do_sample(llm: vllm.LLM,
     return generated_texts
 
 
-def generate_and_test(llm,
-                      sql_lora_files,
-                      tensorizer_config_dict: Union[dict, None] = None):
+def generate_and_test(llm, sql_lora_files, tensorizer_config_dict: Union[dict, None] = None):
     print("lora adapter created")
-    assert do_sample(llm,
-                     sql_lora_files,
-                     tensorizer_config_dict=tensorizer_config_dict,
+    assert do_sample(llm, sql_lora_files, tensorizer_config_dict=tensorizer_config_dict,
                      lora_id=0) == EXPECTED_NO_LORA_OUTPUT
 
     print("lora 1")
-    assert do_sample(llm,
-                     sql_lora_files,
-                     tensorizer_config_dict=tensorizer_config_dict,
+    assert do_sample(llm, sql_lora_files, tensorizer_config_dict=tensorizer_config_dict,
                      lora_id=1) == EXPECTED_LORA_OUTPUT
 
     print("no lora")
-    assert do_sample(llm,
-                     sql_lora_files,
-                     tensorizer_config_dict=tensorizer_config_dict,
+    assert do_sample(llm, sql_lora_files, tensorizer_config_dict=tensorizer_config_dict,
                      lora_id=0) == EXPECTED_NO_LORA_OUTPUT
 
     print("lora 2")
-    assert do_sample(llm,
-                     sql_lora_files,
-                     tensorizer_config_dict=tensorizer_config_dict,
+    assert do_sample(llm, sql_lora_files, tensorizer_config_dict=tensorizer_config_dict,
                      lora_id=2) == EXPECTED_LORA_OUTPUT
 
     print("removing lora")

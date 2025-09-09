@@ -98,8 +98,10 @@ def Hardware(target_hw: str) -> ValueFn:
 
 def Kernel(loader_fn: Callable) -> ValueFn:
     """Return True if loader_fn result is not None and hardware != 'cpu'"""
+
     def kernel_exists(_):
         return loader_fn() is not None
+
     return All(kernel_exists, Not(Hardware('cpu')))
 
 
@@ -126,8 +128,10 @@ def boolean(x: str) -> bool:
 
 def list_of(t: Constructor):
     """Converts a comma seperated string representation of a list of values"""
+
     def list_of_impl(x: str) -> list[Any]:
         return [t(v) for v in x.split(',')]
+
     return list_of_impl
 
 
@@ -156,7 +160,12 @@ class Env:
 class Value:
     """A callable that returns the value calculated through its dependencies or overriden by an associated experimental flag"""
 
-    def __init__(self, name: str, dependencies: Any, env_var: Optional[str] = None, env_var_type: Constructor = boolean, check: Checker = skip_validation):
+    def __init__(self,
+                 name: str,
+                 dependencies: Any,
+                 env_var: Optional[str] = None,
+                 env_var_type: Constructor = boolean,
+                 check: Checker = skip_validation):
         self.name = name
         self.env_var = env_var if env_var is not None else 'VLLM_' + name.upper()
         self.env_var_type = env_var_type
@@ -186,11 +195,12 @@ class Value:
 
 class ValueFromList(Value):
     """ Helper class to create a value with a limited list of possible options """
+
     def __init__(self, name: str, options: list[str]):
         super().__init__(name, FirstEnabled(*options), env_var_type=str, check=choice(*options))
 
 
-HasName = TypeVar('HasName', bound=Value|Env)
+HasName = TypeVar('HasName', bound=Value | Env)
 
 
 def to_dict(collection: list[HasName]) -> dict[str, HasName]:

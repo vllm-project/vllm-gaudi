@@ -12,18 +12,15 @@ import torch.distributed
 import torch.nn as nn
 from vllm.tasks import SupportedTask
 from vllm_gaudi.extension.debug import init_debug_logger
-from vllm_gaudi.extension.profiler import (HabanaMemoryProfiler, format_bytes,
-                                           setup_profiler)
+from vllm_gaudi.extension.profiler import (HabanaMemoryProfiler, format_bytes, setup_profiler)
 from vllm_gaudi.extension.runtime import get_config
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
-from vllm.distributed import (ensure_model_parallel_initialized,
-                              init_distributed_environment)
+from vllm.distributed import (ensure_model_parallel_initialized, init_distributed_environment)
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec)
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec)
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.utils import is_fake_hpu
@@ -77,17 +74,15 @@ class HPUWorker(WorkerBase):
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:
-            self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
-                self.cache_config.cache_dtype]
+            self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
-        self.gc_track_recompiles = bool(
-            "PT_HPU_METRICS_GC_DETAILS" in os.environ
-            and bool_helper(os.getenv("PT_HPU_METRICS_GC_DETAILS")))
+        self.gc_track_recompiles = bool("PT_HPU_METRICS_GC_DETAILS" in os.environ
+                                        and bool_helper(os.getenv("PT_HPU_METRICS_GC_DETAILS")))
         self.step = 0
         self.profile_steps = get_config().VLLM_PROFILE_STEPS
         self.step_profiler = setup_step_profiler(self.profile_steps)
@@ -97,21 +92,19 @@ class HPUWorker(WorkerBase):
         """Initialize the profiler."""
         if envs.VLLM_TORCH_PROFILER_DIR:
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
-            logger.info("Profiling enabled. Traces will be saved to: %s",
-                        torch_profiler_trace_dir)
+            logger.info("Profiling enabled. Traces will be saved to: %s", torch_profiler_trace_dir)
             if os.getenv('VLLM_PROFILER_ENABLED') == 'full':
                 fn = self.model_runner.profiler.full_trace_handler
                 with_stack = False
             else:
                 fn = torch.profiler.tensorboard_trace_handler
                 with_stack = True
-            self.profiler = torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.HPU,
-                ],
-                with_stack=with_stack,
-                on_trace_ready=fn(torch_profiler_trace_dir, use_gzip=True))
+            self.profiler = torch.profiler.profile(activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.HPU,
+            ],
+                                                   with_stack=with_stack,
+                                                   on_trace_ready=fn(torch_profiler_trace_dir, use_gzip=True))
 
         else:
             self.profiler = None
@@ -136,14 +129,11 @@ class HPUWorker(WorkerBase):
 
     def init_device(self):
         # Initialize the distributed environment.
-        init_worker_distributed_environment(self.parallel_config, self.rank,
-                                            self.distributed_init_method,
+        init_worker_distributed_environment(self.parallel_config, self.rank, self.distributed_init_method,
                                             self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
-        self.model_runner = HPUModelRunner(
-            vllm_config=self.vllm_config,
-            is_driver_worker=self.is_driver_worker)
+        self.model_runner = HPUModelRunner(vllm_config=self.vllm_config, is_driver_worker=self.is_driver_worker)
         self.init_profiler()
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
@@ -193,10 +183,7 @@ class HPUWorker(WorkerBase):
                 raise NotImplementedError
 
         runner_kv_caches: list[torch.Tensor] = []
-        bind_kv_cache(
-            kv_caches,
-            self.vllm_config.compilation_config.static_forward_context,
-            runner_kv_caches)
+        bind_kv_cache(kv_caches, self.vllm_config.compilation_config.static_forward_context, runner_kv_caches)
         if is_fake_hpu():
             fake_hpu_cache_alloc = 4 * 2**30  # take 4 GiB flat on fake hpu
             return fake_hpu_cache_alloc
@@ -210,34 +197,30 @@ class HPUWorker(WorkerBase):
         # recipes we will use the extra memory for graphs/blocks
         free_hpu_memory = torch.hpu.mem_get_info()[0]
 
-        graph_reserved_mem = (float(
-            os.environ.get('VLLM_GRAPH_RESERVED_MEM', '0.1'))
+        graph_reserved_mem = (float(os.environ.get('VLLM_GRAPH_RESERVED_MEM', '0.1'))
                               if not self.model_config.enforce_eager else 0)
         graph_headroom = 1 - graph_reserved_mem
         available_hpu_memory = free_hpu_memory * \
             self.cache_config.gpu_memory_utilization
-        hpu_memory_margin = free_hpu_memory * (
-            1 - self.cache_config.gpu_memory_utilization)
+        hpu_memory_margin = free_hpu_memory * (1 - self.cache_config.gpu_memory_utilization)
         self.model_runner.mem_margin = hpu_memory_margin
         cache_size_bytes = available_hpu_memory * graph_headroom
         graph_headroom_bytes = available_hpu_memory * (1 - graph_headroom)
         dummy_block_headroom = single_kv_block_size_bytes
-        msg = (
-            f"Free device memory: {format_bytes(free_hpu_memory)}, "
-            f"{format_bytes(available_hpu_memory)} usable "
-            f"(gpu_memory_utilization={self.cache_config.gpu_memory_utilization}),"
-            f" {format_bytes(graph_headroom_bytes)} reserved for HPUGraphs "
-            f"(VLLM_GRAPH_RESERVED_MEM={graph_reserved_mem}), "
-            f"{format_bytes(dummy_block_headroom)} reserved for KV cache dummy "
-            f"block {format_bytes(cache_size_bytes - dummy_block_headroom)} "
-            "reserved for usable KV cache")
+        msg = (f"Free device memory: {format_bytes(free_hpu_memory)}, "
+               f"{format_bytes(available_hpu_memory)} usable "
+               f"(gpu_memory_utilization={self.cache_config.gpu_memory_utilization}),"
+               f" {format_bytes(graph_headroom_bytes)} reserved for HPUGraphs "
+               f"(VLLM_GRAPH_RESERVED_MEM={graph_reserved_mem}), "
+               f"{format_bytes(dummy_block_headroom)} reserved for KV cache dummy "
+               f"block {format_bytes(cache_size_bytes - dummy_block_headroom)} "
+               "reserved for usable KV cache")
 
         logger.info(msg)
         gc.collect()
         return cache_size_bytes - dummy_block_headroom
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
@@ -316,20 +299,13 @@ def init_worker_distributed_environment(
     local_rank: int = -1,
 ) -> None:
     """Initialize the distributed environment."""
-    init_distributed_environment(parallel_config.world_size,
-                                 rank,
-                                 distributed_init_method,
-                                 local_rank,
-                                 backend='hccl')
-    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size)
+    init_distributed_environment(parallel_config.world_size, rank, distributed_init_method, local_rank, backend='hccl')
+    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size, parallel_config.pipeline_parallel_size)
 
     dummy_tensor_hpu = torch.ones(1).to('hpu')
     torch.distributed.all_reduce(dummy_tensor_hpu)
-    assert dummy_tensor_hpu.item(
-    ) == parallel_config.world_size * parallel_config.data_parallel_size
-    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size)
+    assert dummy_tensor_hpu.item() == parallel_config.world_size * parallel_config.data_parallel_size
+    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size, parallel_config.pipeline_parallel_size)
 
 
 @contextmanager

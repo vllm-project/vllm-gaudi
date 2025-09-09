@@ -9,9 +9,7 @@ from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
 
-TEST_DATA_FILE = os.environ.get(
-    "TEST_DATA_FILE",
-    ".jenkins/vision/configs/Llama-4-Scout-17B-16E-Instruct.yaml")
+TEST_DATA_FILE = os.environ.get("TEST_DATA_FILE", ".jenkins/vision/configs/Llama-4-Scout-17B-16E-Instruct.yaml")
 
 TP_SIZE = int(os.environ.get("TP_SIZE", 1))
 
@@ -38,19 +36,8 @@ def launch_enc_dec_model(config, question):
         enforce_eager=enforce_eager,
     )
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    messages = [{
-        "role":
-        "user",
-        "content": [{
-            "type": "image"
-        }, {
-            "type": "text",
-            "text": f"{question}"
-        }]
-    }]
-    prompt = tokenizer.apply_chat_template(messages,
-                                           add_generation_prompt=True,
-                                           tokenize=False)
+    messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": f"{question}"}]}]
+    prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
     return llm, prompt
 
 
@@ -85,14 +72,12 @@ def get_current_gaudi_platform():
     elif device_type == htexp.synDeviceType.synDeviceGaudi3:
         return "Gaudi3"
     else:
-        raise ValueError(
-            f"Unsupported device: the device type is {device_type}.")
+        raise ValueError(f"Unsupported device: the device type is {device_type}.")
 
 
 def test_enc_dec_model(record_xml_attribute, record_property):
     try:
-        config = yaml.safe_load(
-            Path(TEST_DATA_FILE).read_text(encoding="utf-8"))
+        config = yaml.safe_load(Path(TEST_DATA_FILE).read_text(encoding="utf-8"))
         # Record JUnitXML test name
         platform = get_current_gaudi_platform()
         testname = (f'test_{Path(TEST_DATA_FILE).stem}_{platform}_'
@@ -104,9 +89,7 @@ def test_enc_dec_model(record_xml_attribute, record_property):
         question = mm_input["question"]
         llm, prompt = launch_enc_dec_model(config, question)
 
-        sampling_params = SamplingParams(temperature=0.0,
-                                         max_tokens=100,
-                                         stop_token_ids=None)
+        sampling_params = SamplingParams(temperature=0.0, max_tokens=100, stop_token_ids=None)
 
         num_prompts = config.get('num_prompts', 1)
         model_name = os.path.basename(config.get('model_name'))
@@ -138,9 +121,7 @@ def test_enc_dec_model(record_xml_attribute, record_property):
                 prompt = output.prompt
                 generated_text = output.outputs[0].text
                 print("-----------------------------------")
-                print(
-                    f"Prompt: {prompt!r}\nGenerated text:\n {generated_text}\n"
-                )
+                print(f"Prompt: {prompt!r}\nGenerated text:\n {generated_text}\n")
 
             return
 
