@@ -50,9 +50,15 @@ ValueFn: TypeAlias = Callable[[Config], Any]
 T = TypeVar('T')
 Constructor: TypeAlias = Callable[[str], Any]
 
+
 def All(*parts: ValueFn) -> ValueFn:
     """Return True if all functions return True"""
     return lambda cfg: all(p(cfg) for p in parts)
+
+
+def Any(*parts: ValueFn) -> ValueFn:
+    """Return True if any function returns True"""
+    return lambda cfg: any(p(cfg) for p in parts)
 
 
 def Not(fn: ValueFn) -> ValueFn:
