@@ -16,6 +16,7 @@ import numpy as np
 import torch
 import torch.distributed
 import torch.nn.functional as F
+import torch.nn as nn
 import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 from vllm_gaudi.extension.defragmentation import OnlineDefragmenter
@@ -76,6 +77,12 @@ from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from torch.nn.utils.rnn import pad_sequence
 from vllm.sampling_params import SamplingParams
+from vllm.lora.layers import LoRAMapping
+from vllm.lora.request import LoRARequest
+from vllm.config import LoRAConfig, ModelConfig, SchedulerConfig
+from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
+from vllm.model_executor.models import supports_lora, supports_multimodal
+from vllm_gaudi.extension.ops import LoraMask as LoraMask
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -412,6 +419,10 @@ class HpuModelAdapter(torch.nn.Module):
         # kwargs['attn_metadata'].slot_mapping, compared to untrimmed metadata
         kwargs = kwargs.copy()
         #        selected_token_indices = kwargs.pop('selected_token_indices')
+        if 'lora_mask' in kwargs:
+            lora_mask = kwargs['lora_mask']
+            LoraMask.setLoraMask(lora_mask)
+            kwargs.pop('lora_mask')
         if 'warmup_mode' in kwargs:
             kwargs.pop('warmup_mode')
         input_ids = kwargs['input_ids']
@@ -763,6 +774,115 @@ class HPUModelRunner:
         logits = min(bucketize(logits, logits_buckets), query_len)
 
         return (query_len, shared_blocks, unique_blocks, logits)
+
+    def create_lora_mask(self, input_tokens: torch.Tensor, lora_ids: list[int],
+                         is_prompt: bool):
+        '''
+        This is a helper function to create the mask for lora computations.
+        Lora Mask is needed to ensure we match the correct lora weights for the
+        for the request.
+        For Prompt phase we have
+        lora_mask with shape (batch_size * seq_len, max_loras * max_rank)
+        lora_logits_mask with shape (batch_size, max_loras * max_rank)
+        For Decode phase we have both
+        lora_mask and lora_logits_mask with shape
+        (batch_size, max_loras * max_rank)
+        '''
+        lora_mask: torch.Tensor = None
+        lora_logits_mask: torch.Tensor = None
+        lora_index = 0
+
+        if self.lora_config:
+            if is_prompt:
+                lora_mask = torch.zeros(
+                    input_tokens.shape[0] * input_tokens.shape[1],
+                    (self.lora_config.max_loras) *\
+                        self.lora_config.max_lora_rank,
+                    dtype=self.lora_config.lora_dtype)
+                lora_logits_mask = torch.zeros(
+                    input_tokens.shape[0], (self.lora_config.max_loras) *
+                    self.lora_config.max_lora_rank,
+                    dtype=self.lora_config.lora_dtype)
+
+                ones = torch.ones(input_tokens.shape[1],
+                                  self.lora_config.max_lora_rank,
+                                  dtype=self.lora_config.lora_dtype)
+                logit_ones = torch.ones(1,
+                                        self.lora_config.max_lora_rank,
+                                        dtype=self.lora_config.lora_dtype)
+
+                for i in range(len(lora_ids)):
+                    if lora_ids[i] == 0:
+                        continue
+                    lora_index = self.lora_manager._adapter_manager.\
+                        lora_index_to_id.index(lora_ids[i])
+                    start_row = i * input_tokens.shape[1]
+                    end_row = start_row + input_tokens.shape[1]
+                    start_col = lora_index * self.lora_config.max_lora_rank
+                    end_col = start_col + self.lora_config.max_lora_rank
+                    lora_mask[start_row:end_row, start_col:end_col] = ones
+                    lora_logits_mask[i, start_col:end_col] = logit_ones
+                lora_mask = lora_mask.to('hpu')
+                lora_logits_mask = lora_logits_mask.to('hpu')
+            else:
+                lora_mask = torch.zeros(input_tokens.shape[0],
+                                        (self.lora_config.max_loras) *
+                                        self.lora_config.max_lora_rank,
+                                        dtype=self.lora_config.lora_dtype)
+                ones = torch.ones(1,
+                                  self.lora_config.max_lora_rank,
+                                  dtype=self.lora_config.lora_dtype)
+                for i in range(len(lora_ids)):
+                    if lora_ids[i] == 0:
+                        continue
+                    lora_index = self.lora_manager._adapter_manager.\
+                        lora_index_to_id.index(lora_ids[i])
+                    start_pos = lora_index * self.lora_config.max_lora_rank
+                    end_pos = start_pos + self.lora_config.max_lora_rank
+                    lora_mask[i, start_pos:end_pos] = ones
+                lora_mask = lora_mask.to('hpu')
+                lora_logits_mask = lora_mask
+
+        return lora_mask, lora_logits_mask
+
+    def load_lora_model(self, model: nn.Module, model_config: ModelConfig,
+                        scheduler_config: SchedulerConfig,
+                        lora_config: LoRAConfig, device: str) -> nn.Module:
+
+        if not supports_lora(model):
+            raise ValueError(
+                f"{model.__class__.__name__} does not support LoRA yet.")
+
+        if supports_multimodal(model):
+            logger.warning("Regarding multimodal models, vLLM currently "
+                           "only supports adding LoRA to language model.")
+
+        # Use get_text_config() in case of multimodal models
+        text_config = model_config.hf_config.get_text_config()
+
+        # Add LoRA Manager to the Model Runner
+        self.lora_manager = LRUCacheWorkerLoRAManager(
+            scheduler_config.max_num_seqs,
+            scheduler_config.max_num_batched_tokens,
+            model_config.get_vocab_size(),
+            lora_config,
+            device,
+            model.embedding_modules,
+            model.embedding_padding_modules,
+            max_position_embeddings=text_config.max_position_embeddings,
+        )
+        return self.lora_manager.create_lora_manager(model)
+
+    def set_active_loras(self, lora_requests: set[LoRARequest],
+                         lora_mapping: LoRAMapping) -> None:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
+
+    def remove_all_loras(self):
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        self.lora_manager.remove_all_adapters()
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
@@ -2132,6 +2252,8 @@ class HPUModelRunner:
                                attn_metadata,
                                logits_indices,
                                kv_caches,
+                               lora_logits_mask,
+                               lora_mask,
                                warmup_mode=False,
                                inputs_embeds=None,
                                model_mm_kwargs=None):
@@ -2169,13 +2291,15 @@ class HPUModelRunner:
                 attn_metadata=trimmed_attn_metadata,
                 kv_caches=kv_caches,
                 inputs_embeds=inputs_embeds,
-                model_mm_kwargs=model_mm_kwargs)
+                model_mm_kwargs=model_mm_kwargs,
+                lora_mask=lora_mask)
         # NOTE(kzawora): returning hidden_states is required in prompt logprobs
         # scenarios, as they will do logit processing on their own
         non_flattened_hidden_states = hidden_states
 
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         hidden_states = hidden_states[logits_indices]
+        LoraMask.setLoraMask(lora_logits_mask)
         with self.profiler.record_event('internal', ('compute_logits'
                                                      f'{batch_size}_'
                                                      f'seq{seq_len}_ctx'
@@ -2336,6 +2460,51 @@ class HPUModelRunner:
         )
         logits.copy_(
             logits_cpu.to(self.device, non_blocking=True).to(logits.dtype))
+
+    def _configure_lora(self, input, requests, req_ids, is_prompt):
+        lora_mask = None
+        lora_logits_mask = None
+        if self.lora_config:
+            if is_prompt:
+                lora_requests = [] if req_ids else requests
+                lora_ids = []
+                lora_index_mapping = []
+                lora_prompt_mapping = []
+                for i, r_id in enumerate(req_ids):
+                    lora_requests.append(requests[r_id].lora_request)
+                for lora_req in lora_requests:
+                    lora_id = lora_req.lora_int_id if lora_req else 0
+                    lora_index_mapping += [lora_id] * (input.shape[1])
+                    #TODO: This may need to change when logprobs
+                    # sampling is enabled
+                    lora_prompt_mapping += [lora_id]
+                    lora_ids.append(lora_id)
+            else:
+                lora_requests = []
+                # lora_ids, lora_index_mapping, lora_prompt_mapping
+                # filled with 0 (indicating no lora) to account for
+                # any padding
+                lora_ids = [0] * input.shape[0]
+                lora_index_mapping = [0] * input.shape[0]
+                lora_prompt_mapping = [0] * input.shape[0]
+                for i, r_id in enumerate(req_ids):
+                    lora_requests.append(requests[r_id].lora_request)
+
+                for i, lora_req in enumerate(lora_requests):
+                    lora_id = lora_req.lora_int_id if lora_req else 0
+                    lora_index_mapping[i] = lora_id
+                    lora_prompt_mapping[i] = lora_id
+                    lora_ids[i] = lora_id
+
+            # is_prefill should always be "False" for HPU
+            lora_mapping = LoRAMapping(lora_index_mapping,
+                                       lora_prompt_mapping,
+                                       is_prefill=False)
+            self.set_active_loras(lora_requests, lora_mapping)
+            lora_mask, lora_logits_mask = self.create_lora_mask(
+                input, lora_ids, is_prompt)
+
+        return lora_mask, lora_logits_mask
 
     def _run_sampling(
             self,
@@ -2607,6 +2776,9 @@ class HPUModelRunner:
                         device=self.device,
                     )
 
+                lora_mask, lora_logits_mask = self._configure_lora(
+                    token_ids, self.requests, req_id, True)
+
                 self.event_start = self.profiler.get_timestamp_us()
                 self.profiler.start("internal", "prefill")
                 # Align behavior of incomplete prompt with gpu_model_runner
@@ -2622,6 +2794,8 @@ class HPUModelRunner:
                     self._execute_model_generic(
                         token_ids, position_ids, attn_metadata, logits_indices,
                         self.kv_caches,
+                        lora_logits_mask,
+                        lora_mask,
                         inputs_embeds=inputs_embeds,
                         model_mm_kwargs=model_mm_kwargs,
                         warmup_mode=warmup_mode)
@@ -2657,9 +2831,12 @@ class HPUModelRunner:
         ######################### DECODES #########################
         # Decodes run as one single batch with [padded_decode_bs, 1]
         if num_decodes > 0:
+            assert decode_data is not None
+            lora_mask, lora_logits_mask = self._configure_lora(
+                decode_data.token_ids, self.requests, pd_info.decode_req_ids,
+                False)
             self.event_start = self.profiler.get_timestamp_us()
             self.profiler.start("internal", "decode")
-            assert decode_data is not None
             htorch.core.mark_step()
             non_flattened_hidden_states, sample_hidden_states, logits_device = \
             self._execute_model_generic(
@@ -2668,6 +2845,8 @@ class HPUModelRunner:
                 decode_data.attn_metadata,
                 decode_data.logits_indices,
                 self.kv_caches,
+                lora_logits_mask,
+                lora_mask,
                 warmup_mode=warmup_mode)
             htorch.core.mark_step()
 
@@ -2883,6 +3062,12 @@ class HPUModelRunner:
         logger.info("Starting to load model %s...", self.model_config.model)
         with HabanaMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
+            if self.lora_config:
+                self.model = self.load_lora_model(self.model,
+                                                  self.model_config,
+                                                  self.scheduler_config,
+                                                  self.lora_config,
+                                                  self.device)
         self.model_memory_usage = m.consumed_device_memory
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
