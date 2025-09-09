@@ -9,8 +9,9 @@ from typing import Optional
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.attention.backends.abstract import AttentionMetadata, AttentionImpl
 from vllm_gaudi.attention.backends.hpu_attn import (HPUAttentionBackend,
+                                                    HPUAttentionImpl,
                                                     HPUAttentionMetadata)
 from vllm_gaudi.extension.logger import logger as init_logger
 
@@ -22,6 +23,10 @@ class HPUAttentionBackendV1(HPUAttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "HPU_ATTN_V1"
+
+    @staticmethod
+    def get_impl_cls() -> type["AttentionImpl"]:
+        return HPUAttentionImpl
 
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
@@ -38,8 +43,15 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
 
     seq_lens_tensor: Optional[torch.Tensor]
     context_lens_tensor: Optional[torch.Tensor]
-
     query_start_loc: Optional[torch.Tensor] = None
+
+    def seq_len(self):
+        return self.slot_mapping.size(-1)
+
+    def num_blocks(self):
+        if self.block_list is None:
+            return 0
+        return self.block_list.numel()
 
     @classmethod
     def make_prefill_metadata(cls,
