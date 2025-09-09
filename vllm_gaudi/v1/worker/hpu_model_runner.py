@@ -566,6 +566,11 @@ class HPUModelRunner:
         # hpu-extension which selects fetch_from_cache implementation based
         # on env vars... this should be fixed in the future
         self.enable_bucketing = get_config().use_bucketing
+        self.profiling_run = get_config().VLLM_PROFILE_PROMPT or \
+                             get_config().VLLM_PROFILE_DECODE or \
+                             get_config().VLLM_PT_PROFILE
+        self.enable_bucketing = False if self.profiling_run else \
+                                self.enable_bucketing
         self.use_contiguous_pa = get_config().use_contiguous_pa
         self.skip_warmup = get_config().skip_warmup
 
@@ -705,11 +710,13 @@ class HPUModelRunner:
         self.use_prefix_caching = (
             self.vllm_config.cache_config.enable_prefix_caching)
         self.bucketing_manager = HPUBucketingManager()
+        max_num_prefill_seqs = self.max_num_seqs if self.use_merged_prefill \
+                               else self.max_prefill_batch_size
         if self.enable_bucketing:
             logger.info("Bucketing is ON.")
             self.bucketing_manager.initialize(
                 max_num_seqs=self.max_num_seqs,
-                max_num_prefill_seqs=self.max_prefill_batch_size,
+                max_num_prefill_seqs=max_num_prefill_seqs,
                 block_size=self.block_size,
                 max_num_batched_tokens=self.max_num_batched_tokens,
                 max_model_len=self.max_model_len)
@@ -2946,6 +2953,7 @@ class HPUModelRunner:
                            num_computed_tokens,
                            total_tokens,
                            scheduled_tokens,
+                           is_prompt,
                            block_id=0):
         from vllm.sampling_params import SamplingParams
         from vllm.v1.core.sched.output import NewRequestData
@@ -2969,7 +2977,11 @@ class HPUModelRunner:
             lora_request=None,
         )
         requests.append(req)
-        num_scheduled_tokens[req_id] = scheduled_tokens
+        if is_prompt:
+            num_scheduled_tokens[req_id] = len(
+                prompt_token_ids) - num_computed_tokens
+        else:
+            num_scheduled_tokens[req_id] = scheduled_tokens
 
     @staticmethod
     def _generate_seq_lengths(num_samples, num_blocks, block_size):
@@ -2981,6 +2993,34 @@ class HPUModelRunner:
         seq_lengths = [b * block_size - 1 for b in blocks]
         return seq_lengths
 
+    def distribute_sum_evenly(self, total_sum, max_length):
+        '''
+        Return a balanced list of ints that sums up to total_sum.
+        List cannot be longer than max_length.
+        '''
+        base, remain = divmod(total_sum, max_length)
+        result = [base] * max_length
+
+        for i in range(remain):
+            result[i] += 1
+
+        return result
+
+    def get_merged_prefill_seq_lens(self, query_len, ctx_blocks):
+        '''
+        Get seperate sequence lengths from merged layout to individual 
+        samples.
+        Returns list of sequence length (including query and context) and
+        context lengths.
+        '''
+        ctx_list = self.distribute_sum_evenly(ctx_blocks, self.max_num_seqs)
+        query_list = self.distribute_sum_evenly(query_len, self.max_num_seqs)
+        prompt_list = [
+            q + c * self.block_size for q, c in zip(query_list, ctx_list)
+        ]
+        ctx_list = ctx_list if len(ctx_list) > 0 else [0] * len(prompt_list)
+        return prompt_list, ctx_list
+
     def _execute_dummy_scenario(self, prompt_cfg, decode_cfg):
         from vllm.v1.core.sched.output import (NewRequestData, SchedulerOutput,
                                                CachedRequestData)
@@ -2988,23 +3028,33 @@ class HPUModelRunner:
         scheduled_tokens: dict[str, int] = {}
 
         if prompt_cfg:
-            prompt_bs, prompt_query_len, prompt_blocks = prompt_cfg
-            prompt_ctx_len = prompt_blocks * self.block_size
-            prompt_total_tokens = prompt_query_len + prompt_ctx_len
-            for _ in range(prompt_bs):
+            prompt_bs, prompt_query_len, prompt_num_blocks = prompt_cfg
+            prompt_ctx_len = prompt_num_blocks * self.block_size
+            prompt_total_tokens = [prompt_query_len + prompt_ctx_len]
+            prompt_num_context_blocks = [prompt_num_blocks]
+            if self.max_model_len < sum(prompt_total_tokens) \
+                and self.use_merged_prefill:
+                # split query and ctx in merged prefill case
+                prompt_total_tokens, prompt_num_context_blocks = \
+                     self.get_merged_prefill_seq_lens(prompt_query_len,
+                                                 prompt_num_blocks)
+            for tokens, context_len in zip(prompt_total_tokens,
+                                           prompt_num_context_blocks):
                 self._add_dummy_request(requests,
                                         scheduled_tokens,
-                                        num_computed_tokens=prompt_ctx_len,
-                                        total_tokens=prompt_total_tokens,
-                                        scheduled_tokens=prompt_query_len)
+                                        num_computed_tokens=(context_len *
+                                                             self.block_size),
+                                        total_tokens=tokens,
+                                        scheduled_tokens=prompt_query_len,
+                                        is_prompt=True)
         if decode_cfg:
-            decode_bs, decode_query_len, decode_blocks = decode_cfg
+            decode_bs, decode_query_len, decode_num_blocks = decode_cfg
             if self.use_contiguous_pa:
                 decode_seq_lengths = [self.block_size] * decode_bs
-                block_id = decode_blocks - 1
+                block_id = decode_num_blocks - 1
             else:
                 decode_seq_lengths = self._generate_seq_lengths(
-                    decode_bs, decode_blocks, self.block_size)
+                    decode_bs, decode_num_blocks, self.block_size)
                 block_id = 0
             for dsl in decode_seq_lengths:
                 self._add_dummy_request(requests,
@@ -3012,8 +3062,8 @@ class HPUModelRunner:
                                         num_computed_tokens=dsl,
                                         total_tokens=dsl,
                                         scheduled_tokens=1,
+                                        is_prompt=False,
                                         block_id=block_id)
-
         sched_output = SchedulerOutput(
             scheduled_new_reqs=requests,
             scheduled_cached_reqs=CachedRequestData.make_empty(),
@@ -3137,7 +3187,7 @@ class HPUModelRunner:
                 cache_size_limit * 8,
                 torch._dynamo.config.accumulated_cache_size_limit)
 
-        if self.skip_warmup or self.use_merged_prefill:
+        if self.skip_warmup:
             logger.info("Skipping warmup...")
             return
 
