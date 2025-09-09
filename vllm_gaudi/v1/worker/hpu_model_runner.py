@@ -24,6 +24,8 @@ from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler,
                                            HabanaProfilerCounterHelper,
                                            format_bytes, setup_profiler)
 from vllm_gaudi.extension.runtime import finalize_config, get_config
+from vllm_gaudi.extension.unified import (HPUUnifiedAttentionMetadata,
+                                          create_unified_batch)
 from vllm_gaudi.extension.utils import pad_list
 from vllm_gaudi.extension.debug import init_debug_logger
 
@@ -127,6 +129,7 @@ class BatchContents:
     req_ids: list[str] = empty_list()
     token_ids: list[list[int]] = empty_list()
     context_lens: list[int] = empty_list()
+    prompt_lens: list[int] = empty_list()
     blocks: list[list[int]] = empty_list()
     logits_positions: list[list[int]] = empty_list()
 
@@ -152,7 +155,8 @@ class DecodeInputData:
     num_decodes: int
     token_ids: Optional[torch.Tensor] = None
     position_ids: Optional[torch.Tensor] = None
-    attn_metadata: Optional[HPUAttentionMetadataV1] = None
+    attn_metadata: Optional[HPUAttentionMetadataV1
+                            | HPUUnifiedAttentionMetadata] = None
     logits_indices: Optional[torch.Tensor] = None
     spec_decode_metadata: Optional[SpecDecodeMetadata] = None
 
@@ -281,6 +285,7 @@ class HpuModelAdapter(torch.nn.Module):
         self._rotary_embed_module = self._get_rotary_embedding_module(
             self.model)
         self._rotary_prepare_cos_sin = self._get_prepare_cos_sin()
+        self.unified_attn = get_config().unified_attn
 
     def _get_rotary_embedding_module(self, model: torch.nn.Module):
         """
@@ -409,9 +414,10 @@ class HpuModelAdapter(torch.nn.Module):
         if 'warmup_mode' in kwargs:
             kwargs.pop('warmup_mode')
         input_ids = kwargs['input_ids']
-        kwargs['attn_metadata'] = self._update_metadata(
-            kwargs['attn_metadata'], input_ids.size(0), input_ids.size(1),
-            input_ids.device, self.dtype)
+        if not self.unified_attn:
+            kwargs['attn_metadata'] = self._update_metadata(
+                kwargs['attn_metadata'], input_ids.size(0), input_ids.size(1),
+                input_ids.device, self.dtype)
         if self._rotary_prepare_cos_sin is not None:
             self._rotary_prepare_cos_sin(
                 kwargs['positions'], recompute_cos_sin=self.recompute_cos_sin)
@@ -524,14 +530,6 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
     return attention_metadata
 
 
-def next_pow2(value: int, base: int):
-    res = base
-    while value > 1:
-        value = (value + 1) // 2
-        res *= 2
-    return res
-
-
 def round_up(value: int, k: int):
     return (value + k - 1) // k * k
 
@@ -566,6 +564,11 @@ class HPUModelRunner:
         # hpu-extension which selects fetch_from_cache implementation based
         # on env vars... this should be fixed in the future
         self.enable_bucketing = get_config().use_bucketing
+        self.profiling_run = get_config().VLLM_PROFILE_PROMPT or \
+                             get_config().VLLM_PROFILE_DECODE or \
+                             get_config().VLLM_PT_PROFILE
+        self.enable_bucketing = False if self.profiling_run else \
+                                self.enable_bucketing
         self.use_contiguous_pa = get_config().use_contiguous_pa
         self.skip_warmup = get_config().skip_warmup
 
@@ -693,23 +696,29 @@ class HPUModelRunner:
                 self.vllm_config.model_config.logits_processors),
         )
         self.mem_margin = None
+        self.unified_attn = get_config().unified_attn
+        self.use_merged_prefill = get_config().merged_prefill
 
         self.use_hpu_graph = not self.model_config.enforce_eager
         self.max_batch_size = self.scheduler_config.max_num_seqs
         self.max_num_seqs = self.scheduler_config.max_num_seqs
-        self.max_prefill_batch_size = 1  # TODO(kzawora): add knob for that
+        # TODO(kzawora): add knob for that
+        self.max_prefill_batch_size = 1
+        if self.unified_attn and self.use_merged_prefill:
+            self.max_prefill_batch_size = self.max_num_seqs
         self.seen_configs: set = set()
         self.max_num_batched_tokens = \
             self.scheduler_config.max_num_batched_tokens
-        self.use_merged_prefill = get_config().merged_prefill
         self.use_prefix_caching = (
             self.vllm_config.cache_config.enable_prefix_caching)
         self.bucketing_manager = HPUBucketingManager()
+        max_num_prefill_seqs = self.max_num_seqs if self.use_merged_prefill \
+                               else self.max_prefill_batch_size
         if self.enable_bucketing:
             logger.info("Bucketing is ON.")
             self.bucketing_manager.initialize(
                 max_num_seqs=self.max_num_seqs,
-                max_num_prefill_seqs=self.max_prefill_batch_size,
+                max_num_prefill_seqs=max_num_prefill_seqs,
                 block_size=self.block_size,
                 max_num_batched_tokens=self.max_num_batched_tokens,
                 max_model_len=self.max_model_len)
@@ -732,6 +741,27 @@ class HPUModelRunner:
 
         self.defragmenter = OnlineDefragmenter()
         self.debug_fwd = init_debug_logger('fwd')
+
+    def unified_bucketing_fn(self, query_len, shared_blocks, unique_blocks,
+                             logits):
+        if not get_config().use_bucketing:
+            return query_len, shared_blocks, unique_blocks, logits
+
+        def bucketize(x, buckets):
+            if x < buckets[-1]:
+                return next(b for b in buckets if b >= x)
+            else:
+                return round_up(x, buckets[-1])
+
+        batch_buckets = [0, 1, 2, 4, 8, 16, 32, 64, 128]
+        logits_buckets = [math.ceil(self.max_num_seqs / 8), self.max_num_seqs]
+
+        query_len = bucketize(query_len, batch_buckets)
+        shared_blocks = bucketize(shared_blocks, batch_buckets)
+        unique_blocks = bucketize(unique_blocks, batch_buckets)
+        logits = min(bucketize(logits, logits_buckets), query_len)
+
+        return (query_len, shared_blocks, unique_blocks, logits)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
@@ -1344,6 +1374,9 @@ class HPUModelRunner:
                 dst_start += target_len
         return mrope_position_tensor
 
+    def _skip_bucketing(self, seq_lens, num_blocks):
+        return (len(seq_lens), 0, 0)
+
     def _bucketize_merged_prompt(self, seq_lens, num_blocks):
         seq = sum(seq_lens)
         num_blocks = sum(num_blocks)
@@ -1362,7 +1395,9 @@ class HPUModelRunner:
         return (bs, seq, num_blocks)
 
     def _get_prompt_bucketing_fn(self):
-        if self.use_merged_prefill:
+        if self.unified_attn:
+            return self._skip_bucketing
+        elif self.use_merged_prefill:
             return self._bucketize_merged_prompt
         else:
             return self._bucketize_2d_prompt
@@ -1412,6 +1447,7 @@ class HPUModelRunner:
                 req_ids=[req_id],
                 token_ids=[token_ids],
                 context_lens=[context_len],
+                prompt_lens=[prompt_tokens],
                 blocks=[blocks],
                 logits_positions=[logits_positions],
             )
@@ -1580,6 +1616,40 @@ class HPUModelRunner:
                                 logits_indices=[logits_indices],
                                 logits_requests=[logits_requests])
 
+    def _form_unified_prefill_batch(self, contents):
+        if len(contents.req_ids) == 0:
+            return PrefillInputData()
+
+        token_ids = contents.token_ids
+        req_ids = contents.req_ids
+        query_lens = [len(tids) for tids in contents.token_ids]
+        prompt_lens = contents.prompt_lens
+        if self.profiler.enabled:
+            self.profiler_counter_helper.capture_prompt_seq_stats(query_lens)
+        context_lens = contents.context_lens
+
+        batch_data = create_unified_batch(
+            token_ids=token_ids,
+            block_size=self.block_size,
+            block_table=contents.blocks,
+            context_lengths=context_lens,
+            query_lengths=query_lens,
+            prompt_lengths=prompt_lens,
+            dtype=self.dtype,
+            contiguous_kv=self.use_contiguous_pa,
+            bucketing_fn=self.unified_bucketing_fn,
+        )
+        (token_ids_t, token_positions_t, logits_indices_t, logits_groups,
+         attn_metadata) = batch_data
+        logits_requests = [req_ids[lg] for lg in logits_groups]
+        return PrefillInputData(request_ids=[req_ids],
+                                prompt_lens=[None],
+                                token_ids=[token_ids_t.unsqueeze(0)],
+                                attn_metadata=[attn_metadata],
+                                position_ids=[token_positions_t.unsqueeze(0)],
+                                logits_indices=[logits_indices_t],
+                                logits_requests=[logits_requests])
+
     def _prepare_prefill_inputs(
             self, num_prefills, num_decodes,
             num_scheduled_tokens: list[int]) -> PrefillInputData:
@@ -1588,6 +1658,18 @@ class HPUModelRunner:
             num_prefills, num_decodes, num_scheduled_tokens)
         all_batches = [
             self._form_prefill_batch(bc) for bc in all_batch_contents
+        ]
+        merge_contents(all_batches[0], *all_batches[1:])
+        return all_batches[0]
+
+    def _prepare_unified_prefill_inputs(
+            self, num_prefills, num_decodes,
+            num_scheduled_tokens: list[int]) -> PrefillInputData:
+
+        all_batch_contents = self._extract_prefill_batch_contents(
+            num_prefills, num_decodes, num_scheduled_tokens)
+        all_batches = [
+            self._form_unified_prefill_batch(bc) for bc in all_batch_contents
         ]
         merge_contents(all_batches[0], *all_batches[1:])
         return all_batches[0]
@@ -1915,6 +1997,51 @@ class HPUModelRunner:
             logits_indices = spec_decode_metadata.logits_indices
         return logits_indices, spec_decode_metadata
 
+    def _prepare_unified_decode_inputs(
+            self, num_decodes, num_scheduled_tokens) -> DecodeInputData:
+
+        if num_decodes == 0:
+            return DecodeInputData(num_decodes=0)
+
+        context_lens = self.input_batch.num_computed_tokens_cpu[:num_decodes]
+        query_lengths = [1] * num_decodes
+        prompt_lengths = self.input_batch.num_prompt_tokens[:num_decodes]
+        token_ids_cpu = self.input_batch.token_ids_cpu
+        block_table_cpu_tensor = self.input_batch.block_table[
+            0].get_cpu_tensor()
+        num_blocks = [
+            math.ceil((ctx_len + q_len) / self.block_size)
+            for ctx_len, q_len in zip(context_lens, query_lengths)
+        ]
+        block_table = [
+            block_table_cpu_tensor[i, :nb].tolist()
+            for i, nb in enumerate(num_blocks)
+        ]
+        block_table = self.defragmenter.resolve_all(block_table)
+        token_ids = [[token_ids_cpu[i, ctx_len]]
+                     for i, ctx_len in enumerate(context_lens)]
+
+        batch_data = create_unified_batch(
+            token_ids=token_ids,
+            block_size=self.block_size,
+            block_table=block_table,
+            context_lengths=context_lens,
+            query_lengths=[1] * num_decodes,
+            prompt_lengths=prompt_lengths,
+            dtype=self.dtype,
+            contiguous_kv=self.use_contiguous_pa,
+            bucketing_fn=self.unified_bucketing_fn,
+        )
+        (token_ids_t, token_positions_t, logits_indices_t, logits_groups,
+         attn_metadata) = batch_data
+        return DecodeInputData(
+            num_decodes=num_decodes,
+            token_ids=token_ids_t.unsqueeze(-1),
+            position_ids=token_positions_t.unsqueeze(-1),
+            logits_indices=logits_indices_t,
+            attn_metadata=attn_metadata,
+        )
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1959,19 +2086,23 @@ class HPUModelRunner:
             seq_num_prompt_tokens = self.input_batch.num_prompt_tokens[idx]
             num_scheduled_tokens.append(seq_num_scheduled_tokens)
             num_prompt_tokens.append(seq_num_prompt_tokens)
-            # NOTE: assert that all the decodes are "decodes".
-        return (self._prepare_prefill_inputs(num_prefills, num_decodes,
-                                             num_scheduled_tokens),
-                self._prepare_decode_inputs(num_decodes, num_scheduled_tokens,
-                                            scheduler_output))
+        if self.unified_attn:
+            return (self._prepare_unified_prefill_inputs(
+                num_prefills, num_decodes, num_scheduled_tokens),
+                    self._prepare_unified_decode_inputs(
+                        num_decodes, num_scheduled_tokens))
+        else:
+            return (self._prepare_prefill_inputs(num_prefills, num_decodes,
+                                                 num_scheduled_tokens),
+                    self._prepare_decode_inputs(num_decodes,
+                                                num_scheduled_tokens,
+                                                scheduler_output))
 
     def _seq_len(self, attn_metadata):
-        return attn_metadata.slot_mapping.size(-1)
+        return attn_metadata.seq_len()
 
     def _num_blocks(self, attn_metadata):
-        if attn_metadata.block_list is None:
-            return 0
-        return attn_metadata.block_list.numel()
+        return attn_metadata.num_blocks()
 
     def _check_config(self, batch_size, seq_len, num_blocks, attn_metadata,
                       warmup_mode):
@@ -2008,7 +2139,10 @@ class HPUModelRunner:
         else:
             # no hpu graphs for t.compile?
             use_graphs = False
-        trimmed_attn_metadata = trim_attn_metadata(attn_metadata)
+        if self.unified_attn:
+            trimmed_attn_metadata = attn_metadata
+        else:
+            trimmed_attn_metadata = trim_attn_metadata(attn_metadata)
         if self.is_driver_worker:
             model_event_name = ("model_forward_"
                                 f"bs{batch_size}_"
@@ -2946,6 +3080,7 @@ class HPUModelRunner:
                            num_computed_tokens,
                            total_tokens,
                            scheduled_tokens,
+                           is_prompt,
                            block_id=0):
         from vllm.sampling_params import SamplingParams
         from vllm.v1.core.sched.output import NewRequestData
@@ -2969,7 +3104,11 @@ class HPUModelRunner:
             lora_request=None,
         )
         requests.append(req)
-        num_scheduled_tokens[req_id] = scheduled_tokens
+        if is_prompt:
+            num_scheduled_tokens[req_id] = len(
+                prompt_token_ids) - num_computed_tokens
+        else:
+            num_scheduled_tokens[req_id] = scheduled_tokens
 
     @staticmethod
     def _generate_seq_lengths(num_samples, num_blocks, block_size):
@@ -2981,6 +3120,34 @@ class HPUModelRunner:
         seq_lengths = [b * block_size - 1 for b in blocks]
         return seq_lengths
 
+    def distribute_sum_evenly(self, total_sum, max_length):
+        '''
+        Return a balanced list of ints that sums up to total_sum.
+        List cannot be longer than max_length.
+        '''
+        base, remain = divmod(total_sum, max_length)
+        result = [base] * max_length
+
+        for i in range(remain):
+            result[i] += 1
+
+        return result
+
+    def get_merged_prefill_seq_lens(self, query_len, ctx_blocks):
+        '''
+        Get seperate sequence lengths from merged layout to individual 
+        samples.
+        Returns list of sequence length (including query and context) and
+        context lengths.
+        '''
+        ctx_list = self.distribute_sum_evenly(ctx_blocks, self.max_num_seqs)
+        query_list = self.distribute_sum_evenly(query_len, self.max_num_seqs)
+        prompt_list = [
+            q + c * self.block_size for q, c in zip(query_list, ctx_list)
+        ]
+        ctx_list = ctx_list if len(ctx_list) > 0 else [0] * len(prompt_list)
+        return prompt_list, ctx_list
+
     def _execute_dummy_scenario(self, prompt_cfg, decode_cfg):
         from vllm.v1.core.sched.output import (NewRequestData, SchedulerOutput,
                                                CachedRequestData)
@@ -2988,23 +3155,33 @@ class HPUModelRunner:
         scheduled_tokens: dict[str, int] = {}
 
         if prompt_cfg:
-            prompt_bs, prompt_query_len, prompt_blocks = prompt_cfg
-            prompt_ctx_len = prompt_blocks * self.block_size
-            prompt_total_tokens = prompt_query_len + prompt_ctx_len
-            for _ in range(prompt_bs):
+            prompt_bs, prompt_query_len, prompt_num_blocks = prompt_cfg
+            prompt_ctx_len = prompt_num_blocks * self.block_size
+            prompt_total_tokens = [prompt_query_len + prompt_ctx_len]
+            prompt_num_context_blocks = [prompt_num_blocks]
+            if self.max_model_len < sum(prompt_total_tokens) \
+                and self.use_merged_prefill:
+                # split query and ctx in merged prefill case
+                prompt_total_tokens, prompt_num_context_blocks = \
+                     self.get_merged_prefill_seq_lens(prompt_query_len,
+                                                 prompt_num_blocks)
+            for tokens, context_len in zip(prompt_total_tokens,
+                                           prompt_num_context_blocks):
                 self._add_dummy_request(requests,
                                         scheduled_tokens,
-                                        num_computed_tokens=prompt_ctx_len,
-                                        total_tokens=prompt_total_tokens,
-                                        scheduled_tokens=prompt_query_len)
+                                        num_computed_tokens=(context_len *
+                                                             self.block_size),
+                                        total_tokens=tokens,
+                                        scheduled_tokens=prompt_query_len,
+                                        is_prompt=True)
         if decode_cfg:
-            decode_bs, decode_query_len, decode_blocks = decode_cfg
+            decode_bs, decode_query_len, decode_num_blocks = decode_cfg
             if self.use_contiguous_pa:
                 decode_seq_lengths = [self.block_size] * decode_bs
-                block_id = decode_blocks - 1
+                block_id = decode_num_blocks - 1
             else:
                 decode_seq_lengths = self._generate_seq_lengths(
-                    decode_bs, decode_blocks, self.block_size)
+                    decode_bs, decode_num_blocks, self.block_size)
                 block_id = 0
             for dsl in decode_seq_lengths:
                 self._add_dummy_request(requests,
@@ -3012,8 +3189,8 @@ class HPUModelRunner:
                                         num_computed_tokens=dsl,
                                         total_tokens=dsl,
                                         scheduled_tokens=1,
+                                        is_prompt=False,
                                         block_id=block_id)
-
         sched_output = SchedulerOutput(
             scheduled_new_reqs=requests,
             scheduled_cached_reqs=CachedRequestData.make_empty(),
@@ -3137,7 +3314,7 @@ class HPUModelRunner:
                 cache_size_limit * 8,
                 torch._dynamo.config.accumulated_cache_size_limit)
 
-        if self.skip_warmup or self.use_merged_prefill:
+        if self.skip_warmup:
             logger.info("Skipping warmup...")
             return
 
