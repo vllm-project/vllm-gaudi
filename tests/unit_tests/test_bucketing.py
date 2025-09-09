@@ -8,6 +8,7 @@
 import pytest
 
 import vllm_gaudi.extension.bucketing.linear as linear
+from vllm_gaudi.extension.bucketing.common import generate_buckets
 from vllm_gaudi.extension.runtime import get_config, clear_config
 
 
@@ -46,27 +47,36 @@ def test_warmup_range():
 
 
 def test_generate_prompt_buckets():
-    bs_bucket_config = (1, 4, 16)
-    seq_bucket_config = (512, 512, 1024)
     max_num_batched_tokens = 2048
     block_size = 64
-    prefix_caching = False
-    buckets, omitted_buckets = linear.generate_prompt_buckets(
-        bs_bucket_config, seq_bucket_config, block_size, prefix_caching,
-        max_num_batched_tokens)
-    assert len(buckets) == 5
-    assert len(omitted_buckets) == 7
-    assert all(bs * seq <= max_num_batched_tokens for bs, seq, _ in buckets)
+    max_model_len = 2048
+    max_blocks = 1024
+    bs = 16
+    prompt_bs = 16
+    bs_range = [1, 2, 4, 8, 16]
+    query_range = [512, 1024]
+    ctx_range = [0, 1, 2, 3, 4]
+    buckets = generate_buckets(bs_range, query_range, ctx_range, True,
+                               max_model_len, bs, prompt_bs,
+                               max_num_batched_tokens, block_size, max_blocks)
+    assert len(buckets) == 40
 
 
 def test_generate_decode_buckets():
-    bs_bucket_config = [1, 32, 128]
-    blocks_bucket_config = [128, 128, 2048]
+    max_num_batched_tokens = 131072
+    max_model_len = 2048
     max_blocks = 1024
-    max_model_len = 131072
     block_size = 128
-    buckets = linear.generate_decode_buckets(bs_bucket_config,
-                                             blocks_bucket_config, max_blocks,
-                                             max_model_len, block_size)
-    assert len(buckets) == 72
-    assert all(blocks <= max_blocks for _, _, blocks in buckets)
+    bs = 64
+    prompt_bs = 64
+    bs_range = [1, 2, 4, 8, 16, 32, 64]
+    blocks_range = [
+        128, 256, 384, 512, 640, 768, 896, 1024, 1152, 1280, 1408, 1536, 1664,
+        1792, 1920, 2048
+    ]
+    buckets = generate_buckets(bs_range, [1, 1, 1], blocks_range, False,
+                               max_model_len, bs, prompt_bs,
+                               max_num_batched_tokens, block_size, max_blocks)
+    assert len(buckets) == 15
+    assert all(ctx <= bs * (max_model_len // block_size)
+               for bs, _, ctx in buckets)
