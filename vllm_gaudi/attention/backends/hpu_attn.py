@@ -351,8 +351,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
+        sinks: Optional[int] = None,
     ) -> None:
         super(AttentionImpl, self).__init__()
+        self._sinks = sinks
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not currently supported on HPU.")
         if use_irope:
