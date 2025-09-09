@@ -3233,6 +3233,35 @@ class HPUModelRunner:
         self._execute_dummy_scenario(
             (self.max_prefill_batch_size, max_seq_len, 0), None)
 
+    def may_reinitialize_input_batch(self,
+                                     kv_cache_config: KVCacheConfig) -> None:
+        """
+        Re-initialize the input batch if the block sizes are different from
+        `[self.cache_config.block_size]`. This usually happens when there
+        are multiple KV cache groups.
+
+        Args:
+            kv_cache_config: The KV cache configuration.
+        """
+        block_sizes = [self.block_size]
+        block_sizes = [
+            kv_cache_group.kv_cache_spec.block_size
+            for kv_cache_group in kv_cache_config.kv_cache_groups
+        ]
+        if block_sizes != [self.cache_config.block_size]:
+            assert self.cache_config.cpu_offload_gb == 0, (
+                "Cannot re-initialize the input batch when CPU weight "
+                "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
+                "for more details.")
+            self.input_batch = InputBatch(
+            max_num_reqs=self.scheduler_config.max_num_seqs,
+            max_model_len=self.max_model_len,
+            max_num_batched_tokens=self.max_num_tokens,
+            device=self.device,
+            pin_memory=self.pin_memory,
+            vocab_size=self.model_config.get_vocab_size(),
+            block_sizes=block_sizes)
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -3244,7 +3273,7 @@ class HPUModelRunner:
             raise NotImplementedError(
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
-
+        self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches: dict[str, torch.Tensor] = {}
         num_blocks=1
         for kv_cache_group in kv_cache_config.kv_cache_groups:
