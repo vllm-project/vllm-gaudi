@@ -1,31 +1,33 @@
 import torch
 import torch.nn.functional as F
-from vllm.model_executor.custom_op import CustomOp
 from vllm.lora.layers import VocabParallelEmbeddingWithLoRA
+from vllm.lora import layers
+from vllm.platforms import current_platform
+from typing import Optional
 
 
-@CustomOp.register_oot(name='VocabParallelEmbeddingWithLoRA')
 class HPUVocabParallelEmbeddingWithLoRA(VocabParallelEmbeddingWithLoRA):
 
-    def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
-        # x need to reshaped into 2d as batch is there
-        # can be removed on moving to flat tensors
-        shape = x.shape
-        x = x.view(shape[0] * shape[1])
-
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         added_tokens_mask = torch.where(x > self.base_layer.org_vocab_size - 1,
                                         1, 0)
-        embeddings_indices = torch.narrow(
-            self.punica_wrapper._embeddings_indices, 1, 0, x.size(0))
 
-        indices = embeddings_indices[1]
+        # NB: Don't use torch.narrow here. torch.narrow triggers some
+        # Dynamic Shape specialization in torch.compile
+        # flatten to get num_tokens since HPU uses 2d input layout
+        # reshape indices_1, indices_0 to match shape of input
+        num_tokens = x.view(-1).shape[0]
+        indices_1 = self.punica_wrapper._embeddings_indices[
+            1][:num_tokens].view_as(x)
+        indices_0 = self.punica_wrapper._embeddings_indices[
+            0][:num_tokens].view_as(x)
+
         full_lora_a_embeddings = F.embedding(
-            x + indices,
+            x + indices_1,
             self.lora_a_stacked_2d,
         )
-        indices = embeddings_indices[0]
         full_output = self.base_layer.forward(x +
-                                              (indices * added_tokens_mask))
+                                              (indices_0 * added_tokens_mask))
 
         full_output_org = full_output
         if full_output.ndim == 3:
@@ -37,11 +39,20 @@ class HPUVocabParallelEmbeddingWithLoRA(VocabParallelEmbeddingWithLoRA):
                 full_lora_a_embeddings.shape[1],
                 -1,
             )
-        self.punica_wrapper.add_lora_embedding(full_output,
-                                               full_lora_a_embeddings,
-                                               self.lora_b_stacked,
-                                               add_input=True)
-        # can be removed on moving to flat tensors
-        full_output_org = full_output_org.view(shape[0], shape[1],
-                                               full_output_org.shape[1])
+
+        lora_output: Optional[
+            torch.Tensor] = self.punica_wrapper.add_lora_embedding(
+                full_output,
+                full_lora_a_embeddings,
+                self.lora_b_stacked,
+                add_input=True)
+
+        if not current_platform.can_update_inplace():
+            full_output = lora_output
+
         return full_output.view_as(full_output_org)
+
+
+# refer to https://github.com/vllm-project/vllm/pull/21923 for more details
+# on why this patching is needed.
+layers.VocabParallelEmbeddingWithLoRA = HPUVocabParallelEmbeddingWithLoRA
