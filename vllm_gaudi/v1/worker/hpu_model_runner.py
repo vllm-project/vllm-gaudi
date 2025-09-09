@@ -2949,6 +2949,8 @@ class HPUModelRunner:
                     attn_metadata,
                     logits_indices,
                     self.kv_caches,
+                    None,
+                    None,
                     warmup_mode=warmup_mode)
                 htorch.core.mark_step()
 
@@ -3068,6 +3070,8 @@ class HPUModelRunner:
                 dummy_decode_input_data_across_dp.attn_metadata,
                 dummy_decode_input_data_across_dp.logits_indices,
                 self.kv_caches,
+                None,
+                None,
                 warmup_mode=warmup_mode)
             htorch.core.mark_step()
 
