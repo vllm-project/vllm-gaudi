@@ -120,6 +120,7 @@ def warmup_range(config: Tuple[int, int, int]):
         ramp_up_acc)
     stable = range(bstep, bmax + 1, bstep)
     buckets = list(ramp_up_tw) + list(stable)
+    buckets = [b for b in buckets if b >= bmin]
     if add_zero_bucket:
         buckets.append(0)
     return list(buckets)

@@ -115,6 +115,11 @@ class HPUBucketingManager():
             query_range = strategy.get_range(query_cfg)
             ctx_range = strategy.get_range(ctx_cfg)
 
+            if get_config().use_contiguous_pa and ctx_range[-1] < self.num_hpu_blocks:
+                ctx_range.append(self.num_hpu_blocks)
+
+            print(ctx_range)
+
             self.decode_buckets = generate_buckets(bs_range, query_range, 
                      ctx_range, False, self.max_model_len, self.max_num_seqs,
                      self.max_num_prefill_seqs, self.max_num_batched_tokens, 
@@ -213,10 +218,13 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt,
             (bs_idx, query_idx + 1),
             (bs_idx + 1, query_idx + 1)
         ]
+        valid = bs_range[bs_idx] * query_range[query_idx] <= max_num_batched_tokens
+        if not valid:
+            return {}
         valid_candidates = [
             (b_idx, q_idx)
             for b_idx, q_idx in candidates
-            if b_idx < len(bs_range) and q_idx < len(query_range) and bs_range[b_idx] * query_range[q_idx] <= max_num_batched_tokens
+            if b_idx < len(bs_range) and q_idx < len(query_range)
         ]
         return {(bs_range[b_idx], query_range[q_idx]) for b_idx, q_idx in valid_candidates}
 
@@ -227,8 +235,6 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt,
     # decode
     def block_not_greater_than_max_model_len(bs, query, ctx): return ctx <= bs * math.ceil(max_model_len / block_size)
     def batch_size_smaller_than_blocks(bs, query, ctx): return bs <= ctx
-    def contiguous_pa_dont_filter_out_max(bs, query, ctx):
-        return (ctx == max_blocks) or math.ceil((ctx * block_size) // bs) <= max_model_len
 
     filters_map = {
         "prompt": {
@@ -238,7 +244,7 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt,
         },
         "decode": {
             # depends only on contiguous PA
-            True: [contiguous_pa_dont_filter_out_max],
+            True: [],
             False: [block_not_greater_than_max_model_len, batch_size_smaller_than_blocks],
         }
     }
