@@ -32,6 +32,7 @@ class HpuPlatform(Platform):
     supported_quantization: list[str] = [
         "compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu"
     ]
+    simple_compile_backend = "hpu_backend"
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,

@@ -41,7 +41,8 @@ include = ["vllm_gaudi"]
 
 [tool.yapfignore]
 ignore_patterns = [
-    "build/**", 
+    "build/**",
+    "examples/**",
     "vllm_gaudi/extension/**"  # NOTE(kzawora): re-enable this once extension refactor is ready
 ]
 

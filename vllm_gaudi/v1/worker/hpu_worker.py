@@ -305,6 +305,9 @@ class HPUWorker(WorkerBase):
         else:
             self.profiler.stop()
 
+    def execute_dummy_batch(self) -> None:
+        self.model_runner._dummy_run(1)
+
 
 def init_worker_distributed_environment(
     parallel_config: ParallelConfig,
@@ -320,9 +323,11 @@ def init_worker_distributed_environment(
                                  backend='hccl')
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
+
     dummy_tensor_hpu = torch.ones(1).to('hpu')
     torch.distributed.all_reduce(dummy_tensor_hpu)
-    assert dummy_tensor_hpu.item() == parallel_config.world_size
+    assert dummy_tensor_hpu.item(
+    ) == parallel_config.world_size * parallel_config.data_parallel_size
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
 
