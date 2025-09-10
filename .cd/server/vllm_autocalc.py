@@ -10,8 +10,7 @@ from server.vllm_autocalc_rules import PARAM_CALC_FUNCS
 
 class VarsGenerator:
 
-    def __init__(self, defaults_path, varlist_conf_path,
-                 model_def_settings_path):
+    def __init__(self, defaults_path, varlist_conf_path, model_def_settings_path):
         """
         Initialize VarsGenerator by opening all config files and storing
         their contents.
@@ -34,8 +33,7 @@ class VarsGenerator:
         Reads the model settings CSV and returns a dictionary for the
         selected model.
         """
-        filtered = self.model_def_settings[self.model_def_settings['MODEL'] ==
-                                           self.context['MODEL']]
+        filtered = self.model_def_settings[self.model_def_settings['MODEL'] == self.context['MODEL']]
 
         if filtered.empty:
             raise ValueError(f"No matching rows found for model "
@@ -54,8 +52,7 @@ class VarsGenerator:
         defaults = self.defaults.get('hw_defaults', {})
         self.context['HPU_MEM'] = defaults.get('HPU_MEM', {})
         self.context['DTYPE'] = defaults.get('DTYPE', "bfloat16")
-        self.context['DEVICE_NAME'] = (defaults.get('DEVICE_NAME')
-                                       or self.get_device_name())
+        self.context['DEVICE_NAME'] = (defaults.get('DEVICE_NAME') or self.get_device_name())
         server_conf = self.get_model_from_csv()
         self.context.update(server_conf)
 

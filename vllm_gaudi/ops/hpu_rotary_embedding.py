@@ -2,12 +2,11 @@ from typing import Optional
 
 import torch
 import math
-from vllm.model_executor.layers.rotary_embedding import (
-    RotaryEmbedding, Phi3LongRoPEScaledRotaryEmbedding,
-    Llama4VisionRotaryEmbedding, Llama3RotaryEmbedding,
-    LinearScalingRotaryEmbedding, DynamicNTKScalingRotaryEmbedding,
-    YaRNScalingRotaryEmbedding, DeepseekScalingRotaryEmbedding,
-    MRotaryEmbedding)
+from vllm.model_executor.layers.rotary_embedding import (RotaryEmbedding, Phi3LongRoPEScaledRotaryEmbedding,
+                                                         Llama4VisionRotaryEmbedding, Llama3RotaryEmbedding,
+                                                         LinearScalingRotaryEmbedding, DynamicNTKScalingRotaryEmbedding,
+                                                         YaRNScalingRotaryEmbedding, DeepseekScalingRotaryEmbedding,
+                                                         MRotaryEmbedding)
 from vllm.model_executor.custom_op import CustomOp
 
 
@@ -25,21 +24,14 @@ class HPURotaryEmbedding(RotaryEmbedding):
             positions = positions + offsets
         positions = positions.flatten()
         num_tokens = positions.shape[0]
-        cos_sin = self.cos_sin_cache.index_select(0, positions).view(
-            num_tokens, 1, -1)
+        cos_sin = self.cos_sin_cache.index_select(0, positions).view(num_tokens, 1, -1)
         cos, sin = cos_sin.chunk(2, dim=-1)
         if self.is_neox_style:
             cos = torch.cat((cos, cos), dim=-1)
             sin = torch.cat((sin, sin), dim=-1)
         else:
-            sin = torch.repeat_interleave(sin,
-                                          2,
-                                          dim=-1,
-                                          output_size=cos_sin.shape[-1])
-            cos = torch.repeat_interleave(cos,
-                                          2,
-                                          dim=-1,
-                                          output_size=cos_sin.shape[-1])
+            sin = torch.repeat_interleave(sin, 2, dim=-1, output_size=cos_sin.shape[-1])
+            cos = torch.repeat_interleave(cos, 2, dim=-1, output_size=cos_sin.shape[-1])
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
@@ -50,15 +42,13 @@ class HPURotaryEmbedding(RotaryEmbedding):
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        from habana_frameworks.torch.hpex.kernels import (
-            RotaryPosEmbeddingMode, apply_rotary_pos_emb)
+        from habana_frameworks.torch.hpex.kernels import (RotaryPosEmbeddingMode, apply_rotary_pos_emb)
 
         # Prepare cos-sin caches for long-context + LoRA with offsets for every
         # forward, since the offset information wasn't available previously
         if not hasattr(self, "sin") or self.recompute_cos_sin:
             self.prepare_cos_sin(positions, offsets, recompute_cos_sin=True)
-        if hasattr(self, "scaling_factors") or hasattr(
-                self, "scaling_factor") or self.sin is None:
+        if hasattr(self, "scaling_factors") or hasattr(self, "scaling_factor") or self.sin is None:
             self.prepare_cos_sin(positions, offsets)
         num_tokens = positions.numel()
         # HPU RoPE kernel requires hidden dimension for cos and sin to be equal
@@ -69,10 +59,7 @@ class HPURotaryEmbedding(RotaryEmbedding):
         # GPT-J kernel requires position_ids = None, offset = 0, mode = PAIRWISE
         # and expansion of cos/sin tensors via repeat_interleave
         rope_mode: RotaryPosEmbeddingMode
-        if self.is_neox_style:
-            rope_mode = RotaryPosEmbeddingMode.BLOCKWISE
-        else:
-            rope_mode = RotaryPosEmbeddingMode.PAIRWISE
+        rope_mode = RotaryPosEmbeddingMode.BLOCKWISE if self.is_neox_style else RotaryPosEmbeddingMode.PAIRWISE
         sin = self.sin
         cos = self.cos
         query_shape = query.shape
@@ -88,8 +75,7 @@ class HPURotaryEmbedding(RotaryEmbedding):
 
         query_rot = query[..., :self.rotary_dim]
         query_pass = query[..., self.rotary_dim:]
-        query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0,
-                                         rope_mode)
+        query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0, rope_mode)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_rot = key[..., :self.rotary_dim]
@@ -112,21 +98,14 @@ class HPULinearScalingRotaryEmbedding(LinearScalingRotaryEmbedding):
             positions = positions + offsets
         positions = positions.flatten()
         num_tokens = positions.shape[0]
-        cos_sin = self.cos_sin_cache.index_select(0, positions).view(
-            num_tokens, 1, -1)
+        cos_sin = self.cos_sin_cache.index_select(0, positions).view(num_tokens, 1, -1)
         cos, sin = cos_sin.chunk(2, dim=-1)
         if self.is_neox_style:
             cos = torch.cat((cos, cos), dim=-1)
             sin = torch.cat((sin, sin), dim=-1)
         else:
-            sin = torch.repeat_interleave(sin,
-                                          2,
-                                          dim=-1,
-                                          output_size=cos_sin.shape[-1])
-            cos = torch.repeat_interleave(cos,
-                                          2,
-                                          dim=-1,
-                                          output_size=cos_sin.shape[-1])
+            sin = torch.repeat_interleave(sin, 2, dim=-1, output_size=cos_sin.shape[-1])
+            cos = torch.repeat_interleave(cos, 2, dim=-1, output_size=cos_sin.shape[-1])
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
@@ -137,15 +116,13 @@ class HPULinearScalingRotaryEmbedding(LinearScalingRotaryEmbedding):
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        from habana_frameworks.torch.hpex.kernels import (
-            RotaryPosEmbeddingMode, apply_rotary_pos_emb)
+        from habana_frameworks.torch.hpex.kernels import (RotaryPosEmbeddingMode, apply_rotary_pos_emb)
 
         # Prepare cos-sin caches for long-context + LoRA with offsets for every
         # forward, since the offset information wasn't available previously
         if not hasattr(self, "sin") or self.recompute_cos_sin:
             self.prepare_cos_sin(positions, offsets, recompute_cos_sin=True)
-        if hasattr(self, "scaling_factors") or hasattr(
-                self, "scaling_factor") or self.sin is None:
+        if hasattr(self, "scaling_factors") or hasattr(self, "scaling_factor") or self.sin is None:
             self.prepare_cos_sin(positions, offsets)
         num_tokens = positions.shape[0] * positions.shape[1]
         # HPU RoPE kernel requires hidden dimension for cos and sin to be equal
@@ -156,10 +133,7 @@ class HPULinearScalingRotaryEmbedding(LinearScalingRotaryEmbedding):
         # GPT-J kernel requires position_ids = None, offset = 0, mode = PAIRWISE
         # and expansion of cos/sin tensors via repeat_interleave
         rope_mode: RotaryPosEmbeddingMode
-        if self.is_neox_style:
-            rope_mode = RotaryPosEmbeddingMode.BLOCKWISE
-        else:
-            rope_mode = RotaryPosEmbeddingMode.PAIRWISE
+        rope_mode = RotaryPosEmbeddingMode.BLOCKWISE if self.is_neox_style else RotaryPosEmbeddingMode.PAIRWISE
         sin = self.sin
         cos = self.cos
         query_shape = query.shape
@@ -175,8 +149,7 @@ class HPULinearScalingRotaryEmbedding(LinearScalingRotaryEmbedding):
 
         query_rot = query[..., :self.rotary_dim]
         query_pass = query[..., self.rotary_dim:]
-        query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0,
-                                         rope_mode)
+        query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0, rope_mode)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_rot = key[..., :self.rotary_dim]
@@ -199,21 +172,14 @@ class HPUDynamicNTKScalingRotaryEmbedding(DynamicNTKScalingRotaryEmbedding):
             positions = positions + offsets
         positions = positions.flatten()
         num_tokens = positions.shape[0]
-        cos_sin = self.cos_sin_cache.index_select(0, positions).view(
-            num_tokens, 1, -1)
+        cos_sin = self.cos_sin_cache.index_select(0, positions).view(num_tokens, 1, -1)
         cos, sin = cos_sin.chunk(2, dim=-1)
         if self.is_neox_style:
             cos = torch.cat((cos, cos), dim=-1)
             sin = torch.cat((sin, sin), dim=-1)
         else:
-            sin = torch.repeat_interleave(sin,
-                                          2,
-                                          dim=-1,
-                                          output_size=cos_sin.shape[-1])
-            cos = torch.repeat_interleave(cos,
-                                          2,
-                                          dim=-1,
-                                          output_size=cos_sin.shape[-1])
+            sin = torch.repeat_interleave(sin, 2, dim=-1, output_size=cos_sin.shape[-1])
+            cos = torch.repeat_interleave(cos, 2, dim=-1, output_size=cos_sin.shape[-1])
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
@@ -224,15 +190,13 @@ class HPUDynamicNTKScalingRotaryEmbedding(DynamicNTKScalingRotaryEmbedding):
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        from habana_frameworks.torch.hpex.kernels import (
-            RotaryPosEmbeddingMode, apply_rotary_pos_emb)
+        from habana_frameworks.torch.hpex.kernels import (RotaryPosEmbeddingMode, apply_rotary_pos_emb)
 
         # Prepare cos-sin caches for long-context + LoRA with offsets for every
         # forward, since the offset information wasn't available previously
         if not hasattr(self, "sin") or self.recompute_cos_sin:
             self.prepare_cos_sin(positions, offsets, recompute_cos_sin=True)
-        if hasattr(self, "scaling_factors") or hasattr(
-                self, "scaling_factor") or self.sin is None:
+        if hasattr(self, "scaling_factors") or hasattr(self, "scaling_factor") or self.sin is None:
             self.prepare_cos_sin(positions, offsets)
         num_tokens = positions.shape[0] * positions.shape[1]
         # HPU RoPE kernel requires hidden dimension for cos and sin to be equal
@@ -243,10 +207,7 @@ class HPUDynamicNTKScalingRotaryEmbedding(DynamicNTKScalingRotaryEmbedding):
         # GPT-J kernel requires position_ids = None, offset = 0, mode = PAIRWISE
         # and expansion of cos/sin tensors via repeat_interleave
         rope_mode: RotaryPosEmbeddingMode
-        if self.is_neox_style:
-            rope_mode = RotaryPosEmbeddingMode.BLOCKWISE
-        else:
-            rope_mode = RotaryPosEmbeddingMode.PAIRWISE
+        rope_mode = RotaryPosEmbeddingMode.BLOCKWISE if self.is_neox_style else RotaryPosEmbeddingMode.PAIRWISE
         sin = self.sin
         cos = self.cos
         query_shape = query.shape
@@ -262,8 +223,7 @@ class HPUDynamicNTKScalingRotaryEmbedding(DynamicNTKScalingRotaryEmbedding):
 
         query_rot = query[..., :self.rotary_dim]
         query_pass = query[..., self.rotary_dim:]
-        query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0,
-                                         rope_mode)
+        query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0, rope_mode)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_rot = key[..., :self.rotary_dim]
@@ -286,21 +246,14 @@ class HPUYaRNScalingRotaryEmbedding(YaRNScalingRotaryEmbedding):
             positions = positions + offsets
         positions = positions.flatten()
         num_tokens = positions.shape[0]
-        cos_sin = self.cos_sin_cache.index_select(0, positions).view(
-            num_tokens, 1, -1)
+        cos_sin = self.cos_sin_cache.index_select(0, positions).view(num_tokens, 1, -1)
         cos, sin = cos_sin.chunk(2, dim=-1)
         if self.is_neox_style:
             cos = torch.cat((cos, cos), dim=-1)
             sin = torch.cat((sin, sin), dim=-1)
         else:
-            sin = torch.repeat_interleave(sin,
-                                          2,
-                                          dim=-1,
-                                          output_size=cos_sin.shape[-1])
-            cos = torch.repeat_interleave(cos,
-                                          2,
-                                          dim=-1,
-                                          output_size=cos_sin.shape[-1])
+            sin = torch.repeat_interleave(sin, 2, dim=-1, output_size=cos_sin.shape[-1])
+            cos = torch.repeat_interleave(cos, 2, dim=-1, output_size=cos_sin.shape[-1])
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
@@ -311,15 +264,13 @@ class HPUYaRNScalingRotaryEmbedding(YaRNScalingRotaryEmbedding):
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        from habana_frameworks.torch.hpex.kernels import (
-            RotaryPosEmbeddingMode, apply_rotary_pos_emb)
+        from habana_frameworks.torch.hpex.kernels import (RotaryPosEmbeddingMode, apply_rotary_pos_emb)
 
         # Prepare cos-sin caches for long-context + LoRA with offsets for every
         # forward, since the offset information wasn't available previously
         if not hasattr(self, "sin") or self.recompute_cos_sin:
             self.prepare_cos_sin(positions, offsets, recompute_cos_sin=True)
-        if hasattr(self, "scaling_factors") or hasattr(
-                self, "scaling_factor") or self.sin is None:
+        if hasattr(self, "scaling_factors") or hasattr(self, "scaling_factor") or self.sin is None:
             self.prepare_cos_sin(positions, offsets)
         num_tokens = positions.shape[0] * positions.shape[1]
         # HPU RoPE kernel requires hidden dimension for cos and sin to be equal
@@ -330,10 +281,7 @@ class HPUYaRNScalingRotaryEmbedding(YaRNScalingRotaryEmbedding):
         # GPT-J kernel requires position_ids = None, offset = 0, mode = PAIRWISE
         # and expansion of cos/sin tensors via repeat_interleave
         rope_mode: RotaryPosEmbeddingMode
-        if self.is_neox_style:
-            rope_mode = RotaryPosEmbeddingMode.BLOCKWISE
-        else:
-            rope_mode = RotaryPosEmbeddingMode.PAIRWISE
+        rope_mode = RotaryPosEmbeddingMode.BLOCKWISE if self.is_neox_style else RotaryPosEmbeddingMode.PAIRWISE
         sin = self.sin
         cos = self.cos
         query_shape = query.shape
@@ -349,8 +297,7 @@ class HPUYaRNScalingRotaryEmbedding(YaRNScalingRotaryEmbedding):
 
         query_rot = query[..., :self.rotary_dim]
         query_pass = query[..., self.rotary_dim:]
-        query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0,
-                                         rope_mode)
+        query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0, rope_mode)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_rot = key[..., :self.rotary_dim]
@@ -373,21 +320,14 @@ class HPUDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
             positions = positions + offsets
         positions = positions.flatten()
         num_tokens = positions.shape[0]
-        cos_sin = self.cos_sin_cache.index_select(0, positions).view(
-            num_tokens, 1, -1)
+        cos_sin = self.cos_sin_cache.index_select(0, positions).view(num_tokens, 1, -1)
         cos, sin = cos_sin.chunk(2, dim=-1)
         if self.is_neox_style:
             cos = torch.cat((cos, cos), dim=-1)
             sin = torch.cat((sin, sin), dim=-1)
         else:
-            sin = torch.repeat_interleave(sin,
-                                          2,
-                                          dim=-1,
-                                          output_size=cos_sin.shape[-1])
-            cos = torch.repeat_interleave(cos,
-                                          2,
-                                          dim=-1,
-                                          output_size=cos_sin.shape[-1])
+            sin = torch.repeat_interleave(sin, 2, dim=-1, output_size=cos_sin.shape[-1])
+            cos = torch.repeat_interleave(cos, 2, dim=-1, output_size=cos_sin.shape[-1])
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
@@ -398,15 +338,13 @@ class HPUDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        from habana_frameworks.torch.hpex.kernels import (
-            RotaryPosEmbeddingMode, apply_rotary_pos_emb)
+        from habana_frameworks.torch.hpex.kernels import (RotaryPosEmbeddingMode, apply_rotary_pos_emb)
 
         # Prepare cos-sin caches for long-context + LoRA with offsets for every
         # forward, since the offset information wasn't available previously
         if not hasattr(self, "sin") or self.recompute_cos_sin:
             self.prepare_cos_sin(positions, offsets, recompute_cos_sin=True)
-        if hasattr(self, "scaling_factors") or hasattr(
-                self, "scaling_factor") or self.sin is None:
+        if hasattr(self, "scaling_factors") or hasattr(self, "scaling_factor") or self.sin is None:
             self.prepare_cos_sin(positions, offsets)
         num_tokens = positions.shape[0] * positions.shape[1]
 
@@ -422,10 +360,7 @@ class HPUDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         # GPT-J kernel requires position_ids = None, offset = 0, mode = PAIRWISE
         # and expansion of cos/sin tensors via repeat_interleave
         rope_mode: RotaryPosEmbeddingMode
-        if self.is_neox_style:
-            rope_mode = RotaryPosEmbeddingMode.BLOCKWISE
-        else:
-            rope_mode = RotaryPosEmbeddingMode.PAIRWISE
+        rope_mode = RotaryPosEmbeddingMode.BLOCKWISE if self.is_neox_style else RotaryPosEmbeddingMode.PAIRWISE
         sin = self.sin
         cos = self.cos
         query_shape = query.shape
@@ -441,8 +376,7 @@ class HPUDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
 
         query_rot = query[..., :self.rotary_dim]
         query_pass = query[..., self.rotary_dim:]
-        query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0,
-                                         rope_mode)
+        query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0, rope_mode)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_rot = key[..., :self.rotary_dim]
@@ -475,21 +409,14 @@ class HPULlama3RotaryEmbedding(Llama3RotaryEmbedding):
             positions = positions + offsets
         positions = positions.flatten()
         num_tokens = positions.shape[0]
-        cos_sin = self.cos_sin_cache.index_select(0, positions).view(
-            num_tokens, 1, -1)
+        cos_sin = self.cos_sin_cache.index_select(0, positions).view(num_tokens, 1, -1)
         cos, sin = cos_sin.chunk(2, dim=-1)
         if self.is_neox_style:
             cos = torch.cat((cos, cos), dim=-1)
             sin = torch.cat((sin, sin), dim=-1)
         else:
-            sin = torch.repeat_interleave(sin,
-                                          2,
-                                          dim=-1,
-                                          output_size=cos_sin.shape[-1])
-            cos = torch.repeat_interleave(cos,
-                                          2,
-                                          dim=-1,
-                                          output_size=cos_sin.shape[-1])
+            sin = torch.repeat_interleave(sin, 2, dim=-1, output_size=cos_sin.shape[-1])
+            cos = torch.repeat_interleave(cos, 2, dim=-1, output_size=cos_sin.shape[-1])
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
@@ -500,15 +427,13 @@ class HPULlama3RotaryEmbedding(Llama3RotaryEmbedding):
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        from habana_frameworks.torch.hpex.kernels import (
-            RotaryPosEmbeddingMode, apply_rotary_pos_emb)
+        from habana_frameworks.torch.hpex.kernels import (RotaryPosEmbeddingMode, apply_rotary_pos_emb)
 
         # Prepare cos-sin caches for long-context + LoRA with offsets for every
         # forward, since the offset information wasn't available previously
         if not hasattr(self, "sin") or self.recompute_cos_sin:
             self.prepare_cos_sin(positions, offsets, recompute_cos_sin=True)
-        if hasattr(self, "scaling_factors") or hasattr(
-                self, "scaling_factor") or self.sin is None:
+        if hasattr(self, "scaling_factors") or hasattr(self, "scaling_factor") or self.sin is None:
             self.prepare_cos_sin(positions, offsets)
         num_tokens = positions.shape[0] * positions.shape[1]
         # HPU RoPE kernel requires hidden dimension for cos and sin to be equal
@@ -519,10 +444,7 @@ class HPULlama3RotaryEmbedding(Llama3RotaryEmbedding):
         # GPT-J kernel requires position_ids = None, offset = 0, mode = PAIRWISE
         # and expansion of cos/sin tensors via repeat_interleave
         rope_mode: RotaryPosEmbeddingMode
-        if self.is_neox_style:
-            rope_mode = RotaryPosEmbeddingMode.BLOCKWISE
-        else:
-            rope_mode = RotaryPosEmbeddingMode.PAIRWISE
+        rope_mode = RotaryPosEmbeddingMode.BLOCKWISE if self.is_neox_style else RotaryPosEmbeddingMode.PAIRWISE
         sin = self.sin
         cos = self.cos
         query_shape = query.shape
@@ -538,8 +460,7 @@ class HPULlama3RotaryEmbedding(Llama3RotaryEmbedding):
 
         query_rot = query[..., :self.rotary_dim]
         query_pass = query[..., self.rotary_dim:]
-        query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0,
-                                         rope_mode)
+        query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0, rope_mode)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_rot = key[..., :self.rotary_dim]
@@ -562,8 +483,7 @@ class HPUPhi3LongRoPEScaledRotaryEmbedding(Phi3LongRoPEScaledRotaryEmbedding):
             positions = positions + offsets
         positions = positions.flatten()
         num_tokens = positions.shape[0]
-        cos_sin = self.long_short_cos_sin_cache.index_select(
-            0, positions).view(num_tokens, 1, -1)
+        cos_sin = self.long_short_cos_sin_cache.index_select(0, positions).view(num_tokens, 1, -1)
         cos, sin = cos_sin.chunk(2, dim=-1)
         cos = torch.cat((cos, cos), dim=-1)
         sin = torch.cat((sin, sin), dim=-1)
@@ -578,8 +498,7 @@ class HPUPhi3LongRoPEScaledRotaryEmbedding(Phi3LongRoPEScaledRotaryEmbedding):
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        from habana_frameworks.torch.hpex.kernels import (
-            RotaryPosEmbeddingMode, apply_rotary_pos_emb)
+        from habana_frameworks.torch.hpex.kernels import (RotaryPosEmbeddingMode, apply_rotary_pos_emb)
 
         rope_mode: RotaryPosEmbeddingMode
         rope_mode = RotaryPosEmbeddingMode.BLOCKWISE
@@ -602,8 +521,7 @@ class HPUPhi3LongRoPEScaledRotaryEmbedding(Phi3LongRoPEScaledRotaryEmbedding):
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., :self.rotary_dim]
         query_pass = query[..., self.rotary_dim:]
-        query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0,
-                                         rope_mode)
+        query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0, rope_mode)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_shape = key.shape
@@ -631,8 +549,7 @@ class HPULlama4VisionRotaryEmbedding(Llama4VisionRotaryEmbedding):
         # original model use dtype as complex
         # for HPU, need to change to 'float'
         dtype = torch.float
-        super().__init__(head_size, rotary_dim, max_position_embeddings, base,
-                         is_neox_style, dtype)
+        super().__init__(head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype)
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(self.base)
@@ -648,12 +565,9 @@ class HPULlama4VisionRotaryEmbedding(Llama4VisionRotaryEmbedding):
         num_patches_single_dim = int(math.sqrt(num_patches))
         frequencies_x = img_idx % num_patches_single_dim
         frequencies_y = img_idx // num_patches_single_dim
-        freqs_x = ((frequencies_x + 1)[..., None] *
-                   inv_freq[None, None, :]).repeat_interleave(2, dim=-1)
-        freqs_y = ((frequencies_y + 1)[..., None] *
-                   inv_freq[None, None, :]).repeat_interleave(2, dim=-1)
-        freqs = torch.cat([freqs_x, freqs_y],
-                          dim=-1).float().contiguous()[..., ::2]
+        freqs_x = ((frequencies_x + 1)[..., None] * inv_freq[None, None, :]).repeat_interleave(2, dim=-1)
+        freqs_y = ((frequencies_y + 1)[..., None] * inv_freq[None, None, :]).repeat_interleave(2, dim=-1)
+        freqs = torch.cat([freqs_x, freqs_y], dim=-1).float().contiguous()[..., ::2]
         freqs = freqs.masked_fill(img_idx.reshape(-1, 1, 1) < 0, 0)
 
         # Compute cosine and sine for each angle.
@@ -664,9 +578,9 @@ class HPULlama4VisionRotaryEmbedding(Llama4VisionRotaryEmbedding):
         return cache
 
     def forward_oot(  # type: ignore[override]
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
+            self,
+            query: torch.Tensor,
+            key: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Ensure the cache is on the right device.
         self.cos_sin_cache: torch.Tensor = self.cos_sin_cache.to(query.device)
@@ -680,10 +594,8 @@ class HPULlama4VisionRotaryEmbedding(Llama4VisionRotaryEmbedding):
         # Reshape cos_cache and sin_cache to broadcast properly.
         # We want them to have shape [1, 577, 1, 44] to match the
         # query dimensions (except for the last two dims).
-        cos_cache = cos_cache.view(1, cos_cache.shape[0], 1,
-                                   cos_cache.shape[-1])
-        sin_cache = sin_cache.view(1, sin_cache.shape[0], 1,
-                                   sin_cache.shape[-1])
+        cos_cache = cos_cache.view(1, cos_cache.shape[0], 1, cos_cache.shape[-1])
+        sin_cache = sin_cache.view(1, sin_cache.shape[0], 1, sin_cache.shape[-1])
         # e.g., [1, 577, 1, 44]
 
         # Separate the real and imaginary parts.
@@ -700,10 +612,8 @@ class HPULlama4VisionRotaryEmbedding(Llama4VisionRotaryEmbedding):
         k_rotated_imag = k_real * sin_cache + k_imag * cos_cache
 
         # Re-stack the rotated components into a last dimension of size 2.
-        q_rotated = torch.stack([q_rotated_real, q_rotated_imag],
-                                dim=-1)  # shape: [17, 577, 8, 44, 2]
-        k_rotated = torch.stack([k_rotated_real, k_rotated_imag],
-                                dim=-1)  # shape: [17, 577, 8, 44, 2]
+        q_rotated = torch.stack([q_rotated_real, q_rotated_imag], dim=-1)  # shape: [17, 577, 8, 44, 2]
+        k_rotated = torch.stack([k_rotated_real, k_rotated_imag], dim=-1)  # shape: [17, 577, 8, 44, 2]
 
         # Flatten the last two dimensions to match the original output shape.
         # Flatten back to the desired shape
@@ -727,21 +637,14 @@ class HPUMRotaryEmbedding(MRotaryEmbedding):
             positions = positions + offsets
         positions = positions.flatten()
         num_tokens = positions.shape[0]
-        cos_sin = self.cos_sin_cache.index_select(0, positions).view(
-            num_tokens, 1, -1)
+        cos_sin = self.cos_sin_cache.index_select(0, positions).view(num_tokens, 1, -1)
         cos, sin = cos_sin.chunk(2, dim=-1)
         if self.is_neox_style:
             cos = torch.cat((cos, cos), dim=-1)
             sin = torch.cat((sin, sin), dim=-1)
         else:
-            sin = torch.repeat_interleave(sin,
-                                          2,
-                                          dim=-1,
-                                          output_size=cos_sin.shape[-1])
-            cos = torch.repeat_interleave(cos,
-                                          2,
-                                          dim=-1,
-                                          output_size=cos_sin.shape[-1])
+            sin = torch.repeat_interleave(sin, 2, dim=-1, output_size=cos_sin.shape[-1])
+            cos = torch.repeat_interleave(cos, 2, dim=-1, output_size=cos_sin.shape[-1])
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
@@ -752,15 +655,13 @@ class HPUMRotaryEmbedding(MRotaryEmbedding):
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        from habana_frameworks.torch.hpex.kernels import (
-            RotaryPosEmbeddingMode, apply_rotary_pos_emb)
+        from habana_frameworks.torch.hpex.kernels import (RotaryPosEmbeddingMode, apply_rotary_pos_emb)
 
         # Prepare cos-sin caches for long-context + LoRA with offsets for every
         # forward, since the offset information wasn't available previously
         if not hasattr(self, "sin") or self.recompute_cos_sin:
             self.prepare_cos_sin(positions, offsets, recompute_cos_sin=True)
-        if hasattr(self, "scaling_factors") or hasattr(
-                self, "scaling_factor") or self.sin is None:
+        if hasattr(self, "scaling_factors") or hasattr(self, "scaling_factor") or self.sin is None:
             self.prepare_cos_sin(positions, offsets)
         num_tokens = positions.shape[0] * positions.shape[1]
         # HPU RoPE kernel requires hidden dimension for cos and sin to be equal
@@ -771,10 +672,7 @@ class HPUMRotaryEmbedding(MRotaryEmbedding):
         # GPT-J kernel requires position_ids = None, offset = 0, mode = PAIRWISE
         # and expansion of cos/sin tensors via repeat_interleave
         rope_mode: RotaryPosEmbeddingMode
-        if self.is_neox_style:
-            rope_mode = RotaryPosEmbeddingMode.BLOCKWISE
-        else:
-            rope_mode = RotaryPosEmbeddingMode.PAIRWISE
+        rope_mode = RotaryPosEmbeddingMode.BLOCKWISE if self.is_neox_style else RotaryPosEmbeddingMode.PAIRWISE
         sin = self.sin
         cos = self.cos
         query_shape = query.shape
@@ -790,8 +688,7 @@ class HPUMRotaryEmbedding(MRotaryEmbedding):
 
         query_rot = query[..., :self.rotary_dim]
         query_pass = query[..., self.rotary_dim:]
-        query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0,
-                                         rope_mode)
+        query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0, rope_mode)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_rot = key[..., :self.rotary_dim]

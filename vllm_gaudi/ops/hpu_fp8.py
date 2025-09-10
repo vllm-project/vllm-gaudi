@@ -6,36 +6,27 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
 from vllm.model_executor.layers.quantization import fp8
-from vllm.model_executor.layers.quantization.fp8 import (Fp8LinearMethod as
-                                                         OrigFp8LinearMethod,
-                                                         Fp8MoEMethod,
+from vllm.model_executor.layers.quantization.fp8 import (Fp8LinearMethod as OrigFp8LinearMethod, Fp8MoEMethod,
                                                          Fp8Config)
 import vllm_gaudi.extension.ops as hpu_ops
-from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel,
-                                      VllmMixtureOfExpertsOpFP8)
+from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel, VllmMixtureOfExpertsOpFP8)
 
 
 class Fp8LinearMethod(OrigFp8LinearMethod):
 
     def create_weights(self, *args, **kwargs) -> None:
         if hpu_ops.is_hpu_gaudi2:
-            kwargs['weight_loader'] = hpu_ops.gaudi_weight_wrapper(
-                kwargs.get('weight_loader'))
-        kwargs['weight_loader'] = hpu_ops.synced_weight_loader(
-            kwargs.get('weight_loader'))
+            kwargs['weight_loader'] = hpu_ops.gaudi_weight_wrapper(kwargs.get('weight_loader'))
+        kwargs['weight_loader'] = hpu_ops.synced_weight_loader(kwargs.get('weight_loader'))
         super().create_weights(*args, **kwargs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.quant_config = self.quant_config
         if self.block_quant:
-            layer = hpu_ops.fp8_block_linear_postprocess_weights(
-                layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
+            layer = hpu_ops.fp8_block_linear_postprocess_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
             return
 
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply(self, layer: torch.nn.Module, x: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         if self.block_quant:
             assert self.quant_config.weight_block_size is not None
             return hpu_ops.apply_block_fp8_linear_hpu(
@@ -74,10 +65,8 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
 
     def create_weights(self, *args, **kwargs) -> None:
         if hpu_ops.is_hpu_gaudi2:
-            kwargs['weight_loader'] = hpu_ops.gaudi_weight_wrapper(
-                kwargs.get('weight_loader'))
-        kwargs['weight_loader'] = hpu_ops.synced_weight_loader(
-            kwargs.get('weight_loader'))
+            kwargs['weight_loader'] = hpu_ops.gaudi_weight_wrapper(kwargs.get('weight_loader'))
+        kwargs['weight_loader'] = hpu_ops.synced_weight_loader(kwargs.get('weight_loader'))
         super().create_weights(*args, **kwargs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -98,8 +87,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
                 experts_max,
             )
         if self.block_quant:
-            layer = hpu_ops.fp8_block_moe_prepare_weights(
-                layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
+            layer = hpu_ops.fp8_block_moe_prepare_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
         else:
             layer = hpu_ops.fp8_channel_moe_prepare_weights(layer)
 
@@ -125,17 +113,16 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if use_grouped_topk or custom_routing_function is not None:
-            topk_weights, topk_ids = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias)
+            topk_weights, topk_ids = FusedMoE.select_experts(hidden_states=x,
+                                                             router_logits=router_logits,
+                                                             use_grouped_topk=use_grouped_topk,
+                                                             top_k=top_k,
+                                                             renormalize=renormalize,
+                                                             topk_group=topk_group,
+                                                             num_expert_group=num_expert_group,
+                                                             custom_routing_function=custom_routing_function,
+                                                             scoring_func=scoring_func,
+                                                             e_score_correction_bias=e_score_correction_bias)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
