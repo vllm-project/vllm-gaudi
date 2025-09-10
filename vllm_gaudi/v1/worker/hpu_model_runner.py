@@ -3045,6 +3045,9 @@ class HPUModelRunner:
         num_candidates = len(buckets)
         captured_all = True
         for idx, (batch_size, seq_len, num_blocks) in enumerate(reversed(buckets)):
+            if seq_len > self.max_num_tokens:
+                captured_all = False
+                continue
             # Graph memory usage is proportional to seq dimension in a batch
             phase = f"Graph/{'prompt' if is_prompt else 'decode'}"
             if is_prompt:
