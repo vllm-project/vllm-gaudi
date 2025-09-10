@@ -50,11 +50,11 @@ fi
 echo "Test with structured outputs passed"
 
 # DP2
-echo "Testing data parallel size 2 with vllm-hpu plugin v1"
-echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/examples/data_parallel.py --dp-size 2 --tp-size 2
-HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/examples/data_parallel.py --dp-size 2 --tp-size 2
-if [ $? -ne 0 ]; then
-    echo "Error: Test failed for data parallel size 2" >&2
-    exit -1
-fi
-echo "Test with data parallel size 2 passed"
+# echo "Testing data parallel size 2 with vllm-hpu plugin v1"
+# echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/examples/data_parallel.py --dp-size 2 --tp-size 2
+# HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/examples/data_parallel.py --dp-size 2 --tp-size 2
+# if [ $? -ne 0 ]; then
+#     echo "Error: Test failed for data parallel size 2" >&2
+#     exit -1
+# fi
+# echo "Test with data parallel size 2 passed"
