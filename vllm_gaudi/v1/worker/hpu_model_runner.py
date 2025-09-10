@@ -371,15 +371,16 @@ class HpuModelAdapter(torch.nn.Module):
         attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(
             mask, -math.inf))
         attn_metadata = custom_tuple_replace(prefill_metadata,
-                                             "TrimmedAttentionMetadata",
-                                             attn_bias=attn_bias)
+                                            "TrimmedAttentionMetadata",
+                                            attn_bias=attn_bias)
+
         return attn_metadata
 
     def _set_attn_bias_for_sliding_window(self, attn_metadata, batch_size,
                                           seq_len, window_size, device, dtype):
 
         if (attn_metadata is None
-                or not attn_metadata.is_prompt) or (seq_len <= window_size):
+            or not attn_metadata.is_prompt) or (seq_len <= window_size):
             return attn_metadata
 
         # FusedSDPA with window_size is only supported when the length
@@ -392,14 +393,44 @@ class HpuModelAdapter(torch.nn.Module):
         prefill_metadata = attn_metadata
         shift = 0
 
-        #causal + window size
-        tensor = torch.full((batch_size, 1, seq_len, seq_len),
-                            device=device,
-                            dtype=dtype,
-                            fill_value=1)
-        mask = torch.tril(tensor, diagonal=shift)
-        mask = torch.triu(mask, diagonal=shift - window_size + 1)
-        attn_bias = torch.log(mask)
+        if self.prefill_use_fusedsdpa and attn_metadata.block_list is not None:
+            prefill_metadata = attn_metadata
+
+            seq_lens_t = prefill_metadata.seq_lens_tensor
+            context_lens_t = prefill_metadata.context_lens_tensor
+
+            block_list = attn_metadata.block_list
+            max_context_len = (block_list.size(-1) //
+                            batch_size if block_list is not None else 0)
+            max_context_len = max_context_len * self.block_size
+
+            past_mask = torch.triu(torch.ones(
+                (batch_size, 1, seq_len, max_context_len), device=device), 
+                diagonal=window_size+1
+            )
+
+            # Apply per-sample context length masking
+            context_range = torch.arange(max_context_len, device=device)
+            valid_mask = context_range < context_lens_t.view(-1, 1, 1, 1)
+            past_mask = torch.where(valid_mask, past_mask, 0)
+
+            # Create the second mask (causal mask for seq_len x seq_len)
+            tensor = torch.ones((batch_size, 1, seq_len, seq_len), device=device)
+            causal_mask = torch.tril(tensor, diagonal=shift)
+            causal_mask = torch.triu(causal_mask, diagonal=shift - window_size + 1)
+
+            # Concatenate along the last dimension
+            attn_bias = torch.cat((past_mask, causal_mask), dim=-1)
+            attn_bias = torch.log(attn_bias)
+        else:
+            #causal + window size
+            tensor = torch.full((batch_size, 1, seq_len, seq_len),
+                                device=device,
+                                dtype=dtype,
+                                fill_value=1)
+            mask = torch.tril(tensor, diagonal=shift)
+            mask = torch.triu(mask, diagonal=shift - window_size + 1)
+            attn_bias = torch.log(mask)
 
         attn_metadata = prefill_metadata._replace(window_attn_bias=attn_bias)
         return attn_metadata
