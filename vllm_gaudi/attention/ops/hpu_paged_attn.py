@@ -9,7 +9,6 @@ from typing import Optional
 
 import torch
 from vllm_gaudi.extension import cache_ops, ops
-from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunnerInputBuilderBase
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
@@ -28,8 +27,7 @@ class HPUPagedAttentionMetadata:
 @dataclass
 class HPUPagedAttentionMetadataBuilder:
 
-    def __init__(self,
-                 input_builder: "HPUModelRunnerInputBuilderBase") -> None:
+    def __init__(self, input_builder: "HPUPageAttentionInputBuilderBase") -> None:
         """Create the builder, remember some configuration and parameters."""
         self.input_builder = input_builder
 
@@ -37,11 +35,15 @@ class HPUPagedAttentionMetadataBuilder:
         """Prepare for one batch."""
         pass
 
-    def build(self, seq_lens: list[int], query_lens: list[int],
-              cuda_graph_pad_size: int,
-              batch_size: int) -> HPUPagedAttentionMetadata:
+    def build(self, seq_lens: list[int], query_lens: list[int], cuda_graph_pad_size: int,
+              batch_size: int) -> type[HPUPagedAttentionMetadata]:
         """Build attention metadata with on-device tensors."""
         return HPUPagedAttentionMetadata
+
+
+@dataclass
+class HPUPageAttentionInputBuilderBase:
+    pass
 
 
 class HPUPagedAttention:

@@ -3678,7 +3678,3 @@ class HPUModelRunner:
             else:
                 draft_token_ids.append(drafter_output.tolist())
         return draft_token_ids
-
-
-class HPUModelRunnerInputBuilderBase:
-    pass
