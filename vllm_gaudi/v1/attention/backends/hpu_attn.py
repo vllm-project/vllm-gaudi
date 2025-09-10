@@ -13,7 +13,7 @@ from vllm.attention.backends.abstract import AttentionMetadata, AttentionBackend
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm_gaudi.attention.backends.hpu_attn import (HPUAttentionBackend,
-                                                    HPUAttentionMetadata, HPUEncoderOnlyAttentionMetadata)
+                                                    HPUAttentionMetadata)
 from vllm_gaudi.extension.logger import logger as init_logger
 
 logger = init_logger()
@@ -30,8 +30,8 @@ class HPUAttentionBackendV1(HPUAttentionBackend):
         return HPUAttentionMetadataV1
 
     @staticmethod
-    def get_builder_cls() -> type["HPUEncoderOnlyMetadataBuilder"]:
-        return HPUEncoderOnlyMetadataBuilder
+    def get_builder_cls() -> type["HPUMetadataBuilder"]:
+        return HPUMetadataBuilder
 
 @dataclass
 class HPUAttentionMetadataV1(HPUAttentionMetadata):
@@ -105,50 +105,7 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
             block_size=block_size,
             query_start_loc=query_start_loc)
 
-class HPUEncoderOnlyMetadataBuilder(AttentionMetadataBuilder[HPUEncoderOnlyAttentionMetadata]):
-    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
-        self.vllm_config = vllm_config
-        self.device = device
-        self.num_heads = vllm_config.model_config.get_num_attention_heads()
-        self.head_dim = vllm_config.model_config.get_head_size()
-        self.block_size = kv_cache_spec.block_size
-
-    def build(
-        self,
-        common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata,
-        fast_build: bool = False
-    ) -> HPUEncoderOnlyAttentionMetadata:
-        metadata_copy = copy(common_attn_metadata)
-        metadata_copy.causal = False  # encoder-only
-
-        return HPUEncoderOnlyAttentionMetadata(
-            num_actual_tokens=metadata_copy.num_actual_tokens,
-            max_seq_len=metadata_copy.max_seq_len,
-            seq_lens=metadata_copy.seq_lens.to(self.device),
-            block_size=self.block_size,
-            num_heads=self.num_heads,
-            head_dim=self.head_dim,
-            causal=False
-        )
-
-    def use_cascade_attention(self, *args, **kwargs) -> bool:
-        return False
+class HPUMetadataBuilder(AttentionMetadataBuilder[HPUAttentionMetadata]):
+    def build():
+        pass
     
-class HPUEncoderOnlyAttentionBackend(AttentionBackend):
-    def __init__(self, builder_cls):
-        self.builder_cls = builder_cls
-
-    def forward(self, hidden_states, attention_metadata: HPUEncoderOnlyAttentionMetadata):
-        # Example HPU kernel call
-        from vllm_gaudi.hpu_ops import hpu_encoder_attention_kernel
-
-        output = hpu_encoder_attention_kernel(
-            hidden_states=hidden_states,
-            seq_lens=attention_metadata.seq_lens,
-            block_size=attention_metadata.block_size,
-            num_heads=attention_metadata.num_heads,
-            head_dim=attention_metadata.head_dim,
-            causal=attention_metadata.causal
-        )
-        return output
