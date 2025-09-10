@@ -6,8 +6,8 @@
 ###############################################################################
 
 from .logger import logger
-from .config import Value, choice, boolean, split_values_and_flags
-
+from .config import Value, boolean, split_values_and_flags
+from .validation import choice, regex
 
 _VLLM_VALUES = {}
 
@@ -55,12 +55,6 @@ def set_vllm_config(cfg):
         _VLLM_VALUES['model_type'] = cfg.model_config.model_type
     _VLLM_VALUES['prefix_caching'] = cfg.cache_config.enable_prefix_caching
 
-    # t.compile is very picky about what functions we can call inside modules
-    # since this is the last step we can force recompilation of config to
-    # ensure all values are computed before entering the model
-    from vllm_gaudi.extension.runtime import get_config
-    get_config().finalize()
-
 
 def _get_vllm_engine_version(_):
     try:
@@ -78,15 +72,19 @@ def _get_pt_bridge_mode(_):
 
 def VllmValue(name, env_var_type):
     global _VLLM_VALUES
-    return Value(name, lambda _: _VLLM_VALUES.get(name, None), env_var_type=env_var_type)
+    return Value(name, lambda _: _VLLM_VALUES[name], env_var_type=env_var_type)
 
 
 def get_environment():
     values = [
-        Value('hw', _get_hw, env_var_type=choice('cpu', 'gaudi', 'gaudi2', 'gaudi3')),
-        Value('build', _get_build, env_var_type=str),
+        Value('hw', _get_hw, env_var_type=str, check=choice('cpu', 'gaudi', 'gaudi2', 'gaudi3')),
+        Value('build',
+              _get_build,
+              env_var_type=str,
+              check=regex(r'^\d+\.\d+\.\d+\.\d+$',
+                          hint='You can override detected build by specifying VLLM_BUILD env variable')),
         Value('engine_version', _get_vllm_engine_version, env_var_type=str),
-        Value('bridge_mode', _get_pt_bridge_mode, env_var_type=choice('eager', 'lazy')),
+        Value('bridge_mode', _get_pt_bridge_mode, env_var_type=str, check=choice('eager', 'lazy')),
         VllmValue('model_type', str),
         VllmValue('prefix_caching', boolean),
     ]

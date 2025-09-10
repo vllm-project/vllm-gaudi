@@ -21,6 +21,5 @@ def model_card_path(request):
     """
     path = request.config.getoption("--model_card_path")
     if path is None:
-        pytest.fail(
-            "The --model_card_path argument is required for this test.")
+        pytest.fail("The --model_card_path argument is required for this test.")
     return path

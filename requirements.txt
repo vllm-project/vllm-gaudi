@@ -5,3 +5,5 @@ numpy==1.26.4
 tabulate
 setuptools>=77.0.3,<80.0.0
 setuptools-scm>=8
+numba
+transformers>=4.1,<4.56.0
