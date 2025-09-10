@@ -44,15 +44,14 @@ class PROMPT_DATA:
         self._data = self._data
 
     def get_prompts(self,
-                    model_name: str = "",
                     modality: str = "image",
                     media_source: str = "default",
                     num_prompts: int = 1,
                     skip_vision_data=False):
         if modality == "image":
-            pholder = "<start_of_image>" if "gemma" in model_name.lower() else "<|image_pad|>"
+            pholder = "<|image_pad|>"
         elif modality == "video":
-            pholder = "<video>" if "gemma" in model_name.lower() else "<|video_pad|>"
+            pholder = "<|video_pad|>"
         else:
             raise ValueError(f"Unsupported modality: {modality}."
                              " Supported modality: [image, video]")
@@ -146,8 +145,7 @@ def start_test(model_card_path: str):
                      extra_engine_args=extra_engine_args))
 
             data = PROMPT_DATA()
-            inputs = data.get_prompts(model_name=model_name,
-                                      modality=modality,
+            inputs = data.get_prompts(modality=modality,
                                       media_source=media_source,
                                       num_prompts=num_prompts)
 
