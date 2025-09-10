@@ -9,6 +9,7 @@ import habana_frameworks.torch as htorch
 from vllm import envs
 
 from vllm.platforms import Platform, PlatformEnum, _Backend
+from vllm_gaudi.extension.runtime import get_config
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -28,29 +29,26 @@ class HpuPlatform(Platform):
     dispatch_key: str = "HPU"
     ray_device_key: str = "HPU"
     device_control_env_var: str = "HABANA_VISIBLE_MODULES"
-    supported_quantization: list[str] = [
-        "compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu"
-    ]
+    supported_quantization: list[str] = ["compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu"]
+    simple_compile_backend = "hpu_backend"
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
-                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool, use_mla: bool,
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int, dtype: torch.dtype,
+                             kv_cache_dtype: Optional[str], block_size: int, use_v1: bool, use_mla: bool,
                              has_sink: bool) -> str:
-        if use_v1 and not use_mla:
-            logger.info("Using HPUAttentionV1 backend.")
-            return "vllm_gaudi.attention.backends.hpu_attn.HPUAttentionBackend"
-        if use_v1 and use_mla:
+        assert use_v1, 'Only V1 is supported!'
+        if use_mla:
             logger.info("Using HPUAttentionMLA backend.")
             return ("vllm_gaudi.attention.backends.hpu_attn."
                     "HPUMLAAttentionBackend")
-
-        # Fall back to in-tree HPUAttention backend
-        if use_mla:
-            logger.info("Using HPUAttentionMLA backend.")
-            return "vllm.attention.backends.hpu_attn.HPUMLAAttentionBackend"
-        logger.info("Using HPUAttention backend.")
-        return "vllm.attention.backends.hpu_attn.HPUAttentionBackend"
+        elif get_config().unified_attn:
+            logger.info("Using UnifiedAttention backend.")
+            return ("vllm_gaudi.attention.backends."
+                    "hpu_attn.HPUUnifiedAttentionBackend")
+        else:
+            logger.info("Using HPUAttentionV1 backend.")
+            return ("vllm_gaudi.v1.attention.backends."
+                    "hpu_attn.HPUAttentionBackendV1")
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
@@ -79,27 +77,22 @@ class HpuPlatform(Platform):
             cache_config.block_size = 128
         if (parallel_config.distributed_executor_backend in ['mp', 'uni']
                 and envs.VLLM_WORKER_MULTIPROC_METHOD == 'fork'):
-            if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD",
-                              None) is not None:
+            if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD", None) is not None:
                 logger.warning("On HPU, VLLM_WORKER_MULTIPROC_METHOD=fork "
                                "might cause application hangs on exit. Using "
                                "VLLM_WORKER_MULTIPROC_METHOD=fork anyway, "
                                "as it was explicitly requested.")
             else:
-                logger.warning(
-                    "On HPU, VLLM_WORKER_MULTIPROC_METHOD=fork "
-                    "might cause application hangs on exit. Setting "
-                    "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
-                    "To override that behavior, please set "
-                    "VLLM_WORKER_MULTIPROC_METHOD=fork explicitly.")
+                logger.warning("On HPU, VLLM_WORKER_MULTIPROC_METHOD=fork "
+                               "might cause application hangs on exit. Setting "
+                               "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
+                               "To override that behavior, please set "
+                               "VLLM_WORKER_MULTIPROC_METHOD=fork explicitly.")
                 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-        if (vllm_config.model_config is not None
-                and vllm_config.model_config.dtype
-                in (torch.float16, torch.float32)):
-            logger.warning(
-                "The HPU backend currently does not support %s. "
-                "Using bfloat16 instead.", vllm_config.model_config.dtype)
+        if (vllm_config.model_config is not None and vllm_config.model_config.dtype in (torch.float16, torch.float32)):
+            logger.warning("The HPU backend currently does not support %s. "
+                           "Using bfloat16 instead.", vllm_config.model_config.dtype)
             vllm_config.model_config.dtype = torch.bfloat16
 
         if envs.VLLM_USE_V1:
@@ -108,6 +101,7 @@ class HpuPlatform(Platform):
             # Activate custom ops for v1.
             compilation_config.custom_ops = ["all"]
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            compilation_config.cudagraph_capture_sizes = []
 
             if compilation_config.level != CompilationLevel.NO_COMPILATION:
                 logger.info("[HPU] Forcing CompilationLevel.NO_COMPILATION "
@@ -154,7 +148,7 @@ class HpuPlatform(Platform):
             os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
 
     @classmethod
-    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str, model_config: ModelConfig) -> bool:
         return kv_cache_dtype == "fp8_inc"
 
     @classmethod
@@ -177,8 +171,7 @@ class HpuPlatform(Platform):
             if weight_attrs is None:
                 return
             for key, value in weight_attrs.items():
-                assert not hasattr(weight, key), (
-                    f"Overwriting existing tensor attribute: {key}")
+                assert not hasattr(weight, key), (f"Overwriting existing tensor attribute: {key}")
 
                 # NOTE(woosuk): During weight loading, we often do something
                 # like:

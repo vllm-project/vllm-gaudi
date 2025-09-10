@@ -9,9 +9,8 @@ from typing import Optional
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionMetadata
-from vllm_gaudi.attention.backends.hpu_attn import (HPUAttentionBackend,
-                                                    HPUAttentionMetadata)
+from vllm.attention.backends.abstract import AttentionMetadata, AttentionImpl
+from vllm_gaudi.attention.backends.hpu_attn import (HPUAttentionBackend, HPUAttentionImpl, HPUAttentionMetadata)
 from vllm_gaudi.extension.logger import logger as init_logger
 
 logger = init_logger()
@@ -22,6 +21,10 @@ class HPUAttentionBackendV1(HPUAttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "HPU_ATTN_V1"
+
+    @staticmethod
+    def get_impl_cls() -> type["AttentionImpl"]:
+        return HPUAttentionImpl
 
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
@@ -38,10 +41,25 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
 
     seq_lens_tensor: Optional[torch.Tensor]
     context_lens_tensor: Optional[torch.Tensor]
+    query_start_loc: Optional[torch.Tensor] = None
+
+    def seq_len(self):
+        return self.slot_mapping.size(-1)
+
+    def num_blocks(self):
+        if self.block_list is None:
+            return 0
+        return self.block_list.numel()
 
     @classmethod
-    def make_prefill_metadata(cls, attn_bias, block_list, context_lens_tensor,
-                              seq_lens_tensor, slot_mapping, block_size):
+    def make_prefill_metadata(cls,
+                              attn_bias,
+                              block_list,
+                              context_lens_tensor,
+                              seq_lens_tensor,
+                              slot_mapping,
+                              block_size,
+                              query_start_loc=None):
         return cls(
             is_prompt=True,
             block_list=block_list,
@@ -59,12 +77,19 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
             input_positions=None,
             slot_mapping=slot_mapping,
             enable_kv_scales_calculation=False,
-            block_size=block_size)
+            block_size=block_size,
+            query_start_loc=query_start_loc)
 
     @classmethod
-    def make_decode_metadata(cls, block_list, block_usage, block_groups,
-                             input_positions, num_decode_tokens, slot_mapping,
-                             block_size):
+    def make_decode_metadata(cls,
+                             block_list,
+                             block_usage,
+                             block_groups,
+                             input_positions,
+                             num_decode_tokens,
+                             slot_mapping,
+                             block_size,
+                             query_start_loc=None):
         return cls(
             is_prompt=False,
             block_mapping=None,
@@ -82,4 +107,5 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
             num_decode_tokens=num_decode_tokens,
             slot_mapping=slot_mapping,
             enable_kv_scales_calculation=False,
-            block_size=block_size)
+            block_size=block_size,
+            query_start_loc=query_start_loc)

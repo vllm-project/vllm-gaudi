@@ -17,8 +17,7 @@ ALLOWED_LINES = {
 
 def is_forbidden_import(line: str) -> bool:
     stripped = line.strip()
-    return bool(
-        FORBIDDEN_IMPORT_RE.match(stripped)) and stripped not in ALLOWED_LINES
+    return bool(FORBIDDEN_IMPORT_RE.match(stripped)) and stripped not in ALLOWED_LINES
 
 
 def parse_diff(diff: str) -> list[str]:
@@ -32,24 +31,20 @@ def parse_diff(diff: str) -> list[str]:
         elif line.startswith("@@"):
             match = re.search(r"\+(\d+)", line)
             if match:
-                current_lineno = int(
-                    match.group(1)) - 1  # next "+ line" is here
+                current_lineno = int(match.group(1)) - 1  # next "+ line" is here
         elif line.startswith("+") and not line.startswith("++"):
             current_lineno += 1
             code_line = line[1:]
             if is_forbidden_import(code_line):
-                violations.append(
-                    f"{current_file}:{current_lineno}: {code_line.strip()}")
+                violations.append(f"{current_file}:{current_lineno}: {code_line.strip()}")
     return violations
 
 
 def get_diff(diff_type: str) -> str:
     if diff_type == "staged":
-        return subprocess.check_output(
-            ["git", "diff", "--cached", "--unified=0"], text=True)
+        return subprocess.check_output(["git", "diff", "--cached", "--unified=0"], text=True)
     elif diff_type == "unstaged":
-        return subprocess.check_output(["git", "diff", "--unified=0"],
-                                       text=True)
+        return subprocess.check_output(["git", "diff", "--unified=0"], text=True)
     else:
         raise ValueError(f"Unknown diff_type: {diff_type}")
 

@@ -7,9 +7,11 @@
 
 import os
 from functools import lru_cache, wraps
+from typing import Optional, Any
 
 import habana_frameworks.torch as htorch
 import torch
+import itertools
 
 from vllm_gaudi.extension.runtime import get_config
 
@@ -17,20 +19,6 @@ from vllm_gaudi.extension.runtime import get_config
 @lru_cache(maxsize=None)
 def is_fake_hpu() -> bool:
     return os.environ.get('VLLM_USE_FAKE_HPU', '0') != '0'
-
-
-def with_mark_steps(fn):
-
-    @wraps(fn)
-    def wrapped(*args, **kwargs):
-        htorch.core.mark_step()
-        result = fn(*args, **kwargs)
-        del args
-        del kwargs
-        htorch.core.mark_step()
-        return result
-
-    return wrapped
 
 
 class Matmul(torch.nn.Module):
@@ -81,7 +69,7 @@ class VLLMFP8KVCache(VLLMKVCache):
 
     def quant_input(self, input):
         return torch.ops.hpu.cast_to_fp8_v2(input, self.input_scale, False, False, torch.float8_e4m3fn)[0]
-    
+
     def dequant_output(self, output):
         return torch.ops.hpu.cast_from_fp8(output, self.output_scale, torch.bfloat16)
 
@@ -91,8 +79,7 @@ class VLLMFP8KVCache(VLLMKVCache):
 
     def fetch_from_cache(self, quant_cache, blocks, permutations=None):
         if permutations:
-            output_cache = super().fetch_from_cache(quant_cache, blocks,
-                                                        permutations)
+            output_cache = super().fetch_from_cache(quant_cache, blocks, permutations)
             for i in range(len(output_cache)):
                 output_cache[i] = self.dequant_output(output_cache[i])
             return output_cache
@@ -102,19 +89,19 @@ class VLLMFP8KVCache(VLLMKVCache):
 
 class FP8Matmul(torch.nn.Module):
 
-    def __init__(self, scale_input=1.0, scale_other=1.0,):
+    def __init__(
+        self,
+        scale_input=1.0,
+        scale_other=1.0,
+    ):
         super().__init__()
         self.scale_input = scale_input
         self.scale_other = scale_other
 
     def quant_input(self, x, scale):
-        return torch.ops.hpu.cast_to_fp8_v2(
-            x, scale, False, False, torch.float8_e4m3fn
-        )[0]
+        return torch.ops.hpu.cast_to_fp8_v2(x, scale, False, False, torch.float8_e4m3fn)[0]
 
-    def matmul_fp8(
-        self, x, other, out_dtype, scale_input_inv=None, scale_other_inv=None
-    ):
+    def matmul_fp8(self, x, other, out_dtype, scale_input_inv=None, scale_other_inv=None):
         return torch.ops.hpu.fp8_gemm_v2(
             A=x,
             trans_A=False,
@@ -142,6 +129,7 @@ class FP8Matmul(torch.nn.Module):
 
 
 class ModuleFusedSDPA(torch.nn.Module):
+
     def __init__(self, fusedSDPA):
         super().__init__()
         assert fusedSDPA is not None, f'fusedSDPA kernel is None'
@@ -176,3 +164,14 @@ class ModuleFusedSDPA(torch.nn.Module):
         )
 
 
+def pad_list(input, target_len, val_generator):
+    padding = target_len - len(input)
+    if padding > 0:
+        input.extend(itertools.islice(val_generator, padding))
+    return input
+
+
+def with_default(value: Optional[Any], default: Any) -> Any:
+    if value is not None:
+        return value
+    return default

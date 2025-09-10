@@ -5,8 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
 
-from vllm_gaudi.extension.config import Not, Hardware, VersionRange, ModelType, Kernel, FirstEnabled, All, Value, Env, Disabled, Engine, choice, boolean, to_dict, split_values_and_flags
+from vllm_gaudi.extension.config import Not, Hardware, VersionRange, ModelType, Kernel, Any, All, Value, ValueFromList, Env, Enabled, Disabled, Engine, boolean, to_dict, split_values_and_flags, list_of
 from vllm_gaudi.extension.kernels import fsdpa, block_softmax_adjustment
+from vllm_gaudi.extension.validation import for_all, choice
 
 
 def get_user_flags():
@@ -43,6 +44,10 @@ def get_experimental_flags():
         Env('VLLM_PT_PROFILE', str),
         Env('VLLM_PROFILE_PROMPT', str),
         Env('VLLM_PROFILE_DECODE', str),
+        Env('VLLM_PROFILE_STEPS', list_of(int)),
+        Env('VLLM_DEFRAG_THRESHOLD', int),
+        Env('VLLM_DEFRAG_WITH_GRAPHS', boolean),
+        Env('VLLM_DEBUG', list_of(str), check=for_all(choice('steps', 'defrag', 'fwd'))),
     ]
     return to_dict(flags)
 
@@ -53,26 +58,29 @@ def get_features():
     features = [
         Value('fp32_alibi_biases', True, env_var='VLLM_ALIBI_USE_FLOAT32_BIASES'),
         Value('fp32_softmax', ModelType('qwen2')),
-        Value('fused_block_softmax_adjustment', All(VersionRange(">=1.22.0.494"),
-                                                    Hardware('gaudi3'),
-                                                    Kernel(block_softmax_adjustment),
-                                                    Not(ModelType('qwen2')))),
+        Value(
+            'fused_block_softmax_adjustment',
+            All(VersionRange(">=1.22.0.494"), Hardware('gaudi3'), Kernel(block_softmax_adjustment),
+                Not(ModelType('qwen2')))),
         Value('fused_block_softmax', False),
         Value('flex_impl', False, env_var='VLLM_PROMPT_USE_FLEX_ATTENTION'),
-        Value('fsdpa_impl', All(Kernel(fsdpa),
-                                Not(ModelType('mllama'))), env_var='VLLM_PROMPT_USE_FUSEDSDPA'),
+        Value('fsdpa_impl', All(Kernel(fsdpa), Not(ModelType('mllama'))), env_var='VLLM_PROMPT_USE_FUSEDSDPA'),
         Value('naive_impl', True),
-        Value('prompt_attn_impl', FirstEnabled(*supported_attn_impls), env_var_type=choice(*supported_attn_impls)),
+        ValueFromList('prompt_attn_impl', supported_attn_impls),
         Value('skip_warmup', False),
-        Value('merged_prefill', False),
-        Value('use_contiguous_pa', Disabled('prefix_caching'), env_var='VLLM_CONTIGUOUS_PA'),
+        Value('merged_prefill', Enabled('unified_attn')),
+        Value('use_contiguous_pa',
+              Any(Disabled('prefix_caching'), Enabled('unified_attn')),
+              env_var='VLLM_CONTIGUOUS_PA'),
         Value('use_delayed_sampling', Engine('v0'), env_var='VLLM_DELAYED_SAMPLING'),
         Value('use_bucketing', True, env_var='VLLM_ENABLE_BUCKETING'),
-        Value('exponential_bucketing', True, env_var='VLLM_EXPONENTIAL_BUCKETING'), 
+        Value('exponential_bucketing', True),
         Value('linear_bucketing', True),
-        Value('bucketing_strategy', FirstEnabled(*bucketing_strategies), env_var_type=choice(*bucketing_strategies)),
+        ValueFromList('bucketing_strategy', bucketing_strategies),
+        Value('defrag', Enabled('unified_attn')),
         Value('regional_compilation', True, env_var='VLLM_T_COMPILE_REGIONAL_COMPILATION', env_var_type=boolean),
-        Value('dynamic_shapes_compilation', False, env_var='VLLM_T_COMPILE_DYNAMIC_SHAPES', env_var_type=boolean),
+        Value('dynamic_shapes_compilation', True, env_var='VLLM_T_COMPILE_DYNAMIC_SHAPES', env_var_type=boolean),
         Value('fullgraph_compilation', False, env_var='VLLM_T_COMPILE_FULLGRAPH', env_var_type=boolean),
+        Value('unified_attn', False),
     ]
     return split_values_and_flags(features)

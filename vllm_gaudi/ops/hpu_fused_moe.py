@@ -1,9 +1,10 @@
 from typing import Callable, Optional
 
 import torch
-from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, UnquantizedFusedMoEMethod)
+from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, UnquantizedFusedMoEMethod)
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOp)
+
+import vllm
 
 
 @UnquantizedFusedMoEMethod.register_oot
@@ -28,10 +29,8 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         )
 
         for expert_id in range(layer.local_num_experts):
-            layer.moe_op.w13_list[expert_id].set_weight(
-                layer.w13_weight.data[expert_id])
-            layer.moe_op.w2_list[expert_id].set_weight(
-                layer.w2_weight.data[expert_id])
+            layer.moe_op.w13_list[expert_id].set_weight(layer.w13_weight.data[expert_id])
+            layer.moe_op.w2_list[expert_id].set_weight(layer.w2_weight.data[expert_id])
 
     def forward_oot(
         self,
@@ -55,17 +54,16 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if use_grouped_topk or custom_routing_function is not None:
-            topk_weights, topk_ids = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias)
+            topk_weights, topk_ids = FusedMoE.select_experts(hidden_states=x,
+                                                             router_logits=router_logits,
+                                                             use_grouped_topk=use_grouped_topk,
+                                                             top_k=top_k,
+                                                             renormalize=renormalize,
+                                                             topk_group=topk_group,
+                                                             num_expert_group=num_expert_group,
+                                                             custom_routing_function=custom_routing_function,
+                                                             scoring_func=scoring_func,
+                                                             e_score_correction_bias=e_score_correction_bias)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
@@ -82,3 +80,38 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             permuted_weights=True,
             activation=activation,
         ).view(*input_shape)
+
+
+def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
+    """
+    Compresses the expert map by removing any -1 entries.
+
+    This implementation uses a standard Python loop, which is compatible with
+    graph compilation modes that do not support dynamic shapes resulting from
+    operations like `torch.where`.
+
+    Args:
+        expert_map (torch.Tensor): A tensor of shape (global_num_experts,)
+            mapping a global expert index to its local index. Contains -1 for
+            experts that are not assigned to the current rank.
+
+    Returns:
+        str: A string mapping from local to global index, 
+        ordered by global index.
+            (e.g., "0->5, 1->12, 2->23")
+    """
+    mappings = []
+    # A standard loop over a tensor with a known shape is statically analyzable.
+    # `enumerate` provides the global_index (the position in the tensor) and
+    # `local_index_tensor` (the value at that position).
+    for global_index, local_index_tensor in enumerate(expert_map):
+        local_index = local_index_tensor.item()
+        # We only build strings for valid experts (those not marked as -1).
+        if local_index != -1:
+            mappings.append(f"{local_index}->{global_index}")
+
+    return ", ".join(mappings)
+
+
+vllm.model_executor.layers.fused_moe.layer.get_compressed_expert_map = \
+    get_compressed_expert_map
