@@ -2889,6 +2889,7 @@ class HPUModelRunner:
                 self._compile_methods()
                 self.regional_compilation_layers_list = [RMSNorm, VocabParallelEmbedding]
                 self._regional_compilation(self.model)
+                self.sampler = self._compile(self.sampler)
             else:
                 self.model = self._compile(self.model)
 
