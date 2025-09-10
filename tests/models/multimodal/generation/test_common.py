@@ -20,8 +20,7 @@ def get_model_args(eval_config):
     max_num_seqs = eval_config.get('max_num_seqs', 128)
     tp_size = int(os.environ.get('TP_SIZE', '1'))
     enable_apc = os.environ.get('ENABLE_APC', 'False').lower() in ['true', '1']
-    enforce_eager = os.environ.get('ENFORCE_EAGER',
-                                   'False').lower() in ['true', '1']
+    enforce_eager = os.environ.get('ENFORCE_EAGER', 'False').lower() in ['true', '1']
     model_args = {
         'model': eval_config['model_name'],
         'tensor_parallel_size': tp_size,
@@ -31,8 +30,7 @@ def get_model_args(eval_config):
         'max_model_len': 4096,
         'max_num_seqs': max_num_seqs,
         'trust_remote_code': trust_remote_code,
-        'enable_expert_parallel': eval_config.get('enable_expert_parallel',
-                                                  False),
+        'enable_expert_parallel': eval_config.get('enable_expert_parallel', False),
     }
     if eval_config.get("fp8"):
         model_args['quantization'] = 'inc'
@@ -48,8 +46,7 @@ def launch_lm_eval(eval_config):
     max_num_seqs = eval_config.get('max_num_seqs', 128)
     tp_size = int(os.environ.get('TP_SIZE', '1'))
     enable_apc = os.environ.get('ENABLE_APC', 'False').lower() in ['true', '1']
-    enforce_eager = os.environ.get('ENFORCE_EAGER',
-                                   'False').lower() in ['true', '1']
+    enforce_eager = os.environ.get('ENFORCE_EAGER', 'False').lower() in ['true', '1']
     task = eval_config.get('tasks', 'gsm8k')
     model_args = {
         'pretrained': eval_config['model_name'],
@@ -62,8 +59,7 @@ def launch_lm_eval(eval_config):
         'max_num_seqs': max_num_seqs,
         'trust_remote_code': trust_remote_code,
         'batch_size': max_num_seqs,
-        'enable_expert_parallel': eval_config.get('enable_expert_parallel',
-                                                  False),
+        'enable_expert_parallel': eval_config.get('enable_expert_parallel', False),
     }
     if eval_config.get("fp8"):
         model_args['quantization'] = 'inc'
@@ -92,19 +88,15 @@ def launch_simple(eval_config):
     llm = LLM(**model_args)
     image_url = "https://huggingface.co/datasets/patrickvonplaten/random_img/resolve/main/europe.png"
     # Create a sampling params object.
-    sampling_params = SamplingParams(temperature=0.6,
-                                     top_p=0.9,
-                                     max_tokens=128)
+    sampling_params = SamplingParams(temperature=0.6, top_p=0.9, max_tokens=128)
     messages = [
         {
             "role":
             "user",
             "content": [
                 {
-                    "type":
-                    "text",
-                    "text":
-                    "what countries are on the map, specify "
+                    "type": "text",
+                    "text": "what countries are on the map, specify "
                     "only those that are with a text",
                 },
                 {
@@ -122,16 +114,12 @@ def launch_simple(eval_config):
         generated_text += output.outputs[0].text
 
     european_countries = [
-        "Albania", "Andorra", "Armenia", "Austria", "Azerbaijan", "Belarus",
-        "Belgium", "Bosnia and Herzegovina", "Bulgaria", "Croatia", "Cyprus",
-        "Czech Republic", "Denmark", "Estonia", "Finland", "France", "Georgia",
-        "Germany", "Greece", "Hungary", "Iceland", "Ireland", "Italy",
-        "Kazakhstan", "Kosovo", "Latvia", "Liechtenstein", "Lithuania",
-        "Luxembourg", "Malta", "Moldova", "Monaco", "Montenegro",
-        "Netherlands", "North Macedonia", "Norway", "Poland", "Portugal",
-        "Romania", "Russia", "San Marino", "Serbia", "Slovakia", "Slovenia",
-        "Spain", "Sweden", "Switzerland", "Turkey", "Ukraine",
-        "United Kingdom", "Vatican City"
+        "Albania", "Andorra", "Armenia", "Austria", "Azerbaijan", "Belarus", "Belgium", "Bosnia and Herzegovina",
+        "Bulgaria", "Croatia", "Cyprus", "Czech Republic", "Denmark", "Estonia", "Finland", "France", "Georgia",
+        "Germany", "Greece", "Hungary", "Iceland", "Ireland", "Italy", "Kazakhstan", "Kosovo", "Latvia",
+        "Liechtenstein", "Lithuania", "Luxembourg", "Malta", "Moldova", "Monaco", "Montenegro", "Netherlands",
+        "North Macedonia", "Norway", "Poland", "Portugal", "Romania", "Russia", "San Marino", "Serbia", "Slovakia",
+        "Slovenia", "Spain", "Sweden", "Switzerland", "Turkey", "Ukraine", "United Kingdom", "Vatican City"
     ]
     found_countries: list[str] = []
     for country in european_countries:
@@ -166,8 +154,7 @@ def test_models(model_card_path, monkeypatch) -> None:
     except KeyError as e:
         raise KeyError(f"Available metrics: {results['results']}") from e
     if metric["value"] > measured_value:
-        raise AssertionError(
-            f"Expected: {metric['value']} |  Measured: {measured_value}")
+        raise AssertionError(f"Expected: {metric['value']} |  Measured: {measured_value}")
     print(f"Model: {model_config['model_name']} | "
           f"Task: {task} | "
           f"Metric: {metric['name']} | "
@@ -182,11 +169,7 @@ def __main__(args):
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(
-        description="Test vLLM models with lm-eval")
-    parser.add_argument("--model_card_path",
-                        type=str,
-                        required=True,
-                        help="Path to the model card YAML file.")
+    parser = argparse.ArgumentParser(description="Test vLLM models with lm-eval")
+    parser.add_argument("--model_card_path", type=str, required=True, help="Path to the model card YAML file.")
     args = parser.parse_args()
     __main__(args)

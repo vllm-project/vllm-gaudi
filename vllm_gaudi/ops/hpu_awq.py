@@ -16,16 +16,13 @@ from typing import Any, Optional
 
 import torch
 
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization.base_config import (QuantizationConfig)
 
 from vllm.model_executor.layers.quantization import register_quantization_config
 
 
 def get_linear_classes():
-    from vllm.model_executor.layers.linear import (LinearBase,
-                                                   LinearMethodBase,
-                                                   UnquantizedLinearMethod)
+    from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase, UnquantizedLinearMethod)
     return LinearBase, LinearMethodBase, UnquantizedLinearMethod
 
 
@@ -57,9 +54,8 @@ class AWQHPUConfig(QuantizationConfig):
         self.modules_to_not_convert = modules_to_not_convert or []
 
         if self.weight_bits != 4:
-            raise ValueError(
-                "Currently, only 4-bit weight quantization is supported for "
-                f"AWQ, but got {self.weight_bits} bits.")
+            raise ValueError("Currently, only 4-bit weight quantization is supported for "
+                             f"AWQ, but got {self.weight_bits} bits.")
         self.pack_factor = 32 // self.weight_bits
 
     def __repr__(self) -> str:
@@ -92,13 +88,11 @@ class AWQHPUConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])
         group_size = cls.get_from_keys(config, ["q_group_size", "group_size"])
         zero_point = cls.get_from_keys(config, ["zero_point"])
-        modules_to_not_convert = cls.get_from_keys_or(
-            config, ["modules_to_not_convert"], None)
+        modules_to_not_convert = cls.get_from_keys_or(config, ["modules_to_not_convert"], None)
         return cls(weight_bits, group_size, zero_point, modules_to_not_convert)
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg,
-                                     user_quant) -> Optional[str]:
+    def override_quantization_method(cls, hf_quant_cfg, user_quant) -> Optional[str]:
 
         is_valid_user_quant = user_quant == "awq_hpu"
 
@@ -108,8 +102,7 @@ class AWQHPUConfig(QuantizationConfig):
 
         return None
 
-    def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["AWQHPULinearMethod"]:
+    def get_quant_method(self, layer: torch.nn.Module, prefix: str) -> Optional["AWQHPULinearMethod"]:
         LinearBase, _, UnquantizedLinearMethod = get_linear_classes()
         if isinstance(layer, LinearBase):
             if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
@@ -142,51 +135,43 @@ class AWQHPULinearMethod:
             )
         self.quant_config = quant_config
 
-    def create_weights(self, layer: torch.nn.Module,
-                       input_size_per_partition: int,
-                       output_partition_sizes: list[int], input_size: int,
-                       output_size: int, params_dtype: torch.dtype,
-                       **extra_weight_attrs):
+    def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int, output_partition_sizes: list[int],
+                       input_size: int, output_size: int, params_dtype: torch.dtype, **extra_weight_attrs):
 
-        (GroupQuantScaleParameter,
-         PackedvLLMParameter) = get_parameter_classes()
+        (GroupQuantScaleParameter, PackedvLLMParameter) = get_parameter_classes()
         if input_size_per_partition % self.quant_config.group_size != 0:
-            raise ValueError(
-                "The input size is not aligned with the quantized "
-                "weight shape. This can be caused by too large "
-                "tensor parallel size.")
+            raise ValueError("The input size is not aligned with the quantized "
+                             "weight shape. This can be caused by too large "
+                             "tensor parallel size.")
 
         output_size_per_partition = sum(output_partition_sizes)
         if output_size_per_partition % self.quant_config.pack_factor != 0:
-            raise ValueError(
-                "The output size is not aligned with the quantized "
-                "weight shape. This can be caused by too large "
-                "tensor parallel size.")
+            raise ValueError("The output size is not aligned with the quantized "
+                             "weight shape. This can be caused by too large "
+                             "tensor parallel size.")
 
         weight_loader = extra_weight_attrs.get("weight_loader")
-        qweight = PackedvLLMParameter(
-            data=torch.empty(
-                input_size_per_partition,
-                output_size_per_partition // self.quant_config.pack_factor,
-                dtype=torch.int32,
-            ),
-            input_dim=0,
-            output_dim=1,
-            packed_dim=1,
-            packed_factor=self.quant_config.pack_factor,
-            weight_loader=weight_loader)
+        qweight = PackedvLLMParameter(data=torch.empty(
+            input_size_per_partition,
+            output_size_per_partition // self.quant_config.pack_factor,
+            dtype=torch.int32,
+        ),
+                                      input_dim=0,
+                                      output_dim=1,
+                                      packed_dim=1,
+                                      packed_factor=self.quant_config.pack_factor,
+                                      weight_loader=weight_loader)
 
-        qzeros = PackedvLLMParameter(
-            data=torch.empty(
-                input_size_per_partition // self.quant_config.group_size,
-                output_size_per_partition // self.quant_config.pack_factor,
-                dtype=torch.int32,
-            ),
-            input_dim=0,
-            output_dim=1,
-            packed_dim=1,
-            packed_factor=self.quant_config.pack_factor,
-            weight_loader=weight_loader)
+        qzeros = PackedvLLMParameter(data=torch.empty(
+            input_size_per_partition // self.quant_config.group_size,
+            output_size_per_partition // self.quant_config.pack_factor,
+            dtype=torch.int32,
+        ),
+                                     input_dim=0,
+                                     output_dim=1,
+                                     packed_dim=1,
+                                     packed_factor=self.quant_config.pack_factor,
+                                     weight_loader=weight_loader)
 
         scales = GroupQuantScaleParameter(data=torch.empty(
             input_size_per_partition // self.quant_config.group_size,
@@ -205,21 +190,16 @@ class AWQHPULinearMethod:
         layer.register_parameter("scales", scales)
 
     def pack_tensor(self, x):
-        wf = torch.tensor(list(range(0, 32, self.quant_config.weight_bits)),
-                          dtype=torch.int32).unsqueeze(0)
-        xp = torch.sum(torch.bitwise_left_shift(
-            x.reshape(x.shape[0], -1, (32 // self.quant_config.weight_bits)),
-            wf.unsqueeze(0)),
+        wf = torch.tensor(list(range(0, 32, self.quant_config.weight_bits)), dtype=torch.int32).unsqueeze(0)
+        xp = torch.sum(torch.bitwise_left_shift(x.reshape(x.shape[0], -1, (32 // self.quant_config.weight_bits)),
+                                                wf.unsqueeze(0)),
                        dim=-1).to(torch.int32)
         return xp
 
     def unpack_tensor(self, xp):
-        wf = torch.tensor(list(range(0, 32, self.quant_config.weight_bits)),
-                          dtype=torch.int32).unsqueeze(0)
+        wf = torch.tensor(list(range(0, 32, self.quant_config.weight_bits)), dtype=torch.int32).unsqueeze(0)
         x = torch.bitwise_right_shift(
-            torch.unsqueeze(xp,
-                            -1).expand(xp.shape[0], -1,
-                                       32 // self.quant_config.weight_bits),
+            torch.unsqueeze(xp, -1).expand(xp.shape[0], -1, 32 // self.quant_config.weight_bits),
             wf.unsqueeze(0)).to(torch.int8)
         x = torch.bitwise_and(x, (2**self.quant_config.weight_bits) - 1)
         x = x.reshape((x.shape[0], -1))
@@ -252,17 +232,11 @@ class AWQHPULinearMethod:
         layer.qweight.data = self.pack_tensor(wqu).to(device)
         layer.qzeros.data = self.pack_tensor(zu).to(device)
 
-        layer.qweight = torch.nn.Parameter(layer.qweight.data,
-                                           requires_grad=False)
-        layer.qzeros = torch.nn.Parameter(layer.qzeros.data,
-                                          requires_grad=False)
-        layer.scales = torch.nn.Parameter(layer.scales.data,
-                                          requires_grad=False)
+        layer.qweight = torch.nn.Parameter(layer.qweight.data, requires_grad=False)
+        layer.qzeros = torch.nn.Parameter(layer.qzeros.data, requires_grad=False)
+        layer.scales = torch.nn.Parameter(layer.scales.data, requires_grad=False)
 
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply(self, layer: torch.nn.Module, x: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         qweight = layer.qweight
         scales = layer.scales
         qzeros = layer.qzeros
@@ -270,8 +244,7 @@ class AWQHPULinearMethod:
         out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, ))
         reshaped_x = x.reshape(-1, x.shape[-1])
 
-        weight = torch.ops.hpu.convert_from_uint4(qweight, scales, qzeros,
-                                                  x.dtype)
+        weight = torch.ops.hpu.convert_from_uint4(qweight, scales, qzeros, x.dtype)
         out = torch.matmul(reshaped_x, weight)
 
         if bias is not None:

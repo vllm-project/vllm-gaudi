@@ -10,8 +10,8 @@ from vllm_gaudi.extension.logger import logger as logger
 from vllm_gaudi.extension.runtime import get_config
 
 
-
 class ExponentialBucketingStrategy():
+
     def check_for_user_flags(self, phase):
         dim = ['bs', 'seq'] if phase == 'prompt' else ['bs', 'block']
         params = ['min', 'step', 'max', 'limit']
@@ -23,12 +23,12 @@ class ExponentialBucketingStrategy():
         if len(user_flags) > 0:
             logger().warning("*******************************************************")
             for flag in user_flags:
-                logger().warning(f"Using Exponential Strategy - Your configuration {flag}={getattr(get_config(), flag)} will be overwritten!")
+                logger().warning(
+                    f"Using Exponential Strategy - Your configuration {flag}={getattr(get_config(), flag)} will be overwritten!"
+                )
             logger().warning("*******************************************************")
-        
 
-    def get_prompt_cfgs(self, max_num_prefill_seqs, block_size, 
-                           max_num_batched_tokens, max_model_len):
+    def get_prompt_cfgs(self, max_num_prefill_seqs, block_size, max_num_batched_tokens, max_model_len):
         self.check_for_user_flags('prompt')
         use_merged_prefill = get_config().merged_prefill
         prefix_caching = get_config().prefix_caching
@@ -50,14 +50,14 @@ class ExponentialBucketingStrategy():
 
             prompt_bs_bucket_cfg = (1, 1, 1, 1)
             query_min, query_step, _, query_limit = prev_prompt_query_bucket_cfg
-            prompt_query_bucket_cfg = (query_min, query_step*4, max_num_batched_tokens, query_limit)
+            prompt_query_bucket_cfg = (query_min, query_step * 4, max_num_batched_tokens, query_limit)
             prompt_ctx_bucket_cfg = (0, 4, max_ctx * max_num_prefill_seqs, max_prompt_ctx_limit)
 
             msg = ('Merged prefill is enabled!\n'
-                  'Overriding prompt bucketing settings!\n'
-                  f'prompt bs cfg: {prev_prompt_bs_bucket_cfg} -> {prompt_bs_bucket_cfg}\n'
-                  f'prompt query cfg: {prev_prompt_query_bucket_cfg} -> {prompt_query_bucket_cfg}\n'
-                  f'prompt ctx cfg: {prev_prompt_ctx_bucket_cfg} -> {prompt_ctx_bucket_cfg}\n')
+                   'Overriding prompt bucketing settings!\n'
+                   f'prompt bs cfg: {prev_prompt_bs_bucket_cfg} -> {prompt_bs_bucket_cfg}\n'
+                   f'prompt query cfg: {prev_prompt_query_bucket_cfg} -> {prompt_query_bucket_cfg}\n'
+                   f'prompt ctx cfg: {prev_prompt_ctx_bucket_cfg} -> {prompt_ctx_bucket_cfg}\n')
             logger().info(msg)
 
         msg = ("Prompt bucket config (min, step, max_warmup, limit) "
@@ -68,10 +68,7 @@ class ExponentialBucketingStrategy():
 
         return prompt_bs_bucket_cfg, prompt_query_bucket_cfg, prompt_ctx_bucket_cfg
 
-
-    def get_decode_cfgs(self, max_num_seqs, block_size, 
-                           max_num_batched_tokens, max_model_len,
-                           max_blocks):
+    def get_decode_cfgs(self, max_num_seqs, block_size, max_num_batched_tokens, max_model_len, max_blocks):
         self.check_for_user_flags('decode')
         prefix_caching = get_config().prefix_caching
         use_contiguous_pa = get_config().use_contiguous_pa
@@ -141,14 +138,13 @@ def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=Fals
     if long_context:
         num_buckets_exp = math.floor(num_buckets / 2)
         num_buckets_linear = num_buckets - num_buckets_exp
-        first_step = bmax / num_buckets #or i.e. * 0.25
+        first_step = bmax / num_buckets  #or i.e. * 0.25
     else:
         num_buckets_exp = num_buckets
         first_step = bmax
 
     for i in range(num_buckets_exp):
-        power_unpadded = bmin * np.float_power(
-            first_step / bmin, (1. / float(num_buckets_exp - 1)) * i)
+        power_unpadded = bmin * np.float_power(first_step / bmin, (1. / float(num_buckets_exp - 1)) * i)
         if i == num_buckets - 1 and get_config().use_contiguous_pa:
             bucket = bmax
         else:
@@ -159,7 +155,7 @@ def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=Fals
         #tmp_step = bmax / num_buckets
         tmp_step = (bmax - first_step) / num_buckets_linear
         for i in range(1, num_buckets_linear + 1):
-        #for i in range(1, num_buckets+1):
+            #for i in range(1, num_buckets+1):
             power_unpadded = first_step + i * tmp_step
 
             if i == num_buckets and get_config().use_contiguous_pa:

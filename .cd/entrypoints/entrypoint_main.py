@@ -23,10 +23,9 @@ class EntrypointMain:
         self.config_name = config_name
         self.config_envs = {}
         if (self.config_file is not None) ^ (self.config_name is not None):
-            print(
-                "[ERROR] Both --config-file and --config-name must be "
-                "provided together, or neither.",
-                file=sys.stderr)
+            print("[ERROR] Both --config-file and --config-name must be "
+                  "provided together, or neither.",
+                  file=sys.stderr)
             sys.exit(1)
 
     def _load_env_from_defaults(self):
@@ -37,28 +36,22 @@ class EntrypointMain:
         If no section matches, loads nothing.
         If the file does not exist, it returns an empty dictionary.
         """
-        defaults_file = ("server/server_defaults.yaml" if self.mode == "server"
-                         else "benchmark/benchmark_defaults.yaml")
+        defaults_file = ("server/server_defaults.yaml"
+                         if self.mode == "server" else "benchmark/benchmark_defaults.yaml")
         try:
             with open(defaults_file) as f:
                 config = yaml.safe_load(f)
                 found = False
                 for section_name, section in config.items():
-                    if section_name.startswith("model_") and isinstance(
-                            section, dict):
+                    if section_name.startswith("model_") and isinstance(section, dict):
                         models = section.get("MODELS", [])
-                        if (isinstance(models, list)
-                                and self.config_envs.get("MODEL") in models):
-                            env_vars = {
-                                k: v
-                                for k, v in section.items() if k != "MODELS"
-                            }
+                        if (isinstance(models, list) and self.config_envs.get("MODEL") in models):
+                            env_vars = {k: v for k, v in section.items() if k != "MODELS"}
                             self.config_envs.update(env_vars)
-                            print(
-                                f"[INFO] Loaded default configuration section "
-                                f"'{section_name}' for model "
-                                f"'{self.config_envs.get('MODEL')}' from file: "
-                                f"{defaults_file}")
+                            print(f"[INFO] Loaded default configuration section "
+                                  f"'{section_name}' for model "
+                                  f"'{self.config_envs.get('MODEL')}' from file: "
+                                  f"{defaults_file}")
                             for key, value in env_vars.items():
                                 print(f"    {key}: {value}")
                             found = True
@@ -146,9 +139,8 @@ class EntrypointMain:
                     self.config_envs[param] = eval(os.environ[param])
                 except Exception:
                     self.config_envs[param] = os.environ[param]
-                print(
-                    f"[INFO] Overwriting {param} with value from environment: "
-                    f"{self.config_envs[param]}")
+                print(f"[INFO] Overwriting {param} with value from environment: "
+                      f"{self.config_envs[param]}")
         if not env_vars:
             print(f"[WARNING] No variables loaded from '{env_file}'.")
 
@@ -215,8 +207,7 @@ class EntrypointMain:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="EntrypointMain for vllm docker")
+    parser = argparse.ArgumentParser(description="EntrypointMain for vllm docker")
     parser.add_argument(
         "mode",
         nargs="?",
@@ -225,9 +216,7 @@ if __name__ == "__main__":
         help="Mode to run: server, benchmark, or test",
     )
     parser.add_argument("--config-file", type=str, help="Path to config file")
-    parser.add_argument("--config-name",
-                        type=str,
-                        help="Config name in the config file")
+    parser.add_argument("--config-name", type=str, help="Config name in the config file")
     args = parser.parse_args()
 
     EntrypointMain(
