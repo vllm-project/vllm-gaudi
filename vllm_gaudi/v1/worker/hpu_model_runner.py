@@ -2047,7 +2047,8 @@ class HPUModelRunner:
         indices_match = True
         max_flattened_index = -1
         for req_id, cur_index in self.input_batch.req_id_to_index.items():
-            if req_id in self.input_batch.prev_sampled_token_ids_invalid_indices:
+            if (self.input_batch.prev_sampled_token_ids_invalid_indices is not None
+                    and req_id in self.input_batch.prev_sampled_token_ids_invalid_indices):
                 # This request was in the previous batch but its
                 # prev_sampled_token_ids is invalid
                 continue
@@ -2850,6 +2851,8 @@ class HPUModelRunner:
         req_id_to_index_output_copy = \
             self.input_batch.req_id_to_index.copy()
 
+        max_req_index = max(self.input_batch.req_id_to_index.values())
+        postprocessed_sampled_token_ids: list[list[int]] = [[] for _ in range(max_req_index + 1)]
         if self.use_async_scheduling:
             assert not self.speculative_config, "Speculative decoding not supported with async scheduling"
             self.input_batch.prev_sampled_token_ids = \
@@ -2862,11 +2865,7 @@ class HPUModelRunner:
                 req_id: i
                 for i, req_id in enumerate(self.input_batch.req_ids) if i not in invalid_req_indices_set
             }
-
-            # For the output, create placeholder sampled_token_ids
-            # (will be filled during serialization)
-            max_req_index = max(self.input_batch.req_id_to_index.values())
-            postprocessed_sampled_token_ids = [[] for _ in range(max_req_index + 1)]
+            # For the output, postprocessed_sampled_token_ids will be filled during serialization
         else:
             # From this point onward, all operations are done on CPU.
             # We already have tokens. Let's copy the data to
@@ -2877,9 +2876,6 @@ class HPUModelRunner:
                 sampled_token_ids_list = torch.cat(decode_sampled_token_ids + prefill_sampled_token_ids).tolist()
                 sampled_token_requests = \
                     decode_sampled_requests + prefill_sampled_requests
-                max_req_index = max(self.input_batch.req_id_to_index.values())
-                postprocessed_sampled_token_ids: list[list]
-                postprocessed_sampled_token_ids = [[] for _ in range(max_req_index + 1)]
                 # NOTE(Chendi): in post-processing, spec_decode might
                 # return more than 1 token during decode.
                 start_idx = 0
@@ -2931,12 +2927,10 @@ class HPUModelRunner:
             req_state.output_token_ids.extend(sampled_ids)
 
         # Create output.
-        all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
         # prompt_logprobs_dict: dict[
         #    str, Optional[LogprobsTensors]] = self._get_prompt_logprobs_dict(
         #        prefill_hidden_states_device, scheduler_output)
         prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
-        all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
         logprobs = None
 
         model_runner_output = ModelRunnerOutput(
