@@ -142,16 +142,6 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
 class HPUMLAMetadata(HPUAttentionMetadata, AttentionMetadata):
     pass
 
-# @dataclass
-# class HPUEncoderOnlyAttentionMetadata:
-#     num_actual_tokens: int
-#     max_seq_len: int
-#     seq_lens: torch.Tensor
-#     block_size: int
-#     num_heads: int
-#     head_dim: int
-#     causal: bool = False
-
 class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
 
     def __init__(
