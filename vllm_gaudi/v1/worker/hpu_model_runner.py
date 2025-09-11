@@ -1791,8 +1791,11 @@ class HPUModelRunner:
         num_decode_tokens = torch.tensor(np.sum(context_lens), device='cpu')
 
         # call prepare_spec_decode_inputs to get the logits indices and
-        logits_indices, spec_decode_metadata \
-            = self._prepare_spec_decode_inputs(scheduler_output, logits_indices)
+        if scheduler_output is not None:
+            logits_indices, spec_decode_metadata \
+                = self._prepare_spec_decode_inputs(scheduler_output, logits_indices)
+        else:
+            spec_decode_metadata = None
 
         # CPU<>HPU sync *should not* happen here.
         token_ids_device = async_h2d_copy(token_ids, device=self.device)
@@ -1845,7 +1848,7 @@ class HPUModelRunner:
         # create dummy decode input data with batch size 1
         num_dummy_decodes = 1
         num_dummy_scheduled_tokens = [1]
-        context_lens = [128]
+        context_lens = np.array([128])
         block_table_cpu_tensor = torch.zeros([self._PAD_BLOCK_ID], dtype=torch.int32).reshape(1, -1)
         return self._create_decode_input_data(num_dummy_decodes, num_dummy_scheduled_tokens, context_lens,
                                               block_table_cpu_tensor)
