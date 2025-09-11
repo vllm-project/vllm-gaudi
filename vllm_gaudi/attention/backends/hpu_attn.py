@@ -529,9 +529,23 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             block_list = attn_metadata.block_list if attn_metadata \
                 and attn_metadata.block_list is not None else None
 
-            if self.sliding_window \
-               and attn_metadata.window_attn_bias is not None:
-                attn_bias = attn_metadata.window_attn_bias
+            common_args = self.common_attention_args(block_list, key_cache, value_cache, attn_metadata.block_size)
+
+            if self.sliding_window and seq_len > self.sliding_window:
+                if hasattr(attn_metadata, 'window_attn_bias') and attn_metadata.window_attn_bias is not None:
+                    attn_bias = attn_metadata.window_attn_bias
+                else:
+                    attn_bias = None
+                    window_size = (self.sliding_window, 0)
+                    common_args['window_size'] = window_size
+                    # TODO: Currently HPU doesn't support GQA for FusedSDPA
+                    # with causal + window, so repeat KV so QKV are all the
+                    # same shape.
+                    if query_shape != kv_shape:
+                        repeat_kv = self.num_heads // self.num_kv_heads
+                        key = key.repeat_interleave(repeat_kv, dim=1)
+                        value = value.repeat_interleave(repeat_kv, dim=1)
+                        kv_shape = query_shape
 
             out = ops.prompt_attention(impl=self.prefill_impl,
                                        query=query.view(query_shape),
@@ -541,22 +555,22 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                        attn_bias=attn_bias,
                                        position_bias=position_bias,
                                        valid_seq_lengths=attn_metadata.seq_lens_tensor,
-                                       **self.common_attention_args(block_list, key_cache, value_cache,
-                                                                    attn_metadata.block_size))
+                                       **common_args)
 
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
             # Decoding run.
-            if not self.sliding_window:
-                block_list = attn_metadata.block_list
-                block_groups = attn_metadata.block_groups
-                block_mapping = attn_metadata.block_mapping
-                attn_bias = attn_metadata.attn_bias
-            else:
+            if self.sliding_window and \
+                attn_metadata.window_block_list is not None:
                 block_list = attn_metadata.window_block_list
                 block_groups = attn_metadata.window_block_groups
                 block_mapping = attn_metadata.window_block_mapping
                 attn_bias = attn_metadata.window_attn_bias
+            else:
+                block_list = attn_metadata.block_list
+                block_groups = attn_metadata.block_groups
+                block_mapping = attn_metadata.block_mapping
+                attn_bias = attn_metadata.attn_bias
 
             self.position_bias = None
             alibi_blocks = getattr(attn_metadata, 'alibi_blocks', None)

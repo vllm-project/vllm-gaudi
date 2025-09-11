@@ -89,6 +89,9 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                              num_decode_tokens,
                              slot_mapping,
                              block_size,
+                             window_block_list,
+                             window_block_usage,
+                             window_block_groups,
                              query_start_loc=None):
         return cls(
             is_prompt=False,
@@ -103,6 +106,9 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
             block_list=block_list,
             block_usage=block_usage,
             block_groups=block_groups,
+            window_block_list=window_block_list,
+            window_block_usage=window_block_usage,
+            window_block_groups=window_block_groups,
             input_positions=input_positions,
             num_decode_tokens=num_decode_tokens,
             slot_mapping=slot_mapping,
