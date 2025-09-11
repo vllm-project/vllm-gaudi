@@ -7,8 +7,7 @@ import math
 import os
 import time
 from dataclasses import dataclass, field, fields
-from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union,
-                    Literal, cast)
+from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, Literal, cast)
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -31,8 +30,7 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import (VllmConfig, update_config)
-from vllm.distributed.kv_transfer import (get_kv_transfer_group,
-                                          has_kv_transfer_group)
+from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
 from vllm.forward_context import set_forward_context, DPMetadata
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -49,12 +47,9 @@ from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv, is_pin_memory_available, LazyLoader)
 from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy)
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec, KVCacheTensor)
-from vllm.v1.worker.kv_connector_model_runner_mixin import (
-    KVConnectorModelRunnerMixin)
-from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
-                             DraftTokenIds, ModelRunnerOutput,
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec, KVCacheTensor)
+from vllm.v1.worker.kv_connector_model_runner_mixin import (KVConnectorModelRunnerMixin)
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors, DraftTokenIds, ModelRunnerOutput,
                              KVConnectorOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import bind_kv_cache
@@ -1250,8 +1245,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if requests is not None and req_id not in self.input_batch.req_type:
                 for request in requests:
                     if request == req_id:
-                        self.input_batch.req_type[req_id] = requests_type[
-                            req_id]
+                        self.input_batch.req_type[req_id] = requests_type[req_id]
                         break
 
             num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
@@ -2505,8 +2499,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 # Return empty ModelRunnerOuptut if there's no work to do.
                 return EMPTY_MODEL_RUNNER_OUTPUT
             # For D case, wait until kv finish load here
-            return self.kv_connector_no_forward(scheduler_output,
-                                                self.vllm_config)
+            return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
         if self.input_batch.pooling_params:
             (input_ids, position_ids, num_scheduled_tokens, attn_metadata,
              total_scheduled_tokens) = self._prepare_inputs_for_pooling(scheduler_output)
@@ -2634,8 +2627,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                              is_prompt=True)
                     self.profiler.record_counter(self.event_start, counters)
             self.maybe_wait_for_kv_save()
-            finished_sending, finished_recving = (
-                self.get_finished_kv_transfers(scheduler_output))
+            finished_sending, finished_recving = (self.get_finished_kv_transfers(scheduler_output))
 
             if self.is_driver_worker and self.profiler.enabled:
                 self.profiler_counter_helper.reset_prompt_seq_stats()
@@ -3200,8 +3192,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         return prompt_list, ctx_list
 
     def _execute_dummy_scenario(self, prompt_cfg, decode_cfg):
-        from vllm.v1.core.sched.output import (SchedulerOutput,
-                                               CachedRequestData)
+        from vllm.v1.core.sched.output import (SchedulerOutput, CachedRequestData)
         requests: list[NewRequestData] = []
         scheduled_tokens: dict[str, int] = {}
 
@@ -3762,21 +3753,13 @@ def _make_src_and_dst_indices(
     dst_device: Union[torch.device, str],
 ) -> tuple[torch.Tensor, torch.Tensor]:
     #convert to slot mapping
-    src_slot_mapping = np.concatenate([
-        np.arange(start=s * block_size, stop=(s + 1) * block_size)
-        for s in src_block_ids
-    ])
-    dst_slot_mapping = np.concatenate([
-        np.arange(start=d * block_size, stop=(d + 1) * block_size)
-        for d in dst_block_ids
-    ])
+    src_slot_mapping = np.concatenate(
+        [np.arange(start=s * block_size, stop=(s + 1) * block_size) for s in src_block_ids])
+    dst_slot_mapping = np.concatenate(
+        [np.arange(start=d * block_size, stop=(d + 1) * block_size) for d in dst_block_ids])
 
-    src_slot_mapping = torch.tensor(src_slot_mapping,
-                                    device=src_device,
-                                    dtype=torch.int64)
-    dst_slot_mapping = torch.tensor(dst_slot_mapping,
-                                    device=dst_device,
-                                    dtype=torch.int64)
+    src_slot_mapping = torch.tensor(src_slot_mapping, device=src_device, dtype=torch.int64)
+    dst_slot_mapping = torch.tensor(dst_slot_mapping, device=dst_device, dtype=torch.int64)
     return src_slot_mapping, dst_slot_mapping
 
 
@@ -3797,12 +3780,11 @@ def copy_kv_blocks(
     src_device = next(iter(src_kv_caches.values()))[0].device
     dst_device = next(iter(dst_kv_caches.values()))[0].device
 
-    src_slot_mapping, dst_slot_mapping = _make_src_and_dst_indices(
-        block_size=block_size,
-        src_block_ids=src_block_ids,
-        dst_block_ids=dst_block_ids,
-        src_device=src_device,
-        dst_device=dst_device)
+    src_slot_mapping, dst_slot_mapping = _make_src_and_dst_indices(block_size=block_size,
+                                                                   src_block_ids=src_block_ids,
+                                                                   dst_block_ids=dst_block_ids,
+                                                                   src_device=src_device,
+                                                                   dst_device=dst_device)
 
     start = time.perf_counter()
     target_device = dst_device.type
@@ -3819,21 +3801,16 @@ def copy_kv_blocks(
             hpu_buffer[i][1] = value_cache.index_select(0, src_slot_mapping)
         else:
             #import remote_pdb;remote_pdb.set_trace()
-            dst_kv_caches[layer_name][0].index_put_(
-                (dst_slot_mapping, ),
-                key_cache.index_select(0, src_slot_mapping).to(target_device))
-            dst_kv_caches[layer_name][1].index_put_(
-                (dst_slot_mapping, ),
-                value_cache.index_select(0,
-                                         src_slot_mapping).to(target_device))
+            dst_kv_caches[layer_name][0].index_put_((dst_slot_mapping, ),
+                                                    key_cache.index_select(0, src_slot_mapping).to(target_device))
+            dst_kv_caches[layer_name][1].index_put_((dst_slot_mapping, ),
+                                                    value_cache.index_select(0, src_slot_mapping).to(target_device))
 
         i = i + 1
 
     torch.hpu.synchronize()
 
-    logger.info(
-        "copy_kv_blocks: copy takes %s"
-        "|direction=%s|pid=%s|block_size=%s"
-        "|src_blocks=%s|dst_blocks=%s",
-        time.perf_counter() - start, direction, os.getpid(), block_size,
-        len(src_block_ids), len(dst_block_ids))
+    logger.info("copy_kv_blocks: copy takes %s"
+                "|direction=%s|pid=%s|block_size=%s"
+                "|src_blocks=%s|dst_blocks=%s",
+                time.perf_counter() - start, direction, os.getpid(), block_size, len(src_block_ids), len(dst_block_ids))

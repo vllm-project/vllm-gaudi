@@ -5,20 +5,14 @@ import threading
 import torch
 from vllm_gaudi.extension.logger import logger as init_logger
 from vllm.distributed.kv_transfer.kv_connector.v1 import (nixl_connector)
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
-    NixlAgentMetadata, NixlConnectorWorker)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (NixlAgentMetadata, NixlConnectorWorker)
 
 logger = init_logger()
 
-nixl_connector._NIXL_SUPPORTED_XPUS = {
-    "cuda": ("cuda", ),
-    "tpu": ("cpu", ),
-    "hpu": ("cpu", )
-}
+nixl_connector._NIXL_SUPPORTED_XPUS = {"cuda": ("cuda", ), "tpu": ("cpu", ), "hpu": ("cpu", )}
 
 
-def initialize_host_xfer_buffer(self, kv_caches: dict[str,
-                                                      torch.Tensor]) -> None:
+def initialize_host_xfer_buffer(self, kv_caches: dict[str, torch.Tensor]) -> None:
     """
     Initialize transfer buffer in CPU mem for accelerators
     NOT directly supported by NIXL (e.g., tpu)
@@ -29,15 +23,11 @@ def initialize_host_xfer_buffer(self, kv_caches: dict[str,
             if self.device_type == "hpu":
                 kv_shape = (2, *kv_cache[0].shape)
                 kv_dtype = kv_cache[0].dtype
-                xfer_buffers[layer_name] = torch.empty(kv_shape,
-                                                       dtype=kv_dtype,
-                                                       device="cpu")
+                xfer_buffers[layer_name] = torch.empty(kv_shape, dtype=kv_dtype, device="cpu")
             else:
                 kv_shape = kv_cache.shape
                 kv_dtype = kv_cache.dtype
-                xfer_buffers[layer_name] = torch.empty(kv_shape,
-                                                       dtype=kv_dtype,
-                                                       device="cpu")
+                xfer_buffers[layer_name] = torch.empty(kv_shape, dtype=kv_dtype, device="cpu")
     except MemoryError as e:
         logger.error("NIXLConnectorWorker gets %s.", e)
         raise
@@ -49,30 +39,24 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
     """Register the KV Cache data in nixl."""
 
     _, first_kv_cache = next(iter(kv_caches.items()))
-    if self.device_type == "hpu":
-        kv_elem_size = first_kv_cache[0][0].dtype.itemsize
-    else:
-        kv_elem_size = first_kv_cache.element_size()
+    kv_elem_size = first_kv_cache[0][0].dtype.itemsize if self.device_type == "hpu" else first_kv_cache.element_size()
 
     if self.use_host_buffer:
         self.initialize_host_xfer_buffer(kv_caches=kv_caches)
-        assert len(self.host_xfer_buffers) == len(kv_caches), (
-            f"host_buffer: {len(self.host_xfer_buffers)}, "
-            f"kv_caches: {len(kv_caches)}")
+        assert len(self.host_xfer_buffers) == len(kv_caches), (f"host_buffer: {len(self.host_xfer_buffers)}, "
+                                                               f"kv_caches: {len(kv_caches)}")
         xfer_buffers = self.host_xfer_buffers
     else:
         xfer_buffers = kv_caches
-        assert not self.host_xfer_buffers, (
-            "host_xfer_buffer should not be initialized when "
-            f"kv_buffer_device is {self.kv_buffer_device}")
+        assert not self.host_xfer_buffers, ("host_xfer_buffer should not be initialized when "
+                                            f"kv_buffer_device is {self.kv_buffer_device}")
 
     # TODO(tms): Find a more robust way to detect and handle MLA
     # NOTE (NickLucche) To move blocks efficiently with NIXL, the expected
     # KV memory layout is HND, as opposed to the default NHD. Note that it
     # will only affects the strides. For MLA instead, we make require no
     # such thing and resort to the standard layout.
-    use_mla = len(
-        first_kv_cache.shape) == 3 if self.device_type != "hpu" else False
+    use_mla = len(first_kv_cache.shape) == 3 if self.device_type != "hpu" else False
     if self.device_type == "hpu":
         # habana kv_cache: [2, num_blocks*block_size, kv_heads, head_dim]
         self.num_blocks = first_kv_cache[0].shape[0] // self.block_size
@@ -85,8 +69,7 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         # head size in bytes.
         self.slot_size_bytes = kv_elem_size * n_kv_heads * head_dim
     else:
-        raise RuntimeError(
-            f"{self.device_type} ({self.backend_name}) is not supported.")
+        raise RuntimeError(f"{self.device_type} ({self.backend_name}) is not supported.")
 
     # TODO(tms): self.block_len needs to be per-layer for sliding window,
     # hybrid attn, etc
@@ -95,9 +78,8 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
     logger.info(
         "Registering KV_Caches. use_mla: %s, kv_buffer_device: %s, "
         "use_host_buffer: %s, num_blocks: %s, block_shape: %s, "
-        "per_layer_kv_cache_shape: %s", use_mla, self.kv_buffer_device,
-        self.use_host_buffer, self.num_blocks, block_shape,
-        first_kv_cache[0].shape)
+        "per_layer_kv_cache_shape: %s", use_mla, self.kv_buffer_device, self.use_host_buffer, self.num_blocks,
+        block_shape, first_kv_cache[0].shape)
     self.dst_num_blocks[self.engine_id] = self.num_blocks
     self.device_kv_caches = kv_caches
     kv_caches_base_addr = []
@@ -131,8 +113,7 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
     # Optimization for models with local attention (Llama 4)
     if self.vllm_config.model_config.hf_config.model_type == "llama4":
         from transformers import Llama4TextConfig
-        assert isinstance(self.vllm_config.model_config.hf_text_config,
-                          Llama4TextConfig)
+        assert isinstance(self.vllm_config.model_config.hf_text_config, Llama4TextConfig)
         llama4_config = self.vllm_config.model_config.hf_text_config
         no_rope_layers = llama4_config.no_rope_layers
         chunk_size = llama4_config.attention_chunk_size
@@ -143,8 +124,7 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
             is_local_attention = no_rope_layers[layer_idx] != 0
             block_window = chunk_block_size if is_local_attention else None
             self.block_window_per_layer.append(block_window)
-        logger.debug("Llama 4 block window per layer mapping: %s",
-                     self.block_window_per_layer)
+        logger.debug("Llama 4 block window per layer mapping: %s", self.block_window_per_layer)
         assert len(self.block_window_per_layer) == self.num_layers
 
     descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
@@ -167,30 +147,26 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
             # (addr, len, device id)
             # TODO: does device_id matter to DRAM?
             blocks_data.append((addr, self.block_len, self.tp_rank))
-    logger.debug("Created %s blocks for src engine %s and rank %s",
-                 len(blocks_data), self.engine_id, self.tp_rank)
+    logger.debug("Created %s blocks for src engine %s and rank %s", len(blocks_data), self.engine_id, self.tp_rank)
 
-    descs = self.nixl_wrapper.get_xfer_descs(blocks_data,
-                                             self.nixl_memory_type)
+    descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
     # NIXL_INIT_AGENT to be used for preparations of local descs.
-    self.src_xfer_side_handle = self.nixl_wrapper.prep_xfer_dlist(
-        "NIXL_INIT_AGENT", descs)
+    self.src_xfer_side_handle = self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs)
 
     # After KV Caches registered, listen for new connections.
-    metadata = NixlAgentMetadata(
-        engine_id=self.engine_id,
-        agent_metadata=self.nixl_wrapper.get_agent_metadata(),
-        kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
-        num_blocks=self.num_blocks,
-        block_len=self.block_len,
-        attn_backend_name=self.backend_name,
-        kv_cache_layout=self.kv_cache_layout)
+    metadata = NixlAgentMetadata(engine_id=self.engine_id,
+                                 agent_metadata=self.nixl_wrapper.get_agent_metadata(),
+                                 kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
+                                 num_blocks=self.num_blocks,
+                                 block_len=self.block_len,
+                                 attn_backend_name=self.backend_name,
+                                 kv_cache_layout=self.kv_cache_layout)
     ready_event = threading.Event()
-    self._nixl_handshake_listener_t = threading.Thread(
-        target=self._nixl_handshake_listener,
-        args=(metadata, ready_event, self.side_channel_port, self.tp_rank),
-        daemon=True,
-        name="nixl_handshake_listener")
+    self._nixl_handshake_listener_t = threading.Thread(target=self._nixl_handshake_listener,
+                                                       args=(metadata, ready_event, self.side_channel_port,
+                                                             self.tp_rank),
+                                                       daemon=True,
+                                                       name="nixl_handshake_listener")
     self._nixl_handshake_listener_t.start()
     ready_event.wait()  # Wait for listener ZMQ socket to be ready.
 

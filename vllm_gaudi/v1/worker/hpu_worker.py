@@ -17,8 +17,7 @@ from vllm_gaudi.extension.runtime import get_config
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.distributed import (ensure_model_parallel_initialized,
-                              init_distributed_environment)
+from vllm.distributed import (ensure_model_parallel_initialized, init_distributed_environment)
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -131,9 +130,7 @@ class HPUWorker(WorkerBase):
 
     def init_device(self):
         # Initialize the distributed environment.
-        init_worker_distributed_environment(self.vllm_config, self.rank,
-                                            self.distributed_init_method,
-                                            self.local_rank)
+        init_worker_distributed_environment(self.vllm_config, self.rank, self.distributed_init_method, self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
         self.model_runner = HPUModelRunner(vllm_config=self.vllm_config, is_driver_worker=self.is_driver_worker)
