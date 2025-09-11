@@ -97,13 +97,22 @@ def patched_fused_moe_forward(
             mode='constant',
             value=0.0)
 
+    use_direct_implementation = self.dp_size == 1
     if self.shared_experts is None:
-        fused_output = self.forward_impl(hidden_states, router_logits)
-        assert not isinstance(fused_output, tuple)
+        if use_direct_implementation:
+            fused_output = self.forward_impl(hidden_states, router_logits)
+            assert not isinstance(fused_output, tuple)
+        else:
+            fused_output = torch.ops.vllm.moe_forward(
+                hidden_states, router_logits, self.layer_name)
         return fused_output[..., :og_hidden_states]
     else:
-        shared_output, fused_output = self.forward_impl(
-            hidden_states, router_logits)
+        if use_direct_implementation:
+            shared_output, fused_output = self.forward_impl(
+                hidden_states, router_logits)
+        else:
+            shared_output, fused_output = torch.ops.vllm.moe_forward_shared(
+                hidden_states, router_logits, self.layer_name)
         return (shared_output[..., :og_hidden_states],
                 fused_output[..., :og_hidden_states])
 
