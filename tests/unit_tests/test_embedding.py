@@ -21,7 +21,7 @@ PROMPTS = [
     "model",
     [
         "intfloat/e5-mistral-7b-instruct",
-        "Alibaba-NLP/gte-Qwen2-7B-instruct", #Encoder-only model
+        "Alibaba-NLP/gte-Qwen2-7B-instruct",  #Encoder-only model
     ])
 def test_embeddings(model):
 
