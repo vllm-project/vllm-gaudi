@@ -3132,7 +3132,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                            scheduled_tokens,
                            is_prompt,
                            block_id=0):
-        from vllm.sampling_params import SamplingParams
         num_blocks = round_up(total_tokens, self.block_size) // self.block_size
         prompt_token_ids = list(range(total_tokens))
 
