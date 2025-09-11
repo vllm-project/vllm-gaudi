@@ -9,7 +9,6 @@ from .logger import logger
 from .config import Value, boolean, split_values_and_flags
 from .validation import choice, regex
 
-
 _VLLM_VALUES = {}
 
 
@@ -79,7 +78,11 @@ def VllmValue(name, env_var_type):
 def get_environment():
     values = [
         Value('hw', _get_hw, env_var_type=str, check=choice('cpu', 'gaudi', 'gaudi2', 'gaudi3')),
-        Value('build', _get_build, env_var_type=str, check=regex(r'^\d+\.\d+\.\d+\.\d+$', hint='You can override detected build by specifying VLLM_BUILD env variable')),
+        Value('build',
+              _get_build,
+              env_var_type=str,
+              check=regex(r'^\d+\.\d+\.\d+\.\d+$',
+                          hint='You can override detected build by specifying VLLM_BUILD env variable')),
         Value('engine_version', _get_vllm_engine_version, env_var_type=str),
         Value('bridge_mode', _get_pt_bridge_mode, env_var_type=str, check=choice('eager', 'lazy')),
         VllmValue('model_type', str),
