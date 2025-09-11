@@ -317,7 +317,8 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                                                   block2batch_matmul_op=self.block2batch_matmul,
                                                   keys_fetch_func=self.latent_cache_k.fetch_from_cache,
                                                   values_fetch_func=None,
-                                                  kv_lora_rank=self.kv_lora_rank)
+                                                  kv_lora_rank=self.kv_lora_rank,
+                                                  block_softmax_max_const_op=None)
         result = self._v_up_proj(output)
         return result
 

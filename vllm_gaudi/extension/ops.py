@@ -113,7 +113,7 @@ def pa_block_softmax_with_const_max(attn, value, block_bias, block_groups, block
 
 def flat_pa_mla(query, key_cache, value_cache, block_list, block_mapping, block_bias, block_groups, block_size, scale,
                 matmul_qk_op, matmul_av_op, batch2block_matmul_op, block2batch_matmul_op, keys_fetch_func,
-                values_fetch_func, kv_lora_rank):
+                values_fetch_func, kv_lora_rank, block_softmax_max_const_op):
     batch_size = query.size(0)
     q_heads = query.size(1)
     kv_heads = key_cache.size(1)
@@ -153,7 +153,8 @@ def flat_pa_mla(query, key_cache, value_cache, block_list, block_mapping, block_
                         batch_size=batch_size,
                         matmul_av_op=matmul_av_op,
                         batch2block_matmul_op=batch2block_matmul_op,
-                        block2batch_matmul_op=block2batch_matmul_op)
+                        block2batch_matmul_op=block2batch_matmul_op,
+                        block_softmax_max_const_op=block_softmax_max_const_op)
     attn = block2batch(attn, block_mapping, block2batch_matmul_op)
     attn = attn.squeeze(-2)
     if kv_heads != q_heads:
