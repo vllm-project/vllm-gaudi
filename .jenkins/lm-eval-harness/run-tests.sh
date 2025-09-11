@@ -2,7 +2,7 @@
 
 # Trap Ctrl-C (SIGINT) to cancel running test and prevent further scheduling
 TEST_PROCESS=""
-trap 'echo "Interrupted by user. Killing running test and exiting."; if [[ -n "$TEST_PROCESS" ]]; then kill -9 $TEST_PROCESS 2>/dev/null || true; fi; exit 130' SIGINT
+trap 'echo "Interrupted by user. Killing running test (PID $TEST_PROCESS) and exiting."; if [[ -n "$TEST_PROCESS" ]]; then pkill -P $TEST_PROCESS 2>/dev/null || true; kill -9 $TEST_PROCESS 2>/dev/null || true; fi; exit 130' SIGINT
 
 usage() {
     echo``
