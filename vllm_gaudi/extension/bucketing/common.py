@@ -37,6 +37,7 @@ class HPUBucketingManager():
     _instance = None
     prompt_buckets: List[Tuple[int, int, int]] = []
     decode_buckets: List[Tuple[int, int, int]] = []
+    unified_buckets: List[Tuple[int, int, int]] = []
     initialized = False
 
     def __new__(cls, *args, **kwargs):
@@ -73,6 +74,32 @@ class HPUBucketingManager():
             from vllm_gaudi.extension.bucketing.linear import LinearBucketingStrategy
             strategy = LinearBucketingStrategy()
         return strategy
+
+    def generate_unified_buckets(self):
+        if self.initialized:
+            from vllm_gaudi.extension.bucketing.unified import (UnifiedBucketingStrategy)
+            strategy = UnifiedBucketingStrategy()
+
+            query_cfg, shared_ctx_cfg, unique_ctx_cfg, is_causal = strategy.get_unified_cfgs(bs=self.max_num_seqs,
+                                        max_model_len=self.max_model_len,
+                                        block_size=self.block_size,
+                                        max_blocks=self.num_hpu_blocks)
+            print(query_cfg, shared_ctx_cfg, unique_ctx_cfg, is_causal)
+
+            query_range = strategy.get_range(query_cfg)
+            shared_ctx_range = strategy.get_range(shared_ctx_cfg)
+            unique_ctx_range = strategy.get_range(unique_ctx_cfg)
+            
+            print("EO:", query_range, shared_ctx_range, unique_ctx_range)
+            
+            self.unified_buckets = generate_unified_buckets(query_range, 
+                                         shared_ctx_range, unique_ctx_range, self.max_num_seqs)
+
+            print(self.unified_buckets)
+        else:
+            logger().info("Bucketing is off - skipping prompt buckets generation")
+            self.unified_buckets = []
+        return
 
     def generate_prompt_buckets(self):
         if self.initialized:
@@ -112,8 +139,6 @@ class HPUBucketingManager():
 
             if get_config().use_contiguous_pa and ctx_range[-1] < self.num_hpu_blocks:
                 ctx_range.append(self.num_hpu_blocks)
-
-            print(ctx_range)
 
             self.decode_buckets = generate_buckets(bs_range, query_range, ctx_range, False, self.max_model_len,
                                                    self.max_num_seqs, self.max_num_prefill_seqs,
@@ -169,6 +194,16 @@ class HPUBucketingManager():
                 return new_bucket
             return found_bucket
         return (batch_size, 1, num_blocks)
+
+    def find_unified_bucket(self, query, shared_ctx, unique_ctx):
+        if self.initialized:
+            # TODO: handle is_causal
+            found_bucket = find_equal_or_closest_greater_config(self.unified_buckets, (query, shared_ctx, unique_ctx, 1))
+            if found_bucket is None:
+                logger().warning(f"No bucket found for: {(query, shared_ctx, unique_ctx)}")
+                return (query, shared_ctx, unique_ctx)
+            return found_bucket
+        return (query, shared_ctx, unique_ctx) 
 
     def get_max_prompt_shape(self):
         return max(b[1] for b in self.prompt_buckets) \
@@ -262,6 +297,21 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
             if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
                 buckets.add((bs, query, ctx))
     return sorted(buckets)
+
+
+def generate_unified_buckets(query_range, shared_ctx_range, unique_ctx_range, bs):
+    buckets = set()
+    is_causal = [0, 1]
+
+    for query in query_range:
+        for shared_ctx in shared_ctx_range:
+            for unique_ctx in unique_ctx_range:
+                for causal in is_causal:
+                    if (causal == 0 and query <= bs) or causal == 1:
+                        buckets.add((query, shared_ctx, unique_ctx, causal))
+
+    return sorted(buckets)
+    
 
 
 def is_greater_or_equal(tuple1, tuple2):

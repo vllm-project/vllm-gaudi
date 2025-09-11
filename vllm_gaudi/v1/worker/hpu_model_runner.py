@@ -682,6 +682,7 @@ class HPUModelRunner:
         self.debug_fwd = init_debug_logger('fwd')
 
     def unified_bucketing_fn(self, query_len, shared_blocks, unique_blocks, logits):
+        '''
         if not get_config().use_bucketing:
             return query_len, shared_blocks, unique_blocks, logits
 
@@ -698,8 +699,12 @@ class HPUModelRunner:
         shared_blocks = bucketize(shared_blocks, batch_buckets)
         unique_blocks = bucketize(unique_blocks, batch_buckets)
         logits = min(bucketize(logits, logits_buckets), query_len)
+        '''
+        new_bucket = self.bucketing_manager.find_unified_bucket(query_len, shared_blocks, unique_blocks)
 
-        return (query_len, shared_blocks, unique_blocks, logits)
+        print((query_len, shared_blocks, unique_blocks), new_bucket, logits)
+
+        return (new_bucket[0], new_bucket[1], new_bucket[2], logits)
 
     def create_lora_mask(self, input_tokens: torch.Tensor, lora_ids: list[int], is_prompt: bool):
         '''
@@ -1637,10 +1642,10 @@ class HPUModelRunner:
     def _prepare_unified_prefill_inputs(self, num_prefills, num_decodes,
                                         num_scheduled_tokens: list[int]) -> PrefillInputData:
 
-        all_batch_contents = self._extract_prefill_batch_contents(num_prefills, num_decodes, num_scheduled_tokens)
+        all_batch_contents, _ = self._extract_prefill_batch_contents(num_prefills, num_decodes, num_scheduled_tokens)
         all_batches = [self._form_unified_prefill_batch(bc) for bc in all_batch_contents]
         merge_contents(all_batches[0], *all_batches[1:])
-        return all_batches[0]
+        return all_batches[0], None 
 
     def _create_decode_input_data(self,
                                   num_decodes,
@@ -1945,10 +1950,10 @@ class HPUModelRunner:
             logits_indices = spec_decode_metadata.logits_indices
         return logits_indices, spec_decode_metadata
 
-    def _prepare_unified_decode_inputs(self, num_decodes, num_scheduled_tokens) -> DecodeInputData:
+    def _prepare_unified_decode_inputs(self, num_decodes, num_scheduled_tokens):
 
         if num_decodes == 0:
-            return DecodeInputData(num_decodes=0)
+            return DecodeInputData(num_decodes=0), None
 
         context_lens = self.input_batch.num_computed_tokens_cpu[:num_decodes]
         query_lengths = [1] * num_decodes
@@ -1974,13 +1979,14 @@ class HPUModelRunner:
             bucketing_fn=self.unified_bucketing_fn,
         )
         (token_ids_t, token_positions_t, logits_indices_t, logits_groups, attn_metadata) = batch_data
-        return DecodeInputData(
+        decode_input_data = DecodeInputData(
             num_decodes=num_decodes,
             token_ids=token_ids_t.unsqueeze(-1),
             position_ids=token_positions_t.unsqueeze(-1),
             logits_indices=logits_indices_t,
             attn_metadata=attn_metadata,
         )
+        return decode_input_data, None
 
     def _prepare_inputs(
         self,
@@ -2035,14 +2041,26 @@ class HPUModelRunner:
         return attn_metadata.num_blocks()
 
     def _check_config(self, batch_size, seq_len, num_blocks, attn_metadata, warmup_mode):
-        phase = "prompt" if attn_metadata.is_prompt else "decode"
-        cfg = (phase, batch_size, seq_len, num_blocks)
-        if self.debug_fwd:
-            self.debug_fwd(cfg)
-        seen = cfg in self.seen_configs
-        self.seen_configs.add(cfg)
-        if not seen and not warmup_mode:
-            logger.warning("Configuration: %s was not warmed-up!", cfg)
+        if self.unified_attn:
+            phase = "prompt" if attn_metadata.is_prompt else "decode"
+            shared = attn_metadata.shared_blocks if attn_metadata.shared_blocks is not None else 0
+            unique = attn_metadata.unique_blocks if attn_metadata.unique_blocks else 0
+            cfg = (seq_len, shared, unique)
+            print(cfg, num_blocks)
+            print(self.graphed_buckets)
+            seen = cfg in self.seen_configs
+            self.seen_configs.add(cfg)
+            if not seen and not warmup_mode:
+                logger.warning("Configuration: (query, shared_blcoks, unique_blocks) %s was not warmed-up!", cfg)
+        else:
+            phase = "prompt" if attn_metadata.is_prompt else "decode"
+            cfg = (phase, batch_size, seq_len, num_blocks)
+            if self.debug_fwd:
+                self.debug_fwd(cfg)
+            seen = cfg in self.seen_configs
+            self.seen_configs.add(cfg)
+            if not seen and not warmup_mode:
+                logger.warning("Configuration: %s was not warmed-up!", cfg)
 
     def get_dp_padding(self, num_tokens: int) -> int:
         dp_size = self.vllm_config.parallel_config.data_parallel_size
@@ -3074,6 +3092,17 @@ class HPUModelRunner:
 
         return total_mem, total_batch_seq, captured_all
 
+    def warmup_unified_graphs(self, buckets, kv_cache):
+        idx = 0
+        num_candidates = len(buckets)
+        for idx, (query, shared_ctx, unique_ctx, is_causal) in enumerate(reversed(buckets)):
+            unified_cfg = (query, shared_ctx, unique_ctx, is_causal)
+            if unified_cfg in self.graphed_buckets:
+                continue
+            self.graphed_buckets.add(unified_cfg)
+            self.log_warmup("Unified CFG", idx, num_candidates, query, shared_ctx, unique_ctx)
+            self._execute_dummy_scenario(None, None, unified_cfg)
+
     def _add_dummy_request(self,
                            requests,
                            num_scheduled_tokens,
@@ -3108,6 +3137,31 @@ class HPUModelRunner:
         else:
             num_scheduled_tokens[req_id] = scheduled_tokens
 
+    def _add_dummy_unified_request(requests,
+                                   pl,
+                                   scheduled_tokens,
+                                   num_computed_tokens,
+                                   blocks_num):
+        from vllm.v1.core.sched.output import NewRequestData
+
+        block_ids = [0] * blocks_num
+        req_id = f'{len(requests)}'
+        sampling_params = SamplingParams(temperature=0.0)
+
+        req = NewRequestData(
+            req_id=req_id,
+            prompt_token_ids=prompt_token_ids,
+            mm_kwargs=[],
+            mm_hashes=[],
+            mm_positions=[],
+            sampling_params=sampling_params,
+            pooling_params=None,
+            block_ids=[block_ids],
+            num_computed_tokens=num_computed_tokens,
+            lora_request=None,
+        )
+        requests.append(req)
+
     @staticmethod
     def _generate_seq_lengths(num_samples, num_blocks, block_size):
         assert num_samples <= num_blocks
@@ -3117,6 +3171,29 @@ class HPUModelRunner:
             blocks[i] += 1
         seq_lengths = [b * block_size - 1 for b in blocks]
         return seq_lengths
+
+    def _generate_unified_sequence_lenghts(self, query_len, is_causal):
+        seq_lens = []
+        if is_causal:
+            # first one is prompt, rest decodes
+            seq_lens = [1] * self.max_num_seqs
+            prompt_query_remaining = query_len - self.max_num_seqs
+
+            for i in range(self.max_num_seqs):
+                if prompt_query_remaining <= 0:
+                    break
+
+                add = min(self.max_model_len-1, prompt_query_remaining)
+                seq_lens[i] += add
+                prompt_query_remaining -= add
+
+            print(seq_lens)
+        else: 
+            # all decode
+            seq_lens = [1] * query_len
+
+        return seq_lens
+            
 
     def distribute_sum_evenly(self, total_sum, max_length):
         '''
@@ -3144,7 +3221,7 @@ class HPUModelRunner:
         ctx_list = ctx_list if len(ctx_list) > 0 else [0] * len(prompt_list)
         return prompt_list, ctx_list
 
-    def _execute_dummy_scenario(self, prompt_cfg, decode_cfg):
+    def _execute_dummy_scenario(self, prompt_cfg, decode_cfg, unified_cfg = None):
         from vllm.v1.core.sched.output import (NewRequestData, SchedulerOutput, CachedRequestData)
         requests: list[NewRequestData] = []
         scheduled_tokens: dict[str, int] = {}
@@ -3183,6 +3260,23 @@ class HPUModelRunner:
                                         scheduled_tokens=1,
                                         is_prompt=False,
                                         block_id=block_id)
+
+        if unified_cfg:
+            query_len, shared_ctx_len, unique_ctx_len, is_causal = unified_cfg
+            print(query_len, shared_ctx_len, unique_ctx_len, is_causal)
+            unified_scheduled_tokens = query_len
+            unified_num_computed_tokens = (shared_ctx_len + unique_ctx_len) * self.block_size
+            unified_blocks_num = math.ceil((unified_scheduled_tokens + unified_num_computed_tokens) // self.block_size)
+            print(unified_scheduled_tokens, unified_num_computed_tokens, unified_blocks_num)
+            prompt_lengths = self._generate_unified_sequence_lenghts(query_len, is_causal)
+            exit()
+            for pl in prompt_lengths:
+                self._add_dummy_unified_request(requests,
+                                        pl,
+                                        unified_scheduled_tokens,
+                                        unified_num_computed_tokens,
+                                        unified_blocks_num)
+
         sched_output = SchedulerOutput(
             scheduled_new_reqs=requests,
             scheduled_cached_reqs=CachedRequestData.make_empty(),
@@ -3260,23 +3354,26 @@ class HPUModelRunner:
         if not self.enable_bucketing:
             return
 
-        self.bucketing_manager.generate_prompt_buckets()
-        self.bucketing_manager.generate_decode_buckets()
+        if self.unified_attn:
+            self.bucketing_manager.generate_unified_buckets()
+        else:
+            self.bucketing_manager.generate_prompt_buckets()
+            self.bucketing_manager.generate_decode_buckets()
 
-        max_bucket = max(self.bucketing_manager.decode_buckets[-1][0], self.bucketing_manager.prompt_buckets[-1][0])
-        if max_bucket > self.input_batch.max_num_reqs:
-            input_batch_bkp = self.input_batch
-            self.input_batch = InputBatch(
-                max_num_reqs=self.bucketing_manager.decode_buckets[-1][0],
-                max_model_len=self.max_model_len,
-                max_num_batched_tokens=self.max_num_tokens,
-                device=self.device,
-                pin_memory=self.pin_memory,
-                vocab_size=self.model_config.get_vocab_size(),
-                block_sizes=[self.block_size],
-                logitsprocs=build_logitsprocs(self.vllm_config, self.device, self.pin_memory, self.is_pooling_model,
-                                              self.vllm_config.model_config.logits_processors),
-            )
+            max_bucket = max(self.bucketing_manager.decode_buckets[-1][0], self.bucketing_manager.prompt_buckets[-1][0])
+            if max_bucket > self.input_batch.max_num_reqs:
+                input_batch_bkp = self.input_batch
+                self.input_batch = InputBatch(
+                    max_num_reqs=self.bucketing_manager.decode_buckets[-1][0],
+                    max_model_len=self.max_model_len,
+                    max_num_batched_tokens=self.max_num_tokens,
+                    device=self.device,
+                    pin_memory=self.pin_memory,
+                    vocab_size=self.model_config.get_vocab_size(),
+                    block_sizes=[self.block_size],
+                    logitsprocs=build_logitsprocs(self.vllm_config, self.device, self.pin_memory, self.is_pooling_model,
+                                                  self.vllm_config.model_config.logits_processors),
+                )
 
         self.defragmenter.initialize(self.kv_caches, self.block_size)
 
@@ -3324,17 +3421,18 @@ class HPUModelRunner:
                 self.warmup_sampler()
 
                 # TODO(kzawora): align_workers
-                mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
-                    self.warmup_graphs(
-                        self.bucketing_manager.prompt_buckets,
-                        True, kv_caches)
-                mem_post_decode, decode_batch_seq, decode_captured_all = \
-                    self.warmup_graphs(
-                        self.bucketing_manager.decode_buckets,
-                        False, kv_caches)
+                if self.unified_attn:
+                    self.warmup_unified_graphs(self.bucketing_manager.unified_buckets, kv_caches)
+                else:
+                    mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
+                        self.warmup_graphs(
+                            self.bucketing_manager.prompt_buckets, True, kv_caches)
+                    mem_post_decode, decode_batch_seq, decode_captured_all = \
+                        self.warmup_graphs(
+                            self.bucketing_manager.decode_buckets, False, kv_caches)
 
-                self.log_graph_warmup_summary(self.bucketing_manager.prompt_buckets, True, mem_post_prompt)
-                self.log_graph_warmup_summary(self.bucketing_manager.decode_buckets, False, mem_post_decode)
+                    self.log_graph_warmup_summary(self.bucketing_manager.prompt_buckets, True, mem_post_prompt)
+                    self.log_graph_warmup_summary(self.bucketing_manager.decode_buckets, False, mem_post_decode)
 
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
@@ -3348,8 +3446,9 @@ class HPUModelRunner:
         logger.info(msg)
         self.profiler.end()
 
-        if max_bucket > self.input_batch.max_num_reqs:
-            self.input_batch = input_batch_bkp
+        if not self.unified_attn:
+            if max_bucket > self.input_batch.max_num_reqs:
+                self.input_batch = input_batch_bkp
 
     def shutdown_inc(self):
         can_finalize_inc = self._is_quant_with_inc() and \
