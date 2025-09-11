@@ -2038,14 +2038,26 @@ class HPUModelRunner:
         return attn_metadata.num_blocks()
 
     def _check_config(self, batch_size, seq_len, num_blocks, attn_metadata, warmup_mode):
-        phase = "prompt" if attn_metadata.is_prompt else "decode"
-        cfg = (phase, batch_size, seq_len, num_blocks)
-        if self.debug_fwd:
-            self.debug_fwd(cfg)
-        seen = cfg in self.seen_configs
-        self.seen_configs.add(cfg)
-        if not seen and not warmup_mode:
-            logger.warning("Configuration: %s was not warmed-up!", cfg)
+        if self.unified_attn:
+            phase = "prompt" if attn_metadata.is_prompt else "decode"
+            shared = attn_metadata.shared_blocks if attn_metadata.shared_blocks is not None else 0
+            unique = attn_metadata.unique_blocks if attn_metadata.unique_blocks else 0
+            cfg = (seq_len, shared, unique)
+            print(cfg, num_blocks)
+            print(self.graphed_buckets)
+            seen = cfg in self.seen_configs
+            self.seen_configs.add(cfg)
+            if not seen and not warmup_mode:
+                logger.warning("Configuration: (query, shared_blcoks, unique_blocks) %s was not warmed-up!", cfg)
+        else:
+            phase = "prompt" if attn_metadata.is_prompt else "decode"
+            cfg = (phase, batch_size, seq_len, num_blocks)
+            if self.debug_fwd:
+                self.debug_fwd(cfg)
+            seen = cfg in self.seen_configs
+            self.seen_configs.add(cfg)
+            if not seen and not warmup_mode:
+                logger.warning("Configuration: %s was not warmed-up!", cfg)
 
     def get_dp_padding(self, num_tokens: int) -> int:
         dp_size = self.vllm_config.parallel_config.data_parallel_size
@@ -3121,6 +3133,31 @@ class HPUModelRunner:
         else:
             num_scheduled_tokens[req_id] = scheduled_tokens
 
+    def _add_dummy_unified_request(requests,
+                                   pl,
+                                   scheduled_tokens,
+                                   num_computed_tokens,
+                                   blocks_num):
+        from vllm.v1.core.sched.output import NewRequestData
+
+        block_ids = [0] * blocks_num
+        req_id = f'{len(requests)}'
+        sampling_params = SamplingParams(temperature=0.0)
+
+        req = NewRequestData(
+            req_id=req_id,
+            prompt_token_ids=prompt_token_ids,
+            mm_kwargs=[],
+            mm_hashes=[],
+            mm_positions=[],
+            sampling_params=sampling_params,
+            pooling_params=None,
+            block_ids=[block_ids],
+            num_computed_tokens=num_computed_tokens,
+            lora_request=None,
+        )
+        requests.append(req)
+
     @staticmethod
     def _generate_seq_lengths(num_samples, num_blocks, block_size):
         assert num_samples <= num_blocks
@@ -3130,6 +3167,29 @@ class HPUModelRunner:
             blocks[i] += 1
         seq_lengths = [b * block_size - 1 for b in blocks]
         return seq_lengths
+
+    def _generate_unified_sequence_lenghts(self, query_len, is_causal):
+        seq_lens = []
+        if is_causal:
+            # first one is prompt, rest decodes
+            seq_lens = [1] * self.max_num_seqs
+            prompt_query_remaining = query_len - self.max_num_seqs
+
+            for i in range(self.max_num_seqs):
+                if prompt_query_remaining <= 0:
+                    break
+
+                add = min(self.max_model_len-1, prompt_query_remaining)
+                seq_lens[i] += add
+                prompt_query_remaining -= add
+
+            print(seq_lens)
+        else: 
+            # all decode
+            seq_lens = [1] * query_len
+
+        return seq_lens
+            
 
     def distribute_sum_evenly(self, total_sum, max_length):
         '''
@@ -3200,6 +3260,18 @@ class HPUModelRunner:
         if unified_cfg:
             query_len, shared_ctx_len, unique_ctx_len, is_causal = unified_cfg
             print(query_len, shared_ctx_len, unique_ctx_len, is_causal)
+            unified_scheduled_tokens = query_len
+            unified_num_computed_tokens = (shared_ctx_len + unique_ctx_len) * self.block_size
+            unified_blocks_num = math.ceil((unified_scheduled_tokens + unified_num_computed_tokens) // self.block_size)
+            print(unified_scheduled_tokens, unified_num_computed_tokens, unified_blocks_num)
+            prompt_lengths = self._generate_unified_sequence_lenghts(query_len, is_causal)
+            exit()
+            for pl in prompt_lengths:
+                self._add_dummy_unified_request(requests,
+                                        pl,
+                                        unified_scheduled_tokens,
+                                        unified_num_computed_tokens,
+                                        unified_blocks_num)
 
         sched_output = SchedulerOutput(
             scheduled_new_reqs=requests,
