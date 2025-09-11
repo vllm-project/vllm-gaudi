@@ -2105,7 +2105,6 @@ class HPUModelRunner:
         cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices], arange, out=positions_np)
         token_indices = (positions_np + req_indices * self.input_batch.token_ids_cpu.shape[1])
-        cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
         torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
                            0,
                            torch.from_numpy(token_indices),
