@@ -72,8 +72,6 @@ if [ $? -ne 0 ]; then
 fi
 echo "Test with Qwen3-8B-FP8 + inc requant FP8 model + dynamic quant passed"
 
-# Chendi: commenting out dyamic scaling test, as it is only works on G3 and failed on G2
-# Don't delete them, once we have G3 CI node, we can enable it.
 # QWEN3 + blockfp8 + dynamic scaling
 echo "Testing Qwen3-8B-FP8 + blockfp8 + dynamic scaling"
 echo HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model Qwen/Qwen3-8B-FP8 --trust-remote-code
