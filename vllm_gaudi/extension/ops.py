@@ -13,6 +13,7 @@ import habana_frameworks.torch.core as htcore
 from vllm_gaudi.extension.runtime import get_config
 import habana_frameworks.torch.utils.experimental as htexp
 import types
+
 is_hpu_gaudi2 = htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi2
 
 FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
@@ -690,14 +691,15 @@ def dynamic_quant(data, single_scale=False):
     data_fp8 = torch.ops.hpu.cast_to_fp8_v2(data, 1.0 / scale, False, False, torch.float8_e4m3fn)[0]
     return data_fp8, scale.float()
 
+
 # Note (Yi Liu): Necessary base func for INC to get dequantied weight
-def get_dequant_weights_func(
-    self, ) -> Optional[Callable[[torch.nn.Module], torch.Tensor]]:
+def get_dequant_weights_func(self, ) -> Optional[Callable[[torch.nn.Module], torch.Tensor]]:
     if self.quant_method is not None:
         quant_method = self.quant_method
         if hasattr(quant_method, "dequant_fp8_weight"):
             return quant_method.dequant_fp8_weight
     return None
+
 
 def gaudi_weight_wrapper(weight_loader):
     """Wrapper for Gaudi weight conversion."""
