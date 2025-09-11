@@ -216,6 +216,8 @@ class InputBatch:
         self.sampling_metadata = self._make_sampling_metadata()
         self.pooling_params: dict[str, PoolingParams] = {}
 
+        self.req_type: dict[str, str] = {}
+
     @property
     def req_ids(self) -> list[str]:
         # None elements should only be present transiently
