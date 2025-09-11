@@ -91,11 +91,9 @@ def patched_fused_moe_forward(
     """
     og_hidden_states = hidden_states.shape[-1]
     if self.hidden_size != og_hidden_states:
-        hidden_states = torch.nn.functional.pad(
-            hidden_states,
-            (0, self.hidden_size - og_hidden_states),
-            mode='constant',
-            value=0.0)
+        hidden_states = torch.nn.functional.pad(hidden_states, (0, self.hidden_size - og_hidden_states),
+                                                mode='constant',
+                                                value=0.0)
 
     use_direct_implementation = self.dp_size == 1
     if self.shared_experts is None:
@@ -103,18 +101,15 @@ def patched_fused_moe_forward(
             fused_output = self.forward_impl(hidden_states, router_logits)
             assert not isinstance(fused_output, tuple)
         else:
-            fused_output = torch.ops.vllm.moe_forward(
-                hidden_states, router_logits, self.layer_name)
+            fused_output = torch.ops.vllm.moe_forward(hidden_states, router_logits, self.layer_name)
         return fused_output[..., :og_hidden_states]
     else:
         if use_direct_implementation:
-            shared_output, fused_output = self.forward_impl(
-                hidden_states, router_logits)
+            shared_output, fused_output = self.forward_impl(hidden_states, router_logits)
         else:
-            shared_output, fused_output = torch.ops.vllm.moe_forward_shared(
-                hidden_states, router_logits, self.layer_name)
-        return (shared_output[..., :og_hidden_states],
-                fused_output[..., :og_hidden_states])
+            shared_output, fused_output = torch.ops.vllm.moe_forward_shared(hidden_states, router_logits,
+                                                                            self.layer_name)
+        return (shared_output[..., :og_hidden_states], fused_output[..., :og_hidden_states])
 
 
 def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
