@@ -1,4 +1,1 @@
 Meta-Llama-3.1-8B-Instruct.yaml
-Mistral-7B-Instruct-v0.3.yaml
-granite-8b.yaml
-granite-20b.yaml
