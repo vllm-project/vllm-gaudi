@@ -35,6 +35,7 @@ class HPUAttentionBackendV1(HPUAttentionBackend):
     def get_builder_cls() -> type["HPUMetadataBuilder"]:
         return HPUMetadataBuilder
 
+
 @dataclass
 class HPUAttentionMetadataV1(HPUAttentionMetadata):
     # TODO(kwisniewski98): for now, in V1 input positions are not provided
@@ -114,7 +115,8 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
             block_size=block_size,
             query_start_loc=query_start_loc)
 
+
 class HPUMetadataBuilder(AttentionMetadataBuilder[HPUAttentionMetadata]):
-    def build():
+
+    def build(self):
         pass
-    
