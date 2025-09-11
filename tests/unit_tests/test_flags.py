@@ -8,8 +8,7 @@
 import os
 import pytest
 
-from vllm_gaudi.extension.config import (VersionRange, Config, Kernel, Env,
-                                         boolean, All, Not, Eq, Enabled,
+from vllm_gaudi.extension.config import (VersionRange, Config, Kernel, Env, boolean, All, Not, Eq, Enabled,
                                          FirstEnabled)
 from vllm_gaudi.extension.validation import choice, regex
 
@@ -63,8 +62,7 @@ def test_two_ranges_same_release():
 
 
 def test_multiple_ranges_same_release():
-    ver_check = CfgVersionRange(">=1.19.0.100,<1.19.0.200",
-                                ">=1.19.0.300,<1.19.0.400")
+    ver_check = CfgVersionRange(">=1.19.0.100,<1.19.0.200", ">=1.19.0.300,<1.19.0.400")
     assert not ver_check(build="1.19.0.50")
     assert ver_check(build="1.19.0.100")
     assert ver_check(build="1.19.0.150")
