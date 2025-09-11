@@ -681,6 +681,8 @@ class HPUModelRunner:
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
+        assert not (self.use_async_scheduling and (self.speculative_config is not None)), \
+            "Speculative decoding is not supported with async scheduling."
         self.mem_margin = None
         self.unified_attn = get_config().unified_attn
         self.use_merged_prefill = get_config().merged_prefill
@@ -2853,7 +2855,6 @@ class HPUModelRunner:
         max_req_index = max(self.input_batch.req_id_to_index.values())
         postprocessed_sampled_token_ids: list[list[int]] = [[] for _ in range(max_req_index + 1)]
         if self.use_async_scheduling:
-            assert not self.speculative_config, "Speculative decoding not supported with async scheduling"
             self.input_batch.prev_sampled_token_ids = \
                 sampled_token_ids.flatten().to("cpu", non_blocking=True)
             # self.input_batch.prev_sampled_token_ids_invalid_indices
@@ -2926,28 +2927,38 @@ class HPUModelRunner:
             req_state.output_token_ids.extend(sampled_ids)
 
         # Create output.
+        all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
         # prompt_logprobs_dict: dict[
         #    str, Optional[LogprobsTensors]] = self._get_prompt_logprobs_dict(
         #        prefill_hidden_states_device, scheduler_output)
         prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
+        all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
         logprobs = None
 
-        model_runner_output = ModelRunnerOutput(
-            req_ids=req_ids_output_copy,  # CHECK
-            req_id_to_index=req_id_to_index_output_copy,
-            sampled_token_ids=postprocessed_sampled_token_ids,
-            logprobs=logprobs,
-            prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
-            pooler_output=[],
-        )
-
         if self.use_async_scheduling:
+            model_runner_output = ModelRunnerOutput(
+                req_ids=req_ids_output_copy,  # CHECK
+                req_id_to_index=req_id_to_index_output_copy,
+                sampled_token_ids=postprocessed_sampled_token_ids,
+                logprobs=logprobs,
+                prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
+                pooler_output=[],
+            )
             return AsyncHPUModelRunnerOutput(
                 model_runner_output=model_runner_output,
                 sampled_token_ids=sampled_token_ids,
                 invalid_req_indices=[],
             )
-        return model_runner_output
+        else:
+            model_runner_output = ModelRunnerOutput(
+                req_ids=all_req_ids,
+                req_id_to_index=self.input_batch.req_id_to_index,
+                sampled_token_ids=postprocessed_sampled_token_ids,
+                logprobs=logprobs,
+                prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
+                pooler_output=[],
+            )
+            return model_runner_output
 
     def load_model(self) -> None:
         import habana_frameworks.torch.core as htcore
