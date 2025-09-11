@@ -174,3 +174,46 @@ if [ $? -ne 0 ]; then
     exit -1
 fi
 echo "Test with QWEN3-30B-A3B passed"
+
+# multimodal-support with qwen2.5-vl
+echo "Testing Qwen2.5-VL-7B"
+echo "VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
+python -u vllm-gaudi/tests/models/language/generation/generation_mm.py --model-card-path vllm-gaudi/tests/full_tests/model_cards/qwen2.5-vl-7b.yaml"
+VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
+python -u vllm-gaudi/tests/models/language/generation/generation_mm.py --model-card-path vllm-gaudi/tests/full_tests/model_cards/qwen2.5-vl-7b.yaml
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for multimodal-support with qwen2.5-vl-7b" >&2
+    exit -1
+fi
+echo "Test with multimodal-support with qwen2.5-vl-7b passed"
+
+# spec decode with ngram
+# For G3, acc rate is 0.18, but for G2, it is 0.09
+echo "Testing Spec-decode with ngram"
+echo VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python vllm-gaudi/tests/full_tests/spec_decode.py --task ngram --assert_acc_rate 0.09 --osl 1024
+VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python vllm-gaudi/tests/full_tests/spec_decode.py --task ngram --assert_acc_rate 0.09 --osl 1024
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for spec decode with ngram" >&2
+    exit -1
+fi
+echo "Test with spec decode with ngram passed"
+
+# Embedding-model-support for v1
+echo "Testing Embedding-model-support for v1"
+echo HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/pooling.py --model intfloat/e5-mistral-7b-instruct --trust-remote-code
+HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/pooling.py --model intfloat/e5-mistral-7b-instruct --trust-remote-code
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for Embedding-model-support for v1" >&2
+    exit -1
+fi
+echo "Embedding-model-support for v1 successful"
+
+# DP2
+echo "Testing data parallel size 2 with vllm-hpu plugin v1"
+echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/examples/data_parallel.py --dp-size 2 --tp-size 2
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/examples/data_parallel.py --dp-size 2 --tp-size 2
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for data parallel size 2" >&2
+    exit -1
+fi
+echo "Test with data parallel size 2 passed"
