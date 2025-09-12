@@ -577,8 +577,7 @@ class HPULlama4VisionRotaryEmbedding(Llama4VisionRotaryEmbedding):
         cache = torch.concat([cos_vals, sin_vals], dim=-1)
         return cache
 
-    # FIXME: rename forward -> forward_oot once upstream PR is merged: https://github.com/vllm-project/vllm/pull/24444
-    def forward(  # type: ignore[override]
+    def forward_native(  # type: ignore[override]
             self,
             query: torch.Tensor,
             key: torch.Tensor,
