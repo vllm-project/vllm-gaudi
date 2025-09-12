@@ -2188,15 +2188,16 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
     def _check_config(self, batch_size, seq_len, num_blocks, attn_metadata, warmup_mode):
         if self.unified_attn:
             phase = "prompt" if attn_metadata.is_prompt else "decode"
-            shared = attn_metadata.shared_blocks if attn_metadata.shared_blocks is not None else 0
+            shared = attn_metadata.shared_blocks.size(0) if attn_metadata.shared_blocks is not None else 0
             unique = attn_metadata.unique_blocks if attn_metadata.unique_blocks else 0
+            is_causal = 1 if attn_metadata.causal_bias is not None else 0
             cfg = (seq_len, shared, unique)
-            print(cfg, num_blocks)
-            print(self.graphed_buckets)
+            print("cfg, num_blocks", cfg, num_blocks)
             seen = cfg in self.seen_configs
             self.seen_configs.add(cfg)
             if not seen and not warmup_mode:
-                logger.warning("Configuration: (query, shared_blcoks, unique_blocks) %s was not warmed-up!", cfg)
+                logger.warning("Configuration: (query, shared_blocks, unique_blocks) %s, (%s) was not warmed-up!", \
+                               cfg, 'causal' if is_causal else 'not causal')
         else:
             phase = "prompt" if attn_metadata.is_prompt else "decode"
             cfg = (phase, batch_size, seq_len, num_blocks)
@@ -3512,16 +3513,24 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         else:
             num_scheduled_tokens[req_id] = scheduled_tokens
 
-    def _add_dummy_unified_request(requests,
-                                   pl,
-                                   scheduled_tokens,
+    def _add_dummy_unified_request(self,
+                                   requests,
+                                   is_prompt,
+                                   is_unique,
+                                   block_num,
                                    num_computed_tokens,
-                                   blocks_num):
+                                   num_scheduled_tokens):
         from vllm.v1.core.sched.output import NewRequestData
 
-        block_ids = [0] * blocks_num
         req_id = f'{len(requests)}'
         sampling_params = SamplingParams(temperature=0.0)
+
+        if is_prompt:
+            # num_computed_tokens + num_scheduled_tokens <= prompt token ids
+            prompt_token_ids = num_computed_tokens + num_scheduled_tokens + 1
+        else:
+            # num_computed_tokens + num_scheduled_tokens > prompt_token_ids
+            prompt_token_ids = num_computed_tokens + num_scheduled_tokens - 1
 
         req = NewRequestData(
             req_id=req_id,
@@ -3531,7 +3540,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             mm_positions=[],
             sampling_params=sampling_params,
             pooling_params=None,
-            block_ids=[block_ids],
+            block_ids=block_num,
             num_computed_tokens=num_computed_tokens,
             lora_request=None,
         )
@@ -3568,6 +3577,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             seq_lens = [1] * query_len
 
         return seq_lens
+
+
+    def _generate_blocks_list(self, shared, unique, is_causali, total_tokens):
+        max_block_id = max(shared, unique)
+        block_table = [0] * math.ceil(total_tokens // self.block_size)
+        #print(block_table)
+                
             
 
     def distribute_sum_evenly(self, total_sum, max_length):
@@ -3637,13 +3653,108 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                         block_id=block_id)
 
         if unified_cfg:
+            unified_cfg = (100, 100, 10, 0)
             query_len, shared_ctx_len, unique_ctx_len, is_causal = unified_cfg
             print(query_len, shared_ctx_len, unique_ctx_len, is_causal)
+
+            num_computed_tokens = (shared_ctx_len + unique_ctx_len) * self.block_size 
+            num_scheduled_tokens = query_len
+
+            # prepare first decode with unique block
+            self._add_dummy_unified_request(requests,
+                                   False,
+                                   True,
+                                   [unique_ctx_len - 1],
+                                   num_computed_tokens,
+                                   num_scheduled_tokens)
+            if is_causal:
+                # fill the rest with prompts
+                pass
+            else:
+                # fill the rest with decodes
+                remaining_samples = query_len - 1
+                base = shared_ctx_len // remaining_samples
+                remain = shared_ctx_len % remaining_samples
+                window_size = base + remain
+
+                all_shared_blocks_ids = [block for block in range(shared_ctx_len)]
+                # do not use unique block id
+                if (unique_ctx_len - 1) in all_shared_blocks_ids:
+                    all_shared_blocks_ids.remove(unique_ctx_len - 1)
+                    all_shared_blocks_ids.append(shared_ctx_len + 1)
+                print(all_shared_blocks_ids, len(all_shared_blocks_ids))
+
+                # distribute evenly across sublists
+                split_shared_blocks_ids = [[] for _ in range(remaining_samples)]
+                idx = 0
+                for i in range(remaining_samples):
+                     size = base + (1 if i < remain else 0)
+                     for _ in range(size):
+                         split_shared_blocks_ids[i].append(all_shared_blocks_ids[idx])
+                         idx += 1
+
+                # make sure that all blocks are shared = in at least two decodes
+                for i, block in enumerate(all_shared_blocks_ids):
+                    target = (i + 1) % remaining_samples
+                    if block not in split_shared_blocks_ids[target]:
+                        split_shared_blocks_ids[target].append(block)
+                
+                # fill empty sublists with any blocks
+                for i in range(remaining_samples):
+                    if not split_shared_blocks_ids[i]:
+                        split_shared_blocks_ids[i].append(all_shared_blocks_ids[i % shared_ctx_len])
+                        
+
+                print(split_shared_blocks_ids, len(split_shared_blocks_ids))
+
+                for request_blocks in split_shared_blocks_ids:
+                    self._add_dummy_unified_request(requests,
+                                   False,
+                                   False,
+                                   request_blocks,
+                                   num_computed_tokens,
+                                   num_scheduled_tokens)
+                
+                '''
+                i = 0
+                while len(requests) < shared_ctx_len + 1:
+                    # make sure not to duplicate unique blocks
+                    if i == unique_ctx_len - 1:
+                        i += 1
+                        continue
+                    # make 2 requests with shared blocks
+                    for _ in range(2):
+                        self._add_dummy_unified_request(requests,
+                                   False,
+                                   False,
+                                   i,
+                                   num_computed_tokens,
+                                   num_scheduled_tokens)
+                    i += 1
+                print(query_len, shared_ctx_len)
+                missing_requests = query_len - (1 + shared_ctx_len * 2)
+                print("missing_requests", missing_requests)
+                if missing_requests > 0:
+                    # we fill the rest until we reach desired query len
+                    for r in missing_requests:
+                        self._add_dummy_unified_request(requests,
+                                   False,
+                                   False,
+                                   0,
+                                   num_computed_tokens,
+                                   num_scheduled_tokens)
+                '''
+            print(len(requests), requests[0], requests[-1])
+            exit()
+            '''
             unified_scheduled_tokens = query_len
             unified_num_computed_tokens = (shared_ctx_len + unique_ctx_len) * self.block_size
             unified_blocks_num = math.ceil((unified_scheduled_tokens + unified_num_computed_tokens) // self.block_size)
             print(unified_scheduled_tokens, unified_num_computed_tokens, unified_blocks_num)
-            prompt_lengths = self._generate_unified_sequence_lenghts(query_len, is_causal)
+            scheduled_tokens = query_len
+            num_computed_tokens = (shared_ctx_len + unique_ctx_len) * self.block_size
+            total_tokens = scheduled_tokens + num_computed_tokens
+            blocks = self._generate_blocks_list(shared_ctx_len, unique_ctx_len, is_causal, total_tokens)
             exit()
             for pl in prompt_lengths:
                 self._add_dummy_unified_request(requests,
@@ -3651,6 +3762,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                         unified_scheduled_tokens,
                                         unified_num_computed_tokens,
                                         unified_blocks_num)
+            scheduled_tokens = query_len
+            '''
 
         sched_output = SchedulerOutput(
             scheduled_new_reqs=requests,
