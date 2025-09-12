@@ -1805,9 +1805,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if pad_size > 0:
                 positions = F.pad(positions, (0, pad_size), value=-1, mode='constant')
 
-        # Copy the tensors for async scheduling. H2D sync happens here
-        self._prepare_input_ids(scheduler_output)
-
         ###################################
         # initialize token_ids with padding
         # TOKEN_IDS. [batch, num_tokens]
@@ -1872,15 +1869,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         logits_indices[:num_decodes] = query_start_loc_cpu[1:num_decodes + 1] - 1
         num_decode_tokens = torch.tensor(np.sum(context_lens), device='cpu')
 
-        token_ids_device = async_h2d_copy(token_ids, device=self.device)
         positions_device = async_h2d_copy(positions, device=self.device)
-        # call prepare_spec_decode_inputs to get the logits indices and
-        if scheduler_output is not None:
-            logits_indices, spec_decode_metadata = self._prepare_spec_decode_inputs(scheduler_output, logits_indices,
-                                                                                    token_ids_device, num_tokens)
-        else:
-            spec_decode_metadata = None
-
         block_tables_list = self.defragmenter.resolve_all(block_tables_list)
 
         # CONTEXT_LENS [batch_size]
@@ -1898,6 +1887,35 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         block_groups_device = async_h2d_copy(block_groups, device=self.device)
         num_decode_tokens_device = async_h2d_copy(num_decode_tokens, device=self.device)
         slot_mapping_device = async_h2d_copy(slot_mapping, device=self.device)
+
+        if self.use_async_scheduling:
+            # Move token_ids to device as late as possible
+            token_ids = torch.zeros((padded_batch_size, num_tokens), dtype=torch.int32)
+            # Copy the tensors for async scheduling. H2D sync happens here
+            self._prepare_input_ids(scheduler_output)
+            if num_tokens == 1:
+                token_ids[:num_decodes] = self.input_ids_cpu[:num_decodes].view(-1, 1)
+            else:
+                token_ids_split_tensors = torch.split(self.input_ids_cpu[:total_num_scheduled_tokens],
+                                                      num_tokens_per_req)
+                token_ids[:num_decodes] = \
+                    pad_sequence(list(token_ids_split_tensors),
+                                    batch_first=True,
+                                    padding_value=0)[:num_decodes]
+
+            #####################################
+            # NOTE(Chendi): Since we can't actually do num_tokens = 2,
+            # convert to [batch_size * num_tokens, 1]
+            if num_tokens > 1:
+                token_ids = token_ids.view(-1, 1)
+
+        token_ids_device = async_h2d_copy(token_ids, device=self.device)
+        # call prepare_spec_decode_inputs to get the logits indices and
+        if scheduler_output is not None:
+            logits_indices, spec_decode_metadata = self._prepare_spec_decode_inputs(scheduler_output, logits_indices,
+                                                                                    token_ids_device, num_tokens)
+        else:
+            spec_decode_metadata = None
 
         return DecodeInputData(num_decodes=num_decodes,
                                token_ids=token_ids_device,
