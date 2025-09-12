@@ -93,7 +93,8 @@ class HPUBucketingManager():
             print("EO:", query_range, shared_ctx_range, unique_ctx_range)
             
             self.unified_buckets = generate_unified_buckets(query_range, 
-                                         shared_ctx_range, unique_ctx_range, self.max_num_seqs)
+                                         shared_ctx_range, unique_ctx_range, self.max_num_seqs,
+                                         self.block_size, self.max_model_len)
 
             print(self.unified_buckets)
         else:
@@ -299,19 +300,22 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
     return sorted(buckets)
 
 
-def generate_unified_buckets(query_range, shared_ctx_range, unique_ctx_range, bs):
+def generate_unified_buckets(query_range, shared_ctx_range, unique_ctx_range, bs, block_size, max_model_len):
     buckets = set()
-    is_causal = [0, 1]
+    is_causal = [0]
 
     for query in query_range:
         for shared_ctx in shared_ctx_range:
             for unique_ctx in unique_ctx_range:
                 for causal in is_causal:
-                    if (causal == 0 and query <= bs) or causal == 1:
-                        buckets.add((query, shared_ctx, unique_ctx, causal))
+                    if causal:
+                        if math.ceil(shared_ctx * block_size // bs) <= max_model_len:
+                            buckets.add((query, shared_ctx, unique_ctx, causal))
+                    elif (causal == 0 and query <= bs):
+                        if math.ceil(shared_ctx * block_size // (bs//2) ) <= max_model_len:
+                            buckets.add((query, shared_ctx, unique_ctx, causal))
 
-    return sorted(buckets)
-    
+    return sorted(buckets) 
 
 
 def is_greater_or_equal(tuple1, tuple2):
