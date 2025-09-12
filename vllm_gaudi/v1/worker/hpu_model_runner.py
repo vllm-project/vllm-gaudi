@@ -1155,7 +1155,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
             self.encoder_cache[mm_hash] = scatter_mm_placeholders(
                 output,
-                is_embed=pos_info.is_embed,
+                is_embed=pos_info.is_embed.to(
+                    device=output.device) if pos_info.is_embed is not None else pos_info.is_embed,
             )
 
     # modified from: vllm/v1/worker/gpu_model_runner.py
