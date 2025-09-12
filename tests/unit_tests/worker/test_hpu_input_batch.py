@@ -16,8 +16,7 @@ from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.block_table import BlockTable, MultiGroupBlockTable
-from vllm.v1.worker.gpu_input_batch import CachedRequestState
-from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
+from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
 
 VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
@@ -170,9 +169,7 @@ def _construct_cached_request_state(req_id_suffix: int):
         prompt_token_ids=prompt_token_ids,
         sampling_params=_create_sampling_params(),
         pooling_params=None,
-        mm_kwargs=[],
-        mm_positions=[],
-        mm_hashes=[],
+        mm_features=[],
         block_ids=([], ),
         generator=None,
         num_computed_tokens=len(output_token_ids),

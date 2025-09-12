@@ -10,7 +10,6 @@ from typing import Optional
 from itertools import cycle
 from unittest.mock import patch
 
-from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.sample.metadata import SamplingMetadata
 
 from vllm.model_executor.layers.sampler import get_sampler
@@ -19,7 +18,7 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_pin_memory_available
 
-from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
+from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
 
 VOCAB_SIZE = 1024
 MAX_PROMPT_SIZE = 100
@@ -62,9 +61,7 @@ def _construct_cached_request_state(req_id_suffix: int,
         prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
         pooling_params=None,
-        mm_kwargs=[],
-        mm_positions=[],
-        mm_hashes=[],
+        mm_features=[],
         block_ids=([], ),
         generator=generator,
         num_computed_tokens=len(output_token_ids),

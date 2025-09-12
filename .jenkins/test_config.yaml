@@ -81,13 +81,12 @@ stages:
           cd .jenkins/lm-eval-harness && 
           PT_HPU_LAZY_MODE=1 
           bash run-tests.sh -c configs/models-fp8.txt -t 2
-      # Chendi: llama4 upstream modeling changed, need to fix
-      # - name: gsm8k_fp8_llama4_scout_g3_tp2_compressed_tensor
-      #   flavor: g3.s
-      #   command: >-
-      #     cd .jenkins/lm-eval-harness && 
-      #     VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1  
-      #     bash run-tests.sh -c configs/models-fp8-compressedtensor.txt -t 2
+      - name: gsm8k_fp8_llama4_scout_g3_tp2_compressed_tensor
+        flavor: g3.s
+        command: >-
+          cd .jenkins/lm-eval-harness && 
+          VLLM_WEIGHT_LOAD_FORCE_SYNC=1 VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 
+          bash run-tests.sh -c configs/models-fp8-compressedtensor.txt -t 2
       # Chendi: crash on model weight loading, need to fix
       # - name: gsm8k_fp8_qwen3_30B_g3_tp1_block_scale_dynamic
       #   flavor: g3
@@ -102,10 +101,9 @@ stages:
       #     cd .jenkins/lm-eval-harness && 
       #     VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 VLLM_HPU_FORCE_CHANNEL_FP8=0 
       #     bash run-tests.sh -c configs/models-fp8-blockfp8.txt -t 1
-      # Chendi: comment multimodal test since it is not enabled in V1 yet.
-      # - name: multimodal_llama4_scout_g3_tp2_ep
-      #   flavor: g3.s
-      #   command: >-
-      #     cd .jenkins/vision &&
-      #     PT_HPU_LAZY_MODE=1 VLLM_WEIGHT_LOAD_FORCE_SYNC=1 
-      #     bash run-tests.sh -c configs/models-llama4-scout.txt -t 2
+      - name: multimodal_llama4_scout_g3_tp2_ep
+        flavor: g3.s
+        command: >-
+          cd .jenkins/vision && 
+          PT_HPU_LAZY_MODE=1 VLLM_WEIGHT_LOAD_FORCE_SYNC=1 
+          bash run-tests.sh -c configs/models-llama4-scout.txt -t 2
