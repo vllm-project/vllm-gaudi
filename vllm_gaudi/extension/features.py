@@ -82,5 +82,7 @@ def get_features():
         Value('dynamic_shapes_compilation', True, env_var='VLLM_T_COMPILE_DYNAMIC_SHAPES', env_var_type=boolean),
         Value('fullgraph_compilation', False, env_var='VLLM_T_COMPILE_FULLGRAPH', env_var_type=boolean),
         Value('unified_attn', False),
+        Value('const_norm_value', 10.0, env_var='VLLM_SOFTMAX_CONST_NORM_VALUE'),
+        Value('fused_block_softmax_with_const_max', False, env_var='VLLM_FUSED_BLOCK_SOFTMAX_WITH_CONST_MAX'),
     ]
     return split_values_and_flags(features)

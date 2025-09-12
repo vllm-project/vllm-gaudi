@@ -175,3 +175,12 @@ def with_default(value: Optional[Any], default: Any) -> Any:
     if value is not None:
         return value
     return default
+
+
+class BlockSoftmaxConstMax(torch.nn.Module):
+
+    def __init__(self):
+        super(BlockSoftmaxConstMax, self).__init__()
+
+    def forward(self, attn, block_bias, block_groups, batch_size, const_norm_value):
+        return torch.ops.hpu.block_softmax_const_max(attn, block_bias, block_groups, batch_size, const_norm_value)
