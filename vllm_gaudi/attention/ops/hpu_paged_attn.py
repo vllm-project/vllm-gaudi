@@ -24,6 +24,28 @@ class HPUPagedAttentionMetadata:
     alibi_blocks: Optional[torch.Tensor]
 
 
+@dataclass
+class HPUPagedAttentionMetadataBuilder:
+
+    def __init__(self, input_builder: "HPUPageAttentionInputBuilderBase") -> None:
+        """Create the builder, remember some configuration and parameters."""
+        self.input_builder = input_builder
+
+    def prepare(self) -> None:
+        """Prepare for one batch."""
+        pass
+
+    def build(self, seq_lens: list[int], query_lens: list[int], cuda_graph_pad_size: int,
+              batch_size: int) -> type[HPUPagedAttentionMetadata]:
+        """Build attention metadata with on-device tensors."""
+        return HPUPagedAttentionMetadata
+
+
+@dataclass
+class HPUPageAttentionInputBuilderBase:
+    pass
+
+
 class HPUPagedAttention:
 
     @staticmethod
