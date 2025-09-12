@@ -577,7 +577,7 @@ class HPULlama4VisionRotaryEmbedding(Llama4VisionRotaryEmbedding):
         cache = torch.concat([cos_vals, sin_vals], dim=-1)
         return cache
 
-    def forward_native(  # type: ignore[override]
+    def forward_oot(  # type: ignore[override]
             self,
             query: torch.Tensor,
             key: torch.Tensor,
