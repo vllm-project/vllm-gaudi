@@ -46,6 +46,19 @@ class Fp8LinearMethod(OrigFp8LinearMethod):
                                             bias=bias,
                                             trans_B=False)
 
+    def dequant_fp8_weight(self, layer) -> torch.Tensor:
+        if hasattr(layer, "updated_fp8_weight") and layer.updated_fp8_weight:
+            return layer.weight
+        dequant_weight = hpu_ops.dequant_block_fp8_weight_naive(
+            layer.weight,
+            layer.weight_scale_inv.data,
+            self.quant_config.weight_block_size,
+            original_M=layer.orig_M,
+            original_N=layer.orig_N,
+            do_unpad=True,
+        )
+        return dequant_weight
+
 
 @CustomOp.register_oot(name='Fp8MoEMethod')
 class HPUFp8MoEMethod(Fp8MoEMethod):
