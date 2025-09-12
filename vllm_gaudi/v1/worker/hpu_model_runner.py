@@ -1805,6 +1805,25 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if pad_size > 0:
                 positions = F.pad(positions, (0, pad_size), value=-1, mode='constant')
 
+        # Copy the tensors for async scheduling. H2D sync happens here
+        self._prepare_input_ids(scheduler_output)
+
+        ###################################
+        # initialize token_ids with padding
+        # TOKEN_IDS. [batch, num_tokens]
+        # NOTE(Chendi): Follow GPU_Model_Runner to use global
+        # self.input_ids_cpu, which updated in prepare_inputs from
+        # self.input_batch.token_ids_cpu[:total_num_scheduled_tokens]
+        token_ids = torch.zeros((padded_batch_size, num_tokens), dtype=torch.int32)
+        if num_tokens == 1:
+            token_ids[:num_decodes] = self.input_ids_cpu[:num_decodes].view(-1, 1)
+        else:
+            token_ids_split_tensors = torch.split(self.input_ids_cpu[:total_num_scheduled_tokens], num_tokens_per_req)
+            token_ids[:num_decodes] = \
+                pad_sequence(list(token_ids_split_tensors),
+                                batch_first=True,
+                                padding_value=0)[:num_decodes]
+
         ###################################
         # SLOT_MAPPING [batch, 1]
         # The "slot" is the "physical index" of a token in the KV cache.
@@ -1821,6 +1840,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         slot_mapping = slot_mapping[:padded_batch_size]
         dummy_slots = itertools.cycle(range(self._PAD_SLOT_ID, self._PAD_SLOT_ID + self.block_size))
         slot_mapping[num_decodes:].apply_(lambda _, ds=dummy_slots: next(ds))
+
+        #####################################
+        # NOTE(Chendi): Since we can't actually do num_tokens = 2,
+        # convert to [batch_size * num_tokens, 1]
+        if num_tokens > 1:
+            token_ids = token_ids.view(-1, 1)
+            positions = padded_index.view(-1, 1)
+            slot_mapping = slot_mapping.view(-1, 1)
 
         logits_indices = torch.zeros(padded_batch_size, dtype=torch.int32, device='cpu')
 
@@ -1853,33 +1880,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                                     token_ids_device, num_tokens)
         else:
             spec_decode_metadata = None
-
-        # Copy the tensors for async scheduling. H2D sync happens here
-        self._prepare_input_ids(scheduler_output)
-
-        ###################################
-        # initialize token_ids with padding
-        # TOKEN_IDS. [batch, num_tokens]
-        # NOTE(Chendi): Follow GPU_Model_Runner to use global
-        # self.input_ids_cpu, which updated in prepare_inputs from
-        # self.input_batch.token_ids_cpu[:total_num_scheduled_tokens]
-        token_ids = torch.zeros((padded_batch_size, num_tokens), dtype=torch.int32)
-        if num_tokens == 1:
-            token_ids[:num_decodes] = self.input_ids_cpu[:num_decodes].view(-1, 1)
-        else:
-            token_ids_split_tensors = torch.split(self.input_ids_cpu[:total_num_scheduled_tokens], num_tokens_per_req)
-            token_ids[:num_decodes] = \
-                pad_sequence(list(token_ids_split_tensors),
-                                batch_first=True,
-                                padding_value=0)[:num_decodes]
-
-        #####################################
-        # NOTE(Chendi): Since we can't actually do num_tokens = 2,
-        # convert to [batch_size * num_tokens, 1]
-        if num_tokens > 1:
-            token_ids = token_ids.view(-1, 1)
-            positions = padded_index.view(-1, 1)
-            slot_mapping = slot_mapping.view(-1, 1)
 
         block_tables_list = self.defragmenter.resolve_all(block_tables_list)
 
@@ -2935,13 +2935,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 sampled_token_requests = \
                     decode_sampled_requests + prefill_sampled_requests
                 max_req_index = max(self.input_batch.req_id_to_index.values())
-                postprocessed_sampled_token_ids: list[list]
-                postprocessed_sampled_token_ids = [[] for _ in range(max_req_index + 1)]
                 # NOTE(Chendi): in post-processing, spec_decode might
                 # return more than 1 token during decode.
                 start_idx = 0
                 for i, req_id in enumerate(sampled_token_requests):
-                    num_tokens = spec_decode_num_tokens[i] if spec_decode_num_tokens is not None and i < num_decodes else 1
+                    num_tokens = spec_decode_num_tokens[
+                        i] if spec_decode_num_tokens is not None and i < num_decodes else 1
                     postprocessed_sampled_token_ids[
                         self.input_batch.req_id_to_index[req_id]] += sampled_token_ids_list[start_idx:start_idx +
                                                                                             num_tokens]
