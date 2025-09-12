@@ -61,6 +61,17 @@ if [ $? -ne 0 ]; then
 fi
 echo "Test with deepseek_v2 + inc dynamic quantization + tp 2 successful"
 
+echo "Testing Qwen3-8B-FP8 + inc requant FP8 model + dynamic quant"
+echo VLLM_HPU_FORCE_CHANNEL_FP8=false QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_dynamic_quant.json HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model Qwen/Qwen3-8B-FP8 --trust-remote-code 
+QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_dynamic_quant.json VLLM_HPU_FORCE_CHANNEL_FP8=false  \
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
+    python -u vllm-gaudi/tests/full_tests/generate.py --model Qwen/Qwen3-8B-FP8 --trust-remote-code 
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for Qwen3-8B-FP8 + inc requant FP8 model + dynamic quant" >&2
+    exit -1
+fi
+echo "Test with Qwen3-8B-FP8 + inc requant FP8 model + dynamic quant passed"
+
 # QWEN3 + blockfp8 + dynamic scaling
 echo "Testing Qwen3-8B-FP8 + blockfp8 + dynamic scaling"
 echo HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model Qwen/Qwen3-8B-FP8 --trust-remote-code
