@@ -122,8 +122,7 @@ class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
         default_stream = torch.hpu.current_stream()
         with torch.hpu.stream(async_output_copy_stream):
             async_output_copy_stream.wait_stream(default_stream)
-            self._sampled_token_ids_cpu = self._sampled_token_ids.to(
-                'cpu', non_blocking=True)
+            self._sampled_token_ids_cpu = self._sampled_token_ids.to('cpu', non_blocking=True)
             self._async_copy_ready_event.record()
 
     def get_output(self) -> ModelRunnerOutput:
@@ -1803,25 +1802,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if pad_size > 0:
                 positions = F.pad(positions, (0, pad_size), value=-1, mode='constant')
 
-        # Copy the tensors for async scheduling. H2D sync happens here
-        self._prepare_input_ids(scheduler_output)
-
-        ###################################
-        # initialize token_ids with padding
-        # TOKEN_IDS. [batch, num_tokens]
-        # NOTE(Chendi): Follow GPU_Model_Runner to use global
-        # self.input_ids_cpu, which updated in prepare_inputs from
-        # self.input_batch.token_ids_cpu[:total_num_scheduled_tokens]
-        token_ids = torch.zeros((padded_batch_size, num_tokens), dtype=torch.int32)
-        if num_tokens == 1:
-            token_ids[:num_decodes] = self.input_ids_cpu[:num_decodes].view(-1, 1)
-        else:
-            token_ids_split_tensors = torch.split(self.input_ids_cpu[:total_num_scheduled_tokens], num_tokens_per_req)
-            token_ids[:num_decodes] = \
-                pad_sequence(list(token_ids_split_tensors),
-                                batch_first=True,
-                                padding_value=0)[:num_decodes]
-
         ###################################
         # SLOT_MAPPING [batch, 1]
         # The "slot" is the "physical index" of a token in the KV cache.
@@ -1838,24 +1818,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         slot_mapping = slot_mapping[:padded_batch_size]
         dummy_slots = itertools.cycle(range(self._PAD_SLOT_ID, self._PAD_SLOT_ID + self.block_size))
         slot_mapping[num_decodes:].apply_(lambda _, ds=dummy_slots: next(ds))
-
-        #####################################
-        # NOTE(Chendi): Since we can't actually do num_tokens = 2,
-        # convert to [batch_size * num_tokens, 1]
-        if num_tokens > 1:
-            token_ids = token_ids.view(-1, 1)
-            positions = padded_index.view(-1, 1)
-            slot_mapping = slot_mapping.view(-1, 1)
-
-        block_tables_list = self.defragmenter.resolve_all(block_tables_list)
-
-        # CONTEXT_LENS [batch_size]
-        block_list, block_groups, block_usage = \
-            self.get_habana_paged_attn_buffers(
-                block_tables_list,
-                slot_mapping.tolist(),
-                padded_batch_size * num_tokens
-            )
 
         logits_indices = torch.zeros(padded_batch_size, dtype=torch.int32, device='cpu')
 
@@ -1886,6 +1848,43 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 = self._prepare_spec_decode_inputs(scheduler_output, logits_indices)
         else:
             spec_decode_metadata = None
+
+        # Copy the tensors for async scheduling. H2D sync happens here
+        self._prepare_input_ids(scheduler_output)
+
+        ###################################
+        # initialize token_ids with padding
+        # TOKEN_IDS. [batch, num_tokens]
+        # NOTE(Chendi): Follow GPU_Model_Runner to use global
+        # self.input_ids_cpu, which updated in prepare_inputs from
+        # self.input_batch.token_ids_cpu[:total_num_scheduled_tokens]
+        token_ids = torch.zeros((padded_batch_size, num_tokens), dtype=torch.int32)
+        if num_tokens == 1:
+            token_ids[:num_decodes] = self.input_ids_cpu[:num_decodes].view(-1, 1)
+        else:
+            token_ids_split_tensors = torch.split(self.input_ids_cpu[:total_num_scheduled_tokens], num_tokens_per_req)
+            token_ids[:num_decodes] = \
+                pad_sequence(list(token_ids_split_tensors),
+                                batch_first=True,
+                                padding_value=0)[:num_decodes]
+
+        #####################################
+        # NOTE(Chendi): Since we can't actually do num_tokens = 2,
+        # convert to [batch_size * num_tokens, 1]
+        if num_tokens > 1:
+            token_ids = token_ids.view(-1, 1)
+            positions = padded_index.view(-1, 1)
+            slot_mapping = slot_mapping.view(-1, 1)
+
+        block_tables_list = self.defragmenter.resolve_all(block_tables_list)
+
+        # CONTEXT_LENS [batch_size]
+        block_list, block_groups, block_usage = \
+            self.get_habana_paged_attn_buffers(
+                block_tables_list,
+                slot_mapping.tolist(),
+                padded_batch_size * num_tokens
+            )
 
         # CPU<>HPU sync *should not* happen here.
         token_ids_device = async_h2d_copy(token_ids, device=self.device)
@@ -2087,8 +2086,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
         num_scheduled_tokens = np.array(tokens, dtype=np.int32)
         cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
-        self.async_copy_ready_event.synchronize()
-        prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
+
         # Async scheduling case, where some decode requests from the previous
         # iteration won't have entries in input_ids_cpu and need to be copied
         # on the GPU from prev_sampled_token_ids.
@@ -2117,6 +2115,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # No requests in common with the previous iteration
             # So input_ids_cpu will have all the input ids.
             return
+
+        # D2H Sync happens here
+        self.async_copy_ready_event.synchronize()
+        prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
+
         if indices_match and max_flattened_index == (num_commmon_tokens - 1):
             # Common-case optimization: the batch is unchanged
             # and no reordering happened.
