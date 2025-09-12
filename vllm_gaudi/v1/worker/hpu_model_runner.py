@@ -118,7 +118,7 @@ class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._sampled_token_ids = sampled_token_ids
 
         # TODO: Change to non_blocking once it is working
-        self._sampled_token_ids_cpu = self._sampled_token_ids.to('cpu', non_blocking=False)
+        self._sampled_token_ids_cpu = self._sampled_token_ids.to('cpu', non_blocking=True)
 
     def get_output(self) -> ModelRunnerOutput:
         """Copy the device tensors to the host and return a ModelRunnerOutput.
@@ -128,7 +128,7 @@ class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         # Release the device tensor once the copy has completed
         # TODO: to be used with non_blocking send
-        # torch.hpu.synchronize()
+        torch.hpu.synchronize()
         # del self._sampled_token_ids
 
         valid_sampled_token_ids = self._sampled_token_ids_cpu.tolist()
@@ -1795,6 +1795,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if pad_size > 0:
                 positions = F.pad(positions, (0, pad_size), value=-1, mode='constant')
 
+        # Copy the tensors for async scheduling. H2D sync happens here
+        self._prepare_input_ids(scheduler_output)
+
         ###################################
         # initialize token_ids with padding
         # TOKEN_IDS. [batch, num_tokens]
@@ -2061,7 +2064,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             attn_metadata=attn_metadata,
         )
 
-    def _prepare_input_ids(self, total_num_scheduled_tokens: int, cu_num_tokens: np.ndarray) -> None:
+    def _prepare_input_ids(self, scheduler_output: "SchedulerOutput") -> None:
         """Prepare the input IDs for the current batch.
         
         Carefully handles the `prev_sampled_token_ids` which can be cached
@@ -2071,6 +2074,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if self.input_batch.prev_sampled_token_ids is None:
             return
 
+        # Compute cu_num_tokens from scheduler_output
+        req_ids = self.input_batch.req_ids
+        tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+        num_scheduled_tokens = np.array(tokens, dtype=np.int32)
+        cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
+        torch.hpu.synchronize()
         prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
         # Async scheduling case, where some decode requests from the previous
         # iteration won't have entries in input_ids_cpu and need to be copied
@@ -2144,8 +2153,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                            0,
                            torch.from_numpy(token_indices),
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
-        # Copy the tensors for async scheduling
-        self._prepare_input_ids(total_num_scheduled_tokens, cu_num_tokens)
         ###############################################
 
         # Get the number of scheduled tokens for each request.
