@@ -109,6 +109,7 @@ class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
         model_runner_output: ModelRunnerOutput,
         sampled_token_ids: torch.Tensor,
         invalid_req_indices: list[int],
+        async_output_copy_stream: torch.hpu.Stream,
     ):
         self._model_runner_output = model_runner_output
         self._invalid_req_indices = invalid_req_indices
@@ -117,8 +118,13 @@ class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
         # deallocated until we finish copying it to the host.
         self._sampled_token_ids = sampled_token_ids
 
-        # TODO: Change to non_blocking once it is working
-        self._sampled_token_ids_cpu = self._sampled_token_ids.to('cpu', non_blocking=True)
+        self._async_copy_ready_event = torch.hpu.Event()
+        default_stream = torch.hpu.current_stream()
+        with torch.hpu.stream(async_output_copy_stream):
+            async_output_copy_stream.wait_stream(default_stream)
+            self._sampled_token_ids_cpu = self._sampled_token_ids.to(
+                'cpu', non_blocking=True)
+            self._async_copy_ready_event.record()
 
     def get_output(self) -> ModelRunnerOutput:
         """Copy the device tensors to the host and return a ModelRunnerOutput.
@@ -127,9 +133,7 @@ class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
         """
 
         # Release the device tensor once the copy has completed
-        # TODO: to be used with non_blocking send
-        torch.hpu.synchronize()
-        # del self._sampled_token_ids
+        self._async_copy_ready_event.synchronize()
 
         valid_sampled_token_ids = self._sampled_token_ids_cpu.tolist()
         del self._sampled_token_ids
@@ -687,6 +691,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
+        self.async_output_copy_stream = torch.hpu.Stream() if \
+            self.use_async_scheduling else None
+        self.async_copy_ready_event = torch.hpu.Event() if \
+            self.use_async_scheduling else None
         assert not (self.use_async_scheduling and (self.speculative_config is not None)), \
             "Speculative decoding is not supported with async scheduling."
         self.mem_margin = None
@@ -2079,7 +2087,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
         num_scheduled_tokens = np.array(tokens, dtype=np.int32)
         cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
-        torch.hpu.synchronize()
+        self.async_copy_ready_event.synchronize()
         prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
         # Async scheduling case, where some decode requests from the previous
         # iteration won't have entries in input_ids_cpu and need to be copied
@@ -2906,8 +2914,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         max_req_index = max(self.input_batch.req_id_to_index.values())
         postprocessed_sampled_token_ids: list[list[int]] = [[] for _ in range(max_req_index + 1)]
         if self.use_async_scheduling:
-            self.input_batch.prev_sampled_token_ids = \
-                sampled_token_ids.flatten().to("cpu", non_blocking=True)
+            with torch.hpu.stream(self.async_output_copy_stream):
+                self.async_output_copy_stream.wait_stream(torch.hpu.current_stream())
+                self.input_batch.prev_sampled_token_ids = \
+                    sampled_token_ids.flatten().to("cpu", non_blocking=True)
+                self.async_copy_ready_event.record()
             # self.input_batch.prev_sampled_token_ids_invalid_indices
             invalid_req_indices_set = set(invalid_req_indices)
             self.input_batch.prev_sampled_token_ids_invalid_indices = \
@@ -2999,6 +3010,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 model_runner_output=model_runner_output,
                 sampled_token_ids=sampled_token_ids,
                 invalid_req_indices=[],
+                async_output_copy_stream=self.async_output_copy_stream,
             )
         model_runner_output = ModelRunnerOutput(
             req_ids=all_req_ids,
