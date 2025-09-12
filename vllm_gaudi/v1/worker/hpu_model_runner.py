@@ -3150,9 +3150,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         req = NewRequestData(
             req_id=req_id,
             prompt_token_ids=prompt_token_ids,
-            mm_kwargs=[],
-            mm_hashes=[],
-            mm_positions=[],
+            mm_features=[],
             sampling_params=sampling_params,
             pooling_params=None,
             block_ids=[block_ids],
