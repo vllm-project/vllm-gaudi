@@ -1460,7 +1460,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
             prompt_tokens = self.input_batch.num_prompt_tokens[batch_idx]
             # TODO: Fix non-prompt case
-            num_output_logits = context_len + query_len - prompt_tokens + 1
+            num_output_logits = max(0, context_len + query_len - prompt_tokens + 1)
             logits_positions = list(range(query_len - num_output_logits, query_len))
 
             new_batch_contents = BatchContents(
@@ -2617,11 +2617,16 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     logits_prompt.append(logits_device)
                     prefill_sampled_requests.extend(logits_requests)
                 else:
-                    with self.profiler.record_event('internal', "sampler"):
-                        sampler_output, sampling_metadata = self._run_sampling(batch_changed, logits_device, req_id,
-                                                                               logits_device.shape[0], logits_requests)
-                        prefill_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
-                        prefill_sampled_requests.extend(logits_requests)
+                    # If there are no logits, there is nothing to sample.
+                    # This can happen with chunked prefill when a chunk does
+                    # not complete the prompt and no logits are generated.
+                    if logits_device.numel() > 0:
+                        with self.profiler.record_event('internal', "sampler"):
+                            sampler_output, sampling_metadata = self._run_sampling(batch_changed, logits_device, req_id,
+                                                                                   logits_device.shape[0],
+                                                                                   logits_requests)
+                            prefill_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
+                            prefill_sampled_requests.extend(logits_requests)
                 if self.is_driver_worker and self.profiler.enabled:
                     # Stop recording 'execute_model_generic' event
                     self.profiler.end()
