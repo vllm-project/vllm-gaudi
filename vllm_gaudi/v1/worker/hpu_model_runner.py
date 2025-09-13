@@ -1880,7 +1880,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             )
 
         # CPU<>HPU sync *should not* happen here.
-        logits_indices_device = async_h2d_copy(logits_indices, device=self.device)
         block_list_device = async_h2d_copy(block_list, device=self.device)
         block_usage_device = async_h2d_copy(block_usage, device=self.device)
         block_groups_device = async_h2d_copy(block_groups, device=self.device)
@@ -1915,6 +1914,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                                     token_ids_device, num_tokens)
         else:
             spec_decode_metadata = None
+        logits_indices_device = async_h2d_copy(logits_indices, device=self.device)
 
         return DecodeInputData(num_decodes=num_decodes,
                                token_ids=token_ids_device,
@@ -2858,10 +2858,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         # convert decode_sampled_token_ids as list of tensor
                         spec_decode_num_tokens = [len(v) for v in decode_sampled_token_ids]
                         decode_sampled_token_ids = [
-                            torch.tensor(v, device='cpu').int() for v in decode_sampled_token_ids
+                            torch.tensor(v, device=self.device).int() for v in decode_sampled_token_ids
                         ]
                         decode_sampled_token_ids_device = \
-                            output_token_ids.to('hpu', non_blocking=True)
+                            output_token_ids.to(self.device, non_blocking=True)
                     decode_sampled_requests.extend(self.input_batch.req_ids[:num_decodes])
                     ##### Sampling End #####
 
