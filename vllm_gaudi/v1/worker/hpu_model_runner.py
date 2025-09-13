@@ -2858,10 +2858,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         # convert decode_sampled_token_ids as list of tensor
                         spec_decode_num_tokens = [len(v) for v in decode_sampled_token_ids]
                         decode_sampled_token_ids = [
-                            torch.tensor(v, device=self.device).int() for v in decode_sampled_token_ids
+                            torch.tensor(v, device="cpu").int() for v in decode_sampled_token_ids
                         ]
                         decode_sampled_token_ids_device = \
-                            output_token_ids.to(self.device, non_blocking=True)
+                            output_token_ids.to("hpu", non_blocking=True)
                     decode_sampled_requests.extend(self.input_batch.req_ids[:num_decodes])
                     ##### Sampling End #####
 
@@ -2905,11 +2905,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             for i in range(logits.shape[0] - num_decodes):
                 prefill_sampled_token_ids.append(sampler_output.sampled_token_ids[num_decodes + i].flatten())
             decode_sampled_token_ids.append(sampler_output.sampled_token_ids[:num_decodes].flatten())
-        else:
+        elif self.use_async_scheduling:
             # For async scheduling: keep tokens on HPU and avoid CPU sync
             # Concatenate decode and prefill tokens on HPU
             if decode_sampled_token_ids or prefill_sampled_token_ids:
                 decode_sampled_token_ids = [tensor[:num_decodes] for tensor in decode_sampled_token_ids]
+                # Note: this will cause an issue with the current spec decode impl, as they are on different devices
                 sampled_token_ids = torch.cat(decode_sampled_token_ids + prefill_sampled_token_ids).view(-1, 1)
             else:
                 sampled_token_ids = torch.empty((0, 1), dtype=torch.int32, device=self.device)
