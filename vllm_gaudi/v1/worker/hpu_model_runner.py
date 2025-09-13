@@ -1671,12 +1671,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         return all_batches[0], dummy_prefill_input_batches[0] if dummy_prefill_input_batches else None
 
     def _prepare_unified_prefill_inputs(self, num_prefills, num_decodes,
-                                        num_scheduled_tokens: list[int]) -> PrefillInputData:
+                                        num_scheduled_tokens: list[int]) -> tuple[Any, None]:
 
-        all_batch_contents = self._extract_prefill_batch_contents(num_prefills, num_decodes, num_scheduled_tokens)
+        all_batch_contents, _ = self._extract_prefill_batch_contents(num_prefills, num_decodes, num_scheduled_tokens)
         all_batches = [self._form_unified_prefill_batch(bc) for bc in all_batch_contents]
         merge_contents(all_batches[0], *all_batches[1:])
-        return all_batches[0]
+        return all_batches[0], None
 
     def _create_decode_input_data(self,
                                   num_decodes,
@@ -1966,10 +1966,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             )
         return logits_indices, spec_decode_metadata
 
-    def _prepare_unified_decode_inputs(self, num_decodes, num_scheduled_tokens) -> DecodeInputData:
+    def _prepare_unified_decode_inputs(self, num_decodes, num_scheduled_tokens) -> tuple[DecodeInputData, None]:
 
         if num_decodes == 0:
-            return DecodeInputData(num_decodes=0)
+            return DecodeInputData(num_decodes=0), None
 
         context_lens = self.input_batch.num_computed_tokens_cpu[:num_decodes]
         query_lengths = [1] * num_decodes
@@ -2001,7 +2001,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             position_ids=token_positions_t.unsqueeze(-1),
             logits_indices=logits_indices_t,
             attn_metadata=attn_metadata,
-        )
+        ), None
 
     def _prepare_inputs(
         self,
