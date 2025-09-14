@@ -8,8 +8,9 @@ ARG BASE_NAME=rhel9.2
 ARG PT_VERSION=2.6.0
 ARG REVISION=latest
 ARG REPO_TYPE=habanalabs
+ARG TORCH_TYPE_SUFFIX
 
-FROM ${DOCKER_URL}/${VERSION}/${BASE_NAME}/${REPO_TYPE}/pytorch-installer-${PT_VERSION}:${REVISION}
+FROM ${DOCKER_URL}/${VERSION}/${BASE_NAME}/${REPO_TYPE}/pytorch-${TORCH_TYPE_SUFFIX}installer-${PT_VERSION}:${REVISION}
 
 # Parameterize commit/branch for vllm-fork checkout
 ARG VLLM_GAUDI_COMMIT=v0.10.1
