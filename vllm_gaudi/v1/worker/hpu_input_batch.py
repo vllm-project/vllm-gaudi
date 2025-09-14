@@ -505,6 +505,13 @@ class InputBatch:
         # NOTE(chendi): don't reset batch_update_builder here
         # TODO: follow upstream PR#16728 for enabling batch_update
         self.sampling_metadata = self._make_sampling_metadata()
+        
+    # def refresh_pooling_metadata(self):
+    #     """Apply batch updates, reset input batch at end of step
+    #     * Apply batch add/remove/permute to logits procs' states
+    #     * If batch state is modified, update sampling metadata
+    #     """
+    #     self.pooling_metadata = self._make_pooling_metadata()
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
@@ -558,6 +565,33 @@ class InputBatch:
             bad_words_token_ids=self.bad_words_token_ids,
             logitsprocs=self.logitsprocs,
         )
+
+    # def _make_pooling_metadata(self) -> PoolingMetadata:
+    #     """
+    #     Build PoolingMetadata from self.input_batch requests.
+    #     """
+    #     num_reqs = self.num_reqs
+
+    #     # prompt lengths: each request has its prompt length
+    #     prompt_lens = torch.tensor(
+    #         [self.requests[req_id].num_computed_tokens for req_id in req_ids],
+    #         dtype=torch.int32,
+    #         device='cpu'
+    #     )
+
+    #     # pooling params: one per request
+    #     pooling_params = [PoolingParams(task='embed') for _ in req_ids]
+
+    #     # flatten prompt_token_ids
+    #     prompt_token_ids_list = [torch.tensor(self.requests[req_id].prompt_token_ids, dtype=torch.long, device='cpu') for req_id in req_ids]
+    #     prompt_token_ids = torch.cat(prompt_token_ids_list, dim=0) if prompt_token_ids_list else None
+
+    #     return PoolingMetadata(
+    #         prompt_lens=prompt_lens,
+    #         prompt_token_ids=prompt_token_ids,
+    #         pooling_params=pooling_params,
+    #         pooling_cursor=None  # will build later
+    #     )
 
     def make_selective_sampling_metadata(
         self,
@@ -628,15 +662,12 @@ class InputBatch:
             logitsprocs=self.logitsprocs,
         )
 
-    @property
-    def pooling_metadata(self) -> PoolingMetadata:
-        if len(self.pooling_params) == 0:
-            pooling_params = []
-        else:
-            # Note, for now this assumes that all request in the batch
-            # are either sampling or pooling requests
-            assert len(self.req_ids) == len(self.pooling_params)
-            pooling_params = [self.pooling_params[req_id] for req_id in self.req_ids]
+    def get_pooling_params(self) -> list[PoolingParams]:
+        assert len(self.req_ids) == len(self.pooling_params)
+        return [self.pooling_params[req_id] for req_id in self.req_ids]
+
+    def get_pooling_metadata(self) -> PoolingMetadata:
+        pooling_params = self.get_pooling_params()
 
         return PoolingMetadata(
             prompt_lens=torch.from_numpy(self.num_prompt_tokens[:self.num_reqs]).to(self.device),

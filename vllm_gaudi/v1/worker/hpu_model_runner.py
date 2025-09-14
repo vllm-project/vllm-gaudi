@@ -51,6 +51,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCach
 from vllm.v1.worker.kv_connector_model_runner_mixin import (KVConnectorModelRunnerMixin)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors, DraftTokenIds, ModelRunnerOutput,
                              KVConnectorOutput)
+from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
@@ -69,6 +70,7 @@ from vllm.v1.sample.logits_processor import build_logitsprocs
 from torch.nn.utils.rnn import pad_sequence
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.sampling_params import SamplingParams
+from vllm.pooling_params import PoolingParams
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.config import LoRAConfig, ModelConfig, SchedulerConfig
@@ -548,7 +550,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.kv_cache_dtype = self.dtype
         else:
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
-        self.is_pooling_model = model_config.pooler_config is not None
+        self.is_pooling_model = (model_config.runner_type == 'pooling')
 
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
@@ -577,7 +579,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         self.head_size = self.model_config.get_head_size()
         self.hidden_size = self.model_config.get_hidden_size()
-        self.is_pooling_model = model_config.pooler_config is not None
+        self.is_pooling_model = (model_config.runner_type == 'pooling')
         logger.debug("model config: ", self.model_config)
 
         self.attn_backend = get_attn_backend(
@@ -2346,7 +2348,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         " a batch must be pooling request"
         hidden_states = hidden_states[:num_scheduled_tokens]
 
-        pooling_metadata = self.input_batch.pooling_metadata
+        pooling_metadata = self.input_batch.get_pooling_metadata()
         pooling_metadata.build_pooling_cursor(num_scheduled_tokens_np.tolist(), device=hidden_states.device)
 
         num_reqs = self.input_batch.num_reqs
@@ -3012,6 +3014,114 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                f"free_mem:{free_mem}")
         logger.info(msg)
 
+
+
+
+
+
+
+
+    def warmup_pooler(self):
+        logger.info("Starting pooler warmup with prompt buckets: %s",
+                    self.bucketing_manager.prompt_buckets)
+
+        for (bs, query_len, num_blocks) in self.bucketing_manager.prompt_buckets:
+            if bs == 0 or query_len == 0:
+                continue
+
+            total_tokens = bs * query_len
+            logger.info(f"Warmup: bs={bs}, query_len={query_len}, num_blocks={num_blocks}, total_tokens={total_tokens}")
+
+            # Create dummy request IDs
+            dummy_req_ids = [f"warmup_req_{i}" for i in range(bs)]
+            pooling_params_list = []
+
+            for i, req_id in enumerate(dummy_req_ids):
+                pooling_param = PoolingParams(task='embed')
+                pooling_params_list.append(pooling_param)
+
+                self.requests[req_id] = CachedRequestState(
+                    req_id=req_id,
+                    prompt_token_ids=list(range(query_len)),
+                    mm_features=[],
+                    sampling_params=None,
+                    pooling_params=pooling_param,
+                    generator=None,
+                    block_ids=[[0]],
+                    num_computed_tokens=query_len,
+                    output_token_ids=[],
+                )
+
+                self.input_batch.req_id_to_index[req_id] = i
+
+            # Assign all pooling_params at once
+            self.input_batch.pooling_params = pooling_params_list
+
+
+            # Prepare dummy input_ids and positions for forward pass
+            vocab_size = getattr(self.model.config, "vocab_size", None)
+            if vocab_size is None:
+                raise RuntimeError("Could not determine vocab_size from model config")
+
+            dummy_input_ids = torch.randint(
+                0, vocab_size, (total_tokens,), device=self.device, dtype=torch.long
+            )
+            dummy_positions = torch.arange(
+                total_tokens, device=self.device, dtype=torch.long
+            )
+
+            # Slot mapping: [0..total_tokens-1]
+            slot_mapping = torch.arange(
+                total_tokens, dtype=torch.long, device=self.device
+            )
+
+            # Sequence lengths tensor
+            seq_lens_tensor = torch.full(
+                (bs,), query_len, device=self.device, dtype=torch.int32
+            )
+            context_lens_tensor = torch.zeros(bs, device=self.device, dtype=torch.int32)
+
+            # Attention metadata
+            attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
+                seq_lens_tensor=seq_lens_tensor,
+                context_lens_tensor=context_lens_tensor,
+                slot_mapping=slot_mapping,
+                block_list=None,
+                attn_bias=None,
+                block_size=self.block_size,
+            )
+
+            # Forward pass
+            with set_forward_context(attn_metadata, self.vllm_config):
+                hidden_states = self.model.forward(
+                    input_ids=dummy_input_ids,
+                    positions=dummy_positions,
+                )
+
+            # Flatten hidden states and prepare num_scheduled_tokens
+            flattened = hidden_states.view(-1, hidden_states.shape[-1])
+            num_scheduled_tokens = [query_len] * bs
+            num_scheduled_tokens_np = np.array(num_scheduled_tokens, dtype=np.int32)
+
+            # Call pooler
+            _ = self._pool(flattened, total_tokens, num_scheduled_tokens_np)
+
+            # Cleanup dummy requests after this batch
+            for req_id in dummy_req_ids:
+                del self.requests[req_id]
+            self.input_batch.req_id_to_index.clear()
+
+        torch.hpu.synchronize()
+        logger.info("Pooler warmup completed successfully")
+
+
+
+
+
+
+
+
+
     def warmup_sampler(self):
         """
         Warmup the sampler with different temperature, top-p, and top-k values.
@@ -3318,22 +3428,23 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             return
 
         self.bucketing_manager.generate_prompt_buckets()
-        self.bucketing_manager.generate_decode_buckets()
+        if not self.is_pooling_model:
+            self.bucketing_manager.generate_decode_buckets()
 
-        max_bucket = max(self.bucketing_manager.decode_buckets[-1][0], self.bucketing_manager.prompt_buckets[-1][0])
-        if max_bucket > self.input_batch.max_num_reqs:
-            input_batch_bkp = self.input_batch
-            self.input_batch = InputBatch(
-                max_num_reqs=self.bucketing_manager.decode_buckets[-1][0],
-                max_model_len=self.max_model_len,
-                max_num_batched_tokens=self.max_num_tokens,
-                device=self.device,
-                pin_memory=self.pin_memory,
-                vocab_size=self.model_config.get_vocab_size(),
-                block_sizes=[self.block_size],
-                logitsprocs=build_logitsprocs(self.vllm_config, self.device, self.pin_memory, self.is_pooling_model,
-                                              self.vllm_config.model_config.logits_processors),
-            )
+            max_bucket = max(self.bucketing_manager.decode_buckets[-1][0], self.bucketing_manager.prompt_buckets[-1][0])
+            if max_bucket > self.input_batch.max_num_reqs:
+                input_batch_bkp = self.input_batch
+                self.input_batch = InputBatch(
+                    max_num_reqs=self.bucketing_manager.decode_buckets[-1][0],
+                    max_model_len=self.max_model_len,
+                    max_num_batched_tokens=self.max_num_tokens,
+                    device=self.device,
+                    pin_memory=self.pin_memory,
+                    vocab_size=self.model_config.get_vocab_size(),
+                    block_sizes=[self.block_size],
+                    logitsprocs=build_logitsprocs(self.vllm_config, self.device, self.pin_memory, self.is_pooling_model,
+                                                self.vllm_config.model_config.logits_processors),
+                )
 
         self.defragmenter.initialize(self.kv_caches, self.block_size)
 
@@ -3377,18 +3488,25 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 assert self.mem_margin is not None, \
                     ("HabanaWorker.determine_num_available_blocks needs "
                      "to be called before warming up the model.")
+                if self.is_pooling_model:
+                    self.warmup_pooler()
 
-                self.warmup_sampler()
+                    mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
+                        self.warmup_graphs(
+                            self.bucketing_manager.prompt_buckets,
+                            True, kv_caches)
+                else:
+                    self.warmup_sampler()
 
-                # TODO(kzawora): align_workers
-                mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
-                    self.warmup_graphs(
-                        self.bucketing_manager.prompt_buckets,
-                        True, kv_caches)
-                mem_post_decode, decode_batch_seq, decode_captured_all = \
-                    self.warmup_graphs(
-                        self.bucketing_manager.decode_buckets,
-                        False, kv_caches)
+                    # TODO(kzawora): align_workers
+                    mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
+                        self.warmup_graphs(
+                            self.bucketing_manager.prompt_buckets,
+                            True, kv_caches)
+                    mem_post_decode, decode_batch_seq, decode_captured_all = \
+                        self.warmup_graphs(
+                            self.bucketing_manager.decode_buckets,
+                            False, kv_caches)
 
                 self.log_graph_warmup_summary(self.bucketing_manager.prompt_buckets, True, mem_post_prompt)
                 self.log_graph_warmup_summary(self.bucketing_manager.decode_buckets, False, mem_post_decode)
