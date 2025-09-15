@@ -302,7 +302,7 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
 
 def generate_unified_buckets(query_range, shared_ctx_range, unique_ctx_range, bs, block_size, max_model_len):
     buckets = set()
-    is_causal = [0]
+    is_causal = [1]
 
     for query in query_range:
         for shared_ctx in shared_ctx_range:

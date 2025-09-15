@@ -32,6 +32,7 @@ class CachedRequestState:
     prompt_token_ids: list[int]
     mm_kwargs: list[MultiModalKwargs]
     mm_positions: list[PlaceholderRange]
+    mm_hashes: list[str]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
     generator: Optional[torch.Generator]
@@ -238,6 +239,8 @@ class InputBatch:
             req_index = self.num_reqs
         assert req_index < self.max_num_reqs
 
+        print("toto", request.block_ids, req_index)
+
         req_id = request.req_id
         if req_index == len(self._req_ids):
             self._req_ids.append(req_id)
@@ -262,6 +265,7 @@ class InputBatch:
         self.num_tokens_no_spec[req_index] = request.num_tokens
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
+        print(request.block_ids, req_index)
         self.block_table.add_row(request.block_ids, req_index)
 
         if sampling_params := request.sampling_params:
