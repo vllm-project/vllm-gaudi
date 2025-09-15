@@ -505,7 +505,7 @@ class InputBatch:
         # NOTE(chendi): don't reset batch_update_builder here
         # TODO: follow upstream PR#16728 for enabling batch_update
         self.sampling_metadata = self._make_sampling_metadata()
-        
+
     # def refresh_pooling_metadata(self):
     #     """Apply batch updates, reset input batch at end of step
     #     * Apply batch add/remove/permute to logits procs' states
