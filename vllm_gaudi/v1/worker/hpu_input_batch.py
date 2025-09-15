@@ -566,33 +566,6 @@ class InputBatch:
             logitsprocs=self.logitsprocs,
         )
 
-    # def _make_pooling_metadata(self) -> PoolingMetadata:
-    #     """
-    #     Build PoolingMetadata from self.input_batch requests.
-    #     """
-    #     num_reqs = self.num_reqs
-
-    #     # prompt lengths: each request has its prompt length
-    #     prompt_lens = torch.tensor(
-    #         [self.requests[req_id].num_computed_tokens for req_id in req_ids],
-    #         dtype=torch.int32,
-    #         device='cpu'
-    #     )
-
-    #     # pooling params: one per request
-    #     pooling_params = [PoolingParams(task='embed') for _ in req_ids]
-
-    #     # flatten prompt_token_ids
-    #     prompt_token_ids_list = [torch.tensor(self.requests[req_id].prompt_token_ids, dtype=torch.long, device='cpu') for req_id in req_ids]
-    #     prompt_token_ids = torch.cat(prompt_token_ids_list, dim=0) if prompt_token_ids_list else None
-
-    #     return PoolingMetadata(
-    #         prompt_lens=prompt_lens,
-    #         prompt_token_ids=prompt_token_ids,
-    #         pooling_params=pooling_params,
-    #         pooling_cursor=None  # will build later
-    #     )
-
     def make_selective_sampling_metadata(
         self,
         req_id_output_token_ids: list[tuple[str, list[int]]],
