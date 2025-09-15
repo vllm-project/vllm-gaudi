@@ -408,6 +408,7 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
             hidden_states = self.model(*args, **kwargs)
             if self._rotary_prepare_cos_sin is not None:
                 self._reset_rotary_cos_sin()
+            hidden_states = hidden_states.view(input_ids.size(0), input_ids.size(1), -1)
         return hidden_states
 
     def get_input_embeddings(self, input_ids, multimodal_embeddings=None):
