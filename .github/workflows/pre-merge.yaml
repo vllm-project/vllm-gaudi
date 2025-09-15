@@ -121,9 +121,32 @@ jobs:
 
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
-  hpu_e2e_tests:
+  hpu_perf_tests:
     runs-on: ucb-vllm-cicd-g2
     # This is a final job that runs after the build and unit tests 
+    # Unit tests are supposed to fail fast if anything goes wrong, removing the need for this job to run.
+    needs: [pre_merge_hpu_test_build, hpu_unit_tests]
+    steps:
+      - name: Run test scripts
+        run: |
+          EXITCODE=1
+          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-perf-tests-${{ github.event.pull_request.head.sha }} || true; }
+          trap 'remove_docker_containers; exit $EXITCODE;' EXIT
+          remove_docker_containers
+
+          echo "Running HPU plugin v1 perf tests"
+          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-perf-tests-${{ github.event.pull_request.head.sha }} --network=host \
+            -e HABANA_VISIBLE_DEVICES=all \
+            -e HF_HOME=/workspace/hf_cache \
+            -v /mnt/hf_cache:/workspace/hf_cache \
+            hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
+            /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_perf_tests.sh"
+          
+          EXITCODE=$?
+          echo "Test script exited with code: $EXITCODE"
+  hpu_e2e_tests:
+    runs-on: ucb-vllm-cicd-g2
+    # This is a final job that runs after the build and unit tests
     # Unit tests are supposed to fail fast if anything goes wrong, removing the need for this job to run.
     needs: [pre_merge_hpu_test_build, hpu_unit_tests]
     steps:
@@ -141,13 +164,13 @@ jobs:
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
             /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_gsm8k_tests.sh"
-          
+
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
 
   pre_merge_hpu_test:
     runs-on: ucb-vllm-cicd-g2
-    needs: [hpu_unit_tests, hpu_e2e_tests]
+    needs: [hpu_unit_tests, hpu_e2e_tests, hpu_perf_tests]
     # This job is required to pass for pre-merge CI. By itself it does nothing, and will only pass if all jobs specified in "needs" list pass.
     steps:
       - name: Succeeded if all previous jobs passed
