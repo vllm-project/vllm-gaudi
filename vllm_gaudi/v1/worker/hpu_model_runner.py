@@ -3171,7 +3171,7 @@ class HPUModelRunner:
             mm_positions=[],
             sampling_params=sampling_params,
             pooling_params=None,
-            block_ids=([block_num], ),
+            block_ids=[block_num],
             num_computed_tokens=num_computed_tokens,
             lora_request=None,
         )
@@ -3271,7 +3271,98 @@ class HPUModelRunner:
             '''
             if is_causal:
                 # fill the rest with prompts
-                pass
+                decode_reqs_query = []
+                decode_reqs_blocks = []
+                prompt_reqs_query = []
+                prompt_reqs_blocks = []
+
+                all_shared_blocks_ids = [block for block in range(shared_ctx_len)]
+                unique_block = unique_ctx_len - 1
+                # do not use unique block id
+                if unique_block in all_shared_blocks_ids:
+                    all_shared_blocks_ids.remove(unique_ctx_len - 1)
+                    all_shared_blocks_ids.append(shared_ctx_len + 1)
+                print(all_shared_blocks_ids, len(all_shared_blocks_ids))
+
+                #add unique
+                if unique_ctx_len > 0:
+                    decode_reqs_query.append(1)
+                    decode_reqs_blocks.append([unique_ctx_len - 1])
+                prompts_number = self.max_num_seqs - len(decode_reqs_query)
+                remaining_query = query_len - sum(decode_reqs_query)
+                rounding_total = math.ceil(remaining_query // self.block_size) * self.block_size
+                q, r = divmod(rounding_total, prompts_number)
+                prompt_reqs_query = [q + self.block_size] * (r // self.block_size) + [q] * (prompts_number - (r // self.block_size))
+                prompt_reqs_blocks = [[] for _ in range(len(prompt_reqs_query))]
+                for idx, query in enumerate(prompt_reqs_query): 
+                    available_space_for_ctx = math.floor((self.max_model_len - query) // self.block_size)
+                    print(available_space_for_ctx)
+                    if len(all_shared_blocks_ids) >= available_space_for_ctx:
+                        prompt_reqs_blocks[idx] = all_shared_blocks_ids[:available_space_for_ctx]
+                        del all_shared_blocks_ids[:available_space_for_ctx]
+                    else:
+                        prompt_reqs_blocks[idx] = all_shared_blocks_ids
+                        break
+                    
+
+
+                '''
+
+                while max(prompt_reqs_query) > self.max_model_len:
+                    new_querys = []
+                    for query in prompt_reqs_query:
+                        if query > self.max_model_len:
+                            half1 = query // 2
+                            half2 = query - half1
+                            new_querys.extend([half1, half2])
+                        else:
+                            new_querys.append(query)
+                    prompt_reqs_query = new_querys
+
+                # add corresponding context
+                for query in prompt_reqs_query:
+                    blocks_to_fix = math.floor((self.max_model_len - query) // self.block_size)
+                    if blocks_to_fix > 0:
+                        prompt_reqs_blocks.append(all_shared_blocks_ids[:blocks_to_fix])
+                    else:
+                        prompt_reqs_blocks.append([])
+                '''
+                    
+
+                print(prompt_reqs_query, prompt_reqs_blocks)
+                '''
+                remaining_query = query_len - sum(decode_reqs_query)
+                min_num_prompts = math.floor(remaining_query // self.max_model_len)
+                remain = remaining_query % self.max_model_len
+
+                prompt_reqs_query = [min_num_prompts] if remaining_query > 0 else []
+                if remain > 0:
+                    prompt_reqs_query.append(remain)
+                print("prompt_reqs_query", prompt_reqs_query)
+                if prompt_reqs_query:
+                    chunk_size = (shared_ctx_len + len(prompt_reqs_query) - 1) // len(prompt_reqs_query)
+                    for i in range(0, shared_ctx_len, chunk_size):
+                        prompt_reqs_blocks.append(all_shared_blocks_ids[i:i + chunk_size])
+                '''
+                
+                print("prompt", prompt_reqs_query, prompt_reqs_blocks)
+                print("decode", decode_reqs_query, decode_reqs_blocks)
+                    
+                for query, blocks in zip(prompt_reqs_query, prompt_reqs_blocks):
+                    self._add_dummy_unified_request(requests,
+                                   True,
+                                   False,
+                                   blocks,
+                                   num_computed_tokens,
+                                   query)
+
+                if unique_ctx_len > 0:
+                    self._add_dummy_unified_request(requests,
+                                   False,
+                                   True,
+                                   [unique_ctx_len - 1],
+                                   num_computed_tokens,
+                                   1) 
             else:
                 # fill the rest with decodes
                 remaining_samples = query_len
@@ -3352,7 +3443,8 @@ class HPUModelRunner:
                                    num_computed_tokens,
                                    num_scheduled_tokens)
                 '''
-            print(len(requests), requests[0], requests[-1])
+            print(len(requests))
+            #exit()
             '''
             unified_scheduled_tokens = query_len
             unified_num_computed_tokens = (shared_ctx_len + unique_ctx_len) * self.block_size
