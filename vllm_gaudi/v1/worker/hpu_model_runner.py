@@ -3104,7 +3104,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 else:
                     raise
 
-        # Ensure HPU operations finish
+            # Cleanup after batch has been warmed up
+            self.input_batch.req_id_to_index = {}
+            self.requests = {}
+
+        # Final synchronization to ensure all operations are completed
         torch.hpu.synchronize()
         logger.info("Pooler warmup completed successfully")
 

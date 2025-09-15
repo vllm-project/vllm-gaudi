@@ -506,13 +506,6 @@ class InputBatch:
         # TODO: follow upstream PR#16728 for enabling batch_update
         self.sampling_metadata = self._make_sampling_metadata()
 
-    # def refresh_pooling_metadata(self):
-    #     """Apply batch updates, reset input batch at end of step
-    #     * Apply batch add/remove/permute to logits procs' states
-    #     * If batch state is modified, update sampling metadata
-    #     """
-    #     self.pooling_metadata = self._make_pooling_metadata()
-
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
         if not self.all_greedy:
