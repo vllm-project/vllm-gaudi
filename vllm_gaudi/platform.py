@@ -207,4 +207,4 @@ class HpuPlatform(Platform):
             import vllm.model_executor.utils as utils
             utils.set_weight_attrs = set_weight_attrs
         except Exception as e:
-            logger.warning(f"Failed to patch set_weight_attrs: {e}")
+            logger.warning("Failed to patch set_weight_attrs: %s", e)
