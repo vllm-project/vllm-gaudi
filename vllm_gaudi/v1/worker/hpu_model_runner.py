@@ -3042,14 +3042,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             dummy_input_ids = torch.randint(
                 low=0,
                 high=vocab_size,
-                size=(total_tokens,),
+                size=(total_tokens, ),
                 device=device,
                 dtype=torch.long,
             )
             dummy_positions = torch.arange(total_tokens, device=device, dtype=torch.long)
             slot_mapping = torch.arange(total_tokens, dtype=torch.long, device=device)
-            seq_lens_tensor = torch.full((bs,), query_len, device=device, dtype=torch.int32)
-            context_lens_tensor = torch.zeros((bs,), device=device, dtype=torch.int32)
+            seq_lens_tensor = torch.full((bs, ), query_len, device=device, dtype=torch.int32)
+            context_lens_tensor = torch.zeros((bs, ), device=device, dtype=torch.int32)
 
             attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
                 seq_lens_tensor=seq_lens_tensor,
@@ -3098,11 +3098,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             except RuntimeError as e:
                 err_str = str(e).lower()
                 if "out of memory" in err_str or "oom" in err_str:
-                    raise RuntimeError(
-                        f"HPU out of memory occurred when warming up pooler "
-                        f"with bs={bs}, query_len={query_len}, total_tokens={total_tokens}. "
-                        "Try lowering max_num_seqs or warmup bucket sizes."
-                    ) from e
+                    raise RuntimeError(f"HPU out of memory occurred when warming up pooler "
+                                       f"with bs={bs}, query_len={query_len}, total_tokens={total_tokens}. "
+                                       "Try lowering max_num_seqs or warmup bucket sizes.") from e
                 else:
                     raise
 
@@ -3259,7 +3257,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             pooling_param = PoolingParams(task=task)
             to_update = model.pooler.get_pooling_updates(pooling_param.task)
             to_update.apply(pooling_param)
-            
+
             req = NewRequestData(
                 req_id=req_id,
                 prompt_token_ids=prompt_token_ids,
