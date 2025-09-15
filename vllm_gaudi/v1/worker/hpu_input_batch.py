@@ -215,6 +215,11 @@ class InputBatch:
         self.sampling_metadata = self._make_sampling_metadata()
         self.pooling_params: dict[str, PoolingParams] = {}
 
+        # Cached reference to the GPU tensor of previously sampled tokens
+        self.prev_sampled_token_ids: Optional[torch.Tensor] = None
+        self.prev_sampled_token_ids_invalid_indices: Optional[set[int]] = None
+        self.prev_req_id_to_index: Optional[dict[str, int]] = None
+
         self.req_type: dict[str, str] = {}
 
     @property
