@@ -584,7 +584,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                                       **self.common_attention_args(block_list, key_cache, value_cache,
                                                                                    attn_metadata.block_size))
         # Reshape the output tensor.
-        return output.view(batch_size*seq_len, hidden_size)
+        return output.view(batch_size * seq_len, hidden_size)
 
     def common_attention_args(self, block_list=None, key_cache=None, value_cache=None, block_size=None):
         return {
