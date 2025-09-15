@@ -50,8 +50,8 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCach
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds, LogprobsTensors, ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import bind_kv_cache
-from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
-from vllm.v1.worker.gpu_input_batch import CachedRequestState
+from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
+#from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.distributed.parallel_state import get_pp_group
 
 from vllm.model_executor.models.interfaces import supports_transcription
@@ -855,6 +855,8 @@ class HPUModelRunner:
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
 
+        print("ELOMELO", scheduler_output)
+
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -907,6 +909,8 @@ class HPUModelRunner:
                 to_update = model.pooler.get_pooling_updates(task)
                 assert to_update is not None, (f"{pooling_params.task=} is not supported by the model")
                 to_update.apply(pooling_params)
+
+            print("913", new_req_data.block_ids)
 
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
@@ -964,6 +968,7 @@ class HPUModelRunner:
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
+            print("971", req_data.new_block_ids[i], i, req_id)
             new_block_ids = req_data.new_block_ids[i]
             resumed_from_preemption = req_data.resumed_from_preemption[i]
             req_state.num_computed_tokens = num_computed_tokens
@@ -1037,6 +1042,7 @@ class HPUModelRunner:
         # The smaller empty indices are filled first.
         removed_req_indices = sorted(removed_req_indices, reverse=True)
         for req_id in req_ids_to_add:
+            print("1045", self.input_batch)
             req_state = self.requests[req_id]
             req_index = removed_req_indices.pop() if removed_req_indices else None
             self.input_batch.add_request(req_state, req_index)
@@ -3153,6 +3159,10 @@ class HPUModelRunner:
             # num_computed_tokens + num_scheduled_tokens > prompt_token_ids
             prompt_token_ids = num_computed_tokens + num_scheduled_tokens - 1
 
+        prompt_token_ids = list(range(num_scheduled_tokens))
+
+        #print("DEBUG:", block_num, len(block_num))
+
         req = NewRequestData(
             req_id=req_id,
             prompt_token_ids=prompt_token_ids,
@@ -3161,7 +3171,7 @@ class HPUModelRunner:
             mm_positions=[],
             sampling_params=sampling_params,
             pooling_params=None,
-            block_ids=block_num,
+            block_ids=([block_num], ),
             num_computed_tokens=num_computed_tokens,
             lora_request=None,
         )
@@ -3176,36 +3186,6 @@ class HPUModelRunner:
             blocks[i] += 1
         seq_lengths = [b * block_size - 1 for b in blocks]
         return seq_lengths
-
-    def _generate_unified_sequence_lenghts(self, query_len, is_causal):
-        seq_lens = []
-        if is_causal:
-            # first one is prompt, rest decodes
-            seq_lens = [1] * self.max_num_seqs
-            prompt_query_remaining = query_len - self.max_num_seqs
-
-            for i in range(self.max_num_seqs):
-                if prompt_query_remaining <= 0:
-                    break
-
-                add = min(self.max_model_len-1, prompt_query_remaining)
-                seq_lens[i] += add
-                prompt_query_remaining -= add
-
-            print(seq_lens)
-        else: 
-            # all decode
-            seq_lens = [1] * query_len
-
-        return seq_lens
-
-
-    def _generate_blocks_list(self, shared, unique, is_causali, total_tokens):
-        max_block_id = max(shared, unique)
-        block_table = [0] * math.ceil(total_tokens // self.block_size)
-        #print(block_table)
-                
-            
 
     def distribute_sum_evenly(self, total_sum, max_length):
         '''
@@ -3274,13 +3254,13 @@ class HPUModelRunner:
                                         block_id=block_id)
 
         if unified_cfg:
-            unified_cfg = (100, 100, 10, 0)
+            #unified_cfg = (100, 100, 10, 0)
             query_len, shared_ctx_len, unique_ctx_len, is_causal = unified_cfg
             print(query_len, shared_ctx_len, unique_ctx_len, is_causal)
 
             num_computed_tokens = (shared_ctx_len + unique_ctx_len) * self.block_size 
             num_scheduled_tokens = query_len
-
+            '''
             # prepare first decode with unique block
             self._add_dummy_unified_request(requests,
                                    False,
@@ -3288,19 +3268,21 @@ class HPUModelRunner:
                                    [unique_ctx_len - 1],
                                    num_computed_tokens,
                                    num_scheduled_tokens)
+            '''
             if is_causal:
                 # fill the rest with prompts
                 pass
             else:
                 # fill the rest with decodes
-                remaining_samples = query_len - 1
+                remaining_samples = query_len
                 base = shared_ctx_len // remaining_samples
                 remain = shared_ctx_len % remaining_samples
                 window_size = base + remain
 
                 all_shared_blocks_ids = [block for block in range(shared_ctx_len)]
+                unique_block = unique_ctx_len - 1
                 # do not use unique block id
-                if (unique_ctx_len - 1) in all_shared_blocks_ids:
+                if unique_block in all_shared_blocks_ids:
                     all_shared_blocks_ids.remove(unique_ctx_len - 1)
                     all_shared_blocks_ids.append(shared_ctx_len + 1)
                 print(all_shared_blocks_ids, len(all_shared_blocks_ids))
@@ -3321,9 +3303,14 @@ class HPUModelRunner:
                         split_shared_blocks_ids[target].append(block)
                 
                 # fill empty sublists with any blocks
-                for i in range(remaining_samples):
-                    if not split_shared_blocks_ids[i]:
-                        split_shared_blocks_ids[i].append(all_shared_blocks_ids[i % shared_ctx_len])
+                #for i in range(remaining_samples):
+                #    if not split_shared_blocks_ids[i]:
+                #        split_shared_blocks_ids[i].append(all_shared_blocks_ids[i % shared_ctx_len])
+
+
+                # add unique id
+                min_idx = min(range(remaining_samples), key=lambda j: len(split_shared_blocks_ids[j]))
+                split_shared_blocks_ids[min_idx].append(unique_block)
                         
 
                 print(split_shared_blocks_ids, len(split_shared_blocks_ids))
@@ -3366,7 +3353,6 @@ class HPUModelRunner:
                                    num_scheduled_tokens)
                 '''
             print(len(requests), requests[0], requests[-1])
-            exit()
             '''
             unified_scheduled_tokens = query_len
             unified_num_computed_tokens = (shared_ctx_len + unique_ctx_len) * self.block_size
