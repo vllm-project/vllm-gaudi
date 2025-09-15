@@ -23,9 +23,11 @@ def launch_lm_eval(eval_config):
     enforce_eager = os.environ.get('ENFORCE_EAGER', 'False').lower() in ['true', '1']
     kv_cache_dtype = os.environ.get('KV_CACHE_DTYPE', None)
     task = eval_config.get('tasks', 'gsm8k')
+    async_scheduling = os.environ.get('ASYNC_SCHEDULING', 'False').lower() in ['true', '1']
     model_args = {
         'pretrained': eval_config['model_name'],
         'tensor_parallel_size': tp_size,
+        'async_scheduling': async_scheduling,
         'enforce_eager': enforce_eager,
         'enable_prefix_caching': enable_apc,
         'add_bos_token': True,
