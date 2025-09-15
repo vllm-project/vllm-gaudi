@@ -3,7 +3,12 @@ import os
 
 
 def register():
+    is_registered = os.getenv("VLLM_HPU_REGISTERED", "false").lower() in ("true", "1")
     """Register the HPU platform."""
+    if is_registered:
+        # If register() has been called before, do nothing.
+        return "vllm_gaudi.platform.HpuPlatform"
+    os.environ["VLLM_HPU_REGISTERED"] = "true"
     HpuPlatform.set_torch_compile()
     if os.getenv("VLLM_WEIGHT_LOAD_FORCE_SYNC", "false").lower() in ("true", "1"):
         HpuPlatform.set_synchronized_weight_loader()
