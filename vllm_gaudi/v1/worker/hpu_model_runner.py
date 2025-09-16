@@ -698,8 +698,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             pin_memory=self.pin_memory) if self.use_async_scheduling else None
         self.async_output_copy_stream = torch.hpu.Stream() if \
             self.use_async_scheduling else None
-        self.async_copy_ready_event = torch.hpu.Event() if \
-            self.use_async_scheduling else None
         assert not (self.use_async_scheduling and (self.speculative_config is not None)), \
             "Speculative decoding is not supported with async scheduling."
         self.mem_margin = None
