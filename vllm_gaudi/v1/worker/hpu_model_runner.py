@@ -917,7 +917,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
-                mm_features=new_req_data.mm_features,
+                mm_kwargs=new_req_data.mm_kwargs,
+                mm_positions=new_req_data.mm_positions,
+                mm_hashes=new_req_data.mm_hashes,
                 sampling_params=sampling_params,
                 pooling_params=pooling_params,
                 generator=generator,
@@ -934,8 +936,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 second_per_grid_ts = []
                 audio_feature_lengths = []
                 use_audio_in_video = False
-                for mm_feature in self.requests[req_id].mm_features:
-                    mm_item = mm_feature.data
+                for mm_item in self.requests[req_id].mm_kwargs:
                     mm_input = mm_item.get_data()
                     if mm_input.get("image_grid_thw") is not None:
                         image_grid_thw.append(mm_input["image_grid_thw"].tolist())
@@ -1097,10 +1098,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
 
             for mm_input_id in encoder_input_ids:
-                mm_feature = req_state.mm_features[mm_input_id]
-                mm_hash = mm_feature.identifier
-                mm_kwargs.append(mm_feature.data)
-                mm_hashes_pos.append((mm_hash, mm_feature.mm_position))
+                mm_hash = req_state.mm_hashes[mm_input_id]
+                mm_kwargs.append(req_state.mm_kwargs[mm_input_id])
+                mm_hashes_pos.append((mm_hash, req_state.mm_positions[mm_input_id]))
 
         if not mm_kwargs:
             return
@@ -1172,8 +1172,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             num_computed_tokens = \
                 req_state.num_computed_tokens + shift_computed_tokens
-            for mm_feature in req_state.mm_features:
-                pos_info = mm_feature.mm_position
+            mm_positions = req_state.mm_positions
+            mm_hashes = req_state.mm_hashes
+            for i, pos_info in enumerate(mm_positions):
                 start_pos = pos_info.offset
                 num_encoder_tokens = pos_info.length
 
@@ -1192,7 +1193,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 start_idx = max(num_computed_tokens - start_pos, 0)
                 end_idx = min(num_computed_tokens - start_pos + num_scheduled_tokens, num_encoder_tokens)
                 assert start_idx < end_idx
-                mm_hash = mm_feature.identifier
+                mm_hash = mm_hashes[i]
                 encoder_output = self.encoder_cache.get(mm_hash, None)
                 assert encoder_output is not None,\
                       f"Encoder cache miss for {mm_hash}."
@@ -3052,7 +3053,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 self.requests[req_id] = CachedRequestState(
                     req_id=req_id,
                     prompt_token_ids=list(range(10)),  # Dummy prompt
-                    mm_features=[],
+                    mm_kwargs=[],
+                    mm_positions=[],
+                    mm_hashes=[],
                     sampling_params=SamplingParams(),
                     pooling_params=None,
                     generator=None,
@@ -3152,7 +3155,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         req = NewRequestData(
             req_id=req_id,
             prompt_token_ids=prompt_token_ids,
-            mm_features=[],
+            mm_kwargs=[],
+            mm_hashes=[],
+            mm_positions=[],
             sampling_params=sampling_params,
             pooling_params=None,
             block_ids=[block_ids],

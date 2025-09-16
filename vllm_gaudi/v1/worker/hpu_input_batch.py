@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
@@ -30,7 +30,8 @@ class CachedRequestState:
 
     req_id: str
     prompt_token_ids: list[int]
-    mm_features: list[MultiModalFeatureSpec]
+    mm_kwargs: list[MultiModalKwargs]
+    mm_positions: list[PlaceholderRange]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
     generator: Optional[torch.Generator]
