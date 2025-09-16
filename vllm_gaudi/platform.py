@@ -203,5 +203,8 @@ class HpuPlatform(Platform):
                "to enable synchronized weight loader. This is a hack "
                "preventing Llama 405B OOM.")
         logger.warning(msg)
-        import vllm.model_executor.utils as utils
-        utils.set_weight_attrs = set_weight_attrs
+        try:
+            import vllm.model_executor.utils as utils
+            utils.set_weight_attrs = set_weight_attrs
+        except Exception as e:
+            logger.warning("Failed to patch set_weight_attrs: %s", e)
