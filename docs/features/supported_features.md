@@ -27,6 +27,7 @@ title: Supported Features
 | Multinode support   | vLLM HPU backend supports distributed, multiple-node inference with Ray.    | <REF>  |
 | Guided decode   | vLLM HPU supports a guided decoding backend for generating structured outputs.   | [Documentation](https://docs.vllm.ai/en/latest/features/structured_outputs.html)  |
 | Exponential bucketing | vLLM HPU supports exponential bucketing spacing instead of linear to automate configuration of bucketing mechanism, enabled by default. It can be disabled via `VLLM_EXPONENTIAL_BUCKETING=false` environment variable.   | N/A |
+| Data Parellel support | vLLM HPU supports Data Parellel | [Documentation](https://docs.vllm.ai/en/stable/serving/data_parallel_deployment.html)  |
 
 # Comming Soon
 - Sliding window attention
