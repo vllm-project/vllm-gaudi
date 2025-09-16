@@ -12,7 +12,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig, SchedulerConf
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils import GiB_bytes
-from vllm.v1.core.kv_cache_utils import (estimate_max_model_len, get_kv_cache_config)
+from vllm.v1.core.kv_cache_utils import (estimate_max_model_len, get_kv_cache_configs)
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData, SchedulerOutput)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor)
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -521,7 +521,7 @@ def test_init_kv_cache_without_kv_sharing():
     assert page_size == 262144
     num_expected_blocks = 40960  # 20GB / 256KB (page_size) / 2 (num layers)
     assert num_expected_blocks == available_memory // page_size // 2
-    kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec, available_memory)
+    kv_cache_config = get_kv_cache_configs(vllm_config, [kv_cache_spec], [available_memory])[0]
     assert kv_cache_config.num_blocks == num_expected_blocks
     assert len(kv_cache_config.kv_cache_tensors) == 2
     assert kv_cache_config.kv_cache_tensors[0].size == available_memory // 2
@@ -592,7 +592,7 @@ def test_init_kv_cache_with_kv_sharing_valid():
     # with KV sharing, we can allocate (available_mem//page_size//1) blocks
     # which is twice as many as without KV sharing
     num_expected_blocks = 655360  # 20GB / 32KB
-    kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec, available_memory)
+    kv_cache_config = get_kv_cache_configs(vllm_config, [kv_cache_spec], [available_memory])[0]
     assert kv_cache_config.num_blocks == num_expected_blocks
     assert len(kv_cache_config.kv_cache_tensors) == 1
     # Each layer now has twice the available memory for KV cache

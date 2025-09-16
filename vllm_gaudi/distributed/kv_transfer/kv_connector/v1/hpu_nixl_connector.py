@@ -9,7 +9,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (NixlAge
 
 logger = init_logger()
 
-nixl_connector._NIXL_SUPPORTED_XPUS = {"cuda": ("cuda", ), "tpu": ("cpu", ), "hpu": ("cpu", )}
+nixl_connector._NIXL_SUPPORTED_DEVICE = {"cuda": ("cuda", ), "tpu": ("cpu", ), "hpu": ("cpu", )}
 
 
 def initialize_host_xfer_buffer(self, kv_caches: dict[str, torch.Tensor]) -> None:

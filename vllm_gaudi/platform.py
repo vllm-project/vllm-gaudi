@@ -22,6 +22,11 @@ from vllm_gaudi.extension.logger import logger as init_logger
 logger = init_logger()
 
 
+def retain_envs(var_name):
+    retain_var_list = ['GLOO_SOCKET_IFNAME', 'HCCL_SOCKET_IFNAME', 'NCCL_SOCKET_IFNAME']
+    return ('HPU' in var_name or 'RAY' in var_name or 'VLLM' in var_name or var_name in retain_var_list)
+
+
 class HpuPlatform(Platform):
     _enum = PlatformEnum.OOT if envs.VLLM_USE_V1 else PlatformEnum.HPU
     device_name: str = "hpu"
@@ -31,6 +36,7 @@ class HpuPlatform(Platform):
     device_control_env_var: str = "HABANA_VISIBLE_MODULES"
     supported_quantization: list[str] = ["compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu"]
     simple_compile_backend = "hpu_backend"
+    additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int, dtype: torch.dtype,
@@ -53,6 +59,13 @@ class HpuPlatform(Platform):
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
         return True
+
+    @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        return
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -203,5 +216,8 @@ class HpuPlatform(Platform):
                "to enable synchronized weight loader. This is a hack "
                "preventing Llama 405B OOM.")
         logger.warning(msg)
-        import vllm.model_executor.utils as utils
-        utils.set_weight_attrs = set_weight_attrs
+        try:
+            import vllm.model_executor.utils as utils
+            utils.set_weight_attrs = set_weight_attrs
+        except Exception as e:
+            logger.warning("Failed to patch set_weight_attrs: %s", e)
