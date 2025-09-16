@@ -90,12 +90,13 @@ class OnlineDefragmenter:
             self.fwd_mapping_table.extend(range(len(self.fwd_mapping_table), block_id + 1))
             self.bwd_mapping_table.extend(range(len(self.bwd_mapping_table), block_id + 1))
 
-    def use_block(self, block_id: int):
+    def use_block(self, block_id: int, num_refs: int = 0):
         """ Increase ref-count for block_id """
-        num_refs = self.used_blocks.get(block_id, 0) + 1
+        if num_refs == 0:
+            num_refs = self.used_blocks.get(block_id, 0) + 1
         self.used_blocks[block_id] = num_refs
 
-    def free_block(self, block_id: int):
+    def free_block(self, block_id: int, is_swap: bool = False):
         """ Decrease ref-count for block_id """
         num_refs = self.used_blocks[block_id] - 1
         if num_refs <= 0:
@@ -176,8 +177,9 @@ class OnlineDefragmenter:
             to_swap.append((used_block, free_block))
 
         for used_block, free_block in to_swap:
-            self.free_block(used_block)
-            self.use_block(free_block)
+            num_refs = self.used_blocks[used_block]
+            del self.used_blocks[used_block]
+            self.use_block(free_block, num_refs)
             orig_used_block = self.unresolve(used_block)
             orig_free_block = self.unresolve(free_block)
             self.update_mapping(orig_used_block, free_block)
