@@ -96,7 +96,7 @@ class OnlineDefragmenter:
         self.used_blocks[block_id] = num_refs
 
     def swap_block(self, block_used: int, block_free: int):
-        """ Swap two block_ids in used_blocks """
+        """ Move ref-count to the new block """
         num_refs = self.used_blocks[block_used]
         del self.used_blocks[block_used]
         self.used_blocks[block_free] = num_refs
