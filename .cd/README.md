@@ -64,6 +64,37 @@ cd vllm-gaudi/.cd/
 
    This launches the vLLM server and runs the benchmark suite automatically.
 
+#### 2.1 (Optional) Running the Server with a Benchmark, and pinning CPU cores for memory access coherence
+
+   To improve memory access cohererence and release CPUs to other CPU only workloads like a vLLM serving with Llama3 8B,
+   pin the CPU cores based on different CPU NUMA nodes by using an auto-generate docker-compose.override.yml file.
+   Couple python libraries are needed for the python scripts, so install the required packages using following commnad.
+   ```bash
+   pip install -r vllm-fork/.cd/server/requirements_cpu_binding.txt
+   ```
+   Run below command to do CPU cores pinning via auto-generated docker-compose.override.yml file.
+   ```bash
+   cd vllm-fork/.cd/
+   MODEL="Qwen/Qwen2.5-14B-Instruct" \
+   HF_TOKEN="<your huggingface token>" \
+   DOCKER_IMAGE="vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/vllm-installer-2.7.1:latest" \
+   python3 server/generate_cpu_binding_from_csv.py --settings server/cpu_binding.csv --output ./docker-compose.override.yml \
+   docker compose --profile benchmark -f docker-compose.yml -f docker-compose.override.yml up
+   ```
+
+   To also pin idle CPUs to another service like vllm-cpu-service, please give the service name to update
+   docker-compose.override.yml in order to bind another service to idle cpus.
+   Here is an exmaple to bind idle cpu for vllm-cpu-service service while docker-compose.vllm-cpu-service.yml defines cpu service.
+
+   ```bash
+   cd vllm-fork/.cd/
+   MODEL="Qwen/Qwen2.5-14B-Instruct" \
+   HF_TOKEN="<your huggingface token>" \
+   DOCKER_IMAGE="vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/vllm-installer-2.7.1:latest" \
+   python3 server/generate_cpu_binding_from_csv.py --settings server/cpu_binding.csv --output ./docker-compose.override.yml --cpuservice vllm-cpu-service \
+   docker compose --profile benchmark -f docker-compose.yml -f docker-compose.vllm-cpu-service.yml -f docker-compose.override.yml up
+   ```
+
 ### 3. Run the server using Docker Compose with custom parameters
 
    To override default settings, you can provide additional parameters when starting the server. This is a more advanced approach:
@@ -129,7 +160,7 @@ cd vllm-gaudi/.cd/
    MAX_MODEL_LEN=2048 \
    INPUT_TOK=128 \
    OUTPUT_TOK=128 \
-   CON_REQ=16 \
+   CONCURRENT_REQ=16 \
    NUM_PROMPTS=64 \
    docker compose --profile benchmark up
    ```
