@@ -168,7 +168,7 @@ class OnlineDefragmenter:
             return
         free = self.free_blocks()
         used = sorted(self.used_blocks.keys(), reverse=True)
-        # to_swap_pad = 256
+
         to_swap: list[tuple[int, int]] = []
         for used_block, free_block in zip(used, free):
             if len(to_swap) == self.to_swap_pad_thresholds[-1] or free_block > used_block:
