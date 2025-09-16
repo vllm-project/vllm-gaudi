@@ -18,9 +18,7 @@ class UnifiedBucketingStrategy():
         shared_ctx_cfg = [0, 1, max_shared_ctx, 10, bs]
         max_unique_ctx = max_blocks
         unique_ctx_cfg = [0, 1, max_unique_ctx, 10, bs]
-        # possible values 0 or 1
-        is_causal = [0, 1]
-        return query_cfg, shared_ctx_cfg, unique_ctx_cfg, is_causal
+        return query_cfg, shared_ctx_cfg, unique_ctx_cfg
 
     def get_range(self, cfg):
         range_for_cfg = warmup_unified_range(cfg)

@@ -80,12 +80,10 @@ class HPUBucketingManager():
             from vllm_gaudi.extension.bucketing.unified import (UnifiedBucketingStrategy)
             strategy = UnifiedBucketingStrategy()
 
-            query_cfg, shared_ctx_cfg, unique_ctx_cfg, is_causal = strategy.get_unified_cfgs(bs=self.max_num_seqs,
+            query_cfg, shared_ctx_cfg, unique_ctx_cfg = strategy.get_unified_cfgs(bs=self.max_num_seqs,
                                         max_model_len=self.max_model_len,
                                         block_size=self.block_size,
                                         max_blocks=self.num_hpu_blocks)
-            print(query_cfg, shared_ctx_cfg, unique_ctx_cfg, is_causal)
-
             query_range = strategy.get_range(query_cfg)
             shared_ctx_range = strategy.get_range(shared_ctx_cfg)
             unique_ctx_range = strategy.get_range(unique_ctx_cfg)
@@ -302,15 +300,16 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
 
 def generate_unified_buckets(query_range, shared_ctx_range, unique_ctx_range, bs, block_size, max_model_len):
     buckets = set()
-    is_causal = [1]
+    is_causal = [0, 1]
 
     for query in query_range:
         for shared_ctx in shared_ctx_range:
             for unique_ctx in unique_ctx_range:
                 for causal in is_causal:
                     if causal:
-                        if math.ceil(shared_ctx * block_size // bs) <= max_model_len:
-                            buckets.add((query, shared_ctx, unique_ctx, causal))
+                        max_bs = min(bs, query)
+                        if math.ceil(shared_ctx * block_size // max_bs) <= max_model_len:
+                                buckets.add((query, shared_ctx, unique_ctx, causal))
                     elif (causal == 0 and query <= bs):
                         # non causal query = current bs
                         if math.ceil(shared_ctx * block_size // (query//2) ) <= max_model_len:
