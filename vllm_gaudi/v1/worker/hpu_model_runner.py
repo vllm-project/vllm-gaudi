@@ -2240,9 +2240,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self._check_config(batch_size, seq_len, num_blocks, attn_metadata, warmup_mode)
         additional_kwargs = {}
         if htorch.utils.internal.is_lazy():
-            use_graphs = self._use_graphs()
-            if self.model_config.enforce_eager:
-                additional_kwargs.update({"bypass_hpu_graphs": not use_graphs})
+            additional_kwargs.update({"bypass_hpu_graphs": not self._use_graphs()})
         else:
             # no hpu graphs for t.compile?
             use_graphs = False
