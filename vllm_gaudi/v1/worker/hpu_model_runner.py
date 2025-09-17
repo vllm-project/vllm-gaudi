@@ -732,6 +732,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                       scheduler_config=vllm_config.scheduler_config,
                                                       lora_config=vllm_config.lora_config).tokenizer
 
+        if self.vllm_config.parallel_config.data_parallel_size > 1 and htorch.utils.internal.is_lazy(
+        ) and not self.model_config.enforce_eager:
+            from vllm import envs
+            # disable device group for dp synchronization when hpu graph is
+            # turned on since it's not captured and causes issues
+            envs.VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION = True
+
         # TODO(madamczyk-intel): add a knob for that
         # TODO(madamczyk-intel): debug why increasing it lowers acc
         self.logits_rounding = 1
@@ -2232,9 +2239,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         num_blocks = self._num_blocks(attn_metadata)
         self._check_config(batch_size, seq_len, num_blocks, attn_metadata, warmup_mode)
         additional_kwargs = {}
-        if htorch.utils.internal.is_lazy() and not self.model_config.enforce_eager:
+        if htorch.utils.internal.is_lazy():
             use_graphs = self._use_graphs()
-            additional_kwargs.update({"bypass_hpu_graphs": not use_graphs})
+            if self.model_config.enforce_eager:
+                additional_kwargs.update({"bypass_hpu_graphs": not use_graphs})
         else:
             # no hpu graphs for t.compile?
             use_graphs = False
@@ -2254,7 +2262,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                kv_caches=kv_caches,
                                                inputs_embeds=inputs_embeds,
                                                model_mm_kwargs=model_mm_kwargs,
-                                               lora_mask=lora_mask)
+                                               lora_mask=lora_mask,
+                                               **additional_kwargs)
         # NOTE(kzawora): returning hidden_states is required in prompt logprobs
         # scenarios, as they will do logit processing on their own
         if self.use_aux_hidden_state_outputs:
