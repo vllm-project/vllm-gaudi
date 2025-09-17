@@ -56,6 +56,8 @@ def _compare_objs(obj1, obj2, skip: Sequence = ("logitsprocs", "batch_update_bui
             is_same = True
         elif isinstance(a, CpuGpuBuffer):
             is_same = np.allclose(a.np, b.np) and torch.allclose(a.gpu, b.gpu)
+        assert is_same, f"Attribute {attr_name} is different"\
+            f" in {obj1} and {obj2}: {a} != {b}"
 
 
 def _remove_requests(input_batch: InputBatch, batch_size: int,
