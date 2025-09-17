@@ -3298,7 +3298,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         We execute a minimal swap (1 pair) which will be padded internally to the
         requested threshold size. Thresholds chosen to mirror potential production
-        values: 8, 16, 32, 128, 256, 512.
+        values: 8, 16, 32, 64, 128, 256, 512.
         """
         # If defragmenter is disabled or cache utils not prepared, skip.
         if not getattr(self.defragmenter, 'enabled', False):
@@ -3613,7 +3613,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                      "to be called before warming up the model.")
 
                 self.warmup_sampler()
-                # Warm up defragmentation swap graphs similarly
                 self.warmup_defragmenter()
 
                 # TODO(kzawora): align_workers
