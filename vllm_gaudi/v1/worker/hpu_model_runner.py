@@ -728,9 +728,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             logger.info("Bucketing is OFF.")
         self._PAD_SLOT_ID = -1
         self._PAD_BLOCK_ID = -1
-        self._tokenizer = init_tokenizer_from_configs(model_config=vllm_config.model_config,
-                                                      scheduler_config=vllm_config.scheduler_config,
-                                                      lora_config=vllm_config.lora_config).tokenizer
+        self._tokenizer = init_tokenizer_from_configs(model_config=vllm_config.model_config)
 
         # TODO(madamczyk-intel): add a knob for that
         # TODO(madamczyk-intel): debug why increasing it lowers acc
