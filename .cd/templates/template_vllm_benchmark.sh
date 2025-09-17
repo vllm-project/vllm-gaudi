@@ -21,7 +21,7 @@ if [[ "$DATASET_NAME" == "hf" ]]; then
 fi
 
 ## Start benchmarking vLLM serving
-python3 /workspace/vllm/benchmarks/benchmark_serving.py \
+python3 /workspace/vllm-project/benchmarks/benchmark_serving.py \
                 --model $MODEL \
                 --base-url http://localhost:8000 \
                 --endpoint $ENDPOINT \
