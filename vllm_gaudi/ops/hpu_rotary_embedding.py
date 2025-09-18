@@ -657,13 +657,20 @@ class HPUMRotaryEmbedding(MRotaryEmbedding):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from habana_frameworks.torch.hpex.kernels import (RotaryPosEmbeddingMode, apply_rotary_pos_emb)
 
-        # Prepare cos-sin caches for long-context + LoRA with offsets for every
-        # forward, since the offset information wasn't available previously
-        if not hasattr(self, "sin") or self.recompute_cos_sin:
-            self.prepare_cos_sin(positions, offsets, recompute_cos_sin=True)
-        if hasattr(self, "scaling_factors") or hasattr(self, "scaling_factor") or self.sin is None:
-            self.prepare_cos_sin(positions, offsets)
-        num_tokens = positions.shape[0] * positions.shape[1]
+        num_tokens = positions.shape[-1]
+        cos_sin = self.cos_sin_cache[positions]
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        if positions.ndim == 2:
+            assert self.mrope_section
+
+            cos = torch.cat([m[i] for i, m in enumerate(cos.split(self.mrope_section, dim=-1))], dim=-1)
+            sin = torch.cat([m[i] for i, m in enumerate(sin.split(self.mrope_section, dim=-1))], dim=-1)
+        if self.is_neox_style:
+            cos = torch.cat((cos, cos), dim=-1).unsqueeze(-2)
+            sin = torch.cat((sin, sin), dim=-1).unsqueeze(-2)
+        else:
+            sin = torch.repeat_interleave(sin, 2, dim=-1, output_size=cos_sin.shape[-1]).unsqueeze(-2)
+            cos = torch.repeat_interleave(cos, 2, dim=-1, output_size=cos_sin.shape[-1]).unsqueeze(-2)
         # HPU RoPE kernel requires hidden dimension for cos and sin to be equal
         # to query hidden dimension, so the original tensors need to be
         # expanded
@@ -673,8 +680,6 @@ class HPUMRotaryEmbedding(MRotaryEmbedding):
         # and expansion of cos/sin tensors via repeat_interleave
         rope_mode: RotaryPosEmbeddingMode
         rope_mode = RotaryPosEmbeddingMode.BLOCKWISE if self.is_neox_style else RotaryPosEmbeddingMode.PAIRWISE
-        sin = self.sin
-        cos = self.cos
         query_shape = query.shape
         key_shape = key.shape
         query = query.view(num_tokens, -1, self.head_size)

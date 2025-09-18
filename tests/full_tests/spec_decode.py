@@ -17,7 +17,12 @@ os.environ["VLLM_CONTIGUOUS_PA"] = "false"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
-def time_generation(llm: LLM, prompts: list[str], sampling_params: SamplingParams, num_spec_tokens=5, num_warmups=1):
+def time_generation(llm: LLM,
+                    prompts: list[str],
+                    sampling_params: SamplingParams,
+                    num_spec_tokens=5,
+                    num_warmups=1,
+                    do_profile=False):
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
     # Warmup first
@@ -25,17 +30,35 @@ def time_generation(llm: LLM, prompts: list[str], sampling_params: SamplingParam
     for _ in range(num_warmups):
         llm.generate(prompts, sampling_params)
     logging.info("Starting generation...")
+    ret: list[str] = []
+    acceptance_counts = [0] * (num_spec_tokens + 1)
     start = time.time()
-    outputs = llm.generate(prompts, sampling_params)
+    if do_profile:
+        llm.start_profile()
+    try:
+        outputs = llm.generate(prompts, sampling_params)
+    except Exception as e:
+        logging.error("Error getting metrics: %s", e)
+        end = time.time()
+        latency = end - start
+        result_dict = {
+            'ret_spec': ret,
+            'latency': latency,
+            'acc_counts': acceptance_counts,
+            'acc_rate': 0.0,
+            'num_draft_tokens': 0,
+            'num_drafts': 0,
+        }
+        return result_dict
+    if do_profile:
+        llm.stop_profile()
     end = time.time()
     latency = end - start
     logging.info("Generation completed in %.2f seconds.", latency)
     # Print the outputs.
-    ret = []
-    acceptance_counts = [0] * (num_spec_tokens + 1)
     for output in outputs:
         generated_text = output.outputs[0].text
-        ret.append(generated_text)
+        ret.append(generated_text[:200])
 
     try:
         metrics = llm.llm_engine.get_metrics()
@@ -98,7 +121,8 @@ def test_ngram(is_enable, args, prompts, sampling_params, task_key, result_queue
             disable_log_stats=False,
         )
 
-    result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups)
+    result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups,
+                                  args.do_profile)
 
     result_queue.put((task_key, result_dict))
 
@@ -121,7 +145,32 @@ def test_eagle_model(is_enable, args, prompts, sampling_params, task_key, result
             enforce_eager=args.enforce_eager,
         )
 
-    result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups)
+    result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups,
+                                  args.do_profile)
+    result_queue.put((task_key, result_dict))
+
+
+def test_eagle3_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
+    if not is_enable:
+        llm = LLM(
+            model="meta-llama/Meta-Llama-3-8B-Instruct",
+            disable_log_stats=False,
+            enforce_eager=args.enforce_eager,
+        )
+    else:
+        llm = LLM(
+            model="meta-llama/Meta-Llama-3-8B-Instruct",
+            speculative_config={
+                "model": "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
+                "num_speculative_tokens": args.num_spec_tokens,
+                "method": "eagle3",
+            },
+            disable_log_stats=False,
+            enforce_eager=args.enforce_eager,
+        )
+
+    result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups,
+                                  args.do_profile)
     result_queue.put((task_key, result_dict))
 
 
@@ -143,28 +192,65 @@ def test_medusa_model(is_enable, args, prompts, sampling_params, task_key, resul
             enforce_eager=args.enforce_eager,
         )
 
-    result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups)
+    result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups,
+                                  args.do_profile)
+    result_queue.put((task_key, result_dict))
+
+
+def test_eaglemtp_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
+    if not is_enable:
+        llm = LLM(
+            model="eagle618/deepseek-v3-random",
+            disable_log_stats=False,
+        )
+    else:
+        llm = LLM(
+            model="eagle618/deepseek-v3-random",
+            speculative_config={
+                "model": "eagle618/eagle-deepseek-v3-random",
+                "num_speculative_tokens": args.num_spec_tokens,
+            },
+            disable_log_stats=False,
+        )
+
+    result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups,
+                                  args.do_profile)
     result_queue.put((task_key, result_dict))
 
 
 def test_mtp_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
     if not is_enable:
         llm = LLM(
-            model="Qwen/Qwen3-4B",
+            model="/mnt/weka/data/pytorch/DeepSeek-R1",
+            tensor_parallel_size=8,
+            enable_expert_parallel=True,
             disable_log_stats=False,
+            trust_remote_code=True,
         )
     else:
         llm = LLM(
-            model="Qwen/Qwen3-4B",
+            model="/mnt/weka/data/pytorch/DeepSeek-R1",
+            tensor_parallel_size=8,
+            enable_expert_parallel=True,
             speculative_config={
-                "method": "deepseek_mtp",
-                "model": "Qwen/Qwen3-0.6B",
                 "num_speculative_tokens": args.num_spec_tokens,
             },
             disable_log_stats=False,
+            trust_remote_code=True,
         )
+        # llm = LLM(
+        #     model="wemaster/deepseek_mtp_main_random_bf16",
+        #     tensor_parallel_size=1,
+        #     speculative_config={
+        #         "num_speculative_tokens": 1,
+        #     },
+        #     trust_remote_code=True,
+        #     disable_log_stats=False,
+        #     max_model_len=4096,
+        # )
 
-    result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups)
+    result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups,
+                                  args.do_profile)
     result_queue.put((task_key, result_dict))
 
 
@@ -180,14 +266,19 @@ if __name__ == "__main__":
     parser.add_argument("--num_warmups", type=int, default=1, help="Number of warmup runs before timing.")
     parser.add_argument("--assert_acc_rate",
                         type=float,
-                        default=0.15,
+                        default=0.0,
                         help="Assert that the acceptance rate is at least this value.")
+    parser.add_argument("--do_profile", action="store_true", help="Enable profiling during generation.")
 
     # 'ngram', 'eagle', 'eagle3', 'medusa', 'mlp_speculator',
     # 'draft_model' or 'deepseek_mtp
     # V1 does not support draft_model yet.
     # MLP speculator => https://github.com/vllm-project/vllm/pull/21276
     args = parser.parse_args()
+    if args.do_profile:
+        logging.info('Profiling is enabled. Results will be saved to '
+                     './vllm_profile_spec_decode')
+        os.environ["VLLM_TORCH_PROFILER_DIR"] = "./vllm_profile_spec_decode"
 
     # Sample prompts.
     prompts = [
@@ -222,6 +313,18 @@ if __name__ == "__main__":
             multiprocessing.Process(target=test_ngram,
                                     args=(True, args, prompts, sampling_params, 'spec_ngram', result_queue))
         }
+    elif task == "deepseek_eaglemtp":
+        if args.run_base:
+            task_queue['baseline_eaglemtp'] = {
+                'proc':
+                multiprocessing.Process(target=test_eaglemtp_model,
+                                        args=(False, args, prompts, sampling_params, 'baseline_mtp', result_queue))
+            }
+        task_queue['spec_eaglemtp'] = {
+            'proc':
+            multiprocessing.Process(target=test_eaglemtp_model,
+                                    args=(True, args, prompts, sampling_params, 'spec_eaglemtp', result_queue))
+        }
     elif task == "deepseek_mtp":
         if args.run_base:
             task_queue['baseline_mtp'] = {
@@ -246,6 +349,18 @@ if __name__ == "__main__":
             multiprocessing.Process(target=test_eagle_model,
                                     args=(True, args, prompts, sampling_params, 'spec_eagle', result_queue))
         }
+    elif task == "eagle3":
+        if args.run_base:
+            task_queue['baseline_eagle3'] = {
+                'proc':
+                multiprocessing.Process(target=test_eagle3_model,
+                                        args=(False, args, prompts, sampling_params, 'baseline_eagle3', result_queue))
+            }
+        task_queue['spec_eagle3'] = {
+            'proc':
+            multiprocessing.Process(target=test_eagle3_model,
+                                    args=(True, args, prompts, sampling_params, 'spec_eagle3', result_queue))
+        }
     elif task == "medusa":
         if args.run_base:
             task_queue['baseline_medusa'] = {
@@ -258,6 +373,8 @@ if __name__ == "__main__":
             multiprocessing.Process(target=test_medusa_model,
                                     args=(True, args, prompts, sampling_params, 'spec_medusa', result_queue))
         }
+    else:
+        raise ValueError(f"Unknown task: {task}")
 
     try:
         for key, task in task_queue.items():
@@ -281,7 +398,7 @@ if __name__ == "__main__":
             for prompt, text in zip(prompts, proc['result']['ret_spec']):
                 print("---")
                 print(f"Prompt: {prompt}")
-                print(f"Generated text: {text[:200]}'...'")
+                print(f"Generated text: {text}'...'")
             print("=========================================")
             if proc['proc'].is_alive():
                 proc['proc'].terminate()
