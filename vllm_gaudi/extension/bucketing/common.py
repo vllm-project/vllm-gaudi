@@ -89,13 +89,14 @@ class HPUBucketingManager():
             shared_ctx_range = strategy.get_range(shared_ctx_cfg)
             unique_ctx_range = strategy.get_range(unique_ctx_cfg)
             
-            print("EO:", query_range, shared_ctx_range, unique_ctx_range)
-            
             self.unified_buckets = generate_unified_buckets(query_range, 
                                          shared_ctx_range, unique_ctx_range, self.max_num_seqs,
                                          self.block_size, self.max_model_len)
 
-            print(self.unified_buckets)
+            msg = (f"Generated {len(self.unified_buckets)} "
+                   f"unified buckets [query, shared_blocks, unique_blocks]: "
+                   f"{list(self.unified_buckets)}")
+            logger().info(msg)
         else:
             logger().info("Bucketing is off - skipping prompt buckets generation")
             self.unified_buckets = []
@@ -149,7 +150,7 @@ class HPUBucketingManager():
             self.decode_buckets = []
         return
 
-    def log_generate_info(self, is_prompt):
+    def log_generate_info(self, is_prompt=False):
         phase = 'prompt' if is_prompt else 'decode'
         buckets = self.prompt_buckets if is_prompt else self.decode_buckets
         msg = (f"Generated {len(buckets)} "
@@ -314,7 +315,8 @@ def generate_unified_buckets(query_range, shared_ctx_range, unique_ctx_range, bs
                     elif (causal == 0 and query <= bs):
                         # non causal query = current bs
                         if math.ceil(shared_ctx * block_size // (query//2) ) <= max_model_len:
-                            buckets.add((query, shared_ctx, unique_ctx, causal))
+                            if shared_ctx > 0 or unique_ctx > 0:
+                                buckets.add((query, shared_ctx, unique_ctx, causal))
 
     return sorted(buckets) 
 
