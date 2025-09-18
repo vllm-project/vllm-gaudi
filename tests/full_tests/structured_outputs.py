@@ -18,12 +18,8 @@ from vllm.sampling_params import StructuredOutputsParams
 MAX_TOKENS=1024
 
 # Structured outputs by Choice (list of possible options)
-structured_outputs_params_choice = StructuredOutputsParams(
-    choice=["Positive", "Negative"]
-)
-sampling_params_choice = SamplingParams(
-    structured_outputs=structured_outputs_params_choice
-)
+structured_outputs_params_choice = StructuredOutputsParams(choice=["Positive", "Negative"])
+sampling_params_choice = SamplingParams(structured_outputs=structured_outputs_params_choice)
 prompt_choice = "Classify this sentiment: vLLM is wonderful!"
 
 # Structured outputs by Regex
@@ -54,9 +50,7 @@ class CarDescription(BaseModel):
 
 json_schema = CarDescription.model_json_schema()
 structured_outputs_params_json = StructuredOutputsParams(json=json_schema)
-sampling_params_json = SamplingParams(
-    structured_outputs=structured_outputs_params_json, max_tokens=MAX_TOKENS
-)
+sampling_params_json = SamplingParams(structured_outputs=structured_outputs_params_json, max_tokens=MAX_TOKENS)
 prompt_json = ("Generate a JSON with the brand, model and car_type of "
                "the most iconic car from the 90's")
 
@@ -69,16 +63,9 @@ table ::= "table_1 " | "table_2 "
 condition ::= column "= " number
 number ::= "1 " | "2 "
 """
-structured_outputs_params_grammar = StructuredOutputsParams(
-    grammar=simplified_sql_grammar
-)
-sampling_params_grammar = SamplingParams(
-    structured_outputs=structured_outputs_params_grammar,
-    max_tokens=MAX_TOKENS,
-)
-prompt_grammar = (
-    "Generate an SQL query to show the 'username' and 'email' from the 'users' table."
-)
+structured_outputs_params_grammar = StructuredOutputsParams(grammar=simplified_sql_grammar)
+sampling_params_grammar = SamplingParams(structured_outputs=structured_outputs_params_grammar, max_tokens=MAX_TOKENS)
+prompt_grammar = ("Generate an SQL query to show the 'username' and 'email' from the 'users' table.")
 
 
 def format_output(title: str, output: str):
