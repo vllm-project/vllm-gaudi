@@ -27,9 +27,6 @@ from vllm_gaudi.extension.unified import (unified_attn, HPUUnifiedAttentionMetad
 
 logger = init_logger()
 
-# Whether to collapse the attention output to 2D tensor. This can be required for some models.
-COLLAPSE_ATTENTION_OUTPUT = int(os.environ.get("VLLM_COLLAPSE_ATTENTION_OUTPUT", "0")) == 1
-
 
 class HPUAttentionBackend(AttentionBackend):
 
@@ -476,7 +473,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 k_scale=layer._k_scale_float,
                 v_scale=layer._k_scale_float,
             )
-
+        # Set return shape
+        output_shape = query.shape
         if query.dim() == 2:
             if attn_metadata.seq_lens_tensor is not None:
                 batch_size = attn_metadata.seq_lens_tensor.shape[0] if not self.use_merged_prefill else 1
@@ -586,14 +584,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                                       position_bias=self.position_bias,
                                                       **self.common_attention_args(block_list, key_cache, value_cache,
                                                                                    attn_metadata.block_size))
-        # Reshape the output tensor.
-        # NOTE (attafosu): Need to selectively flatten the batch and seq dims.
-        # Some modules require 1D/2D attn outputs, e.g Qwen3MoeSparseMoeBlock
-        # Re: https://github.com/vllm-project/vllm/issues/24806
-        # Doing this by default for all models breaks post-attn ops for other models, e.g facebook/opt-125m.
-        if COLLAPSE_ATTENTION_OUTPUT:
-            return output.view(batch_size * seq_len, hidden_size)
-        return output.view(batch_size, seq_len, hidden_size)
+
+        return output.view(*output_shape)
 
     def common_attention_args(self, block_list=None, key_cache=None, value_cache=None, block_size=None):
         return {

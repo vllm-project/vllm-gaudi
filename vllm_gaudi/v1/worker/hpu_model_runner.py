@@ -327,6 +327,7 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         self._rotary_embed_module = self._get_rotary_embedding_module(self.model)
         self._rotary_prepare_cos_sin = self._get_prepare_cos_sin()
         self.unified_attn = get_config().unified_attn
+        self.flatten_input = get_config().flatten_input
 
     def _get_rotary_embedding_module(self, model: torch.nn.Module):
         """
@@ -448,11 +449,12 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
             kwargs.update(model_mm_kwargs)
 
         num_input_tokens = input_ids.size(0) * input_ids.size(1)
+        if self.flatten_input:
+            kwargs['input_ids'] = input_ids.view(-1)
         with set_forward_context(attn_meta, self.vllm_config, num_tokens=num_input_tokens):
             hidden_states = self.model(*args, **kwargs)
             if self._rotary_prepare_cos_sin is not None:
                 self._reset_rotary_cos_sin()
-            hidden_states = hidden_states.view(input_ids.size(0), input_ids.size(1), -1)
         return hidden_states
 
     def get_input_embeddings(self, input_ids, multimodal_embeddings=None):

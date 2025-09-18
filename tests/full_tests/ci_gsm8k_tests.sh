@@ -166,9 +166,9 @@ echo "Test with deepseek R1 passed"
 
 # used to check HPUATTN + MOE + ExpertParallel
 echo "Testing GSM8K on QWEN3-30B-A3B"
-echo VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 TP_SIZE=2 VLLM_COLLAPSE_ATTENTION_OUTPUT=1 \
+echo VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 TP_SIZE=2 \
 pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/Qwen3-30B-A3B.yaml
-VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 TP_SIZE=2 VLLM_COLLAPSE_ATTENTION_OUTPUT=1 \
+VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 TP_SIZE=2 \
 pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/Qwen3-30B-A3B.yaml
 if [ $? -ne 0 ]; then
     echo "Error: Test failed for QWEN3-30B-A3B" >&2
