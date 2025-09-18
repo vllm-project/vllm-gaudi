@@ -11,13 +11,13 @@ from vllm_gaudi.extension.runtime import get_config
 
 
 class UnifiedBucketingStrategy():
-    def get_unified_cfgs(self, bs, max_model_len, block_size, max_blocks):
-        # [min, step, max, limit, turning_point]
-        query_cfg = [128, 128, 4096, 10, bs]
+    def get_unified_cfgs(self, bs, max_model_len, block_size, max_blocks, max_num_batched_tokens):
+        # [min, step, max, turning_point]
+        query_cfg = [128, 128, max_num_batched_tokens, bs]
         max_shared_ctx = math.ceil(max_model_len // block_size) * bs
-        shared_ctx_cfg = [0, 1, max_shared_ctx, 10, bs]
-        max_unique_ctx = max_blocks
-        unique_ctx_cfg = [0, 1, max_unique_ctx, 10, bs]
+        shared_ctx_cfg = [0, 1, max_shared_ctx, bs]
+        max_unique_ctx = max_blocks # // 2 - 500 # TODO: OOM
+        unique_ctx_cfg = [0, 1, max_unique_ctx, bs]
         return query_cfg, shared_ctx_cfg, unique_ctx_cfg
 
     def get_range(self, cfg):
@@ -58,7 +58,7 @@ def warmup_unified_range(cfg):
            | min                            /
            +-------------------------------------------→ 
     '''        
-    bmin, bstep, bmax, limit, turning_point = cfg
+    bmin, bstep, bmax, turning_point = cfg
 
     buckets: Set[Tuple[int, int]] = set()
 

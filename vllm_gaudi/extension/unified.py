@@ -324,6 +324,7 @@ def create_unified_batch(
     for group_id, (blocks, ctx_len, q_len,
                    p_len) in enumerate(zip(block_table, context_lengths, query_lengths, prompt_lengths)):
         is_prompt = ctx_len + q_len <= p_len
+        print("is_prompt = ctx_len + q_len <= p_len", "ctx_len", ctx_len, "q_len", q_len, "p_len", p_len, blocks)
         output_tokens = min(max(ctx_len + q_len - p_len + 1, 0), q_len)
         new_positions = list(range(ctx_len, ctx_len + q_len))
         new_slots = [blocks[ti // block_size] * block_size + ti % block_size for ti in new_positions]
@@ -335,9 +336,11 @@ def create_unified_batch(
         logits_groups.extend([group_id] * output_tokens)
 
         if is_prompt:
+            print("is prompt")
             causal_groups.add(group_id)
             cur_pos = ctx_len
         else:
+            print("is not prompt")
             cur_pos = ctx_len + 1
         for i, b in enumerate(blocks):
             cur_offset = i * block_size
@@ -349,8 +352,11 @@ def create_unified_batch(
                 break
 
     token_ids = list(itertools.chain(*token_ids))
+    print(block_tokens)
     shared_blocks = [bid for bid, btok in block_tokens.items() if btok > 1]
     unique_blocks = [bid for bid, btok in block_tokens.items() if btok == 1]
+
+    print("shared_blocks, unique_blocks", shared_blocks, unique_blocks)
 
     num_tokens = len(token_ids)
     num_shared_blocks = len(shared_blocks)
@@ -362,6 +368,8 @@ def create_unified_batch(
     else:
         num_unique_blocks = 0
     num_logits = len(logits_indices)
+
+    print(num_tokens, num_shared_blocks, num_unique_blocks)
 
     pre_pad = (num_tokens, num_shared_blocks, num_unique_blocks, num_logits)
     post_pad = bucketing_fn(*pre_pad)

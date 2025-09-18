@@ -83,7 +83,8 @@ class HPUBucketingManager():
             query_cfg, shared_ctx_cfg, unique_ctx_cfg = strategy.get_unified_cfgs(bs=self.max_num_seqs,
                                         max_model_len=self.max_model_len,
                                         block_size=self.block_size,
-                                        max_blocks=self.num_hpu_blocks)
+                                        max_blocks=self.num_hpu_blocks,
+                                        max_num_batched_tokens=self.max_num_batched_tokens)
             query_range = strategy.get_range(query_cfg)
             shared_ctx_range = strategy.get_range(shared_ctx_cfg)
             unique_ctx_range = strategy.get_range(unique_ctx_cfg)
