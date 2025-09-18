@@ -2634,7 +2634,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         batch_changed = self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
-            if not has_kv_transfer_group():
+            if not has_kv_transfer_group() or warmup_mode:
                 # Return empty ModelRunnerOuptut if there's no work to do.
                 return EMPTY_MODEL_RUNNER_OUTPUT
             # For D case, wait until kv finish load here
@@ -2679,8 +2679,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         decode_sampled_requests = []
         #if not has_kv_transfer_group():
         #    assert not (num_prefills > 0 and num_decodes > 0)
-        with set_forward_context(None, self.vllm_config):
-            self.maybe_setup_kv_connector(scheduler_output)
+        # skip kv_connector if dummy run
+        if not warmup_mode:
+            with set_forward_context(None, self.vllm_config):
+                self.maybe_setup_kv_connector(scheduler_output)
         finished_sending, finished_recving = set(), set()
 
         # NOTE(Chendi): used by spec decode draft model, since we are doing
@@ -2783,7 +2785,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                              prompt_batch_idx=idx,
                                                                              is_prompt=True)
                     self.profiler.record_counter(self.event_start, counters)
-            self.maybe_wait_for_kv_save()
+            if not warmup_mode:
+                self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = (self.get_finished_kv_transfers(scheduler_output))
 
             if self.is_driver_worker and self.profiler.enabled:
