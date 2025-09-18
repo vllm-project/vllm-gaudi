@@ -15,6 +15,8 @@ from pydantic import BaseModel
 from vllm import LLM, SamplingParams
 from vllm.sampling_params import StructuredOutputsParams
 
+MAX_TOKENS=1024
+
 # Structured outputs by Choice (list of possible options)
 structured_outputs_params_choice = StructuredOutputsParams(
     choice=["Positive", "Negative"]
