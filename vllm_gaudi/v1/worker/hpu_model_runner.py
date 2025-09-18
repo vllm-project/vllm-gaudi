@@ -1534,9 +1534,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             else:
                 all_batch_contents.append(new_batch_contents)
 
-        num_prefill_batches = len(all_batch_contents) if (len(all_batch_contents[0].req_ids) > 0) else 0
+        num_real_prefill_batches = 0
+        for content in all_batch_contents:
+            if len(content.req_ids) > 0:
+                num_real_prefill_batches += 1
 
-        num_pad_across_dp = self.get_dp_padding(num_prefill_batches)
+        num_pad_across_dp = self.get_dp_padding(num_real_prefill_batches)
         return all_batch_contents, num_pad_across_dp
 
     def _make_attn_bias(self, context_groups, token_groups):
@@ -2792,7 +2795,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if self.is_driver_worker and self.profiler.enabled:
                 self.profiler_counter_helper.reset_prompt_seq_stats()
 
-        elif num_pad_prefill_batch_across_dp > 0:
+        if num_pad_prefill_batch_across_dp > 0:
             for idx, (req_id, prompt_len, token_ids, position_ids, attn_metadata, logits_indices,
                       logits_requests) in enumerate(zip(*shallow_tuple(dummy_prefill_input_data_batches_across_dp))):
                 htorch.core.mark_step()
@@ -2898,6 +2901,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                        None,
                                                                        warmup_mode=warmup_mode)
             htorch.core.mark_step()
+
         if structured_output:
             # Scheduler places cached before prompt
             logits_combined = logits_decode + logits_prompt
