@@ -1058,9 +1058,10 @@ class MoeWNA16Matmul(torch.nn.Module):
     """
     Matmul wrapper for compressed int4 WNA16 format
     """
+
     def __init__(self):
         super().__init__()
-        
+
     def set_weight_packed(self, weight_packed: torch.Tensor):
         self.weight_packed = weight_packed
 
@@ -1073,27 +1074,22 @@ class MoeWNA16Matmul(torch.nn.Module):
     def get_dequant_weight(self):
         return torch.ops.hpu.convert_from_uint4(
             self.weight_packed,
-            self.weight_scale, 
-            self.zero_point, 
+            self.weight_scale,
+            self.zero_point,
             self.weight_scale.dtype,
-        ) 
-        
+        )
+
     def forward(self, state, expert_id, w):
         raise NotImplementedError()
-    
-    
+
+
 class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
     """ Mixture of Experts for compressed int4 WNA16 """
-    def __init__(
-        self, num_experts: int, experts_min: int = 0, experts_max: int = 8
-    ):
+
+    def __init__(self, num_experts: int, experts_min: int = 0, experts_max: int = 8):
         super().__init__()
-        self.w13_list = torch.nn.ModuleList(
-            [MoeWNA16Matmul() for _ in range(num_experts)]
-        )
-        self.w2_list = torch.nn.ModuleList(
-            [MoeWNA16Matmul() for _ in range(num_experts)]
-        )
+        self.w13_list = torch.nn.ModuleList([MoeWNA16Matmul() for _ in range(num_experts)])
+        self.w2_list = torch.nn.ModuleList([MoeWNA16Matmul() for _ in range(num_experts)])
         max_expert_per_slice = 32
         self.num_experts = num_experts
         self.experts_min = experts_min
@@ -1122,16 +1118,15 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
         htorch.core.mark_step()
 
         if self.moe_n_slice == 1:
-            return torch.ops.hpu.mixture_of_experts(
-                hidden_states=x,
-                expert_routing_table=topk_ids,
-                router_weights=topk_weights,
-                w12=w13_list,
-                w3=w2_list,
-                permuted_weights=permuted_weights,
-                activation=activation,
-                experts_min=self.experts_min,
-                experts_max=self.experts_max)
+            return torch.ops.hpu.mixture_of_experts(hidden_states=x,
+                                                    expert_routing_table=topk_ids,
+                                                    router_weights=topk_weights,
+                                                    w12=w13_list,
+                                                    w3=w2_list,
+                                                    permuted_weights=permuted_weights,
+                                                    activation=activation,
+                                                    experts_min=self.experts_min,
+                                                    experts_max=self.experts_max)
         for i in range(self.moe_n_slice):
             w13_list_slice = w13_list[i * self.num_expert_per_group:(i + 1) * self.num_expert_per_group]
             w2_list_slice = w2_list[i * self.num_expert_per_group:(i + 1) * self.num_expert_per_group]
