@@ -43,7 +43,7 @@ from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingType
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv, is_pin_memory_available, LazyLoader)
 from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy)
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
@@ -692,9 +692,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
+        # Cache token ids on device to avoid h2d copies
+        self.input_ids_hpu = torch.zeros(
+            self.max_num_tokens, dtype=torch.int32, device=self.device,
+            pin_memory=self.pin_memory) if self.use_async_scheduling else None
         self.async_output_copy_stream = torch.hpu.Stream() if \
-            self.use_async_scheduling else None
-        self.async_copy_ready_event = torch.hpu.Event() if \
             self.use_async_scheduling else None
         assert not (self.use_async_scheduling and (self.speculative_config is not None)), \
             "Speculative decoding is not supported with async scheduling."
@@ -728,9 +730,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             logger.info("Bucketing is OFF.")
         self._PAD_SLOT_ID = -1
         self._PAD_BLOCK_ID = -1
-        self._tokenizer = init_tokenizer_from_configs(model_config=vllm_config.model_config,
-                                                      scheduler_config=vllm_config.scheduler_config,
-                                                      lora_config=vllm_config.lora_config).tokenizer
+        self._tokenizer = init_tokenizer_from_configs(model_config=vllm_config.model_config)
+
+        if self.vllm_config.parallel_config.data_parallel_size > 1 and htorch.utils.internal.is_lazy(
+        ) and not self.model_config.enforce_eager:
+            from vllm import envs
+            # disable device group for dp synchronization when hpu graph is
+            # turned on since it's not captured and causes issues
+            envs.VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION = True
 
         # TODO(madamczyk-intel): add a knob for that
         # TODO(madamczyk-intel): debug why increasing it lowers acc
@@ -1886,17 +1893,15 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         num_decode_tokens_device = async_h2d_copy(num_decode_tokens, device=self.device)
         slot_mapping_device = async_h2d_copy(slot_mapping, device=self.device)
 
+        token_ids_device = async_h2d_copy(token_ids, device=self.device)
         if self.use_async_scheduling:
-            # Move token_ids to device as late as possible
-            token_ids = torch.zeros((padded_batch_size, num_tokens), dtype=torch.int32)
-            # Copy the tensors for async scheduling. H2D sync happens here
             self._prepare_input_ids(scheduler_output)
             if num_tokens == 1:
-                token_ids[:num_decodes] = self.input_ids_cpu[:num_decodes].view(-1, 1)
+                token_ids_device[:num_decodes] = self.input_ids_hpu[:num_decodes].view(-1, 1)
             else:
-                token_ids_split_tensors = torch.split(self.input_ids_cpu[:total_num_scheduled_tokens],
+                token_ids_split_tensors = torch.split(self.input_ids_hpu[:total_num_scheduled_tokens],
                                                       num_tokens_per_req)
-                token_ids[:num_decodes] = \
+                token_ids_device[:num_decodes] = \
                     pad_sequence(list(token_ids_split_tensors),
                                     batch_first=True,
                                     padding_value=0)[:num_decodes]
@@ -1905,9 +1910,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # NOTE(Chendi): Since we can't actually do num_tokens = 2,
             # convert to [batch_size * num_tokens, 1]
             if num_tokens > 1:
-                token_ids = token_ids.view(-1, 1)
+                token_ids_device = token_ids_device.view(-1, 1)
 
-        token_ids_device = async_h2d_copy(token_ids, device=self.device)
         # call prepare_spec_decode_inputs to get the logits indices and
         if scheduler_output is not None:
             logits_indices, spec_decode_metadata = self._prepare_spec_decode_inputs(scheduler_output, logits_indices,
@@ -2121,24 +2125,23 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # So input_ids_cpu will have all the input ids.
             return
 
-        # D2H Sync happens here
-        self.async_copy_ready_event.synchronize()
         prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
 
         if indices_match and max_flattened_index == (num_commmon_tokens - 1):
             # Common-case optimization: the batch is unchanged
             # and no reordering happened.
             # The indices are both the same permutation of 0..N-1
-            self.input_ids_cpu[:len(flattened_indices)].copy_(prev_sampled_token_ids[:len(flattened_indices)])
+            self.input_ids_hpu[:len(flattened_indices)].copy_(prev_sampled_token_ids[:len(flattened_indices)])
             return
 
         # Upload the index tensors asynchronously
         # so the scatter can be non-blocking
-        input_ids_index_tensor = torch.tensor(flattened_indices, dtype=torch.int64, device="cpu")
+        input_ids_index_tensor = torch.tensor(flattened_indices, dtype=torch.int64).to(self.device, non_blocking=True)
         if prev_sampled_token_ids.size(0) <= len(prev_common_req_indices):
             prev_common_req_indices = prev_common_req_indices[:prev_sampled_token_ids.size(0)]
-        prev_common_req_indices_tensor = torch.tensor(prev_common_req_indices, dtype=torch.int64, device="cpu")
-        self.input_ids_cpu.scatter_(dim=0,
+        prev_common_req_indices_tensor = torch.tensor(prev_common_req_indices, dtype=torch.int64).to(self.device,
+                                                                                                     non_blocking=True)
+        self.input_ids_hpu.scatter_(dim=0,
                                     index=input_ids_index_tensor,
                                     src=prev_sampled_token_ids[prev_common_req_indices_tensor])
 
@@ -2232,7 +2235,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         num_blocks = self._num_blocks(attn_metadata)
         self._check_config(batch_size, seq_len, num_blocks, attn_metadata, warmup_mode)
         additional_kwargs = {}
-        if htorch.utils.internal.is_lazy() and not self.model_config.enforce_eager:
+        if htorch.utils.internal.is_lazy():
             use_graphs = self._use_graphs()
             additional_kwargs.update({"bypass_hpu_graphs": not use_graphs})
         else:
@@ -2254,7 +2257,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                kv_caches=kv_caches,
                                                inputs_embeds=inputs_embeds,
                                                model_mm_kwargs=model_mm_kwargs,
-                                               lora_mask=lora_mask)
+                                               lora_mask=lora_mask,
+                                               **additional_kwargs)
         # NOTE(kzawora): returning hidden_states is required in prompt logprobs
         # scenarios, as they will do logit processing on their own
         if self.use_aux_hidden_state_outputs:
@@ -2924,11 +2928,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         max_req_index = max(self.input_batch.req_id_to_index.values())
         postprocessed_sampled_token_ids: list[list[int]] = [[] for _ in range(max_req_index + 1)]
         if self.use_async_scheduling:
-            with torch.hpu.stream(self.async_output_copy_stream):
-                self.async_output_copy_stream.wait_stream(torch.hpu.current_stream())
-                self.input_batch.prev_sampled_token_ids = \
-                    sampled_token_ids.flatten().to("cpu", non_blocking=True)
-                self.async_copy_ready_event.record()
+            self.input_batch.prev_sampled_token_ids = sampled_token_ids.flatten()
             # self.input_batch.prev_sampled_token_ids_invalid_indices
             invalid_req_indices_set = set(invalid_req_indices)
             self.input_batch.prev_sampled_token_ids_invalid_indices = \
