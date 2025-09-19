@@ -166,7 +166,7 @@ jobs:
             -e VLLM_USE_V1=1 \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
-            /bin/bash "python -u /workspace/vllm-gaudi/examples/data_parallel.py --dp-size 2 --tp-size 2"
+            /bin/bash -c "python -u /workspace/vllm-gaudi/examples/data_parallel.py --dp-size 2 --tp-size 2"
 
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
