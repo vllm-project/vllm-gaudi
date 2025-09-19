@@ -2184,7 +2184,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             seq_num_prompt_tokens = self.input_batch.num_prompt_tokens[idx]
             num_scheduled_tokens.append(seq_num_scheduled_tokens)
             num_prompt_tokens.append(seq_num_prompt_tokens)
-        return (self._prepare_prefill_inputs(num_prefills, num_decodes, num_scheduled_tokens, warmup),
+        return (self._prepare_prefill_inputs(num_prefills, num_decodes, num_scheduled_tokens),
                 self._prepare_decode_inputs(num_decodes, num_scheduled_tokens, scheduler_output))
 
     def _seq_len(self, attn_metadata):
@@ -3547,7 +3547,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         req = NewRequestData(
             req_id=req_id,
             prompt_token_ids=prompt_token_ids,
-            mm_features=[],
+            mm_kwargs=[],
+            mm_hashes=[],
+            mm_positions=[],
             sampling_params=sampling_params,
             pooling_params=None,
             block_ids=[block_num],
