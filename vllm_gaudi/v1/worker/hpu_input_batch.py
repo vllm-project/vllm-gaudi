@@ -20,7 +20,7 @@ from vllm.v1.worker.block_table import MultiGroupBlockTable
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder, LogitsProcessors)
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 
-from vllm_gaudi.utils import async_h2d_copy
+from vllm_gaudi.utils import async_h2d_copy, async_h2d_update
 
 _SAMPLING_EPS = 1e-5
 
@@ -570,23 +570,18 @@ class InputBatch:
         skip_copy: bool = False,
     ) -> SamplingMetadata:
         req_indices: list[int] = [self.req_id_to_index[req_id] for req_id, _ in req_id_output_token_ids]
-
-        def async_h2d_update(tensor_cpu: torch.Tensor, tensor: torch.Tensor) -> None:
-            # Using in-place .copy_ triggers a sync point.
-            tensor[req_indices] = tensor_cpu[req_indices].to(self.device, non_blocking=True)
-
         prompt_token_ids = None
         if not skip_copy:
-            async_h2d_update(self.temperature_cpu_tensor, self.temperature)
-            async_h2d_update(self.top_p_cpu_tensor, self.top_p)
-            async_h2d_update(self.top_k_cpu_tensor, self.top_k)
+            async_h2d_update(self.temperature_cpu_tensor, self.temperature, req_indices)
+            async_h2d_update(self.top_p_cpu_tensor, self.top_p, req_indices)
+            async_h2d_update(self.top_k_cpu_tensor, self.top_k, req_indices)
             if not self.no_penalties:
                 # Since syncing these tensors is expensive only copy them
                 # if necessary i.e. if there are requests which require
                 # penalties to be applied during sampling.
-                async_h2d_update(self.frequency_penalties_cpu_tensor, self.frequency_penalties)
-                async_h2d_update(self.presence_penalties_cpu_tensor, self.presence_penalties)
-                async_h2d_update(self.repetition_penalties_cpu_tensor, self.repetition_penalties)
+                async_h2d_update(self.frequency_penalties_cpu_tensor, self.frequency_penalties, req_indices)
+                async_h2d_update(self.presence_penalties_cpu_tensor, self.presence_penalties, req_indices)
+                async_h2d_update(self.repetition_penalties_cpu_tensor, self.repetition_penalties, req_indices)
                 # The prompt tokens are used only for applying penalties during
                 # the sampling process. Hence copy these tensors only when
                 # there are requests which need penalties to be applied.
@@ -610,7 +605,7 @@ class InputBatch:
         if not self.no_allowed_token_ids:
             assert self.allowed_token_ids_mask is not None
             assert self.allowed_token_ids_mask_cpu_tensor is not None
-            async_h2d_update(self.allowed_token_ids_mask_cpu_tensor, self.allowed_token_ids_mask)
+            async_h2d_update(self.allowed_token_ids_mask_cpu_tensor, self.allowed_token_ids_mask, req_indices)
             allowed_token_ids_mask = self.allowed_token_ids_mask[req_indices]
         return SamplingMetadata(
             temperature=self.temperature[req_indices],
