@@ -17,7 +17,7 @@ jobs:
     if: |
       github.event_name == 'workflow_dispatch' ||
       github.ref == 'refs/heads/main'
-    runs-on: ucb-vllm-cicd-g2
+    runs-on: hourly-ci
     permissions:
       contents: read # Required to checkout code and read history
 
