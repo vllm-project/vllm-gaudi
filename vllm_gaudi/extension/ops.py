@@ -12,6 +12,7 @@ import math
 import habana_frameworks.torch.core as htcore
 from vllm_gaudi.extension.runtime import get_config
 import habana_frameworks.torch.utils.experimental as htexp
+import types
 
 is_hpu_gaudi2 = htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi2
 
@@ -702,19 +703,29 @@ def dynamic_quant(data, single_scale=False):
     return data_fp8, scale.float()
 
 
+# Note (Yi Liu): Necessary base func for INC to get dequantied weight
+def get_dequant_weights_func(self, ) -> Optional[Callable[[torch.nn.Module], torch.Tensor]]:
+    if self.quant_method is not None:
+        quant_method = self.quant_method
+        if hasattr(quant_method, "dequant_fp8_weight"):
+            return quant_method.dequant_fp8_weight
+    return None
+
+
 def gaudi_weight_wrapper(weight_loader):
     """Wrapper for Gaudi weight conversion."""
 
     def wrapper(*args, **kwargs):
-        # args[0] is parameter, args[1] is loaded_weight
-        # weights will be always in fp8, but scales will be in fp32,
-        # so we can detect it by dtype
-        loaded_weight = args[1]
-        if loaded_weight.dtype == torch.float8_e4m3fn:
-            loaded_weight = (loaded_weight.float() * 0.5).to(torch.float8_e4m3fn)
-        else:
-            loaded_weight = (loaded_weight.data * 2.0)
-        args = (args[0], loaded_weight) + args[2:]
+        if get_config().scale_adjustment:
+            # args[0] is parameter, args[1] is loaded_weight
+            # weights will be always in fp8, but scales will be in fp32,
+            # so we can detect it by dtype
+            loaded_weight = args[1]
+            if loaded_weight.dtype == torch.float8_e4m3fn:
+                loaded_weight = (loaded_weight.float() * 0.5).to(torch.float8_e4m3fn)
+            else:
+                loaded_weight = (loaded_weight.data * 2.0)
+            args = (args[0], loaded_weight) + args[2:]
 
         weight_loader(*args, **kwargs)
 
@@ -748,6 +759,9 @@ def fp8_block_linear_postprocess_weights(layer, force_channel_fp8=False):
         layer.weight_scale_inv = torch.nn.Parameter(weight_scale_inv, requires_grad=False)
         htorch.core.mark_step()
         return layer
+    else:
+        # For INC path, we attach the dequant func to the layer
+        layer.get_dequant_weights_func = types.MethodType(get_dequant_weights_func, layer)
 
     layer.weight = torch.nn.Parameter(weight, requires_grad=False)
     orig_M = torch.nn.Parameter(torch.tensor(orig_M, dtype=torch.int32, device=weight.device), requires_grad=False)
@@ -759,9 +773,6 @@ def fp8_block_linear_postprocess_weights(layer, force_channel_fp8=False):
 
 
 def fp8_block_moe_prepare_weights(layer, force_channel_fp8=False):
-    if torch.isnan(layer.w13_weight.data).any():
-        raise ValueError("NaN detected in weights. Please use the flag VLLM_HPU_CONVERT_TO_FP8UZ to convert it at runtime or" \
-        " convert the weights using scripts/deepseek_gaudi2 from vllm-hpu-extension")
     if force_channel_fp8:
         # convert to channel-wise fp8
         w13_weight, w13_weight_scale_inv = dynamic_quant(

@@ -5,7 +5,7 @@ import gc
 import os
 import queue
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 import torch.distributed
@@ -16,12 +16,13 @@ from vllm_gaudi.extension.profiler import (HabanaMemoryProfiler, format_bytes, s
 from vllm_gaudi.extension.runtime import get_config
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized, init_distributed_environment)
+from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec)
-from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerOutput)
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.utils import is_fake_hpu
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, bool_helper
@@ -128,9 +129,9 @@ class HPUWorker(WorkerBase):
         self.profiler.stop()
 
     def init_device(self):
+        self.device = torch.device("hpu")
         # Initialize the distributed environment.
-        init_worker_distributed_environment(self.parallel_config, self.rank, self.distributed_init_method,
-                                            self.local_rank)
+        init_worker_distributed_environment(self.vllm_config, self.rank, self.distributed_init_method, self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
         self.model_runner = HPUModelRunner(vllm_config=self.vllm_config, is_driver_worker=self.is_driver_worker)
@@ -254,7 +255,7 @@ class HPUWorker(WorkerBase):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> ModelRunnerOutput:
+    ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput]:
         if self.step_debug:
             self.step_debug(f'step={self.step}')
         if self.step_profiler and self.step == self.profile_steps[0]:
@@ -293,11 +294,12 @@ class HPUWorker(WorkerBase):
 
 
 def init_worker_distributed_environment(
-    parallel_config: ParallelConfig,
+    vllm_config: VllmConfig,
     rank: int,
     distributed_init_method: Optional[str] = None,
     local_rank: int = -1,
 ) -> None:
+    parallel_config = vllm_config.parallel_config
     """Initialize the distributed environment."""
     init_distributed_environment(parallel_config.world_size, rank, distributed_init_method, local_rank, backend='hccl')
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size, parallel_config.pipeline_parallel_size)
@@ -306,6 +308,8 @@ def init_worker_distributed_environment(
     torch.distributed.all_reduce(dummy_tensor_hpu)
     assert dummy_tensor_hpu.item() == parallel_config.world_size * parallel_config.data_parallel_size
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size, parallel_config.pipeline_parallel_size)
+
+    ensure_kv_transfer_initialized(vllm_config)
 
 
 @contextmanager

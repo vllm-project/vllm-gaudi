@@ -15,9 +15,9 @@ from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.block_table import BlockTable, MultiGroupBlockTable
-from vllm.v1.worker.gpu_input_batch import CachedRequestState
-from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
+from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
 
 VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
@@ -38,7 +38,7 @@ def _compare_objs(obj1, obj2, skip: Sequence = ("logitsprocs", "batch_update_bui
 
         is_same = False
         if isinstance(a, torch.Tensor):
-            if (a.numel() == 0 or b.numel() == 0):
+            if a.numel() == 0 or b.numel() == 0:
                 is_same = (a.numel() == 0 and b.numel() == 0)
             elif torch.allclose(a, b):
                 is_same = True
@@ -54,6 +54,8 @@ def _compare_objs(obj1, obj2, skip: Sequence = ("logitsprocs", "batch_update_bui
             is_same = True  # if we make it here must be same
         elif a == b:
             is_same = True
+        elif isinstance(a, CpuGpuBuffer):
+            is_same = np.allclose(a.np, b.np) and torch.allclose(a.gpu, b.gpu)
         assert is_same, f"Attribute {attr_name} is different"\
             f" in {obj1} and {obj2}: {a} != {b}"
 
@@ -170,9 +172,7 @@ def _construct_cached_request_state(req_id_suffix: int):
         prompt_token_ids=prompt_token_ids,
         sampling_params=_create_sampling_params(),
         pooling_params=None,
-        mm_kwargs=[],
-        mm_positions=[],
-        mm_hashes=[],
+        mm_features=[],
         block_ids=([], ),
         generator=None,
         num_computed_tokens=len(output_token_ids),
