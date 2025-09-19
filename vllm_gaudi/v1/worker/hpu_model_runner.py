@@ -54,7 +54,6 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors, DraftTo
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
-#from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.models.interfaces import (supports_eagle3, supports_transcription)
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
@@ -3343,7 +3342,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     prompt_cfg = (batch_size, seq_len, num_blocks)
                 else:
                     decode_cfg = (batch_size, 1, num_blocks)
-                self._execute_dummy_scenario(prompt_cfg, decode_cfg)
+                self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
             # TODO(kzawora): align_workers
             used_mem = mem_prof.consumed_device_memory
             total_mem += used_mem
@@ -3360,7 +3359,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 continue
             self.graphed_buckets.add(unified_cfg)
             self.log_warmup("Unified CFG", idx, num_candidates, query, shared_ctx, unique_ctx, is_causal)
-            self._execute_dummy_scenario(None, None, unified_cfg)
+            self._prepare_dummy_unified_scenario(unified_cfg)
 
     def _add_dummy_request(self,
                            requests,
@@ -3412,9 +3411,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         req = NewRequestData(
             req_id=req_id,
             prompt_token_ids=prompt_token_ids,
-            mm_kwargs=[],
-            mm_hashes=[],
-            mm_positions=[],
+            mm_features=[],
             sampling_params=sampling_params,
             pooling_params=None,
             block_ids=[block_num],
@@ -3461,8 +3458,90 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         ctx_list = ctx_list if len(ctx_list) > 0 else [0] * len(prompt_list)
         return prompt_list, ctx_list
 
-    def _execute_dummy_scenario(self, prompt_cfg, decode_cfg, unified_cfg=None):
-        from vllm.v1.core.sched.output import (SchedulerOutput, CachedRequestData)
+    def _prepare_dummy_unified_scenario(self, unified_cfg):
+        requests: list[NewRequestData] = []
+        scheduled_tokens: dict[str, int] = {}
+
+        query_len, shared_ctx_len, unique_ctx_len, is_causal = unified_cfg
+        num_computed_tokens = (shared_ctx_len + unique_ctx_len) * self.block_size
+
+        if is_causal:
+            decode_reqs_query = []
+            decode_reqs_blocks = []
+            prompt_reqs_query = []
+            prompt_reqs_blocks: list = []
+
+            all_shared_blocks_ids = [block for block in range(shared_ctx_len)]
+            unique_block = unique_ctx_len - 1
+            # do not use unique block id
+            if unique_block in all_shared_blocks_ids:
+                all_shared_blocks_ids.remove(unique_ctx_len - 1)
+                all_shared_blocks_ids.append(shared_ctx_len + 1)
+
+            #add unique
+            if unique_ctx_len > 0:
+                decode_reqs_query.append(1)
+                decode_reqs_blocks.append([unique_ctx_len - 1])
+            prompts_number = self.max_num_seqs - len(decode_reqs_query)
+            remaining_query = query_len - sum(decode_reqs_query)
+
+            q, r = divmod(remaining_query, prompts_number)
+            prompt_reqs_query = [q + (1 if i < r else 0) for i in range(prompts_number)]
+            prompt_reqs_blocks = [[] for _ in range(len(prompt_reqs_query))]
+            for idx, query in enumerate(prompt_reqs_query):
+                available_space_for_ctx = math.floor((self.max_model_len - query) // self.block_size)
+                if len(all_shared_blocks_ids) >= available_space_for_ctx:
+                    prompt_reqs_blocks[idx] = all_shared_blocks_ids[:available_space_for_ctx]
+                    del all_shared_blocks_ids[:available_space_for_ctx]
+                else:
+                    prompt_reqs_blocks[idx] = all_shared_blocks_ids
+                    break
+            if unique_ctx_len > 0:
+                self._add_dummy_unified_request(requests, False, True, [unique_ctx_len - 1], num_computed_tokens, 1,
+                                                scheduled_tokens)
+
+            for query, blocks in zip(prompt_reqs_query, prompt_reqs_blocks):
+                self._add_dummy_unified_request(requests, True, False, blocks, num_computed_tokens, query,
+                                                scheduled_tokens)
+
+        else:
+            remaining_samples = query_len
+            base = shared_ctx_len // remaining_samples
+            remain = shared_ctx_len % remaining_samples
+
+            all_shared_blocks_ids = [block for block in range(shared_ctx_len)]
+            unique_block = unique_ctx_len - 1
+            # do not use unique block id
+            if unique_block in all_shared_blocks_ids:
+                all_shared_blocks_ids.remove(unique_ctx_len - 1)
+                all_shared_blocks_ids.append(shared_ctx_len + 1)
+
+            # distribute evenly across sublists
+            split_shared_blocks_ids: list[list[int]] = [[] for _ in range(remaining_samples)]
+            idx = 0
+            for i in range(remaining_samples):
+                size = base + (1 if i < remain else 0)
+                for _ in range(size):
+                    split_shared_blocks_ids[i].append(all_shared_blocks_ids[idx])
+                    idx += 1
+
+            # make sure that all blocks are shared = in at least two decodes
+            for i, block in enumerate(all_shared_blocks_ids):
+                target = (i + 1) % remaining_samples
+                if block not in split_shared_blocks_ids[target]:
+                    split_shared_blocks_ids[target].append(block)
+
+            # add unique id
+            min_idx = min(range(remaining_samples), key=lambda j: len(split_shared_blocks_ids[j]))
+            split_shared_blocks_ids[min_idx].append(unique_block)
+
+            for request_blocks in split_shared_blocks_ids:
+                self._add_dummy_unified_request(requests, False, False, request_blocks, num_computed_tokens, 1,
+                                                scheduled_tokens)
+
+        self._execute_dummy_scenario(requests, scheduled_tokens)
+
+    def _prepare_dummy_scenario(self, prompt_cfg, decode_cfg):
         requests: list[NewRequestData] = []
         scheduled_tokens: dict[str, int] = {}
 
@@ -3500,86 +3579,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                         scheduled_tokens=1,
                                         is_prompt=False,
                                         block_id=block_id)
+        self._execute_dummy_scenario(requests, scheduled_tokens)
 
-        if unified_cfg:
-            query_len, shared_ctx_len, unique_ctx_len, is_causal = unified_cfg
-            num_computed_tokens = (shared_ctx_len + unique_ctx_len) * self.block_size
 
-            if is_causal:
-                decode_reqs_query = []
-                decode_reqs_blocks = []
-                prompt_reqs_query = []
-                prompt_reqs_blocks: list = []
-
-                all_shared_blocks_ids = [block for block in range(shared_ctx_len)]
-                unique_block = unique_ctx_len - 1
-                # do not use unique block id
-                if unique_block in all_shared_blocks_ids:
-                    all_shared_blocks_ids.remove(unique_ctx_len - 1)
-                    all_shared_blocks_ids.append(shared_ctx_len + 1)
-
-                #add unique
-                if unique_ctx_len > 0:
-                    decode_reqs_query.append(1)
-                    decode_reqs_blocks.append([unique_ctx_len - 1])
-                prompts_number = self.max_num_seqs - len(decode_reqs_query)
-                remaining_query = query_len - sum(decode_reqs_query)
-
-                q, r = divmod(remaining_query, prompts_number)
-                prompt_reqs_query = [q + (1 if i < r else 0) for i in range(prompts_number)]
-                prompt_reqs_blocks = [[] for _ in range(len(prompt_reqs_query))]
-                for idx, query in enumerate(prompt_reqs_query):
-                    available_space_for_ctx = math.floor((self.max_model_len - query) // self.block_size)
-                    if len(all_shared_blocks_ids) >= available_space_for_ctx:
-                        prompt_reqs_blocks[idx] = all_shared_blocks_ids[:available_space_for_ctx]
-                        del all_shared_blocks_ids[:available_space_for_ctx]
-                    else:
-                        prompt_reqs_blocks[idx] = all_shared_blocks_ids
-                        break
-
-                if unique_ctx_len > 0:
-                    self._add_dummy_unified_request(requests, False, True, [unique_ctx_len - 1], num_computed_tokens, 1,
-                                                    scheduled_tokens)
-
-                for query, blocks in zip(prompt_reqs_query, prompt_reqs_blocks):
-                    self._add_dummy_unified_request(requests, True, False, blocks, num_computed_tokens, query,
-                                                    scheduled_tokens)
-
-            else:
-                remaining_samples = query_len
-                base = shared_ctx_len // remaining_samples
-                remain = shared_ctx_len % remaining_samples
-
-                all_shared_blocks_ids = [block for block in range(shared_ctx_len)]
-                unique_block = unique_ctx_len - 1
-                # do not use unique block id
-                if unique_block in all_shared_blocks_ids:
-                    all_shared_blocks_ids.remove(unique_ctx_len - 1)
-                    all_shared_blocks_ids.append(shared_ctx_len + 1)
-
-                # distribute evenly across sublists
-                split_shared_blocks_ids: list[list[int]] = [[] for _ in range(remaining_samples)]
-                idx = 0
-                for i in range(remaining_samples):
-                    size = base + (1 if i < remain else 0)
-                    for _ in range(size):
-                        split_shared_blocks_ids[i].append(all_shared_blocks_ids[idx])
-                        idx += 1
-
-                # make sure that all blocks are shared = in at least two decodes
-                for i, block in enumerate(all_shared_blocks_ids):
-                    target = (i + 1) % remaining_samples
-                    if block not in split_shared_blocks_ids[target]:
-                        split_shared_blocks_ids[target].append(block)
-
-                # add unique id
-                min_idx = min(range(remaining_samples), key=lambda j: len(split_shared_blocks_ids[j]))
-                split_shared_blocks_ids[min_idx].append(unique_block)
-
-                for request_blocks in split_shared_blocks_ids:
-                    self._add_dummy_unified_request(requests, False, False, request_blocks, num_computed_tokens, 1,
-                                                    scheduled_tokens)
-
+    def _execute_dummy_scenario(self, requests, scheduled_tokens):
+        from vllm.v1.core.sched.output import (SchedulerOutput, CachedRequestData)
+      
         sched_output = SchedulerOutput(
             scheduled_new_reqs=requests,
             scheduled_cached_reqs=CachedRequestData.make_empty(),
