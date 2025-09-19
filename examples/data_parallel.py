@@ -119,7 +119,7 @@ def main(
         "The president of the United States is",
         "The capital of France is",
         "The future of AI is",
-    ] * 40
+    ] * 100
 
     # generate prompts with different length to demonstrate DP aware padding.
     if args.random_input:
