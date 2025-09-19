@@ -236,16 +236,6 @@ class GPTQHPULinearMethod:
         zeros = self.unpack_zeros_from_cuda_old_format(layer).cpu()
         layer.qzeros.data = self.pack_tensor(zeros).to('hpu')
 
-        # TODO: Support group indexing and remove the check
-        columns = layer.qweight.shape[0]
-        if self.quant_config.group_size > 0:
-            g_idx_trivial_list = [i // self.quant_config.group_size for i in range(columns)]
-        else:
-            g_idx_trivial_list = [0] * columns
-        g_idx_trivial = torch.tensor(g_idx_trivial_list, dtype=torch.int32)
-        g_idx_trivial = g_idx_trivial.to('hpu')
-        assert torch.equal(layer.g_idx, g_idx_trivial), "Non-trivial tensor g_idx is not supported"
-
         # for torch.compile
         layer.qweight = Parameter(layer.qweight.data, requires_grad=False)
         layer.qzeros = Parameter(layer.qzeros.data, requires_grad=False)
@@ -262,7 +252,7 @@ class GPTQHPULinearMethod:
 
         reshaped_x = x.reshape(-1, x.shape[-1])
 
-        weight = torch.ops.hpu.convert_from_uint4(layer.qweight, layer.scales, layer.qzeros, x.dtype)
+        weight = torch.ops.hpu.convert_from_uint4(layer.qweight, layer.scales, layer.qzeros, x.dtype, layer.g_idx)
         output = torch.matmul(reshaped_x, weight)
 
         if bias is not None:
