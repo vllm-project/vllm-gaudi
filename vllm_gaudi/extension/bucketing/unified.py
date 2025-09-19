@@ -17,7 +17,7 @@ class UnifiedBucketingStrategy():
         query_cfg = [block_size, max_num_batched_tokens, bs]
         max_shared_ctx = math.ceil(max_model_len // block_size) * bs
         shared_ctx_cfg = [0, max_shared_ctx, bs]
-        max_unique_ctx = max_blocks 
+        max_unique_ctx = max_blocks
         unique_ctx_cfg = [0, max_unique_ctx, bs]
         return query_cfg, shared_ctx_cfg, unique_ctx_cfg
 

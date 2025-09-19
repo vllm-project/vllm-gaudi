@@ -3581,10 +3581,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                         block_id=block_id)
         self._execute_dummy_scenario(requests, scheduled_tokens)
 
-
     def _execute_dummy_scenario(self, requests, scheduled_tokens):
         from vllm.v1.core.sched.output import (SchedulerOutput, CachedRequestData)
-      
+
         sched_output = SchedulerOutput(
             scheduled_new_reqs=requests,
             scheduled_cached_reqs=CachedRequestData.make_empty(),
