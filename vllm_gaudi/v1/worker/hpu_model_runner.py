@@ -1439,6 +1439,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         for b_idx, req_id in enumerate(req_ids):
             cl = context_lens[b_idx]
             qsl = query_lens[b_idx]
+            assert self.requests[req_id].mrope_positions is not None
             input_mrope_position = \
                 self.requests[req_id].mrope_positions[:, cl:cl + qsl]
             dst_end = dst_start + qsl
@@ -1674,7 +1675,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             contiguous_kv=self.use_contiguous_pa,
             bucketing_fn=self.unified_bucketing_fn,
         )
-        
+
         (token_ids_t, token_positions_t, logits_indices_t, logits_groups, attn_metadata) = batch_data
         logits_requests = [req_ids[lg] for lg in logits_groups]
         return PrefillInputData(request_ids=[req_ids],
@@ -1722,13 +1723,17 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             merge_contents(dummy_prefill_input_batches[0], *dummy_prefill_input_batches[1:])
         return all_batches[0], dummy_prefill_input_batches[0] if dummy_prefill_input_batches else None
 
-    def _prepare_unified_prefill_inputs(self, num_prefills, num_decodes,
-                                        num_scheduled_tokens: list[int], warmup = False) -> PrefillInputData:
+    def _prepare_unified_prefill_inputs(self,
+                                        num_prefills,
+                                        num_decodes,
+                                        num_scheduled_tokens: list[int],
+                                        warmup=False) -> tuple[PrefillInputData, None]:
 
-        all_batch_contents, _ = self._extract_prefill_batch_contents(num_prefills, num_decodes, num_scheduled_tokens, warmup)
+        all_batch_contents, _ = self._extract_prefill_batch_contents(num_prefills, num_decodes, num_scheduled_tokens,
+                                                                     warmup)
         all_batches = [self._form_unified_prefill_batch(bc) for bc in all_batch_contents]
         merge_contents(all_batches[0], *all_batches[1:])
-        return all_batches[0], None 
+        return all_batches[0], None
 
     def _create_decode_input_data(self,
                                   num_decodes,
@@ -2145,7 +2150,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         num_prefills,
         num_decodes,
-        warmup = False,
+        warmup=False,
     ):
 
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -2190,6 +2195,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         return attn_metadata.num_blocks()
 
     def _check_config(self, batch_size, seq_len, num_blocks, attn_metadata, warmup_mode):
+        cfg: tuple[Any, ...] | None = None
         if self.unified_attn:
             phase = "prompt" if attn_metadata.is_prompt else "decode"
             shared = attn_metadata.shared_blocks.size(0) if attn_metadata.shared_blocks is not None else 0
@@ -2764,7 +2770,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         num_prefills = len(pd_info.prompt_req_ids)
         num_reqs = num_decodes + num_prefills
         with self.profiler.record_event('internal', 'prepare_input_tensors'):
-            prefill_input_data, decode_input_data = self._prepare_inputs(scheduler_output, num_prefills, num_decodes, warmup_mode)
+            prefill_input_data, decode_input_data = self._prepare_inputs(scheduler_output, num_prefills, num_decodes,
+                                                                         warmup_mode)
         prefill_data, \
             dummy_prefill_input_data_batches_across_dp = prefill_input_data
         num_pad_prefill_batch_across_dp = \
@@ -3153,7 +3160,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()
 
-        
         return model_runner_output
 
     def load_model(self) -> None:
@@ -3297,7 +3303,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                f'used_mem:{format_bytes(total_mem)}')
         logger.info(msg)
 
-    def log_warmup(self, phase, i, max_i, first_dim, second_dim, third_dim, causal = False):
+    def log_warmup(self, phase, i, max_i, first_dim, second_dim, third_dim, causal=False):
         free_mem = format_bytes(HabanaMemoryProfiler.current_free_device_memory())
         if self.unified_attn:
             msg = (f"[Warmup][{phase}][{i + 1}/{max_i}] "
@@ -3523,14 +3529,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         else:
             num_scheduled_tokens[req_id] = scheduled_tokens
 
-    def _add_dummy_unified_request(self,
-                                   requests,
-                                   is_prompt,
-                                   is_unique,
-                                   block_num,
-                                   num_computed_tokens,
-                                   num_scheduled_tokens,
-                                   scheduled_tokens):
+    def _add_dummy_unified_request(self, requests, is_prompt, is_unique, block_num, num_computed_tokens,
+                                   num_scheduled_tokens, scheduled_tokens):
         from vllm.v1.core.sched.output import NewRequestData
 
         req_id = f'{len(requests)}'
@@ -3557,7 +3557,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_computed_tokens=num_computed_tokens,
             lora_request=None,
         )
-        
+
         requests.append(req)
         scheduled_tokens[req_id] = num_scheduled_tokens
 
@@ -3639,14 +3639,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         if unified_cfg:
             query_len, shared_ctx_len, unique_ctx_len, is_causal = unified_cfg
-            num_computed_tokens = (shared_ctx_len + unique_ctx_len) * self.block_size 
-            num_scheduled_tokens = query_len
-            
+            num_computed_tokens = (shared_ctx_len + unique_ctx_len) * self.block_size
+
             if is_causal:
                 decode_reqs_query = []
                 decode_reqs_blocks = []
                 prompt_reqs_query = []
-                prompt_reqs_blocks = []
+                prompt_reqs_blocks: list = []
 
                 all_shared_blocks_ids = [block for block in range(shared_ctx_len)]
                 unique_block = unique_ctx_len - 1
@@ -3661,11 +3660,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     decode_reqs_blocks.append([unique_ctx_len - 1])
                 prompts_number = self.max_num_seqs - len(decode_reqs_query)
                 remaining_query = query_len - sum(decode_reqs_query)
-                
+
                 q, r = divmod(remaining_query, prompts_number)
-                prompt_reqs_query = [q + (1 if i < r else 0 ) for i in range(prompts_number)]
+                prompt_reqs_query = [q + (1 if i < r else 0) for i in range(prompts_number)]
                 prompt_reqs_blocks = [[] for _ in range(len(prompt_reqs_query))]
-                for idx, query in enumerate(prompt_reqs_query): 
+                for idx, query in enumerate(prompt_reqs_query):
                     available_space_for_ctx = math.floor((self.max_model_len - query) // self.block_size)
                     if len(all_shared_blocks_ids) >= available_space_for_ctx:
                         prompt_reqs_blocks[idx] = all_shared_blocks_ids[:available_space_for_ctx]
@@ -3675,28 +3674,17 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         break
 
                 if unique_ctx_len > 0:
-                    self._add_dummy_unified_request(requests,
-                                   False,
-                                   True,
-                                   [unique_ctx_len - 1],
-                                   num_computed_tokens,
-                                   1,
-                                   scheduled_tokens)
-                                    
+                    self._add_dummy_unified_request(requests, False, True, [unique_ctx_len - 1], num_computed_tokens, 1,
+                                                    scheduled_tokens)
+
                 for query, blocks in zip(prompt_reqs_query, prompt_reqs_blocks):
-                    self._add_dummy_unified_request(requests,
-                                   True,
-                                   False,
-                                   blocks,
-                                   num_computed_tokens,
-                                   query,
-                                   scheduled_tokens)
+                    self._add_dummy_unified_request(requests, True, False, blocks, num_computed_tokens, query,
+                                                    scheduled_tokens)
 
             else:
                 remaining_samples = query_len
                 base = shared_ctx_len // remaining_samples
                 remain = shared_ctx_len % remaining_samples
-                window_size = base + remain
 
                 all_shared_blocks_ids = [block for block in range(shared_ctx_len)]
                 unique_block = unique_ctx_len - 1
@@ -3704,15 +3692,15 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 if unique_block in all_shared_blocks_ids:
                     all_shared_blocks_ids.remove(unique_ctx_len - 1)
                     all_shared_blocks_ids.append(shared_ctx_len + 1)
-                
+
                 # distribute evenly across sublists
-                split_shared_blocks_ids = [[] for _ in range(remaining_samples)]
+                split_shared_blocks_ids: list[list[int]] = [[] for _ in range(remaining_samples)]
                 idx = 0
                 for i in range(remaining_samples):
-                     size = base + (1 if i < remain else 0)
-                     for _ in range(size):
-                         split_shared_blocks_ids[i].append(all_shared_blocks_ids[idx])
-                         idx += 1
+                    size = base + (1 if i < remain else 0)
+                    for _ in range(size):
+                        split_shared_blocks_ids[i].append(all_shared_blocks_ids[idx])
+                        idx += 1
 
                 # make sure that all blocks are shared = in at least two decodes
                 for i, block in enumerate(all_shared_blocks_ids):
@@ -3723,18 +3711,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 # add unique id
                 min_idx = min(range(remaining_samples), key=lambda j: len(split_shared_blocks_ids[j]))
                 split_shared_blocks_ids[min_idx].append(unique_block)
-                        
 
                 for request_blocks in split_shared_blocks_ids:
-                    self._add_dummy_unified_request(requests,
-                                   False,
-                                   False,
-                                   request_blocks,
-                                   num_computed_tokens,
-                                   1,
-                                   scheduled_tokens)
+                    self._add_dummy_unified_request(requests, False, False, request_blocks, num_computed_tokens, 1,
+                                                    scheduled_tokens)
 
-        
         sched_output = SchedulerOutput(
             scheduled_new_reqs=requests,
             scheduled_cached_reqs=CachedRequestData.make_empty(),
@@ -3905,9 +3886,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         logger.info(msg)
         self.profiler.end()
 
-        if not self.unified_attn:
-            if max_bucket > self.input_batch.max_num_reqs:
-                self.input_batch = input_batch_bkp
+        if not self.unified_attn and max_bucket > self.input_batch.max_num_reqs:
+            self.input_batch = input_batch_bkp
 
     def shutdown_inc(self):
         can_finalize_inc = self._is_quant_with_inc() and \
