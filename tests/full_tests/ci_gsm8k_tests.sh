@@ -137,7 +137,18 @@ if [ $? -ne 0 ]; then
 fi
 echo "Test with compressed w4a16 passed"
 
-# compressed w4a16 MOE
+# compressed w4a16 MOE + EP
+echo "Testing GSM8K on Llama-4-Scout-17B-16E-w4a16"
+echo VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=0 VLLM_USE_V1=1 TP_SIZE=4 \
+pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/Scout-17B-16E-w4a16.yaml
+VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=0 VLLM_USE_V1=1 TP_SIZE=4 \
+pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/Scout-17B-16E-w4a16.yaml
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for Scout-17B-16E-w4a16" >&2
+    exit -1
+fi
+echo "Test with Scout-17B-16E-w4a16 passed"
+
 echo "Testing compressed w4a16 MoE inference with vllm-hpu plugin v1"
 echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model RedHatAI/Qwen3-30B-A3B-quantized.w4a16 --dtype bfloat16 
 HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model RedHatAI/Qwen3-30B-A3B-quantized.w4a16 --dtype bfloat16
