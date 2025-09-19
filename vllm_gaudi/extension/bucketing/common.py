@@ -80,18 +80,18 @@ class HPUBucketingManager():
             from vllm_gaudi.extension.bucketing.unified import (UnifiedBucketingStrategy)
             strategy = UnifiedBucketingStrategy()
 
-            query_cfg, shared_ctx_cfg, unique_ctx_cfg = strategy.get_unified_cfgs(bs=self.max_num_seqs,
-                                        max_model_len=self.max_model_len,
-                                        block_size=self.block_size,
-                                        max_blocks=self.num_hpu_blocks,
-                                        max_num_batched_tokens=self.max_num_batched_tokens)
+            query_cfg, shared_ctx_cfg, unique_ctx_cfg = strategy.get_unified_cfgs(
+                bs=self.max_num_seqs,
+                max_model_len=self.max_model_len,
+                block_size=self.block_size,
+                max_blocks=self.num_hpu_blocks,
+                max_num_batched_tokens=self.max_num_batched_tokens)
             query_range = strategy.get_range(query_cfg)
             shared_ctx_range = strategy.get_range(shared_ctx_cfg)
             unique_ctx_range = strategy.get_range(unique_ctx_cfg)
-            
-            self.unified_buckets = generate_unified_buckets(query_range, 
-                                         shared_ctx_range, unique_ctx_range, self.max_num_seqs,
-                                         self.block_size, self.max_model_len)
+
+            self.unified_buckets = generate_unified_buckets(query_range, shared_ctx_range, unique_ctx_range,
+                                                            self.max_num_seqs, self.block_size, self.max_model_len)
 
             msg = (f"Generated {len(self.unified_buckets)} "
                    f"unified buckets [query, shared_blocks, unique_blocks]: "
@@ -199,12 +199,13 @@ class HPUBucketingManager():
     def find_unified_bucket(self, query, shared_ctx, unique_ctx):
         if self.initialized:
             # TODO: handle is_causal
-            found_bucket = find_equal_or_closest_greater_config(self.unified_buckets, (query, shared_ctx, unique_ctx, 1))
+            found_bucket = find_equal_or_closest_greater_config(self.unified_buckets,
+                                                                (query, shared_ctx, unique_ctx, 1))
             if found_bucket is None:
                 logger().warning(f"No bucket found for: {(query, shared_ctx, unique_ctx)}")
                 return (query, shared_ctx, unique_ctx)
             return found_bucket
-        return (query, shared_ctx, unique_ctx) 
+        return (query, shared_ctx, unique_ctx)
 
     def get_max_prompt_shape(self):
         return max(b[1] for b in self.prompt_buckets) \
@@ -311,14 +312,14 @@ def generate_unified_buckets(query_range, shared_ctx_range, unique_ctx_range, bs
                     if causal:
                         max_bs = min(bs, query)
                         if math.ceil(shared_ctx * block_size // max_bs) <= max_model_len:
-                                buckets.add((query, shared_ctx, unique_ctx, causal))
+                            buckets.add((query, shared_ctx, unique_ctx, causal))
                     elif (causal == 0 and query <= bs):
                         # non causal query = current bs
-                        if math.ceil(shared_ctx * block_size // (query//2) ) <= max_model_len:
+                        if math.ceil(shared_ctx * block_size // (query // 2)) <= max_model_len:
                             if shared_ctx > 0 or unique_ctx > 0:
                                 buckets.add((query, shared_ctx, unique_ctx, causal))
 
-    return sorted(buckets) 
+    return sorted(buckets)
 
 
 def is_greater_or_equal(tuple1, tuple2):
