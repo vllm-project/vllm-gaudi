@@ -16,7 +16,7 @@ model_text:
     - Qwen/Qwen2.5-7B-Instruct
     - ibm-granite/granite-8b-code-instruct-4k
     - ibm-granite/granite-20b-code-instruct-8k
-  DATASET: /workspace/vllm/benchmarks/sonnet.txt
+  DATASET: /workspace/vllm-project/benchmarks/sonnet.txt
   DATASET_NAME: sonnet
   ENDPOINT: /v1/completions
   BACKEND: vllm
