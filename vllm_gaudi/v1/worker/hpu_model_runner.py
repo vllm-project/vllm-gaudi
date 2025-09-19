@@ -1442,7 +1442,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             qsl = query_lens[b_idx]
             assert self.requests[req_id].mrope_positions is not None
             input_mrope_position = \
-                self.requests[req_id].mrope_positions[:, cl:cl + qsl]
+                self.requests[req_id].mrope_positions[:, cl:cl + qsl] # type: ignore[index]
             dst_end = dst_start + qsl
             mrope_position_tensor[:, dst_start:dst_end].copy_(input_mrope_position, non_blocking=True)
 
