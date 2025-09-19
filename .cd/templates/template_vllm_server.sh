@@ -11,5 +11,8 @@ vllm serve $MODEL \
         --max-model-len $MAX_MODEL_LEN \
         --gpu-memory-utilization $GPU_MEM_UTILIZATION \
         --max-num-seqs $MAX_NUM_SEQS \
+        --async_scheduling \
+        --generation-config vllm \
+        --max_num_batched_tokens $MAX_NUM_BATCHED_TOKENS \
         --disable-log-requests \
 2>&1 | tee -a  logs/vllm_server.log
