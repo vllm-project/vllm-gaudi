@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import pytest
 import math
 
 import server.vllm_autocalc_rules as rules
@@ -110,14 +111,16 @@ def test_calc_DECODE_BLOCK_STEP_GRAPHS():
     assert rules.calc_DECODE_BLOCK_STEP_GRAPHS(ctx) == expected
 
 
-def test_calc_NUM_DECODE_GRAPHS():
+@pytest.mark.parametrize("cpa", ["true", "false"])
+def test_calc_NUM_DECODE_GRAPHS(cpa):
     ctx = {
         'DECODE_BS_RAMP_GRAPHS': 2,
         'DECODE_BS_STEP_GRAPHS': 3,
         'DECODE_BLOCK_RAMP_GRAPHS': 4,
-        'DECODE_BLOCK_STEP_GRAPHS': 5
+        'DECODE_BLOCK_STEP_GRAPHS': 5,
+        'VLLM_CONTIGUOUS_PA': cpa
     }
-    expected = ((2 + 3) * (4 + 5)) / 2
+    expected = (2 + 3) * (4 + 5) if cpa else (2 + 3) * (4 + 5) / 2
     assert rules.calc_NUM_DECODE_GRAPHS(ctx) == expected
 
 
