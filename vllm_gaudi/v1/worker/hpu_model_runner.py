@@ -327,6 +327,7 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         self._rotary_embed_module = self._get_rotary_embedding_module(self.model)
         self._rotary_prepare_cos_sin = self._get_prepare_cos_sin()
         self.unified_attn = get_config().unified_attn
+        self.flatten_input = get_config().flatten_input
 
     def _get_rotary_embedding_module(self, model: torch.nn.Module):
         """
@@ -448,6 +449,8 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
             kwargs.update(model_mm_kwargs)
 
         num_input_tokens = input_ids.size(0) * input_ids.size(1)
+        if self.flatten_input:
+            kwargs['input_ids'] = input_ids.view(-1)
         with set_forward_context(attn_meta, self.vllm_config, num_tokens=num_input_tokens):
             hidden_states = self.model(*args, **kwargs)
             if self._rotary_prepare_cos_sin is not None:
@@ -1388,6 +1391,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             block_bucket_size = \
                 self.bucketing_manager.find_decode_bucket(batch_size,
                                                           block_bucket_size)[2]
+            block_bucket_size += self.get_dp_padding(block_bucket_size)
+
             indices: list[Any]
             indices = [None] * block_bucket_size
             for i, bid in enumerate(block_list):
@@ -1399,6 +1404,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             block_bucket_size = \
                 self.bucketing_manager.find_decode_bucket(batch_size,
                                                           len(block_list))[2]
+            block_bucket_size += self.get_dp_padding(block_bucket_size)
 
             def padding_fn(tensor, pad_value):
                 return pad_list(tensor, block_bucket_size, itertools.repeat(pad_value))
