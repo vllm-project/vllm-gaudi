@@ -60,6 +60,7 @@ class OnlineDefragmenter:
     def __init__(self):
         config = get_config()
         self.threshold = with_default(config.VLLM_DEFRAG_THRESHOLD, 32)
+        self.to_swap_pad_thresholds = [8, 16, 32, 64, 128, 256, 512]
         self.used_blocks = {}
         self.req_blocks = {}
         self.fwd_mapping_table = []
@@ -174,6 +175,7 @@ class OnlineDefragmenter:
         max_used = max(self.used_blocks.keys())
         num_used = len(self.used_blocks)
         pre_max_used = max_used
+        # Use threshold for fragmentation trigger
         if max_used - self.threshold <= num_used:
             return
         free = self.free_blocks()
@@ -181,7 +183,7 @@ class OnlineDefragmenter:
 
         to_swap: list[tuple[int, int]] = []
         for used_block, free_block in zip(used, free):
-            if len(to_swap) == self.threshold or free_block > used_block:
+            if len(to_swap) == self.to_swap_pad_thresholds[-1] or free_block > used_block:
                 break
             assert used_block in self.used_blocks
             assert free_block not in self.used_blocks
@@ -195,9 +197,11 @@ class OnlineDefragmenter:
             self.update_mapping(orig_free_block, used_block)
 
         assert self.cache_utils is not None
-        self.cache_utils.swap(to_swap, self.threshold)
+        to_swap_pad = next((x for x in self.to_swap_pad_thresholds if x >= len(to_swap)),
+                           self.to_swap_pad_thresholds[-1])
+        self.cache_utils.swap(to_swap, to_swap_pad)
         if self.debug:
             max_used = max(self.used_blocks.keys())
             num_used = len(self.used_blocks)
-            post_status = f'max_id_used={pre_max_used}->{max_used} num_used={num_used} swapped={len(to_swap)}/{self.threshold}'
+            post_status = f'max_id_used={pre_max_used}->{max_used} num_used={num_used} swapped={len(to_swap)}/{to_swap_pad}'
             self.debug(f'defragmentation done {post_status}')
