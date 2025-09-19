@@ -3681,7 +3681,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         for tensor in kv_cache_config.kv_cache_tensors:
             for lname in tensor.shared_by:
                 tensor_map[lname] = tensor
-      
+
         kv_caches: dict[str, torch.Tensor] = {}
         kv_cache_sizes = {}
         num_blocks = 1
