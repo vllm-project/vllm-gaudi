@@ -406,46 +406,49 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
 
     def _set_attn_bias_for_sliding_window(self, attn_metadata, batch_size, seq_len, window_size, device, dtype):
 
-        if (attn_metadata is None or not attn_metadata.is_prompt) or (seq_len <= window_size):
+        if (attn_metadata is None or not attn_metadata.is_prompt):
             return attn_metadata
 
         # FusedSDPA with window_size is only supported when the length
         # of the input_token is multiple of the slice_size
         if (self.use_window_sdpa and seq_len >= self.slice_thld and self.slice_size != 0
-                and (seq_len % self.slice_size == 0)):
+                and (seq_len % self.slice_size == 0) and attn_metadata.block_list is None):
             # no need to set sliding window mask, just use built-in window-sdpa
             return attn_metadata
 
         prefill_metadata = attn_metadata
         shift = 0
 
-        if self.prefill_use_fusedsdpa and attn_metadata.block_list is not None:
-            prefill_metadata = attn_metadata
+        seq_lens_t = prefill_metadata.seq_lens_tensor
+        context_lens_t = prefill_metadata.context_lens_tensor
 
-            context_lens_t = prefill_metadata.context_lens_tensor
+        if self.prefill_use_fusedsdpa and attn_metadata.block_list is not None:
 
             block_list = attn_metadata.block_list
             max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
             max_context_len = max_context_len * self.block_size
 
-            past_mask = torch.triu(torch.ones((batch_size, 1, seq_len, max_context_len), device=device),
-                                   diagonal=window_size + 1)
+            invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=device) - 1
+            past_indices = torch.arange(max_context_len, device=device)
+            past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
+                         (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
 
-            # Apply per-sample context length masking
-            context_range = torch.arange(max_context_len, device=device)
-            valid_mask = context_range < context_lens_t.view(-1, 1, 1, 1)
-            past_mask = torch.where(valid_mask, past_mask, 0)
-
-            # Create the second mask (causal mask for seq_len x seq_len)
-            tensor = torch.ones((batch_size, 1, seq_len, seq_len), device=device)
-            causal_mask = torch.tril(tensor, diagonal=shift)
+            # Create boolean sliding window mask
+            causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=shift)
             causal_mask = torch.triu(causal_mask, diagonal=shift - window_size + 1)
+            causal_mask = causal_mask.view(batch_size, 1, seq_len, seq_len)
 
-            # Concatenate along the last dimension
-            attn_bias = torch.cat((past_mask, causal_mask), dim=-1)
-            attn_bias = torch.log(attn_bias)
+            # TODO: Investigate further - Removing Padding cause accuracy issue
+            # len_mask = (torch.arange(0, seq_len, device=device, dtype=torch.int32).view(1, seq_len).lt(
+            #     seq_lens_t.unsqueeze(-1)).view(batch_size, 1, 1, seq_len))
+            # causal_mask = causal_mask.logical_and(len_mask)
+
+            mask = torch.concat((past_mask, causal_mask), dim=-1)
+            attn_bias = torch.where(mask, torch.tensor(0.0, dtype=dtype, device=device),
+                                    torch.tensor(float('-inf'), dtype=dtype, device=device))
         else:
-            #causal + window size
+            # CAUSAL MASK without removing padding (CAUSAL+sliding window)
+            # removing padding cause accuracy issue for images input
             tensor = torch.full((batch_size, 1, seq_len, seq_len), device=device, dtype=dtype, fill_value=1)
             mask = torch.tril(tensor, diagonal=shift)
             mask = torch.triu(mask, diagonal=shift - window_size + 1)
@@ -1997,7 +2000,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             window_block_list, window_block_groups, window_block_usage = \
                 self.get_habana_paged_attn_buffers(
                     window_block_tables, slot_mapping.tolist(),
-                    padded_batch_size)
+                    padded_batch_size * num_tokens)
 
         # CPU<>HPU sync *should not* happen here.
         block_list_device = async_h2d_copy(block_list, device=self.device)
