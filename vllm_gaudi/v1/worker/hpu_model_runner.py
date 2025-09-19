@@ -754,7 +754,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         logits_buckets = [self.max_num_seqs]
         logits = min(bucketize(logits, logits_buckets), query_len)
-        
+
         new_bucket = self.bucketing_manager.find_unified_bucket(query_len, shared_blocks, unique_blocks, is_causal)
         return (new_bucket[0], new_bucket[1], new_bucket[2], logits)
 

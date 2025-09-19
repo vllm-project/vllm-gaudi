@@ -306,8 +306,8 @@ def generate_unified_buckets(query_range, shared_ctx_range, unique_ctx_range, bs
     buckets = set()
     is_causal = [0, 1]
 
-    for query, shared_ctx, unique_ctx, causal in itertools.product(
-            query_range, shared_ctx_range, unique_ctx_range, is_causal):
+    for query, shared_ctx, unique_ctx, causal in itertools.product(query_range, shared_ctx_range, unique_ctx_range,
+                                                                   is_causal):
         if causal:
             max_bs = min(bs, query)
             if math.ceil(shared_ctx * block_size // max_bs) <= max_model_len:
