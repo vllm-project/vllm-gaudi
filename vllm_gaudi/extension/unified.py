@@ -8,8 +8,9 @@
 import math
 import torch
 import functools
+from dataclasses import dataclass
 import itertools
-from typing import Optional, Callable, TypeAlias, Union
+from typing import Optional, Callable, TypeAlias, Union, Self
 from dataclasses import dataclass
 import habana_frameworks.torch as htorch
 
@@ -100,7 +101,7 @@ def optional(op):
     return opt_impl
 
 
-def merge(*attn_results: torch.tensor) -> torch.tensor:
+def merge(*attn_results: torch.tensor, feps: torch.tensor) -> torch.tensor:
     """Merge partial attention values into final attn score"""
     all_attn, all_max, all_sum = zip(*attn_results)
     global_max = functools.reduce(optional(torch.maximum), all_max)
@@ -108,6 +109,7 @@ def merge(*attn_results: torch.tensor) -> torch.tensor:
     adjust = optional(lambda x, a: x * a)
     all_adj = [calc_adjustment(x) for x in all_max]
     global_sum = functools.reduce(optional(torch.add), [adjust(s, a) for s, a in zip(all_sum, all_adj)])
+    global_sum = torch.maximum(global_sum, feps)
     rescale = optional(lambda x, adj: x * (adj / global_sum).unsqueeze(-1))
     attn = [rescale(attn, adj) for attn, adj in zip(all_attn, all_adj)]
     attn = functools.reduce(optional(torch.add), attn)
@@ -115,7 +117,7 @@ def merge(*attn_results: torch.tensor) -> torch.tensor:
 
 
 def partial_attn_causal(query: torch.tensor, key: torch.tensor, value: torch.tensor, bias: Optional[torch.tensor],
-                        slice_size: int, epsilon: torch.tensor) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
+                        slice_size: int, fmin: torch.tensor) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
     """Partial attention where qkv are assumed to be causal between slices"""
     if bias is None:
         return (None, None, None)
@@ -140,7 +142,7 @@ def partial_attn_causal(query: torch.tensor, key: torch.tensor, value: torch.ten
         b = bias[q_min:q_max, 0:q_max]
 
         s_attn = torch.matmul(q, k.transpose(-1, -2)) + b.unsqueeze(0).unsqueeze(0)
-        s_max = torch.maximum(s_attn.amax(-1), epsilon)
+        s_max = torch.maximum(s_attn.amax(-1), fmin)
         s_attn = torch.exp(s_attn - s_max.unsqueeze(-1))
         s_sum = torch.sum(s_attn, -1)
         s_attn = torch.matmul(s_attn, v)
@@ -155,7 +157,7 @@ def partial_attn_causal(query: torch.tensor, key: torch.tensor, value: torch.ten
     return combine(attn_slices), combine(max_slices), combine(sum_slices)
 
 
-def partial_attn_shared(query: torch.tensor, blocks: torch.tensor, bias: Optional[torch.tensor], epsilon: torch.tensor,
+def partial_attn_shared(query: torch.tensor, blocks: torch.tensor, bias: Optional[torch.tensor], fmin: torch.tensor,
                         cache_utils: CacheUtils) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
     """Partial attention where all shared blocks are compared with whole query"""
     if bias is None:
@@ -163,11 +165,12 @@ def partial_attn_shared(query: torch.tensor, blocks: torch.tensor, bias: Optiona
     kv_heads = cache_utils.kv_heads
     query = query.transpose(0, 1).unflatten(0, (kv_heads, -1))
     key, value = cache_utils.fetch_shared(blocks)
+    bias = bias.flatten(-2, -1).unsqueeze(0)
 
     attn = torch.matmul(query, key.transpose(-1, -2))
     attn = attn.flatten(0, 1)
-    attn = attn + bias.unsqueeze(0)
-    local_max = torch.maximum(attn.amax(-1), epsilon)
+    attn = attn + bias
+    local_max = torch.maximum(attn.amax(-1), fmin)
     attn = torch.exp(attn - local_max.unsqueeze(-1))
     local_sum = attn.sum(-1)
     attn = torch.matmul(attn.unflatten(0, (kv_heads, -1)), value).flatten(0, 1)
@@ -175,7 +178,7 @@ def partial_attn_shared(query: torch.tensor, blocks: torch.tensor, bias: Optiona
 
 
 def partial_attn_unique(query: torch.tensor, blocks: torch.tensor, block_mapping: torch.tensor,
-                        bias: Optional[torch.tensor], epsilon: torch.tensor,
+                        bias: Optional[torch.tensor], fmin: torch.tensor,
                         cache_utils: CacheUtils) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
     """Partial attention where all blocks are used by max one query"""
     if bias is None:
@@ -189,7 +192,7 @@ def partial_attn_unique(query: torch.tensor, blocks: torch.tensor, block_mapping
 
     attn = torch.matmul(query, key.transpose(-1, -2))
     attn = attn + bias.unsqueeze(1).unsqueeze(1).unsqueeze(1)
-    block_max = torch.maximum(attn.amax(-1), epsilon)
+    block_max = torch.maximum(attn.amax(-1), fmin)
     attn = torch.exp(attn - block_max.unsqueeze(-1))
     block_sum = attn.sum(-1)
     attn = torch.matmul(attn, value)
@@ -214,7 +217,8 @@ class HPUUnifiedAttentionMetadata:
     unique_blocks: Optional[torch.tensor] | Optional[int]
     unique_block_mapping: Optional[torch.tensor]
     unique_bias: Optional[torch.tensor]
-    epsilon: torch.tensor
+    fmin: torch.tensor
+    feps: torch.tensor
 
     def seq_len(self):
         # TODO: This needs to be changed in case of mixed batches
@@ -248,27 +252,29 @@ def unified_attn(query: torch.tensor, key: torch.tensor, value: torch.tensor, ke
                                  value=value,
                                  bias=metadata.causal_bias,
                                  slice_size=metadata.causal_width,
-                                 epsilon=metadata.epsilon)
+                                 fmin=metadata.fmin)
     shared = partial_attn_shared(query=scaled_query,
                                  blocks=metadata.shared_blocks,
                                  bias=metadata.shared_bias,
-                                 epsilon=metadata.epsilon,
+                                 fmin=metadata.fmin,
                                  cache_utils=cache_utils)
     unique = partial_attn_unique(query=scaled_query,
                                  blocks=metadata.unique_blocks,
                                  block_mapping=metadata.unique_block_mapping,
                                  bias=metadata.unique_bias,
-                                 epsilon=metadata.epsilon,
+                                 fmin=metadata.fmin,
                                  cache_utils=cache_utils)
 
-    attn = merge(causal, shared, unique)
+    attn = merge(causal, shared, unique, feps=metadata.feps)
     if attn is None:
         return query
     return attn
 
 
-def to_hpu(data: Union[torch.tensor, list], dtype: Optional[torch.dtype] = None) -> torch.tensor:
+def to_hpu(data: Optional[Union[torch.tensor, list]], dtype: Optional[torch.dtype] = None) -> torch.tensor:
     """Copy either data or a cpu tensor to hpu"""
+    if data is None:
+        return None
     if torch.is_tensor(data):
         return data.to('hpu', non_blocking=True)
     else:
@@ -288,150 +294,214 @@ def create_causal_bias(groups: torch.tensor, positions: torch.tensor, dtype: tor
     return mask_to_bias(causal_mask, dtype)
 
 
-def create_unique_bias(block_usage: torch.tensor, block_size: int, dtype: torch.dtype) -> torch.tensor:
-    """Create block bias based on block_usage"""
-    block_usage = to_hpu(block_usage, torch.int64)
-    block_range = torch.arange(block_size, device='hpu', dtype=torch.int64)
-    usage_mask = block_range.unsqueeze(0) >= block_usage.unsqueeze(-1)
-    return mask_to_bias(usage_mask, dtype)
+def indices_and_offsets(counts: torch.tensor) -> tuple[torch.tensor, torch.tensor]:
+    """Split groups of sizes 'counts' into individual indices and offsets. Example:
+       counts([1, 2, 3]) -> group_indices=[0, 1, 1, 2, 2, 2] group_offsets=[0, 0, 1, 0, 1, 2]"""
+    cum_end = torch.cumsum(counts, dim=0, dtype=counts.dtype)
+    cum_start = cum_end - counts
+    total = cum_end[-1] + 1
+    indices = torch.zeros(total, dtype=counts.dtype, device=counts.device)
+    indices.scatter_add_(0, cum_end[:-1].to(torch.int64), torch.ones_like(cum_end[:-1]))
+    indices = torch.cumsum(indices, dim=0)
+    offsets = torch.arange(total, dtype=counts.dtype, device=counts.device) - cum_start.index_select(0, indices)
+    return indices[:-1], offsets[:-1]
 
 
-def padded(data: list, target_len: int, value: int = -1) -> list:
-    """Return padded list"""
-    padding = target_len - len(data)
-    assert padding >= 0
-    return data + [value] * padding
+def fetch_2d(table: torch.tensor, indices: torch.tensor, offsets: torch.tensor) -> torch.tensor:
+    """Fetch data from a 2d table using indices and offsets"""
+    assert table.dim() == 2, 'Only 2D tables are supported!'
+    flat_indices = indices * table.size(-1) + offsets
+    return table.flatten().index_select(0, flat_indices)
 
 
-def create_unified_batch(
-    token_ids: list[list[int]], block_size: int, block_table: list[list[int]], context_lengths: list[int],
-    query_lengths: list[int], prompt_lengths: list[int], dtype: torch.dtype, contiguous_kv: bool,
-    bucketing_fn: Callable[[int, int, int, int], tuple[int, int, int, int]]
-) -> tuple[torch.tensor, torch.tensor, torch.tensor, list[int], HPUUnifiedAttentionMetadata]:
-    """Create a batch that utilizes unified attention"""
-    #TODO: this needs to be optimized
-    slots = []
-    positions = []
-    groups = []
-    logits_indices = []
-    logits_groups = []
-    logits_offset = 0
+def group_sum(groups: torch.tensor, values: torch.tensor):
+    """ Sum values coresponding to the same groups """
+    max_value = groups.amax().item()
+    tmp = torch.zeros((max_value + 1, ), dtype=values.dtype, device=values.device)
+    tmp.scatter_add_(0, groups.to(torch.int64), values)
+    return tmp.index_select(0, groups)
 
-    causal_groups = set()
-    block_tokens = {}
-    block_usage = {}
 
-    for group_id, (blocks, ctx_len, q_len,
-                   p_len) in enumerate(zip(block_table, context_lengths, query_lengths, prompt_lengths)):
-        is_prompt = ctx_len + q_len <= p_len
-        output_tokens = min(max(ctx_len + q_len - p_len + 1, 0), q_len)
-        new_positions = list(range(ctx_len, ctx_len + q_len))
-        new_slots = [blocks[ti // block_size] * block_size + ti % block_size for ti in new_positions]
-        logits_offset += q_len
-        slots.extend(new_slots)
-        groups.extend([group_id] * q_len)
-        positions.extend(new_positions)
-        logits_indices.extend(range(logits_offset - output_tokens, logits_offset))
-        logits_groups.extend([group_id] * output_tokens)
+def generate_bias(block_usages: torch.tensor, block_size: torch.tensor, dtype: torch.dtype) -> torch.tensor:
+    """ Generate block bias based on block_usage """
+    block_len_range = torch.arange(1, block_size + 1, dtype=block_usages.dtype, device=block_usages.device)
+    block_mask = block_len_range.unsqueeze(0) > block_usages.unsqueeze(-1)
+    return mask_to_bias(block_mask, dtype=dtype)
 
-        if is_prompt:
-            causal_groups.add(group_id)
-            cur_pos = ctx_len
-        else:
-            cur_pos = ctx_len + 1
-        for i, b in enumerate(blocks):
-            cur_offset = i * block_size
-            usage = min(cur_pos - cur_offset, block_size)
-            if usage > 0:
-                block_usage.setdefault(b, {})[group_id] = usage
-                block_tokens[b] = block_tokens.get(b, 0) + q_len
-            else:
-                break
 
-    token_ids = list(itertools.chain(*token_ids))
-    shared_blocks = [bid for bid, btok in block_tokens.items() if btok > 1]
-    unique_blocks = [bid for bid, btok in block_tokens.items() if btok == 1]
+@dataclass
+class UnifiedBatch:
+    req_ids_cpu: list[str]
+    token_ids: torch.tensor
+    token_positions: torch.tensor
+    new_token_positions_cpu: torch.tensor
+    logits_indices: torch.tensor
+    logits_groups_cpu: torch.tensor
+    attn_metadata: HPUUnifiedAttentionMetadata
 
-    num_tokens = len(token_ids)
-    num_shared_blocks = len(shared_blocks)
-    if unique_blocks:
-        if contiguous_kv:
-            num_unique_blocks = max(unique_blocks) + 1
-        else:
-            num_unique_blocks = len(unique_blocks)
-    else:
-        num_unique_blocks = 0
-    num_logits = len(logits_indices)
 
-    pre_pad = (num_tokens, num_shared_blocks, num_unique_blocks, num_logits)
-    post_pad = bucketing_fn(*pre_pad)
-    padded_num_tokens, padded_num_shared_blocks, padded_num_unique_blocks, padded_num_logits = post_pad
+@dataclass
+class Context:
+    """ Contains relevant information for computing past context either from shared or unique blocks"""
+    group_ids: torch.tensor
+    group_offsets: torch.tensor
+    block_ids: torch.tensor
+    block_usages: torch.tensor
 
-    token_ids_t = to_hpu(padded(token_ids, padded_num_tokens), torch.int64)
-    slots_t = to_hpu(padded(slots, padded_num_tokens), torch.int64)
-    positions_t = to_hpu(padded(positions, padded_num_tokens), torch.int64)
-    groups_t = to_hpu(padded(groups, padded_num_tokens), torch.int64)
-    logits_indices_t = to_hpu(padded(logits_indices, padded_num_logits), torch.int64)
-    htorch.core.mark_step()
+    @staticmethod
+    def create(num_computed_tokens: torch.tensor, block_table: torch.tensor, block_size: int) -> Self:
+        """ Create a new Context obj """
+        num_ctx_blocks = (num_computed_tokens + block_size - 1) // block_size
+        if num_ctx_blocks.sum() <= 0:
+            return None
 
-    if causal_groups:
-        causal_bias = create_causal_bias(groups_t, positions_t, dtype)
-    else:
-        causal_bias = None
-    htorch.core.mark_step()
+        group_ids, group_offsets = indices_and_offsets(num_ctx_blocks)
+        block_ids = fetch_2d(block_table, group_ids, group_offsets)
+        block_usages = torch.clamp(
+            num_computed_tokens.index_select(0, group_ids) - group_offsets * block_size + 1, 1, block_size)
 
-    htorch.core.mark_step()
-    if padded_num_shared_blocks:
-        group_offset = list(itertools.accumulate(query_lengths, initial=0))
-        shared_bias_cpu = torch.full((padded_num_tokens, padded_num_shared_blocks, block_size),
+        ctx = Context(group_ids, group_offsets, block_ids, block_usages)
+        all_shapes = [v.shape for v in ctx._values() if torch.is_tensor(v)]
+        for t in all_shapes[1:]:
+            assert all_shapes[0] == t
+        return ctx
+
+    def _values(self) -> tuple[torch.tensor, torch.tensor, torch.tensor, torch.tensor]:
+        """ Split Context into individual values """
+        return (self.group_ids, self.group_offsets, self.block_ids, self.block_usages)
+
+    def index_select(self, indices: torch.tensor) -> Self:
+        """ Create a new Context from only specified indices """
+        if indices.size(0) <= 0:
+            return None
+        values = [v.index_select(0, indices) for v in self._values()]
+        return Context(*values)
+
+    def split(self, num_scheduled_tokens: torch.tensor) -> tuple[Self, Self]:
+        """ Split a Context into a shared block Context and unique block Context"""
+        num_tokens = num_scheduled_tokens.index_select(0, self.group_ids)
+        block_tokens = group_sum(self.block_ids, num_tokens)
+        shared_idx = torch.argwhere(block_tokens > 1).flatten()
+        unique_idx = torch.argwhere(block_tokens == 1).flatten()
+        assert shared_idx.size(0) + unique_idx.size(0) == self.group_ids.size(0)
+        return self.index_select(shared_idx), self.index_select(unique_idx)
+
+
+def hpu_tensor(tensor: torch.tensor, shape: tuple, pad_value: Union[int, float]) -> torch.tensor:
+    """ Pad if necessary and move tensor to HPU"""
+    if tensor is None:
+        return None
+    assert len(tensor.shape) == len(shape)
+    orig_shape = tensor.shape
+    padding = tuple(itertools.chain(*[(0, target - cur) for cur, target in reversed(list(zip(tensor.shape, shape)))]))
+    assert all(p >= 0 for p in padding)
+    if sum(padding) > 0:
+        tensor = torch.nn.functional.pad(tensor, padding, value=pad_value)
+    return to_hpu(tensor)
+
+
+def create_unified_batch(req_ids: list[str], all_token_ids: torch.tensor, num_computed_tokens: torch.tensor,
+                         num_scheduled_tokens: torch.tensor, num_prompt_tokens: torch.tensor, block_table: torch.tensor,
+                         block_size: int, dtype: torch.dtype, bucketing_fn: Callable[[bool, int, int, int, int],
+                                                                                     tuple[int, int, int,
+                                                                                           int]]) -> UnifiedBatch:
+    """ Calculate all necessary tensors needed for batch scheduling """
+    total_tokens = num_computed_tokens + num_scheduled_tokens
+    query_len = num_scheduled_tokens.sum().item()
+    contains_prompts = torch.any(total_tokens <= num_prompt_tokens).item()
+    num_output_tokens = total_tokens - num_prompt_tokens + 1
+    num_output_tokens = torch.clamp(num_output_tokens, torch.zeros_like(num_scheduled_tokens), num_scheduled_tokens)
+    group_starts = torch.cumsum(num_scheduled_tokens, dim=0) - num_scheduled_tokens
+
+    token_groups, token_offsets = indices_and_offsets(num_scheduled_tokens)
+    token_positions = token_offsets + num_computed_tokens.index_select(0, token_groups)
+    token_ids = fetch_2d(all_token_ids, token_groups, token_positions)
+
+    token_blocks = fetch_2d(block_table, token_groups, token_positions.floor_divide(block_size))
+    token_slots = token_blocks * block_size + token_positions.fmod(block_size)
+
+    logits_groups, logits_offsets = indices_and_offsets(num_output_tokens)
+    start_logits_indices = torch.cumsum(num_scheduled_tokens, dim=0,
+                                        dtype=num_scheduled_tokens.dtype) - num_output_tokens
+    logits_indices = logits_offsets + start_logits_indices.index_select(0, logits_groups)
+    new_token_positions = total_tokens.index_select(0, logits_groups)
+
+    def first_dim(t: Optional[torch.tensor]) -> int:
+        """ Takes first dim size or 0 if tensor is None"""
+        return t.size(0) if t is not None else 0
+
+    causal_bias = None
+    shared_blocks = None
+    shared_bias = None
+    unique_blocks = 0
+    unique_block_mapping = None
+    unique_bias = None
+
+    if contains_prompts:
+        causal_bias = create_causal_bias(token_groups, token_positions, dtype)
+
+    ctx = Context.create(num_computed_tokens, block_table, block_size)
+    if ctx:
+        shared_ctx, unique_ctx = ctx.split(num_scheduled_tokens)
+        if shared_ctx:
+            shared_blocks, orig_shared_blocks = torch.unique(shared_ctx.block_ids, return_inverse=True)
+
+            shared_group_starts = group_starts.index_select(0, shared_ctx.group_ids)
+
+            shared_tokens = num_scheduled_tokens.index_select(0, shared_ctx.group_ids)
+            shared_token_indices, shared_token_offsets = indices_and_offsets(shared_tokens)
+
+            shared_token_idx = shared_group_starts.index_select(0, shared_token_indices) + shared_token_offsets
+            shared_block_idx = orig_shared_blocks.index_select(0, shared_token_indices)
+            shared_block_usage = shared_ctx.block_usages.index_select(0, shared_token_indices)
+            shared_block_bias = generate_bias(shared_block_usage, block_size, dtype)
+
+            shared_bias = torch.full((query_len, shared_blocks.size(0), block_size),
                                      -math.inf,
                                      dtype=dtype,
-                                     device='cpu')
-        for i, bid in enumerate(shared_blocks):
-            for gid, bu in block_usage[bid].items():
-                token_start = group_offset[gid]
-                token_end = group_offset[gid + 1]
-                shared_bias_cpu[token_start:token_end, i, :bu] = 0.0
-        shared_blocks_t = to_hpu(padded(shared_blocks, padded_num_shared_blocks), torch.int64)
-        shared_bias_t = to_hpu(shared_bias_cpu.flatten(-2, -1))
-    else:
-        shared_blocks_t = None
-        shared_bias_t = None
-    htorch.core.mark_step()
+                                     device=shared_blocks.device)
+            shared_bias.index_put_((shared_token_idx, shared_block_idx), shared_block_bias)
 
-    htorch.core.mark_step()
-    if padded_num_unique_blocks:
-        unique_block_usage = {bid: next(iter(block_usage[bid].items())) for bid in unique_blocks}
-        if contiguous_kv:
-            unique_block_ids = range(padded_num_unique_blocks)
-            unique_blocks = padded_num_unique_blocks
-        else:
-            unique_blocks = padded(unique_blocks, padded_num_unique_blocks)
-            unique_block_ids = unique_blocks
-            unique_blocks = to_hpu(unique_blocks, torch.int64)
+        if unique_ctx:
+            unique_blocks = torch.amax(unique_ctx.block_ids).item() + 1
+            unique_bias = torch.full((unique_blocks, block_size),
+                                     -math.inf,
+                                     dtype=dtype,
+                                     device=unique_ctx.block_ids.device)
+            unique_block_bias = generate_bias(unique_ctx.block_usages, block_size, dtype)
+            unique_bias.index_copy_(0, unique_ctx.block_ids.to(torch.int64), unique_block_bias)
+            unique_group_starts = group_starts.index_select(0, unique_ctx.group_ids)
+            unique_block_mapping = torch.full((unique_blocks, ),
+                                              -1,
+                                              dtype=torch.int64,
+                                              device=unique_ctx.block_ids.device)
+            unique_block_mapping.index_copy_(0, unique_ctx.block_ids.to(torch.int64), unique_group_starts)
 
-        dummy_block_usage = (-1, 0)
-        block_data = [unique_block_usage.get(bid, dummy_block_usage) for bid in unique_block_ids]
-        unique_block_mapping, unique_block_usage = zip(*block_data)
-        unique_bias_t = create_unique_bias(unique_block_usage, block_size, dtype)
-        unique_block_mapping_t = to_hpu(unique_block_mapping, torch.int64)
-    else:
-        unique_blocks = None
-        unique_bias_t = None
-        unique_block_mapping_t = None
-    htorch.core.mark_step()
-
-    epsilon_t = to_hpu(torch.finfo(dtype).min)
+    bucket = bucketing_fn(contains_prompts, first_dim(token_ids), first_dim(shared_blocks), unique_blocks,
+                          first_dim(logits_indices))
+    target_qlen, target_shared_blocks, target_unique_blocks, target_logits = bucket
 
     default_causal_width = 512
-    attn_metadata = HPUUnifiedAttentionMetadata(block_size=block_size,
-                                                slot_mapping=slots_t,
-                                                causal_bias=causal_bias,
-                                                causal_width=default_causal_width,
-                                                shared_blocks=shared_blocks_t,
-                                                shared_bias=shared_bias_t,
-                                                unique_blocks=unique_blocks,
-                                                unique_block_mapping=unique_block_mapping_t,
-                                                unique_bias=unique_bias_t,
-                                                epsilon=epsilon_t)
-    return token_ids_t, positions_t, logits_indices_t, logits_groups, attn_metadata
+    fmin = torch.finfo(dtype).min
+    feps = torch.finfo(dtype).tiny
+
+    return UnifiedBatch(req_ids_cpu=req_ids,
+                        token_ids=hpu_tensor(token_ids, (target_qlen, ), -1),
+                        token_positions=hpu_tensor(token_positions, (target_qlen, ), -1),
+                        new_token_positions_cpu=new_token_positions,
+                        logits_indices=hpu_tensor(logits_indices, (target_logits, ), -1),
+                        logits_groups_cpu=logits_groups,
+                        attn_metadata=HPUUnifiedAttentionMetadata(
+                            block_size=block_size,
+                            slot_mapping=hpu_tensor(token_slots, (target_qlen, ), -1),
+                            causal_bias=hpu_tensor(causal_bias, (target_qlen, target_qlen), -math.inf),
+                            causal_width=default_causal_width,
+                            shared_blocks=hpu_tensor(shared_blocks, (target_shared_blocks, ), -1),
+                            shared_bias=hpu_tensor(shared_bias, (target_qlen, target_shared_blocks, block_size),
+                                                   -math.inf),
+                            unique_blocks=target_unique_blocks,
+                            unique_block_mapping=hpu_tensor(unique_block_mapping, (target_unique_blocks, ), -1),
+                            unique_bias=hpu_tensor(unique_bias, (target_unique_blocks, block_size), -math.inf),
+                            fmin=to_hpu(fmin),
+                            feps=to_hpu(feps),
+                        ))
