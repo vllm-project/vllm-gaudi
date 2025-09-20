@@ -58,6 +58,19 @@ def async_h2d_copy(source, dest_tensor=None, dtype=None, device='hpu'):
     return cpu_tensor.to(device, non_blocking=True)
 
 
+def async_h2d_update(source: torch.Tensor, dest: torch.Tensor, indices: list[int], device='hpu'):
+    """
+    Asynchronously update specific rows of a device tensor from a CPU tensor.
+
+    Args:
+        source: CPU tensor with data to copy
+        dest: Device tensor to update
+        indices: List of row indices in dest to update
+        device: Target device
+    """
+    dest[indices] = source[indices].to(device, non_blocking=True)
+
+
 def make_ndarray_with_pad_align(
     x: list[list[T]],
     pad: T,
