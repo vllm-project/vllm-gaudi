@@ -19,15 +19,14 @@ fi
 echo "Test with tensor parallel size 2 passed"
 
 # mla and moe
-# NOTE(adobrzyn): upstream bug
-#echo "Testing MLA and MoE with vllm-hpu plugin v1"
-#echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code
-#HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code
-#if [ $? -ne 0 ]; then
-#    echo "Error: Test failed for deepseek v2 lite passed" >&2
-#    exit -1
-#fi
-#echo "Test with deepseek v2 lite passed"
+echo "Testing MLA and MoE with vllm-hpu plugin v1"
+echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for deepseek v2 lite passed" >&2
+    exit -1
+fi
+echo "Test with deepseek v2 lite passed"
 
 # granite + inc
 echo "Testing granite-8b + inc with vllm-hpu plugin v1"
@@ -41,26 +40,26 @@ fi
 echo "Test with granite + inc passed"
 
 # deepseek v2 + inc
-#echo "Testing deepseek_v2 + inc with vllm-hpu plugin v1"
-#echo QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_unit_scale_quant.json HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code  --quantization inc --kv_cache_dtype fp8_inc
-#QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_unit_scale_quant.json \
-#HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --kv_cache_dtype fp8_inc
-#if [ $? -ne 0 ]; then
-#    echo "Error: Test failed for deepseek_v2 + inc" >&2
-#    exit -1
-#fi
-#echo "Test with deepseek_v2 + inc passed"
+echo "Testing deepseek_v2 + inc with vllm-hpu plugin v1"
+echo QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_unit_scale_quant.json HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code  --quantization inc --kv_cache_dtype fp8_inc
+QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_unit_scale_quant.json \
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --kv_cache_dtype fp8_inc
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for deepseek_v2 + inc" >&2
+    exit -1
+fi
+echo "Test with deepseek_v2 + inc passed"
 
 # deepseek v2 + inc + dynamic quantization + tp2
-#echo "Testing deepseek_v2 + inc dynamic quantization + tp2"
-#echo QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_dynamic_quant.json HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code  --quantization inc --tensor-parallel-size 2
-#QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_dynamic_quant.json \
-#HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --tensor-parallel-size 2
-#if [ $? -ne 0 ]; then
-#    echo "Error: Test failed for deepseek_v2 + inc dynamic quantization + tp2" >&2
-#    exit -1
-#fi
-#echo "Test with deepseek_v2 + inc dynamic quantization + tp 2 successful"
+echo "Testing deepseek_v2 + inc dynamic quantization + tp2"
+echo QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_dynamic_quant.json HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code  --quantization inc --tensor-parallel-size 2
+QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_dynamic_quant.json \
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --tensor-parallel-size 2
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for deepseek_v2 + inc dynamic quantization + tp2" >&2
+    exit -1
+fi
+echo "Test with deepseek_v2 + inc dynamic quantization + tp 2 successful"
 
 echo "Testing Qwen3-8B-FP8 + inc requant FP8 model + dynamic quant"
 echo VLLM_HPU_FORCE_CHANNEL_FP8=false QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_dynamic_quant.json HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model Qwen/Qwen3-8B-FP8 --trust-remote-code 
@@ -175,16 +174,16 @@ fi
 echo "Test with granite-8b + async_scheduling passed"
 
 # used to check MLA + MOE
-#echo "Testing GSM8K on deepseek v2 lite"
+echo "Testing GSM8K on deepseek v2 lite"
 # deepseek-R1
-#echo VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml
-#VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
-#pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml
-#if [ $? -ne 0 ]; then
-#    echo "Error: Test failed for deepseek R1" >&2
-#    exit -1
-#fi
-#echo "Test with deepseek R1 passed"
+echo VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml
+VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
+pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for deepseek R1" >&2
+    exit -1
+fi
+echo "Test with deepseek R1 passed"
 
 # used to check HPUATTN + MOE + ExpertParallel
 echo "Testing GSM8K on QWEN3-30B-A3B"
