@@ -24,6 +24,7 @@ from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention, HPUPaged
 
 from vllm_gaudi.extension.logger import logger as init_logger
 from vllm_gaudi.extension.unified import (unified_attn, HPUUnifiedAttentionMetadata)
+from vllm.model_executor.layers.linear import ColumnParallelLinear
 
 logger = init_logger()
 
@@ -151,19 +152,26 @@ class HPUMLAMetadata(HPUAttentionMetadata, AttentionMetadata):
 class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
 
     def __init__(
-            self,
-            num_heads: int,
-            head_size: int,
-            scale: float,
-            num_kv_heads: int,
-            alibi_slopes: Optional[list[float]],
-            sliding_window: Optional[int],
-            kv_cache_dtype: str,
-            logits_soft_cap: Optional[float],
-            attn_type: str,
-            kv_sharing_target_layer_name: Optional[str] = None,
-            # MLA Specific Arguments
-            **kwargs) -> None:
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: Optional[list[float]],
+        sliding_window: Optional[int],
+        kv_cache_dtype: str,
+        logits_soft_cap: Optional[float],
+        attn_type: str,
+        kv_sharing_target_layer_name: Optional[str],
+        # MLA Specific Arguments
+        q_lora_rank: Optional[int],
+        kv_lora_rank: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        qk_head_dim: int,
+        v_head_dim: int,
+        kv_b_proj: ColumnParallelLinear,
+    ) -> None:
         torch.nn.Module.__init__(self)
 
         self.num_heads = num_heads
@@ -172,16 +180,13 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         self.num_kv_heads = num_kv_heads
         self.kv_cache_dtype = kv_cache_dtype
 
-        self.q_lora_rank = kwargs.get('q_lora_rank')
-        self.kv_lora_rank = kwargs.get('kv_lora_rank')
-        self.qk_nope_head_dim = kwargs.get('qk_nope_head_dim')
-        self.qk_rope_head_dim = kwargs.get('qk_rope_head_dim')
-        self.qk_head_dim = kwargs.get('qk_head_dim')
-        self.v_head_dim = kwargs.get('v_head_dim')
-        self.kv_b_proj = kwargs.get('kv_b_proj')
-
-        #MLACommonImpl.__init__(self, num_heads, head_size, scale, num_kv_heads, alibi_slopes, sliding_window,
-        #                       kv_cache_dtype, logits_soft_cap, attn_type, kv_sharing_target_layer_name, **kwargs)
+        self.q_lora_rank = q_lora_rank
+        self.kv_lora_rank = kv_lora_rank
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.qk_head_dim = qk_head_dim
+        self.v_head_dim = v_head_dim
+        self.kv_b_proj = kv_b_proj
 
         self.enable_fp8_attn = kv_cache_dtype == 'fp8_inc' and os.environ.get('QUANT_CONFIG', None) is None
         self.matmul_qk = Matmul() if not self.enable_fp8_attn \
