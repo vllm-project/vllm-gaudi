@@ -2,7 +2,6 @@ from typing import Callable, Optional
 
 import torch
 from vllm_gaudi import envs
-from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
 from vllm.model_executor.layers.quantization import fp8
@@ -60,7 +59,6 @@ class Fp8LinearMethod(OrigFp8LinearMethod):
         return dequant_weight
 
 
-@CustomOp.register_oot(name='Fp8MoEMethod')
 class HPUFp8MoEMethod(Fp8MoEMethod):
 
     def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
