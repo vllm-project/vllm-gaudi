@@ -17,7 +17,7 @@ jobs:
     if: |
       github.event_name == 'workflow_dispatch' ||
       github.ref == 'refs/heads/main'
-    runs-on: ucb-vllm-cicd-g2
+    runs-on: hourly-ci
     permissions:
       contents: read # Required to checkout code and read history
 
@@ -78,7 +78,7 @@ jobs:
           echo "Attempting to build Docker image..."
           # Ensure this image is accessible from GitHub Actions (e.g., public registry or authenticated private registry).
           docker build --no-cache -t hpu-plugin-v1-test-env-hourly-ci -f - . <<EOF
-          FROM 1.22-619-pt2.7.1:latest
+          FROM vault.habana.ai/gaudi-docker/1.22.0/ubuntu24.04/habanalabs/pytorch-installer-2.7.1:latest
 
           COPY ./ /workspace/vllm-gaudi
           WORKDIR /workspace
@@ -115,6 +115,24 @@ jobs:
           EOF
           echo "Docker image built successfully."
 
+      - name: Run pytest in tests/unit_tests
+        run: |
+          EXITCODE=1
+          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-unit-tests-hourly-ci || true; }
+          trap 'remove_docker_containers; exit $EXITCODE;' EXIT
+          remove_docker_containers
+
+          echo "Running HPU plugin v1 unit tests"
+          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-unit-tests-hourly-ci --network=host \
+            -e HABANA_VISIBLE_DEVICES=all \
+            -e HF_HOME=/workspace/hf_cache \
+            -v /mnt/hf_cache:/workspace/hf_cache \
+            hpu-plugin-v1-test-env-hourly-ci \
+            /bin/bash -c "pytest -vvv --durations=10 --durations-min=1.0 /workspace/vllm-gaudi/tests/unit_tests"
+
+          EXITCODE=$?
+          echo "Test script exited with code: $EXITCODE"
+
       - name: Run test scripts
         run: |
           EXITCODE=1
@@ -128,7 +146,50 @@ jobs:
             -e HF_HOME=/workspace/hf_cache \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-hourly-ci \
-            /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_tests.sh"
+            /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_gsm8k_tests.sh"
           
+          EXITCODE=$?
+          echo "Test script exited with code: $EXITCODE"
+
+      - name: Run Data Parallel test
+        run: |
+          EXITCODE=1
+          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-dp-tests-hourly-ci || true; }
+          trap 'remove_docker_containers; exit $EXITCODE;' EXIT
+          remove_docker_containers
+
+          echo "Running HPU plugin v1 dp tests"
+          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-dp-tests-hourly-ci --network=host \
+            -e HABANA_VISIBLE_DEVICES=all \
+            -e HF_HOME=/workspace/hf_cache \
+            -e VLLM_SKIP_WARMUP=true \
+            -e PT_HPU_LAZY_MODE=1 \
+            -e VLLM_USE_V1=1 \
+            -v /mnt/hf_cache:/workspace/hf_cache \
+            hpu-plugin-v1-test-env-hourly-ci \
+            /bin/bash -c "python -u /workspace/vllm-gaudi/examples/data_parallel.py --dp-size 2 --tp-size 2"
+
+          EXITCODE=$?
+          echo "Test script exited with code: $EXITCODE"
+
+      - name: Run PD disaggregate test
+        run: |
+          EXITCODE=1
+          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-pd-tests-hourly-ci || true; }
+          trap 'remove_docker_containers; exit $EXITCODE;' EXIT
+          remove_docker_containers
+
+          echo "Running HPU plugin v1 nixl pd tests"
+          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-pd-tests-hourly-ci --network=host \
+            -e HABANA_VISIBLE_DEVICES=all \
+            -e HF_HOME=/workspace/hf_cache \
+            -v /mnt/hf_cache:/workspace/hf_cache \
+            hpu-plugin-v1-test-env-hourly-ci \
+            /bin/bash -c "
+                pip install lm-eval[api] &&
+                cd /workspace/vllm-gaudi/tests/unit_tests &&
+                ./run_accuracy_test.sh
+            "
+
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"

@@ -127,6 +127,27 @@ if [ $? -ne 0 ]; then
 fi
 echo "Test with gptq passed"
 
+# compressed w4a16
+echo "Testing compressed w4a16 inference with vllm-hpu plugin v1"
+echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model RedHatAI/Qwen3-8B-quantized.w4a16 --dtype bfloat16 
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model RedHatAI/Qwen3-8B-quantized.w4a16 --dtype bfloat16
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for compressed w4a16" >&2
+    exit -1
+fi
+echo "Test with compressed w4a16 passed"
+
+# compressed w4a16 MOE
+echo "Testing compressed w4a16 MoE inference with vllm-hpu plugin v1"
+echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model RedHatAI/Qwen3-30B-A3B-quantized.w4a16 --dtype bfloat16 
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model RedHatAI/Qwen3-30B-A3B-quantized.w4a16 --dtype bfloat16
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for compressed w4a16 MoE" >&2
+    exit -1
+fi
+echo "Test with compressed w4a16 MoE passed"
+# 
+
 # gsm8k test
 # used to check HPUattn + MLP
 echo "Testing GSM8K on ganite-8b"
@@ -208,16 +229,6 @@ if [ $? -ne 0 ]; then
     exit -1
 fi
 echo "Embedding-model-support for v1 successful"
-
-# DP2
-echo "Testing data parallel size 2 with vllm-hpu plugin v1"
-echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/examples/data_parallel.py --dp-size 2 --tp-size 2
-HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/examples/data_parallel.py --dp-size 2 --tp-size 2
-if [ $? -ne 0 ]; then
-    echo "Error: Test failed for data parallel size 2" >&2
-    exit -1
-fi
-echo "Test with data parallel size 2 passed"
 
 # Gemma3 with image input
 echo "Testing gemma-3-4b-it"
