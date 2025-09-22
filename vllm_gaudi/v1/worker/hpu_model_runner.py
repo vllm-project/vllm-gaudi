@@ -23,7 +23,7 @@ from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler, HabanaMemory
                                            format_bytes, setup_profiler)
 from vllm_gaudi.extension.runtime import finalize_config, get_config
 from vllm_gaudi.extension.unified import (create_unified_batch)
-from vllm_gaudi.extension.utils import pad_list
+from vllm_gaudi.extension.utils import pad_list, with_default
 from vllm_gaudi.extension.debug import init_debug_logger
 
 from vllm.attention.backends.abstract import AttentionType
@@ -706,8 +706,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.use_hpu_graph = not self.model_config.enforce_eager
         self.max_batch_size = self.scheduler_config.max_num_seqs
         self.max_num_seqs = self.scheduler_config.max_num_seqs
-        # TODO(kzawora): add knob for that
-        self.max_prefill_batch_size = 1
+        self.max_prefill_batch_size = with_default(get_config().VLLM_PROMPT_BS_BUCKET_MAX, 1)
         self.seen_configs: set = set()
         self.max_num_batched_tokens = \
             self.scheduler_config.max_num_batched_tokens
@@ -3694,13 +3693,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 prompt_total_tokens, prompt_num_context_blocks = \
                      self.get_merged_prefill_seq_lens(prompt_query_len,
                                                  prompt_num_blocks)
-            for tokens, context_len in zip(prompt_total_tokens, prompt_num_context_blocks):
-                self._add_dummy_request(requests,
-                                        scheduled_tokens,
-                                        num_computed_tokens=(context_len * self.block_size),
-                                        total_tokens=tokens,
-                                        scheduled_tokens=prompt_query_len,
-                                        is_prompt=True)
+            for _ in range(prompt_bs):
+                for tokens, context_len in zip(prompt_total_tokens, prompt_num_context_blocks):
+                    self._add_dummy_request(requests,
+                                            scheduled_tokens,
+                                            num_computed_tokens=(context_len * self.block_size),
+                                            total_tokens=tokens,
+                                            scheduled_tokens=prompt_query_len,
+                                            is_prompt=True)
         if decode_cfg:
             decode_bs, decode_query_len, decode_num_blocks = decode_cfg
             if self.use_contiguous_pa:
