@@ -10,9 +10,9 @@
 
 <p style="text-align:center">
 <script async defer src="https://buttons.github.io/buttons.js"></script>
-<a class="github-button" href="https://github.com/HabanaAI/vllm-fork" data-show-count="true" data-size="large" aria-label="Star">Star</a>
-<a class="github-button" href="https://github.com/HabanaAI/vllm-fork/subscription" data-show-count="true" data-icon="octicon-eye" data-size="large" aria-label="Watch">Watch</a>
-<a class="github-button" href="https://github.com/HabanaAI/vllm-fork/fork" data-show-count="true" data-icon="octicon-repo-forked" data-size="large" aria-label="Fork">Fork</a>
+<a class="github-button" href="https://github.com/vllm-project/vllm-gaudi" data-show-count="true" data-size="large" aria-label="Star">Star</a>
+<a class="github-button" href="https://github.com/vllm-project/vllm-gaudi/subscription" data-show-count="true" data-icon="octicon-eye" data-size="large" aria-label="Watch">Watch</a>
+<a class="github-button" href="https://github.com/vllm-project/vllm-gaudi/fork" data-show-count="true" data-icon="octicon-repo-forked" data-size="large" aria-label="Fork">Fork</a>
 </p>
 
 vLLM Gaudi plugin (vllm-gaudi) integrates Intel Gaudi accelerators with vLLM to optimize large language model inference.
