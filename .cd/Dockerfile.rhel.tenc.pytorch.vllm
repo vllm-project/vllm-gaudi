@@ -61,7 +61,7 @@ RUN mkdir -p $VLLM_PATH2 && \
 # Install additional Python packages
 RUN pip3 install datasets pandas
 
-# Copy utility scripts and configuration /// to be enabled later PWolsza
+# Copy utility scripts and configuration
 RUN mkdir -p /root/scripts/
 COPY templates /root/scripts/templates/
 COPY entrypoints /root/scripts/entrypoints/
