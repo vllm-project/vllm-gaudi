@@ -53,8 +53,8 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors, DraftTo
                              AsyncModelRunnerOutput, KVConnectorOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import bind_kv_cache
-from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
-from vllm.v1.worker.gpu_input_batch import CachedRequestState
+from vllm_gaudi.v1.worker.utils import initialize_kv_cache_for_kv_sharing
+from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.models.interfaces import (supports_eagle3, supports_transcription)
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
@@ -645,6 +645,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # Lazy initialization
         # self.model: nn.Module  # set after load_model
         self.kv_caches: list[torch.Tensor] = []
+        # KV sharing tracks layers that share the same KV cache
+        self.shared_kv_cache_layers: dict[str, str] = {}
         self.inc_initialized_successfully = False
         self._is_inc_finalized = False
 
@@ -885,6 +887,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         use_mla = self.vllm_config.model_config.use_mla
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         for layer_name, attn_module in forward_ctx.items():
+            kv_sharing_target_layer_name = getattr(attn_module, 'kv_sharing_target_layer_name', None)
+            if kv_sharing_target_layer_name is not None:
+                self.shared_kv_cache_layers[layer_name] = kv_sharing_target_layer_name
+                continue
             if isinstance(attn_module, FusedMoE):
                 continue
 
@@ -3800,6 +3806,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             for group in kv_cache_config.kv_cache_groups:
                 layer_names.update(group.layer_names)
             assert layer_names == set(kv_caches.keys()), "Some layers are not correctly initialized"
+
+        if self.shared_kv_cache_layers:
+            initialize_kv_cache_for_kv_sharing(self.shared_kv_cache_layers, kv_cache_config.kv_cache_groups, kv_caches)
+
         bind_kv_cache(kv_caches, self.vllm_config.compilation_config.static_forward_context, self.kv_caches)
 
         if self.enable_bucketing:
