@@ -165,8 +165,24 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
             # MLA Specific Arguments
             **kwargs) -> None:
         torch.nn.Module.__init__(self)
-        MLACommonImpl.__init__(self, num_heads, head_size, scale, num_kv_heads, alibi_slopes, sliding_window,
-                               kv_cache_dtype, logits_soft_cap, attn_type, kv_sharing_target_layer_name, **kwargs)
+
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.scale = float(scale)
+        self.num_kv_heads = num_kv_heads
+        self.kv_cache_dtype = kv_cache_dtype
+
+        self.q_lora_rank = kwargs.get('q_lora_rank')
+        self.kv_lora_rank = kwargs.get('kv_lora_rank')
+        self.qk_nope_head_dim = kwargs.get('qk_nope_head_dim')
+        self.qk_rope_head_dim = kwargs.get('qk_rope_head_dim')
+        self.qk_head_dim = kwargs.get('qk_head_dim')
+        self.v_head_dim = kwargs.get('v_head_dim')
+        self.kv_b_proj = kwargs.get('kv_b_proj')
+
+        #MLACommonImpl.__init__(self, num_heads, head_size, scale, num_kv_heads, alibi_slopes, sliding_window,
+        #                       kv_cache_dtype, logits_soft_cap, attn_type, kv_sharing_target_layer_name, **kwargs)
+
         self.enable_fp8_attn = kv_cache_dtype == 'fp8_inc' and os.environ.get('QUANT_CONFIG', None) is None
         self.matmul_qk = Matmul() if not self.enable_fp8_attn \
             else FP8Matmul()
