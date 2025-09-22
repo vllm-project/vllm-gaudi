@@ -408,10 +408,9 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         prefill_metadata = attn_metadata
         shift = 0
 
-        seq_lens_t = prefill_metadata.seq_lens_tensor
-        context_lens_t = prefill_metadata.context_lens_tensor
-
         if self.prefill_use_fusedsdpa and attn_metadata.block_list is not None:
+
+            context_lens_t = prefill_metadata.context_lens_tensor
 
             block_list = attn_metadata.block_list
             max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
@@ -428,6 +427,7 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
             causal_mask = causal_mask.view(batch_size, 1, seq_len, seq_len)
 
             # TODO: Investigate further - Removing Padding cause accuracy issue
+            # seq_lens_t = prefill_metadata.seq_lens_tensor
             # len_mask = (torch.arange(0, seq_len, device=device, dtype=torch.int32).view(1, seq_len).lt(
             #     seq_lens_t.unsqueeze(-1)).view(batch_size, 1, 1, seq_len))
             # causal_mask = causal_mask.logical_and(len_mask)

@@ -131,7 +131,10 @@ def start_test(model_card_path: str):
                 dict(modality=modality, input_data_config=input_data_config, extra_engine_args=extra_engine_args))
 
             data = PROMPT_DATA()
-            inputs = data.get_prompts(model_name=model_name, modality=modality, media_source=media_source, num_prompts=num_prompts)
+            inputs = data.get_prompts(model_name=model_name,
+                                      modality=modality,
+                                      media_source=media_source,
+                                      num_prompts=num_prompts)
 
             logger.info("*** Questions for modality %(modality)s: %(questions)s",
                         dict(modality=modality, questions=data._questions[modality]))
