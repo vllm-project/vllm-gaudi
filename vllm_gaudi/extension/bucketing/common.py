@@ -1,6 +1,7 @@
 import os
 import bisect
 import math
+import itertools
 from typing import Dict
 import inspect
 from dataclasses import dataclass, field
@@ -196,11 +197,11 @@ class HPUBucketingManager():
             return found_bucket
         return (batch_size, 1, num_blocks)
 
-    def find_unified_bucket(self, query, shared_ctx, unique_ctx):
+    def find_unified_bucket(self, query, shared_ctx, unique_ctx, is_causal):
         if self.initialized:
             # TODO: handle is_causal
             found_bucket = find_equal_or_closest_greater_config(self.unified_buckets,
-                                                                (query, shared_ctx, unique_ctx, 1))
+                                                                (query, shared_ctx, unique_ctx, is_causal))
             if found_bucket is None:
                 logger().warning(f"No bucket found for: {(query, shared_ctx, unique_ctx)}")
                 return (query, shared_ctx, unique_ctx)
@@ -305,19 +306,18 @@ def generate_unified_buckets(query_range, shared_ctx_range, unique_ctx_range, bs
     buckets = set()
     is_causal = [0, 1]
 
-    for query in query_range:
-        for shared_ctx in shared_ctx_range:
-            for unique_ctx in unique_ctx_range:
-                for causal in is_causal:
-                    if causal:
-                        max_bs = min(bs, query)
-                        if math.ceil(shared_ctx * block_size // max_bs) <= max_model_len:
-                            buckets.add((query, shared_ctx, unique_ctx, causal))
-                    elif (causal == 0 and query <= bs):
-                        # non causal query = current bs
-                        if math.ceil(shared_ctx * block_size // (query // 2)) <= max_model_len:
-                            if shared_ctx > 0 or unique_ctx > 0:
-                                buckets.add((query, shared_ctx, unique_ctx, causal))
+    for query, shared_ctx, unique_ctx, causal in itertools.product(query_range, shared_ctx_range, unique_ctx_range,
+                                                                   is_causal):
+        if causal:
+            max_bs = min(bs, query)
+            if math.ceil(shared_ctx * block_size // max_bs) <= max_model_len:
+                buckets.add((query, shared_ctx, unique_ctx, causal))
+        elif (query <= bs):
+            # non causal query = current bs
+            if shared_ctx > 0 or unique_ctx > 0:
+                if shared_ctx == 0 or (query > 1 and \
+                    math.ceil(shared_ctx * block_size // (query // 2)) <= max_model_len):
+                    buckets.add((query, shared_ctx, unique_ctx, causal))
 
     return sorted(buckets)
 
