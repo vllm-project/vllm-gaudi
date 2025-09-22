@@ -15,7 +15,7 @@
 <a class="github-button" href="https://github.com/HabanaAI/vllm-fork/fork" data-show-count="true" data-icon="octicon-repo-forked" data-size="large" aria-label="Fork">Fork</a>
 </p>
 
-vLLM HPU plugin (vllm-hpu) integrates Intel Gaudi accelerators with vLLM to optimize large language model inference.
+vLLM Gaudi plugin (vllm-gaudi) integrates Intel Gaudi accelerators with vLLM to optimize large language model inference.
 
 This plugin follows the [[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162) and [[RFC]: Enhancing vLLM Plugin Architecture](https://github.com/vllm-project/vllm/issues/19161) principles, providing a modular interface for Intel Gaudi hardware.
 
