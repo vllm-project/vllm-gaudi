@@ -71,7 +71,6 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
             num_decode_tokens=0,
             context_lens_tensor=context_lens_tensor,
             seq_lens_tensor=seq_lens_tensor,
-            multi_modal_placeholder_index_maps=None,
             num_prefills=0,  # ignored on HPU
             num_prefill_tokens=0,  # ignored on HPU
             input_positions=None,
