@@ -188,6 +188,10 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
 
+        # NOTE(kzawora): restore this once https://github.com/vllm-project/vllm/pull/25385 is merged
+        #MLACommonImpl.__init__(self, num_heads, head_size, scale, num_kv_heads, alibi_slopes, sliding_window,
+        #                       kv_cache_dtype, logits_soft_cap, attn_type, kv_sharing_target_layer_name, **kwargs)
+
         self.enable_fp8_attn = kv_cache_dtype == 'fp8_inc' and os.environ.get('QUANT_CONFIG', None) is None
         self.matmul_qk = Matmul() if not self.enable_fp8_attn \
             else FP8Matmul()
