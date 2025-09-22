@@ -34,7 +34,6 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer
 from vllm.forward_context import set_forward_context, DPMetadata
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -66,6 +65,7 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.sample.sampler import Sampler
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from torch.nn.utils.rnn import pad_sequence
 from vllm.v1.core.sched.output import NewRequestData
@@ -573,7 +573,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.use_aux_hidden_state_outputs = False
         self.supports_mm_inputs = False
 
-        self.sampler = get_sampler()
+        self.sampler = Sampler()
 
         # NOTE(kzawora) update_env is a hack to work around VLLMKVCache in
         # hpu-extension which selects fetch_from_cache implementation based
@@ -2299,7 +2299,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                      f'{batch_size}_'
                                                      f'seq{seq_len}_ctx'
                                                      f'{num_blocks}')):
-            logits = self.model.compute_logits(hidden_states, None)
+            logits = self.model.compute_logits(hidden_states)
         return non_flattened_hidden_states, aux_hidden_states, \
             hidden_states, logits
 
@@ -2341,7 +2341,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # If this is a partial request (i.e. chunked prefill),
             # then there is prompt logprob generated for each index.
             prompt_hidden_states = hidden_states[i, :num_logits]
-            logits = self.model.compute_logits(prompt_hidden_states, None)
+            logits = self.model.compute_logits(prompt_hidden_states)
 
             # Get the "target" tokens for each index. For prompt at index i,
             # the token at prompt index i+1 is the "sampled" token we want
@@ -3437,7 +3437,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         for batch_size in test_batch_sizes:
             dummy_hidden_states = torch.randn(batch_size, self.hidden_size, dtype=self.dtype, device=self.device)
-            dummy_logits = self.model.compute_logits(dummy_hidden_states, None)
+            dummy_logits = self.model.compute_logits(dummy_hidden_states)
 
             # Create dummy requests for this specific configuration
             dummy_req_ids = [f"warmup_req_{batch_size}_{i}" for i in range(max(1, batch_size))]
@@ -4079,7 +4079,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     last_hidden_states, hidden_states = ret_hidden_states
                 last_hidden_states = last_hidden_states.view(-1, last_hidden_states.shape[-1])
                 sample_hidden_states = last_hidden_states[last_token_indices]
-                logits = self.drafter.model.compute_logits(sample_hidden_states, None)
+                logits = self.drafter.model.compute_logits(sample_hidden_states)
                 draft_token_ids = logits.argmax(dim=-1)
                 return draft_token_ids, hidden_states
 
