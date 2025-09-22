@@ -232,10 +232,8 @@ echo "Embedding-model-support for v1 successful"
 
 # Gemma3 with image input
 echo "Testing gemma-3-4b-it"
-echo "VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
-python -u vllm-gaudi/tests/models/language/generation/generation_mm.py --model-card-path vllm-gaudi/tests/full_tests/model_cards/gemma-3-27b-it.yaml"
-VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
-python -u vllm-gaudi/tests/models/language/generation/generation_mm.py --model-card-path vllm-gaudi/tests/full_tests/model_cards/gemma-3-27b-it.yaml
+echo "VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/models/language/generation/generation_mm.py --model-card-path vllm-gaudi/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
+VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/models/language/generation/generation_mm.py --model-card-path vllm-gaudi/tests/full_tests/model_cards/gemma-3-4b-it.yaml
 if [ $? -ne 0 ]; then
     echo "Error: Test failed for multimodal-support with gemma-3-4b-it" >&2
     exit -1
