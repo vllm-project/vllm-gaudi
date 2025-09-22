@@ -98,7 +98,6 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
             context_lens_tensor=None,
             num_prefills=0,  # ignored on HPU
             num_prefill_tokens=0,  # ignored on HPU
-            multi_modal_placeholder_index_maps=None,
             block_list=block_list,
             block_usage=block_usage,
             block_groups=block_groups,
