@@ -338,10 +338,6 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         self.is_mm_optimized = is_mm_optimized(self.model)
         self.sliding_window = vllm_config.model_config.get_sliding_window()
         self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
-        if self.interleaved_sliding_window:
-            self.use_window_sdpa = os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
-            self.slice_size = int(os.getenv("PT_HPU_SDPA_BC_FACTOR", "1024"))
-            self.slice_thld = int(os.environ.get('VLLM_FUSEDSDPA_SLIDE_THLD', '8192'))
 
     def _get_rotary_embedding_module(self, model: torch.nn.Module):
         """
@@ -407,13 +403,6 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
     def _set_attn_bias_for_sliding_window(self, attn_metadata, batch_size, seq_len, window_size, device, dtype):
 
         if (attn_metadata is None or not attn_metadata.is_prompt):
-            return attn_metadata
-
-        # FusedSDPA with window_size is only supported when the length
-        # of the input_token is multiple of the slice_size
-        if (self.use_window_sdpa and seq_len >= self.slice_thld and self.slice_size != 0
-                and (seq_len % self.slice_size == 0) and attn_metadata.block_list is None):
-            # no need to set sliding window mask, just use built-in window-sdpa
             return attn_metadata
 
         prefill_metadata = attn_metadata
