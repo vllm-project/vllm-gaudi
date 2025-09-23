@@ -7,7 +7,6 @@ from torch.distributed import ProcessGroup
 
 from vllm.distributed.device_communicators.base_device_communicator \
     import DeviceCommunicatorBase
-from vllm.forward_context import get_forward_context
 from vllm.distributed.parallel_state import GroupCoordinator, get_dp_group
 
 import habana_frameworks.torch as htorch  # noqa: F401
@@ -84,12 +83,8 @@ class HpuCommunicator(DeviceCommunicatorBase):
             htorch.core.mark_step()
         assert self.dp_group is not None
         assert hidden_states.dim() == 2, "Input hidden states must be 2D"
-        cu_tokens_across_dp_cpu = get_forward_context().dp_metadata.cu_tokens_across_dp_cpu
 
-        # assume num tokens is padded across DP ranks
-        assert cu_tokens_across_dp_cpu[0] * self.dp_world_size == cu_tokens_across_dp_cpu[-1]
-
-        local_hidden_states = torch.empty((cu_tokens_across_dp_cpu[0], hidden_states.size(-1)),
+        local_hidden_states = torch.empty((hidden_states.size(0) // self.dp_world_size, hidden_states.size(-1)),
                                           device=hidden_states.device,
                                           dtype=hidden_states.dtype)
 
