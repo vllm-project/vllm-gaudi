@@ -2999,7 +2999,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if not warmup_mode:
                 self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = (self.get_finished_kv_transfers(scheduler_output))
-            # Join prefill results
 
             if self.is_driver_worker and self.profiler.enabled:
                 self.profiler_counter_helper.reset_prompt_seq_stats()
