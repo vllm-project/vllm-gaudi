@@ -339,6 +339,13 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         self.sliding_window = vllm_config.model_config.get_sliding_window()
         self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
 
+        # for DP
+        # dummy input tokens
+        self.num_input_tokens = -1
+        # dummy num_tokens_across_dp to skip dp padding sync between ranks
+        self.num_tokens_across_dp = [self.num_input_tokens] * self.vllm_config.parallel_config.data_parallel_size
+        self.num_tokens_across_dp_cpu = torch.tensor(self.num_tokens_across_dp, device='cpu', dtype=torch.int32)
+
     def _get_rotary_embedding_module(self, model: torch.nn.Module):
         """
         Dynamically get the RotaryEmbedding layer in the model.
@@ -525,17 +532,12 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         if model_mm_kwargs is not None:
             kwargs.update(model_mm_kwargs)
 
-        num_input_tokens = input_ids.size(0) * input_ids.size(1)
-        # dummy num_tokens_across_dp to skip dp padding sync between ranks
-        num_tokens_across_dp = [0] * self.vllm_config.parallel_config.data_parallel_size
-        num_tokens_across_dp[self.vllm_config.parallel_config.data_parallel_rank] = num_input_tokens
-        num_tokens_across_dp_cpu = torch.tensor(num_tokens_across_dp, device='cpu', dtype=torch.int32)
         if self.flatten_input:
             kwargs['input_ids'] = input_ids.view(-1)
         with set_forward_context(attn_meta,
                                  self.vllm_config,
-                                 num_tokens=num_input_tokens,
-                                 num_tokens_across_dp=num_tokens_across_dp_cpu):
+                                 num_tokens=self.num_input_tokens,
+                                 num_tokens_across_dp=self.num_tokens_across_dp_cpu):
             hidden_states = self.model(*args, **kwargs)
             if self._rotary_prepare_cos_sin is not None:
                 self._reset_rotary_cos_sin()
