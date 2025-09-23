@@ -17,13 +17,14 @@ from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, ModuleFusedSDPA, Soft
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl, AttentionLayer, AttentionMetadata,
                                               AttentionType)
-from vllm.attention.backends.mla.common import MLACommonImpl
+from vllm.v1.attention.backends.mla.common import MLACommonImpl
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention, HPUPagedAttentionMetadata,
                                                      HPUPagedAttentionMetadataBuilder)
 
 from vllm_gaudi.extension.logger import logger as init_logger
 from vllm_gaudi.extension.unified import (unified_attn, HPUUnifiedAttentionMetadata)
+from vllm.model_executor.layers.linear import ColumnParallelLinear
 
 logger = init_logger()
 
@@ -151,22 +152,46 @@ class HPUMLAMetadata(HPUAttentionMetadata, AttentionMetadata):
 class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
 
     def __init__(
-            self,
-            num_heads: int,
-            head_size: int,
-            scale: float,
-            num_kv_heads: int,
-            alibi_slopes: Optional[list[float]],
-            sliding_window: Optional[int],
-            kv_cache_dtype: str,
-            logits_soft_cap: Optional[float],
-            attn_type: str,
-            kv_sharing_target_layer_name: Optional[str] = None,
-            # MLA Specific Arguments
-            **kwargs) -> None:
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: Optional[list[float]],
+        sliding_window: Optional[int],
+        kv_cache_dtype: str,
+        logits_soft_cap: Optional[float],
+        attn_type: str,
+        kv_sharing_target_layer_name: Optional[str],
+        # MLA Specific Arguments
+        q_lora_rank: Optional[int],
+        kv_lora_rank: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        qk_head_dim: int,
+        v_head_dim: int,
+        kv_b_proj: ColumnParallelLinear,
+    ) -> None:
         torch.nn.Module.__init__(self)
-        MLACommonImpl.__init__(self, num_heads, head_size, scale, num_kv_heads, alibi_slopes, sliding_window,
-                               kv_cache_dtype, logits_soft_cap, attn_type, kv_sharing_target_layer_name, **kwargs)
+
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.scale = float(scale)
+        self.num_kv_heads = num_kv_heads
+        self.kv_cache_dtype = kv_cache_dtype
+
+        self.q_lora_rank = q_lora_rank
+        self.kv_lora_rank = kv_lora_rank
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.qk_head_dim = qk_head_dim
+        self.v_head_dim = v_head_dim
+        self.kv_b_proj = kv_b_proj
+
+        # NOTE(kzawora): restore this once https://github.com/vllm-project/vllm/pull/25385 is merged
+        #MLACommonImpl.__init__(self, num_heads, head_size, scale, num_kv_heads, alibi_slopes, sliding_window,
+        #                       kv_cache_dtype, logits_soft_cap, attn_type, kv_sharing_target_layer_name, **kwargs)
+
         self.enable_fp8_attn = kv_cache_dtype == 'fp8_inc' and os.environ.get('QUANT_CONFIG', None) is None
         self.matmul_qk = Matmul() if not self.enable_fp8_attn \
             else FP8Matmul()
@@ -535,8 +560,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             block_list = attn_metadata.block_list if attn_metadata \
                 and attn_metadata.block_list is not None else None
 
-            if self.sliding_window \
-               and attn_metadata.window_attn_bias is not None:
+            common_args = self.common_attention_args(block_list, key_cache, value_cache, attn_metadata.block_size)
+
+            if self.sliding_window and hasattr(attn_metadata,
+                                               'window_attn_bias') and attn_metadata.window_attn_bias is not None:
                 attn_bias = attn_metadata.window_attn_bias
 
             out = ops.prompt_attention(impl=self.prefill_impl,
@@ -547,22 +574,22 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                        attn_bias=attn_bias,
                                        position_bias=position_bias,
                                        valid_seq_lengths=attn_metadata.seq_lens_tensor,
-                                       **self.common_attention_args(block_list, key_cache, value_cache,
-                                                                    attn_metadata.block_size))
+                                       **common_args)
 
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
             # Decoding run.
-            if not self.sliding_window:
-                block_list = attn_metadata.block_list
-                block_groups = attn_metadata.block_groups
-                block_mapping = attn_metadata.block_mapping
-                attn_bias = attn_metadata.attn_bias
-            else:
+            if self.sliding_window and \
+                attn_metadata.window_block_list is not None:
                 block_list = attn_metadata.window_block_list
                 block_groups = attn_metadata.window_block_groups
                 block_mapping = attn_metadata.window_block_mapping
                 attn_bias = attn_metadata.window_attn_bias
+            else:
+                block_list = attn_metadata.block_list
+                block_groups = attn_metadata.block_groups
+                block_mapping = attn_metadata.block_mapping
+                attn_bias = attn_metadata.attn_bias
 
             self.position_bias = None
             alibi_blocks = getattr(attn_metadata, 'alibi_blocks', None)
