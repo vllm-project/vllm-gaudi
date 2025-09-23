@@ -41,7 +41,6 @@ a `(2, 1, 512)` bucket, or the context length increases beyond 512 tokens. It wi
 > [!NOTE]
 > Bucketing is transparent to the user – padding in the sequence length dimension is never returned, and padding in the batch dimension does not create new requests.
 
-
 ### Exponential Strategy  - Default
 
 Exponential strategy is the default warm-up mechanism. It is based on 4 parameters:
@@ -65,7 +64,7 @@ min = 128, step = 128, max = 4096, limit = 13
 
 This strategy creates more buckets with smaller values closer to `min`. As the values increase toward `max`, the buckets become less frequent, meaning the distance between them gets larger. This helps prioritize warming up the smaller values more precisely, while still covering the full range.
 
-### Linear Strategy 
+### Linear Strategy
 
 > [!NOTE]
 > Starting from v1.22.0 Intel Gaudi Software release, Linear strategy is no longer the default warm-up mechanism.
@@ -92,7 +91,7 @@ min = 128, step = 128, max = 512
 => buckets = ramp_up + stable => (128, 256, 384, 512)
 ```
 
-### Unified Strategy 
+### Unified Strategy
 
 Unified startegy is dedicated startegy for Unified Attention. It's buckets are determined by different dimensions:
 - `query length`: sequence length without context tokens
@@ -107,7 +106,7 @@ Unified bucketing prepares buckets for moth prompt and decode as one, known as `
 
 **Alpha Version:**
 
-Currently there are six points in ranges for query length, shared blocks and unique blocks. They are based on `max num seqs` and `max num batched tokens` values. Points are as follows whole, half and one quarter of both values resulting in six points in total. 
+Currently there are six points in ranges for query length, shared blocks and unique blocks. They are based on `max num seqs` and `max num batched tokens` values. Points are as follows whole, half and one quarter of both values resulting in six points in total.
 
 Example distribution is shown below:
 
