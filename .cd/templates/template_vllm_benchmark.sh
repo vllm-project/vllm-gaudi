@@ -3,7 +3,7 @@
 #@VARS
 
 # Wait for vLLM server to be ready
-until curl -s http://localhost:8000${ENDPOINT} > /dev/null; do
+until curl -s http://localhost:8000/v1/models > /dev/null; do
     echo "Waiting for vLLM server to be ready..."
     sleep 15
 done
@@ -25,6 +25,7 @@ vllm bench serve \
                 --model $MODEL \
                 --base-url http://localhost:8000 \
                 --endpoint $ENDPOINT \
+                --endpoint-type $BACKEND \
                 --backend $BACKEND \
                 --dataset-name $DATASET_NAME \
                 --dataset-path $DATASET\
