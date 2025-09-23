@@ -1582,6 +1582,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # for the valid tokens before padding.
         # This would require getting multimodal input embeddings here as well
         token_ids = self._align_and_pad(contents.token_ids, (target_bs, target_seq), itertools.repeat(-1))
+        # Update query_lens after padding
+        query_lens = [target_seq] * target_bs
+
         # If the model uses M-RoPE, we need to fill
         # and pad the M-RoPE positions for the scheduled prefill tokens
         if self.uses_mrope:
