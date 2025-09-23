@@ -350,6 +350,17 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         result = self._v_up_proj(output)
         return result
 
+    # NOTE(Chendi): PR25184 using output buffer as default, which can't be used in HPU Graph,
+    # so we override and always return a new tensor
+    def _v_up_proj(self, x):
+        # Convert from (B, N, L) to (N, B, L)
+        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+        # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
+        x = torch.bmm(x, self.W_UV)
+        # Convert from (N, B, V) to (B, N * V)
+        x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+        return x
+
 
 class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
     """
