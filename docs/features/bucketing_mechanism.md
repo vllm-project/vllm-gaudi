@@ -47,7 +47,7 @@ Exponential strategy is the default warm-up mechanism. It is based on 4 paramete
 - `min`: the smallest value
 - `step`: the rounding value for bucket boundaries
 - `max`: the largest value
-- `limit`: the number of buckets
+- `limit`: the maximum number of buckets
 
 > [!WARNING]
 > These parameters are not configurable by the user.
@@ -93,13 +93,13 @@ min = 128, step = 128, max = 512
 
 ### Unified Strategy
 
-Unified startegy is dedicated startegy for Unified Attention. It's buckets are determined by different dimensions:
-- `query length`: sequence length without context tokens
-- `shared num blocks`: context length counted in blocks, inculding only blocks that are either shared between at least two block tables (different requests) or is used by at least two tokens in query
-- `unique num blocks`: context length counted in blocks, inculding only blocks that are not shared between block tables and are used only by one token
+Unified strategy is dedicated strategy for Unified Attention. It's buckets are determined by different dimensions:
+- `query length`: number of currently processed tokens, without context tokens
+- `shared num blocks`: context length counted in blocks, including only blocks that are either shared between at least two block tables (different requests) or is used by at least two tokens in query
+- `unique num blocks`: context length counted in blocks, including only blocks that are not shared between block tables and are used only by one token
 - `is causal`: only two possible values: 0 and 1. Causal determines if there is at least one prompt in batch
 
-Unified bucketing prepares buckets for moth prompt and decode as one, known as `unified cfg`.
+Unified bucketing prepares buckets for both prompt and decode as one, known as `unified cfg`.
 
 > [!WARNING]
 > No parameters for unified warmup are configurable by the user.
@@ -124,7 +124,7 @@ This way our bucketing will look like this:
 INFO 09-23 12:32:43 [common.py:100] Generated 375 unified buckets [query, shared_blocks, unique_blocks]: [(8, 0, 0, 1), (8, 0, 8, 0), ..., (2048, 256, 2890, 1), (2048, 256, 5781, 1)]
 ```
 
-With eery bucket logged seperatley in warm-up phase:
+With every bucket logged separately in warm-up phase:
 
 ```{.}
 (EngineCore_DP0 pid=805) INFO 09-23 12:32:50 [hpu_model_runner.py:3320] [Warmup][Unified CFG][2/375] query_len:2048 shared_blocks:256 unique_blocks:2890 (causal) free_mem:11.16 GiB
