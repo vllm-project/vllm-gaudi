@@ -2999,6 +2999,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if not warmup_mode:
                 self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = (self.get_finished_kv_transfers(scheduler_output))
+            # Join prefill results
 
             if self.is_driver_worker and self.profiler.enabled:
                 self.profiler_counter_helper.reset_prompt_seq_stats()
@@ -3923,7 +3924,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
-            get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
+            if self.vllm_config.kv_transfer_config.kv_buffer_device == "cpu":
+                get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
             global hpu_buffer
         htorch.hpu.synchronize()
 

@@ -37,6 +37,8 @@ class HpuPlatform(Platform):
     supported_quantization: list[str] = ["compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu"]
     simple_compile_backend = "hpu_backend"
     additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
+    nixl_supported_devices: dict[str, tuple[str, ...]] = {"hpu": ("cpu", )}
+    nixl_memory_type: str = "DRAM"
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int, dtype: torch.dtype,
@@ -82,6 +84,10 @@ class HpuPlatform(Platform):
             else:
                 parallel_config.worker_cls = \
                     "vllm.worker.hpu_worker.HPUWorker"
+
+        if vllm_config.kv_transfer_config.kv_buffer_device == 'hpu':
+            cls.nixl_supported_devices = {"hpu": ("hpu", )}
+            cls.nixl_memory_type = "VRAM"
 
         # NOTE(kzawora): default block size for Gaudi should be 128
         # smaller sizes still work, but very inefficiently
@@ -144,6 +150,14 @@ class HpuPlatform(Platform):
     def supports_v1(cls, model_config: ModelConfig) -> bool:
         # V1 support on HPU is experimental
         return True
+
+    @classmethod
+    def get_nixl_supported_devices(cls) -> dict[str, tuple[str, ...]]:
+        return cls.nixl_supported_devices
+
+    @classmethod
+    def get_nixl_memory_type(cls) -> str:
+        return cls.nixl_memory_type
 
     @classmethod
     def set_torch_compile(cls) -> None:
