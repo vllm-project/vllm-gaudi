@@ -195,9 +195,17 @@ jobs:
           echo "Test script exited with code: $EXITCODE"
 
   pre_merge_hpu_test:
-    runs-on: ucb-vllm-cicd-g2
-    needs: [hpu_unit_tests, hpu_e2e_tests, hpu_perf_tests]
+    runs-on: ubuntu-latest
+    needs: [hpu_unit_tests, hpu_e2e_tests, hpu_perf_tests, hpu_dp_tests, hpu_pd_tests]
     # This job is required to pass for pre-merge CI. By itself it does nothing, and will only pass if all jobs specified in "needs" list pass.
     steps:
       - name: Succeeded if all previous jobs passed
-        run: echo "All previous jobs passed." 
+        run: echo "All previous jobs passed."
+
+  # Add this gatekeeper job
+  merge-gate:
+    runs-on: ubuntu-latest
+    needs: [pre_merge_hpu_test]
+    if: success() # This ensures the job is SKIPPED if pre_merge_hpu_test is canceled
+    steps:
+      - run: echo "All required checks passed." 
