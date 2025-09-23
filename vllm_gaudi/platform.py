@@ -37,6 +37,7 @@ class HpuPlatform(Platform):
     supported_quantization: list[str] = ["compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu"]
     simple_compile_backend = "hpu_backend"
     additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
+
     nixl_supported_devices: dict[str, tuple[str, ...]] = {"hpu": ("cpu", )}
     nixl_memory_type: str = "DRAM"
 
@@ -84,10 +85,6 @@ class HpuPlatform(Platform):
             else:
                 parallel_config.worker_cls = \
                     "vllm.worker.hpu_worker.HPUWorker"
-
-        if vllm_config.kv_transfer_config.kv_buffer_device == 'hpu':
-            cls.nixl_supported_devices = {"hpu": ("hpu", )}
-            cls.nixl_memory_type = "VRAM"
 
         # NOTE(kzawora): default block size for Gaudi should be 128
         # smaller sizes still work, but very inefficiently
