@@ -9,87 +9,109 @@ PLACEHOLDER_TOKEN_ID = rejection_sampler.PLACEHOLDER_TOKEN_ID
 GREEDY_TEMPERATURE = rejection_sampler.GREEDY_TEMPERATURE
 
 
-def rejection_greedy_sample_pytorch(
-    output_token_ids: torch.Tensor,
-    cu_num_draft_tokens: torch.Tensor,
-    draft_token_ids: torch.Tensor,
-    target_argmax: torch.Tensor,
+def rejection_sample_pytorch(
+    padded_draft_token_ids: torch.Tensor,
+    padded_target_token_ids: torch.Tensor,
     bonus_token_ids: torch.Tensor,
-    is_greedy: Optional[torch.Tensor] = None,
+    cu_num_draft_tokens: torch.Tensor,
 ) -> torch.Tensor:
     """
-    PyTorch implementation of the rejection greedy sampling kernel.
+    Performs vectorized rejection sampling on a batch of token sequences.
+
+    This function compares draft tokens to target tokens and accepts them up to 
+    the first mismatch. If an entire sequence of draft tokens is accepted, a 
+    bonus token is appended. This version handles variable numbers of draft 
+    tokens per sequence.
 
     Args:
-        output_token_ids: A tensor to store the output tokens.
-                          Shape: [batch_size, max_spec_len + 1].
-                          Assumed to be pre-filled with a padding token.
-        cu_num_draft_tokens: The cumulative sum of the number of draft tokens
-                             for each request. Shape: [batch_size].
-        draft_token_ids: A flattened tensor of all draft token IDs.
-                         Shape: [total_num_draft_tokens].
-        target_argmax: A flattened tensor of the target model's argmax
-                       predictions for each draft token. 
-                       Shape: [total_num_draft_tokens].
-        bonus_token_ids: A token to append if all draft tokens in a request
-                         are accepted. Shape: [batch_size].
-        is_greedy: An optional boolean tensor indicating which requests in the
-                   batch use greedy sampling. If None, all are assumed greedy.
-                   Shape: [batch_size].
+        padded_draft_token_ids (torch.Tensor): A 2D tensor of draft tokens.
+            Shape: (num_seqs, max_draft_tokens)
+        padded_target_token_ids (torch.Tensor): A 2D tensor of target tokens
+            predicted by the main model.
+            Shape: (num_seqs, max_draft_tokens)
+        bonus_token_ids (torch.Tensor): A single bonus token for each sequence,
+            to be used if all draft tokens are accepted.
+            Shape: (num_seqs, 1)
+        cu_num_draft_tokens (torch.Tensor): The cumulative sum of the number of
+            draft tokens for each request. Used to determine actual sequence 
+            lengths. Shape: (num_seqs,)
+        padding_token_id (int): The value used to pad the output tensor.
+            Defaults to -1.
 
     Returns:
-        The `output_token_ids` tensor filled with the accepted tokens.
+        torch.Tensor: The resulting tensor of accepted tokens.
+            Shape: (num_seqs, max_draft_tokens + 1)
     """
-    batch_size = cu_num_draft_tokens.shape[0]
-    cu_num_draft_tokens_list = cu_num_draft_tokens.tolist()
-    num_draft_tokens_list = []
-    for i in range(batch_size):
-        if i == 0:
-            num_draft_tokens_list.append((0, cu_num_draft_tokens_list[i]))
-        else:
-            num_draft_tokens_list.append((cu_num_draft_tokens_list[i - 1], cu_num_draft_tokens_list[i]))
+    # 0. wait for device processing to finish
+    # NOTE(chendi): Found CPU processing is faster than HPU for this step.
+    padded_draft_token_ids = padded_draft_token_ids.cpu().to(torch.int32)
+    padded_target_token_ids = padded_target_token_ids.cpu().to(torch.int32)
+    bonus_token_ids = bonus_token_ids.cpu().to(torch.int32)
+    cu_num_draft_tokens = cu_num_draft_tokens.cpu()
+    # 1. Get tensor dimensions and device for calculations
+    num_seqs, max_draft_tokens = padded_draft_token_ids.shape
+    padded_target_token_ids = padded_target_token_ids.view(num_seqs, -1)
+    bonus_token_ids = bonus_token_ids.view(num_seqs, -1)
+    device = padded_draft_token_ids.device
 
-    # Iterate over each request in the batch, which corresponds to the
-    # parallel execution of the Triton kernel.
-    for req_idx in range(batch_size):
-        # If a filter is provided, skip non-greedy requests.
-        if is_greedy is not None and not is_greedy[req_idx]:
-            continue
+    # 2. Calculate the number of draft tokens for each sequence from the
+    # cumulative sum
+    start_indices = torch.cat((torch.tensor([0], device=device,
+                                            dtype=cu_num_draft_tokens.dtype), cu_num_draft_tokens[:-1]))
+    num_draft_tokens_per_seq = cu_num_draft_tokens - start_indices
 
-        # Determine the start and end indices for this request's tokens
-        # in the flattened input tensors.
-        start_idx = num_draft_tokens_list[req_idx][0]
-        end_idx = num_draft_tokens_list[req_idx][1]
-        num_draft_tokens = end_idx - start_idx
+    # 3. Find the first mismatch, ignoring padding tokens
+    # Create a mask to only consider valid tokens for each sequence
+    pos = torch.arange(max_draft_tokens, device=device)
+    valid_token_mask = pos < num_draft_tokens_per_seq.unsqueeze(-1)
 
-        if num_draft_tokens == 0:
-            output_token_ids[req_idx, 0] = bonus_token_ids[req_idx]
-            continue
+    matches = (padded_draft_token_ids == padded_target_token_ids)
 
-        # This loop is a direct translation of the Triton kernel's core logic.
-        rejected = False
-        for pos in range(num_draft_tokens):
-            if rejected:
-                break
-            else:
-                draft_token = draft_token_ids[start_idx + pos]
-                target_token = target_argmax[start_idx + pos]
+    mismatches = ~matches
+    any_mismatch = mismatches.any(dim=1)
+    first_mismatch_idx = torch.argmax(mismatches.int(), dim=1)
 
-                # Always store the target model's prediction.
-                output_token_ids[req_idx, pos] = target_argmax[start_idx + pos]
+    # 4. Determine the number of accepted tokens for each sequence
+    # If a mismatch occurs, we accept tokens up to and including the mismatch.
+    # If no mismatch, accept all *actual* draft tokens.
+    num_accepted = ((first_mismatch_idx + 1) * any_mismatch + num_draft_tokens_per_seq * (~any_mismatch))
 
-                # If the draft token doesn't match the target, we "reject"
-                # all subsequent tokens.
-                if draft_token != target_token:
-                    rejected = True
+    # 5. Create the output tensor by masking the target tokens
+    # Initialize the output tensor with the padding value.
+    # Create output buffer.
+    output_tokens = torch.empty(
+        (num_seqs, max_draft_tokens + 1),
+        dtype=torch.int32,  # Consistent with SamplerOutput.sampled_token_ids.
+        device=device,
+    )
+    output_tokens.fill_(PLACEHOLDER_TOKEN_ID)
 
-        # If the entire draft sequence was accepted without any rejection,
-        # append the bonus token.
-        if not rejected:
-            # Ensure we don't write out of bounds.
-            output_token_ids[req_idx, num_draft_tokens] = bonus_token_ids[req_idx]
+    # Create a mask that is True for all positions up to the number of
+    # accepted tokens.
+    acceptance_mask = pos < num_accepted.unsqueeze(-1)
+    acceptance_mask = acceptance_mask & valid_token_mask
 
-    return output_token_ids
+    # Use the mask to copy the accepted target tokens into the output tensor.
+    output_slice = output_tokens[:, :max_draft_tokens]
+    output_slice[acceptance_mask] = padded_target_token_ids[acceptance_mask]
+
+    # 6. Add the bonus token where all draft tokens were accepted
+    # Create a boolean mask for sequences where all drafts were a match.
+    all_accepted_mask = ~any_mismatch
+
+    # If any sequences were fully accepted, place the bonus tokens.
+    if all_accepted_mask.sum() > 0:
+        # Get the column indices (positions) for the bonus tokens using the mask
+        bonus_pos_indices = num_draft_tokens_per_seq[all_accepted_mask].long()
+
+        # Get the corresponding bonus token values using the mask.
+        bonus_values = bonus_token_ids[all_accepted_mask].squeeze(-1)
+
+        # Place the bonus tokens using boolean indexing for rows and integer
+        # indexing for columns.
+        output_tokens[all_accepted_mask, bonus_pos_indices] = bonus_values
+
+    return output_tokens
 
 
 def rejection_sample(
@@ -108,40 +130,12 @@ def rejection_sample(
     bonus_token_ids: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
-    assert draft_token_ids.ndim == 1
-    assert draft_probs is None or draft_probs.ndim == 2
-    assert cu_num_draft_tokens.ndim == 1
-    assert target_probs.ndim == 2
+    assert sampling_metadata.all_greedy, "Only greedy sampling is supported."
 
-    batch_size = len(num_draft_tokens)
-    num_tokens = draft_token_ids.shape[0]
-    vocab_size = target_probs.shape[-1]
-    device = target_probs.device
-    assert draft_token_ids.is_contiguous()
-    assert draft_probs is None or draft_probs.is_contiguous()
-    assert target_probs.is_contiguous()
-    assert bonus_token_ids.is_contiguous()
-    assert target_probs.shape == (num_tokens, vocab_size)
-
-    # Create output buffer.
-    output_token_ids = torch.empty(
-        (batch_size, max_spec_len + 1),
-        dtype=torch.int32,  # Consistent with SamplerOutput.sampled_token_ids.
-        device=device,
-    )
-    output_token_ids.fill_(PLACEHOLDER_TOKEN_ID)
-
-    is_greedy = None if sampling_metadata.all_greedy else sampling_metadata.temperature == GREEDY_TEMPERATURE
     # Rejection sampling for greedy sampling requests.
+
     target_argmax = target_probs.argmax(dim=-1)
-    output_token_ids = rejection_greedy_sample_pytorch(
-        output_token_ids,
-        cu_num_draft_tokens,
-        draft_token_ids,
-        target_argmax,
-        bonus_token_ids,
-        is_greedy,
-    )
+    output_token_ids = rejection_sample_pytorch(draft_token_ids, target_argmax, bonus_token_ids, cu_num_draft_tokens)
     return output_token_ids
 
 

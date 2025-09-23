@@ -17,7 +17,6 @@ class Fp8LinearMethod(OrigFp8LinearMethod):
     def create_weights(self, *args, **kwargs) -> None:
         if hpu_ops.is_hpu_gaudi2:
             kwargs['weight_loader'] = hpu_ops.gaudi_weight_wrapper(kwargs.get('weight_loader'))
-        kwargs['weight_loader'] = hpu_ops.synced_weight_loader(kwargs.get('weight_loader'))
         super().create_weights(*args, **kwargs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -45,6 +44,19 @@ class Fp8LinearMethod(OrigFp8LinearMethod):
                                             input_scale=input_scale,
                                             bias=bias,
                                             trans_B=False)
+
+    def dequant_fp8_weight(self, layer) -> torch.Tensor:
+        if hasattr(layer, "updated_fp8_weight") and layer.updated_fp8_weight:
+            return layer.weight
+        dequant_weight = hpu_ops.dequant_block_fp8_weight_naive(
+            layer.weight,
+            layer.weight_scale_inv.data,
+            self.quant_config.weight_block_size,
+            original_M=layer.orig_M,
+            original_N=layer.orig_N,
+            do_unpad=True,
+        )
+        return dequant_weight
 
 
 @CustomOp.register_oot(name='Fp8MoEMethod')

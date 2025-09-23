@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import habana_frameworks.torch as htorch
@@ -22,6 +22,11 @@ from vllm_gaudi.extension.logger import logger as init_logger
 logger = init_logger()
 
 
+def retain_envs(var_name):
+    retain_var_list = ['GLOO_SOCKET_IFNAME', 'HCCL_SOCKET_IFNAME', 'NCCL_SOCKET_IFNAME']
+    return ('HPU' in var_name or 'RAY' in var_name or 'VLLM' in var_name or var_name in retain_var_list)
+
+
 class HpuPlatform(Platform):
     _enum = PlatformEnum.OOT if envs.VLLM_USE_V1 else PlatformEnum.HPU
     device_name: str = "hpu"
@@ -31,6 +36,7 @@ class HpuPlatform(Platform):
     device_control_env_var: str = "HABANA_VISIBLE_MODULES"
     supported_quantization: list[str] = ["compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu"]
     simple_compile_backend = "hpu_backend"
+    additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int, dtype: torch.dtype,
@@ -53,6 +59,13 @@ class HpuPlatform(Platform):
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
         return True
+
+    @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        return
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -152,56 +165,22 @@ class HpuPlatform(Platform):
         return kv_cache_dtype == "fp8_inc"
 
     @classmethod
-    def set_synchronized_weight_loader(cls) -> None:
+    def use_sync_weight_loader(cls) -> bool:
+        """
+        Returns if the current platform needs to sync weight loader.
+        """
+        force_sync = os.getenv("VLLM_WEIGHT_LOAD_FORCE_SYNC", "true").lower() in ("true", "1")
+        return force_sync
 
-        def set_weight_attrs(
-            weight: torch.Tensor,
-            weight_attrs: Optional[dict[str, Any]],
-        ):
-            """Set attributes on a weight tensor.
+    @classmethod
+    def make_synced_weight_loader(cls, original_weight_loader):
+        """
+        Wrap the original weight loader to make it synced.
+        """
 
-            This method is used to set attributes on a weight tensor.
-            This method will not overwrite existing attributes.
+        def _synced_weight_loader(param, *args, **kwargs):
+            out = original_weight_loader(param, *args, **kwargs)
+            torch.hpu.synchronize()
+            return out
 
-            Args:
-                weight: The weight tensor.
-                weight_attrs: A dictionary of attributes to set on the weight
-                    tensor.
-            """
-            if weight_attrs is None:
-                return
-            for key, value in weight_attrs.items():
-                assert not hasattr(weight, key), (f"Overwriting existing tensor attribute: {key}")
-
-                # NOTE(woosuk): During weight loading, we often do something
-                # like:
-                # narrowed_tensor = param.data.narrow(0, offset, len)
-                # narrowed_tensor.copy_(real_weight)
-                # expecting narrowed_tensor and param.data to share the same
-                # storage.
-                # However, on TPUs, narrowed_tensor will lazily propagate to
-                # the base tensor, which is param.data, leading to the
-                # redundant memory usage.
-                # This sometimes causes OOM errors during model loading. To
-                # avoid this, we sync the param tensor after its weight loader
-                # is called.
-                # TODO(woosuk): Remove this hack once we have a better solution.
-                # NOTE(ksmusz): Issue seen in HPU also, same hack applied.
-                if key == "weight_loader":
-                    value = _make_synced_weight_loader(value)
-                setattr(weight, key, value)
-
-        def _make_synced_weight_loader(original_weight_loader):
-
-            def _synced_weight_loader(param, *args, **kwargs):
-                original_weight_loader(param, *args, **kwargs)
-                torch.hpu.synchronize()
-
-            return _synced_weight_loader
-
-        msg = ("Monkey-patching vllm.model_executor.utils.set_weight_attrs "
-               "to enable synchronized weight loader. This is a hack "
-               "preventing Llama 405B OOM.")
-        logger.warning(msg)
-        import vllm.model_executor.utils as utils
-        utils.set_weight_attrs = set_weight_attrs
+        return _synced_weight_loader

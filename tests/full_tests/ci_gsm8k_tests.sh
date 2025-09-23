@@ -61,6 +61,17 @@ if [ $? -ne 0 ]; then
 fi
 echo "Test with deepseek_v2 + inc dynamic quantization + tp 2 successful"
 
+echo "Testing Qwen3-8B-FP8 + inc requant FP8 model + dynamic quant"
+echo VLLM_HPU_FORCE_CHANNEL_FP8=false QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_dynamic_quant.json HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model Qwen/Qwen3-8B-FP8 --trust-remote-code 
+QUANT_CONFIG=vllm-gaudi/tests/models/language/generation/inc_dynamic_quant.json VLLM_HPU_FORCE_CHANNEL_FP8=false  \
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
+    python -u vllm-gaudi/tests/full_tests/generate.py --model Qwen/Qwen3-8B-FP8 --trust-remote-code 
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for Qwen3-8B-FP8 + inc requant FP8 model + dynamic quant" >&2
+    exit -1
+fi
+echo "Test with Qwen3-8B-FP8 + inc requant FP8 model + dynamic quant passed"
+
 # QWEN3 + blockfp8 + dynamic scaling
 echo "Testing Qwen3-8B-FP8 + blockfp8 + dynamic scaling"
 echo HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model Qwen/Qwen3-8B-FP8 --trust-remote-code
@@ -116,6 +127,27 @@ if [ $? -ne 0 ]; then
 fi
 echo "Test with gptq passed"
 
+# compressed w4a16
+echo "Testing compressed w4a16 inference with vllm-hpu plugin v1"
+echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model RedHatAI/Qwen3-8B-quantized.w4a16 --dtype bfloat16 
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model RedHatAI/Qwen3-8B-quantized.w4a16 --dtype bfloat16
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for compressed w4a16" >&2
+    exit -1
+fi
+echo "Test with compressed w4a16 passed"
+
+# compressed w4a16 MOE
+echo "Testing compressed w4a16 MoE inference with vllm-hpu plugin v1"
+echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model RedHatAI/Qwen3-30B-A3B-quantized.w4a16 --dtype bfloat16 
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model RedHatAI/Qwen3-30B-A3B-quantized.w4a16 --dtype bfloat16
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for compressed w4a16 MoE" >&2
+    exit -1
+fi
+echo "Test with compressed w4a16 MoE passed"
+# 
+
 # gsm8k test
 # used to check HPUattn + MLP
 echo "Testing GSM8K on ganite-8b"
@@ -128,6 +160,18 @@ if [ $? -ne 0 ]; then
     exit -1
 fi
 echo "Test with granite-8b passed"
+
+# used to check asynchronous scheduling
+echo "Testing GSM8K on ganite-8b with async scheduling"
+echo VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 ASYNC_SCHEDULING=1 \
+pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/granite-8b.yaml
+VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 ASYNC_SCHEDULING=1 \
+pytest -v -s vllm-gaudi/tests/models/language/generation/test_common.py --model_card_path vllm-gaudi/tests/full_tests/model_cards/granite-8b.yaml
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for granite-8b + async_scheduling" >&2
+    exit -1
+fi
+echo "Test with granite-8b + async_scheduling passed"
 
 # used to check MLA + MOE
 echo "Testing GSM8K on deepseek v2 lite"
@@ -168,8 +212,8 @@ echo "Test with multimodal-support with qwen2.5-vl-7b passed"
 # spec decode with ngram
 # For G3, acc rate is 0.18, but for G2, it is 0.09
 echo "Testing Spec-decode with ngram"
-echo VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python vllm-gaudi/tests/full_tests/spec_decode.py --task ngram --assert_acc_rate 0.09 --osl 1024
-VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python vllm-gaudi/tests/full_tests/spec_decode.py --task ngram --assert_acc_rate 0.09 --osl 1024
+echo VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python vllm-gaudi/tests/full_tests/spec_decode.py --task ngram --assert_acc_rate 0.25 --osl 1024
+VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python vllm-gaudi/tests/full_tests/spec_decode.py --task ngram --assert_acc_rate 0.25 --osl 1024
 if [ $? -ne 0 ]; then
     echo "Error: Test failed for spec decode with ngram" >&2
     exit -1
@@ -185,3 +229,14 @@ if [ $? -ne 0 ]; then
     exit -1
 fi
 echo "Embedding-model-support for v1 successful"
+
+# TODO: Commented out for now due to the HF token required.
+# Gemma3 with image input
+# echo "Testing gemma-3-4b-it"
+# echo "VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/models/language/generation/generation_mm.py --model-card-path vllm-gaudi/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
+# VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/models/language/generation/generation_mm.py --model-card-path vllm-gaudi/tests/full_tests/model_cards/gemma-3-4b-it.yaml
+# if [ $? -ne 0 ]; then
+#     echo "Error: Test failed for multimodal-support with gemma-3-4b-it" >&2
+#     exit -1
+# fi
+# echo "Test with multimodal-support with gemma-3-4b-it passed"
