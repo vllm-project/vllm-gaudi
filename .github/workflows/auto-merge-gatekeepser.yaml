@@ -1,0 +1,16 @@
+name: Auto Merge gatekeeper
+
+on:
+  workflow_run:
+    # List the workflow files you want to check
+    workflows: ["pre-commit", "Basic HPU test suite"]
+    types:
+      - completed
+
+jobs:
+  auto-merge-gatekeeper:
+    runs-on: ubuntu-latest
+    # This job runs only if the triggering workflow was successful
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - run: echo "All CI jobs passed."

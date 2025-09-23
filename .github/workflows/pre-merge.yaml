@@ -1,4 +1,4 @@
-name: Basic HPU test suite 
+name: Basic HPU test suite
 
 on:
   pull_request:
@@ -201,11 +201,3 @@ jobs:
     steps:
       - name: Succeeded if all previous jobs passed
         run: echo "All previous jobs passed."
-
-  # Add this gatekeeper job
-  merge-gate:
-    runs-on: ubuntu-latest
-    needs: [pre_merge_hpu_test]
-    if: success() # This ensures the job is SKIPPED if pre_merge_hpu_test is canceled
-    steps:
-      - run: echo "All required checks passed." 
