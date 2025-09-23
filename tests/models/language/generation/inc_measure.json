@@ -1,0 +1,7 @@
+ {
+   "method": "HOOKS",
+   "mode": "MEASURE",
+   "observer": "maxabs",
+   "calibration_sample_interval": 1,
+   "dump_stats_path": "./hqt_output/measure"
+ }
