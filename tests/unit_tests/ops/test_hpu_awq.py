@@ -26,18 +26,18 @@ def test_awq_linear_method(dist_init):
         compile_config = HPUCompileConfig()
         oot_op = torch.compile(oot_op, **compile_config.get_compile_args())
 
-    # qweight, qzeros, scales extracted from first RowParallelLinear of TheBloke/Llama-2-7B-Chat-AWQ
-    # (with adjusted shape, to make tensors smaller - output_size = 8 instead of 4096)
+    # qweight, qzeros, scales were extracted from first RowParallelLinear of TheBloke/Llama-2-7B-Chat-AWQ
+    # (with adjusted shape, to make tensors smaller)
     qweight = torch.load("data/awq/qweight.pt", weights_only=False, map_location="hpu")
     oot_op.qweight.copy_(qweight)
     qzeros = torch.load("data/awq/qzeros.pt", weights_only=False, map_location="hpu")
-    oot_op.qzeros.data.copy_(qzeros)
+    oot_op.qzeros.copy_(qzeros)
     scales = torch.load("data/awq/scales.pt", weights_only=False, map_location="hpu").to(torch.bfloat16)
-    oot_op.scales.data.copy_(scales)
+    oot_op.scales.copy_(scales)
 
     # Input and expected output
     # Output tensor holds the data that was returned by cuda implementation of AWQLinearMethod for given input
-    # (AWQLinearMethod was triggered offline with the same input as below to get the desired output)
+    # (AWQLinearMethod was triggered offline with the same input as below to get the ref_output)
     input = torch.load("data/awq/input.pt", weights_only=False, map_location="hpu").to(torch.bfloat16)
     ref_output = torch.load("data/awq/output.pt", weights_only=False, map_location="hpu").to(torch.bfloat16)
 
