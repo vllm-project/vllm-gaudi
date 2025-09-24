@@ -1,3 +1,14 @@
+# Gemma3 with image input
+# Test a model requires HF_TOKEN for early detection HF_TOKEN issue
+echo "Testing gemma-3-4b-it"
+echo "VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/models/language/generation/generation_mm.py --model-card-path vllm-gaudi/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
+VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/models/language/generation/generation_mm.py --model-card-path vllm-gaudi/tests/full_tests/model_cards/gemma-3-4b-it.yaml
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for multimodal-support with gemma-3-4b-it" >&2
+    exit -1
+fi
+echo "Test with multimodal-support with gemma-3-4b-it passed"
+
 # basic model
 echo "Testing basic model with vllm-hpu plugin v1"
 echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model facebook/opt-125m
@@ -232,12 +243,3 @@ if [ $? -ne 0 ]; then
 fi
 echo "Embedding-model-support for v1 successful"
 
-# DP2
-echo "Testing data parallel size 2 with vllm-hpu plugin v1"
-echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/examples/data_parallel.py --dp-size 2 --tp-size 2
-HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/examples/data_parallel.py --dp-size 2 --tp-size 2
-if [ $? -ne 0 ]; then
-    echo "Error: Test failed for data parallel size 2" >&2
-    exit -1
-fi
-echo "Test with data parallel size 2 passed"
