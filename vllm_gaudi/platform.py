@@ -37,7 +37,6 @@ class HpuPlatform(Platform):
     supported_quantization: list[str] = ["compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu"]
     simple_compile_backend = "hpu_backend"
     additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
-    nixl_memory_type: str = "DRAM"
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int, dtype: torch.dtype,
@@ -152,7 +151,10 @@ class HpuPlatform(Platform):
 
     @classmethod
     def get_nixl_memory_type(cls) -> str:
-        return cls.nixl_memory_type
+        if os.environ.get("VLLM_NIXL_DEVICE_TO_DEVICE", "0").lower() in ["1", "true"]:
+            return "VRAM"
+        else:
+            return "DRAM"
 
     @classmethod
     def set_torch_compile(cls) -> None:

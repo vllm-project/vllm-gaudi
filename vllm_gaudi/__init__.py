@@ -1,12 +1,9 @@
 from vllm_gaudi.platform import HpuPlatform
-import os
 
 
 def register():
     """Register the HPU platform."""
     HpuPlatform.set_torch_compile()
-    if os.environ.get("VLLM_NIXL_DEVICE_TO_DEVICE", "0").lower() in ["1", "true"]:
-        HpuPlatform.nixl_memory_type = "VRAM"
     return "vllm_gaudi.platform.HpuPlatform"
 
 
