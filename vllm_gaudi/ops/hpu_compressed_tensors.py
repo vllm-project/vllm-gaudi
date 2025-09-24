@@ -383,14 +383,6 @@ class HPUMPLinearKernel(MPLinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         c = self.config
 
-        if c.has_g_idx:
-            # TODO: Support group indexing and remove the check
-            w_gidx = getattr(layer, self.w_gidx_name)
-            columns, _ = c.partition_weight_shape
-            g_idx_trivial = [i // c.group_size for i in range(columns)] if c.group_size > 0 else [0] * columns
-            g_idx_trivial = torch.tensor(g_idx_trivial, dtype=torch.int32, device="hpu")
-            assert torch.equal(w_gidx, g_idx_trivial), "Non-trivial tensor g_idx is not supported"
-
         def transform_w_q(x):
             assert isinstance(x, BasevLLMParameter)
             qweight = unpack_quantized_values_into_int32(x.data.transpose(0, 1), c.weight_type, packed_dim=0)
@@ -412,7 +404,7 @@ class HPUMPLinearKernel(MPLinearKernel):
         else:
             self.w_zp_name: str = "qzeros"
             device = getattr(layer, self.w_q_name).device
-            groups = c.partition_weight_shape[0] // c.group_size
+            groups = c.partition_weight_shape[0] // c.group_size if c.group_size > 0 else 1
             out_features = c.partition_weight_shape[1]
 
             if c.weight_type.has_bias():
@@ -464,6 +456,8 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MoEMethod):
             raise ValueError("For Fused MoE layers, only ", f"{CompressionFormat.pack_quantized.value} ",
                              "is supported for the following bits: ", f"{HPU_WNA16_SUPPORTED_BITS}")
         self.quant_type = WNA16_SUPPORTED_TYPES_MAP[self.num_bits]
+        config = self.quant_config.target_scheme_map["Linear"].get("weights")
+        self.actorder = config.actorder
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int, params_dtype: torch.dtype, **extra_weight_attrs):
@@ -606,7 +600,6 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MoEMethod):
         w2_weight_packed = self.gptq_hpu_moe_repack(layer.w2_weight_packed)
 
         # for torch.compile
-        # transfer to hpu to ensure that moe_op tensors are on HPU if model ran with weights_load_device="cpu"
         layer.w13_weight_packed = torch.nn.Parameter(w13_weight_packed, requires_grad=False)
         layer.w2_weight_packed = torch.nn.Parameter(w2_weight_packed, requires_grad=False)
         layer.w13_weight_scale = torch.nn.Parameter(layer.w13_weight_scale.data.transpose(1, 2).contiguous(),
@@ -631,6 +624,11 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MoEMethod):
             layer.moe_op.w2_list[expert_id].set_weight_scale(layer.w2_weight_scale.data[expert_id])
             layer.moe_op.w13_list[expert_id].set_zero_point(layer.w13_zero_point.data)
             layer.moe_op.w2_list[expert_id].set_zero_point(layer.w2_zero_point.data)
+
+            if self.actorder == "group":
+                layer.moe_op.w13_list[expert_id].set_g_idx(layer.w13_weight_g_idx.data[expert_id])
+                layer.moe_op.w2_list[expert_id].set_g_idx(layer.w2_weight_g_idx.data[expert_id])
+
         htorch.core.mark_step()
 
     def apply(
