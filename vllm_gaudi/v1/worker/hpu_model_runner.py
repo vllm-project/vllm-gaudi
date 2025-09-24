@@ -72,7 +72,6 @@ from vllm.v1.core.sched.output import NewRequestData
 from vllm.sampling_params import SamplingParams
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.config import LoRAConfig, ModelConfig, SchedulerConfig
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm_gaudi.extension.ops import LoraMask as LoraMask
@@ -925,9 +924,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         return lora_mask, lora_logits_mask
 
-    def load_lora_model(self, model: nn.Module, model_config: ModelConfig, scheduler_config: SchedulerConfig,
-                        lora_config: LoRAConfig, device: str) -> nn.Module:
-
+    def load_lora_model(self, model: nn.Module, vllm_config: VllmConfig, device: str) -> nn.Module:
         if not supports_lora(model):
             raise ValueError(f"{model.__class__.__name__} does not support LoRA yet.")
 
@@ -935,19 +932,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             logger.warning("Regarding multimodal models, vLLM currently "
                            "only supports adding LoRA to language model.")
 
-        # Use get_text_config() in case of multimodal models
-        text_config = model_config.hf_config.get_text_config()
-
         # Add LoRA Manager to the Model Runner
         self.lora_manager = LRUCacheWorkerLoRAManager(
-            scheduler_config.max_num_seqs,
-            scheduler_config.max_num_batched_tokens,
-            model_config.get_vocab_size(),
-            lora_config,
+            vllm_config,
             device,
             model.embedding_modules,
             model.embedding_padding_modules,
-            max_position_embeddings=text_config.max_position_embeddings,
         )
         return self.lora_manager.create_lora_manager(model)
 
@@ -3279,8 +3269,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         with HabanaMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
             if self.lora_config:
-                self.model = self.load_lora_model(self.model, self.model_config, self.scheduler_config,
-                                                  self.lora_config, self.device)
+                self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
         self.model_memory_usage = m.consumed_device_memory
         logger.info("Loading model weights took %.4f GB", self.model_memory_usage / float(2**30))
 
