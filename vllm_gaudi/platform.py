@@ -37,8 +37,6 @@ class HpuPlatform(Platform):
     supported_quantization: list[str] = ["compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu"]
     simple_compile_backend = "hpu_backend"
     additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
-
-    nixl_supported_devices: dict[str, tuple[str, ...]] = {"hpu": ("cpu", "hpu")}
     nixl_memory_type: str = "DRAM"
 
     @classmethod
@@ -150,7 +148,7 @@ class HpuPlatform(Platform):
 
     @classmethod
     def get_nixl_supported_devices(cls) -> dict[str, tuple[str, ...]]:
-        return cls.nixl_supported_devices
+        return {"hpu": ("cpu", "hpu")}
 
     @classmethod
     def get_nixl_memory_type(cls) -> str:
