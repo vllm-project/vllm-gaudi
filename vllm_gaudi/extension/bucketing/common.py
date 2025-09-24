@@ -314,8 +314,9 @@ def generate_unified_buckets(query_range, shared_ctx_range, unique_ctx_range, bs
                 buckets.add((query, shared_ctx, unique_ctx, causal))
         elif (query <= bs):
             # non causal query = current bs
-            if math.ceil(shared_ctx * block_size // (query // 2)) <= max_model_len:
-                if shared_ctx > 0 or unique_ctx > 0:
+            if shared_ctx > 0 or unique_ctx > 0:
+                if shared_ctx == 0 or (query > 1 and \
+                    math.ceil(shared_ctx * block_size // (query // 2)) <= max_model_len):
                     buckets.add((query, shared_ctx, unique_ctx, causal))
 
     return sorted(buckets)
