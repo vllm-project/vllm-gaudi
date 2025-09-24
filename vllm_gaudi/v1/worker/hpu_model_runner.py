@@ -1962,7 +1962,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         query_start_loc_np[1:num_decodes + 1] = np.array(query_start_loc_list)
 
         logits_indices[:num_decodes] = query_start_loc_cpu[1:num_decodes + 1] - 1
-        num_decode_tokens = torch.tensor(np.sum(context_lens), device='cpu')
 
         positions_device = async_h2d_copy(positions, device=self.device)
         block_tables_list = self.defragmenter.resolve_all(block_tables_list)
@@ -1987,7 +1986,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         block_list_device = async_h2d_copy(block_list, device=self.device)
         block_usage_device = async_h2d_copy(block_usage, device=self.device)
         block_groups_device = async_h2d_copy(block_groups, device=self.device)
-        num_decode_tokens_device = async_h2d_copy(num_decode_tokens, device=self.device)
         slot_mapping_device = async_h2d_copy(slot_mapping, device=self.device)
         window_block_list_device = async_h2d_copy(window_block_list,
                                                   device=self.device) if self.interleaved_sliding_window else None
@@ -2032,7 +2030,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                    block_usage=block_usage_device,
                                    block_groups=block_groups_device,
                                    input_positions=None,
-                                   num_decode_tokens=num_decode_tokens_device,
                                    slot_mapping=slot_mapping_device,
                                    block_size=self.block_size,
                                    window_block_list=window_block_list_device,

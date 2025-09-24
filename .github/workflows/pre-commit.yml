@@ -1,8 +1,8 @@
 name: pre-commit
 
 on:
-  pull_request_target:
-    types: [opened, synchronize, reopened]
+  pull_request:
+  push:
     branches: [main]
 
 concurrency: 
