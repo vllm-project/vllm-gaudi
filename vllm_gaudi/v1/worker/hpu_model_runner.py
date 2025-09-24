@@ -4052,7 +4052,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
-            get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
+            if self.vllm_config.kv_transfer_config.kv_buffer_device == "cpu":
+                get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
             global hpu_buffer
         htorch.hpu.synchronize()
 
