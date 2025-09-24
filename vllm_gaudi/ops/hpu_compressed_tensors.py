@@ -22,7 +22,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
     WNA16_SUPPORTED_TYPES_MAP)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (find_matched_target)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
-    CompressedTensorsW8A8Fp8MoEMethod, CompressedTensorsWNA16MoEMethod)
+    CompressedTensorsW8A8Fp8MoEMethod, CompressedTensorsWNA16MarlinMoEMethod)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision import (MPLinearKernel, MPLinearLayerConfig)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (pack_quantized_values_into_int32,
                                                                        unpack_quantized_values_into_int32)
@@ -404,7 +404,8 @@ class HPUMPLinearKernel(MPLinearKernel):
         else:
             self.w_zp_name: str = "qzeros"
             device = getattr(layer, self.w_q_name).device
-            groups = c.partition_weight_shape[0] // c.group_size if c.group_size > 0 else 1
+            # use groups=1 for channelwise quantization
+            groups = (c.partition_weight_shape[0] // c.group_size) if c.group_size > 0 else 1
             out_features = c.partition_weight_shape[1]
 
             if c.weight_type.has_bias():
@@ -440,8 +441,8 @@ class HPUMPLinearKernel(MPLinearKernel):
         return output.reshape(out_shape)
 
 
-@CustomOp.register_oot(name='CompressedTensorsWNA16MoEMethod')
-class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MoEMethod):
+@CustomOp.register_oot(name='CompressedTensorsWNA16MarlinMoEMethod')
+class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
 
     def __init__(
         self,
@@ -456,8 +457,6 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MoEMethod):
             raise ValueError("For Fused MoE layers, only ", f"{CompressionFormat.pack_quantized.value} ",
                              "is supported for the following bits: ", f"{HPU_WNA16_SUPPORTED_BITS}")
         self.quant_type = WNA16_SUPPORTED_TYPES_MAP[self.num_bits]
-        config = self.quant_config.target_scheme_map["Linear"].get("weights")
-        self.actorder = config.actorder
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int, params_dtype: torch.dtype, **extra_weight_attrs):
