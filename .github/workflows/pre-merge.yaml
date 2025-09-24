@@ -23,12 +23,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           # Fetch full history for accurate commit comparison
-          fetch-depth: 0
-
-      - name: Clean and Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
           clean: true # Ensure a clean workspace before checkout
 
       - name: Setup Docker environment and build image
