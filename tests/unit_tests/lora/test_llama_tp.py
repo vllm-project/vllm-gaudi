@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import pytest
 from typing import Union
 
 import vllm
 from vllm.lora.request import LoRARequest
 #from ..utils import VLLM_PATH, create_new_process_for_each_test, multi_gpu_test
 
-MODEL_PATH = "/mnt/weka/data/pytorch/llama2/Llama-2-7b-hf"
+MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 
 EXPECTED_LORA_OUTPUT = [
     "  SELECT icao FROM table_name_74 WHERE airport = 'lilongwe international airport' ",  # noqa: E501
@@ -71,7 +70,6 @@ def generate_and_test(llm, sql_lora_files, tensorizer_config_dict: Union[dict, N
 
 
 #@create_new_process_for_each_test()
-@pytest.mark.xfail(reason="Weka not available")
 def test_llama_lora(sql_lora_files):
 
     llm = vllm.LLM(
