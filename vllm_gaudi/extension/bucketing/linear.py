@@ -22,7 +22,7 @@ class LinearBucketingStrategy:
                                                        step=block_size,
                                                        max=max_model_len)
         max_ctx = math.ceil((max_model_len - prompt_query_bucket_cfg[0]) // block_size)
-        prompt_ctx_bucket_cfg = [0, 1, max_ctx]
+        prompt_ctx_bucket_cfg = read_bucket_settings('prompt', 'ctx', min=0, step=1, max=max_ctx)
 
         if use_merged_prefill:
             prev_prompt_bs_bucket_cfg = tuple(prompt_bs_bucket_cfg)
@@ -32,7 +32,11 @@ class LinearBucketingStrategy:
             prompt_bs_bucket_cfg = (1, 1, 1)
             query_min, query_step, _ = prev_prompt_query_bucket_cfg
             prompt_query_bucket_cfg = (query_min, query_step * 4, max_num_batched_tokens)
-            prompt_ctx_bucket_cfg = (0, 4, max_ctx * max_num_prefill_seqs)
+            prompt_ctx_bucket_cfg = read_bucket_settings('prompt',
+                                                         'ctx',
+                                                         min=0,
+                                                         step=4,
+                                                         max=max_ctx * max_num_prefill_seqs)
 
             msg = ('Merged prefill is enabled!\n'
                    'Overriding prompt bucketing settings!\n'
