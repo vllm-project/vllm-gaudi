@@ -59,6 +59,11 @@ class LinearBucketingStrategy:
                                                        min=block_size,
                                                        step=block_size,
                                                        max=max_blocks)
+        if decode_block_bucket_cfg[2] > max_blocks:
+            logger().info(
+                f'VLLM_DECODE_BLOCK_BUCKET_MAX={decode_block_bucket_cfg[2]} is higher than max_blocks={max_blocks}. Your configuration VLLM_DECODE_BLOCK_BUCKET_MAX={decode_block_bucket_cfg[2]} will be overwritten to VLLM_DECODE_BLOCK_BUCKET_MAX={max_blocks}'
+            )
+            decode_block_bucket_cfg[2] = max_blocks
 
         msg = ("Decode bucket config (min, step, max_warmup) "
                f"bs:{decode_bs_bucket_cfg}, "
