@@ -71,7 +71,6 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
             num_decode_tokens=0,
             context_lens_tensor=context_lens_tensor,
             seq_lens_tensor=seq_lens_tensor,
-            multi_modal_placeholder_index_maps=None,
             num_prefills=0,  # ignored on HPU
             num_prefill_tokens=0,  # ignored on HPU
             input_positions=None,
@@ -89,6 +88,9 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                              num_decode_tokens,
                              slot_mapping,
                              block_size,
+                             window_block_list,
+                             window_block_usage,
+                             window_block_groups,
                              query_start_loc=None):
         return cls(
             is_prompt=False,
@@ -99,10 +101,12 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
             context_lens_tensor=None,
             num_prefills=0,  # ignored on HPU
             num_prefill_tokens=0,  # ignored on HPU
-            multi_modal_placeholder_index_maps=None,
             block_list=block_list,
             block_usage=block_usage,
             block_groups=block_groups,
+            window_block_list=window_block_list,
+            window_block_usage=window_block_usage,
+            window_block_groups=window_block_groups,
             input_positions=input_positions,
             num_decode_tokens=num_decode_tokens,
             slot_mapping=slot_mapping,
