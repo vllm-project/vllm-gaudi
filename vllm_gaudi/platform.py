@@ -146,6 +146,17 @@ class HpuPlatform(Platform):
         return True
 
     @classmethod
+    def get_nixl_supported_devices(cls) -> dict[str, tuple[str, ...]]:
+        return {"hpu": ("cpu", "hpu")}
+
+    @classmethod
+    def get_nixl_memory_type(cls) -> str:
+        if os.environ.get("VLLM_NIXL_DEVICE_TO_DEVICE", "0").lower() in ["1", "true"]:
+            return "VRAM"
+        else:
+            return "DRAM"
+
+    @classmethod
     def set_torch_compile(cls) -> None:
         # NOTE: PT HPU lazy backend (PT_HPU_LAZY_MODE = 1)
         # does not support torch.compile
