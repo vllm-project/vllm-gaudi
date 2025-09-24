@@ -138,15 +138,35 @@ if [ $? -ne 0 ]; then
 fi
 echo "Test with gptq passed"
 
-# compressed w4a16
-echo "Testing compressed w4a16 inference with vllm-hpu plugin v1"
+# compressed w4a16 (grouped) 
+echo "Testing compressed w4a16 (grouped) inference with vllm-hpu plugin v1"
 echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model RedHatAI/Qwen3-8B-quantized.w4a16 --dtype bfloat16 
 HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model RedHatAI/Qwen3-8B-quantized.w4a16 --dtype bfloat16
 if [ $? -ne 0 ]; then
     echo "Error: Test failed for compressed w4a16" >&2
     exit -1
 fi
-echo "Test with compressed w4a16 passed"
+echo "Test with compressed w4a16 (grouped) passed"
+
+# compressed w4a16 (channelwise) 
+echo "Testing compressed w4a16 (channelwise) inference with vllm-hpu plugin v1"
+echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model nm-testing/tinyllama-oneshot-w4a16-channel-v2 --dtype bfloat16 
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model nm-testing/tinyllama-oneshot-w4a16-channel-v2 --dtype bfloat16
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for compressed w4a16 (channelwise)" >&2
+    exit -1
+fi
+echo "Test with compressed w4a16 (channelwise) passed"
+
+# compressed w4a16 MoE with g_idx
+echo "Testing compressed w4a16 MoE with g_idx inference with vllm-hpu plugin v1"
+echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model nm-testing/test-w4a16-mixtral-actorder-group --dtype bfloat16 
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u vllm-gaudi/tests/full_tests/generate.py --model nm-testing/test-w4a16-mixtral-actorder-group --dtype bfloat16
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for compressed w4a16 MoE with g_idx" >&2
+    exit -1
+fi
+echo "Test with compressed w4a16 MoE with g_idx passed"
 
 # compressed w4a16 MOE + EP
 echo "Testing GSM8K on Llama-4-Scout-17B-16E-w4a16"
