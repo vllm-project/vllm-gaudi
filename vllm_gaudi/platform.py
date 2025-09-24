@@ -38,7 +38,7 @@ class HpuPlatform(Platform):
     simple_compile_backend = "hpu_backend"
     additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
 
-    nixl_supported_devices: dict[str, tuple[str, ...]] = {"hpu": ("cpu", )}
+    nixl_supported_devices: dict[str, tuple[str, ...]] = {"hpu": ("cpu", "hpu")}
     nixl_memory_type: str = "DRAM"
 
     @classmethod
