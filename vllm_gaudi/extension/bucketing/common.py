@@ -205,12 +205,14 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
         '''
         candidates = [(bs_idx, query_idx), (bs_idx + 1, query_idx), (bs_idx, query_idx + 1),
                       (bs_idx + 1, query_idx + 1)]
-        valid = bs_range[bs_idx] * query_range[query_idx] <= max_num_batched_tokens
-        if not valid:
-            return {}
-        valid_candidates = [(b_idx, q_idx) for b_idx, q_idx in candidates
-                            if b_idx < len(bs_range) and q_idx < len(query_range)]
-        return {(bs_range[b_idx], query_range[q_idx]) for b_idx, q_idx in valid_candidates}
+        valid_candidates = set()
+
+        for b_idx, q_idx in candidates:
+            if b_idx < len(bs_range) and q_idx < len(query_range):
+                if bs_range[b_idx] * query_range[q_idx] <= max_num_batched_tokens:
+                    valid_candidates.add((bs_range[b_idx], query_range[q_idx]))
+
+        return valid_candidates
 
     # filter rules for buckets
     # prompt
