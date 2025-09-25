@@ -5,10 +5,8 @@ title: Warm-up
 
 ## Warm-up
 
-Warm-up is a highly recommended step that occurs before the vLLM server starts listening. It executes a forward pass for each bucket using dummy data. The goal is to pre-compile all graphs
-and avoid any graph compilation overhead within bucket boundaries during server runtime. Each warmup step is logged during vLLM startup.
-
-This example uses the same buckets as those in the Bucketing Mechanism section. Each output line corresponds to the execution of a single bucket. When a bucket is executed for the first time, its graph is compiled and can be reused later, avoiding further graph compilations.
+Warm-up is a highly recommended step that occurs before the vLLM server starts listening. It performs a forward pass for each bucket using dummy data. The goal is to precompile all graphs and eliminate any graph compilation overhead within bucket boundaries during server runtime. Each warmup step is logged during vLLM startup.
+This example uses the same buckets as those described in the Bucketing Mechanism section. Each output line corresponds to the execution of a single bucket. When a bucket is executed for the first time, its graph is compiled and can be reused later, avoiding further graph compilations.
 
 ```{.}
 INFO 08-01 22:26:47 hpu_model_runner.py:1066] [Warmup][Prompt][1/24] batch_size:4 seq_len:1024 free_mem:79.16 GiB
@@ -25,26 +23,26 @@ INFO 08-01 22:27:16 hpu_model_runner.py:1066] [Warmup][Decode][48/48] batch_size
 ```
 
 > [!TIP]
-> Compiling all the buckets may take some time and can be disabled by setting the `VLLM_SKIP_WARMUP=true` environment variable. Remember that if you do this, you may encounter graph compilations when executing a given bucket for the first time.
+> Compiling all buckets may take some time and can be disabled by setting the `VLLM_SKIP_WARMUP=true` environment variable. Keep in mind that if you do this, you may encounter graph compilations when executing a given bucket for the first time.
 
 > [!WARNING]
-> Disabling warmup is fine for development, but it is highly recommended to enable it in deployment.
+> Disabling warmup is acceptable for development purposes, but it is strongly recommended to enable it in production deployments.
 
 ## HPU Graph Capture
 
-[HPU Graphs](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html) are currently the most performant execution method of vLLM on Intel Gaudi. When HPU Graphs are enabled,
-execution graphs will be traced (recorded) ahead of time (after performing warmup), to be later replayed during inference, significantly reducing host overheads. Recording can take large amounts of memory, which
-needs to be taken into account when allocating KV cache. Enabling HPU Graphs will impact the number of available KV cache blocks, but vLLM provides user-configurable variables to control memory management.
+[HPU Graphs](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html) are currently the most performant execution method for vLLM on Intel Gaudi. When HPU Graphs are enabled,
+execution graphs are be traced (recorded) ahead of time (after performing warmup), and later replayed during inference, significantly reducing host overheads. Recording can consume large amounts of memory, which
+must be considred when allocating KV cache. Enabling HPU Graphs affects the number of available KV cache blocks, but vLLM provides user-configurable variables to manage memory usage.
 
-When HPU Graphs are used, they share the common memory pool ("usable memory") with the KV cache, as determined by the `gpu_memory_utilization` flag (default value is `0.9`). Before the KV cache is allocated,
-the model weights are loaded onto the device, and a forward pass of the model is executed on dummy data to estimate memory usage. Only after that, the `gpu_memory_utilization` flag is applied. At its default value,
+When HPU Graphs are used, they share the common memory pool ("usable memory") with the KV cache, as determined by the `gpu_memory_utilization` flag (default value is `0.9`). Before allocating the KV cache,
+the model weights are loaded onto the device, and a forward pass is executed on dummy data to estimate memory usage. Only then is the `gpu_memory_utilization` flag applied. At its default value,
 it marks 90% of the free device memory at that point as usable. Next, the KV cache is allocated, the model is warmed up, and HPU Graphs are captured. The `VLLM_GRAPH_RESERVED_MEM` environment variable defines
 the ratio of memory reserved for HPU Graph capture. With its default value (`VLLM_GRAPH_RESERVED_MEM=0.1`), 10% of the usable memory will be reserved for graph capture (referred to as "usable graph memory"), and the remaining 90% will be used for the KV cache.
 
 > [!NOTE]
-> `gpu_memory_utilization` does not represent the absolute memory usage across the HPU. Instead, it specifies the memory margin after loading the model and running a profile. For example, if a device has 100 GiB of total memory and 50 GiB of free memory after loading the model weights and executing the profiling run, the default value of `gpu_memory_utilization` will mark 90% of the 50 GiB as usable, leaving 5 GiB as a margin, regardless of the total device memory.
+> `gpu_memory_utilization` does not represent the absolute memory usage across the HPU. Instead, it specifies the memory margin after loading the model and running a profiling pass. For example, if a device has 100 GiB of total memory and 50 GiB of free memory after loading the model weights and executing the profiling run, the default value of `gpu_memory_utilization` will mark 90% of the 50 GiB as usable, leaving 5 GiB as a margin - regardless of the total device memory.
 
-When many requests are pending, the vLLM scheduler attempts to fill the maximum batch size for decoding as quickly as possible. Once a request is finished, the decode batch size decreases. When this happens, vLLM attempts to schedule a prefill iteration for requests in the waiting queue to restore the decode batch size to its previous state. In a fully loaded scenario, the decode batch size is often at its maximum, making large-batch HPU graphs critical to capture. On the other hand prompt iterations will typically be executed with very low batch sizes (1-4).
+When many requests are pending, the vLLM scheduler attempts to fill the maximum decode batch size as quickly as possible. Once a request completes, the decode batch size decreases. When this happens, vLLM schedules a prefill iteration for requests in the waiting queue to restore the previous decode batch size. In fully loaded scenarios, the decode batch size is often at its maximum, making large-batch HPU graphs critical to capture. On the other hand, prompt iterations typically execute with very low batch sizes (1-4).
 
 Each step outlined is logged by the vLLM server, with negative values indicating memory release:
 
