@@ -340,11 +340,9 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
 
         # for DP
-        # dummy input tokens
-        self.num_input_tokens = -1
-        # dummy num_tokens_across_dp to skip dp padding sync between ranks
-        self.num_tokens_across_dp = [self.num_input_tokens] * self.vllm_config.parallel_config.data_parallel_size
-        self.num_tokens_across_dp_cpu = torch.tensor(self.num_tokens_across_dp, device='cpu', dtype=torch.int32)
+        self.dummy_num_input_tokens = -1
+        self.num_tokens_across_dp = [self.dummy_num_input_tokens] * self.vllm_config.parallel_config.data_parallel_size
+        self.dummy_num_tokens_across_dp_cpu = torch.tensor(self.num_tokens_across_dp, device='cpu', dtype=torch.int32)
 
     def _get_rotary_embedding_module(self, model: torch.nn.Module):
         """
@@ -534,10 +532,12 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
 
         if self.flatten_input:
             kwargs['input_ids'] = input_ids.view(-1)
+        # here num_tokens and num_tokens_across_dp are dummy values which are
+        # used to skip sync between DP ranks
         with set_forward_context(attn_meta,
                                  self.vllm_config,
-                                 num_tokens=self.num_input_tokens,
-                                 num_tokens_across_dp=self.num_tokens_across_dp_cpu):
+                                 num_tokens=self.dummy_num_input_tokens,
+                                 num_tokens_across_dp=self.dummy_num_tokens_across_dp_cpu):
             hidden_states = self.model(*args, **kwargs)
             if self._rotary_prepare_cos_sin is not None:
                 self._reset_rotary_cos_sin()
