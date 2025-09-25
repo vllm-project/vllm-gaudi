@@ -1527,7 +1527,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if target_bs == 1 and bs > 1:
             data = [list(itertools.chain(*data))]
         data = [pad_list(x, target_len, padding_gen) for x in data]
-        padding = itertools.islice(padding_gen, target_len)
+        # Convert islice into list since pytorch expects object compatible with PySequence_Fast functions
+        padding = list(itertools.islice(padding_gen, target_len))
         data = pad_list(data, target_bs, itertools.repeat(padding))
         return data
 
