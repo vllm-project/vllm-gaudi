@@ -92,7 +92,6 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
     for cache_or_caches in xfer_buffers.values():
         # Normalize to always be a list of caches
         cache_list = [cache_or_caches] if use_mla \
-                        or self._use_pallas_v1 or self._use_flashinfer \
                         else cache_or_caches
         for cache in cache_list:
             base_addr = cache.data_ptr() if self.use_host_buffer else htexp._data_ptr(cache)
