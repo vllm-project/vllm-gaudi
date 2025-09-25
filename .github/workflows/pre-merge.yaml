@@ -1,7 +1,8 @@
 name: Basic HPU test suite 
 
 on:
-  pull_request:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
     branches: [main]
 
   # Allow manual triggering for testing purposes
@@ -22,12 +23,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           # Fetch full history for accurate commit comparison
-          fetch-depth: 0
-
-      - name: Clean and Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
           clean: true # Ensure a clean workspace before checkout
 
       - name: Setup Docker environment and build image
@@ -88,6 +84,7 @@ jobs:
           docker run --rm --runtime=habana --name=hpu-plugin-v1-test-unit-tests-${{ github.event.pull_request.head.sha }} --network=host \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
+            -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
             /bin/bash -c "pytest -vvv --durations=10 --durations-min=1.0 /workspace/vllm-gaudi/tests/unit_tests"
@@ -111,6 +108,7 @@ jobs:
           docker run --rm --runtime=habana --name=hpu-plugin-v1-test-pd-tests-${{ github.event.pull_request.head.sha }} --network=host \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
+            -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
             /bin/bash -c "
@@ -137,6 +135,7 @@ jobs:
           echo "Running HPU plugin v1 perf tests"
           docker run --rm --runtime=habana --name=hpu-plugin-v1-test-perf-tests-${{ github.event.pull_request.head.sha }} --network=host \
             -e HABANA_VISIBLE_DEVICES=all \
+            -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -e HF_HOME=/workspace/hf_cache \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
@@ -164,6 +163,7 @@ jobs:
             -e VLLM_SKIP_WARMUP=true \
             -e PT_HPU_LAZY_MODE=1 \
             -e VLLM_USE_V1=1 \
+            -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
             /bin/bash -c "python -u /workspace/vllm-gaudi/examples/data_parallel.py --dp-size 2 --tp-size 2"
@@ -187,6 +187,7 @@ jobs:
           docker run --rm --runtime=habana --name=hpu-plugin-v1-test-e2e-tests-${{ github.event.pull_request.head.sha }} --network=host \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
+            -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
             /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_gsm8k_tests.sh"
