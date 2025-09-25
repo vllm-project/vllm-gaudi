@@ -129,7 +129,7 @@ jobs:
           # This command robustly discovers all functions in the script that match the 'run_*'
           # naming convention, excluding the main 'run_all_tests' function itself.
           # The final list is formatted into a JSON array required for the matrix strategy.
-          TEST_FUNCTIONS=$( grep '^run_' ./vllm-gaudi/tests/full_tests/ci_gsm8k_tests.sh | \
+          TEST_FUNCTIONS=$( grep '^run_' ./tests/full_tests/ci_gsm8k_tests.sh | \
                    awk '{print $1}' | \
                    sed 's/()//' | \
                    jq -R . | jq -s . )
