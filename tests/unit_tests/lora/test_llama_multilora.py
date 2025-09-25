@@ -96,7 +96,8 @@ def _test_llama_multilora(sql_lora_files, tp_size):
         enable_lora=True,
         max_loras=2,
         max_lora_rank=8,
-        max_num_seqs=256,
+        max_num_seqs=8,
+        max_model_len=512,
         dtype='bfloat16',
         tensor_parallel_size=tp_size,
         hf_token=os.environ.get("HF_TOKEN"),
@@ -109,13 +110,7 @@ def _test_llama_multilora(sql_lora_files, tp_size):
 
 
 def test_llama_multilora_1x(sql_lora_files):
-    original_value = os.environ.get("VLLM_SKIP_WARMUP", None)
-    os.environ["VLLM_SKIP_WARMUP"] = "1"
     _test_llama_multilora(sql_lora_files, 1)
-    if original_value is None:
-        del os.environ["VLLM_SKIP_WARMUP"]
-    else:
-        os.environ["VLLM_SKIP_WARMUP"] = original_value
 
 
 #def test_llama_multilora_2x(sql_lora_files):
