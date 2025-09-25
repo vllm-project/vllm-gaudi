@@ -72,7 +72,6 @@ from vllm.v1.core.sched.output import NewRequestData
 from vllm.sampling_params import SamplingParams
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.config import LoRAConfig, ModelConfig, SchedulerConfig
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm_gaudi.extension.ops import LoraMask as LoraMask
@@ -732,7 +731,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.dtype,
             self.kv_cache_dtype,
             self.block_size,
-            self.model_config.is_attention_free,
             use_mla=self.model_config.use_mla,
         )
 
@@ -935,9 +933,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         return lora_mask, lora_logits_mask
 
-    def load_lora_model(self, model: nn.Module, model_config: ModelConfig, scheduler_config: SchedulerConfig,
-                        lora_config: LoRAConfig, device: str) -> nn.Module:
-
+    def load_lora_model(self, model: nn.Module, vllm_config: VllmConfig, device: str) -> nn.Module:
         if not supports_lora(model):
             raise ValueError(f"{model.__class__.__name__} does not support LoRA yet.")
 
@@ -945,19 +941,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             logger.warning("Regarding multimodal models, vLLM currently "
                            "only supports adding LoRA to language model.")
 
-        # Use get_text_config() in case of multimodal models
-        text_config = model_config.hf_config.get_text_config()
-
         # Add LoRA Manager to the Model Runner
         self.lora_manager = LRUCacheWorkerLoRAManager(
-            scheduler_config.max_num_seqs,
-            scheduler_config.max_num_batched_tokens,
-            model_config.get_vocab_size(),
-            lora_config,
+            vllm_config,
             device,
             model.embedding_modules,
             model.embedding_padding_modules,
-            max_position_embeddings=text_config.max_position_embeddings,
         )
         return self.lora_manager.create_lora_manager(model)
 
@@ -1982,7 +1971,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         query_start_loc_np[1:num_decodes + 1] = np.array(query_start_loc_list)
 
         logits_indices[:num_decodes] = query_start_loc_cpu[1:num_decodes + 1] - 1
-        num_decode_tokens = torch.tensor(np.sum(context_lens), device='cpu')
 
         positions_device = async_h2d_copy(positions, device=self.device)
         block_tables_list = self.defragmenter.resolve_all(block_tables_list)
@@ -2007,7 +1995,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         block_list_device = async_h2d_copy(block_list, device=self.device)
         block_usage_device = async_h2d_copy(block_usage, device=self.device)
         block_groups_device = async_h2d_copy(block_groups, device=self.device)
-        num_decode_tokens_device = async_h2d_copy(num_decode_tokens, device=self.device)
         slot_mapping_device = async_h2d_copy(slot_mapping, device=self.device)
         window_block_list_device = async_h2d_copy(window_block_list,
                                                   device=self.device) if self.interleaved_sliding_window else None
@@ -2052,7 +2039,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                    block_usage=block_usage_device,
                                    block_groups=block_groups_device,
                                    input_positions=None,
-                                   num_decode_tokens=num_decode_tokens_device,
                                    slot_mapping=slot_mapping_device,
                                    block_size=self.block_size,
                                    window_block_list=window_block_list_device,
@@ -3289,8 +3275,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         with HabanaMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
             if self.lora_config:
-                self.model = self.load_lora_model(self.model, self.model_config, self.scheduler_config,
-                                                  self.lora_config, self.device)
+                self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
         self.model_memory_usage = m.consumed_device_memory
         logger.info("Loading model weights took %.4f GB", self.model_memory_usage / float(2**30))
 
@@ -3933,7 +3918,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
-            get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
+            if self.vllm_config.kv_transfer_config.kv_buffer_device == "cpu":
+                get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
             global hpu_buffer
         htorch.hpu.synchronize()
 

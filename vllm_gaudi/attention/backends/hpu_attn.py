@@ -18,7 +18,6 @@ from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, ModuleFusedSDPA, Soft
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl, AttentionLayer, AttentionMetadata,
                                               AttentionType)
 from vllm.v1.attention.backends.mla.common import MLACommonImpl
-from vllm.attention.backends.utils import CommonAttentionState
 from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention, HPUPagedAttentionMetadata,
                                                      HPUPagedAttentionMetadataBuilder)
 
@@ -41,10 +40,6 @@ class HPUAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
-        raise NotImplementedError()
-
-    @staticmethod
-    def get_state_cls() -> type["CommonAttentionState"]:
         raise NotImplementedError()
 
     @staticmethod
@@ -122,6 +117,7 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
     block_size: int
+    slot_mapping: torch.Tensor
     attn_bias: Optional[torch.Tensor]
     seq_lens_tensor: Optional[torch.Tensor]
     context_lens_tensor: Optional[torch.Tensor]
@@ -349,6 +345,17 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                                                   kv_lora_rank=self.kv_lora_rank)
         result = self._v_up_proj(output)
         return result
+
+    # NOTE(Chendi): PR25184 using output buffer as default, which can't be used in HPU Graph,
+    # so we override and always return a new tensor
+    def _v_up_proj(self, x):
+        # Convert from (B, N, L) to (N, B, L)
+        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+        # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
+        x = torch.bmm(x, self.W_UV)
+        # Convert from (N, B, V) to (B, N * V)
+        x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+        return x
 
 
 class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
