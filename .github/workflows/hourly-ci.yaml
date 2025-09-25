@@ -127,11 +127,20 @@ jobs:
       - name: Discover test functions
         id: set-matrix
         run: |
-          # This command inspects the run_all_tests function in the script to find all individual
-          # test functions, then formats them into a JSON array for the matrix strategy.
-          TEST_FUNCTIONS=$(sed -n '/^run_all_tests() {/,/^}/p' ./vllm-gaudi/tests/full_tests/ci_gsm8k_tests.sh | grep '^\s*run_.*' | awk '{print $1}' | jq -R . | jq -s .)
-          echo "Discovered tests: $TEST_FUNCTIONS"
-          echo "matrix=$TEST_FUNCTIONS" >> $GITHUB_OUTPUT
+          TEST_SCRIPT="./vllm-gaudi/tests/full_tests/ci_gsm8k_tests.sh"
+
+          # This command robustly discovers all functions in the script that match the 'run_*'
+          # naming convention, excluding the main 'run_all_tests' function itself.
+          # It uses `declare -F` to reliably list functions after sourcing the script in a subshell.
+          # The final list is formatted into a JSON array required for the matrix strategy.
+          TEST_FUNCTIONS=$( (source $TEST_SCRIPT && declare -F) | \
+                            awk '{print $3}' | \
+                            grep '^run_' | \
+                            grep -v '^run_all_tests$' | \
+                            jq -R . | jq -s . )
+
+          echo "Discovered test matrix: $TEST_FUNCTIONS"
+          echo "matrix=$TEST_FUNCTIONS" >> "$GITHUB_OUTPUT"
 
   run_individual_tests:
     needs: [setup_and_build, discover_tests]
