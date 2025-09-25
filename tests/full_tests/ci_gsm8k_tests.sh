@@ -181,7 +181,7 @@ run_embedding_model_test() {
 # --- Utility Functions ---
 
 # Function to run all tests sequentially
-run_all_tests() {
+launch_all_tests() {
     echo "🚀 Starting all test suites..."
     run_gemma3_test
     run_basic_model_test
@@ -224,7 +224,7 @@ usage() {
 
 # Default to 'run_all_tests' if no function name is provided as an argument.
 # The ${1:-run_all_tests} syntax means "use $1 if it exists, otherwise use 'run_all_tests'".
-FUNCTION_TO_RUN=${1:-run_all_tests}
+FUNCTION_TO_RUN=${1:-launch_all_tests}
 
 # Check if the provided argument corresponds to a declared function in this script.
 if declare -f "$FUNCTION_TO_RUN" > /dev/null
