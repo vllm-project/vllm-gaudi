@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import habana_frameworks.torch as htorch
@@ -146,6 +146,17 @@ class HpuPlatform(Platform):
         return True
 
     @classmethod
+    def get_nixl_supported_devices(cls) -> dict[str, tuple[str, ...]]:
+        return {"hpu": ("cpu", "hpu")}
+
+    @classmethod
+    def get_nixl_memory_type(cls) -> str:
+        if os.environ.get("VLLM_NIXL_DEVICE_TO_DEVICE", "0").lower() in ["1", "true"]:
+            return "VRAM"
+        else:
+            return "DRAM"
+
+    @classmethod
     def set_torch_compile(cls) -> None:
         # NOTE: PT HPU lazy backend (PT_HPU_LAZY_MODE = 1)
         # does not support torch.compile
@@ -165,59 +176,22 @@ class HpuPlatform(Platform):
         return kv_cache_dtype == "fp8_inc"
 
     @classmethod
-    def set_synchronized_weight_loader(cls) -> None:
+    def use_sync_weight_loader(cls) -> bool:
+        """
+        Returns if the current platform needs to sync weight loader.
+        """
+        force_sync = os.getenv("VLLM_WEIGHT_LOAD_FORCE_SYNC", "true").lower() in ("true", "1")
+        return force_sync
 
-        def set_weight_attrs(
-            weight: torch.Tensor,
-            weight_attrs: Optional[dict[str, Any]],
-        ):
-            """Set attributes on a weight tensor.
+    @classmethod
+    def make_synced_weight_loader(cls, original_weight_loader):
+        """
+        Wrap the original weight loader to make it synced.
+        """
 
-            This method is used to set attributes on a weight tensor.
-            This method will not overwrite existing attributes.
+        def _synced_weight_loader(param, *args, **kwargs):
+            out = original_weight_loader(param, *args, **kwargs)
+            torch.hpu.synchronize()
+            return out
 
-            Args:
-                weight: The weight tensor.
-                weight_attrs: A dictionary of attributes to set on the weight
-                    tensor.
-            """
-            if weight_attrs is None:
-                return
-            for key, value in weight_attrs.items():
-                assert not hasattr(weight, key), (f"Overwriting existing tensor attribute: {key}")
-
-                # NOTE(woosuk): During weight loading, we often do something
-                # like:
-                # narrowed_tensor = param.data.narrow(0, offset, len)
-                # narrowed_tensor.copy_(real_weight)
-                # expecting narrowed_tensor and param.data to share the same
-                # storage.
-                # However, on TPUs, narrowed_tensor will lazily propagate to
-                # the base tensor, which is param.data, leading to the
-                # redundant memory usage.
-                # This sometimes causes OOM errors during model loading. To
-                # avoid this, we sync the param tensor after its weight loader
-                # is called.
-                # TODO(woosuk): Remove this hack once we have a better solution.
-                # NOTE(ksmusz): Issue seen in HPU also, same hack applied.
-                if key == "weight_loader":
-                    value = _make_synced_weight_loader(value)
-                setattr(weight, key, value)
-
-        def _make_synced_weight_loader(original_weight_loader):
-
-            def _synced_weight_loader(param, *args, **kwargs):
-                original_weight_loader(param, *args, **kwargs)
-                torch.hpu.synchronize()
-
-            return _synced_weight_loader
-
-        msg = ("Monkey-patching vllm.model_executor.utils.set_weight_attrs "
-               "to enable synchronized weight loader. This is a hack "
-               "preventing Llama 405B OOM.")
-        logger.warning(msg)
-        try:
-            import vllm.model_executor.utils as utils
-            utils.set_weight_attrs = set_weight_attrs
-        except Exception as e:
-            logger.warning("Failed to patch set_weight_attrs: %s", e)
+        return _synced_weight_loader

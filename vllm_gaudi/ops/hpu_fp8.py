@@ -17,7 +17,6 @@ class Fp8LinearMethod(OrigFp8LinearMethod):
     def create_weights(self, *args, **kwargs) -> None:
         if hpu_ops.is_hpu_gaudi2:
             kwargs['weight_loader'] = hpu_ops.gaudi_weight_wrapper(kwargs.get('weight_loader'))
-        kwargs['weight_loader'] = hpu_ops.synced_weight_loader(kwargs.get('weight_loader'))
         super().create_weights(*args, **kwargs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -75,6 +74,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         self.allow_deep_gemm = False
 
         self.topk_indices_dtype = None
+        self.fused_experts = None
 
     def create_weights(self, *args, **kwargs) -> None:
         if hpu_ops.is_hpu_gaudi2:
