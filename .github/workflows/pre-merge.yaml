@@ -13,6 +13,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+    - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+      with:
+        python-version: "3.12"
+    - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
+    - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
+    - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+      with:
+        extra_args: --all-files --hook-stage manual
   discover_tests:
     runs-on: ucb-vllm-cicd-g2
     outputs:
@@ -40,7 +52,7 @@ jobs:
           echo "matrix=$TEST_FUNCTIONS" >> "$GITHUB_OUTPUT"
   pre_merge_hpu_test_build:
     runs-on: ucb-vllm-cicd-g2
-    needs: discover_tests
+    needs: [pre-commit, discover_tests]
     permissions:
       contents: read # Required to checkout code and read history
 
@@ -196,7 +208,7 @@ jobs:
 
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
-  hpu_e2e_tests:
+  e2e:
     runs-on: ucb-vllm-cicd-g2
     needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_tests]
     strategy:
@@ -226,10 +238,9 @@ jobs:
 
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
-
   pre_merge_hpu_test:
     runs-on: ucb-vllm-cicd-g2
-    needs: [hpu_unit_tests, hpu_e2e_tests, hpu_perf_tests]
+    needs: [hpu_unit_tests, e2e, hpu_perf_tests]
     # This job is required to pass for pre-merge CI. By itself it does nothing, and will only pass if all jobs specified in "needs" list pass.
     steps:
       - name: Succeeded if all previous jobs passed
