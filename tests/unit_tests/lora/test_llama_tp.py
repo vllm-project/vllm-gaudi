@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import pytest
+import os
 from typing import Union
 
 import vllm
 from vllm.lora.request import LoRARequest
 #from ..utils import VLLM_PATH, create_new_process_for_each_test, multi_gpu_test
 
-MODEL_PATH = "/mnt/weka/data/pytorch/llama2/Llama-2-7b-hf"
+MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 
 EXPECTED_LORA_OUTPUT = [
     "  SELECT icao FROM table_name_74 WHERE airport = 'lilongwe international airport' ",  # noqa: E501
@@ -71,9 +71,9 @@ def generate_and_test(llm, sql_lora_files, tensorizer_config_dict: Union[dict, N
 
 
 #@create_new_process_for_each_test()
-@pytest.mark.xfail(reason="Weka not available")
 def test_llama_lora(sql_lora_files):
-
+    original_value = os.environ.get("VLLM_SKIP_WARMUP", None)
+    os.environ["VLLM_SKIP_WARMUP"] = "1"
     llm = vllm.LLM(
         MODEL_PATH,
         tokenizer=sql_lora_files,
@@ -84,6 +84,10 @@ def test_llama_lora(sql_lora_files):
         dtype='bfloat16',
     )
     generate_and_test(llm, sql_lora_files)
+    if original_value is None:
+        del os.environ["VLLM_SKIP_WARMUP"]
+    else:
+        os.environ["VLLM_SKIP_WARMUP"] = original_value
 
 
 '''@multi_gpu_test(num_gpus=4)

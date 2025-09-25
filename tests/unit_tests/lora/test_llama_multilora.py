@@ -1,10 +1,10 @@
-import pytest
+import os
 from typing import Optional
 
 from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
 from vllm.lora.request import LoRARequest
 
-MODEL_PATH = "/mnt/weka/data/pytorch/llama2/Llama-2-7b-hf"
+MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 
 
 def create_test_prompts(lora_path: str) -> list[tuple[str, SamplingParams, Optional[LoRARequest]]]:
@@ -105,9 +105,14 @@ def _test_llama_multilora(sql_lora_files, tp_size):
     assert generated_texts == expected_output
 
 
-@pytest.mark.xfail(reason="Weka not available")
 def test_llama_multilora_1x(sql_lora_files):
+    original_value = os.environ.get("VLLM_SKIP_WARMUP", None)
+    os.environ["VLLM_SKIP_WARMUP"] = "1"
     _test_llama_multilora(sql_lora_files, 1)
+    if original_value is None:
+        del os.environ["VLLM_SKIP_WARMUP"]
+    else:
+        os.environ["VLLM_SKIP_WARMUP"] = original_value
 
 
 #def test_llama_multilora_2x(sql_lora_files):
