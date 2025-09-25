@@ -127,13 +127,10 @@ jobs:
       - name: Discover test functions
         id: set-matrix
         run: |
-          TEST_SCRIPT="./vllm-gaudi/tests/full_tests/ci_gsm8k_tests.sh"
-
           # This command robustly discovers all functions in the script that match the 'run_*'
           # naming convention, excluding the main 'run_all_tests' function itself.
-          # It uses `declare -F` to reliably list functions after sourcing the script in a subshell.
           # The final list is formatted into a JSON array required for the matrix strategy.
-          TEST_FUNCTIONS=$( (source $TEST_SCRIPT && declare -F) | \
+          TEST_FUNCTIONS=$( (source ./vllm-gaudi/tests/full_tests/ci_gsm8k_tests.sh && declare -F) | \
                             awk '{print $3}' | \
                             grep '^run_' | \
                             grep -v '^run_all_tests$' | \
