@@ -118,7 +118,6 @@ jobs:
 
   discover_tests:
     runs-on: hourly-ci
-    needs: setup_and_build
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
