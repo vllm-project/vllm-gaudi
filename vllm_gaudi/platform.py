@@ -207,7 +207,7 @@ class HpuPlatform(Platform):
         parent_class = BasevLLMParameter.__mro__[1]
         parent_torch_function = getattr(parent_class, "__torch_function__", None)
 
-        def torch_function(cls, func, types, args=(), kwargs=None):
+        def torch_function(origin_cls, func, types, args=(), kwargs=None):
             if kwargs is None:
                 kwargs = {}
             if parent_torch_function is None:
@@ -215,3 +215,4 @@ class HpuPlatform(Platform):
             return parent_torch_function(func, types, args, kwargs)
 
         BasevLLMParameter.__torch_function__ = classmethod(torch_function)
+        return
