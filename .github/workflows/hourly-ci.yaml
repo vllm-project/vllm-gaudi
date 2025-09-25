@@ -70,6 +70,13 @@ jobs:
           # Use the 'vllm-upstream/main' ref to log commits from that remote
           git log HEAD..vllm-upstream/main --pretty=format:"%h - %an, %ar : %s" --since="${{ steps.prev_run_time.outputs.PREV_RUN_TIME }}"
 
+      - name: Get latest commit sha from vllm-upstream/main
+        id: latest_vllm_commit
+        run: |
+          # Use the 'vllm-upstream/main' ref to log latest commit from that remote
+          LATEST_COMMIT=$(git rev-parse vllm-upstream/main)
+          echo "LATEST_COMMIT=$LATEST_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "Latest commit from upstream vLLM: $LATEST_COMMIT"
 
       - name: Setup Docker environment and build image
         # Using a multi-line string for the Dockerfile is generally fine,
@@ -85,7 +92,7 @@ jobs:
 
           RUN git clone https://github.com/vllm-project/vllm.git vllm
           WORKDIR /workspace/vllm
-          RUN git checkout main
+          RUN git checkout ${{ steps.latest_vllm_commit.outputs.LATEST_COMMIT }}
 
           # Pinning versions in requirements might be good practice for CI consistency
           RUN pip install pytest pytest_asyncio
@@ -193,3 +200,15 @@ jobs:
 
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
+
+      - name: Store last stable vllm commit sha
+        if: success()
+        run: |
+          # Store the latest commit SHA from vllm-upstream/main to a file in the repository
+          LATEST_COMMIT_SHA=${{ steps.latest_vllm_commit.outputs.LATEST_COMMIT }}
+          echo "Storing latest stable vLLM commit SHA: $LATEST_COMMIT_SHA"
+
+          echo "$LATEST_COMMIT_SHA" > VLLM_STABLE_COMMIT
+          git add VLLM_STABLE_COMMIT
+          git commit -m "Update stable vLLM commit SHA to $LATEST_COMMIT_SHA" || echo "No changes to commit"
+          git push origin bmyrcha/test_branch
