@@ -82,6 +82,7 @@ def test_llama_lora(sql_lora_files):
         max_num_seqs=13,
         max_loras=4,
         dtype='bfloat16',
+        hf_token=os.environ.get("HF_TOKEN"),
     )
     generate_and_test(llm, sql_lora_files)
     if original_value is None:

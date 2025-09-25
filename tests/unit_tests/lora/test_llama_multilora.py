@@ -90,14 +90,17 @@ expected_output = [
 
 def _test_llama_multilora(sql_lora_files, tp_size):
     """Main function that sets up and runs the prompt processing."""
-    engine_args = EngineArgs(model=MODEL_PATH,
-                             tokenizer=sql_lora_files,
-                             enable_lora=True,
-                             max_loras=2,
-                             max_lora_rank=8,
-                             max_num_seqs=256,
-                             dtype='bfloat16',
-                             tensor_parallel_size=tp_size)
+    engine_args = EngineArgs(
+        model=MODEL_PATH,
+        tokenizer=sql_lora_files,
+        enable_lora=True,
+        max_loras=2,
+        max_lora_rank=8,
+        max_num_seqs=256,
+        dtype='bfloat16',
+        tensor_parallel_size=tp_size,
+        hf_token=os.environ.get("HF_TOKEN"),
+    )
     engine = LLMEngine.from_engine_args(engine_args)
     test_prompts = create_test_prompts(sql_lora_files)
     results = process_requests(engine, test_prompts)
