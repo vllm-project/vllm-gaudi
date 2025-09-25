@@ -19,6 +19,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       github.ref == 'refs/heads/main'
     runs-on: hourly-ci
+    needs: discover_tests
     permissions:
       contents: read # Required to checkout code and read history
 
@@ -132,7 +133,7 @@ jobs:
           TEST_FUNCTIONS=$( grep '^run_' ./tests/full_tests/ci_gsm8k_tests.sh | \
                    awk '{print $1}' | \
                    sed 's/()//' | \
-                   jq -R . | jq -s . )
+                   jq -R . | jq -s -c . )
 
           echo "Discovered test matrix: $TEST_FUNCTIONS"
           echo "matrix=$TEST_FUNCTIONS" >> "$GITHUB_OUTPUT"
