@@ -22,7 +22,8 @@ jobs:
     needs: discover_tests
     permissions:
       contents: read # Required to checkout code and read history
-
+    outputs:
+      latest_commit: ${{ steps.latest_vllm_commit.outputs.LATEST_COMMIT }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -151,7 +152,7 @@ jobs:
           fi
           echo "matrix=$TEST_FUNCTIONS" >> "$GITHUB_OUTPUT"
 
-  run_individual_tests:
+  e2e:
     needs: [setup_and_build, discover_tests]
     runs-on: hourly-ci
     strategy:
@@ -233,25 +234,31 @@ jobs:
             "
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
-  gate-keeper:
-    needs: [run_unit_tests, run_individual_tests, run_data_parallel_test, run_pd_disaggregate_test]
+  
+  store_last_stable_vllm_commit:
+    needs: [setup_and_build, run_unit_tests, e2e, run_data_parallel_test, run_pd_disaggregate_test]
     runs-on: hourly-ci
+    permissions:
+      contents: write # Permission is required to push a commit
     steps:
-      - name: Gate Keeper - Ensure all tests passed
-        run: |
-          echo "All dependent test jobs completed successfully. Proceeding with post-test actions."
-  Store_last_stable_vllm_commit:
-    needs: gate-keeper
-    runs-on: hourly-ci
-    steps:
-      - name: Store last stable vllm commit sha
-        if: success()
-        run: |
-          # Store the latest commit SHA from vllm-upstream/main to a file in the repository
-          LATEST_COMMIT_SHA=${{ steps.latest_vllm_commit.outputs.LATEST_COMMIT }}
-          echo "Storing latest stable vLLM commit SHA: $LATEST_COMMIT_SHA"
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
+      - name: Configure Git
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Store last stable vllm commit sha
+        run: |
+          LATEST_COMMIT_SHA=${{ needs.setup_and_build.outputs.latest_commit }}
+          echo "Storing latest stable vLLM commit SHA: $LATEST_COMMIT_SHA"
           echo "$LATEST_COMMIT_SHA" > VLLM_STABLE_COMMIT
-          git add VLLM_STABLE_COMMIT
-          git commit -m "Update stable vLLM commit SHA to $LATEST_COMMIT_SHA" || echo "No changes to commit"
-          git push origin vllm/last-good-commit-for-vllm-gaudi
+          
+          # Only commit and push if the file has changed to avoid empty commits
+          if ! git diff --quiet VLLM_STABLE_COMMIT; then
+            git add VLLM_STABLE_COMMIT
+            git commit -m "Update stable vLLM commit to ${LATEST_COMMIT_SHA}"
+            git push origin HEAD:vllm/last-good-commit-for-vllm-gaudi
+          else
+            echo "No changes to stable commit file."
+          fi
