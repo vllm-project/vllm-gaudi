@@ -74,6 +74,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         self.allow_deep_gemm = False
 
         self.topk_indices_dtype = None
+        self.fused_experts = None
 
     def create_weights(self, *args, **kwargs) -> None:
         if hpu_ops.is_hpu_gaudi2:
