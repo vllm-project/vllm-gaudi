@@ -136,6 +136,11 @@ jobs:
                    jq -R . | jq -s -c . )
 
           echo "Discovered test matrix: $TEST_FUNCTIONS"
+          # Fail the job if no tests were found.
+          if [ "$TEST_FUNCTIONS" = "[]" ]; then
+            echo "::error::No test functions were discovered. Failing the workflow."
+            exit 1
+          fi
           echo "matrix=$TEST_FUNCTIONS" >> "$GITHUB_OUTPUT"
 
   run_individual_tests:
