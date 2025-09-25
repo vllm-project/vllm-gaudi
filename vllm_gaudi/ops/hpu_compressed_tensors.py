@@ -226,16 +226,17 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if use_grouped_topk or custom_routing_function is not None:
-            topk_weights, topk_ids = FusedMoE.select_experts(hidden_states=x,
-                                                             router_logits=router_logits,
-                                                             use_grouped_topk=use_grouped_topk,
-                                                             top_k=top_k,
-                                                             renormalize=renormalize,
-                                                             topk_group=topk_group,
-                                                             num_expert_group=num_expert_group,
-                                                             custom_routing_function=custom_routing_function,
-                                                             scoring_func=scoring_func,
-                                                             e_score_correction_bias=e_score_correction_bias)
+            topk_weights, topk_ids, zero_expert_result = FusedMoE.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
@@ -663,18 +664,19 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         x = x.view(-1, x.shape[-1])
 
         if use_grouped_topk or custom_routing_function is not None:
-            topk_weights, topk_ids = FusedMoE.select_experts(hidden_states=x,
-                                                             router_logits=router_logits,
-                                                             use_grouped_topk=use_grouped_topk,
-                                                             top_k=top_k,
-                                                             renormalize=renormalize,
-                                                             topk_group=topk_group,
-                                                             num_expert_group=num_expert_group,
-                                                             custom_routing_function=custom_routing_function,
-                                                             scoring_func=scoring_func,
-                                                             routed_scaling_factor=routed_scaling_factor,
-                                                             e_score_correction_bias=e_score_correction_bias,
-                                                             indices_type=self.topk_indices_dtype)
+            topk_weights, topk_ids, zero_expert_result = FusedMoE.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                routed_scaling_factor=routed_scaling_factor,
+                e_score_correction_bias=e_score_correction_bias,
+                indices_type=self.topk_indices_dtype)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)

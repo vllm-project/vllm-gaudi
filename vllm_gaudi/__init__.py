@@ -9,6 +9,7 @@ def register():
 
 def register_ops():
     """Register custom ops for the HPU platform."""
+    HpuPlatform.patch_for_pt27()
     import vllm_gaudi.v1.sample.hpu_rejection_sampler  # noqa: F401
     import vllm_gaudi.distributed.kv_transfer.kv_connector.v1.hpu_nixl_connector  # noqa: F401
     import vllm_gaudi.ops.hpu_fused_moe  # noqa: F401
