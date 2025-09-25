@@ -4216,13 +4216,19 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 draft_token_ids.append([])
                 continue
 
-            drafter_output = self.drafter.propose(self.input_batch.token_ids_cpu[i, :num_tokens])
+            drafter_output = self.drafter.propose(self.input_batch.token_ids_cpu[i:i + 1, :num_tokens],
+                                                  self.input_batch.req_ids[i:i + 1],
+                                                  self.input_batch.num_tokens_no_spec[i:i + 1],
+                                                  self.input_batch.token_ids_cpu[i:i + 1],
+                                                  self.input_batch.spec_decode_unsupported_reqs)
+            drafter_output = drafter_output[0] if len(drafter_output) > 0 else None
+
             if drafter_output is None or len(drafter_output) == 0:
                 logger.debug("Skipping speculative decoding for request %s, "
                              "drafter output is empty", req_id)
                 draft_token_ids.append([-1])
             else:
-                draft_token_ids.append(drafter_output.tolist())
+                draft_token_ids.append(drafter_output)
         return draft_token_ids
 
 
