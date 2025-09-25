@@ -60,6 +60,14 @@ jobs:
           echo "Commits merged/pushed in vllm-project/vllm.git in the last 4 hours:"
           git log HEAD..vllm-upstream/main --pretty=format:"%h - %an, %ar : %s" --since="${{ steps.prev_run_time.outputs.PREV_RUN_TIME }}"
 
+      - name: Get latest commit sha from vllm-upstream/main
+        id: latest_vllm_commit
+        run: |
+          # Use the 'vllm-upstream/main' ref to log latest commit from that remote
+          LATEST_COMMIT=$(git rev-parse vllm-upstream/main)
+          echo "LATEST_COMMIT=$LATEST_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "Latest commit from upstream vLLM: $LATEST_COMMIT"
+
       - name: Setup Docker environment and build image
         run: |
           echo "Attempting to build Docker image..."
@@ -71,7 +79,7 @@ jobs:
 
           RUN git clone https://github.com/vllm-project/vllm.git vllm
           WORKDIR /workspace/vllm
-          RUN git checkout main
+          RUN git checkout ${{ steps.latest_vllm_commit.outputs.LATEST_COMMIT }}
 
           RUN pip install pytest pytest_asyncio
           RUN pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git
@@ -223,6 +231,27 @@ jobs:
               cd /workspace/vllm-gaudi/tests/unit_tests &&
               ./run_accuracy_test.sh
             "
-
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
+  gate-keeper:
+    needs: [run_unit_tests, run_individual_tests, run_data_parallel_test, run_pd_disaggregate_test]
+    runs-on: hourly-ci
+    steps:
+      - name: Gate Keeper - Ensure all tests passed
+        run: |
+          echo "All dependent test jobs completed successfully. Proceeding with post-test actions."
+  Store_last_stable_vllm_commit:
+    needs: gate-keeper
+    runs-on: hourly-ci
+    steps:
+      - name: Store last stable vllm commit sha
+        if: success()
+        run: |
+          # Store the latest commit SHA from vllm-upstream/main to a file in the repository
+          LATEST_COMMIT_SHA=${{ steps.latest_vllm_commit.outputs.LATEST_COMMIT }}
+          echo "Storing latest stable vLLM commit SHA: $LATEST_COMMIT_SHA"
+
+          echo "$LATEST_COMMIT_SHA" > VLLM_STABLE_COMMIT
+          git add VLLM_STABLE_COMMIT
+          git commit -m "Update stable vLLM commit SHA to $LATEST_COMMIT_SHA" || echo "No changes to commit"
+          git push origin vllm/last-good-commit-for-vllm-gaudi
