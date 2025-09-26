@@ -1061,6 +1061,7 @@ class MoeWNA16Matmul(torch.nn.Module):
 
     def __init__(self):
         super().__init__()
+        self.g_idx = None
 
     def set_weight_packed(self, weight_packed: torch.Tensor):
         self.weight_packed = weight_packed
@@ -1071,13 +1072,12 @@ class MoeWNA16Matmul(torch.nn.Module):
     def set_zero_point(self, zero_point: torch.Tensor):
         self.zero_point = zero_point
 
+    def set_g_idx(self, g_idx: torch.Tensor):
+        self.g_idx = g_idx
+
     def get_dequant_weight(self):
-        return torch.ops.hpu.convert_from_uint4(
-            self.weight_packed,
-            self.weight_scale,
-            self.zero_point,
-            self.weight_scale.dtype,
-        )
+        return torch.ops.hpu.convert_from_uint4(self.weight_packed, self.weight_scale, self.zero_point,
+                                                self.weight_scale.dtype, self.g_idx)
 
     def forward(self, state, expert_id, w):
         raise NotImplementedError()

@@ -35,21 +35,7 @@ def time_generation(llm: LLM,
     start = time.time()
     if do_profile:
         llm.start_profile()
-    try:
-        outputs = llm.generate(prompts, sampling_params)
-    except Exception as e:
-        logging.error("Error getting metrics: %s", e)
-        end = time.time()
-        latency = end - start
-        result_dict = {
-            'ret_spec': ret,
-            'latency': latency,
-            'acc_counts': acceptance_counts,
-            'acc_rate': 0.0,
-            'num_draft_tokens': 0,
-            'num_drafts': 0,
-        }
-        return result_dict
+    outputs = llm.generate(prompts, sampling_params)
     if do_profile:
         llm.stop_profile()
     end = time.time()
@@ -60,19 +46,8 @@ def time_generation(llm: LLM,
         generated_text = output.outputs[0].text
         ret.append(generated_text[:200])
 
-    try:
-        metrics = llm.llm_engine.get_metrics()
-    except Exception as e:
-        logging.error("Error getting metrics: %s", e)
-        result_dict = {
-            'ret_spec': ret,
-            'latency': latency,
-            'acc_counts': acceptance_counts,
-            'acc_rate': 0.0,
-            'num_draft_tokens': 0,
-            'num_drafts': 0,
-        }
-        return result_dict
+    metrics = llm.llm_engine.get_metrics()
+
     num_drafts = 0
     num_draft_tokens = 0
     num_accepted_tokens = 0
@@ -104,153 +79,190 @@ def time_generation(llm: LLM,
     return result_dict
 
 
-def test_ngram(is_enable, args, prompts, sampling_params, task_key, result_queue):
-    if not is_enable:
-        llm = LLM(
-            model="Qwen/Qwen3-4B",
-            disable_log_stats=False,
-        )
-    else:
-        llm = LLM(
-            model="Qwen/Qwen3-4B",
-            speculative_config={
-                "method": "ngram",
-                "prompt_lookup_max": 3,
-                "num_speculative_tokens": args.num_spec_tokens,
-            },
-            disable_log_stats=False,
-        )
+def create_error_result(e: Exception) -> dict:
+    """Helper function to create a standardized error result dictionary."""
+    return {
+        'ret_spec': [],
+        'latency': 0,
+        'acc_counts': [],
+        'acc_rate': 0,
+        'num_draft_tokens': 0,
+        'num_drafts': 0,
+        'error': str(e)
+    }
 
-    result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups,
-                                  args.do_profile)
+
+def test_ngram(is_enable, args, prompts, sampling_params, task_key, result_queue):
+    try:
+        if not is_enable:
+            llm = LLM(
+                model="Qwen/Qwen3-4B",
+                disable_log_stats=False,
+            )
+        else:
+            llm = LLM(
+                model="Qwen/Qwen3-4B",
+                speculative_config={
+                    "method": "ngram",
+                    "prompt_lookup_max": 3,
+                    "num_speculative_tokens": args.num_spec_tokens,
+                },
+                disable_log_stats=False,
+            )
+
+        result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups,
+                                      args.do_profile)
+    except Exception as e:
+        logging.exception("Task %s failed: %s", task_key, e)
+        result_dict = create_error_result(e)
 
     result_queue.put((task_key, result_dict))
 
 
 def test_eagle_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
-    if not is_enable:
-        llm = LLM(
-            model="meta-llama/Meta-Llama-3-8B-Instruct",
-            disable_log_stats=False,
-            enforce_eager=args.enforce_eager,
-        )
-    else:
-        llm = LLM(
-            model="meta-llama/Meta-Llama-3-8B-Instruct",
-            speculative_config={
-                "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
-                "num_speculative_tokens": args.num_spec_tokens,
-            },
-            disable_log_stats=False,
-            enforce_eager=args.enforce_eager,
-        )
+    try:
+        if not is_enable:
+            llm = LLM(
+                model="meta-llama/Meta-Llama-3-8B-Instruct",
+                disable_log_stats=False,
+                enforce_eager=args.enforce_eager,
+            )
+        else:
+            llm = LLM(
+                model="meta-llama/Meta-Llama-3-8B-Instruct",
+                speculative_config={
+                    "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
+                    "num_speculative_tokens": args.num_spec_tokens,
+                },
+                disable_log_stats=False,
+                enforce_eager=args.enforce_eager,
+            )
 
-    result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups,
-                                  args.do_profile)
+        result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups,
+                                      args.do_profile)
+    except Exception as e:
+        logging.exception("Task %s failed: %s", task_key, e)
+        result_dict = create_error_result(e)
     result_queue.put((task_key, result_dict))
 
 
 def test_eagle3_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
-    if not is_enable:
-        llm = LLM(
-            model="meta-llama/Meta-Llama-3-8B-Instruct",
-            disable_log_stats=False,
-            enforce_eager=args.enforce_eager,
-        )
-    else:
-        llm = LLM(
-            model="meta-llama/Meta-Llama-3-8B-Instruct",
-            speculative_config={
-                "model": "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
-                "num_speculative_tokens": args.num_spec_tokens,
-                "method": "eagle3",
-            },
-            disable_log_stats=False,
-            enforce_eager=args.enforce_eager,
-        )
+    try:
+        if not is_enable:
+            llm = LLM(
+                model="meta-llama/Meta-Llama-3-8B-Instruct",
+                disable_log_stats=False,
+                enforce_eager=args.enforce_eager,
+            )
+        else:
+            llm = LLM(
+                model="meta-llama/Meta-Llama-3-8B-Instruct",
+                speculative_config={
+                    "model": "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
+                    "num_speculative_tokens": args.num_spec_tokens,
+                    "method": "eagle3",
+                },
+                disable_log_stats=False,
+                enforce_eager=args.enforce_eager,
+            )
 
-    result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups,
-                                  args.do_profile)
+        result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups,
+                                      args.do_profile)
+    except Exception as e:
+        logging.exception("Task %s failed: %s", task_key, e)
+        result_dict = create_error_result(e)
     result_queue.put((task_key, result_dict))
 
 
 def test_medusa_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
-    if not is_enable:
-        llm = LLM(
-            model="JackFram/llama-68m",
-            disable_log_stats=False,
-            enforce_eager=args.enforce_eager,
-        )
-    else:
-        llm = LLM(
-            model="JackFram/llama-68m",
-            speculative_config={
-                "model": "abhigoyal/vllm-medusa-llama-68m-random",
-                "num_speculative_tokens": args.num_spec_tokens,
-            },
-            disable_log_stats=False,
-            enforce_eager=args.enforce_eager,
-        )
+    try:
+        if not is_enable:
+            llm = LLM(
+                model="JackFram/llama-68m",
+                disable_log_stats=False,
+                enforce_eager=args.enforce_eager,
+            )
+        else:
+            llm = LLM(
+                model="JackFram/llama-68m",
+                speculative_config={
+                    "model": "abhigoyal/vllm-medusa-llama-68m-random",
+                    "num_speculative_tokens": args.num_spec_tokens,
+                },
+                disable_log_stats=False,
+                enforce_eager=args.enforce_eager,
+            )
 
-    result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups,
-                                  args.do_profile)
+        result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups,
+                                      args.do_profile)
+    except Exception as e:
+        logging.exception("Task %s failed: %s", task_key, e)
+        result_dict = create_error_result(e)
     result_queue.put((task_key, result_dict))
 
 
 def test_eaglemtp_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
-    if not is_enable:
-        llm = LLM(
-            model="eagle618/deepseek-v3-random",
-            disable_log_stats=False,
-        )
-    else:
-        llm = LLM(
-            model="eagle618/deepseek-v3-random",
-            speculative_config={
-                "model": "eagle618/eagle-deepseek-v3-random",
-                "num_speculative_tokens": args.num_spec_tokens,
-            },
-            disable_log_stats=False,
-        )
+    try:
+        if not is_enable:
+            llm = LLM(
+                model="eagle618/deepseek-v3-random",
+                disable_log_stats=False,
+            )
+        else:
+            llm = LLM(
+                model="eagle618/deepseek-v3-random",
+                speculative_config={
+                    "model": "eagle618/eagle-deepseek-v3-random",
+                    "num_speculative_tokens": args.num_spec_tokens,
+                },
+                disable_log_stats=False,
+            )
 
-    result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups,
-                                  args.do_profile)
+        result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups,
+                                      args.do_profile)
+    except Exception as e:
+        logging.exception("Task %s failed: %s", task_key, e)
+        result_dict = create_error_result(e)
     result_queue.put((task_key, result_dict))
 
 
 def test_mtp_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
-    if not is_enable:
-        llm = LLM(
-            model="/mnt/weka/data/pytorch/DeepSeek-R1",
-            tensor_parallel_size=8,
-            enable_expert_parallel=True,
-            disable_log_stats=False,
-            trust_remote_code=True,
-        )
-    else:
-        llm = LLM(
-            model="/mnt/weka/data/pytorch/DeepSeek-R1",
-            tensor_parallel_size=8,
-            enable_expert_parallel=True,
-            speculative_config={
-                "num_speculative_tokens": args.num_spec_tokens,
-            },
-            disable_log_stats=False,
-            trust_remote_code=True,
-        )
-        # llm = LLM(
-        #     model="wemaster/deepseek_mtp_main_random_bf16",
-        #     tensor_parallel_size=1,
-        #     speculative_config={
-        #         "num_speculative_tokens": 1,
-        #     },
-        #     trust_remote_code=True,
-        #     disable_log_stats=False,
-        #     max_model_len=4096,
-        # )
+    try:
+        if not is_enable:
+            llm = LLM(
+                model="/mnt/weka/data/pytorch/DeepSeek-R1",
+                tensor_parallel_size=8,
+                enable_expert_parallel=True,
+                disable_log_stats=False,
+                trust_remote_code=True,
+            )
+        else:
+            llm = LLM(
+                model="/mnt/weka/data/pytorch/DeepSeek-R1",
+                tensor_parallel_size=8,
+                enable_expert_parallel=True,
+                speculative_config={
+                    "num_speculative_tokens": args.num_spec_tokens,
+                },
+                disable_log_stats=False,
+                trust_remote_code=True,
+            )
+            # llm = LLM(
+            #     model="wemaster/deepseek_mtp_main_random_bf16",
+            #     tensor_parallel_size=1,
+            #     speculative_config={
+            #         "num_speculative_tokens": 1,
+            #     },
+            #     trust_remote_code=True,
+            #     disable_log_stats=False,
+            #     max_model_len=4096,
+            # )
 
-    result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups,
-                                  args.do_profile)
+        result_dict = time_generation(llm, prompts, sampling_params, args.num_spec_tokens, args.num_warmups,
+                                      args.do_profile)
+    except Exception as e:
+        logging.exception("Task %s failed: %s", task_key, e)
+        result_dict = create_error_result(e)
     result_queue.put((task_key, result_dict))
 
 

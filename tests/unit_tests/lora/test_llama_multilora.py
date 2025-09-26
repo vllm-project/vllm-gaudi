@@ -91,6 +91,7 @@ expected_output = [
 def _test_llama_multilora(sql_lora_files, tp_size):
     """Main function that sets up and runs the prompt processing."""
     engine_args = EngineArgs(model=MODEL_PATH,
+                             tokenizer=sql_lora_files,
                              enable_lora=True,
                              max_loras=2,
                              max_lora_rank=8,

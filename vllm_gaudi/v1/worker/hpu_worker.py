@@ -273,7 +273,9 @@ class HPUWorker(WorkerBase):
                 self.step_profiler = None
                 raise RuntimeError('Step profiling finished!')
         self.step += 1
-        return output if self.rank == 0 else None
+        # NOTE(Harish): removed "if self.rank == 0 else None" for KV_connector enabling with TP>1
+        # referred to Gpu Model Runner, KV connector aggregation expects valid output from all ranks
+        return output
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
