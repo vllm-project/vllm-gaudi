@@ -3503,6 +3503,47 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         logger.info("Sampler warmup completed successfully")
 
+    def warmup_defragmenter(self):
+        """Warm up defragmentation swap graphs for different thresholds.
+
+        We execute a minimal swap (1 pair) which will be padded internally to the
+        requested threshold size. Thresholds chosen to mirror potential production
+        values: 8, 16, 32, 64, 128, 256, 512.
+        """
+        # If defragmenter is disabled or cache utils not prepared, skip.
+        if not getattr(self.defragmenter, 'enabled', False):
+            return
+        if self.defragmenter.cache_utils is None:
+            return
+
+        thresholds = self.defragmenter.to_swap_pad_thresholds
+
+        logger.info("Warming up defragmenter with thresholds: %s", thresholds)
+
+        # Use simple valid block ids present in caches (assume at least 2 blocks allocated when kv caches created)
+        # We only need distinct ids for a swap. They will be scaled by block_size inside swap.
+        # If for some reason only 1 block exists, skip warmup gracefully.
+        try:
+            k_cache = self.defragmenter.cache_utils.kv_caches[0][0]
+            num_blocks_available = k_cache.shape[0] // self.block_size
+        except Exception:
+            num_blocks_available = 0
+        if num_blocks_available < 2:
+            logger.warning("Skipping defragmenter warmup, insufficient blocks (%s)", num_blocks_available)
+            return
+
+        # Minimal pair to trigger a swap path
+        to_swap = [(1, 0)]
+
+        for th in thresholds:
+            self.defragmenter.cache_utils.swap(to_swap, th)
+
+        # If the number of swaps was odd, do one more to make it even and return to original state.
+        if len(thresholds) % 2 == 1:
+            self.defragmenter.cache_utils.swap(to_swap, thresholds[0])
+
+        logger.info("Defragmenter warmup completed successfully")
+
     def warmup_graphs(self, buckets, is_prompt, kv_caches, starting_mem=0, total_batch_seq=0.001):
         total_mem = starting_mem
         idx = 0
@@ -3782,6 +3823,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                      "to be called before warming up the model.")
 
                 self.warmup_sampler()
+                self.warmup_defragmenter()
 
                 # TODO(kzawora): align_workers
                 mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
@@ -4146,41 +4188,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self,
         sampled_token_ids: list[list[int]],
     ) -> list[list[int]]:
-        # TODO(woosuk): Optimize.
-        draft_token_ids: list[list[int]] = []
-        for i, sampled_ids in enumerate(sampled_token_ids):
-            num_sampled_ids = len(sampled_ids)
-            if not num_sampled_ids:
-                # Skip speculative decoding.
-                logger.debug("Skipping speculative decoding for request %s, "
-                             "no sampled tokens", i)
-                draft_token_ids.append([])
-                continue
-
-            # Skip requests that require sampling parameters that are not
-            # supported with speculative decoding.
-            if i >= len(self.input_batch.req_ids):
-                logger.debug("Skipping speculative decoding for padding request %s, ", i)
-                continue
-            req_id = self.input_batch.req_ids[i]
-            if req_id in self.input_batch.spec_decode_unsupported_reqs:
-                logger.debug("Skipping speculative decoding for request %s", req_id)
-                draft_token_ids.append([])
-                continue
-
-            num_tokens = self.input_batch.num_tokens_no_spec[i]
-            if num_tokens >= self.max_model_len:
-                # Skip requests that have already reached the max model length.
-                draft_token_ids.append([])
-                continue
-
-            drafter_output = self.drafter.propose(self.input_batch.token_ids_cpu[i, :num_tokens])
-            if drafter_output is None or len(drafter_output) == 0:
-                logger.debug("Skipping speculative decoding for request %s, "
-                             "drafter output is empty", req_id)
-                draft_token_ids.append([-1])
-            else:
-                draft_token_ids.append(drafter_output.tolist())
+        draft_token_ids = self.drafter.propose(sampled_token_ids, self.input_batch.req_ids,
+                                               self.input_batch.num_tokens_no_spec, self.input_batch.token_ids_cpu,
+                                               self.input_batch.spec_decode_unsupported_reqs)
+        # swipe draft_token_ids_native replacing [] to [-1]
+        for i in range(len(draft_token_ids)):
+            if len(draft_token_ids[i]) == 0:
+                draft_token_ids[i] = [-1]
         return draft_token_ids
 
 
