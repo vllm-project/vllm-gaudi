@@ -85,10 +85,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Wait for a few seconds to allow GitHub to determine mergeable_state
-          echo "Waiting 20 seconds for GitHub to calculate mergeable state..."
-          sleep 20
-
           BLOCKING_REASON=""
 
           # --- New check to see if the PR is behind the base branch ---
