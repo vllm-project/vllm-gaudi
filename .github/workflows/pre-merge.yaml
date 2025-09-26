@@ -40,10 +40,13 @@ jobs:
 
           # This part remains the same
           if [[ -n "$BLOCKING_REASON" ]]; then
-            echo "run_ci=false" >> "$GITHUB_OUTPUT"
-            echo "reason<<EOF" >> "$GITHUB_OUTPUT"
-            echo "$BLOCKING_REASON" >> "$GITHUB_OUTPUT"
-            echo "EOF" >> "$GITHUB_OUTPUT"
+            # Group the commands and redirect the output once for efficiency
+            {
+              echo "run_ci=false"
+              echo "reason<<EOF"
+              echo "$BLOCKING_REASON"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
           else
             echo "run_ci=true" >> "$GITHUB_OUTPUT"
           fi
