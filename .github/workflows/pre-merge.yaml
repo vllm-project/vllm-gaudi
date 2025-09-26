@@ -1,7 +1,7 @@
 name: Basic HPU test suite 
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
 
@@ -37,6 +37,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           clean: true # Ensure a clean workspace before checkout
+          fetch-depth: 0
       - name: Wait for DCO check to complete
         id: wait_for_dco
         continue-on-error: true
@@ -72,12 +73,6 @@ jobs:
           
           echo "DCO check finished with conclusion: $CONCLUSION"
           echo "conclusion=$CONCLUSION" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          clean: true # Ensure a clean workspace before checkout    
 
       - name: Check for other blocking conditions
         id: check_conditions
@@ -208,7 +203,7 @@ jobs:
     permissions:
       contents: read # Required to checkout code and read history
     outputs:
-      target_commit: ${{ steps.determine_commit.outputs.TEST_VLLM_COMMIT }}
+      target_commit: ${{ steps.checkout_vllm_upstream.outputs.TEST_VLLM_COMMIT }}
     steps:
       - name: Read Stable Commit from Target Branch
         id: read_stable_commit
@@ -265,6 +260,7 @@ jobs:
           echo "TARGET_COMMIT=${FINAL_TARGET}" >> "$GITHUB_ENV"
           echo "commit_ref=${FINAL_TARGET}" >> "$GITHUB_OUTPUT"
       - name: Add vLLM upstream as a remote and checkout target commit
+        id: checkout_vllm_upstream
         run: |
           echo "Attempting to remove remote branch if it exists..."
           git remote remove vllm-upstream || true
