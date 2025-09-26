@@ -28,7 +28,7 @@ title: Supported Features
 | Exponential bucketing | vLLM HPU supports exponential bucketing spacing instead of linear to automate configuration of bucketing mechanism, enabled by default. It can be disabled via `VLLM_EXPONENTIAL_BUCKETING=false` environment variable.   | N/A |
 | Data Parellel support | vLLM HPU supports Data Parellel | [Documentation](https://docs.vllm.ai/en/stable/serving/data_parallel_deployment.html)<br>[Example](https://docs.vllm.ai/en/latest/examples/offline_inference/data_parallel.html)  |
 
-# Comming Soon
+# Coming Soon
 - Sliding window attention
 - P/D disaggregate support
 - In-place weight update
