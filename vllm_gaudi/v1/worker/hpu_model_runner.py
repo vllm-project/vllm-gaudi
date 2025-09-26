@@ -4191,41 +4191,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self,
         sampled_token_ids: list[list[int]],
     ) -> list[list[int]]:
-        # TODO(woosuk): Optimize.
-        draft_token_ids: list[list[int]] = []
-        for i, sampled_ids in enumerate(sampled_token_ids):
-            num_sampled_ids = len(sampled_ids)
-            if not num_sampled_ids:
-                # Skip speculative decoding.
-                logger.debug("Skipping speculative decoding for request %s, "
-                             "no sampled tokens", i)
-                draft_token_ids.append([])
-                continue
-
-            # Skip requests that require sampling parameters that are not
-            # supported with speculative decoding.
-            if i >= len(self.input_batch.req_ids):
-                logger.debug("Skipping speculative decoding for padding request %s, ", i)
-                continue
-            req_id = self.input_batch.req_ids[i]
-            if req_id in self.input_batch.spec_decode_unsupported_reqs:
-                logger.debug("Skipping speculative decoding for request %s", req_id)
-                draft_token_ids.append([])
-                continue
-
-            num_tokens = self.input_batch.num_tokens_no_spec[i]
-            if num_tokens >= self.max_model_len:
-                # Skip requests that have already reached the max model length.
-                draft_token_ids.append([])
-                continue
-
-            drafter_output = self.drafter.propose(self.input_batch.token_ids_cpu[i, :num_tokens])
-            if drafter_output is None or len(drafter_output) == 0:
-                logger.debug("Skipping speculative decoding for request %s, "
-                             "drafter output is empty", req_id)
-                draft_token_ids.append([-1])
-            else:
-                draft_token_ids.append(drafter_output.tolist())
+        draft_token_ids = self.drafter.propose(sampled_token_ids, self.input_batch.req_ids,
+                                               self.input_batch.num_tokens_no_spec, self.input_batch.token_ids_cpu,
+                                               self.input_batch.spec_decode_unsupported_reqs)
+        # swipe draft_token_ids_native replacing [] to [-1]
+        for i in range(len(draft_token_ids)):
+            if len(draft_token_ids[i]) == 0:
+                draft_token_ids[i] = [-1]
         return draft_token_ids
 
 

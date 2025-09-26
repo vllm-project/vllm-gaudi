@@ -195,3 +195,24 @@ class HpuPlatform(Platform):
             return out
 
         return _synced_weight_loader
+
+    @classmethod
+    def patch_for_pt27(cls) -> None:
+
+        from vllm.utils import is_torch_equal_or_newer
+        if is_torch_equal_or_newer("2.8.0"):
+            return
+
+        from vllm.model_executor import BasevLLMParameter
+        parent_class = BasevLLMParameter.__mro__[1]
+        parent_torch_function = getattr(parent_class, "__torch_function__", None)
+
+        def torch_function(origin_cls, func, types, args=(), kwargs=None):
+            if kwargs is None:
+                kwargs = {}
+            if parent_torch_function is None:
+                return NotImplemented
+            return parent_torch_function(func, types, args, kwargs)
+
+        BasevLLMParameter.__torch_function__ = classmethod(torch_function)
+        return
