@@ -30,6 +30,12 @@ jobs:
       reason: ${{ steps.check_conditions.outputs.reason }}
 
     steps:
+      # Add this checkout step
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          clean: true # Ensure a clean workspace before checkout
       - name: Wait for DCO check to complete
         id: wait_for_dco
         continue-on-error: true
