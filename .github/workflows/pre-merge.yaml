@@ -85,7 +85,7 @@ jobs:
             BLOCKING_REASON="This is a **Draft PR**. Please mark it as 'Ready for Review' to trigger the CI."
 
           # Use the 'gh' CLI to fetch the LIVE mergeable state after the sleep
-          elif [[ "$(gh pr view ${{ github.event.pull_request.number }} --json mergeableState --jq '.mergeableState' | tr '[:upper:]' '[:lower:]')" == "behind" ]]; then
+          elif [[ "$(gh pr view ${{ github.event.pull_request.number }} --json mergeStateStatus --jq '.mergeStateStatus  ' | tr '[:upper:]' '[:lower:]')" == "behind" ]]; then
             BLOCKING_REASON="Your branch is **behind the base branch**. Please merge or rebase to get the latest changes."
           fi
 
