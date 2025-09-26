@@ -161,13 +161,12 @@ run_qwen2_5_vl_test() {
     echo "✅ Test with multimodal-support with qwen2.5-vl-7b passed."
 }
 
-#NOTE(Chendi): Spec Decode failed due upstream change
 # Spec decode with ngram
-# run_spec_decode_ngram_test() {
-#     echo "➡️ Testing Spec-decode with ngram..."
-#     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --assert_acc_rate 0.25 --osl 1024
-#     echo "✅ Test with spec decode with ngram passed."
-# }
+run_spec_decode_ngram_test() {
+    echo "➡️ Testing Spec-decode with ngram..."
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --assert_acc_rate 0.25 --osl 1024
+    echo "✅ Test with spec decode with ngram passed."
+}
 
 # Embedding-model-support for v1
 run_embedding_model_test() {
