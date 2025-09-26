@@ -32,6 +32,9 @@
       - sequence length min (`VLLM_PROMPT_SEQ_BUCKET_MIN`): `block_size`
       - sequence length step (`VLLM_PROMPT_SEQ_BUCKET_STEP`): `block_size`
       - sequence length max (`VLLM_PROMPT_SEQ_BUCKET_MAX`): `1024`
+      - sequence ctx min (`VLLM_PROMPT_CTX_BUCKET_MIN`): `0`
+      - sequence ctx step (`VLLM_PROMPT_CTX_BUCKET_STEP`): `1`
+      - sequence ctx max (`VLLM_PROMPT_CTX_BUCKET_MAX`): `(max_model_len - block_size) // block_size`
     - Decode:
       - batch size min (`VLLM_DECODE_BS_BUCKET_MIN`): `1`
       - batch size step (`VLLM_DECODE_BS_BUCKET_STEP`): `min(max_num_seqs, 32)`
