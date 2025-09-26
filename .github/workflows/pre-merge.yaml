@@ -1,7 +1,7 @@
 name: Basic HPU test suite 
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
 
@@ -23,7 +23,8 @@ jobs:
     permissions:
       # Required to read the status of checks and PR details
       checks: read
-      pull-requests: read
+      # Add this line to allow posting comments on PRs
+      pull-requests: write
     outputs:
       # This output will be used to signal if the main CI should run
       run_ci: ${{ steps.check_conditions.outputs.run_ci }}
