@@ -2,7 +2,7 @@ name: Basic HPU test suite
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
 
   # Allow manual triggering for testing purposes
@@ -14,6 +14,7 @@ concurrency:
 
 jobs:
   pre-commit:
+    if: github.event.pull_request.draft == false && github.event.pull_request.mergeable_state == 'clean'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
