@@ -15,12 +15,12 @@ Set the following environment variables to avoid OOM/functional issues.  Additio
 
 - `VLLM_ENGINE_ITERATION_TIMEOUT_S=3600`
 - `VLLM_RPC_TIMEOUT=100000`
-- `VLLM_PROMPT_USE_FUSEDSDPA=1`
-- `PT_HPU_ENABLE_LAZY_COLLECTIVES=true`
-- `PT_HPUGRAPH_DISABLE_TENSOR_CACHE=1`
 - `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`
 
-**32K context length flags examples:**
+## Warmup buckets preparation
+Exponential bucketing mechanism automatically prepares buckets for long context. Linear bucketing mechanism requires manual flags settings.
+
+**32K context length flags examples for linear warmup:**
 
 - `VLLM_GRAPH_RESERVED_MEM`: The value depends on the model and context length settings. Use `VLLM_GRAPH_RESERVED_MEM=0.02` for Llama3.1-8B or `VLLM_GRAPH_RESERVED_MEM=0.1` for Llama3.1-70B.
 - `VLLM_PROMPT_BS_BUCKET_MIN=1`: Suggested value, depends on the model. You can increase it until you reach an OOM error or decrease it if OOM occurs.
