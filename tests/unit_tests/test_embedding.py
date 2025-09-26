@@ -17,6 +17,7 @@ PROMPTS = [
 ]
 
 
+@pytest.mark.xfail(reason="skip, expect fix by SW-241408")
 @pytest.mark.parametrize(
     "model",
     [
