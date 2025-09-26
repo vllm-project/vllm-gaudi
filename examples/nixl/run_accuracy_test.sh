@@ -2,12 +2,12 @@
 #set -xe
 
 # Models to run
-MODELS=(
-    "Qwen/Qwen3-0.6B"
-)
 #MODELS=(
-#	"meta-llama/Llama-3.1-8B"
+#    "Qwen/Qwen3-0.6B"
 #)
+MODELS=(
+	"meta-llama/Llama-3.1-8B"
+)
 
 export VLLM_USE_V1=1
 export VLLM_SKIP_WARMUP="true"
@@ -103,7 +103,7 @@ run_tests_for_model() {
     echo "Starting prefill instance $i on GPU $GPU_ID, port $PORT"
 
     # Build the command with or without model-specific args
-    BASE_CMD="RANK=0 UCX_TLS=tcp VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
+    BASE_CMD="RANK=0 UCX_TLS=rc,ud,ib VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
     --max_num_batched_tokens 8192 \
@@ -136,7 +136,7 @@ run_tests_for_model() {
     echo "Starting decode instance $i on GPU $GPU_ID, port $PORT"
 
     # Build the command with or without model-specific args
-    BASE_CMD="RANK=1 UCX_TLS=tcp VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
+    BASE_CMD="RANK=1 UCX_TLS=rc,ud,ib VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
     --max_num_batched_tokens 8192 \
