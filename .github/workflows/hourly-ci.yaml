@@ -262,4 +262,4 @@ jobs:
           echo "Pushing changes to remote branch..."
           # Explicitly set the remote URL with the token to prevent hanging on auth
           git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
-          git push origin HEAD:vllm/last-good-commit-for-vllm-gaudi
+          git push --force origin HEAD:vllm/last-good-commit-for-vllm-gaudi
