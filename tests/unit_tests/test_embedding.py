@@ -24,7 +24,7 @@ PROMPTS = [
         # "ssmits/Qwen2-7B-Instruct-embed-base",
         # "BAAI/bge-multilingual-gemma2",
     ])
-def _test_embeddings(model):
+def test_embeddings(model):
 
     args = Namespace(model=model, runner="pooling", enforce_eager=True)
     llm = vllm.LLM(**vars(args))
