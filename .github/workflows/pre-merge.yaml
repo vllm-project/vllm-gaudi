@@ -25,26 +25,13 @@ jobs:
       run_ci: ${{ steps.check_conditions.outputs.run_ci }}
 
     steps:
-      - name: Wait for DCO check to complete
-        id: dco_check_waiter
-        uses: lewagon/wait-on-check-action@v1.3.1
-        # Don't fail the job here; we want to post a comment first
-        continue-on-error: true
-        with:
-          # This must match the name of your DCO status check
-          check-name: 'DCO'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          wait-interval: 20 # Poll every 20 seconds
       - name: Check for blocking conditions
         id: check_conditions
         run: |
           # The message we will post to the PR if blocked
           BLOCKING_REASON=""
 
-          if [[ "${{ steps.dco_check_waiter.outcome }}" == "failure" ]]; then
-            BLOCKING_REASON="The **DCO sign-off** check has failed. Please ensure all commits are signed-off (e.g., 'git commit -s')."
-
-          elif [[ "${{ github.event.pull_request.draft }}" == "true" ]]; then
+          if [[ "${{ github.event.pull_request.draft }}" == "true" ]]; then
             BLOCKING_REASON="This is a **Draft PR**. Please mark it as 'Ready for Review' to trigger the CI."
 
           elif [[ "${{ github.event.pull_request.mergeable_state }}" == "behind" ]]; then
