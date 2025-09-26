@@ -20,27 +20,82 @@ concurrency:
 jobs:
   gatekeeper:
     runs-on: ubuntu-latest
+    permissions:
+      # Required to read the status of checks and PR details
+      checks: read
+      pull-requests: read
     outputs:
       # This output will be used to signal if the main CI should run
       run_ci: ${{ steps.check_conditions.outputs.run_ci }}
+      reason: ${{ steps.check_conditions.outputs.reason }}
 
     steps:
-      - name: Check for blocking conditions
-        id: check_conditions
+      # Add this checkout step
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          clean: true # Ensure a clean workspace before checkout
+      - name: Wait for DCO check to complete
+        id: wait_for_dco
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # The message we will post to the PR if blocked
+          echo "Waiting for DCO check to complete..."
+          CONCLUSION=""
+          ATTEMPTS=0
+          MAX_ATTEMPTS=30 # 30 attempts * 20 seconds = 10 minute timeout
+
+          # Poll every 20 seconds until the check is no longer in progress
+          while [[ -z "$CONCLUSION" || "$CONCLUSION" == "null" ]]; do
+            if [ $ATTEMPTS -ge $MAX_ATTEMPTS ]; then
+              echo "::error::Timed out waiting for DCO check to complete."
+              CONCLUSION="timed_out"
+              break
+            fi
+
+            sleep 20
+            
+            # Fetch all checks for the PR's head SHA
+            CHECKS_JSON=$(gh api "repos/${{ github.repository }}/commits/${{ github.event.pull_request.head.sha }}/check-runs")
+            
+            # Find the DCO check's conclusion and status in one go
+            DCO_CHECK=$(echo "$CHECKS_JSON" | jq '.check_runs[] | select(.name == "DCO")')
+            CONCLUSION=$(echo "$DCO_CHECK" | jq -r '.conclusion')
+            STATUS=$(echo "$DCO_CHECK" | jq -r '.status')
+            
+            echo "Current DCO status: $STATUS"
+            ATTEMPTS=$((ATTEMPTS + 1))
+          done
+          
+          echo "DCO check finished with conclusion: $CONCLUSION"
+          echo "conclusion=$CONCLUSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check for other blocking conditions
+        id: check_conditions
+        # Provide the GITHUB_TOKEN for the gh CLI to authenticate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Wait for a few seconds to allow GitHub to determine mergeable_state
+          echo "Waiting 20 seconds for GitHub to calculate mergeable state..."
+          sleep 20
+
           BLOCKING_REASON=""
 
-          if [[ "${{ github.event.pull_request.draft }}" == "true" ]]; then
+          if [[ "${{ steps.wait_for_dco.outputs.conclusion }}" != "success" ]]; then
+            BLOCKING_REASON="The **DCO sign-off** check did not pass (status: ${{ steps.wait_for_dco.outputs.conclusion }}). Please ensure all commits are signed-off."
+
+          elif [[ "${{ github.event.pull_request.draft }}" == "true" ]]; then
             BLOCKING_REASON="This is a **Draft PR**. Please mark it as 'Ready for Review' to trigger the CI."
 
-          elif [[ "${{ github.event.pull_request.mergeable_state }}" == "behind" ]]; then
+          # Use the 'gh' CLI to fetch the LIVE mergeable state after the sleep
+          elif [[ "$(gh pr view ${{ github.event.pull_request.number }} --json mergeStateStatus --jq '.mergeStateStatus  ' | tr '[:upper:]' '[:lower:]')" == "behind" ]]; then
             BLOCKING_REASON="Your branch is **behind the base branch**. Please merge or rebase to get the latest changes."
           fi
 
-          # This part remains the same
           if [[ -n "$BLOCKING_REASON" ]]; then
-            # Group the commands and redirect the output once for efficiency
             {
               echo "run_ci=false"
               echo "reason<<EOF"
@@ -51,7 +106,11 @@ jobs:
             echo "run_ci=true" >> "$GITHUB_OUTPUT"
           fi
 
+          echo "Reason (if blocked): $BLOCKING_REASON"
+
       - name: Post comment if CI is blocked
+        # This ensures that even if commenting fails, the next step will run
+        continue-on-error: true
         # Only run this step if the check failed
         if: steps.check_conditions.outputs.run_ci == 'false'
         uses: peter-evans/create-or-update-comment@v4
@@ -68,6 +127,7 @@ jobs:
         run: |
           echo "Failing this job to prevent the main CI from running."
           exit 1
+
   discover_tests:
     runs-on: ucb-vllm-cicd-g2
     outputs:
@@ -93,9 +153,36 @@ jobs:
             exit 1
           fi
           echo "matrix=$TEST_FUNCTIONS" >> "$GITHUB_OUTPUT"
+
+  pre-commit:
+    # This job now runs in parallel with the build job
+    needs: gatekeeper
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          clean: true # Ensure a clean workspace before checkout
+
+      - name: Setup Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: "3.12"
+
+      - name: Add problem matchers
+        run: |
+          echo "::add-matcher::.github/workflows/matchers/actionlint.json"
+          echo "::add-matcher::.github/workflows/matchers/mypy.json"
+
+      - name: Run pre-commit hooks
+        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+        with:
+          extra_args: --all-files --hook-stage manual
+
   pre_merge_hpu_test_build:
     runs-on: ucb-vllm-cicd-g2
-    needs: [gatekeeper, discover_tests]
+    needs: [pre-commit, discover_tests]
     permissions:
       contents: read # Required to checkout code and read history
 
@@ -150,19 +237,7 @@ jobs:
 
           EOF
           echo "Docker image built successfully."
-  pre-commit:
-    needs: pre_merge_hpu_test_build
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-    - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
-      with:
-        python-version: "3.12"
-    - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
-    - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
-    - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
-      with:
-        extra_args: --all-files --hook-stage manual
+
   hpu_unit_tests:
     runs-on: ucb-vllm-cicd-g2
     needs: pre_merge_hpu_test_build
