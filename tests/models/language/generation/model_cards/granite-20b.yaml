@@ -1,9 +1,0 @@
-model_card:
-  model_name: "/mnt/weka/data/pytorch/granite/granite-20b"
-  tasks: gsm8k_cot
-  num_fewshot: 8
-  limit: 500
-
-metrics:
-  name: exact_match,strict-match
-  value: 0.5443

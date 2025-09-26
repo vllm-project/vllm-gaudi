@@ -1,9 +1,0 @@
-model_card:
-  model_name: "/mnt/weka/data/pytorch/llama3.1/Meta-Llama-3.1-70B-Instruct"
-  tasks: gsm8k
-  num_fewshot: 5
-  limit: 250
-
-metrics:
-  name: exact_match,strict-match
-  value: 0.892
