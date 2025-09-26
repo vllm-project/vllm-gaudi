@@ -23,7 +23,8 @@ jobs:
     permissions:
       # Required to read the status of checks and PR details
       checks: read
-      pull-requests: read
+      # Add this line to allow posting comments on PRs
+      pull-requests: write
     outputs:
       # This output will be used to signal if the main CI should run
       run_ci: ${{ steps.check_conditions.outputs.run_ci }}
@@ -45,7 +46,7 @@ jobs:
           echo "Waiting for DCO check to complete..."
           CONCLUSION=""
           ATTEMPTS=0
-          MAX_ATTEMPTS=30 # 30 attempts * 20 seconds = 10 minute timeout
+          MAX_ATTEMPTS=2 # 2 attempts * 20 seconds = 40 seconds timeout
 
           # Poll every 20 seconds until the check is no longer in progress
           while [[ -z "$CONCLUSION" || "$CONCLUSION" == "null" ]]; do
