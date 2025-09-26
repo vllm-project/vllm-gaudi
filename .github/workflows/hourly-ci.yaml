@@ -243,6 +243,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: vllm/last-good-commit-for-vllm-gaudi
+          fetch-depth: 0 # Fetch full history to ensure we can push changes
 
       - name: Configure Git
         run: |
