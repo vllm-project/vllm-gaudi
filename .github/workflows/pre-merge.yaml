@@ -8,12 +8,82 @@ on:
   # Allow manual triggering for testing purposes
   workflow_dispatch: {}
 
+permissions:
+  pull-requests: write
+  # This line allows it to read the status of checks like DCO
+  checks: read
+
 concurrency: 
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  gatekeeper:
+    runs-on: ubuntu-latest
+    outputs:
+      # This output will be used to signal if the main CI should run
+      run_ci: ${{ steps.check_conditions.outputs.run_ci }}
+
+    steps:
+      - name: Wait for DCO check to complete
+        id: dco_check_waiter
+        uses: lewagon/wait-on-check-action@v1.3.1
+        # Don't fail the job here; we want to post a comment first
+        continue-on-error: true
+        with:
+          # This must match the name of your DCO status check
+          check-name: 'DCO'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 20 # Poll every 20 seconds
+      - name: Check for blocking conditions
+        id: check_conditions
+        run: |
+          # The message we will post to the PR if blocked
+          BLOCKING_REASON=""
+
+          # Condition 1: Check the outcome of the DCO waiter step
+          if [[ "${{ steps.dco_check_waiter.outcome }}" == "failure" ]]; then
+            BLOCKING_REASON="The **DCO sign-off** check has failed. Please ensure all commits are signed-off (e.g., 'git commit -s')."
+
+          # Condition 2: Check if the PR is a draft
+          if [[ "${{ github.event.pull_request.draft }}" == "true" ]]; then
+            BLOCKING_REASON="This is a **Draft PR**. Please mark it as 'Ready for Review' to trigger the CI."
+          
+          # Condition 3: Check if the branch is behind its base
+          elif [[ "${{ github.event.pull_request.mergeable_state }}" == "behind" ]]; then
+            BLOCKING_REASON="Your branch is **behind the base branch**. Please merge or rebase to get the latest changes."
+          fi
+
+          # If we found a reason to block, set run_ci to false and save the reason
+          if [[ -n "$BLOCKING_REASON" ]]; then
+            echo "run_ci=false" >> "$GITHUB_OUTPUT"
+            # We need to escape newlines for the comment action
+            echo "reason<<EOF" >> "$GITHUB_OUTPUT"
+            echo "$BLOCKING_REASON" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_ci=true" >> "$GITHUB_OUTPUT"
+          fi
+      
+      - name: Post comment if CI is blocked
+        # Only run this step if the check failed
+        if: steps.check_conditions.outputs.run_ci == 'false'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ### 🚧 CI Blocked
+
+            The main CI workflow was not started for the following reason:
+            > ${{ steps.check_conditions.outputs.reason }}
+
+      - name: Fail the job to block downstream CI
+        if: steps.check_conditions.outputs.run_ci == 'false'
+        run: |
+          echo "Failing this job to prevent the main CI from running."
+          exit 1
   pre-commit:
+    needs: gatekeeper
     if: github.event.pull_request.draft == false && github.event.pull_request.mergeable_state == 'clean'
     runs-on: ubuntu-latest
     steps:
