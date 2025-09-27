@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import pytest
+import os
 from typing import Union
 
 import vllm
 from vllm.lora.request import LoRARequest
 #from ..utils import VLLM_PATH, create_new_process_for_each_test, multi_gpu_test
 
-MODEL_PATH = "/mnt/weka/data/pytorch/llama2/Llama-2-7b-hf"
+MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 
 EXPECTED_LORA_OUTPUT = [
     "  SELECT icao FROM table_name_74 WHERE airport = 'lilongwe international airport' ",  # noqa: E501
-    "  SELECT nationality FROM table_name_11 WHERE elector = 'Anchero Pantaleone' ",  # noqa: E501
+    "  SELECT nationality FROM table_name_11 WHERE elector = 'anchero pantaleone' ",  # noqa: E501
     "  SELECT one_mora FROM table_name_95 WHERE gloss = 'low tone mora with a gloss of /˩okiru/' [òkìɽɯ́] AND accented_mora = 'low tone mora with a gloss of /˩ok",  # noqa: E501
     "  SELECT sex FROM people WHERE people_id IN (SELECT people_id FROM candidate GROUP BY sex ORDER BY COUNT(people_id) DESC LIMIT 1) ",  # noqa: E501
     "  SELECT pick FROM table_name_60 WHERE former_wnba_team = 'minnesota lynx' ",  # noqa: E501
@@ -71,17 +71,17 @@ def generate_and_test(llm, sql_lora_files, tensorizer_config_dict: Union[dict, N
 
 
 #@create_new_process_for_each_test()
-@pytest.mark.xfail(reason="Weka not available")
 def test_llama_lora(sql_lora_files):
-
     llm = vllm.LLM(
         MODEL_PATH,
         tokenizer=sql_lora_files,
         enable_lora=True,
         # also test odd max_num_seqs
-        max_num_seqs=13,
+        max_num_seqs=7,
+        max_model_len=512,
         max_loras=4,
         dtype='bfloat16',
+        hf_token=os.environ.get("HF_TOKEN"),
     )
     generate_and_test(llm, sql_lora_files)
 
