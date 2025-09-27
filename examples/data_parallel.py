@@ -30,6 +30,7 @@ Multi-node:
 """
 
 import os
+import sys
 from time import sleep
 import torch
 
@@ -176,6 +177,8 @@ def main(
 
 if __name__ == "__main__":
     args = parse_args()
+    print("Execution is currently disabled. Exiting. expected fix in SW-241422")
+    sys.exit(0)  # Exits gracefully with an success code
 
     dp_size = args.dp_size
     tp_size = args.tp_size

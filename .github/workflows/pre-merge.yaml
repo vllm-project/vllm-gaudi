@@ -303,7 +303,7 @@ jobs:
           RUN git checkout \$VLLM_COMMIT_ARG
 
           # Pinning versions in requirements might be good practice for CI consistency
-          RUN pip install pytest pytest_asyncio
+          RUN pip install pytest pytest_asyncio pytest-timeout
           RUN pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git
 
           ENV no_proxy=localhost,127.0.0.1
@@ -348,7 +348,7 @@ jobs:
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
-            /bin/bash -c "pytest -vvv --durations=10 --durations-min=1.0 /workspace/vllm-gaudi/tests/unit_tests"
+            /bin/bash -c "pytest -vvv --timeout=300 --durations=10 --durations-min=1.0 /workspace/vllm-gaudi/tests/unit_tests"
           
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
