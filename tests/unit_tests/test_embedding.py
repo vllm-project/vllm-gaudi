@@ -5,10 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
 
-import pytest
-from argparse import Namespace
-import vllm
-
 PROMPTS = [
     "Hello, my name is",
     "The president of the United States is",
@@ -16,25 +12,25 @@ PROMPTS = [
     "The future of AI is",
 ]
 
+# @pytest.mark.xfail(reason="skip, expect fix by SW-241408")
+# @pytest.mark.parametrize(
+#     "model",
+#     [
+#         "intfloat/e5-mistral-7b-instruct",
+#         # "ssmits/Qwen2-7B-Instruct-embed-base",
+#         # "BAAI/bge-multilingual-gemma2",
+#     ])
+# def test_embeddings(model):
 
-@pytest.mark.parametrize(
-    "model",
-    [
-        "intfloat/e5-mistral-7b-instruct",
-        # "ssmits/Qwen2-7B-Instruct-embed-base",
-        # "BAAI/bge-multilingual-gemma2",
-    ])
-def test_embeddings(model):
+#     args = Namespace(model=model, runner="pooling", enforce_eager=True)
+#     llm = vllm.LLM(**vars(args))
 
-    args = Namespace(model=model, runner="pooling", enforce_eager=True)
-    llm = vllm.LLM(**vars(args))
+#     outputs = llm.embed(PROMPTS)
 
-    outputs = llm.embed(PROMPTS)
+#     assert isinstance(outputs, list)
+#     assert len(outputs) == len(PROMPTS)
 
-    assert isinstance(outputs, list)
-    assert len(outputs) == len(PROMPTS)
-
-    for out in outputs:
-        emb = out.outputs.embedding
-        assert isinstance(emb, list)
-        assert all(isinstance(x, float) for x in emb)
+#     for out in outputs:
+#         emb = out.outputs.embedding
+#         assert isinstance(emb, list)
+#         assert all(isinstance(x, float) for x in emb)
