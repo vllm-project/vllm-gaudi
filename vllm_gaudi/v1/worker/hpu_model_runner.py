@@ -4046,7 +4046,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         prompt_cfg = None
         decode_cfg = 1, 1, 1
         # add dummy decode run
-        self._execute_dummy_scenario(prompt_cfg, decode_cfg)
+        self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
         return
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
