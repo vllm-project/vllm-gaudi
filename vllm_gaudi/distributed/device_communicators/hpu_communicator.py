@@ -55,7 +55,10 @@ class HpuCommunicator(DeviceCommunicatorBase):
                                               input_size[dim + 1:])
         return output_tensor
 
-    def dispatch(self, hidden_states: torch.Tensor, router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def dispatch(self,
+                 hidden_states: torch.Tensor,
+                 router_logits: torch.Tensor,
+                 is_sequence_parallel: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
         assert self.dp_group is not None
         assert hidden_states.dim() == 2, "Input hidden states must be 2D"
         input_size = hidden_states.size()
@@ -78,7 +81,7 @@ class HpuCommunicator(DeviceCommunicatorBase):
                                                  group=self.dp_group.device_group)
         return hidden_states_across_dp, router_logits_across_dp
 
-    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def combine(self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False) -> torch.Tensor:
         if htorch.utils.internal.is_lazy():
             htorch.core.mark_step()
         assert self.dp_group is not None
