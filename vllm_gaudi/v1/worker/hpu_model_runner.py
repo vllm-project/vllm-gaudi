@@ -1306,7 +1306,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     device=output.device) if pos_info.is_embed is not None else pos_info.is_embed,
             )
 
-    def _get_padded_token_len(paddings: list[int], x: int) -> int:
+    def _get_padded_token_len(self, paddings: list[int], x: int) -> int:
         """Return the first element in paddings list greater or equal to x."""
         index = bisect.bisect_left(paddings, x)
         assert index < len(paddings)
