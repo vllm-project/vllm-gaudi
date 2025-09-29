@@ -1608,7 +1608,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
             prompt_tokens = self.input_batch.num_prompt_tokens[batch_idx]
             # TODO: Fix non-prompt case
-            num_output_logits = context_len + query_len - prompt_tokens + 1
+            num_output_logits = max(0, context_len + query_len - prompt_tokens + 1)
             logits_positions = list(range(query_len - num_output_logits, query_len))
 
             new_batch_contents = BatchContents(
@@ -2992,11 +2992,16 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     logits_prompt.append(logits_device)
                     prefill_sampled_requests.extend(logits_requests)
                 else:
-                    with self.profiler.record_event('internal', "sampler"):
-                        sampler_output, sampling_metadata = self._run_sampling(batch_changed, logits_device, req_id,
-                                                                               logits_device.shape[0], logits_requests)
-                        prefill_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
-                        prefill_sampled_requests.extend(logits_requests)
+                    # If there are no logits, there is nothing to sample.
+                    # This can happen with chunked prefill when a chunk does
+                    # not complete the prompt and no logits are generated.
+                    if logits_device.numel() > 0:
+                        with self.profiler.record_event('internal', "sampler"):
+                            sampler_output, sampling_metadata = self._run_sampling(batch_changed, logits_device, req_id,
+                                                                                   logits_device.shape[0],
+                                                                                   logits_requests)
+                            prefill_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
+                            prefill_sampled_requests.extend(logits_requests)
                 if self.is_driver_worker and self.profiler.enabled:
                     # Stop recording 'execute_model_generic' event
                     self.profiler.end()
@@ -3471,6 +3476,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         for batch_size in test_batch_sizes:
             dummy_hidden_states = torch.randn(batch_size, self.hidden_size, dtype=self.dtype, device=self.device)
+            if self.lora_config:
+                lora_logits_mask = torch.zeros(batch_size,
+                                               (self.lora_config.max_loras) * self.lora_config.max_lora_rank,
+                                               dtype=self.lora_config.lora_dtype).to('hpu')
+                LoraMask.setLoraMask(lora_logits_mask)
             dummy_logits = self.model.compute_logits(dummy_hidden_states)
 
             # Create dummy requests for this specific configuration
