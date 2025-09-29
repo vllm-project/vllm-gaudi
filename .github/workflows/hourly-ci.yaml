@@ -24,6 +24,7 @@ jobs:
       contents: read # Required to checkout code and read history
     outputs:
       latest_commit: ${{ steps.latest_vllm_commit.outputs.LATEST_COMMIT }}
+      latest_plugin_commit: ${{ steps.latest_vllm_plugin_commit.outputs.LATEST_PLUGIN_COMMIT }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -68,6 +69,14 @@ jobs:
           LATEST_COMMIT=$(git rev-parse vllm-upstream/main)
           echo "LATEST_COMMIT=$LATEST_COMMIT" >> "$GITHUB_OUTPUT"
           echo "Latest commit from upstream vLLM: $LATEST_COMMIT"
+
+      - name: Get latest commit sha from vllm-gaudi/main
+        id: latest_vllm_plugin_commit
+        run: |
+          # Use the 'vllm-gaudi/main' ref to log latest commit from that remote
+          LATEST_PLUGIN_COMMIT=${{ github.sha }}
+          echo "LATEST_PLUGIN_COMMIT=$LATEST_PLUGIN_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "Latest commit from vLLM-Gaudi plugin: $LATEST_PLUGIN_COMMIT"
 
       - name: Setup Docker environment and build image
         run: |
@@ -261,6 +270,22 @@ jobs:
           # Only commit and push if the file has changed to avoid empty commits
           git add VLLM_STABLE_COMMIT
           git commit --allow-empty -m "Update stable vLLM commit to ${LATEST_COMMIT_SHA}"
+          
+          echo "Pushing changes to remote branch..."
+          # Explicitly set the remote URL with the token to prevent hanging on auth
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
+          git push --force origin HEAD:vllm/last-good-commit-for-vllm-gaudi
+
+
+      - name: Store last stable vLLM-Gaudi commit sha
+        run: |
+          LATEST_PLUGIN_COMMIT_SHA=${{ needs.setup_and_build.outputs.latest_commit }}
+          echo "Storing latest stable vLLM commit SHA: $LATEST_PLUGIN_COMMIT_SHA"
+          echo "$LATEST_PLUGIN_COMMIT_SHA" > VLLM_GAUDI_STABLE_COMMIT
+          
+          # Only commit and push if the file has changed to avoid empty commits
+          git add VLLM_GAUDI_STABLE_COMMIT
+          git commit --allow-empty -m "Update stable vLLM-Gaudi commit to ${LATEST_PLUGIN_COMMIT_SHA}"
           
           echo "Pushing changes to remote branch..."
           # Explicitly set the remote URL with the token to prevent hanging on auth
