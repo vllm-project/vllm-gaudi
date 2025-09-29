@@ -3476,6 +3476,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         for batch_size in test_batch_sizes:
             dummy_hidden_states = torch.randn(batch_size, self.hidden_size, dtype=self.dtype, device=self.device)
+            if self.lora_config:
+                lora_logits_mask = torch.zeros(batch_size,
+                                               (self.lora_config.max_loras) * self.lora_config.max_lora_rank,
+                                               dtype=self.lora_config.lora_dtype).to('hpu')
+                LoraMask.setLoraMask(lora_logits_mask)
             dummy_logits = self.model.compute_logits(dummy_hidden_states)
 
             # Create dummy requests for this specific configuration
