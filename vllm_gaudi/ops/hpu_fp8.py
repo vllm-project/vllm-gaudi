@@ -64,7 +64,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
 
     def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
         super().__init__(quant_config, layer)
-        
+
         # Disable marlin
         self.use_marlin = False
 
