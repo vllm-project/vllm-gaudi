@@ -62,6 +62,21 @@ jobs:
           echo "Commits merged/pushed in vllm-project/vllm.git in the last 4 hours:"
           git log HEAD..vllm-upstream/main --pretty=format:"%h - %an, %ar : %s" --since="${{ steps.prev_run_time.outputs.PREV_RUN_TIME }}"
 
+      - name: List commit differences since last stable run
+        run: |
+         LAST_STABLE_VLLM_COMMIT=$(git show origin/vllm/last-good-commit-for-vllm-gaudi:VLLM_STABLE_COMMIT)
+         if [ $? -ne 0 ]; then
+          echo "ERROR: No VLLM_STABLE_COMMIT file found in origin/vllm/last-good-commit-for-vllm-gaudi."
+          exit 1
+         fi
+         LAST_STABLE_VLLM_COMMIT_TITLE=$(git show --no-patch --oneline $LAST_STABLE_VLLM_COMMIT)
+         if [ $? -ne 0 ]; then
+          echo "ERROR: VLLM_STABLE_COMMIT contents does not look like a valid vLLM commit"
+          exit 1
+         fi 
+         echo "Last stable vLLM commit: $LAST_STABLE_VLLM_COMMIT_TITLE"
+         echo "Commits merged/pushed in vllm-project/vllm.git since last stable commit:"
+         git log $LAST_STABLE_VLLM_COMMIT..vllm-upstream/main --pretty=format:"%h - %an, %ar : %s"
 
       - name: Get latest commit sha from vllm-upstream/main
         id: latest_vllm_commit
