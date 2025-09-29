@@ -16,6 +16,7 @@
 
 - `VLLM_GRAPH_RESERVED_MEM`: percentage of memory dedicated to HPUGraph capture. The default is `0.1`.
 - `VLLM_EXPONENTIAL_BUCKETING`: if `true`, enables exponential bucket spacing instead of linear. The default is `true`.
+- `VLLM_SKIP_WARMUP`: if `true`, warmup is skipped. The default is `false`.
 
 !!! note
     If the model config reports a high `max_model_len`, set it to max `input_tokens+output_tokens` rounded up to a multiple of `block_size` as per actual requirements.
