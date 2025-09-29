@@ -542,8 +542,10 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
                 self._reset_rotary_cos_sin()
         return hidden_states
 
-    def get_input_embeddings(self, input_ids, multimodal_embeddings=False):
-        return self.model.get_input_embeddings(input_ids=input_ids, is_multiodal=multimodal_embeddings)
+    def get_input_embeddings(self, input_ids, multimodal_embeddings=None, is_multiodal=False):
+        return self.model.get_input_embeddings(input_ids=input_ids, 
+                                               multimodal_embeddings=multimodal_embeddings,
+                                               is_multiodal=is_multiodal)
 
     def get_multimodal_embeddings(self, **batched_mm_inputs):
         return self.model.get_multimodal_embeddings(**batched_mm_inputs)
@@ -2971,13 +2973,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     with self.profiler.record_event('internal', 'prepare_input_encoders'):
                         self._execute_mm_encoder(scheduler_output, req_id)
 
-                    mm_embeds = self._gather_mm_embeddings(scheduler_output, req_id)
+                    mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output, req_id)
                     # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa E501
                     # This may require moving multimodal input preps into _prepare_inputs,        # noqa E501
                     # to avoid padding issues.
                     inputs_embeds = self.model.get_input_embeddings(
                         input_ids=token_ids,
-                        multimodal_embeddings=mm_embeds or False,
+                        multimodal_embeddings=mm_embeds or None,
+                        is_multimodal=is_mm_embed,
                     )
 
                     model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
