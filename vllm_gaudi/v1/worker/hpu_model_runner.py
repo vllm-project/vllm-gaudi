@@ -543,7 +543,7 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         return hidden_states
 
     def get_input_embeddings(self, input_ids, multimodal_embeddings=None, is_multiodal=False):
-        return self.model.get_input_embeddings(input_ids=input_ids, 
+        return self.model.get_input_embeddings(input_ids=input_ids,
                                                multimodal_embeddings=multimodal_embeddings,
                                                is_multiodal=is_multiodal)
 
