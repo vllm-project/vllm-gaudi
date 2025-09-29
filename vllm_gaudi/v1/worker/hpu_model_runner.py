@@ -1326,7 +1326,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         is_mm_embed[:total_num_scheduled_tokens] = False
 
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        padded_total_num_scheduled_tokens = self._get_padded_token_len(self.num_tokens_paddings, 
+        padded_total_num_scheduled_tokens = self._get_padded_token_len(self.num_tokens_paddings,
                                                                        total_num_scheduled_tokens)
         req_start_idx = 0
         for req_id in req_ids:
