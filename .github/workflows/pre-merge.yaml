@@ -373,7 +373,7 @@ jobs:
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
             /bin/bash -c "
-                pip install nixl==0.5.0 lm-eval[api] &&
+                pip install lm-eval[api] &&
                 cd /workspace/vllm-gaudi/tests/unit_tests &&
                 ./run_accuracy_test.sh
             "
