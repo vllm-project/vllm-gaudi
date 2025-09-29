@@ -541,8 +541,8 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
                 self._reset_rotary_cos_sin()
         return hidden_states
 
-    def get_input_embeddings(self, input_ids, multimodal_embeddings=None):
-        return self.model.get_input_embeddings(input_ids=input_ids, multimodal_embeddings=multimodal_embeddings)
+    def get_input_embeddings(self, input_ids, multimodal_embeddings=False):
+        return self.model.get_input_embeddings(input_ids=input_ids, is_multiodal=multimodal_embeddings)
 
     def get_multimodal_embeddings(self, **batched_mm_inputs):
         return self.model.get_multimodal_embeddings(**batched_mm_inputs)
@@ -737,6 +737,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(model_config)
+        if self.supports_mm_inputs:
+            self.is_mm_embed_cpu = torch.zeros(self.max_num_tokens,
+                                               dtype=torch.bool,
+                                               device="cpu",
+                                               pin_memory=self.pin_memory)
         self.is_multimodal_raw_input_supported = (model_config.is_multimodal_raw_input_only_model)
 
         # Lazy initialization
@@ -1306,8 +1311,17 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         req_ids: list[str],
         shift_computed_tokens: int = 0,
-    ) -> list[torch.Tensor]:
-        mm_embeds: list[torch.Tensor] = []
+    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
+        mm_embeds = list[torch.Tensor]()
+        is_mm_embed = self.is_mm_embed.cpu
+        is_mm_embed[:total_num_scheduled_tokens] = False
+        
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        padded_total_num_scheduled_tokens = _get_padded_token_len(
+            self.num_tokens_paddings, total_num_scheduled_tokens)
+        req_start_idx = 0
         for req_id in req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             req_state = self.requests[req_id]
@@ -1346,8 +1360,18 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     encoder_output[start_idx:end_idx],
                     is_embed=is_embed,
                 )
+                req_start_pos = req_start_idx + start_pos - num_computed_tokens
+                is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
+                    = True
+
+                # Only whole mm items are processed
                 mm_embeds.append(mm_embeds_item)
-        return mm_embeds
+            req_start_idx += num_scheduled_tokens
+
+        is_mm_embed = is_mm_embed[:padded_total_num_scheduled_tokens] \
+            .to(self.device)
+
+        return mm_embeds, is_mm_embed
 
     def get_model(self) -> torch.nn.Module:
         assert self.model is not None
@@ -2946,7 +2970,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     # to avoid padding issues.
                     inputs_embeds = self.model.get_input_embeddings(
                         input_ids=token_ids,
-                        multimodal_embeddings=mm_embeds or None,
+                        multimodal_embeddings=mm_embeds or False,
                     )
 
                     model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
