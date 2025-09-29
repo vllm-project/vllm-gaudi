@@ -1,5 +1,17 @@
 #!/bin/bash
-set -xe
+set -e
+
+# --- Install Nixl ---
+echo "Installing lm-eval dependency..."
+python ../../install_nixl.py
+echo "Dependency installation complete."
+
+
+# --- Install Dependencies ---
+echo "Installing lm-eval dependency..."
+pip install lm-eval[api]
+echo "Dependency installation complete."
+
 
 # Models to run
 MODELS=(
