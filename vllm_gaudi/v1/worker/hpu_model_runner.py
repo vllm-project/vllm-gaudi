@@ -52,8 +52,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors, DraftTo
                              AsyncModelRunnerOutput, KVConnectorOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import bind_kv_cache
-from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
-from vllm.v1.worker.gpu_input_batch import CachedRequestState
+from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.models.interfaces import (supports_eagle3, supports_transcription)
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
@@ -859,16 +858,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             else:
                 return round_up(x, buckets[-1])
 
-        query_buckets = [1, 8, 32] if not is_causal else [128, 256, 512]
-        block_buckets = [0, 8, 16, 64, 128, 256, 512]
         logits_buckets = [self.max_num_seqs]
-
-        query_len = bucketize(query_len, query_buckets)
-        shared_blocks = bucketize(shared_blocks, block_buckets)
-        unique_blocks = bucketize(unique_blocks, block_buckets)
         logits = min(bucketize(logits, logits_buckets), query_len)
-
-        return (query_len, shared_blocks, unique_blocks, logits)
+        new_bucket = self.bucketing_manager.find_unified_bucket(query_len, shared_blocks, unique_blocks, is_causal)
+        return (new_bucket[0], new_bucket[1], new_bucket[2], logits)
 
     def create_lora_mask(self, input_tokens: torch.Tensor, lora_ids: list[int], is_prompt: bool):
         '''
@@ -1543,8 +1536,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         for b_idx, req_id in enumerate(req_ids):
             cl = context_lens[b_idx]
             qsl = query_lens[b_idx]
+            assert self.requests[req_id].mrope_positions is not None
             input_mrope_position = \
-                self.requests[req_id].mrope_positions[:, cl:cl + qsl]
+                self.requests[req_id].mrope_positions[:, cl:cl + qsl] # type: ignore[index]
             dst_end = dst_start + qsl
             mrope_position_tensor[:, dst_start:dst_end].copy_(input_mrope_position, non_blocking=True)
 
@@ -1593,7 +1587,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         return target_bs <= self.max_prefill_batch_size and\
             target_bs * target_seq <= self.max_num_tokens
 
-    def _extract_prefill_batch_contents(self, num_prefills, num_decodes, num_scheduled_tokens):
+    def _extract_prefill_batch_contents(self, num_prefills, num_decodes, num_scheduled_tokens, warmup=False):
         # DECODES are the first num_decodes REQUESTS.
         # PREFILLS are the next num_reqs - num_decodes REQUESTS.
         num_reqs = num_prefills + num_decodes
@@ -1609,11 +1603,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
             num_blocks = round_up(context_len + query_len, self.block_size) // self.block_size
             blocks = block_table_cpu_tensor[batch_idx, :num_blocks].tolist()
-            blocks = [self.defragmenter.resolve(b) for b in blocks]
+            if not warmup:
+                blocks = [self.defragmenter.resolve(b) for b in blocks]
 
             prompt_tokens = self.input_batch.num_prompt_tokens[batch_idx]
             # TODO: Fix non-prompt case
-            num_output_logits = context_len + query_len - prompt_tokens + 1
+            num_output_logits = max(0, context_len + query_len - prompt_tokens + 1)
             logits_positions = list(range(query_len - num_output_logits, query_len))
 
             new_batch_contents = BatchContents(
@@ -1780,6 +1775,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             contiguous_kv=self.use_contiguous_pa,
             bucketing_fn=self.unified_bucketing_fn,
         )
+
         (token_ids_t, token_positions_t, logits_indices_t, logits_groups, attn_metadata) = batch_data
         logits_requests = [req_ids[lg] for lg in logits_groups]
         return PrefillInputData(request_ids=[req_ids],
@@ -1827,13 +1823,17 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             merge_contents(dummy_prefill_input_batches[0], *dummy_prefill_input_batches[1:])
         return all_batches[0], dummy_prefill_input_batches[0] if dummy_prefill_input_batches else None
 
-    def _prepare_unified_prefill_inputs(self, num_prefills, num_decodes,
-                                        num_scheduled_tokens: list[int]) -> PrefillInputData:
+    def _prepare_unified_prefill_inputs(self,
+                                        num_prefills,
+                                        num_decodes,
+                                        num_scheduled_tokens: list[int],
+                                        warmup=False) -> tuple[PrefillInputData, None]:
 
-        all_batch_contents = self._extract_prefill_batch_contents(num_prefills, num_decodes, num_scheduled_tokens)
+        all_batch_contents, _ = self._extract_prefill_batch_contents(num_prefills, num_decodes, num_scheduled_tokens,
+                                                                     warmup)
         all_batches = [self._form_unified_prefill_batch(bc) for bc in all_batch_contents]
         merge_contents(all_batches[0], *all_batches[1:])
-        return all_batches[0]
+        return all_batches[0], None
 
     def _create_decode_input_data(self,
                                   num_decodes,
@@ -2155,10 +2155,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             )
         return logits_indices, spec_decode_metadata
 
-    def _prepare_unified_decode_inputs(self, num_decodes, num_scheduled_tokens) -> DecodeInputData:
+    def _prepare_unified_decode_inputs(self, num_decodes, num_scheduled_tokens, warmup_mode=False):
 
         if num_decodes == 0:
-            return DecodeInputData(num_decodes=0)
+            return DecodeInputData(num_decodes=0), None
 
         context_lens = self.input_batch.num_computed_tokens_cpu[:num_decodes]
         query_lengths = [1] * num_decodes
@@ -2169,7 +2169,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             math.ceil((ctx_len + q_len) / self.block_size) for ctx_len, q_len in zip(context_lens, query_lengths)
         ]
         block_table = [block_table_cpu_tensor[i, :nb].tolist() for i, nb in enumerate(num_blocks)]
-        block_table = self.defragmenter.resolve_all(block_table)
+        if not warmup_mode:
+            block_table = self.defragmenter.resolve_all(block_table)
         token_ids = [[token_ids_cpu[i, ctx_len]] for i, ctx_len in enumerate(context_lens)]
 
         batch_data = create_unified_batch(
@@ -2184,13 +2185,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             bucketing_fn=self.unified_bucketing_fn,
         )
         (token_ids_t, token_positions_t, logits_indices_t, logits_groups, attn_metadata) = batch_data
-        return DecodeInputData(
+        decode_input_data = DecodeInputData(
             num_decodes=num_decodes,
             token_ids=token_ids_t.unsqueeze(-1),
             position_ids=token_positions_t.unsqueeze(-1),
             logits_indices=logits_indices_t,
             attn_metadata=attn_metadata,
         )
+        return decode_input_data, None
 
     def _prepare_input_ids(self, scheduler_output: "SchedulerOutput") -> None:
         """Prepare the input IDs for the current batch.
@@ -2262,6 +2264,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         num_prefills,
         num_decodes,
+        warmup=False,
     ):
 
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -2306,14 +2309,27 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         return attn_metadata.num_blocks()
 
     def _check_config(self, batch_size, seq_len, num_blocks, attn_metadata, warmup_mode):
-        phase = "prompt" if attn_metadata.is_prompt else "decode"
-        cfg = (phase, batch_size, seq_len, num_blocks)
-        if self.debug_fwd:
-            self.debug_fwd(cfg)
-        seen = cfg in self.seen_configs
-        self.seen_configs.add(cfg)
-        if not seen and not warmup_mode:
-            logger.warning("Configuration: %s was not warmed-up!", cfg)
+        cfg: tuple[Any, ...] | None = None
+        if self.unified_attn:
+            phase = "prompt" if attn_metadata.is_prompt else "decode"
+            shared = attn_metadata.shared_blocks.size(0) if attn_metadata.shared_blocks is not None else 0
+            unique = attn_metadata.unique_blocks if attn_metadata.unique_blocks else 0
+            is_causal = 1 if attn_metadata.causal_bias is not None else 0
+            cfg = (seq_len, shared, unique)
+            seen = cfg in self.seen_configs
+            self.seen_configs.add(cfg)
+            if not seen and not warmup_mode:
+                logger.warning("Configuration: (query, shared_blocks, unique_blocks) %s, (%s) was not warmed-up!", \
+                               cfg, 'causal' if is_causal else 'not causal')
+        else:
+            phase = "prompt" if attn_metadata.is_prompt else "decode"
+            cfg = (phase, batch_size, seq_len, num_blocks)
+            if self.debug_fwd:
+                self.debug_fwd(cfg)
+            seen = cfg in self.seen_configs
+            self.seen_configs.add(cfg)
+            if not seen and not warmup_mode:
+                logger.warning("Configuration: %s was not warmed-up!", cfg)
 
     def get_dp_padding(self, num_tokens: int) -> int:
         dp_size = self.vllm_config.parallel_config.data_parallel_size
@@ -2871,7 +2887,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         num_prefills = len(pd_info.prompt_req_ids)
         num_reqs = num_decodes + num_prefills
         with self.profiler.record_event('internal', 'prepare_input_tensors'):
-            prefill_input_data, decode_input_data = self._prepare_inputs(scheduler_output, num_prefills, num_decodes)
+            prefill_input_data, decode_input_data = self._prepare_inputs(scheduler_output, num_prefills, num_decodes,
+                                                                         warmup_mode)
         prefill_data, \
             dummy_prefill_input_data_batches_across_dp = prefill_input_data
         num_pad_prefill_batch_across_dp = \
@@ -2975,11 +2992,16 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     logits_prompt.append(logits_device)
                     prefill_sampled_requests.extend(logits_requests)
                 else:
-                    with self.profiler.record_event('internal', "sampler"):
-                        sampler_output, sampling_metadata = self._run_sampling(batch_changed, logits_device, req_id,
-                                                                               logits_device.shape[0], logits_requests)
-                        prefill_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
-                        prefill_sampled_requests.extend(logits_requests)
+                    # If there are no logits, there is nothing to sample.
+                    # This can happen with chunked prefill when a chunk does
+                    # not complete the prompt and no logits are generated.
+                    if logits_device.numel() > 0:
+                        with self.profiler.record_event('internal', "sampler"):
+                            sampler_output, sampling_metadata = self._run_sampling(batch_changed, logits_device, req_id,
+                                                                                   logits_device.shape[0],
+                                                                                   logits_requests)
+                            prefill_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
+                            prefill_sampled_requests.extend(logits_requests)
                 if self.is_driver_worker and self.profiler.enabled:
                     # Stop recording 'execute_model_generic' event
                     self.profiler.end()
@@ -3406,13 +3428,21 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                f'used_mem:{format_bytes(total_mem)}')
         logger.info(msg)
 
-    def log_warmup(self, phase, i, max_i, batch_size, seq_len, num_blocks):
+    def log_warmup(self, phase, i, max_i, first_dim, second_dim, third_dim, causal=False):
         free_mem = format_bytes(HabanaMemoryProfiler.current_free_device_memory())
-        msg = (f"[Warmup][{phase}][{i + 1}/{max_i}] "
-               f"batch_size:{batch_size} "
-               f"query_len:{seq_len} "
-               f"num_blocks:{num_blocks} "
-               f"free_mem:{free_mem}")
+        if self.unified_attn:
+            msg = (f"[Warmup][{phase}][{i + 1}/{max_i}] "
+                   f"query_len:{first_dim} "
+                   f"shared_blocks:{second_dim} "
+                   f"unique_blocks:{third_dim} "
+                   f"({'causal' if causal else 'non causal'}) "
+                   f"free_mem:{free_mem}")
+        else:
+            msg = (f"[Warmup][{phase}][{i + 1}/{max_i}] "
+                   f"batch_size:{first_dim} "
+                   f"query_len:{second_dim} "
+                   f"num_blocks:{third_dim} "
+                   f"free_mem:{free_mem}")
         logger.info(msg)
 
     def warmup_sampler(self):
@@ -3446,6 +3476,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         for batch_size in test_batch_sizes:
             dummy_hidden_states = torch.randn(batch_size, self.hidden_size, dtype=self.dtype, device=self.device)
+            if self.lora_config:
+                lora_logits_mask = torch.zeros(batch_size,
+                                               (self.lora_config.max_loras) * self.lora_config.max_lora_rank,
+                                               dtype=self.lora_config.lora_dtype).to('hpu')
+                LoraMask.setLoraMask(lora_logits_mask)
             dummy_logits = self.model.compute_logits(dummy_hidden_states)
 
             # Create dummy requests for this specific configuration
@@ -3503,6 +3538,47 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         logger.info("Sampler warmup completed successfully")
 
+    def warmup_defragmenter(self):
+        """Warm up defragmentation swap graphs for different thresholds.
+
+        We execute a minimal swap (1 pair) which will be padded internally to the
+        requested threshold size. Thresholds chosen to mirror potential production
+        values: 8, 16, 32, 64, 128, 256, 512.
+        """
+        # If defragmenter is disabled or cache utils not prepared, skip.
+        if not getattr(self.defragmenter, 'enabled', False):
+            return
+        if self.defragmenter.cache_utils is None:
+            return
+
+        thresholds = self.defragmenter.to_swap_pad_thresholds
+
+        logger.info("Warming up defragmenter with thresholds: %s", thresholds)
+
+        # Use simple valid block ids present in caches (assume at least 2 blocks allocated when kv caches created)
+        # We only need distinct ids for a swap. They will be scaled by block_size inside swap.
+        # If for some reason only 1 block exists, skip warmup gracefully.
+        try:
+            k_cache = self.defragmenter.cache_utils.kv_caches[0][0]
+            num_blocks_available = k_cache.shape[0] // self.block_size
+        except Exception:
+            num_blocks_available = 0
+        if num_blocks_available < 2:
+            logger.warning("Skipping defragmenter warmup, insufficient blocks (%s)", num_blocks_available)
+            return
+
+        # Minimal pair to trigger a swap path
+        to_swap = [(1, 0)]
+
+        for th in thresholds:
+            self.defragmenter.cache_utils.swap(to_swap, th)
+
+        # If the number of swaps was odd, do one more to make it even and return to original state.
+        if len(thresholds) % 2 == 1:
+            self.defragmenter.cache_utils.swap(to_swap, thresholds[0])
+
+        logger.info("Defragmenter warmup completed successfully")
+
     def warmup_graphs(self, buckets, is_prompt, kv_caches, starting_mem=0, total_batch_seq=0.001):
         total_mem = starting_mem
         idx = 0
@@ -3529,13 +3605,24 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     prompt_cfg = (batch_size, seq_len, num_blocks)
                 else:
                     decode_cfg = (batch_size, 1, num_blocks)
-                self._execute_dummy_scenario(prompt_cfg, decode_cfg)
+                self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
             # TODO(kzawora): align_workers
             used_mem = mem_prof.consumed_device_memory
             total_mem += used_mem
             total_batch_seq += batch_seq
 
         return total_mem, total_batch_seq, captured_all
+
+    def warmup_unified_graphs(self, buckets, kv_cache):
+        idx = 0
+        num_candidates = len(buckets)
+        for idx, (query, shared_ctx, unique_ctx, is_causal) in enumerate(reversed(buckets)):
+            unified_cfg = (query, shared_ctx, unique_ctx, is_causal)
+            if unified_cfg in self.graphed_buckets:
+                continue
+            self.graphed_buckets.add(unified_cfg)
+            self.log_warmup("Unified CFG", idx, num_candidates, query, shared_ctx, unique_ctx, is_causal)
+            self._prepare_dummy_unified_scenario(unified_cfg)
 
     def _add_dummy_request(self,
                            requests,
@@ -3567,6 +3654,36 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_scheduled_tokens[req_id] = len(prompt_token_ids) - num_computed_tokens
         else:
             num_scheduled_tokens[req_id] = scheduled_tokens
+
+    def _add_dummy_unified_request(self, requests, is_prompt, is_unique, block_num, num_computed_tokens,
+                                   num_scheduled_tokens, scheduled_tokens):
+        from vllm.v1.core.sched.output import NewRequestData
+
+        req_id = f'{len(requests)}'
+        sampling_params = SamplingParams(temperature=0.0)
+        num_computed_tokens = max(len(block_num) * self.block_size - 1, 0)
+
+        if is_prompt:
+            # num_computed_tokens + num_scheduled_tokens <= prompt token ids
+            prompt_token_ids = num_computed_tokens + num_scheduled_tokens + 1
+        else:
+            # num_computed_tokens + num_scheduled_tokens > prompt_token_ids
+            prompt_token_ids = num_computed_tokens + num_scheduled_tokens - 1
+        prompt_token_ids = list(range(prompt_token_ids))
+
+        req = NewRequestData(
+            req_id=req_id,
+            prompt_token_ids=prompt_token_ids,
+            mm_features=[],
+            sampling_params=sampling_params,
+            pooling_params=None,
+            block_ids=[block_num],
+            num_computed_tokens=num_computed_tokens,
+            lora_request=None,
+        )
+
+        requests.append(req)
+        scheduled_tokens[req_id] = num_scheduled_tokens
 
     @staticmethod
     def _generate_seq_lengths(num_samples, num_blocks, block_size):
@@ -3604,8 +3721,90 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         ctx_list = ctx_list if len(ctx_list) > 0 else [0] * len(prompt_list)
         return prompt_list, ctx_list
 
-    def _execute_dummy_scenario(self, prompt_cfg, decode_cfg):
-        from vllm.v1.core.sched.output import (SchedulerOutput, CachedRequestData)
+    def _prepare_dummy_unified_scenario(self, unified_cfg):
+        requests: list[NewRequestData] = []
+        scheduled_tokens: dict[str, int] = {}
+
+        query_len, shared_ctx_len, unique_ctx_len, is_causal = unified_cfg
+        num_computed_tokens = (shared_ctx_len + unique_ctx_len) * self.block_size
+
+        if is_causal:
+            decode_reqs_query = []
+            decode_reqs_blocks = []
+            prompt_reqs_query = []
+            prompt_reqs_blocks: list = []
+
+            all_shared_blocks_ids = [block for block in range(shared_ctx_len)]
+            unique_block = unique_ctx_len - 1
+            # do not use unique block id
+            if unique_block in all_shared_blocks_ids:
+                all_shared_blocks_ids.remove(unique_ctx_len - 1)
+                all_shared_blocks_ids.append(shared_ctx_len + 1)
+
+            #add unique
+            if unique_ctx_len > 0:
+                decode_reqs_query.append(1)
+                decode_reqs_blocks.append([unique_ctx_len - 1])
+            prompts_number = self.max_num_seqs - len(decode_reqs_query)
+            remaining_query = query_len - sum(decode_reqs_query)
+
+            q, r = divmod(remaining_query, prompts_number)
+            prompt_reqs_query = [q + (1 if i < r else 0) for i in range(prompts_number)]
+            prompt_reqs_blocks = [[] for _ in range(len(prompt_reqs_query))]
+            for idx, query in enumerate(prompt_reqs_query):
+                available_space_for_ctx = math.floor((self.max_model_len - query) // self.block_size)
+                if len(all_shared_blocks_ids) >= available_space_for_ctx:
+                    prompt_reqs_blocks[idx] = all_shared_blocks_ids[:available_space_for_ctx]
+                    del all_shared_blocks_ids[:available_space_for_ctx]
+                else:
+                    prompt_reqs_blocks[idx] = all_shared_blocks_ids
+                    break
+            if unique_ctx_len > 0:
+                self._add_dummy_unified_request(requests, False, True, [unique_ctx_len - 1], num_computed_tokens, 1,
+                                                scheduled_tokens)
+
+            for query, blocks in zip(prompt_reqs_query, prompt_reqs_blocks):
+                self._add_dummy_unified_request(requests, True, False, blocks, num_computed_tokens, query,
+                                                scheduled_tokens)
+
+        else:
+            remaining_samples = query_len
+            base = shared_ctx_len // remaining_samples
+            remain = shared_ctx_len % remaining_samples
+
+            all_shared_blocks_ids = [block for block in range(shared_ctx_len)]
+            unique_block = unique_ctx_len - 1
+            # do not use unique block id
+            if unique_block in all_shared_blocks_ids:
+                all_shared_blocks_ids.remove(unique_ctx_len - 1)
+                all_shared_blocks_ids.append(shared_ctx_len + 1)
+
+            # distribute evenly across sublists
+            split_shared_blocks_ids: list[list[int]] = [[] for _ in range(remaining_samples)]
+            idx = 0
+            for i in range(remaining_samples):
+                size = base + (1 if i < remain else 0)
+                for _ in range(size):
+                    split_shared_blocks_ids[i].append(all_shared_blocks_ids[idx])
+                    idx += 1
+
+            # make sure that all blocks are shared = in at least two decodes
+            for i, block in enumerate(all_shared_blocks_ids):
+                target = (i + 1) % remaining_samples
+                if block not in split_shared_blocks_ids[target]:
+                    split_shared_blocks_ids[target].append(block)
+
+            # add unique id
+            min_idx = min(range(remaining_samples), key=lambda j: len(split_shared_blocks_ids[j]))
+            split_shared_blocks_ids[min_idx].append(unique_block)
+
+            for request_blocks in split_shared_blocks_ids:
+                self._add_dummy_unified_request(requests, False, False, request_blocks, num_computed_tokens, 1,
+                                                scheduled_tokens)
+
+        self._execute_dummy_scenario(requests, scheduled_tokens)
+
+    def _prepare_dummy_scenario(self, prompt_cfg, decode_cfg):
         requests: list[NewRequestData] = []
         scheduled_tokens: dict[str, int] = {}
 
@@ -3643,6 +3842,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                         scheduled_tokens=1,
                                         is_prompt=False,
                                         block_id=block_id)
+        self._execute_dummy_scenario(requests, scheduled_tokens)
+
+    def _execute_dummy_scenario(self, requests, scheduled_tokens):
+        from vllm.v1.core.sched.output import (SchedulerOutput, CachedRequestData)
+
         sched_output = SchedulerOutput(
             scheduled_new_reqs=requests,
             scheduled_cached_reqs=CachedRequestData.make_empty(),
@@ -3720,23 +3924,26 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if not self.enable_bucketing:
             return
 
-        self.bucketing_manager.generate_prompt_buckets()
-        self.bucketing_manager.generate_decode_buckets()
+        if self.unified_attn:
+            self.bucketing_manager.generate_unified_buckets()
+        else:
+            self.bucketing_manager.generate_prompt_buckets()
+            self.bucketing_manager.generate_decode_buckets()
 
-        max_bucket = max(self.bucketing_manager.decode_buckets[-1][0], self.bucketing_manager.prompt_buckets[-1][0])
-        if max_bucket > self.input_batch.max_num_reqs:
-            input_batch_bkp = self.input_batch
-            self.input_batch = InputBatch(
-                max_num_reqs=self.bucketing_manager.decode_buckets[-1][0],
-                max_model_len=self.max_model_len,
-                max_num_batched_tokens=self.max_num_tokens,
-                device=self.device,
-                pin_memory=self.pin_memory,
-                vocab_size=self.model_config.get_vocab_size(),
-                block_sizes=[self.block_size],
-                logitsprocs=build_logitsprocs(self.vllm_config, self.device, self.pin_memory, self.is_pooling_model,
-                                              self.vllm_config.model_config.logits_processors),
-            )
+            max_bucket = max(self.bucketing_manager.decode_buckets[-1][0], self.bucketing_manager.prompt_buckets[-1][0])
+            if max_bucket > self.input_batch.max_num_reqs:
+                input_batch_bkp = self.input_batch
+                self.input_batch = InputBatch(
+                    max_num_reqs=self.bucketing_manager.decode_buckets[-1][0],
+                    max_model_len=self.max_model_len,
+                    max_num_batched_tokens=self.max_num_tokens,
+                    device=self.device,
+                    pin_memory=self.pin_memory,
+                    vocab_size=self.model_config.get_vocab_size(),
+                    block_sizes=[self.block_size],
+                    logitsprocs=build_logitsprocs(self.vllm_config, self.device, self.pin_memory, self.is_pooling_model,
+                                                  self.vllm_config.model_config.logits_processors),
+                )
 
         self.defragmenter.initialize(self.kv_caches, self.block_size)
 
@@ -3782,19 +3989,21 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                      "to be called before warming up the model.")
 
                 self.warmup_sampler()
+                self.warmup_defragmenter()
 
                 # TODO(kzawora): align_workers
-                mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
-                    self.warmup_graphs(
-                        self.bucketing_manager.prompt_buckets,
-                        True, kv_caches)
-                mem_post_decode, decode_batch_seq, decode_captured_all = \
-                    self.warmup_graphs(
-                        self.bucketing_manager.decode_buckets,
-                        False, kv_caches)
+                if self.unified_attn:
+                    self.warmup_unified_graphs(self.bucketing_manager.unified_buckets, kv_caches)
+                else:
+                    mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
+                        self.warmup_graphs(
+                            self.bucketing_manager.prompt_buckets, True, kv_caches)
+                    mem_post_decode, decode_batch_seq, decode_captured_all = \
+                        self.warmup_graphs(
+                            self.bucketing_manager.decode_buckets, False, kv_caches)
 
-                self.log_graph_warmup_summary(self.bucketing_manager.prompt_buckets, True, mem_post_prompt)
-                self.log_graph_warmup_summary(self.bucketing_manager.decode_buckets, False, mem_post_decode)
+                    self.log_graph_warmup_summary(self.bucketing_manager.prompt_buckets, True, mem_post_prompt)
+                    self.log_graph_warmup_summary(self.bucketing_manager.decode_buckets, False, mem_post_decode)
 
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
@@ -3808,7 +4017,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         logger.info(msg)
         self.profiler.end()
 
-        if max_bucket > self.input_batch.max_num_reqs:
+        if not self.unified_attn and max_bucket > self.input_batch.max_num_reqs:
             self.input_batch = input_batch_bkp
 
     def shutdown_inc(self):
@@ -4146,41 +4355,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self,
         sampled_token_ids: list[list[int]],
     ) -> list[list[int]]:
-        # TODO(woosuk): Optimize.
-        draft_token_ids: list[list[int]] = []
-        for i, sampled_ids in enumerate(sampled_token_ids):
-            num_sampled_ids = len(sampled_ids)
-            if not num_sampled_ids:
-                # Skip speculative decoding.
-                logger.debug("Skipping speculative decoding for request %s, "
-                             "no sampled tokens", i)
-                draft_token_ids.append([])
-                continue
-
-            # Skip requests that require sampling parameters that are not
-            # supported with speculative decoding.
-            if i >= len(self.input_batch.req_ids):
-                logger.debug("Skipping speculative decoding for padding request %s, ", i)
-                continue
-            req_id = self.input_batch.req_ids[i]
-            if req_id in self.input_batch.spec_decode_unsupported_reqs:
-                logger.debug("Skipping speculative decoding for request %s", req_id)
-                draft_token_ids.append([])
-                continue
-
-            num_tokens = self.input_batch.num_tokens_no_spec[i]
-            if num_tokens >= self.max_model_len:
-                # Skip requests that have already reached the max model length.
-                draft_token_ids.append([])
-                continue
-
-            drafter_output = self.drafter.propose(self.input_batch.token_ids_cpu[i, :num_tokens])
-            if drafter_output is None or len(drafter_output) == 0:
-                logger.debug("Skipping speculative decoding for request %s, "
-                             "drafter output is empty", req_id)
-                draft_token_ids.append([-1])
-            else:
-                draft_token_ids.append(drafter_output.tolist())
+        draft_token_ids = self.drafter.propose(sampled_token_ids, self.input_batch.req_ids,
+                                               self.input_batch.num_tokens_no_spec, self.input_batch.token_ids_cpu,
+                                               self.input_batch.spec_decode_unsupported_reqs)
+        # swipe draft_token_ids_native replacing [] to [-1]
+        for i in range(len(draft_token_ids)):
+            if len(draft_token_ids[i]) == 0:
+                draft_token_ids[i] = [-1]
         return draft_token_ids
 
 

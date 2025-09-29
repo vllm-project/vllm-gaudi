@@ -2,23 +2,277 @@ name: Basic HPU test suite
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
 
   # Allow manual triggering for testing purposes
   workflow_dispatch: {}
+
+permissions:
+  pull-requests: write
+  # This line allows it to read the status of checks like DCO
+  checks: read
 
 concurrency: 
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  pre_merge_hpu_test_build:
-    runs-on: ucb-vllm-cicd-g2
+  gatekeeper:
+    runs-on: ubuntu-latest
     permissions:
-      contents: read # Required to checkout code and read history
+      # Required to read the status of checks and PR details
+      checks: read
+      # Add this line to allow posting comments on PRs
+      pull-requests: write
+    outputs:
+      # This output will be used to signal if the main CI should run
+      run_ci: ${{ steps.check_conditions.outputs.run_ci }}
+      reason: ${{ steps.check_conditions.outputs.reason }}
 
     steps:
+      # Add this checkout step
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          clean: true # Ensure a clean workspace before checkout
+          fetch-depth: 0
+      - name: Wait for DCO check to complete
+        id: wait_for_dco
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Waiting for DCO check to complete..."
+          CONCLUSION=""
+          ATTEMPTS=0
+          MAX_ATTEMPTS=2 # 2 attempts * 20 seconds = 40 seconds timeout
+
+          # Poll every 20 seconds until the check is no longer in progress
+          while [[ -z "$CONCLUSION" || "$CONCLUSION" == "null" ]]; do
+            if [ $ATTEMPTS -ge $MAX_ATTEMPTS ]; then
+              echo "::error::Timed out waiting for DCO check to complete."
+              CONCLUSION="timed_out"
+              break
+            fi
+
+            sleep 20
+            
+            # Fetch all checks for the PR's head SHA
+            CHECKS_JSON=$(gh api "repos/${{ github.repository }}/commits/${{ github.event.pull_request.head.sha }}/check-runs")
+            
+            # Find the DCO check's conclusion and status in one go
+            DCO_CHECK=$(echo "$CHECKS_JSON" | jq '.check_runs[] | select(.name == "DCO")')
+            CONCLUSION=$(echo "$DCO_CHECK" | jq -r '.conclusion')
+            STATUS=$(echo "$DCO_CHECK" | jq -r '.status')
+            
+            echo "Current DCO status: $STATUS"
+            ATTEMPTS=$((ATTEMPTS + 1))
+          done
+          
+          echo "DCO check finished with conclusion: $CONCLUSION"
+          echo "conclusion=$CONCLUSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check for other blocking conditions
+        id: check_conditions
+        # Provide the GITHUB_TOKEN for the gh CLI to authenticate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BLOCKING_REASON=""
+
+          # --- New check to see if the PR is behind the base branch ---
+          echo "Checking if the PR is behind the base branch..."
+          # Fetch just the latest commit from the base branch for comparison
+          git fetch origin ${{ github.event.pull_request.base.ref }} --depth=1
+          behind_count=$(git rev-list --count HEAD..origin/${{ github.event.pull_request.base.ref }})
+          
+          if_pr_is_behind="false"
+          if [[ $behind_count -gt 0 ]]; then
+            echo "PR is behind by ${behind_count} commit(s)."
+            if_pr_is_behind="true"
+          else
+            echo "PR is up-to-date with the base branch."
+          fi
+          # --- End of new check ---
+
+
+          if [[ "${{ steps.wait_for_dco.outputs.conclusion }}" != "success" ]]; then
+            BLOCKING_REASON="The **DCO sign-off** check did not pass (status: ${{ steps.wait_for_dco.outputs.conclusion }}). Please ensure all commits are signed-off."
+
+          elif [[ "${{ github.event.pull_request.draft }}" == "true" ]]; then
+            BLOCKING_REASON="This is a **Draft PR**. Please mark it as 'Ready for Review' to trigger the CI."
+
+          # Use the 'gh' CLI to fetch the LIVE mergeable state after the sleep
+          elif [[ "$if_pr_is_behind" == "true" ]]; then
+            BLOCKING_REASON="Your branch is **behind the base branch**. Please merge or rebase to get the latest changes."
+          fi
+
+          if [[ -n "$BLOCKING_REASON" ]]; then
+            {
+              echo "run_ci=false"
+              echo "reason<<EOF"
+              echo "$BLOCKING_REASON"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "run_ci=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "Reason (if blocked): $BLOCKING_REASON"
+
+      - name: Post comment if CI is blocked
+        # This ensures that even if commenting fails, the next step will run
+        continue-on-error: true
+        # Only run this step if the check failed
+        if: steps.check_conditions.outputs.run_ci == 'false'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ### 🚧 CI Blocked
+
+            The main CI workflow was not started for the following reason:
+            > ${{ steps.check_conditions.outputs.reason }}
+
+      - name: Fail the job to block downstream CI
+        if: steps.check_conditions.outputs.run_ci == 'false'
+        run: |
+          echo "Failing this job to prevent the main CI from running."
+          exit 1
+
+  discover_tests:
+    runs-on: ucb-vllm-cicd-g2
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          clean: true # Ensure a clean workspace before checkout
+      - name: Discover test functions
+        id: set-matrix
+        run: |
+          # This command robustly discovers all functions in the script that match the 'run_*'
+          # naming convention, excluding the main 'run_all_tests' function itself.
+          # The final list is formatted into a JSON array required for the matrix strategy.
+          TEST_FUNCTIONS=$( grep '^run_' ./tests/full_tests/ci_gsm8k_tests.sh | \
+                   awk '{print $1}' | \
+                   sed 's/()//' | \
+                   jq -R . | jq -s -c . )
+
+          echo "Discovered test matrix: $TEST_FUNCTIONS"
+          # Fail the job if no tests were found.
+          if [ "$TEST_FUNCTIONS" = "[]" ]; then
+            echo "::error::No test functions were discovered. Failing the workflow."
+            exit 1
+          fi
+          echo "matrix=$TEST_FUNCTIONS" >> "$GITHUB_OUTPUT"
+
+  pre-commit:
+    # This job now runs in parallel with the build job
+    needs: gatekeeper
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          clean: true # Ensure a clean workspace before checkout
+
+      - name: Setup Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: "3.12"
+
+      - name: Add problem matchers
+        run: |
+          echo "::add-matcher::.github/workflows/matchers/actionlint.json"
+          echo "::add-matcher::.github/workflows/matchers/mypy.json"
+
+      - name: Run pre-commit hooks
+        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+        with:
+          extra_args: --all-files --hook-stage manual
+
+  pre_merge_hpu_test_build:
+    runs-on: ucb-vllm-cicd-g2
+    needs: [pre-commit, discover_tests]
+    permissions:
+      contents: read # Required to checkout code and read history
+    outputs:
+      target_commit: ${{ steps.checkout_vllm_upstream.outputs.TEST_VLLM_COMMIT }}
+    steps:
+      - name: Read Stable Commit from Target Branch
+        id: read_stable_commit
+        run: |
+          TARGET_BRANCH="vllm/last-good-commit-for-vllm-gaudi"
+          TARGET_FILE="VLLM_STABLE_COMMIT"
+          
+          echo "Attempting to read $TARGET_FILE from branch $TARGET_BRANCH..."
+          
+          # Fetch the specific branch; `|| true` prevents failure if the branch doesn't exist
+          git fetch origin "$TARGET_BRANCH" --no-tags --depth=1 || true
+          
+          # Try to read the file; `|| COMMIT_HASH=""` prevents failure if the file doesn't exist
+          COMMIT_HASH=$(git show "origin/$TARGET_BRANCH:$TARGET_FILE" 2>/dev/null) || COMMIT_HASH=""
+          
+          # Clean up any extra whitespace
+          COMMIT_HASH=$(echo "$COMMIT_HASH" | tr -d '[:space:]')
+          
+          if [ -z "$COMMIT_HASH" ]; then
+            echo "::warning::Stable commit hash not found or file is empty."
+          else
+            echo "Stable commit hash recorded: $COMMIT_HASH"
+          fi
+          
+          # Save the hash (or an empty string) to an environment variable
+          echo "VLLM_STABLE_COMMIT=$COMMIT_HASH" >> "$GITHUB_ENV"
+      - name: Determine Target Commit Based on PR Title
+        id: determine_commit
+        # ⬇️ 1. Add this 'env' block to safely import the title
+        env:
+          PR_TITLE_ENV: ${{ github.event.pull_request.title }}
+        run: |
+          # Default to the stable commit from the previous step
+          FINAL_TARGET="${VLLM_STABLE_COMMIT}"
+          # ⬇️ 2. Read the title from the safe environment variable
+          PR_TITLE="$PR_TITLE_ENV"
+
+          echo "Pull Request Title: \"${PR_TITLE}\""
+          
+          # Check if the title contains the special flag
+          if [[ "$PR_TITLE" == *"[FIX_FOR_VLLM_LATEST]"* ]]; then
+            echo "✅ Flag '[FIX_FOR_VLLM_LATEST]' found in title."
+            echo "Setting target to 'main'."
+            FINAL_TARGET="vllm-upstream/main"
+          elif [ -z "$FINAL_TARGET" ]; then
+            # This is the corrected check for a missing commit hash
+            echo "⚠️ Stable commit was not found. Defaulting target to 'main'."
+            FINAL_TARGET="vllm-upstream/main"
+          else
+            echo "Using stable commit: ${FINAL_TARGET}"
+          fi
+          
+          # Export the result to an environment variable for subsequent steps
+          echo "TARGET_COMMIT=${FINAL_TARGET}" >> "$GITHUB_ENV"
+          echo "commit_ref=${FINAL_TARGET}" >> "$GITHUB_OUTPUT"
+      - name: Add vLLM upstream as a remote and checkout target commit
+        id: checkout_vllm_upstream
+        run: |
+          echo "Attempting to remove remote branch if it exists..."
+          git remote remove vllm-upstream || true
+          echo "add vllm-upstream remote..."
+          git remote add vllm-upstream https://github.com/vllm-project/vllm.git
+          echo "Checking out code from '${{ env.TARGET_COMMIT }}'..."
+          git fetch vllm-upstream --depth=100
+          git checkout "${{ env.TARGET_COMMIT }}"
+          COMMIT_ID=$(git rev-parse HEAD)
+          echo "TEST_VLLM_COMMIT=$COMMIT_ID" >> "$GITHUB_OUTPUT"
+          echo "TEST_VLLM_COMMIT=$COMMIT_ID" >> "$GITHUB_ENV"
+          echo "Target commit ID for testing: $COMMIT_ID"
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -32,18 +286,24 @@ jobs:
         run: |
           echo "Attempting to build Docker image..."
           # Ensure this image is accessible from GitHub Actions (e.g., public registry or authenticated private registry).
-          docker build --no-cache -t hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} -f - . <<EOF
+          docker build \
+            --no-cache \
+            --build-arg VLLM_COMMIT_ARG=${{ env.TEST_VLLM_COMMIT }} \
+            -t hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
+            -f - . <<EOF
           FROM vault.habana.ai/gaudi-docker/1.22.0/ubuntu24.04/habanalabs/pytorch-installer-2.7.1:latest
+
+          ARG VLLM_COMMIT_ARG=main
 
           COPY ./ /workspace/vllm-gaudi
           WORKDIR /workspace
 
           RUN git clone https://github.com/vllm-project/vllm.git vllm
           WORKDIR /workspace/vllm
-          RUN git checkout main
+          RUN git checkout \$VLLM_COMMIT_ARG
 
           # Pinning versions in requirements might be good practice for CI consistency
-          RUN pip install pytest pytest_asyncio
+          RUN pip install pytest pytest_asyncio pytest-timeout
           RUN pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git
 
           ENV no_proxy=localhost,127.0.0.1
@@ -69,6 +329,7 @@ jobs:
 
           EOF
           echo "Docker image built successfully."
+
   hpu_unit_tests:
     runs-on: ucb-vllm-cicd-g2
     needs: pre_merge_hpu_test_build
@@ -87,7 +348,7 @@ jobs:
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
-            /bin/bash -c "pytest -vvv --durations=10 --durations-min=1.0 /workspace/vllm-gaudi/tests/unit_tests"
+            /bin/bash -c "pytest -vvv --timeout=300 --durations=10 --durations-min=1.0 /workspace/vllm-gaudi/tests/unit_tests"
           
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
@@ -170,35 +431,61 @@ jobs:
 
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
-  hpu_e2e_tests:
+  e2e:
     runs-on: ucb-vllm-cicd-g2
-    # This is a final job that runs after the build and unit tests
-    # Unit tests are supposed to fail fast if anything goes wrong, removing the need for this job to run.
-    needs: [pre_merge_hpu_test_build, hpu_unit_tests]
+    needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_tests]
+    strategy:
+      fail-fast: false
+      matrix:
+        # The list of test functions is dynamically populated from the output of the 'discover_tests' job.
+        test_function: ${{ fromJson(needs.discover_tests.outputs.matrix) }}
+
     steps:
-      - name: Run test scripts
+      - name: Run test suite - ${{ matrix.test_function }}
         run: |
           EXITCODE=1
-          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-e2e-tests-${{ github.event.pull_request.head.sha }} || true; }
+          CONTAINER_NAME="hpu-plugin-test-e2e-${{ github.event.pull_request.head.sha }}-${{ matrix.test_function }}"
+          # Ensure the container is removed upon exit, regardless of success or failure.
+          remove_docker_containers() { docker rm -f $CONTAINER_NAME || true; }
           trap 'remove_docker_containers; exit $EXITCODE;' EXIT
           remove_docker_containers
 
-          echo "Running HPU plugin v1 e2e tests"
-          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-e2e-tests-${{ github.event.pull_request.head.sha }} --network=host \
+          echo "Running HPU plugin test: ${{ matrix.test_function }}"
+          docker run --rm --runtime=habana --name=$CONTAINER_NAME --network=host \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
-            /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_gsm8k_tests.sh"
+            /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_gsm8k_tests.sh" "${{ matrix.test_function }}"
 
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
-
+  
   pre_merge_hpu_test:
     runs-on: ucb-vllm-cicd-g2
-    needs: [hpu_unit_tests, hpu_e2e_tests, hpu_perf_tests]
+    needs: [hpu_unit_tests, e2e, hpu_perf_tests]
     # This job is required to pass for pre-merge CI. By itself it does nothing, and will only pass if all jobs specified in "needs" list pass.
     steps:
       - name: Succeeded if all previous jobs passed
         run: echo "All previous jobs passed." 
+  # This is a new job, at the same level as hpu-test-suite
+  post-comment:
+    name: Post PR Comment
+    # This job runs after hpu-test-suite completes
+    needs: [pre_merge_hpu_test, pre_merge_hpu_test_build]
+    runs-on: ubuntu-latest
+    permissions:
+      # Permissions are required on a per-job basis
+      pull-requests: write
+    steps:
+      - name: Post Comment on Success
+        if: needs.pre_merge_hpu_test.result == 'success'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ### ✅ CI Passed
+            All checks passed successfully against the following vllm commit:
+            **`${{ needs.pre_merge_hpu_test_build.outputs.target_commit }}`**
+

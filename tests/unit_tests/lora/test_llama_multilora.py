@@ -1,10 +1,10 @@
-import pytest
+import os
 from typing import Optional
 
 from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
 from vllm.lora.request import LoRARequest
 
-MODEL_PATH = "/mnt/weka/data/pytorch/llama2/Llama-2-7b-hf"
+MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 
 
 def create_test_prompts(lora_path: str) -> list[tuple[str, SamplingParams, Optional[LoRARequest]]]:
@@ -82,22 +82,26 @@ expected_output = [
     " or, through inaction, allow a human being to come to harm.\nA robot must obey the orders given it by human beings except where such orders would conflict with the First Law.\nA robot must protect its own existence as long as such protection does not conflict with the First or Second Law.\nThe Three Laws of Robotics were created by Isaac Asimov in 1942. They are the foundation of robotics and artificial intelligence.\nThe Three Laws of Robotics are the foundation of robotics and artificial intelligence. They were created by Isaac Asimov in 194",  # noqa: E501
     " that is the question.\nThe question is not whether you will be a leader, but whether you will be a good leader.\nThe question is not whether you will be a leader, but whether you will be a good leader. The question is not whether you will be a leader, but whether you will be a good leader. The question is not whether you will be a leader, but whether you will be a good leader. The question is not whether you will be a leader, but whether you will be a good leader. The question is not whether you will be a leader, but whether you will be a good leader. The",  # noqa: E501
     "  SELECT icao FROM table_name_74 WHERE airport = 'lilongwe international airport' ",  # noqa: E501
-    "  SELECT nationality FROM table_name_11 WHERE elector = 'Anchero Pantaleone' ",  # noqa: E501
+    "  SELECT nationality FROM table_name_11 WHERE elector = 'anchero pantaleone' ",  # noqa: E501
     "  SELECT icao FROM table_name_74 WHERE airport = 'lilongwe international airport' ",  # noqa: E501
-    "  SELECT nationality FROM table_name_11 WHERE elector = 'Anchero Pantaleone' "  # noqa: E501
+    "  SELECT nationality FROM table_name_11 WHERE elector = 'anchero pantaleone' "  # noqa: E501
 ]
 
 
 def _test_llama_multilora(sql_lora_files, tp_size):
     """Main function that sets up and runs the prompt processing."""
-    engine_args = EngineArgs(model=MODEL_PATH,
-                             tokenizer=sql_lora_files,
-                             enable_lora=True,
-                             max_loras=2,
-                             max_lora_rank=8,
-                             max_num_seqs=256,
-                             dtype='bfloat16',
-                             tensor_parallel_size=tp_size)
+    engine_args = EngineArgs(
+        model=MODEL_PATH,
+        tokenizer=sql_lora_files,
+        enable_lora=True,
+        max_loras=2,
+        max_lora_rank=8,
+        max_num_seqs=8,
+        max_model_len=512,
+        dtype='bfloat16',
+        tensor_parallel_size=tp_size,
+        hf_token=os.environ.get("HF_TOKEN"),
+    )
     engine = LLMEngine.from_engine_args(engine_args)
     test_prompts = create_test_prompts(sql_lora_files)
     results = process_requests(engine, test_prompts)
@@ -105,7 +109,6 @@ def _test_llama_multilora(sql_lora_files, tp_size):
     assert generated_texts == expected_output
 
 
-@pytest.mark.xfail(reason="Weka not available")
 def test_llama_multilora_1x(sql_lora_files):
     _test_llama_multilora(sql_lora_files, 1)
 
