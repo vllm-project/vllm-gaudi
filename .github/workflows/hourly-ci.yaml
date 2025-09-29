@@ -62,6 +62,7 @@ jobs:
           echo "Commits merged/pushed in vllm-project/vllm.git in the last 4 hours:"
           git log HEAD..vllm-upstream/main --pretty=format:"%h - %an, %ar : %s" --since="${{ steps.prev_run_time.outputs.PREV_RUN_TIME }}"
 
+
       - name: Get latest commit sha from vllm-upstream/main
         id: latest_vllm_commit
         run: |
@@ -279,7 +280,7 @@ jobs:
 
       - name: Store last stable vLLM-Gaudi commit sha
         run: |
-          LATEST_PLUGIN_COMMIT_SHA=${{ needs.setup_and_build.outputs.latest_commit }}
+          LATEST_PLUGIN_COMMIT_SHA=${{ needs.setup_and_build.outputs.latest_plugin_commit }}
           echo "Storing latest stable vLLM commit SHA: $LATEST_PLUGIN_COMMIT_SHA"
           echo "$LATEST_PLUGIN_COMMIT_SHA" > VLLM_GAUDI_STABLE_COMMIT
           
