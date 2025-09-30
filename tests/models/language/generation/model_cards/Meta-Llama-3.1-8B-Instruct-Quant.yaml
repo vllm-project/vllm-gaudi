@@ -1,0 +1,14 @@
+model_card:
+  model_name: "/mnt/weka/data/pytorch/llama3.1/Meta-Llama-3.1-8B-Instruct"
+  tasks: gsm8k_cot_llama
+  num_fewshot: 8
+  fewshot_as_multiturn: true
+  apply_chat_template: true
+  limit: null
+  inc: true
+  fp8: true # use INC for quantization in fp8, including kv cache.
+
+
+metrics:
+  name: exact_match,strict-match
+  value: 0.805

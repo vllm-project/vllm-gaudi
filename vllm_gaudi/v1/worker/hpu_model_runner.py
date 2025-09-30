@@ -23,7 +23,7 @@ from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler, HabanaMemory
                                            format_bytes, setup_profiler)
 from vllm_gaudi.extension.runtime import finalize_config, get_config
 from vllm_gaudi.extension.unified import (create_unified_batch)
-from vllm_gaudi.extension.utils import pad_list
+from vllm_gaudi.extension.utils import pad_list, with_default
 from vllm_gaudi.extension.debug import init_debug_logger
 
 from vllm.attention.backends.abstract import AttentionType
@@ -807,8 +807,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.use_hpu_graph = not self.model_config.enforce_eager
         self.max_batch_size = self.scheduler_config.max_num_seqs
         self.max_num_seqs = self.scheduler_config.max_num_seqs
-        # TODO(kzawora): add knob for that
-        self.max_prefill_batch_size = 1
+        self.max_prefill_batch_size = with_default(get_config().VLLM_PROMPT_BS_BUCKET_MAX, 1)
         self.seen_configs: set = set()
         self.max_num_batched_tokens = \
             self.scheduler_config.max_num_batched_tokens
@@ -1608,7 +1607,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
             prompt_tokens = self.input_batch.num_prompt_tokens[batch_idx]
             # TODO: Fix non-prompt case
-            num_output_logits = context_len + query_len - prompt_tokens + 1
+            num_output_logits = max(0, context_len + query_len - prompt_tokens + 1)
             logits_positions = list(range(query_len - num_output_logits, query_len))
 
             new_batch_contents = BatchContents(
@@ -1684,6 +1683,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # for the valid tokens before padding.
         # This would require getting multimodal input embeddings here as well
         token_ids = self._align_and_pad(contents.token_ids, (target_bs, target_seq), itertools.repeat(-1))
+        # Update query_lens and context_lens after padding
+        query_lens.extend([0] * (target_bs - len(query_lens)))
+        context_lens.extend([0] * (target_bs - len(context_lens)))
+
         # If the model uses M-RoPE, we need to fill
         # and pad the M-RoPE positions for the scheduled prefill tokens
         if self.uses_mrope:
@@ -2992,11 +2995,16 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     logits_prompt.append(logits_device)
                     prefill_sampled_requests.extend(logits_requests)
                 else:
-                    with self.profiler.record_event('internal', "sampler"):
-                        sampler_output, sampling_metadata = self._run_sampling(batch_changed, logits_device, req_id,
-                                                                               logits_device.shape[0], logits_requests)
-                        prefill_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
-                        prefill_sampled_requests.extend(logits_requests)
+                    # If there are no logits, there is nothing to sample.
+                    # This can happen with chunked prefill when a chunk does
+                    # not complete the prompt and no logits are generated.
+                    if logits_device.numel() > 0:
+                        with self.profiler.record_event('internal', "sampler"):
+                            sampler_output, sampling_metadata = self._run_sampling(batch_changed, logits_device, req_id,
+                                                                                   logits_device.shape[0],
+                                                                                   logits_requests)
+                            prefill_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
+                            prefill_sampled_requests.extend(logits_requests)
                 if self.is_driver_worker and self.profiler.enabled:
                     # Stop recording 'execute_model_generic' event
                     self.profiler.end()
@@ -3471,6 +3479,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         for batch_size in test_batch_sizes:
             dummy_hidden_states = torch.randn(batch_size, self.hidden_size, dtype=self.dtype, device=self.device)
+            if self.lora_config:
+                lora_logits_mask = torch.zeros(batch_size,
+                                               (self.lora_config.max_loras) * self.lora_config.max_lora_rank,
+                                               dtype=self.lora_config.lora_dtype).to('hpu')
+                LoraMask.setLoraMask(lora_logits_mask)
             dummy_logits = self.model.compute_logits(dummy_hidden_states)
 
             # Create dummy requests for this specific configuration
@@ -3809,13 +3822,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 prompt_total_tokens, prompt_num_context_blocks = \
                      self.get_merged_prefill_seq_lens(prompt_query_len,
                                                  prompt_num_blocks)
-            for tokens, context_len in zip(prompt_total_tokens, prompt_num_context_blocks):
-                self._add_dummy_request(requests,
-                                        scheduled_tokens,
-                                        num_computed_tokens=(context_len * self.block_size),
-                                        total_tokens=tokens,
-                                        scheduled_tokens=prompt_query_len,
-                                        is_prompt=True)
+            for _ in range(prompt_bs):
+                for tokens, context_len in zip(prompt_total_tokens, prompt_num_context_blocks):
+                    self._add_dummy_request(requests,
+                                            scheduled_tokens,
+                                            num_computed_tokens=(context_len * self.block_size),
+                                            total_tokens=tokens,
+                                            scheduled_tokens=prompt_query_len,
+                                            is_prompt=True)
         if decode_cfg:
             decode_bs, decode_query_len, decode_num_blocks = decode_cfg
             if self.use_contiguous_pa:
@@ -4046,7 +4060,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         prompt_cfg = None
         decode_cfg = 1, 1, 1
         # add dummy decode run
-        self._execute_dummy_scenario(prompt_cfg, decode_cfg)
+        self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
         return
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
