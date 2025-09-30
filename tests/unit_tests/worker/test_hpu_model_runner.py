@@ -34,7 +34,6 @@ def initialize_kv_cache(runner: HPUModelRunner):
         num_kv_heads=runner.model_config.get_num_kv_heads(runner.parallel_config),
         head_size=runner.model_config.get_head_size(),
         dtype=runner.kv_cache_dtype,
-        use_mla=False,
     )
     tensor_size = attn_spec.page_size_bytes * NUM_BLOCKS
     kv_cache_config = KVCacheConfig(
