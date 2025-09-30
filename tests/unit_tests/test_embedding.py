@@ -15,6 +15,7 @@ PROMPTS = [
     "The future of AI is",
 ]
 
+
 @pytest.mark.parametrize(
     "model",
     [
