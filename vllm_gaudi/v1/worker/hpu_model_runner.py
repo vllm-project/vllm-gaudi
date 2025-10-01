@@ -2650,7 +2650,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             lambda x: x.to("cpu", non_blocking=True),
             raw_pooler_output,
         )
-        torch.hpu.synchronize()
 
         pooler_output: list[Optional[torch.Tensor]] = []
         for raw_output, seq_len, prompt_len in zip(raw_pooler_output, seq_lens, pooling_metadata.prompt_lens):
