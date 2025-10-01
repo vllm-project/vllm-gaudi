@@ -278,7 +278,7 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
 
     def batch_size_smaller_than_blocks(bs, query, ctx):
         if not bs <= ctx:
-            omitted_buckets.append(("condition: bs <= ctx, ", "-> bs, query, ctx: ", bs, query, ctx))
+            omitted_buckets.add(("condition: bs <= ctx, ", "-> bs, query, ctx: ", bs, query, ctx))
         return bs <= ctx
 
     filters_map = {
