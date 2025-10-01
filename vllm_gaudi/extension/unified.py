@@ -10,7 +10,7 @@ import torch
 import functools
 from dataclasses import dataclass
 import itertools
-from typing import Optional, Callable, TypeAlias, Union, Self
+from typing import Optional, Callable, TypeAlias, Union
 from dataclasses import dataclass
 import habana_frameworks.torch as htorch
 
@@ -349,7 +349,7 @@ class Context:
     block_usages: torch.tensor
 
     @staticmethod
-    def create(num_computed_tokens: torch.tensor, block_table: torch.tensor, block_size: int) -> Self:
+    def create(num_computed_tokens: torch.tensor, block_table: torch.tensor, block_size: int) -> 'Context':
         """ Create a new Context obj """
         num_ctx_blocks = (num_computed_tokens + block_size - 1) // block_size
         if num_ctx_blocks.sum() <= 0:
@@ -370,14 +370,14 @@ class Context:
         """ Split Context into individual values """
         return (self.group_ids, self.group_offsets, self.block_ids, self.block_usages)
 
-    def index_select(self, indices: torch.tensor) -> Self:
+    def index_select(self, indices: torch.tensor) -> 'Context':
         """ Create a new Context from only specified indices """
         if indices.size(0) <= 0:
             return None
         values = [v.index_select(0, indices) for v in self._values()]
         return Context(*values)
 
-    def split(self, num_scheduled_tokens: torch.tensor) -> tuple[Self, Self]:
+    def split(self, num_scheduled_tokens: torch.tensor) -> tuple['Context', 'Context']:
         """ Split a Context into a shared block Context and unique block Context"""
         num_tokens = num_scheduled_tokens.index_select(0, self.group_ids)
         block_tokens = group_sum(self.block_ids, num_tokens)
