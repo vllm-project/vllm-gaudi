@@ -6,7 +6,7 @@
 #    "Qwen/Qwen3-0.6B"
 #)
 MODELS=(
-	"meta-llama/Llama-3.1-8B"
+	"meta-llama/Llama-3.1-8B-Instruct"
 )
 
 export VLLM_USE_V1=1
