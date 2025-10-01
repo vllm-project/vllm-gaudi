@@ -10,14 +10,12 @@ set -e
 VLLM_GAUDI_PREFIX=${VLLM_GAUDI_PREFIX:-"vllm-gaudi"}
 echo $VLLM_GAUDI_PREFIX
 
-# NOTE(Chendi): temporarily disable gemma3 test due to upstream change.
-# Expect fixing from https://github.com/vllm-project/vllm-gaudi/pull/286
-# # Gemma3 with image input
-# run_gemma3_test() {
-#     echo "➡️ Testing gemma-3-4b-it..."
-#     VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
-#     echo "✅ Test with multimodal-support with gemma-3-4b-it passed."
-# }
+# Gemma3 with image input
+run_gemma3_test() {
+    echo "➡️ Testing gemma-3-4b-it..."
+    VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
+    echo "✅ Test with multimodal-support with gemma-3-4b-it passed."
+}
 
 # Basic model test
 run_basic_model_test() {
@@ -184,15 +182,13 @@ run_gsm8k_qwen3_30b_test() {
     echo "✅ Test with QWEN3-30B-A3B passed."
 }
 
-# NOTE(Chendi): Disabled due to upstream change #16229
-# Expect fixing from https://github.com/vllm-project/vllm-gaudi/pull/286
-# # Multimodal-support with qwen2.5-vl
-# run_qwen2_5_vl_test() {
-#     echo "➡️ Testing Qwen2.5-VL-7B..."
-#     VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
-#     python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen2.5-vl-7b.yaml"
-#     echo "✅ Test with multimodal-support with qwen2.5-vl-7b passed."
-# }
+# Multimodal-support with qwen2.5-vl
+run_qwen2_5_vl_test() {
+    echo "➡️ Testing Qwen2.5-VL-7B..."
+    VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
+    python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen2.5-vl-7b.yaml"
+    echo "✅ Test with multimodal-support with qwen2.5-vl-7b passed."
+}
 
 # Spec decode with ngram
 run_spec_decode_ngram_test() {
@@ -217,7 +213,7 @@ run_embedding_model_test() {
 # Function to run all tests sequentially
 launch_all_tests() {
     echo "🚀 Starting all test suites..."
-    # run_gemma3_test
+    run_gemma3_test
     run_basic_model_test
     run_tp2_test
     run_mla_moe_test
@@ -237,7 +233,7 @@ launch_all_tests() {
     run_gsm8k_granite_async_test
     run_gsm8k_deepseek_test
     run_gsm8k_qwen3_30b_test
-    #run_qwen2_5_vl_test
+    run_qwen2_5_vl_test
     run_spec_decode_ngram_test
     #run_embedding_model_test
     echo "🎉 All test suites passed successfully!"
