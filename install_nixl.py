@@ -47,32 +47,6 @@ def install_system_dependencies():
     print("--- System dependencies installed successfully. ---\n")
 
 
-def update_nixl_config():
-    """Programmatically updates the nixl pyproject.toml file."""
-    try:
-        import tomli
-        import tomli_w
-    except ModuleNotFoundError:
-        print("--> Dependency 'tomli' or 'tomli-w' not found. Installing now...")
-        run_command([sys.executable, '-m', 'pip', 'install', 'tomli', 'tomli-w'])
-        import tomli
-        import tomli_w
-
-    file_path = os.path.join(NIXL_DIR, 'pyproject.toml')
-    print(f"--> Updating configuration in {file_path}")
-    try:
-        with open(file_path, 'rb') as f:
-            data = tomli.load(f)
-        args = data.setdefault('tool', {}).setdefault('meson-python', {}).setdefault('args', {})
-        args['setup'] = ['-Dinstall_headers=false', '-Ddisable_gds_backend=true']
-        with open(file_path, 'wb') as f:
-            tomli_w.dump(data, f)
-        print("--> NIXL configuration updated successfully.")
-    except Exception as e:
-        print(f"ERROR: Failed to update nixl config: {e}", file=sys.stderr)
-        sys.exit(1)
-
-
 def build_and_install_prerequisites(args):
     """Builds UCX and NIXL from source, with checks to skip if already installed."""
     install_system_dependencies()
@@ -116,8 +90,6 @@ def build_and_install_prerequisites(args):
         print("\n[2/2] Configuring and building NIXL from source...")
         if not os.path.exists(NIXL_DIR):
             run_command(['git', 'clone', NIXL_REPO_URL, NIXL_DIR])
-
-        update_nixl_config()
 
         build_env = os.environ.copy()
         pkg_config_path = os.path.join(ucx_install_path, 'lib', 'pkgconfig')

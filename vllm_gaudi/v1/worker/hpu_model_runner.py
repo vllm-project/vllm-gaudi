@@ -964,7 +964,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         forward_ctx = self.vllm_config.compilation_config.static_forward_context
         block_size = self.vllm_config.cache_config.block_size
-        use_mla = self.vllm_config.model_config.use_mla
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         for layer_name, attn_module in forward_ctx.items():
             if isinstance(attn_module, FusedMoE):
@@ -977,8 +976,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 kv_cache_spec[layer_name] = FullAttentionSpec(block_size=block_size,
                                                               num_kv_heads=attn_module.num_kv_heads,
                                                               head_size=attn_module.head_size,
-                                                              dtype=self.kv_cache_dtype,
-                                                              use_mla=use_mla)
+                                                              dtype=self.kv_cache_dtype)
             elif attn_module.attn_type in (AttentionType.ENCODER, AttentionType.ENCODER_ONLY):
                 # encoder-only attention does not need KV cache.
                 continue
@@ -4424,16 +4422,25 @@ def copy_kv_blocks(
     for layer_name in src_kv_caches:
         key_cache = src_kv_caches[layer_name][0]
         value_cache = src_kv_caches[layer_name][1]
+        if direction == "d2h":
+            # NOTE(chendi): in order to keep host_buffer shape[0] same as tpu and gpu case
+            # so we need to flatten the dst_kv_caches
+            dst_kv_caches[layer_name] = dst_kv_caches[layer_name].flatten(1, 2)
+        else:
+            key_cache = key_cache.flatten(0, 1)
+            if value_cache is not None:
+                value_cache = value_cache.flatten(0, 1)
 
         if direction == "d2h" and use_hpu_buffer:
             hpu_buffer[i][0] = key_cache.index_select(0, src_slot_mapping)
             hpu_buffer[i][1] = value_cache.index_select(0, src_slot_mapping)
         else:
-            #import remote_pdb;remote_pdb.set_trace()
             dst_kv_caches[layer_name][0].index_put_((dst_slot_mapping, ),
                                                     key_cache.index_select(0, src_slot_mapping).to(target_device))
             dst_kv_caches[layer_name][1].index_put_((dst_slot_mapping, ),
                                                     value_cache.index_select(0, src_slot_mapping).to(target_device))
+        if direction == "d2h":
+            dst_kv_caches[layer_name] = dst_kv_caches[layer_name].unflatten(1, (-1, block_size))
 
         i = i + 1
 
