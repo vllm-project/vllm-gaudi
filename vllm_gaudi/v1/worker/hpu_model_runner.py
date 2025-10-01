@@ -741,8 +741,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.uses_mrope = model_config.uses_mrope
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(model_config)
         if self.supports_mm_inputs:
-            self.is_mm_embed = self._make_buffer(self.max_num_tokens,
-                                                 dtype=torch.bool)
+            self.is_mm_embed = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
         self.is_multimodal_raw_input_supported = (model_config.is_multimodal_raw_input_only_model)
 
         # Lazy initialization
@@ -853,15 +852,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         assert not (self.unified_attn and not self.use_contiguous_pa), 'Unified attn requires contiguous_pa!'
         assert not (self.unified_attn and not self.use_merged_prefill), 'Unified attn requires merged_prefill!'
 
-    def _make_buffer(self,
-                     *size: Union[int, torch.SymInt],
-                     dtype: torch.dtype,
-                     numpy: bool = True) -> CpuGpuBuffer:
-        return CpuGpuBuffer(*size,
-                            dtype=dtype,
-                            device=self.device,
-                            pin_memory=self.pin_memory,
-                            with_numpy=numpy)
+    def _make_buffer(self, *size: Union[int, torch.SymInt], dtype: torch.dtype, numpy: bool = True) -> CpuGpuBuffer:
+        return CpuGpuBuffer(*size, dtype=dtype, device=self.device, pin_memory=self.pin_memory, with_numpy=numpy)
 
     def unified_bucketing_fn(self, is_causal, query_len, shared_blocks, unique_blocks, logits):
         if not get_config().use_bucketing:
@@ -1322,15 +1314,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         req_ids: list[str],
         shift_computed_tokens: int = 0,
+        total_num_scheduled_tokens: Optional[int] = None,
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
-        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        total_num_scheduled_tokens = total_num_scheduled_tokens or scheduler_output.total_num_scheduled_tokens
 
         mm_embeds = list[torch.Tensor]()
         is_mm_embed = self.is_mm_embed.cpu
-        print(is_mm_embed, total_num_scheduled_tokens)
         is_mm_embed[:total_num_scheduled_tokens] = False
 
-        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         req_start_idx = 0
         for req_id in req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
@@ -1378,10 +1369,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 mm_embeds.append(mm_embeds_item)
             req_start_idx += num_scheduled_tokens
 
-        print(is_mm_embed.device)
-
         is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
-        print(is_mm_embed.device)
 
         return mm_embeds, is_mm_embed
 
@@ -2423,8 +2411,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # no hpu graphs for t.compile?
             use_graphs = False
         trimmed_attn_metadata = attn_metadata if self.unified_attn else trim_attn_metadata(attn_metadata)
-        #print(trimmed_attn_metadata)
-        #print(attn_metadata)
         if self.is_driver_worker:
             model_event_name = ("model_forward_"
                                 f"bs{batch_size}_"
@@ -2433,13 +2419,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                 f"graphs{'T' if use_graphs else 'F'}")
         else:
             model_event_name = 'model_executable'
-        print("tst1")
         with self.profiler.record_event('internal', model_event_name):
-            #print(model_mm_kwargs)
-            #print(token_ids.shape, position_ids.shape)
-            #print(trimmed_attn_metadata)
-            #print(inputs_embeds)
-            #print(model_mm_kwargs, lora_mask, additional_kwargs)
             hidden_states = self.model.forward(input_ids=token_ids,
                                                positions=position_ids,
                                                attn_metadata=trimmed_attn_metadata,
@@ -2795,7 +2775,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         htorch.core.mark_step()
         batch = self.prepare_unified_batch(scheduler_output)
         htorch.core.mark_step()
-        print("_execute_model_generic", batch.attn_metadata)
         non_flattened_hidden_states, aux_hidden_states, hidden_states, logits_device = \
             self._execute_model_generic(
                 token_ids=batch.token_ids.unsqueeze(-1),
@@ -2977,7 +2956,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             htorch.core.mark_step()
             for idx, (req_id, prompt_len, token_ids, position_ids, attn_metadata, logits_indices,
                       logits_requests) in enumerate(zip(*shallow_tuple(prefill_data))):
-                print("DEBUG: attn_metadata", attn_metadata)
 
                 inputs_embeds = None
                 model_mm_kwargs = None
@@ -2986,7 +2964,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     with self.profiler.record_event('internal', 'prepare_input_encoders'):
                         self._execute_mm_encoder(scheduler_output, req_id)
 
-                    mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output, req_id)
+                    mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output,
+                                                                        req_id,
+                                                                        total_num_scheduled_tokens=token_ids.shape[-1])
                     # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa E501
                     # This may require moving multimodal input preps into _prepare_inputs,        # noqa E501
                     # to avoid padding issues.
