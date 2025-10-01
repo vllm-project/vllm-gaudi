@@ -1,26 +1,29 @@
+# This workflow runs tests on a schedule and can also be triggered manually.
+# It is designed to run each test suite in parallel for faster execution.
+
 name: Hourly Commit Check and Tests
 
 on:
   # Schedule the workflow to run every 4 hours
   schedule:
-    # Use cron syntax: "minute hour day_of_month month day_of_week"
-    # This runs at minute 0, every 4th hour (0, 4, 8, 12, 16, 20 UTC)
-    # Adjust 'hour' if you need a specific starting point or timezone offset.
-    # GitHub Actions schedules are in UTC.
+    # Runs at minute 0, every 4th hour (0, 4, 8, 12, 16, 20 UTC)
     - cron: '0 */4 * * *'
 
-  # Allow manual triggering for testing purposes
+  # Allow manual triggering from the GitHub Actions UI
   workflow_dispatch: {}
 
 jobs:
-  list_commits_and_test:
+  # JOB 1: Sets up the environment and builds the Docker image needed for all tests.
+  setup_and_build:
     if: |
       github.event_name == 'workflow_dispatch' ||
       github.ref == 'refs/heads/main'
     runs-on: hourly-ci
+    needs: discover_tests
     permissions:
       contents: read # Required to checkout code and read history
-
+    outputs:
+      latest_commit: ${{ steps.latest_vllm_commit.outputs.LATEST_COMMIT }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -28,16 +31,14 @@ jobs:
           # Fetch full history for accurate commit comparison
           fetch-depth: 0
 
-      - name: Pre-Job Workspace Cleanup (Custom Folder)
-        # This step will run even if previous steps failed, ensuring cleanup.
+      - name: Pre-Job Workspace Cleanup
         if: always()
         run: |
-          echo "Attempting to remove remote branch"
+          echo "Attempting to remove remote branch if it exists..."
           git remote remove vllm-upstream || true
+          echo "Cleanup complete."
 
-          echo "Cleanup of remote branch complete."
-
-      - name: Clean and Checkout repository
+      - name: Clean and Checkout repository again
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -46,37 +47,31 @@ jobs:
       - name: Add vLLM upstream as a remote and fetch its history
         run: |
           git remote add vllm-upstream https://github.com/vllm-project/vllm.git
-          git fetch vllm-upstream --depth=100 # Fetch enough history to cover 4 hours or more
-          # Alternatively, fetch all history for vllm-upstream: git fetch vllm-upstream --no-tags
+          git fetch vllm-upstream --depth=100
 
       - name: Calculate previous run time
         id: prev_run_time
         run: |
-          CURRENT_RUN_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          echo "Current run started at: $CURRENT_RUN_TIME"
-
-          # Calculate the time 4 hours ago. This assumes regular 4-hour intervals.
           PREV_RUN_TIME=$(date -u -d "4 hours ago" +"%Y-%m-%dT%H:%M:%SZ")
           echo "Looking for commits since: $PREV_RUN_TIME"
-
-          # Store these for subsequent steps
-          echo "CURRENT_RUN_TIME=$CURRENT_RUN_TIME" >> "$GITHUB_OUTPUT"
           echo "PREV_RUN_TIME=$PREV_RUN_TIME" >> "$GITHUB_OUTPUT"
 
       - name: List commit differences in the last 4 hours
         run: |
           echo "Commits merged/pushed in vllm-project/vllm.git in the last 4 hours:"
-
-          # Use the 'vllm-upstream/main' ref to log commits from that remote
           git log HEAD..vllm-upstream/main --pretty=format:"%h - %an, %ar : %s" --since="${{ steps.prev_run_time.outputs.PREV_RUN_TIME }}"
 
+      - name: Get latest commit sha from vllm-upstream/main
+        id: latest_vllm_commit
+        run: |
+          # Use the 'vllm-upstream/main' ref to log latest commit from that remote
+          LATEST_COMMIT=$(git rev-parse vllm-upstream/main)
+          echo "LATEST_COMMIT=$LATEST_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "Latest commit from upstream vLLM: $LATEST_COMMIT"
 
       - name: Setup Docker environment and build image
-        # Using a multi-line string for the Dockerfile is generally fine,
-        # but consider moving it to a separate file for better readability/maintainability
         run: |
           echo "Attempting to build Docker image..."
-          # Ensure this image is accessible from GitHub Actions (e.g., public registry or authenticated private registry).
           docker build --no-cache -t hpu-plugin-v1-test-env-hourly-ci -f - . <<EOF
           FROM vault.habana.ai/gaudi-docker/1.22.0/ubuntu24.04/habanalabs/pytorch-installer-2.7.1:latest
 
@@ -85,36 +80,33 @@ jobs:
 
           RUN git clone https://github.com/vllm-project/vllm.git vllm
           WORKDIR /workspace/vllm
-          RUN git checkout main
+          RUN git checkout ${{ steps.latest_vllm_commit.outputs.LATEST_COMMIT }}
 
-          # Pinning versions in requirements might be good practice for CI consistency
-          RUN pip install pytest pytest_asyncio
+          RUN pip install pytest pytest_asyncio pytest-timeout
           RUN pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git
 
           ENV no_proxy=localhost,127.0.0.1
           ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
 
-          # Ensure setup.py install works as expected
           RUN bash -c 'pip install -r <(sed "/^[torch]/d" requirements/build.txt)'
           RUN VLLM_TARGET_DEVICE=empty pip install --no-build-isolation .
 
-          # install development dependencies (for testing)
           RUN python3 -m pip install -e tests/vllm_test_utils
 
           WORKDIR /workspace/vllm-gaudi
           RUN pip install -e .
 
           WORKDIR /workspace
-          # Symlinks. Ensure target paths are correct relative to the current WORKDIR
-          # '/workspace/vllm/tests' is correct
-          # Ensure these are created relative to the /workspace/ directory
           RUN ln -s /workspace/vllm/tests /workspace/tests \
               && ln -s /workspace/vllm/examples /workspace/examples \
               && ln -s /workspace/vllm/benchmarks /workspace/benchmarks
-
           EOF
           echo "Docker image built successfully."
 
+  run_unit_tests:
+    needs: setup_and_build
+    runs-on: hourly-ci
+    steps:
       - name: Run pytest in tests/unit_tests
         run: |
           EXITCODE=1
@@ -129,30 +121,72 @@ jobs:
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-hourly-ci \
-            /bin/bash -c "pytest -vvv --durations=10 --durations-min=1.0 /workspace/vllm-gaudi/tests/unit_tests"
+            /bin/bash -c "pytest -vvv --timeout=300 --durations=10 --durations-min=1.0 /workspace/vllm-gaudi/tests/unit_tests"
 
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
 
-      - name: Run test scripts
+  discover_tests:
+    runs-on: hourly-ci
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Discover test functions
+        id: set-matrix
+        run: |
+          # This command robustly discovers all functions in the script that match the 'run_*'
+          # naming convention, excluding the main 'run_all_tests' function itself.
+          # The final list is formatted into a JSON array required for the matrix strategy.
+          TEST_FUNCTIONS=$( grep '^run_' ./tests/full_tests/ci_gsm8k_tests.sh | \
+                   awk '{print $1}' | \
+                   sed 's/()//' | \
+                   jq -R . | jq -s -c . )
+
+          echo "Discovered test matrix: $TEST_FUNCTIONS"
+          # Fail the job if no tests were found.
+          if [ "$TEST_FUNCTIONS" = "[]" ]; then
+            echo "::error::No test functions were discovered. Failing the workflow."
+            exit 1
+          fi
+          echo "matrix=$TEST_FUNCTIONS" >> "$GITHUB_OUTPUT"
+
+  e2e:
+    needs: [setup_and_build, discover_tests]
+    runs-on: hourly-ci
+    strategy:
+      fail-fast: false
+      matrix:
+        # The list of test functions is dynamically populated from the output of the 'discover_tests' job.
+        test_function: ${{ fromJson(needs.discover_tests.outputs.matrix) }}
+
+    steps:
+      - name: Run test suite - ${{ matrix.test_function }}
         run: |
           EXITCODE=1
-          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-hourly-ci || true; }
+          CONTAINER_NAME="hpu-plugin-test-${{ matrix.test_function }}-${{ github.run_id }}"
+          # Ensure the container is removed upon exit, regardless of success or failure.
+          remove_docker_containers() { docker rm -f $CONTAINER_NAME || true; }
           trap 'remove_docker_containers; exit $EXITCODE;' EXIT
           remove_docker_containers
 
-          echo "Running HPU plugin v1 test"
-          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-hourly-ci --network=host \
+          echo "Running HPU plugin test: ${{ matrix.test_function }}"
+          docker run --rm --runtime=habana --name=$CONTAINER_NAME --network=host \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-hourly-ci \
-            /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_gsm8k_tests.sh"
-          
+            /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_gsm8k_tests.sh" "${{ matrix.test_function }}"
+
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
 
+  run_data_parallel_test:
+    needs: setup_and_build
+    runs-on: hourly-ci
+    steps:
       - name: Run Data Parallel test
         run: |
           EXITCODE=1
@@ -175,6 +209,10 @@ jobs:
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
 
+  run_pd_disaggregate_test:
+    needs: setup_and_build
+    runs-on: hourly-ci
+    steps:
       - name: Run PD disaggregate test
         run: |
           EXITCODE=1
@@ -190,10 +228,41 @@ jobs:
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-hourly-ci \
             /bin/bash -c "
-                pip install lm-eval[api] &&
-                cd /workspace/vllm-gaudi/tests/unit_tests &&
-                ./run_accuracy_test.sh
+              pip install lm-eval[api] &&
+              cd /workspace/vllm-gaudi/tests/unit_tests &&
+              ./run_accuracy_test.sh
             "
-
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
+  
+  store_last_stable_vllm_commit:
+    needs: [setup_and_build, run_unit_tests, e2e, run_data_parallel_test, run_pd_disaggregate_test]
+    runs-on: hourly-ci
+    permissions:
+      contents: write # Permission is required to push a commit
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: vllm/last-good-commit-for-vllm-gaudi
+          fetch-depth: 0 # Fetch full history to ensure we can push changes
+
+      - name: Configure Git
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Store last stable vllm commit sha
+        run: |
+          LATEST_COMMIT_SHA=${{ needs.setup_and_build.outputs.latest_commit }}
+          echo "Storing latest stable vLLM commit SHA: $LATEST_COMMIT_SHA"
+          echo "$LATEST_COMMIT_SHA" > VLLM_STABLE_COMMIT
+          
+          # Only commit and push if the file has changed to avoid empty commits
+          git add VLLM_STABLE_COMMIT
+          git commit --allow-empty -m "Update stable vLLM commit to ${LATEST_COMMIT_SHA}"
+          
+          echo "Pushing changes to remote branch..."
+          # Explicitly set the remote URL with the token to prevent hanging on auth
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
+          git push --force origin HEAD:vllm/last-good-commit-for-vllm-gaudi
