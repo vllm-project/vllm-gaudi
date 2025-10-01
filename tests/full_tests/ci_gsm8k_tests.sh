@@ -33,13 +33,12 @@ run_tp2_test() {
     echo "✅ Test with tensor parallel size 2 passed."
 }
 
-# NOTE(Chendi): Disabled due to upstream change: #25896
-# # MLA and MoE test
-# run_mla_moe_test() {
-#     echo "➡️ Testing MLA and MoE with vllm-hpu plugin v1..."
-#     HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code
-#     echo "✅ Test with deepseek v2 lite passed."
-# }
+# MLA and MoE test
+run_mla_moe_test() {
+    echo "➡️ Testing MLA and MoE with vllm-hpu plugin v1..."
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code
+    echo "✅ Test with deepseek v2 lite passed."
+}
 
 # Granite + INC test
 run_granite_inc_test() {
@@ -49,23 +48,21 @@ run_granite_inc_test() {
     echo "✅ Test with granite + inc passed."
 }
 
-# NOTE(Chendi): Disabled due to upstream change: #25896
-# # Deepseek v2 + INC test
-# run_deepseek_v2_inc_test() {
-#     echo "➡️ Testing deepseek_v2 + inc with vllm-hpu plugin v1..."
-#     QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_unit_scale_quant.json" \
-#     HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --kv_cache_dtype fp8_inc
-#     echo "✅ Test with deepseek_v2 + inc passed."
-# }
+# Deepseek v2 + INC test
+run_deepseek_v2_inc_test() {
+    echo "➡️ Testing deepseek_v2 + inc with vllm-hpu plugin v1..."
+    QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_unit_scale_quant.json" \
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --kv_cache_dtype fp8_inc
+    echo "✅ Test with deepseek_v2 + inc passed."
+}
 
-# NOTE(Chendi): Disabled due to upstream change: #25896
-# # Deepseek v2 + INC + dynamic quantization + TP2
-# run_deepseek_v2_inc_dynamic_tp2_test() {
-#     echo "➡️ Testing deepseek_v2 + inc dynamic quantization + tp2..."
-#     QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_dynamic_quant.json" \
-#     HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --tensor-parallel-size 2
-#     echo "✅ Test with deepseek_v2 + inc dynamic quantization + tp2 successful."
-# }
+# Deepseek v2 + INC + dynamic quantization + TP2
+run_deepseek_v2_inc_dynamic_tp2_test() {
+    echo "➡️ Testing deepseek_v2 + inc dynamic quantization + tp2..."
+    QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_dynamic_quant.json" \
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --tensor-parallel-size 2
+    echo "✅ Test with deepseek_v2 + inc dynamic quantization + tp2 successful."
+}
 
 # Qwen3-8B-FP8 + INC requant
 run_qwen3_inc_dynamic_test() {
@@ -171,14 +168,13 @@ run_gsm8k_granite_async_test() {
     echo "✅ Test with granite-8b + async_scheduling passed."
 }
 
-# NOTE(Chendi): Disabled due to upstream change: #25896
-# # GSM8K on deepseek v2 lite
-# run_gsm8k_deepseek_test() {
-#     echo "➡️ Testing GSM8K on deepseek v2 lite..."
-#     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
-#     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml"
-#     echo "✅ Test with deepseek R1 passed."
-# }
+# GSM8K on deepseek v2 lite
+run_gsm8k_deepseek_test() {
+    echo "➡️ Testing GSM8K on deepseek v2 lite..."
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml"
+    echo "✅ Test with deepseek R1 passed."
+}
 
 # GSM8K on QWEN3-30B-A3B
 run_gsm8k_qwen3_30b_test() {
@@ -224,10 +220,10 @@ launch_all_tests() {
     # run_gemma3_test
     run_basic_model_test
     run_tp2_test
-    # run_mla_moe_test
+    run_mla_moe_test
     run_granite_inc_test
-    # run_deepseek_v2_inc_test
-    # run_deepseek_v2_inc_dynamic_tp2_test
+    run_deepseek_v2_inc_test
+    run_deepseek_v2_inc_dynamic_tp2_test
     run_qwen3_inc_dynamic_test
     run_qwen3_blockfp8_dynamic_scaling_test
     run_qwen3_compressed_tensor_dynamic_scaling_test
@@ -239,7 +235,7 @@ launch_all_tests() {
     run_compressed_w4a16_moe_gidx_test
     run_gsm8k_granite_test
     run_gsm8k_granite_async_test
-    ##  run_gsm8k_deepseek_test
+    run_gsm8k_deepseek_test
     run_gsm8k_qwen3_30b_test
     #run_qwen2_5_vl_test
     run_spec_decode_ngram_test
