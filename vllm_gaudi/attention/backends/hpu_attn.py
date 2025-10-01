@@ -167,6 +167,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         qk_head_dim: int,
         v_head_dim: int,
         kv_b_proj: ColumnParallelLinear,
+        **kwargs,
     ) -> None:
         torch.nn.Module.__init__(self)
 
