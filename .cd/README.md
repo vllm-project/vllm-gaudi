@@ -78,6 +78,7 @@ cd vllm-gaudi/.cd/
 - `VLLM_DECODE_BS_BUCKET_STEP` - Determines the batch size step for decode operations, influencing how batches are grouped and processed.
 - `VLLM_PROMPT_BS_BUCKET_STEP` - Sets the batch size step for prompt processing, impacting how prompt batches are handled.
 - `VLLM_PROMPT_SEQ_BUCKET_STEP` - Controls the step size for prompt sequence allocation, affecting how sequences are bucketed for processing.
+- `VLLM_PROMPT_CTX_BUCKET_STEP` - Controls the step size for prompt ctx allocation, affecting how ctx blocks are bucketed for processing.
 
    **Example usage:**
 
