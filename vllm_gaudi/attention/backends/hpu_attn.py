@@ -18,7 +18,6 @@ from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, ModuleFusedSDPA, Soft
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl, AttentionLayer, AttentionMetadata,
                                               AttentionType)
 from vllm.v1.attention.backends.mla.common import MLACommonImpl
-from vllm.attention.backends.utils import CommonAttentionState
 from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention, HPUPagedAttentionMetadata,
                                                      HPUPagedAttentionMetadataBuilder)
 
@@ -41,10 +40,6 @@ class HPUAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
-        raise NotImplementedError()
-
-    @staticmethod
-    def get_state_cls() -> type["CommonAttentionState"]:
         raise NotImplementedError()
 
     @staticmethod
@@ -122,6 +117,7 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
     block_size: int
+    slot_mapping: torch.Tensor
     attn_bias: Optional[torch.Tensor]
     seq_lens_tensor: Optional[torch.Tensor]
     context_lens_tensor: Optional[torch.Tensor]
@@ -171,6 +167,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         qk_head_dim: int,
         v_head_dim: int,
         kv_b_proj: ColumnParallelLinear,
+        **kwargs,
     ) -> None:
         torch.nn.Module.__init__(self)
 

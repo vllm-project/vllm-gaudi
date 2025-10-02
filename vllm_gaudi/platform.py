@@ -41,8 +41,10 @@ class HpuPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int, dtype: torch.dtype,
                              kv_cache_dtype: Optional[str], block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink: bool) -> str:
+                             has_sink: bool, use_sparse: bool) -> str:
         assert use_v1, 'Only V1 is supported!'
+        if use_sparse:
+            raise NotImplementedError("Sparse Attention is not supported on HPU.")
         if use_mla:
             logger.info("Using HPUAttentionMLA backend.")
             return ("vllm_gaudi.attention.backends.hpu_attn."
@@ -146,6 +148,17 @@ class HpuPlatform(Platform):
         return True
 
     @classmethod
+    def get_nixl_supported_devices(cls) -> dict[str, tuple[str, ...]]:
+        return {"hpu": ("cpu", "hpu")}
+
+    @classmethod
+    def get_nixl_memory_type(cls) -> str:
+        if os.environ.get("VLLM_NIXL_DEVICE_TO_DEVICE", "0").lower() in ["1", "true"]:
+            return "VRAM"
+        else:
+            return "DRAM"
+
+    @classmethod
     def set_torch_compile(cls) -> None:
         # NOTE: PT HPU lazy backend (PT_HPU_LAZY_MODE = 1)
         # does not support torch.compile
@@ -159,6 +172,9 @@ class HpuPlatform(Platform):
             # requires enabling lazy collectives
             # see https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html  # noqa: E501
             os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
+        # If not set by user then for torch compile enable Runtime scale patching by default
+        elif os.environ.get('RUNTIME_SCALE_PATCHING') is None:
+            os.environ['RUNTIME_SCALE_PATCHING'] = '1'
 
     @classmethod
     def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str, model_config: ModelConfig) -> bool:
@@ -184,3 +200,24 @@ class HpuPlatform(Platform):
             return out
 
         return _synced_weight_loader
+
+    @classmethod
+    def patch_for_pt27(cls) -> None:
+
+        from vllm.utils import is_torch_equal_or_newer
+        if is_torch_equal_or_newer("2.8.0"):
+            return
+
+        from vllm.model_executor import BasevLLMParameter
+        parent_class = BasevLLMParameter.__mro__[1]
+        parent_torch_function = getattr(parent_class, "__torch_function__", None)
+
+        def torch_function(origin_cls, func, types, args=(), kwargs=None):
+            if kwargs is None:
+                kwargs = {}
+            if parent_torch_function is None:
+                return NotImplemented
+            return parent_torch_function(func, types, args, kwargs)
+
+        BasevLLMParameter.__torch_function__ = classmethod(torch_function)
+        return
