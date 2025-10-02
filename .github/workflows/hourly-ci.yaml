@@ -226,6 +226,7 @@ jobs:
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
+            -v /mnt/wheels_cache:/workspace/wheels_cache \
             hpu-plugin-v1-test-env-hourly-ci \
             /bin/bash -c "
               pip install lm-eval[api] &&
