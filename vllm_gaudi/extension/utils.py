@@ -171,6 +171,17 @@ def pad_list(input, target_len, val_generator):
     return input
 
 
+def align_and_pad(data, bucketing, padding_gen):
+    bs = len(data)
+    target_bs, target_len = bucketing
+    if target_bs == 1 and bs > 1:
+        data = [list(itertools.chain(*data))]
+    data = [pad_list(x, target_len, padding_gen) for x in data]
+    padding = itertools.islice(padding_gen, target_len)
+    data = pad_list(data, target_bs, itertools.tee(padding, target_bs - len(data)))
+    return data
+
+
 def with_default(value: Optional[Any], default: Any) -> Any:
     if value is not None:
         return value
