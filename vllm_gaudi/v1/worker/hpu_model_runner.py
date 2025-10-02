@@ -3329,6 +3329,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             with HabanaMemoryProfiler() as m_inc:
                 from neural_compressor.torch.quantization import (FP8Config, convert, prepare)
                 config = FP8Config.from_json_file(os.getenv("QUANT_CONFIG", ""))
+                self._inc_preprocess()
                 if config.measure:
                     self.model = prepare(self.model, config)
                 elif config.quantize:
@@ -3444,6 +3445,29 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
     def _use_graphs(self):
         return not self.model_config.enforce_eager
+
+    def _remove_duplicate_submodules(self):
+        model = self.get_model()
+        if hasattr(model, "model"):
+            for layer in self.get_model().model.layers:
+                self_attn = layer.self_attn
+                # delete attr kv_b_proj in self_attn,
+                # as they have been transferred to the MLAImpl.
+                if hasattr(self_attn, "mla_attn"):
+                    mla_attn = self_attn.mla_attn
+                    duplicate_mods = ["kv_a_proj_with_mqa", "q_proj", "kv_b_proj", "o_proj"]
+                    for m in duplicate_mods:
+                        if hasattr(self_attn, m) and hasattr(mla_attn, m):
+                            delattr(self_attn, m)
+                    if hasattr(mla_attn, "mla_attn") and hasattr(mla_attn.mla_attn, "impl"):
+                        mla_impl = mla_attn.mla_attn.impl
+                        duplicate_mods = ["kv_b_proj"]
+                        for m in duplicate_mods:
+                            if hasattr(mla_attn, m) and hasattr(mla_impl, m):
+                                delattr(mla_attn, m)
+
+    def _inc_preprocess(self):
+        self._remove_duplicate_submodules()
 
     def log_graph_warmup_summary(self, buckets, is_prompt, total_mem):
         phase = f'Graph/{"Prompt" if is_prompt else "Decode"}'
