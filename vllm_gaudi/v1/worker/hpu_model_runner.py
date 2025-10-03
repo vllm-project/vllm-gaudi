@@ -4089,11 +4089,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_candidates = len(buckets)
 
             for idx, img_arg in enumerate(buckets):
-                # some model might need checks .. Not needed for Gemma.
-                # if img_arg > max_items:
-                #     logger.warning(f"mm bucket {idx} is bigger than max_limit {max_items} for {modality}, skip warmup ")
-                #     continue
-
                 # Create dummy batch of multimodal inputs.
                 batched_dummy_mm_inputs = self._get_mm_dummy_batch(
                     modality,
@@ -4127,10 +4122,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
             if self.supports_mm_inputs:
                 # Delayed multimodal buckets during warmup until model is loaded.
-                from vllm_gaudi.extension.bucketing.vision import HPUVisionBuckets
-                #TODO: Check - is_batch_based = is_batch_based(self.get_model())
-                self.get_model().vision_buckets = HPUVisionBuckets()
-                print(f"Multimodal bucket : {self.get_model().vision_buckets.multimodal_buckets}")
+                from vllm_gaudi.extension.bucketing.vision import HPUVisionBucketManager
+                self.get_model().vision_bucket_manager = HPUVisionBucketManager(self.model_config.model)
+                msg = (f"Multimodal bucket : {self.get_model().vision_bucket_manager.multimodal_buckets}")
+                logger.info(msg)
 
             max_bucket = max(self.bucketing_manager.decode_buckets[-1][0], self.bucketing_manager.prompt_buckets[-1][0])
             if max_bucket > self.input_batch.max_num_reqs:
@@ -4176,7 +4171,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         # Most model's multimodal embedding has to be run without COMPILE ONLY mode.
         if self.supports_mm_inputs:
-            self.warmup_multimodal_graphs(self.get_model().vision_buckets.multimodal_buckets)
+            self.warmup_multimodal_graphs(self.get_model().vision_bucket_manager.multimodal_buckets)
 
         compile_only_mode_context = functools.partial(bc.env_setting, "PT_COMPILE_ONLY_MODE", True)
         can_use_compile_only_mode = True
