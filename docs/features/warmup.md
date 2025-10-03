@@ -79,11 +79,11 @@ INFO 08-02 17:38:43 hpu_executor.py:91] init_cache_engine took 37.92 GiB of devi
 ```
 
 ## Sampler Warm-Up
-The sampler converts model logits into next-token selections using configured decoding strategies (greedy or probabilistic). Its warm-up phase primes compiled graph variants (or internal code paths) for a representative set of batch sizes and sampling parameter combinations so that first real user requests avoid extra compilation / setup latency.
+The sampler converts model logits into next-token selections, using configured decoding strategies (greedy or probabilistic). Its warm-up phase prepares compiled graph variants (or internal code paths) for a representative set of batch sizes and sampling parameter combinations, so that first real user requests avoid extra compilation / setup latency.
 
 ### How the Sampler Warm-Up Works
 
-Implemented in `warmup_sampler`, the routine systematically exercises the sampling stack across a Cartesian set of (batch size, temperature, top-p, top-k) patterns and a flag that signals whether the batch size changed. Key steps:
+Implemented in `warmup_sampler`, the routine systematically exercises the sampling stack across a Cartesian set of (batch size, temperature, top-p, top-k) patterns and a flag, that signals whether the batch size changed. Key steps:
 
 1. Build a list of test batch sizes: it prepends `[0, 1]` to the distinct decode bucket batch sizes, as these need to be always warmed up.
 2. Define a list of sampling configurations (12 total) covering:
@@ -101,7 +101,7 @@ Implemented in `warmup_sampler`, the routine systematically exercises the sampli
    * Update each request's `SamplingParams` (temperature, top_p, top_k).
    * Mark the request as greedy or random (separate sets) to test branching.
    * Populate `req_output_token_ids` with padded placeholders and refresh internal sampling metadata.
-   * Invoke `_run_sampling` passing `batch_changed` so both changed/unchanged batch-size code paths get compiled / exercised.
+   * Invoke `_run_sampling` passing `batch_changed` so both changed/unchanged batch-size code paths get compiled/exercised.
    * Reset per-iteration sampler bookkeeping sets/lists.
 5. After finishing all sampling configs for a batch size, clear request maps and continue.
 6. Perform an HPU synchronize and log success.
@@ -128,7 +128,7 @@ INFO 09-22 16:39:42 [hpu_model_runner.py:3350] Starting sampler warmup...
 INFO 09-22 16:39:43 [hpu_model_runner.py:3411] Sampler warmup completed successfully
 ```
 
-If warm-up is globally skipped (see below) none of these lines appear.
+If warm-up is globally skipped ([see below](#how-to-turn-it-off)), none of these lines appear.
 
 ### Why We Warm Up the Sampler (and Risks If We Do Not)
 
@@ -148,7 +148,7 @@ Skipping the sampler warm-up does not affect correctness—only the latency prof
 
 There is no dedicated flag for the sampler alone. It participates in the global warm-up sequence and is skipped when:
 
-* `VLLM_SKIP_WARMUP=true` is set (all warm-up stages skipped).
+* `VLLM_SKIP_WARMUP=true` is set.
 * The engine is configured to enforce eager execution in a mode where no graph capture / compilation is desired (sampler still runs the first time on demand, but without a separate warm-up call).
 
 ### Related Notes & Environment Variables
