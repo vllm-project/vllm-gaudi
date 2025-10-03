@@ -73,7 +73,7 @@ jobs:
         run: |
           if [ "${{ steps.check_branch.outputs.exists }}" == 'true' ]; then
             if [ -f "VLLM_STABLE_COMMIT" ]; then
-              VLLM_COMMIT_ID=$(cat VLLM_STABLE_COMMIT | tr -d '[:space:]')
+              VLLM_COMMIT_ID=$(tr -d '[:space:]' < VLLM_STABLE_COMMIT)
               echo "Read vLLM commit from existing branch file: $VLLM_COMMIT_ID"
             else
               echo "::error::Branch exists but VLLM_STABLE_COMMIT file not found!"
@@ -374,4 +374,4 @@ jobs:
           title: ${{ env.SUBJECT }}
           content-filepath: ./report.md
           # Optional: Add labels to the issue
-          labels: branch-out-report, automated
+          labels: release-report, automated
