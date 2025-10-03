@@ -53,7 +53,6 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors, DraftTo
                              AsyncModelRunnerOutput, KVConnectorOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import bind_kv_cache
-from vllm.v1.utils import CpuGpuBuffer
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.models.interfaces import (SupportsMultiModal, supports_eagle3, supports_transcription)
@@ -543,10 +542,8 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
                 self._reset_rotary_cos_sin()
         return hidden_states
 
-    def get_input_embeddings(self, input_ids, multimodal_embeddings=None, is_multimodal=False):
-        return self.model.get_input_embeddings(input_ids=input_ids,
-                                               multimodal_embeddings=multimodal_embeddings,
-                                               is_multimodal=is_multimodal)
+    def get_input_embeddings(self, input_ids, multimodal_embeddings=None):
+        return self.model.get_input_embeddings(input_ids=input_ids, multimodal_embeddings=multimodal_embeddings)
 
     def get_multimodal_embeddings(self, **batched_mm_inputs):
         return self.model.get_multimodal_embeddings(**batched_mm_inputs)
@@ -741,8 +738,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(model_config)
-        if self.supports_mm_inputs:
-            self.is_mm_embed = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
         self.is_multimodal_raw_input_supported = (model_config.is_multimodal_raw_input_only_model)
 
         # Lazy initialization
@@ -852,9 +847,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         assert not (self.unified_attn and not self.use_contiguous_pa), 'Unified attn requires contiguous_pa!'
         assert not (self.unified_attn and not self.use_merged_prefill), 'Unified attn requires merged_prefill!'
-
-    def _make_buffer(self, *size: Union[int, torch.SymInt], dtype: torch.dtype, numpy: bool = True) -> CpuGpuBuffer:
-        return CpuGpuBuffer(*size, dtype=dtype, device=self.device, pin_memory=self.pin_memory, with_numpy=numpy)
 
     def unified_bucketing_fn(self, is_causal, query_len, shared_blocks, unique_blocks, logits):
         if not get_config().use_bucketing:
@@ -1319,15 +1311,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         req_ids: list[str],
         shift_computed_tokens: int = 0,
-        total_num_scheduled_tokens: Optional[int] = None,
-    ) -> tuple[list[torch.Tensor], torch.Tensor]:
-        total_num_scheduled_tokens = total_num_scheduled_tokens or scheduler_output.total_num_scheduled_tokens
-
-        mm_embeds = list[torch.Tensor]()
-        is_mm_embed = self.is_mm_embed.cpu
-        is_mm_embed[:total_num_scheduled_tokens] = False
-
-        req_start_idx = 0
+    ) -> list[torch.Tensor]:
+        mm_embeds: list[torch.Tensor] = []
         for req_id in req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             req_state = self.requests[req_id]
@@ -1366,17 +1351,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     encoder_output[start_idx:end_idx],
                     is_embed=is_embed,
                 )
-                req_start_pos = req_start_idx + start_pos - num_computed_tokens
-                is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
-                    = True
-
-                # Only whole mm items are processed
                 mm_embeds.append(mm_embeds_item)
-            req_start_idx += num_scheduled_tokens
-
-        is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
-
-        return mm_embeds, is_mm_embed
+        return mm_embeds
 
     def get_model(self) -> torch.nn.Module:
         assert self.model is not None
@@ -2963,16 +2939,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     with self.profiler.record_event('internal', 'prepare_input_encoders'):
                         self._execute_mm_encoder(scheduler_output, req_id)
 
-                    mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output,
-                                                                        req_id,
-                                                                        total_num_scheduled_tokens=token_ids.shape[-1])
+                    mm_embeds = self._gather_mm_embeddings(scheduler_output, req_id)
                     # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa E501
                     # This may require moving multimodal input preps into _prepare_inputs,        # noqa E501
                     # to avoid padding issues.
                     inputs_embeds = self.model.get_input_embeddings(
-                        token_ids,
-                        multimodal_embeddings=mm_embeds,
-                        is_multimodal=is_mm_embed,
+                        input_ids=token_ids,
+                        multimodal_embeddings=mm_embeds or None,
                     )
 
                     model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
