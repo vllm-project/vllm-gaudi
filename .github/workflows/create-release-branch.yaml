@@ -24,7 +24,7 @@ jobs:
     outputs:
       tag_name: ${{ steps.extract_tag.outputs.tag_name }}
       commit_id: ${{ steps.get_vllm_commit.outputs.commit_id }}
-      branch_name: ${{ github.event.inputs.branch_name }}
+      branch_name: ${{ steps.set_final_branch_name.outputs.branch_name }}
 
     steps:
       # Step 1: Check if the target branch already exists on the remote.
@@ -99,16 +99,26 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       # Step 6: Create and push the new branch only if it did not already exist.
-      - name: "Create and Push New Branch"
+      - name: "Create and Push New Branch with Prefix"
         if: steps.check_branch.outputs.exists == 'false'
         run: |
-          BRANCH_NAME="${{ github.event.inputs.branch_name }}"
+          BRANCH_NAME="pre_${{ github.event.inputs.branch_name }}"
           git checkout -b "$BRANCH_NAME"
           echo "${{ steps.get_vllm_commit.outputs.commit_id }}" > VLLM_STABLE_COMMIT
           git add VLLM_STABLE_COMMIT
           git commit -m "Set vLLM stable commit for ${{ steps.extract_tag.outputs.tag_name }}"
           git push -u origin "$BRANCH_NAME"
           echo "✅ Successfully created and pushed new branch '$BRANCH_NAME'."
+
+      # Step 7: Set the final branch name for subsequent jobs
+      - name: "Set Final Branch Name Output"
+        id: set_final_branch_name
+        run: |
+          if [ "${{ steps.check_branch.outputs.exists }}" == 'true' ]; then
+            echo "branch_name=${{ github.event.inputs.branch_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "branch_name=pre_${{ github.event.inputs.branch_name }}" >> $GITHUB_OUTPUT
+          fi
 
   setup_and_build:
     runs-on: hourly-ci
@@ -314,7 +324,7 @@ jobs:
   summarize_and_notify:
     name: "Summarize Test Results and Notify"
     runs-on: ubuntu-latest
-    if: always()
+    if: needs.prepare-release-branch.result == 'success'
     needs:
       - prepare-release-branch
       - run_unit_tests
