@@ -350,7 +350,7 @@ jobs:
           check_status "Performance Tests" "${{ needs.run_hpu_perf_tests.result }}"
           
           REPORT_BODY+="\n---\n"
-          if [ $FAILED_COUNT -gt 0 ]; then
+          if [ "$FAILED_COUNT" -gt 0 ]; then
             SUBJECT="❌ Build Failed for ${{ needs.prepare-release-branch.outputs.branch_name }}"
             REPORT_BODY+="**Overall Status: FAILED**\n\n"
             REPORT_BODY+="**${FAILED_COUNT} job(s) failed:**\n"
@@ -365,7 +365,7 @@ jobs:
           ${REPORT_BODY}
           EOF
           
-          echo "SUBJECT=$SUBJECT" >> $GITHUB_ENV
+          echo "SUBJECT=$SUBJECT" >> "$GITHUB_ENV"
 
       - name: "Create GitHub Issue with Summary"
         uses: peter-evans/create-issue-from-file@v5
