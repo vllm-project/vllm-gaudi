@@ -23,7 +23,7 @@ from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler, HabanaMemory
                                            format_bytes, setup_profiler)
 from vllm_gaudi.extension.runtime import finalize_config, get_config
 from vllm_gaudi.extension.unified import (create_unified_batch)
-from vllm_gaudi.extension.utils import pad_list, with_default
+from vllm_gaudi.extension.utils import align_and_pad, pad_list, with_default
 from vllm_gaudi.extension.debug import init_debug_logger
 
 from vllm.attention.backends.abstract import AttentionType
@@ -1536,16 +1536,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         block_usage = torch.tensor(block_usage, dtype=self.model_config.dtype, device='cpu')
         return block_list, block_groups, block_usage
 
-    def _align_and_pad(self, data, bucketing, padding_gen):
-        bs = len(data)
-        target_bs, target_len = bucketing
-        if target_bs == 1 and bs > 1:
-            data = [list(itertools.chain(*data))]
-        data = [pad_list(x, target_len, padding_gen) for x in data]
-        padding = itertools.islice(padding_gen, target_len)
-        data = pad_list(data, target_bs, itertools.repeat(padding))
-        return data
-
     def _align_and_pad_mrope_positions(self, req_ids: list[str], context_lens: list[int], query_lens: list[int],
                                        bucketing: tuple[int, int], padding_gen: int) -> torch.Tensor:
         target_bs, target_len = bucketing
@@ -1705,7 +1695,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # For models with multimodal support, we may want to get embeddings
         # for the valid tokens before padding.
         # This would require getting multimodal input embeddings here as well
-        token_ids = self._align_and_pad(contents.token_ids, (target_bs, target_seq), itertools.repeat(-1))
+        token_ids = align_and_pad(contents.token_ids, (target_bs, target_seq), itertools.repeat(-1))
         # Update query_lens and context_lens after padding
         query_lens.extend([0] * (target_bs - len(query_lens)))
         context_lens.extend([0] * (target_bs - len(context_lens)))
@@ -1722,11 +1712,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             )
 
         else:
-            token_positions = self._align_and_pad(token_positions, (target_bs, target_seq), itertools.repeat(-1))
-        token_slots = self._align_and_pad(token_slots, (target_bs, target_seq), itertools.repeat(-1))
-        token_groups = self._align_and_pad(token_groups, (target_bs, target_seq), itertools.repeat(-1))
-        context_blocks = self._align_and_pad(context_blocks, (target_bs, target_blocks), itertools.repeat(-1))
-        context_groups = self._align_and_pad(context_groups, (target_bs, target_blocks), itertools.repeat(-1))
+            token_positions = align_and_pad(token_positions, (target_bs, target_seq), itertools.repeat(-1))
+        token_slots = align_and_pad(token_slots, (target_bs, target_seq), itertools.repeat(-1))
+        token_groups = align_and_pad(token_groups, (target_bs, target_seq), itertools.repeat(-1))
+        context_blocks = align_and_pad(context_blocks, (target_bs, target_blocks), itertools.repeat(-1))
+        context_groups = align_and_pad(context_groups, (target_bs, target_blocks), itertools.repeat(-1))
 
         # TODO: cycle through dummy slots and blocks
         # dummy_slots = itertools.cycle(
@@ -3339,6 +3329,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             with HabanaMemoryProfiler() as m_inc:
                 from neural_compressor.torch.quantization import (FP8Config, convert, prepare)
                 config = FP8Config.from_json_file(os.getenv("QUANT_CONFIG", ""))
+                self._inc_preprocess()
                 if config.measure:
                     self.model = prepare(self.model, config)
                 elif config.quantize:
@@ -3454,6 +3445,29 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
     def _use_graphs(self):
         return not self.model_config.enforce_eager
+
+    def _remove_duplicate_submodules(self):
+        model = self.get_model()
+        if hasattr(model, "model"):
+            for layer in self.get_model().model.layers:
+                self_attn = layer.self_attn
+                # delete attr kv_b_proj in self_attn,
+                # as they have been transferred to the MLAImpl.
+                if hasattr(self_attn, "mla_attn"):
+                    mla_attn = self_attn.mla_attn
+                    duplicate_mods = ["kv_a_proj_with_mqa", "q_proj", "kv_b_proj", "o_proj"]
+                    for m in duplicate_mods:
+                        if hasattr(self_attn, m) and hasattr(mla_attn, m):
+                            delattr(self_attn, m)
+                    if hasattr(mla_attn, "mla_attn") and hasattr(mla_attn.mla_attn, "impl"):
+                        mla_impl = mla_attn.mla_attn.impl
+                        duplicate_mods = ["kv_b_proj"]
+                        for m in duplicate_mods:
+                            if hasattr(mla_attn, m) and hasattr(mla_impl, m):
+                                delattr(mla_attn, m)
+
+    def _inc_preprocess(self):
+        self._remove_duplicate_submodules()
 
     def log_graph_warmup_summary(self, buckets, is_prompt, total_mem):
         phase = f'Graph/{"Prompt" if is_prompt else "Decode"}'
