@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os, math
-import threading
+import os
 import torch
 import time
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (NixlAgentMetadata, NixlConnector, NixlConnectorWorker, NixlConnectorMetadata)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (NixlConnector, NixlConnectorWorker,
+                                                                         NixlConnectorMetadata)
 from vllm_gaudi.platform import logger
 import habana_frameworks.torch.core as htexp
 
@@ -61,6 +61,7 @@ def wait_for_save(self):
        self.connector_worker.copy_blocks:
         self.connector_worker.save_kv_to_host(self._connector_metadata)
 
+
 def rewrite_kv_based_on_transfer_layout(self, metadata: NixlConnectorMetadata):
     decoder_tp_ratio = int(os.getenv('DECODER_TP_RATIO', 1))
     if decoder_tp_ratio == 1:
@@ -71,12 +72,12 @@ def rewrite_kv_based_on_transfer_layout(self, metadata: NixlConnectorMetadata):
         for k, v in self.device_kv_caches.items():
             gb, h, d = v[0].shape
             indices = torch.tensor(block_ids, device=v[0].device)
-            gbhd = [int(gb/self.block_size), self.block_size, h, d]
+            gbhd = [int(gb / self.block_size), self.block_size, h, d]
             for i in range(len(self.device_kv_caches[k])):
                 kv = v[i].reshape(gbhd)
-                kv_selected  = torch.index_select(kv, 0, indices)
-                bc, bs, h, d  = kv_selected.shape
-                shape = int(bs*h/decoder_tp_ratio*d)
+                kv_selected = torch.index_select(kv, 0, indices)
+                bc, bs, h, d = kv_selected.shape
+                shape = int(bs * h / decoder_tp_ratio * d)
                 blocks = torch.chunk(kv_selected, 2, dim=2)
                 vecs = [b.reshape([bc, shape]) for b in blocks]
                 kv_selected = torch.concat(vecs, dim=1).reshape(kv_selected.shape)
@@ -84,6 +85,7 @@ def rewrite_kv_based_on_transfer_layout(self, metadata: NixlConnectorMetadata):
     if len(metadata.reqs_to_save) > 0:
         torch.hpu.synchronize()
     logger.debug(f"rewrite_kv_based_on_transfer_layout done time:{time.perf_counter() - t}")
+
 
 NixlConnectorWorker.rewrite_kv_based_on_transfer_layout = rewrite_kv_based_on_transfer_layout
 NixlConnector.wait_for_save = wait_for_save

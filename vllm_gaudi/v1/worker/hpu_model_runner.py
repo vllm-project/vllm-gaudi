@@ -95,8 +95,6 @@ logger = init_logger()
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
-#hpu_buffer: list[list[torch.Tensor]] = []
-
 
 class BucketingFailedException(Exception):
     pass
@@ -4177,7 +4175,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             get_kv_transfer_group().register_kv_caches(kv_caches)
             if self.vllm_config.kv_transfer_config.kv_buffer_device == "cpu":
                 get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
-            #global hpu_buffer
         htorch.hpu.synchronize()
 
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
