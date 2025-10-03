@@ -3,7 +3,9 @@ name: Basic HPU test suite
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
-    branches: [main]
+    branches: 
+      - main
+      - releases/**
 
   # Allow manual triggering for testing purposes
   workflow_dispatch: {}
@@ -167,30 +169,50 @@ jobs:
     outputs:
       target_commit: ${{ steps.checkout_vllm_upstream.outputs.TEST_VLLM_COMMIT }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Fetch full history for accurate commit comparison
+          ref: ${{ github.event.pull_request.head.sha }}
+          clean: true # Ensure a clean workspace before checkout
       - name: Read Stable Commit from Target Branch
         id: read_stable_commit
         run: |
-          TARGET_BRANCH="vllm/last-good-commit-for-vllm-gaudi"
           TARGET_FILE="VLLM_STABLE_COMMIT"
-          
-          echo "Attempting to read $TARGET_FILE from branch $TARGET_BRANCH..."
-          
-          # Fetch the specific branch; `|| true` prevents failure if the branch doesn't exist
-          git fetch origin "$TARGET_BRANCH" --no-tags --depth=1 || true
-          
-          # Try to read the file; `|| COMMIT_HASH=""` prevents failure if the file doesn't exist
-          COMMIT_HASH=$(git show "origin/$TARGET_BRANCH:$TARGET_FILE" 2>/dev/null) || COMMIT_HASH=""
-          
-          # Clean up any extra whitespace
-          COMMIT_HASH=$(echo "$COMMIT_HASH" | tr -d '[:space:]')
-          
-          if [ -z "$COMMIT_HASH" ]; then
-            echo "::warning::Stable commit hash not found or file is empty."
+          COMMIT_HASH=""
+
+          # 1. Primary Check: Look in the current branch
+          echo "INFO: Checking for '$TARGET_FILE' in the current branch..."
+          if [ -f "$TARGET_FILE" ]; then
+            COMMIT_HASH=$(tr -d '[:space:]' < "$TARGET_FILE")
+            if [ -n "$COMMIT_HASH" ]; then
+              echo "✅ Found stable commit in current branch: $COMMIT_HASH"
+            else
+              echo "::warning:: File '$TARGET_FILE' is empty in current branch. Proceeding to fallback."
+            fi
           else
-            echo "Stable commit hash recorded: $COMMIT_HASH"
+            echo "INFO: File not found in current branch. Proceeding to fallback."
+          fi
+
+          # 2. Fallback Check: Look in the remote branch if the first check failed
+          if [ -z "$COMMIT_HASH" ]; then
+            TARGET_BRANCH="vllm/last-good-commit-for-vllm-gaudi"
+            echo "➡️ Fallback: Attempting to read '$TARGET_FILE' from branch '$TARGET_BRANCH'..."
+            
+            git fetch origin "$TARGET_BRANCH" --no-tags --depth=1 || true
+            
+            # Read file from the remote branch; suppress errors if not found
+            COMMIT_HASH=$(git show "origin/$TARGET_BRANCH:$TARGET_FILE" 2>/dev/null) || COMMIT_HASH=""
+            COMMIT_HASH=$(echo "$COMMIT_HASH" | tr -d '[:space:]')
+            
+            if [ -n "$COMMIT_HASH" ]; then
+              echo "✅ Found stable commit in fallback branch: $COMMIT_HASH"
+            else
+              echo "::error:: Fallback failed. Could not find a valid commit hash in either location."
+            fi
           fi
           
-          # Save the hash (or an empty string) to an environment variable
+          # 3. Export the final result
           echo "VLLM_STABLE_COMMIT=$COMMIT_HASH" >> "$GITHUB_ENV"
       - name: Determine Target Commit Based on PR Title
         id: determine_commit
@@ -255,7 +277,7 @@ jobs:
             -f - . <<EOF
           FROM vault.habana.ai/gaudi-docker/1.22.0/ubuntu24.04/habanalabs/pytorch-installer-2.7.1:latest
 
-          ARG VLLM_COMMIT_ARG=main
+          ARG VLLM_COMMIT_ARG
 
           COPY ./ /workspace/vllm-gaudi
           WORKDIR /workspace
