@@ -382,6 +382,7 @@ def test_m_rotary_embedding(
         "max_position_embeddings": max_position_embeddings,
         "base": base,
         "is_neox_style": is_neox_style,
+        "mrope_section": [rotary_dim // 2]
     }
     native_rotary_data = RotaryData(cls=MRotaryEmbedding, dtype=torch.bfloat16, device="hpu")
     oot_rotary_data = RotaryData(cls=HPUMRotaryEmbedding, dtype=torch.bfloat16, device="hpu")

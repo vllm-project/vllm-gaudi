@@ -1,5 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import torch
 import habana_frameworks.torch as htorch
+from utils import get_data_path
 from vllm_gaudi.ops.hpu_awq import AWQHPULinearMethod, AWQHPUConfig
 from vllm_gaudi.utils import HPUCompileConfig
 from vllm.model_executor.layers.linear import RowParallelLinear
@@ -22,27 +26,29 @@ def test_awq_linear_method(dist_init):
                                disable_tp=False).to("hpu")
     assert isinstance(oot_op.quant_method, AWQHPULinearMethod)
 
+    # qweight, qzeros, scales were extracted from first RowParallelLinear of TheBloke/Llama-2-7B-Chat-AWQ
+    # (with adjusted shape, to make tensors smaller)
+    qweight = torch.load(get_data_path("data/awq/qweight.pt"), weights_only=False, map_location="hpu")
+    oot_op.qweight.copy_(qweight)
+    qzeros = torch.load(get_data_path("data/awq/qzeros.pt"), weights_only=False, map_location="hpu")
+    oot_op.qzeros.copy_(qzeros)
+    scales = torch.load(get_data_path("data/awq/scales.pt"), weights_only=False, map_location="hpu").to(torch.bfloat16)
+    oot_op.scales.copy_(scales)
+
+    oot_op.quant_method.process_weights_after_loading(oot_op)
+
     if not htorch.utils.internal.is_lazy():
         compile_config = HPUCompileConfig()
         oot_op = torch.compile(oot_op, **compile_config.get_compile_args())
 
-    # qweight, qzeros, scales were extracted from first RowParallelLinear of TheBloke/Llama-2-7B-Chat-AWQ
-    # (with adjusted shape, to make tensors smaller)
-    qweight = torch.load("data/awq/qweight.pt", weights_only=False, map_location="hpu")
-    oot_op.qweight.copy_(qweight)
-    qzeros = torch.load("data/awq/qzeros.pt", weights_only=False, map_location="hpu")
-    oot_op.qzeros.copy_(qzeros)
-    scales = torch.load("data/awq/scales.pt", weights_only=False, map_location="hpu").to(torch.bfloat16)
-    oot_op.scales.copy_(scales)
-
     # Input and expected output
     # Output tensor holds the data that was returned by cuda implementation of AWQLinearMethod for given input
     # (AWQLinearMethod was triggered offline with the same input as below to get the ref_output)
-    input = torch.load("data/awq/input.pt", weights_only=False, map_location="hpu").to(torch.bfloat16)
-    ref_output = torch.load("data/awq/output.pt", weights_only=False, map_location="hpu").to(torch.bfloat16)
+    input = torch.load(get_data_path("data/awq/input.pt"), weights_only=False, map_location="hpu").to(torch.bfloat16)
+    ref_output = torch.load(get_data_path("data/awq/output.pt"), weights_only=False,
+                            map_location="hpu").to(torch.bfloat16)
 
     # Execute layer
-    oot_op.quant_method.process_weights_after_loading(oot_op)
     out = oot_op(input)
 
     # Check correctness

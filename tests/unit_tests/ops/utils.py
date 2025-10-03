@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import contextlib
 from vllm.model_executor.custom_op import CustomOp
 
@@ -28,3 +29,7 @@ def register_op(base_cls, oot_cls):
     within temporary_op_registry_oot context manager.
     """
     CustomOp.op_registry_oot[base_cls.__name__] = oot_cls
+
+
+def get_data_path(filename):
+    return os.path.join(os.path.dirname(__file__), filename)
