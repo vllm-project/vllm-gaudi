@@ -4,6 +4,9 @@
 # This source code is licensed under the Apache 2.0 license found in the
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
+import pytest
+from argparse import Namespace
+import vllm
 
 PROMPTS = [
     "Hello, my name is",
@@ -12,25 +15,25 @@ PROMPTS = [
     "The future of AI is",
 ]
 
-# @pytest.mark.xfail(reason="skip, expect fix by SW-241408")
-# @pytest.mark.parametrize(
-#     "model",
-#     [
-#         "intfloat/e5-mistral-7b-instruct",
-#         # "ssmits/Qwen2-7B-Instruct-embed-base",
-#         # "BAAI/bge-multilingual-gemma2",
-#     ])
-# def test_embeddings(model):
 
-#     args = Namespace(model=model, runner="pooling", enforce_eager=True)
-#     llm = vllm.LLM(**vars(args))
+@pytest.mark.parametrize(
+    "model",
+    [
+        "intfloat/e5-mistral-7b-instruct",
+        # "ssmits/Qwen2-7B-Instruct-embed-base",
+        # "BAAI/bge-multilingual-gemma2",
+    ])
+def test_embeddings(model):
 
-#     outputs = llm.embed(PROMPTS)
+    args = Namespace(model=model, runner="pooling", enforce_eager=True)
+    llm = vllm.LLM(**vars(args))
 
-#     assert isinstance(outputs, list)
-#     assert len(outputs) == len(PROMPTS)
+    outputs = llm.embed(PROMPTS)
 
-#     for out in outputs:
-#         emb = out.outputs.embedding
-#         assert isinstance(emb, list)
-#         assert all(isinstance(x, float) for x in emb)
+    assert isinstance(outputs, list)
+    assert len(outputs) == len(PROMPTS)
+
+    for out in outputs:
+        emb = out.outputs.embedding
+        assert isinstance(emb, list)
+        assert all(isinstance(x, float) for x in emb)
