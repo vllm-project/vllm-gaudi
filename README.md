@@ -38,6 +38,7 @@ Learn more:
     cd vllm
     git checkout $VLLM_COMMIT_HASH
     pip install -r <(sed '/^[torch]/d' requirements/build.txt)
+    pip install torch --index-url https://download.pytorch.org/whl/cpu
     VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
     cd ..
     ```
