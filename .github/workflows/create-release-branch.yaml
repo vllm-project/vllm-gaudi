@@ -114,7 +114,7 @@ jobs:
       - name: "Set Final Branch Name Output"
         id: set_final_branch_name
         run: |
-          if [ "${{ steps.check_branch.outputs.exists }}" == 'true' ]; then
+          if [ "${{ steps.check_branch.outputs.exists }}" == "true" ]; then
             echo "branch_name=${{ github.event.inputs.branch_name }}" >> $GITHUB_OUTPUT
           else
             echo "branch_name=pre_${{ github.event.inputs.branch_name }}" >> $GITHUB_OUTPUT
@@ -339,9 +339,13 @@ jobs:
         run: |
           # Start with a clean report file and add the header
           echo "## Test Summary for Branch: ${{ needs.prepare-release-branch.outputs.branch_name }}" > report.md
-          echo "" >> report.md
-          echo "See the full workflow run [here](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})." >> report.md
-          echo "" >> report.md
+          
+          # Append the link to the workflow run using a command group
+          {
+            echo ""
+            echo "See the full workflow run [here](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+            echo ""
+          } >> report.md
           
           FAILED_TESTS=""
           FAILED_COUNT=0
@@ -365,23 +369,24 @@ jobs:
           check_status "PD Disaggregate Test" "${{ needs.run_pd_disaggregate_test.result }}"
           check_status "Performance Tests" "${{ needs.run_hpu_perf_tests.result }}"
           
-          # Append the final summary section to the report file
-          echo "" >> report.md
-          echo "---" >> report.md
-          echo "" >> report.md
-
-          if [ "$FAILED_COUNT" -gt 0 ]; then
-            SUBJECT="❌ Build Failed for ${{ needs.prepare-release-branch.outputs.branch_name }}"
-            echo "**Overall Status: FAILED**" >> report.md
-            echo "" >> report.md
-            echo "**${FAILED_COUNT} job(s) failed:**" >> report.md
-            echo -e "$FAILED_TESTS" >> report.md
-          else
-            SUBJECT="✅ Build Succeeded for ${{ needs.prepare-release-branch.outputs.branch_name }}"
-            echo "**Overall Status: PASSED**" >> report.md
-            echo "" >> report.md
-            echo "All tests passed successfully." >> report.md
-          fi
+          # Append the final summary section to the report file using a command group
+          {
+            echo ""
+            echo "---"
+            echo ""
+            if [ "$FAILED_COUNT" -gt 0 ]; then
+              SUBJECT="❌ Release Build Failed for ${{ needs.prepare-release-branch.outputs.branch_name }}"
+              echo "**Overall Status: FAILED**"
+              echo ""
+              echo "**${FAILED_COUNT} job(s) failed:**"
+              echo -e "$FAILED_TESTS"
+            else
+              SUBJECT="✅ Release Build Succeeded for ${{ needs.prepare-release-branch.outputs.branch_name }}"
+              echo "**Overall Status: PASSED**"
+              echo ""
+              echo "All tests passed successfully."
+            fi
+          } >> report.md
           
           echo "SUBJECT=$SUBJECT" >> "$GITHUB_ENV"
 
