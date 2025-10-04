@@ -115,9 +115,9 @@ jobs:
         id: set_final_branch_name
         run: |
           if [ "${{ steps.check_branch.outputs.exists }}" == "true" ]; then
-            echo "branch_name=${{ github.event.inputs.branch_name }}" >> $GITHUB_OUTPUT
+            echo "branch_name=${{ github.event.inputs.branch_name }}" >> "$GITHUB_OUTPUT"
           else
-            echo "branch_name=pre_${{ github.event.inputs.branch_name }}" >> $GITHUB_OUTPUT
+            echo "branch_name=pre_${{ github.event.inputs.branch_name }}" >> "$GITHUB_OUTPUT"
           fi
 
   setup_and_build:
@@ -387,6 +387,8 @@ jobs:
               echo "All tests passed successfully."
             fi
           } >> report.md
+
+          echo "Tested Branch: ${{ needs.prepare-release-branch.outputs.branch_name }}" >> report.md
           
           echo "SUBJECT=$SUBJECT" >> "$GITHUB_ENV"
 
