@@ -24,7 +24,7 @@ jobs:
     outputs:
       tag_name: ${{ steps.extract_tag.outputs.tag_name }}
       commit_id: ${{ steps.get_vllm_commit.outputs.commit_id }}
-      branch_name: ${{ github.event.inputs.branch_name }}
+      branch_name: ${{ steps.set_final_branch_name.outputs.branch_name }}
 
     steps:
       # Step 1: Check if the target branch already exists on the remote.
@@ -99,16 +99,26 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       # Step 6: Create and push the new branch only if it did not already exist.
-      - name: "Create and Push New Branch"
+      - name: "Create and Push New Branch with Prefix"
         if: steps.check_branch.outputs.exists == 'false'
         run: |
-          BRANCH_NAME="${{ github.event.inputs.branch_name }}"
+          BRANCH_NAME="pre_${{ github.event.inputs.branch_name }}"
           git checkout -b "$BRANCH_NAME"
           echo "${{ steps.get_vllm_commit.outputs.commit_id }}" > VLLM_STABLE_COMMIT
           git add VLLM_STABLE_COMMIT
           git commit -m "Set vLLM stable commit for ${{ steps.extract_tag.outputs.tag_name }}"
           git push -u origin "$BRANCH_NAME"
           echo "✅ Successfully created and pushed new branch '$BRANCH_NAME'."
+
+      # Step 7: Set the final branch name for subsequent jobs
+      - name: "Set Final Branch Name Output"
+        id: set_final_branch_name
+        run: |
+          if [ "${{ steps.check_branch.outputs.exists }}" == "true" ]; then
+            echo "branch_name=${{ github.event.inputs.branch_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "branch_name=pre_${{ github.event.inputs.branch_name }}" >> "$GITHUB_OUTPUT"
+          fi
 
   setup_and_build:
     runs-on: hourly-ci
@@ -314,7 +324,7 @@ jobs:
   summarize_and_notify:
     name: "Summarize Test Results and Notify"
     runs-on: ubuntu-latest
-    if: always()
+    if: needs.prepare-release-branch.result == 'success'
     needs:
       - prepare-release-branch
       - run_unit_tests
@@ -325,20 +335,30 @@ jobs:
     steps:
       - name: "Generate Summary Report"
         id: summary
+        if: needs.prepare-release-branch.result == 'success'
         run: |
-          REPORT_BODY="## Test Summary for Branch: ${{ needs.prepare-release-branch.outputs.branch_name }}\n\n"
-          REPORT_BODY+="See the full workflow run [here](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).\n\n"
+          # Start with a clean report file and add the header
+          echo "## Test Summary for Branch: ${{ needs.prepare-release-branch.outputs.branch_name }}" > report.md
+          
+          # Append the link to the workflow run using a command group
+          {
+            echo ""
+            echo "See the full workflow run [here](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+            echo ""
+          } >> report.md
+          
           FAILED_TESTS=""
           FAILED_COUNT=0
           
+          # This function now appends its result directly to the report file
           check_status() {
             JOB_NAME=$1
             JOB_RESULT=$2
             if [ "$JOB_RESULT" == "success" ]; then
-              REPORT_BODY+="✅ $JOB_NAME: Passed\n"
+              echo "✅ $JOB_NAME: Passed" >> report.md
             else
-              REPORT_BODY+="❌ $JOB_NAME: ${JOB_RESULT^}\n" # Capitalize first letter
-              FAILED_TESTS+="* $JOB_NAME\n"
+              echo "❌ $JOB_NAME: ${JOB_RESULT^}" >> report.md
+              FAILED_TESTS+="* $JOB_NAME\n" # Collect failed test names for the summary
               FAILED_COUNT=$((FAILED_COUNT+1))
             fi
           }
@@ -349,21 +369,26 @@ jobs:
           check_status "PD Disaggregate Test" "${{ needs.run_pd_disaggregate_test.result }}"
           check_status "Performance Tests" "${{ needs.run_hpu_perf_tests.result }}"
           
-          REPORT_BODY+="\n---\n"
-          if [ "$FAILED_COUNT" -gt 0 ]; then
-            SUBJECT="❌ Build Failed for ${{ needs.prepare-release-branch.outputs.branch_name }}"
-            REPORT_BODY+="**Overall Status: FAILED**\n\n"
-            REPORT_BODY+="**${FAILED_COUNT} job(s) failed:**\n"
-            REPORT_BODY+="$FAILED_TESTS"
-          else
-            SUBJECT="✅ Build Succeeded for ${{ needs.prepare-release-branch.outputs.branch_name }}"
-            REPORT_BODY+="**Overall Status: PASSED**\n\nAll tests passed successfully."
-          fi
-          
-          # Use a heredoc to handle multiline report body
-          cat <<EOF > report.md
-          ${REPORT_BODY}
-          EOF
+          # Append the final summary section to the report file using a command group
+          {
+            echo ""
+            echo "---"
+            echo ""
+            if [ "$FAILED_COUNT" -gt 0 ]; then
+              SUBJECT="❌ Release Build Failed for ${{ needs.prepare-release-branch.outputs.branch_name }}"
+              echo "**Overall Status: FAILED**"
+              echo ""
+              echo "**${FAILED_COUNT} job(s) failed:**"
+              echo -e "$FAILED_TESTS"
+            else
+              SUBJECT="✅ Release Build Succeeded for ${{ needs.prepare-release-branch.outputs.branch_name }}"
+              echo "**Overall Status: PASSED**"
+              echo ""
+              echo "All tests passed successfully."
+            fi
+          } >> report.md
+
+          echo "Tested Branch: ${{ needs.prepare-release-branch.outputs.branch_name }}" >> report.md
           
           echo "SUBJECT=$SUBJECT" >> "$GITHUB_ENV"
 
