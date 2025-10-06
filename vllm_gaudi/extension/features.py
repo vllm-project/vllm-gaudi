@@ -23,6 +23,9 @@ def get_user_flags():
         Env('VLLM_PROMPT_SEQ_BUCKET_STEP', int),
         Env('VLLM_PROMPT_SEQ_BUCKET_MAX', int),
         Env('VLLM_PROMPT_SEQ_BUCKET_LIMIT', int),
+        Env('VLLM_PROMPT_CTX_BUCKET_MIN', int),
+        Env('VLLM_PROMPT_CTX_BUCKET_STEP', int),
+        Env('VLLM_PROMPT_CTX_BUCKET_MAX', int),
         Env('VLLM_DECODE_BS_BUCKET_MIN', int),
         Env('VLLM_DECODE_BS_BUCKET_STEP', int),
         Env('VLLM_DECODE_BS_BUCKET_MAX', int),
@@ -83,6 +86,6 @@ def get_features():
         Value('fullgraph_compilation', False, env_var='VLLM_T_COMPILE_FULLGRAPH', env_var_type=boolean),
         Value('unified_attn', False),
         Value('scale_adjustment', True, env_var='VLLM_SCALE_ADJUSTMENT', env_var_type=boolean),
-        Value('flatten_input', ModelType('qwen3_moe')),
+        Value('flatten_input', Any(ModelType('qwen3_moe'), ModelType('granitemoe'), ModelType('glm4_moe'))),
     ]
     return split_values_and_flags(features)

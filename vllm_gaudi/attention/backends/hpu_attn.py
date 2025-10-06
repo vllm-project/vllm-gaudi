@@ -18,7 +18,6 @@ from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, ModuleFusedSDPA, Soft
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl, AttentionLayer, AttentionMetadata,
                                               AttentionType)
 from vllm.v1.attention.backends.mla.common import MLACommonImpl
-from vllm.attention.backends.utils import CommonAttentionState
 from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention, HPUPagedAttentionMetadata,
                                                      HPUPagedAttentionMetadataBuilder)
 
@@ -41,10 +40,6 @@ class HPUAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
-        raise NotImplementedError()
-
-    @staticmethod
-    def get_state_cls() -> type["CommonAttentionState"]:
         raise NotImplementedError()
 
     @staticmethod
@@ -122,6 +117,7 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
     block_size: int
+    slot_mapping: torch.Tensor
     attn_bias: Optional[torch.Tensor]
     seq_lens_tensor: Optional[torch.Tensor]
     context_lens_tensor: Optional[torch.Tensor]
@@ -171,6 +167,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         qk_head_dim: int,
         v_head_dim: int,
         kv_b_proj: ColumnParallelLinear,
+        **kwargs,
     ) -> None:
         torch.nn.Module.__init__(self)
 
@@ -349,6 +346,17 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                                                   kv_lora_rank=self.kv_lora_rank)
         result = self._v_up_proj(output)
         return result
+
+    # NOTE(Chendi): PR25184 using output buffer as default, which can't be used in HPU Graph,
+    # so we override and always return a new tensor
+    def _v_up_proj(self, x):
+        # Convert from (B, N, L) to (N, B, L)
+        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+        # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
+        x = torch.bmm(x, self.W_UV)
+        # Convert from (N, B, V) to (B, N * V)
+        x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+        return x
 
 
 class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
@@ -560,8 +568,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             block_list = attn_metadata.block_list if attn_metadata \
                 and attn_metadata.block_list is not None else None
 
-            if self.sliding_window \
-               and attn_metadata.window_attn_bias is not None:
+            common_args = self.common_attention_args(block_list, key_cache, value_cache, attn_metadata.block_size)
+
+            if self.sliding_window and hasattr(attn_metadata,
+                                               'window_attn_bias') and attn_metadata.window_attn_bias is not None:
                 attn_bias = attn_metadata.window_attn_bias
 
             out = ops.prompt_attention(impl=self.prefill_impl,
@@ -572,22 +582,22 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                        attn_bias=attn_bias,
                                        position_bias=position_bias,
                                        valid_seq_lengths=attn_metadata.seq_lens_tensor,
-                                       **self.common_attention_args(block_list, key_cache, value_cache,
-                                                                    attn_metadata.block_size))
+                                       **common_args)
 
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
             # Decoding run.
-            if not self.sliding_window:
-                block_list = attn_metadata.block_list
-                block_groups = attn_metadata.block_groups
-                block_mapping = attn_metadata.block_mapping
-                attn_bias = attn_metadata.attn_bias
-            else:
+            if self.sliding_window and \
+                attn_metadata.window_block_list is not None:
                 block_list = attn_metadata.window_block_list
                 block_groups = attn_metadata.window_block_groups
                 block_mapping = attn_metadata.window_block_mapping
                 attn_bias = attn_metadata.window_attn_bias
+            else:
+                block_list = attn_metadata.block_list
+                block_groups = attn_metadata.block_groups
+                block_mapping = attn_metadata.block_mapping
+                attn_bias = attn_metadata.attn_bias
 
             self.position_bias = None
             alibi_blocks = getattr(attn_metadata, 'alibi_blocks', None)
