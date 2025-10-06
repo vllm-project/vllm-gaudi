@@ -3,7 +3,7 @@ title: Troubleshooting
 ---
 [](){ #troubleshooting }
 
-1. My FP8 model is not working when torch compiled with following error:
+1. My FP8 model is not working when torch compile is enabled with following error:
 
 ```
 AssertionError: Scaling method "ScaleMethodString.ACT_MAXABS_PCS_POW2_WEIGHT_MAXABS_PTS_POW2_HW" is not supported for runtime scale patching (graph recompile reduction)
