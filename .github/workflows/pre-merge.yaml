@@ -22,6 +22,7 @@ concurrency:
 jobs:
   gatekeeper:
     runs-on: ubuntu-latest
+    if: github.event.action == 'opened' || github.event.before != github.event.after
     permissions:
       # Required to read the status of checks and PR details
       checks: read
