@@ -36,7 +36,6 @@ class HPUScheduler(Scheduler):
             include_finished_set=include_finished_set,
             log_stats=log_stats,
         )
-        #        return
         self.kv_cache_manager = HPUKVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,

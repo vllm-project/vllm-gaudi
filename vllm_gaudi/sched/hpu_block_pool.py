@@ -4,6 +4,7 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock, )
 from vllm.distributed.kv_events import (
     KVCacheEvent, )
+from vllm_gaudi.sched.hpu_block_queue import HPUFreeKVCacheBlockQueue
 
 logger = init_logger()
 
@@ -26,10 +27,10 @@ class HPUBlockPool(BlockPool):
         # Free block queue that constructs and manipulates a doubly linked
         # list of free blocks (including eviction candidates when caching is
         # enabled).
-        from vllm.v1.core.kv_cache_utils import FreeKVCacheBlockQueue
-        self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
+        #from vllm.v1.core.kv_cache_utils import FreeKVCacheBlockQueue
+        #elf.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
 
-        #        self.free_block_queue = HPUFreeKVCacheBlockQueue(self.blocks)
+        self.free_block_queue = HPUFreeKVCacheBlockQueue(self.blocks)
 
         # Cache for block lookup
         self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()

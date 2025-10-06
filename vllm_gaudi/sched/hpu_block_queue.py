@@ -8,14 +8,30 @@ import os
 logger = init_logger()
 
 
-def ensure_sorted(first_block: KVCacheBlock, last_block: KVCacheBlock):
+def ensure_valid_and_sorted(first_block: KVCacheBlock, last_block: KVCacheBlock):
     current_block = first_block
+    fwd_blocks = []
     while current_block is not None and current_block != last_block:
         if current_block.next_free_block is None:
             raise RuntimeError("The blocks are not properly linked.")
         if current_block.block_id > current_block.next_free_block.block_id:
             raise RuntimeError("The blocks are not sorted by block_id.")
+        fwd_blocks.append(current_block)
         current_block = current_block.next_free_block
+    fwd_blocks.append(current_block)
+    bwd_blocks = []
+    current_block = last_block
+    while current_block is not None and current_block != first_block:
+        if current_block.prev_free_block is None:
+            raise RuntimeError("The blocks are not properly linked.")
+        if current_block.block_id < current_block.prev_free_block.block_id:
+            raise RuntimeError("The blocks are not sorted by block_id.")
+        bwd_blocks.append(current_block)
+        current_block = current_block.prev_free_block
+    bwd_blocks.append(current_block)
+    bwd_blocks.reverse()
+    if fwd_blocks != bwd_blocks:
+        raise RuntimeError("The blocks are not properly linked.")
 
 
 def wrapper(method):
@@ -24,12 +40,12 @@ def wrapper(method):
     def wrapped(self, *args, **kwargs):
         first_block: KVCacheBlock = self.fake_free_list_head.next_free_block
         last_block: KVCacheBlock = self.fake_free_list_tail.prev_free_block
-        ensure_sorted(first_block, last_block)
+        ensure_valid_and_sorted(first_block, last_block)
         out = method(self, *args, **kwargs)
 
         first_block: KVCacheBlock = self.fake_free_list_head.next_free_block
         last_block: KVCacheBlock = self.fake_free_list_tail.prev_free_block
-        ensure_sorted(first_block, last_block)
+        ensure_valid_and_sorted(first_block, last_block)
         return out
 
     return wrapped
@@ -40,6 +56,8 @@ class DebuggingMetaClass(type):
     def __new__(meta, classname, bases, classDict):
         enable_debugging = os.environ.get("VLLM_HPU_BLOCK_QUEUE_DEBUG",
                                           '').lower() in ("y", "yes", "t", "true", "on", "1")
+        if enable_debugging:
+            logger.warning("HPUFreeKVCacheBlockQueue debugging is enabled. This will impact the performance severely.")
         newClassDict = {}
         for attributeName, attribute in classDict.items():
             # Wrap non-constructor methods with the debugging wrapper checking for sortedness
