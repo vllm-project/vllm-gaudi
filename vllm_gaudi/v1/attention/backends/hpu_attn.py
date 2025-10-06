@@ -9,9 +9,8 @@ from typing import Optional
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionMetadata
-from vllm_gaudi.attention.backends.hpu_attn import (HPUAttentionBackend,
-                                                    HPUAttentionMetadata)
+from vllm.attention.backends.abstract import AttentionMetadata, AttentionImpl
+from vllm_gaudi.attention.backends.hpu_attn import (HPUAttentionBackend, HPUAttentionImpl, HPUAttentionMetadata)
 from vllm_gaudi.extension.logger import logger as init_logger
 
 logger = init_logger()
@@ -22,6 +21,10 @@ class HPUAttentionBackendV1(HPUAttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "HPU_ATTN_V1"
+
+    @staticmethod
+    def get_impl_cls() -> type["AttentionImpl"]:
+        return HPUAttentionImpl
 
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
@@ -38,8 +41,15 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
 
     seq_lens_tensor: Optional[torch.Tensor]
     context_lens_tensor: Optional[torch.Tensor]
-
     query_start_loc: Optional[torch.Tensor] = None
+
+    def seq_len(self):
+        return self.slot_mapping.size(-1)
+
+    def num_blocks(self):
+        if self.block_list is None:
+            return 0
+        return self.block_list.numel()
 
     @classmethod
     def make_prefill_metadata(cls,
@@ -50,25 +60,19 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                               slot_mapping,
                               block_size,
                               query_start_loc=None):
-        return cls(
-            is_prompt=True,
-            block_list=block_list,
-            block_mapping=None,
-            block_usage=None,
-            block_groups=None,
-            attn_bias=attn_bias,
-            alibi_blocks=None,
-            num_decode_tokens=0,
-            context_lens_tensor=context_lens_tensor,
-            seq_lens_tensor=seq_lens_tensor,
-            multi_modal_placeholder_index_maps=None,
-            num_prefills=0,  # ignored on HPU
-            num_prefill_tokens=0,  # ignored on HPU
-            input_positions=None,
-            slot_mapping=slot_mapping,
-            enable_kv_scales_calculation=False,
-            block_size=block_size,
-            query_start_loc=query_start_loc)
+        return cls(is_prompt=True,
+                   block_list=block_list,
+                   block_mapping=None,
+                   block_usage=None,
+                   block_groups=None,
+                   attn_bias=attn_bias,
+                   alibi_blocks=None,
+                   context_lens_tensor=context_lens_tensor,
+                   seq_lens_tensor=seq_lens_tensor,
+                   input_positions=None,
+                   slot_mapping=slot_mapping,
+                   block_size=block_size,
+                   query_start_loc=query_start_loc)
 
     @classmethod
     def make_decode_metadata(cls,
@@ -76,26 +80,25 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                              block_usage,
                              block_groups,
                              input_positions,
-                             num_decode_tokens,
                              slot_mapping,
                              block_size,
+                             window_block_list,
+                             window_block_usage,
+                             window_block_groups,
                              query_start_loc=None):
-        return cls(
-            is_prompt=False,
-            block_mapping=None,
-            alibi_blocks=None,
-            attn_bias=None,
-            seq_lens_tensor=None,
-            context_lens_tensor=None,
-            num_prefills=0,  # ignored on HPU
-            num_prefill_tokens=0,  # ignored on HPU
-            multi_modal_placeholder_index_maps=None,
-            block_list=block_list,
-            block_usage=block_usage,
-            block_groups=block_groups,
-            input_positions=input_positions,
-            num_decode_tokens=num_decode_tokens,
-            slot_mapping=slot_mapping,
-            enable_kv_scales_calculation=False,
-            block_size=block_size,
-            query_start_loc=query_start_loc)
+        return cls(is_prompt=False,
+                   block_mapping=None,
+                   alibi_blocks=None,
+                   attn_bias=None,
+                   seq_lens_tensor=None,
+                   context_lens_tensor=None,
+                   block_list=block_list,
+                   block_usage=block_usage,
+                   block_groups=block_groups,
+                   window_block_list=window_block_list,
+                   window_block_usage=window_block_usage,
+                   window_block_groups=window_block_groups,
+                   input_positions=input_positions,
+                   slot_mapping=slot_mapping,
+                   block_size=block_size,
+                   query_start_loc=query_start_loc)

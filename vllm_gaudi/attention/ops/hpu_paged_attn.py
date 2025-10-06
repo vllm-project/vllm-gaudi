@@ -24,6 +24,28 @@ class HPUPagedAttentionMetadata:
     alibi_blocks: Optional[torch.Tensor]
 
 
+@dataclass
+class HPUPagedAttentionMetadataBuilder:
+
+    def __init__(self, input_builder: "HPUPageAttentionInputBuilderBase") -> None:
+        """Create the builder, remember some configuration and parameters."""
+        self.input_builder = input_builder
+
+    def prepare(self) -> None:
+        """Prepare for one batch."""
+        pass
+
+    def build(self, seq_lens: list[int], query_lens: list[int], cuda_graph_pad_size: int,
+              batch_size: int) -> type[HPUPagedAttentionMetadata]:
+        """Build attention metadata with on-device tensors."""
+        return HPUPagedAttentionMetadata
+
+
+@dataclass
+class HPUPageAttentionInputBuilderBase:
+    pass
+
+
 class HPUPagedAttention:
 
     @staticmethod
@@ -50,13 +72,9 @@ class HPUPagedAttention:
         return key_cache, value_cache
 
     @staticmethod
-    def write_to_paged_cache(key: torch.Tensor, value: torch.Tensor,
-                             key_cache: torch.Tensor,
-                             value_cache: torch.Tensor,
-                             slot_mapping: torch.Tensor, kv_cache_dtype: str,
-                             is_prompt: bool) -> None:
-        cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
-                                    slot_mapping, kv_cache_dtype, is_prompt)
+    def write_to_paged_cache(key: torch.Tensor, value: torch.Tensor, key_cache: torch.Tensor, value_cache: torch.Tensor,
+                             slot_mapping: torch.Tensor, kv_cache_dtype: str, is_prompt: bool) -> None:
+        cache_ops.reshape_and_cache(key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype, is_prompt)
 
     @staticmethod
     def forward_decode(**kwargs) -> torch.Tensor:

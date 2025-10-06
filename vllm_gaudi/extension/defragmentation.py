@@ -60,6 +60,7 @@ class OnlineDefragmenter:
     def __init__(self):
         config = get_config()
         self.threshold = with_default(config.VLLM_DEFRAG_THRESHOLD, 32)
+        self.to_swap_pad_thresholds = [8, 16, 32, 64, 128, 256, 512]
         self.used_blocks = {}
         self.req_blocks = {}
         self.fwd_mapping_table = []
@@ -75,36 +76,45 @@ class OnlineDefragmenter:
         if self.graphed:
             config = get_config()
             if config.bridge_mode == 'lazy':
-                self.cache_utils = htorch.hpu.wrap_in_hpu_graph(
-                    self.cache_utils, disable_tensor_cache=True)
+                self.cache_utils = htorch.hpu.wrap_in_hpu_graph(self.cache_utils, disable_tensor_cache=True)
             elif config.bridge_mode == 'eager':
                 self.cache_utils.forward = torch.compile(self.cache_utils.forward,
-                                                        backend='hpu_backend',
-                                                        fullgraph=True,
-                                                        dynamic=False)
+                                                         backend='hpu_backend',
+                                                         fullgraph=True,
+                                                         dynamic=False)
         if self.debug:
             self.debug('initialized')
 
     def _extend_mapping_table(self, block_id: int):
         """ Make sure mapping_tables are big enough to hold block_id """
         if len(self.fwd_mapping_table) <= block_id:
-            self.fwd_mapping_table.extend(
-                range(len(self.fwd_mapping_table), block_id + 1))
-            self.bwd_mapping_table.extend(
-                range(len(self.bwd_mapping_table), block_id + 1))
+            self.fwd_mapping_table.extend(range(len(self.fwd_mapping_table), block_id + 1))
+            self.bwd_mapping_table.extend(range(len(self.bwd_mapping_table), block_id + 1))
+
+    def get_ref_count(self, block_id):
+        return self.used_blocks.get(block_id, 0)
+
+    def set_ref_count(self, block_id, ref_count):
+        if ref_count <= 0:
+            del self.used_blocks[block_id]
+        else:
+            self.used_blocks[block_id] = ref_count
+
+    def swap_refs(self, block_a, block_b):
+        a_refs = self.get_ref_count(block_a)
+        b_refs = self.get_ref_count(block_b)
+        self.set_ref_count(block_a, b_refs)
+        self.set_ref_count(block_b, a_refs)
 
     def use_block(self, block_id: int):
         """ Increase ref-count for block_id """
-        num_refs = self.used_blocks.get(block_id, 0) + 1
-        self.used_blocks[block_id] = num_refs
+        num_refs = self.get_ref_count(block_id) + 1
+        self.set_ref_count(block_id, num_refs)
 
     def free_block(self, block_id: int):
         """ Decrease ref-count for block_id """
-        num_refs = self.used_blocks[block_id] - 1
-        if num_refs <= 0:
-            del self.used_blocks[block_id]
-        else:
-            self.used_blocks[block_id] = num_refs
+        num_refs = self.get_ref_count(block_id) - 1
+        self.set_ref_count(block_id, num_refs)
 
     def resolve(self, block_id: int) -> int:
         """ Apply block_id mapping """
@@ -165,6 +175,7 @@ class OnlineDefragmenter:
         max_used = max(self.used_blocks.keys())
         num_used = len(self.used_blocks)
         pre_max_used = max_used
+        # Use threshold for fragmentation trigger
         if max_used - self.threshold <= num_used:
             return
         free = self.free_blocks()
@@ -172,24 +183,25 @@ class OnlineDefragmenter:
 
         to_swap: list[tuple[int, int]] = []
         for used_block, free_block in zip(used, free):
-            if len(to_swap) == self.threshold or free_block > used_block:
+            if len(to_swap) == self.to_swap_pad_thresholds[-1] or free_block > used_block:
                 break
             assert used_block in self.used_blocks
             assert free_block not in self.used_blocks
             to_swap.append((used_block, free_block))
 
         for used_block, free_block in to_swap:
-            self.free_block(used_block)
-            self.use_block(free_block)
+            self.swap_refs(used_block, free_block)
             orig_used_block = self.unresolve(used_block)
             orig_free_block = self.unresolve(free_block)
             self.update_mapping(orig_used_block, free_block)
             self.update_mapping(orig_free_block, used_block)
 
         assert self.cache_utils is not None
-        self.cache_utils.swap(to_swap, self.threshold)
+        to_swap_pad = next((x for x in self.to_swap_pad_thresholds if x >= len(to_swap)),
+                           self.to_swap_pad_thresholds[-1])
+        self.cache_utils.swap(to_swap, to_swap_pad)
         if self.debug:
             max_used = max(self.used_blocks.keys())
             num_used = len(self.used_blocks)
-            post_status = f'max_id_used={pre_max_used}->{max_used} num_used={num_used} swapped={len(to_swap)}/{self.threshold}'
+            post_status = f'max_id_used={pre_max_used}->{max_used} num_used={num_used} swapped={len(to_swap)}/{to_swap_pad}'
             self.debug(f'defragmentation done {post_status}')
