@@ -1,12 +1,9 @@
 from vllm_gaudi.platform import HpuPlatform
-import os
 
 
 def register():
     """Register the HPU platform."""
     HpuPlatform.set_torch_compile()
-    if os.getenv("VLLM_WEIGHT_LOAD_FORCE_SYNC", "false").lower() in ("true", "1"):
-        HpuPlatform.set_synchronized_weight_loader()
     return "vllm_gaudi.platform.HpuPlatform"
 
 
@@ -22,3 +19,4 @@ def register_ops():
     import vllm_gaudi.ops.hpu_fp8  # noqa: F401
     import vllm_gaudi.ops.hpu_gptq  # noqa: F401
     import vllm_gaudi.ops.hpu_awq  # noqa: F401
+    import vllm_gaudi.ops.hpu_multihead_attn  # noqa: F401
