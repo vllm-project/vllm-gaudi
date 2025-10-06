@@ -4067,10 +4067,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         dummy_mm_item = dummy_mm_data[modality][0]
         dummy_mm_items = [dummy_mm_item] * max_items_per_batch
 
+        self.model.model = cast(SupportsMultiModal, self.model.model)
         return next(mm_kwargs_group for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
             dummy_mm_items,
             device=self.device,
             pin_memory=self.pin_memory,
+            merge_by_field_config=self.model.model.merge_by_field_config,
         ))
 
     def warmup_multimodal_graphs(self, buckets):
