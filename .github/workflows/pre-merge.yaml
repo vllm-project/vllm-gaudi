@@ -2,8 +2,10 @@ name: Basic HPU test suite
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    branches: 
+      - main
+      - releases/**
 
   # Allow manual triggering for testing purposes
   workflow_dispatch: {}
@@ -20,6 +22,7 @@ concurrency:
 jobs:
   gatekeeper:
     runs-on: ubuntu-latest
+    if: github.event.action == 'opened' || github.event.before != github.event.after
     permissions:
       # Required to read the status of checks and PR details
       checks: read
@@ -38,41 +41,6 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           clean: true # Ensure a clean workspace before checkout
           fetch-depth: 0
-      - name: Wait for DCO check to complete
-        id: wait_for_dco
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "Waiting for DCO check to complete..."
-          CONCLUSION=""
-          ATTEMPTS=0
-          MAX_ATTEMPTS=2 # 2 attempts * 20 seconds = 40 seconds timeout
-
-          # Poll every 20 seconds until the check is no longer in progress
-          while [[ -z "$CONCLUSION" || "$CONCLUSION" == "null" ]]; do
-            if [ $ATTEMPTS -ge $MAX_ATTEMPTS ]; then
-              echo "::error::Timed out waiting for DCO check to complete."
-              CONCLUSION="timed_out"
-              break
-            fi
-
-            sleep 20
-            
-            # Fetch all checks for the PR's head SHA
-            CHECKS_JSON=$(gh api "repos/${{ github.repository }}/commits/${{ github.event.pull_request.head.sha }}/check-runs")
-            
-            # Find the DCO check's conclusion and status in one go
-            DCO_CHECK=$(echo "$CHECKS_JSON" | jq '.check_runs[] | select(.name == "DCO")')
-            CONCLUSION=$(echo "$DCO_CHECK" | jq -r '.conclusion')
-            STATUS=$(echo "$DCO_CHECK" | jq -r '.status')
-            
-            echo "Current DCO status: $STATUS"
-            ATTEMPTS=$((ATTEMPTS + 1))
-          done
-          
-          echo "DCO check finished with conclusion: $CONCLUSION"
-          echo "conclusion=$CONCLUSION" >> "$GITHUB_OUTPUT"
 
       - name: Check for other blocking conditions
         id: check_conditions
@@ -98,10 +66,7 @@ jobs:
           # --- End of new check ---
 
 
-          if [[ "${{ steps.wait_for_dco.outputs.conclusion }}" != "success" ]]; then
-            BLOCKING_REASON="The **DCO sign-off** check did not pass (status: ${{ steps.wait_for_dco.outputs.conclusion }}). Please ensure all commits are signed-off."
-
-          elif [[ "${{ github.event.pull_request.draft }}" == "true" ]]; then
+          if [[ "${{ github.event.pull_request.draft }}" == "true" ]]; then
             BLOCKING_REASON="This is a **Draft PR**. Please mark it as 'Ready for Review' to trigger the CI."
 
           # Use the 'gh' CLI to fetch the LIVE mergeable state after the sleep
@@ -197,38 +162,82 @@ jobs:
         with:
           extra_args: --all-files --hook-stage manual
 
+  check-run-ci:
+    name: Check for relevant file changes
+    runs-on: ubuntu-latest
+    outputs:
+      # This output will be 'true' if files in the specified paths changed
+      run_gaudi_job: ${{ steps.changed-files.outputs.any_changed }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Fetches the entire history to compare against the base of the PR
+          fetch-depth: 0
+
+      - name: Check for changes in specific paths
+        id: changed-files
+        uses: tj-actions/changed-files@v44
+        with:
+          files: |
+            vllm-gaudi/**
+            tests/**
+
   pre_merge_hpu_test_build:
+    if: >
+        needs.check-run-ci.outputs.run_gaudi_job == 'true' &&
+        !contains(github.event.pull_request.labels.*.name, 'skip-gaudi-tests')
     runs-on: ucb-vllm-cicd-g2
-    needs: [pre-commit, discover_tests]
+    needs: [check-run-ci, pre-commit, discover_tests]
     permissions:
       contents: read # Required to checkout code and read history
     outputs:
       target_commit: ${{ steps.checkout_vllm_upstream.outputs.TEST_VLLM_COMMIT }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Fetch full history for accurate commit comparison
+          ref: ${{ github.event.pull_request.head.sha }}
+          clean: true # Ensure a clean workspace before checkout
       - name: Read Stable Commit from Target Branch
         id: read_stable_commit
         run: |
-          TARGET_BRANCH="vllm/last-good-commit-for-vllm-gaudi"
           TARGET_FILE="VLLM_STABLE_COMMIT"
-          
-          echo "Attempting to read $TARGET_FILE from branch $TARGET_BRANCH..."
-          
-          # Fetch the specific branch; `|| true` prevents failure if the branch doesn't exist
-          git fetch origin "$TARGET_BRANCH" --no-tags --depth=1 || true
-          
-          # Try to read the file; `|| COMMIT_HASH=""` prevents failure if the file doesn't exist
-          COMMIT_HASH=$(git show "origin/$TARGET_BRANCH:$TARGET_FILE" 2>/dev/null) || COMMIT_HASH=""
-          
-          # Clean up any extra whitespace
-          COMMIT_HASH=$(echo "$COMMIT_HASH" | tr -d '[:space:]')
-          
-          if [ -z "$COMMIT_HASH" ]; then
-            echo "::warning::Stable commit hash not found or file is empty."
+          COMMIT_HASH=""
+
+          # 1. Primary Check: Look in the current branch
+          echo "INFO: Checking for '$TARGET_FILE' in the current branch..."
+          if [ -f "$TARGET_FILE" ]; then
+            COMMIT_HASH=$(tr -d '[:space:]' < "$TARGET_FILE")
+            if [ -n "$COMMIT_HASH" ]; then
+              echo "✅ Found stable commit in current branch: $COMMIT_HASH"
+            else
+              echo "::warning:: File '$TARGET_FILE' is empty in current branch. Proceeding to fallback."
+            fi
           else
-            echo "Stable commit hash recorded: $COMMIT_HASH"
+            echo "INFO: File not found in current branch. Proceeding to fallback."
+          fi
+
+          # 2. Fallback Check: Look in the remote branch if the first check failed
+          if [ -z "$COMMIT_HASH" ]; then
+            TARGET_BRANCH="vllm/last-good-commit-for-vllm-gaudi"
+            echo "➡️ Fallback: Attempting to read '$TARGET_FILE' from branch '$TARGET_BRANCH'..."
+            
+            git fetch origin "$TARGET_BRANCH" --no-tags --depth=1 || true
+            
+            # Read file from the remote branch; suppress errors if not found
+            COMMIT_HASH=$(git show "origin/$TARGET_BRANCH:$TARGET_FILE" 2>/dev/null) || COMMIT_HASH=""
+            COMMIT_HASH=$(echo "$COMMIT_HASH" | tr -d '[:space:]')
+            
+            if [ -n "$COMMIT_HASH" ]; then
+              echo "✅ Found stable commit in fallback branch: $COMMIT_HASH"
+            else
+              echo "::error:: Fallback failed. Could not find a valid commit hash in either location."
+            fi
           fi
           
-          # Save the hash (or an empty string) to an environment variable
+          # 3. Export the final result
           echo "VLLM_STABLE_COMMIT=$COMMIT_HASH" >> "$GITHUB_ENV"
       - name: Determine Target Commit Based on PR Title
         id: determine_commit
@@ -293,7 +302,7 @@ jobs:
             -f - . <<EOF
           FROM vault.habana.ai/gaudi-docker/1.22.0/ubuntu24.04/habanalabs/pytorch-installer-2.7.1:latest
 
-          ARG VLLM_COMMIT_ARG=main
+          ARG VLLM_COMMIT_ARG
 
           COPY ./ /workspace/vllm-gaudi
           WORKDIR /workspace
@@ -371,9 +380,10 @@ jobs:
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
+            -v /mnt/wheels_cache:/workspace/wheels_cache \
             hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
             /bin/bash -c "
-                pip install nixl==0.5.0 lm-eval[api] &&
+                pip install lm-eval[api] &&
                 cd /workspace/vllm-gaudi/tests/unit_tests &&
                 ./run_accuracy_test.sh
             "
