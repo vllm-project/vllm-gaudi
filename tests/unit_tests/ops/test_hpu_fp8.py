@@ -31,7 +31,7 @@ def test_fp8_linear_method(dist_init, monkeypatch):
                                disable_tp=False).to("hpu")
     assert isinstance(oot_op.quant_method, Fp8LinearMethod)
 
-    # Load weight and weight_scale_inv were extracted from first RowParallelLinear layer of Qwen/Qwen3-8B-FP8
+    # Weight and weight_scale_inv were extracted from first RowParallelLinear layer of Qwen/Qwen3-8B-FP8
     # (with adjusted shapes, to make tensors smaller)
     weight = torch.load(get_data_path("data/fp8/linear_weight.pt"), weights_only=False, map_location="hpu")
     oot_op.weight.copy_(weight)
@@ -57,7 +57,7 @@ def test_fp8_linear_method(dist_init, monkeypatch):
     out = oot_op(input)
 
     # Check correctness
-    torch.testing.assert_close(ref_output, out, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(ref_output, out, atol=1e-3, rtol=1e-3)
 
 
 def test_fp8_moe_method(dist_init, monkeypatch):
@@ -95,7 +95,9 @@ def test_fp8_moe_method(dist_init, monkeypatch):
                       enable_eplb=False,
                       num_redundant_experts=0,
                       has_bias=False,
-                      is_sequence_parallel=False).to("hpu")
+                      is_sequence_parallel=False,
+                      zero_expert_num=0,
+                      zero_expert_type=None).to("hpu")
     assert isinstance(oot_op.quant_method, HPUFp8MoEMethod)
 
     # Weights were extracted from first FusedMoE layer of Qwen/Qwen3-30B-A3B-FP8
