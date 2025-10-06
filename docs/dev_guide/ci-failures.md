@@ -31,7 +31,11 @@ Additional Gaudi tests are expectd to pass but aren't mandatory. Those tests are
 All PRs that do not interfere in code, like docstring changes or README updates can be merged without HPU tests and Gaudi tests. It is still required to pass pre-commit check.
 
 ## Hourly Checks and Tests
-On vllm-gaudi repository hourly tests can be found in ```Hourly Commit Check and Tests``` under ```Actions``` tab. 
+On vllm-gaudi repository hourly tests can be found in ```Hourly Commit Check and Tests``` under ```Actions``` tab. This tab also allows developers to manually trigger hourly tests on selected branch.
+
+If the last hourly test is failing it means that vllm-gaudi main branch doesn't work with upstream newest main commit. To find last good commit check [last good commit](https://github.com/vllm-project/vllm-gaudi/blob/vllm/last-good-commit-for-vllm-gaudi/VLLM_STABLE_COMMIT).
+
+Failing hourly checks will be fixed by developers as soon as possible.
 
 ## Troubleshooting
 ### Unreleated failures
