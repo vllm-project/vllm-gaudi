@@ -244,22 +244,21 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
         candidates = [(bs_idx, query_idx), (bs_idx + 1, query_idx), (bs_idx, query_idx + 1),
                       (bs_idx + 1, query_idx + 1)]
         valid_candidates = [(b_idx, q_idx) for b_idx, q_idx in candidates
-                            if (b_idx < len(bs_range) and q_idx < len(query_range))
-                            and not_over_max_num_batched_tokens(bs_range[b_idx], query_range[q_idx])]
+                            if (b_idx < len(bs_range) and q_idx < len(query_range))]
         return {(bs_range[b_idx], query_range[q_idx]) for b_idx, q_idx in valid_candidates}
 
     # filter rules for buckets
     # prompt
     def not_over_max_model_len(bs, query, ctx):
-        if not query + ctx * block_size <= max_model_len:
+        if not bs * (query + ctx * block_size) <= max_model_len:
             omitted_buckets.add(
-                ("condition: query + ctx * block_size <= max_model_len", "-> bs, quesry, ctx: ", bs, query, ctx))
-        return query + ctx * block_size <= max_model_len
+                ("condition: bs * (query + ctx * block_size) <= max_model_len", "-> bs, query, ctx: ", bs, query, ctx))
+        return bs * (query + ctx * block_size) <= max_model_len
 
-    def not_over_max_num_batched_tokens(bs, query):
+    def not_over_max_num_batched_tokens(bs, query, ctx):
         if not bs * query <= max_num_batched_tokens:
-            omitted_buckets.add(("bs_range[bs_idx] * query_range[query_idx] <= max_num_batched_tokens",
-                                 "-> bs, query: ", bs_idx, query_idx))
+            omitted_buckets.add(
+                ("condition: bs * query <= max_num_batched_tokens", "-> bs, query, ctx: ", bs, query, ctx))
         return bs * query <= max_num_batched_tokens
 
     def ctx_not_over_max_ctx_for_merged_prefill(bs, query, ctx):
@@ -287,7 +286,7 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
         "prompt": {
             # depends only on merged_prefill
             True: [ctx_not_over_max_ctx_for_merged_prefill],
-            False: [not_over_max_model_len],
+            False: [not_over_max_model_len, not_over_max_num_batched_tokens],
         },
         "decode": {
             # depends only on contiguous PA
