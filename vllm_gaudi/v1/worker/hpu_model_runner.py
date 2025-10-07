@@ -3636,8 +3636,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         num_candidates = len(buckets)
         captured_all = True
         for idx, (batch_size, seq_len, num_blocks) in enumerate(reversed(buckets)):
-            if seq_len > self.max_num_tokens:
-                continue
             # Graph memory usage is proportional to seq dimension in a batch
             phase = f"Graph/{'prompt' if is_prompt else 'decode'}"
             if is_prompt:
@@ -3996,6 +3994,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     logitsprocs=build_logitsprocs(self.vllm_config, self.device, self.pin_memory, self.is_pooling_model,
                                                   self.vllm_config.model_config.logits_processors),
                 )
+
+        # adjust positions_cpu to fit biggest possible bucket (can be over token budget)
+        max_num_tokens = self.bucketing_manager.get_max_prompt_shape()
+        self.positions_cpu = torch.zeros(max_num_tokens,
+                                         dtype=torch.int64,
+                                         device="cpu",
+                                         pin_memory=self.pin_memory)
+        self.positions_np = self.positions_cpu.numpy()
 
         self.defragmenter.initialize(self.kv_caches, self.block_size)
 
