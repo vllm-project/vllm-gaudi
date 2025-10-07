@@ -146,7 +146,7 @@ Skipping the sampler warm-up does not affect correctness—only the latency prof
 
 ### How to Turn It Off
 
-There is no dedicated flag for the sampler alone. It participates in the global warm-up sequence and is skipped whe:
+There is no dedicated flag for the sampler alone. It participates in the global warm-up sequence and is skipped when:
 
 * `VLLM_SKIP_WARMUP=true` is set.
 * The engine is configured to enforce eager execution in a mode where no graph capture/compilation is desired (sampler still runs the first time on demand, but without a separate warm-up call).
