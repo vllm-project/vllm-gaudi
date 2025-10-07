@@ -78,10 +78,7 @@ class OnlineDefragmenter:
             if config.bridge_mode == 'lazy':
                 self.cache_utils = htorch.hpu.wrap_in_hpu_graph(self.cache_utils, disable_tensor_cache=True)
             elif config.bridge_mode == 'eager':
-                self.cache_utils.forward = torch.compile(self.cache_utils.forward,
-                                                         backend='hpu_backend',
-                                                         fullgraph=True,
-                                                         dynamic=False)
+                self.cache_utils = torch.compile(self.cache_utils, backend='hpu_backend', fullgraph=True, dynamic=False)
         if self.debug:
             self.debug('initialized')
 
