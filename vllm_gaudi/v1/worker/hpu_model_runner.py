@@ -813,7 +813,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.use_hpu_graph = not self.model_config.enforce_eager
         self.max_batch_size = self.scheduler_config.max_num_seqs
         self.max_num_seqs = self.scheduler_config.max_num_seqs
-        self.max_prefill_batch_size = with_default(get_config().VLLM_PROMPT_BS_BUCKET_MAX, 1)
+        self.max_prefill_batch_size = with_default(get_config().VLLM_MAX_PREFILL_BATCH_SIZE, 1)
         self.seen_configs: set = set()
         self.max_num_batched_tokens = \
             self.scheduler_config.max_num_batched_tokens
