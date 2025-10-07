@@ -1,7 +1,6 @@
 # vLLM for Gaudi – Quick Start
 
-This guide explains how to quickly run vLLM on Gaudi using a prebuilt Docker image and Docker Compose, with options for custom parameters and benchmarking.
-Supports a wide range of validated models including LLaMa, Mistral, and Qwen families, with flexible configuration via environment variables or YAML files.
+This guide explains how to quickly run vLLM on Gaudi using a prebuilt Docker image and Docker Compose, with options for custom parameters and benchmarking. Supports a wide range of validated models including LLaMa, Mistral, and Qwen families, with flexible configuration via environment variables or YAML files.
 
 ## Supported Models
 
@@ -40,14 +39,14 @@ cd vllm-gaudi/.cd/
 
 - `MODEL` - Select a model from the table above.
 - `HF_TOKEN` - Your Hugging Face token (generate one at <https://huggingface.co>).
-- `DOCKER_IMAGE` - The vLLM Docker image URL from Gaudi or local repository.
+- `DOCKER_IMAGE` - The vLLM Docker image URL from Gaudi or local repository. When using the Gaudi repository, please select Docker images with the vllm-installer* prefix in the file name.
 
    **Example usage:**
 
    ```bash
    MODEL="Qwen/Qwen2.5-14B-Instruct" \
    HF_TOKEN="<your huggingface token>" \
-   DOCKER_IMAGE="<docker image url>" \
+   DOCKER_IMAGE="vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/vllm-installer-2.7.1:latest" \
    docker compose up
    ```
 
@@ -58,7 +57,7 @@ cd vllm-gaudi/.cd/
    ```bash
    MODEL="Qwen/Qwen2.5-14B-Instruct" \
    HF_TOKEN="<your huggingface token>" \
-   DOCKER_IMAGE="<docker image url>" \
+   DOCKER_IMAGE="vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/vllm-installer-2.7.1:latest" \
    docker compose --profile benchmark up
    ```
 
@@ -85,7 +84,7 @@ cd vllm-gaudi/.cd/
    ```bash
    MODEL="Qwen/Qwen2.5-14B-Instruct" \
    HF_TOKEN="<your huggingface token>" \
-   DOCKER_IMAGE="<docker image url>" \
+   DOCKER_IMAGE="vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/vllm-installer-2.7.1:latest" \
    TENSOR_PARALLEL_SIZE=1 \
    MAX_MODEL_LEN=2048 \
    docker compose up
@@ -105,7 +104,7 @@ cd vllm-gaudi/.cd/
    ```bash
    MODEL="Qwen/Qwen2.5-14B-Instruct" \
    HF_TOKEN="<your huggingface token>" \
-   DOCKER_IMAGE="<docker image url>" \
+   DOCKER_IMAGE="vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/vllm-installer-2.7.1:latest" \
    INPUT_TOK=128 \
    OUTPUT_TOK=128 \
    CON_REQ=16 \
@@ -124,7 +123,7 @@ cd vllm-gaudi/.cd/
    ```bash
    MODEL="Qwen/Qwen2.5-14B-Instruct" \
    HF_TOKEN="<your huggingface token>" \
-   DOCKER_IMAGE="<docker image url>" \
+   DOCKER_IMAGE="vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/vllm-installer-2.7.1:latest" \
    VTENSOR_PARALLEL_SIZE=1 \
    MAX_MODEL_LEN=2048 \
    INPUT_TOK=128 \
@@ -149,15 +148,16 @@ cd vllm-gaudi/.cd/
 
    ```bash
    HF_TOKEN=<your huggingface token> \
-   VLLM_SERVER_CONFIG_FILE=server_configurations/server_text.yaml \
+   DOCKER_IMAGE="vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/vllm-installer-2.7.1:latest" \  
+   VLLM_SERVER_CONFIG_FILE=server/server_text.yaml \
    VLLM_SERVER_CONFIG_NAME=llama31_8b_instruct \
-   VLLM_BENCHMARK_CONFIG_FILE=benchmark_configurations/benchmark_text.yaml \
+   VLLM_BENCHMARK_CONFIG_FILE=benchmark/benchmark_text.yaml \
    VLLM_BENCHMARK_CONFIG_NAME=llama31_8b_instruct \
    docker compose --profile benchmark up
    ```
 
    > [!NOTE]
-   > When using configuration files, you do not need to set the `MODEL` environment variable, as the model name is specified within the configuration file. However, you must still provide your `HF_TOKEN`.
+   > When using configuration files, you do not need to set the `MODEL` environment variable, as the model name is specified within the configuration file. However, you must still provide your `HF_TOKEN`and 'DOCKER_IMAGE' .
 
 ### 7. Running the Server Directly with Docker
 
@@ -177,8 +177,9 @@ cd vllm-gaudi/.cd/
      --runtime=habana \
      -e HABANA_VISIBLE_DEVICES=all \
      -p 8000:8000 \
+     -e HF_HOME='mnt/hf_cache' \
      --name vllm-server \
-     <docker image name>
+     vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/vllm-installer-2.7.1:latest
    ```
 
    This method gives you full flexibility over Docker runtime options.

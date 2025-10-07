@@ -23,3 +23,6 @@ Learn more:
 
 📚 [Intel Gaudi Documentation](https://docs.habana.ai/en/v1.21.1/index.html)  
 🚀 [vLLM Plugin System Overview](https://docs.vllm.ai/en/latest/design/plugin_system.html)
+
+## Running vLLM on Gaudi with Docker Compose
+We are delivering ready-to-run container images that include both vLLM and Gaudi software. Please follow the [instruction](https://github.com/vllm-project/vllm-gaudi/tree/releases/v0.11.0/.cd) to quickly launch vLLM on Gaudi using a prebuilt Docker image and Docker Compose, with options for custom parameters and benchmarking.
