@@ -3997,10 +3997,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         # adjust positions_cpu to fit biggest possible bucket (can be over token budget)
         max_num_tokens = self.bucketing_manager.get_max_prompt_shape()
-        self.positions_cpu = torch.zeros(max_num_tokens,
-                                         dtype=torch.int64,
-                                         device="cpu",
-                                         pin_memory=self.pin_memory)
+        self.positions_cpu = torch.zeros(max_num_tokens, dtype=torch.int64, device="cpu", pin_memory=self.pin_memory)
         self.positions_np = self.positions_cpu.numpy()
 
         self.defragmenter.initialize(self.kv_caches, self.block_size)
