@@ -243,13 +243,9 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
         '''
         candidates = [(bs_idx, query_idx), (bs_idx + 1, query_idx), (bs_idx, query_idx + 1),
                       (bs_idx + 1, query_idx + 1)]
-        valid = bs_range[bs_idx] * query_range[query_idx] <= max_num_batched_tokens
-        if not valid:
-            omitted_buckets.add(("bs_range[bs_idx] * query_range[query_idx] <= max_num_batched_tokens",
-                                 "-> bs, quesry: ", bs_idx, query_idx))
-            return {}
         valid_candidates = [(b_idx, q_idx) for b_idx, q_idx in candidates
-                            if b_idx < len(bs_range) and q_idx < len(query_range)]
+                            if (b_idx < len(bs_range) and q_idx < len(query_range))
+                            and not_over_max_num_batched_tokens(bs_range[b_idx], query_range[q_idx])]
         return {(bs_range[b_idx], query_range[q_idx]) for b_idx, q_idx in valid_candidates}
 
     # filter rules for buckets
@@ -259,6 +255,12 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
             omitted_buckets.add(
                 ("condition: query + ctx * block_size <= max_model_len", "-> bs, quesry, ctx: ", bs, query, ctx))
         return query + ctx * block_size <= max_model_len
+
+    def not_over_max_num_batched_tokens(bs, query):
+        if not bs * query <= max_num_batched_tokens:
+            omitted_buckets.add(("bs_range[bs_idx] * query_range[query_idx] <= max_num_batched_tokens",
+                                 "-> bs, query: ", bs_idx, query_idx))
+        return bs * query <= max_num_batched_tokens
 
     def ctx_not_over_max_ctx_for_merged_prefill(bs, query, ctx):
         if not ctx <= max_num_prefill_seqs * math.ceil(
