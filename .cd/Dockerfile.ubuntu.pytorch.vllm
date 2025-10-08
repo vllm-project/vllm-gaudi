@@ -13,6 +13,7 @@ FROM ${DOCKER_URL}/${VERSION}/${BASE_NAME}/${REPO_TYPE}/pytorch-installer-${PT_V
 
 # Parameterize commit/branch for vllm-project & vllm-gaudi checkout
 ARG VLLM_GAUDI_COMMIT=main
+# leave empty to use last-good-commit-for-vllm-gaudi
 ARG VLLM_PROJECT_COMMIT=
 ENV OMPI_MCA_btl_vader_single_copy_mechanism=none
 
