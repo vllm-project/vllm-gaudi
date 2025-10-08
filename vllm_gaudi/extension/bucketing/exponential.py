@@ -23,6 +23,8 @@ class ExponentialBucketingStrategy():
         if len(user_flags) > 0:
             logger().warning("*******************************************************")
             for flag in user_flags:
+                if flag in ("VLLM_PROMPT_BS_BUCKET_MAX"):
+                    continue
                 logger().warning(
                     f"Using Exponential Strategy - Your configuration {flag}={getattr(get_config(), flag)} will be overwritten!"
                 )
