@@ -2995,7 +2995,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                      dtype=torch.int32)
                         logits_indices = torch.cat([logits_indices, logits_append])
                     if self.use_async_scheduling:
-                        # Discard partial prefill logits for async scheduling
+                        # Discard partial prefill logit for async scheduling
                         # Depends on 1 decode token/batch
                         invalid_req_indices.append(num_decodes + idx)
                 htorch.core.mark_step()
