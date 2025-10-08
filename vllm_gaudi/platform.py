@@ -8,10 +8,11 @@ import habana_frameworks.torch as htorch
 
 from vllm import envs
 
-from vllm.platforms import Platform, PlatformEnum, _Backend
+from vllm.platforms import Platform, PlatformEnum
 from vllm_gaudi.extension.runtime import get_config
 
 if TYPE_CHECKING:
+    from vllm.attention.backends.registry import _Backend
     from vllm.config import ModelConfig, VllmConfig
 else:
     ModelConfig = None
@@ -39,7 +40,7 @@ class HpuPlatform(Platform):
     additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int, dtype: torch.dtype,
+    def get_attn_backend_cls(cls, selected_backend: "_Backend", head_size: int, dtype: torch.dtype,
                              kv_cache_dtype: Optional[str], block_size: int, use_v1: bool, use_mla: bool,
                              has_sink: bool, use_sparse: bool) -> str:
         assert use_v1, 'Only V1 is supported!'
