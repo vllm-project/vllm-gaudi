@@ -38,7 +38,6 @@ Learn more:
     cd vllm
     git checkout $VLLM_COMMIT_HASH
     pip install -r <(sed '/^[torch]/d' requirements/build.txt)
-
     wget -nv https://vault.habana.ai/artifactory/gaudi-installer/[latest-version]/habanalabs-installer.sh
     chmod +x habanalabs-installer-[latest-version].sh
     export HABANALABS_VIRTUAL_DIR=[YOUR_PYTHON_VENv]
