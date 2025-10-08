@@ -14,40 +14,9 @@
 
 **Performance Tuning Knobs:**
 
-- `VLLM_SKIP_WARMUP`: if `true`, warmup is skipped. The default is `false`.
 - `VLLM_GRAPH_RESERVED_MEM`: percentage of memory dedicated to HPUGraph capture. The default is `0.1`.
-- `VLLM_GRAPH_PROMPT_RATIO`: percentage of reserved graph memory dedicated to prompt graphs. The default is `0.3`.
-- `VLLM_GRAPH_PROMPT_STRATEGY`: strategy determining order of prompt graph capture, `min_tokens` or `max_bs`. The default is `min_tokens`.
-- `VLLM_GRAPH_DECODE_STRATEGY`: strategy determining order of decode graph capture, `min_tokens` or `max_bs`. The default is `max_bs`.
 - `VLLM_EXPONENTIAL_BUCKETING`: if `true`, enables exponential bucket spacing instead of linear. The default is `true`.
-- `VLLM_{phase}_{dim}_BUCKET_{param}`: collection of 12 environment variables configuring ranges of bucketing mechanism (linear bucketing only).
-  - `{phase}` is either `PROMPT` or `DECODE`
-  - `{dim}` is either `BS`, `SEQ` or `BLOCK`
-  - `{param}` is either `MIN`, `STEP` or `MAX`
-  - Default values:
-    - Prompt:
-      - batch size min (`VLLM_PROMPT_BS_BUCKET_MIN`): `1`
-      - batch size step (`VLLM_PROMPT_BS_BUCKET_STEP`): `min(max_num_seqs, 32)`
-      - batch size max (`VLLM_PROMPT_BS_BUCKET_MAX`): `min(max_num_seqs, 64)`
-      - sequence length min (`VLLM_PROMPT_SEQ_BUCKET_MIN`): `block_size`
-      - sequence length step (`VLLM_PROMPT_SEQ_BUCKET_STEP`): `block_size`
-      - sequence length max (`VLLM_PROMPT_SEQ_BUCKET_MAX`): `1024`
-      - sequence ctx min (`VLLM_PROMPT_CTX_BUCKET_MIN`): `0`
-      - sequence ctx step (`VLLM_PROMPT_CTX_BUCKET_STEP`): `1`
-      - sequence ctx max (`VLLM_PROMPT_CTX_BUCKET_MAX`): `(max_model_len - block_size) // block_size`
-    - Decode:
-      - batch size min (`VLLM_DECODE_BS_BUCKET_MIN`): `1`
-      - batch size step (`VLLM_DECODE_BS_BUCKET_STEP`): `min(max_num_seqs, 32)`
-      - batch size max (`VLLM_DECODE_BS_BUCKET_MAX`): `max_num_seqs`
-      - block size min (`VLLM_DECODE_BLOCK_BUCKET_MIN`): `block_size`
-      - block size step (`VLLM_DECODE_BLOCK_BUCKET_STEP`): `block_size`
-      - block size max (`VLLM_DECODE_BLOCK_BUCKET_MAX`): `max(128, (max_num_seqs*2048)/block_size)`
-  - Recommended Values:
-    - Prompt:
-      - sequence length max (`VLLM_PROMPT_SEQ_BUCKET_MAX`): `max_model_len`
-    - Decode:
-
-      - block size max (`VLLM_DECODE_BLOCK_BUCKET_MAX`): `max(128, (max_num_seqs*max_model_len/block_size)`
+- `VLLM_SKIP_WARMUP`: if `true`, warmup is skipped. The default is `false`.
 
 !!! note
     If the model config reports a high `max_model_len`, set it to max `input_tokens+output_tokens` rounded up to a multiple of `block_size` as per actual requirements.
@@ -69,3 +38,28 @@ Additionally, there are HPU PyTorch Bridge environment variables impacting vLLM 
 - `PT_HPU_ENABLE_LAZY_COLLECTIVES`: must be set to `true` for tensor parallel inference with HPU Graphs. The default is `true`.
 - `PT_HPUGRAPH_DISABLE_TENSOR_CACHE`: must be set to `false` for LLaVA, qwen, and RoBERTa models. The default is `false`.
 - `VLLM_PROMPT_USE_FLEX_ATTENTION`: enabled only for the Llama model, allowing usage of `torch.nn.attention.flex_attention` instead of FusedSDPA. Requires `VLLM_PROMPT_USE_FUSEDSDPA=0`. The default is `false`.
+
+**Additional Performance Tuning Knobs - Linear Bucketing Strategy only:**
+
+- `VLLM_{phase}_{dim}_BUCKET_{param}`: collection of 12 environment variables configuring ranges of bucketing mechanism (linear bucketing only).
+  - `{phase}` is either `PROMPT` or `DECODE`
+  - `{dim}` is either `BS`, `SEQ` or `BLOCK`
+  - `{param}` is either `MIN`, `STEP` or `MAX`
+  - Default values:
+    - Prompt:
+      - batch size min (`VLLM_PROMPT_BS_BUCKET_MIN`): `1`
+      - batch size step (`VLLM_PROMPT_BS_BUCKET_STEP`): `32`
+      - batch size max (`VLLM_PROMPT_BS_BUCKET_MAX`): `max_num_prefill_seqs`
+      - sequence length min (`VLLM_PROMPT_SEQ_BUCKET_MIN`): `block_size`
+      - sequence length step (`VLLM_PROMPT_SEQ_BUCKET_STEP`): `block_size`
+      - sequence length max (`VLLM_PROMPT_SEQ_BUCKET_MAX`): `max_model_len`
+      - sequence ctx min (`VLLM_PROMPT_CTX_BUCKET_MIN`): `0`
+      - sequence ctx step (`VLLM_PROMPT_CTX_BUCKET_STEP`): `1`
+      - sequence ctx max (`VLLM_PROMPT_CTX_BUCKET_MAX`): `(max_model_len - block_size) // block_size`
+    - Decode:
+      - batch size min (`VLLM_DECODE_BS_BUCKET_MIN`): `1`
+      - batch size step (`VLLM_DECODE_BS_BUCKET_STEP`): `32`
+      - batch size max (`VLLM_DECODE_BS_BUCKET_MAX`): `max_num_seqs`
+      - block size min (`VLLM_DECODE_BLOCK_BUCKET_MIN`): `block_size`
+      - block size step (`VLLM_DECODE_BLOCK_BUCKET_STEP`): `block_size`
+      - block size max (`VLLM_DECODE_BLOCK_BUCKET_MAX`): `max_blocks`
