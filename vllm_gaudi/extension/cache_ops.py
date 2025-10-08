@@ -33,9 +33,9 @@ def copy_blocks(key_caches, value_caches, block_mapping):
 
     for key_cache, value_cache in zip(key_caches, value_caches):
         # read once, write once - no overlap
-        k_values = key_cache.index_select(0, src)   # gather
+        k_values = key_cache.index_select(0, src)  # gather
         v_values = value_cache.index_select(0, src)
-        key_cache.index_put_([dst], k_values)       # scatter
+        key_cache.index_put_([dst], k_values)  # scatter
         value_cache.index_put_([dst], v_values)
 
     if key_caches[0].device.type == 'hpu':
