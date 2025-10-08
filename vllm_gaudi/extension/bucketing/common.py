@@ -305,9 +305,9 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
     filters = get_filters(is_prompt, use_merged_prefill, use_contiguous_pa)
     for bs_idx, bs in enumerate(bs_range):
         for ctx_idx, ctx in enumerate(ctx_range):
-            buckets = expand_to_neighbor_buckets(bs_idx, bs_range, ctx_idx, ctx_range,
-                                                 max_num_batched_tokens) if not is_prompt else {(bs, ctx)}
-            buckets_2d.update(buckets)
+            local_buckets = expand_to_neighbor_buckets(bs_idx, bs_range, ctx_idx, ctx_range,
+                                                       max_num_batched_tokens) if not is_prompt else {(bs, ctx)}
+            buckets_2d.update(local_buckets)
 
     for bs, ctx in buckets_2d:
         for query in query_range:
