@@ -163,7 +163,8 @@ jobs:
           extra_args: --all-files --hook-stage manual
 
   pre_merge_hpu_test_build:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-gaudi-tests') }}
+    if: >
+        !contains(github.event.pull_request.labels.*.name, 'skip-gaudi-tests')
     runs-on: ucb-vllm-cicd-g2
     needs: [pre-commit, discover_tests]
     permissions:
