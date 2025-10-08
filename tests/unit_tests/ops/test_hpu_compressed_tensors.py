@@ -301,6 +301,4 @@ def test_compressed_tensors_wna16_moe_method(dist_init):
         out = oot_op.forward_impl(hidden_states, router_logits)
 
     # Check correctness
-    import pdb
-    pdb.set_trace()
     torch.testing.assert_close(ref_output, out, atol=1e-4, rtol=1e-4)
