@@ -230,7 +230,7 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
     use_merged_prefill = get_config().merged_prefill
     use_contiguous_pa = get_config().use_contiguous_pa
 
-    def expand_to_neighbor_buckets(bs_idx, bs_range, query_idx, query_range, max_num_batched_tokens):
+    def expand_to_neighbor_buckets(bs_idx, bs_range, ctx_idx, ctx_range, max_num_batched_tokens):
         '''
         Expand 2d bucket (bs, query) to include:
         - itself
@@ -241,16 +241,15 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
         values that are in and out of budget:
         bs < edge_case_bs < next bs and query < edge_case_query < next query
         '''
-        candidates = [(bs_idx, query_idx), (bs_idx + 1, query_idx), (bs_idx, query_idx + 1),
-                      (bs_idx + 1, query_idx + 1)]
-        valid = bs_range[bs_idx] * query_range[query_idx] <= max_num_batched_tokens
+        candidates = [(bs_idx, ctx_idx), (bs_idx + 1, ctx_idx), (bs_idx, ctx_idx + 1), (bs_idx + 1, ctx_idx + 1)]
+        valid = bs_range[bs_idx] * ctx_range[ctx_idx] <= max_num_batched_tokens
         if not valid:
             omitted_buckets.add(("bs_range[bs_idx] * query_range[query_idx] <= max_num_batched_tokens",
-                                 "-> bs, quesry: ", bs_idx, query_idx))
+                                 "-> bs, quesry: ", bs_idx, ctx_idx))
             return {}
         valid_candidates = [(b_idx, q_idx) for b_idx, q_idx in candidates
-                            if b_idx < len(bs_range) and q_idx < len(query_range)]
-        return {(bs_range[b_idx], query_range[q_idx]) for b_idx, q_idx in valid_candidates}
+                            if b_idx < len(bs_range) and q_idx < len(ctx_range)]
+        return {(bs_range[b_idx], ctx_range[q_idx]) for b_idx, q_idx in valid_candidates}
 
     # filter rules for buckets
     # prompt
@@ -298,21 +297,20 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
         phase = "prompt" if is_prompt else "decode"
         if is_prompt:
             return filters_map[phase][use_merged_prefill]
-        else:
-            return filters_map[phase][use_contiguous_pa]
-        return []
+        return filters_map[phase][use_contiguous_pa]
 
     buckets = set()
     buckets_2d = set()
     omitted_buckets = set()
     filters = get_filters(is_prompt, use_merged_prefill, use_contiguous_pa)
     for bs_idx, bs in enumerate(bs_range):
-        for query_idx, query in enumerate(query_range):
-            buckets_2d.update(
-                expand_to_neighbor_buckets(bs_idx, bs_range, query_idx, query_range, max_num_batched_tokens))
+        for ctx_idx, ctx in enumerate(ctx_range):
+            buckets = expand_to_neighbor_buckets(bs_idx, bs_range, ctx_idx, ctx_range,
+                                                 max_num_batched_tokens) if not is_prompt else {(bs, ctx)}
+            buckets_2d.update(buckets)
 
-    for bs, query in buckets_2d:
-        for ctx in ctx_range:
+    for bs, ctx in buckets_2d:
+        for query in query_range:
             if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
                 buckets.add((bs, query, ctx))
     if not buckets:
