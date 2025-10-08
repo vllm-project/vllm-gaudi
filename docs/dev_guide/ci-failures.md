@@ -25,7 +25,7 @@ HPU tests consist of several unit tests:
 All of the above tests are mandatory. Those tests operate in fast fail mode, meaning if one test fails, all of the others won't be triggered.
 
 ### HPU Gaudi tests
-Additional Gaudi tests are expectd to pass but aren't mandatory. Those tests are being run on internal Jenkins system, so results are internal only. Those tests can be run by CODEOWNERs and TESTOWNERs only. 
+Additional Gaudi tests are expectd to pass, but aren't mandatory. Those tests are being run on internal Jenkins system, so results are internal only. Those tests can be run by CODEOWNERs and TESTOWNERs only.
 
 ## Docs Pull Requests
 All PRs that do not interfere in code, like docstring changes or README updates can be merged without HPU tests and Gaudi tests. It is still required to pass pre-commit check.
