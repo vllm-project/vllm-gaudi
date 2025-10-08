@@ -23,7 +23,7 @@
 - `VLLM_PROMPT_BS_BUCKET_MAX`: `(VLLM_PROMPT_BS_BUCKET_MAX * query) <=`max_num_batched_tokens`- prefill batch size max. The default is`1`.
 - `VLLM_{phase}_{dim}_BUCKET_{param}`: collection of environment variables configuring ranges of bucketing mechanism (linear bucketing only).
   - `{phase}` is either `PROMPT` or `DECODE`
-  - `{dim}` is either `BS`, `SEQ` or `BLOCK`
+  - `{dim}` is either `BS`, `SEQ`, `STX` or `BLOCK`
   - `{param}` is either `MIN`, `STEP` or `MAX`
   - Default values:
     - Prompt:
