@@ -20,8 +20,8 @@
 - `VLLM_GRAPH_PROMPT_STRATEGY`: strategy determining order of prompt graph capture, `min_tokens` or `max_bs`. The default is `min_tokens`.
 - `VLLM_GRAPH_DECODE_STRATEGY`: strategy determining order of decode graph capture, `min_tokens` or `max_bs`. The default is `max_bs`.
 - `VLLM_EXPONENTIAL_BUCKETING`: if `true`, enables exponential bucket spacing instead of linear. The default is `true`.
-- `VLLM_PROMPT_BS_BUCKET_MAX`: prefill batch size max. The default is `1`.
-- `VLLM_{phase}_{dim}_BUCKET_{param}`: collection of 12 environment variables configuring ranges of bucketing mechanism (linear bucketing only).
+- `VLLM_PROMPT_BS_BUCKET_MAX`: `(VLLM_PROMPT_BS_BUCKET_MAX * query) <=`max_num_batched_tokens`- prefill batch size max. The default is`1`.
+- `VLLM_{phase}_{dim}_BUCKET_{param}`: collection of environment variables configuring ranges of bucketing mechanism (linear bucketing only).
   - `{phase}` is either `PROMPT` or `DECODE`
   - `{dim}` is either `BS`, `SEQ` or `BLOCK`
   - `{param}` is either `MIN`, `STEP` or `MAX`

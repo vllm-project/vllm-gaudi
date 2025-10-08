@@ -17,14 +17,13 @@ class ExponentialBucketingStrategy():
         params = ['min', 'step', 'max', 'limit']
         env_vars = [f'VLLM_{phase}_{dim}_BUCKET_{p}'.upper() for dim in dim for p in params]
         user_flags = []
+        overwritten_user_flags = ["VLLM_PROMPT_BS_BUCKET_MAX"]
         for e in env_vars:
-            if getattr(get_config(), e) is not None:
+            if getattr(get_config(), e) is not None and e not in overwritten_user_flags:
                 user_flags.append(e)
         if len(user_flags) > 0:
             logger().warning("*******************************************************")
             for flag in user_flags:
-                if flag in ("VLLM_PROMPT_BS_BUCKET_MAX"):
-                    continue
                 logger().warning(
                     f"Using Exponential Strategy - Your configuration {flag}={getattr(get_config(), flag)} will be overwritten!"
                 )
