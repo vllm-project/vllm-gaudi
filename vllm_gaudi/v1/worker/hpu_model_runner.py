@@ -97,6 +97,7 @@ _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
 decoder_tp_ratio = int(os.getenv('DECODER_TP_RATIO', 1))
 
+
 class BucketingFailedException(Exception):
     pass
 
@@ -2831,7 +2832,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         vecs = [b.reshape([bc, shape]) for b in blocks]
                         kv_selected = torch.concat(vecs, dim=1).reshape(kv_selected.shape)
                         kv.index_copy_(dim=0, index=indices, source=kv_selected)
-
 
     @torch.inference_mode()
     def execute_model(

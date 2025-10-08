@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 import torch
-import time
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnectorWorker
 from vllm_gaudi.platform import logger
 import habana_frameworks.torch.core as htexp
@@ -50,6 +48,7 @@ def _hpu_data_ptr(tensor_self):
 
     # Fallback to the original implementation for CPU tensors or host buffers
     return original_data_ptr(tensor_self)
+
 
 torch.Tensor.data_ptr = _hpu_data_ptr
 
