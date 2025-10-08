@@ -2997,7 +2997,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     if self.use_async_scheduling:
                         # Discard partial prefill logit for async scheduling
                         # Depends on 1 decode token/batch
-                        invalid_req_indices.append(num_decodes + idx)
+                        prefill_start_idx = num_decodes
+                        invalid_req_indices.append(prefill_start_idx + idx)
                 htorch.core.mark_step()
                 non_flattened_hidden_states, aux_hidden_states, \
                     sample_hidden_states, logits_device = \
