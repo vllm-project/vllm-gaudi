@@ -95,6 +95,7 @@ logger = init_logger()
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
+decoder_tp_ratio = int(os.getenv('DECODER_TP_RATIO', 1))
 
 class BucketingFailedException(Exception):
     pass
@@ -2807,6 +2808,27 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         )
         return model_runner_output
 
+    def rewrite_kv_based_on_transfer_layout(self, scheduler_output: "SchedulerOutput"):
+        if scheduler_output.kv_connector_metadata:
+            for req_id, meta in scheduler_output.kv_connector_metadata.reqs_to_save.items():
+                block_ids = meta.local_block_ids
+                for layer_idx in range(len(self.kv_caches)):
+                    k = self.kv_caches[layer_idx][0]
+                    v = self.kv_caches[layer_idx][1]
+                    gb, h, d = v.shape
+                    indices = torch.tensor(block_ids, device=v.device)
+                    gbhd = [int(gb / self.block_size), self.block_size, h, d]
+                    for kv_tensor in [k, v]:
+                        kv = kv_tensor.reshape(gbhd)
+                        kv_selected = torch.index_select(kv, 0, indices)
+                        bc, bs, h, d = kv_selected.shape
+                        shape = int(bs * h / decoder_tp_ratio * d)
+                        blocks = torch.chunk(kv_selected, 2, dim=2)
+                        vecs = [b.reshape([bc, shape]) for b in blocks]
+                        kv_selected = torch.concat(vecs, dim=1).reshape(kv_selected.shape)
+                        kv.index_copy_(dim=0, index=indices, source=kv_selected)
+
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -3035,6 +3057,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                              prompt_batch_idx=idx,
                                                                              is_prompt=True)
                     self.profiler.record_counter(self.event_start, counters)
+
+            if decoder_tp_ratio > 1:
+                self.rewrite_kv_based_on_transfer_layout(scheduler_output)
             if not warmup_mode:
                 self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = (self.get_finished_kv_transfers(scheduler_output))
