@@ -31,7 +31,7 @@ ENV ENV=~/.profile
 # Clone the vllm-project repository and install inside the container
 # --- START: COMBINED RUN COMMAND ---
 RUN \
-    # Clone vllm-gaudi and get the commit hash
+    # Clone vllm-gaudi and get the commit hash for the vllm-project/vllm
     set -e && \
     mkdir -p $VLLM_PATH2 && \
     git clone https://github.com/vllm-project/vllm-gaudi.git $VLLM_PATH2 && \
@@ -43,13 +43,16 @@ RUN \
        echo "Using vLLM commit : ${VLLM_PROJECT_COMMIT}"; \
     fi && \
     mkdir -p $VLLM_PATH && \
+    # Clone vllm-project/vllm and use configured or last good commit hash
     git clone https://github.com/vllm-project/vllm.git $VLLM_PATH && \
     cd $VLLM_PATH && \
     git remote add upstream https://github.com/vllm-project/vllm.git && \
     git fetch upstream --tags || true && \
     git checkout ${VLLM_PROJECT_COMMIT} && \
+    # Install vllm-project/vllm
     bash -c "pip install -r <(sed '/^[torch]/d' requirements/build.txt)" && \
     VLLM_TARGET_DEVICE=empty pip install --no-build-isolation . && \
+    # Install vllm-gaudi plugin
     cd $VLLM_PATH2 && \
     git checkout ${VLLM_GAUDI_COMMIT} && \
     VLLM_TARGET_DEVICE=hpu pip install -v . --no-build-isolation
