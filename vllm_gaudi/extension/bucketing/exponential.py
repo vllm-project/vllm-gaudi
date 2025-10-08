@@ -31,8 +31,6 @@ class ExponentialBucketingStrategy():
     def get_prompt_cfgs(self, max_num_prefill_seqs, block_size, max_num_batched_tokens, max_model_len):
         self.check_for_user_flags('prompt')
         use_merged_prefill = get_config().merged_prefill
-        prefix_caching = get_config().prefix_caching
-        max_prompt_seq = max_model_len
 
         # cfgs shape: [min, step, max, limit]
         prompt_bs_limit = math.ceil(math.log2(max_num_prefill_seqs)) + 1
