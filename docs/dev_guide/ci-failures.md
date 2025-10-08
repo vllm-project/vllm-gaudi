@@ -1,6 +1,6 @@
 # CI Failures
 
-## CI 
+## CI
 
 For all PRs that are created in vllm-gaudi repository all checks in CI are required:
 - pre-commit & DCO
