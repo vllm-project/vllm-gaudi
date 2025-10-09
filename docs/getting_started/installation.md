@@ -16,7 +16,7 @@ This guide provides instructions on running vLLM with Intel Gaudi devices.
     [Optimizing Training Platform Guide](https://docs.habana.ai/en/latest/PyTorch/Model_Optimization_PyTorch/Optimization_in_Training_Platform.html).
 
 ## Running vLLM on Gaudi with Docker Compose
-Starting with the 1.22 release, we are introducing ready-to-run container images that bundle vLLM and Gaudi software. Please follow the [instruction](https://github.com/vllm-project/vllm-gaudi/tree/pwolsza/docs/.cd) to quickly launch vLLM on Gaudi using a prebuilt Docker image and Docker Compose, with options for custom parameters and benchmarking.
+Starting with the 1.22 release, we are introducing ready-to-run container images that bundle vLLM and Gaudi software. Please follow the [instruction](https://github.com/vllm-project/vllm-gaudi/tree/main/.cd) to quickly launch vLLM on Gaudi using a prebuilt Docker image and Docker Compose, with options for custom parameters and benchmarking.
 
 ## Quick Start Using Dockerfile
 # --8<-- [start:docker_quickstart]
@@ -86,7 +86,7 @@ Use the following commands to run a Docker image. Make sure to update the versio
     cd ..
     ```
 
-=== "vLLM Plugin"
+=== "Install vLLM Plugin"
 
    Install vLLM-Gaudi from source:
 
