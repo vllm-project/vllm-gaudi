@@ -66,7 +66,7 @@ Use the following commands to run a Docker image. Make sure to update the versio
    API update may crash vllm-gaudi, this commit saved is verified with vllm-gaudi
    in a hourly basis
 
-    ```bash
+    ```bash{.console}
     git clone https://github.com/vllm-project/vllm-gaudi
     cd vllm-gaudi
     export VLLM_COMMIT_HASH=$(git show "origin/vllm/last-good-commit-for-vllm-gaudi:VLLM_STABLE_COMMIT" 2>/dev/null)
@@ -76,7 +76,7 @@ Use the following commands to run a Docker image. Make sure to update the versio
 
     Install vLLM with `pip` or [from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source)
     
-    ```bash
+    ```bash{.console}
     # Build vLLM from source for empty platform, reusing existing torch installation
     git clone https://github.com/vllm-project/vllm
     cd vllm
@@ -89,12 +89,15 @@ Use the following commands to run a Docker image. Make sure to update the versio
 === "Install vLLM Plugin"
 
    Install vLLM-Gaudi from source:
-
+    ```{.console}
         cd vllm-gaudi
         pip install -e .
         cd ..
+    ```
 
-### (Optional) Install nixl:
+### Build and Install vLLM with nixl:
+
+=== "Install vLLM Plugin with nixl"
 
     ```bash
     cd vllm-gaudi
@@ -102,8 +105,9 @@ Use the following commands to run a Docker image. Make sure to update the versio
     cd ..
     ```
 
-#### Install nixl with Docker file
+=== "Install vLLM Gaudi and nixl with Docker file"
 
+    ```{.console}
     docker build -t ubuntu.pytorch.vllm.nixl.latest \
       -f .cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest github.com/vllm-project/vllm-gaudi
     docker run -it --rm --runtime=habana \
@@ -111,9 +115,11 @@ Use the following commands to run a Docker image. Make sure to update the versio
       --network=host \
       -e HABANA_VISIBLE_DEVICES=all \
       vllm-gaudi-for-llmd /bin/bash
+    ```
 
-#### Full nixl installation from source (vLLM and vLLM-Gaudi):
+=== "Full installation from source vLLM Gaudi with nixl"
 
+    ```{.console}
     # Fetch last good commit on vllm
     git clone https://github.com/vllm-project/vllm-gaudi
     cd vllm-gaudi
@@ -133,3 +139,4 @@ Use the following commands to run a Docker image. Make sure to update the versio
     
     # Build nixl
     python install_nixl.sh
+    ```
