@@ -10,9 +10,7 @@ import habana_frameworks.torch  # noqa: F401
 from vllm.utils import cdiv
 from tests.unit_tests.attention.utils import (BatchSpec, create_common_attn_metadata, create_vllm_config,
                                               check_token_ordering_preservation, is_prefill_scenario)
-from tests.unit_tests.attention.non_unified_attn_utils import get_non_unified_attn_metadata
 
-from vllm_gaudi.v1.attention.backends.hpu_attn import (HPUAttentionBackendV1)
 from vllm_gaudi.extension.runtime import get_config
 
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -154,11 +152,16 @@ def run_attention_backend(vllm_config, device: torch.device, common_attn_metadat
     batch_size = len(seq_lens)
     is_prompt = is_prefill_scenario(batch_spec)
     if backend == 'non_unified':
+        from vllm_gaudi.v1.attention.backends.hpu_attn import (HPUAttentionBackendV1)
+        from tests.unit_tests.attention.non_unified_attn_utils import get_non_unified_attn_metadata
         attn_metadata = get_non_unified_attn_metadata(vllm_config, common_attn_metadata, batch_spec, query_dtype,
                                                       device)
         impl_cls = HPUAttentionBackendV1.get_impl_cls()
     elif backend == 'unified':
-        pytest.xfail("Unified attention test not supported yet")
+        from vllm_gaudi.attention.backends.hpu_attn import HPUUnifiedAttentionBackend
+        from tests.unit_tests.attention.unified_attn_utils import get_unified_attn_metadata
+        attn_metadata = get_unified_attn_metadata(vllm_config, common_attn_metadata, batch_spec, query_dtype, device)
+        impl_cls = HPUUnifiedAttentionBackend.get_impl_cls()
     else:
         raise ValueError(f"Unknown backend: {backend}")
     num_heads = vllm_config.model_config.get_num_attention_heads(vllm_config.parallel_config)
