@@ -8,12 +8,15 @@ This guide provides instructions on running vLLM with Intel Gaudi devices.
 
 - Python 3.10
 - Intel Gaudi 2 or 3 AI accelerators
-- Intel Gaudi software version 1.21.0 or above
+- Intel Gaudi software version 1.22.0 or above
 
 !!! note
     To set up the execution environment, please follow the instructions in the [Gaudi Installation Guide](https://docs.habana.ai/en/latest/Installation_Guide/index.html).
     To achieve the best performance on HPU, please follow the methods outlined in the
     [Optimizing Training Platform Guide](https://docs.habana.ai/en/latest/PyTorch/Model_Optimization_PyTorch/Optimization_in_Training_Platform.html).
+
+## Running vLLM on Gaudi with Docker Compose
+Starting with the 1.22 release, we are introducing ready-to-run container images that bundle vLLM and Gaudi software. Please follow the [instruction](https://github.com/vllm-project/vllm-gaudi/tree/pwolsza/docs/.cd) to quickly launch vLLM on Gaudi using a prebuilt Docker image and Docker Compose, with options for custom parameters and benchmarking.
 
 ## Quick Start Using Dockerfile
 # --8<-- [start:docker_quickstart]
@@ -22,15 +25,8 @@ Set up the container with the latest Intel Gaudi Software Suite release using th
 === "Ubuntu"
 
     ```
-    $ docker build -f Dockerfile.hpu -t vllm-hpu-env  .
-    $ docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --rm vllm-hpu-env
-    ```
-
-=== "Red Hat Enterprise Linux for Use with Red Hat OpenShift AI"
-
-    ```
-    $ docker build -f Dockerfile.hpu.ubi -t vllm-hpu-env  .
-    $ docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --rm vllm-hpu-env
+    $ docker build -f .cd/Dockerfile.ubuntu.pytorch.vllm -t vllm-hpu-env  .
+    $ docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --entrypoint='' --rm vllm-hpu-env
     ```
 
 !!! tip
@@ -59,58 +55,81 @@ Refer to the [Intel Gaudi documentation](https://docs.habana.ai/en/latest/Instal
 
 Use the following commands to run a Docker image. Make sure to update the versions below as listed in the [Support Matrix](https://docs.habana.ai/en/latest/Support_Matrix/Support_Matrix.html):
 
-    docker pull vault.habana.ai/gaudi-docker/1.21.0/ubuntu22.04/habanalabs/pytorch-installer-2.6.0:latest
-    docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --ipc=host vault.habana.ai/gaudi-docker/1.21.0/ubuntu22.04/habanalabs/pytorch-installer-2.6.0:latest
+    docker pull vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/pytorch-installer-2.7.1:latest
+    docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --ipc=host vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/pytorch-installer-2.7.1:latest
 
 ### Build and Install vLLM
 
-Currently, multiple ways are provided which can be used to install vLLM with Intel® Gaudi®:
+=== "Get Last good commit on vllm"
 
-=== "Stable vLLM-fork version"
+   NOTE: vllm-gaudi is always follow latest vllm commit, however, vllm upstream
+   API update may crash vllm-gaudi, this commit saved is verified with vllm-gaudi
+   in a hourly basis
 
-    vLLM releases are being performed periodically to align with Intel® Gaudi® software releases. The stable version is released with a tag, and supports fully validated features and performance optimizations in Gaudi's [vLLM-fork](https://github.com/HabanaAI/vllm-fork). To install the stable release from [HabanaAI/vLLM-fork](https://github.com/HabanaAI/vllm-fork), run the following:
-
-    ```{.console}
-    git clone https://github.com/HabanaAI/vllm-fork.git
-    cd vllm-fork
-    git checkout v0.7.2+Gaudi-1.21.0
-    pip install -r requirements-hpu.txt
-    python setup.py develop
+    ```bash
+    git clone https://github.com/vllm-project/vllm-gaudi
+    cd vllm-gaudi
+    export VLLM_COMMIT_HASH=$(git show "origin/vllm/last-good-commit-for-vllm-gaudi:VLLM_STABLE_COMMIT" 2>/dev/null)
     ```
 
-=== "Latest vLLM-fork"
+=== "Install vLLM"
 
-    Currently, the latest features and performance optimizations are being developed in Gaudi's [vLLM-fork](https://github.com/HabanaAI/vllm-fork) and periodically upstreamed to the vLLM main repository.
-    To install latest [HabanaAI/vLLM-fork](https://github.com/HabanaAI/vllm-fork), run the following:
-
-    ```{.console}
-    git clone https://github.com/HabanaAI/vllm-fork.git
-    cd vllm-fork
-    git checkout habana_main
-    pip install --upgrade pip
-    pip install -r requirements-hpu.txt
-    python setup.py develop
-    ```
-
-=== "vLLM Upstream"
-
-    If you prefer to build and install directly from the main vLLM source, where periodically we are upstreaming new features, run the following:
-
-    ```{.console}
-    git clone https://github.com/vllm-project/vllm.git
+    Install vLLM with `pip` or [from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source)
+    
+    ```bash
+    # Build vLLM from source for empty platform, reusing existing torch installation
+    git clone https://github.com/vllm-project/vllm
     cd vllm
-    pip install -r requirements-hpu.txt
-    python setup.py develop
+    git checkout $VLLM_COMMIT_HASH
+    pip install -r <(sed '/^[torch]/d' requirements/build.txt)
+    VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
+    cd ..
     ```
 
-=== "[EXPERIMENTAL] vLLM Upstream + Plugin"
+=== "vLLM Plugin"
 
-    You're on the bleeding edge, good luck to you:
+   Install vLLM-Gaudi from source:
 
-    ```{.console}
-    VLLM_TARGET_DEVICE=hpu pip install git+https://github.com/HabanaAI/vllm-fork.git@dev/upstream_vllm_for_plugin
-    pip uninstall -y triton
-    git clone -b plugin_poc https://github.com/HabanaAI/vllm-hpu-extension.git vllm-hpu
-    cd vllm-hpu
+        cd vllm-gaudi
+        pip install -e .
+        cd ..
+
+### (Optional) Install nixl:
+
+    ```bash
+    cd vllm-gaudi
+    python install_nixl.sh
+    cd ..
+    ```
+
+#### Install nixl with Docker file
+
+    docker build -t ubuntu.pytorch.vllm.nixl.latest \
+      -f .cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest github.com/vllm-project/vllm-gaudi
+    docker run -it --rm --runtime=habana \
+      --name=ubuntu.pytorch.vllm.nixl.latest \
+      --network=host \
+      -e HABANA_VISIBLE_DEVICES=all \
+      vllm-gaudi-for-llmd /bin/bash
+
+#### Full nixl installation from source (vLLM and vLLM-Gaudi):
+
+    # Fetch last good commit on vllm
+    git clone https://github.com/vllm-project/vllm-gaudi
+    cd vllm-gaudi
+    export VLLM_COMMIT_HASH=$(git show "origin/vllm/last-good-commit-for-vllm-gaudi:VLLM_STABLE_COMMIT" 2>/dev/null)
+    
+    # Build vLLM from source for empty platform, reusing existing torch installation
+    git clone https://github.com/vllm-project/vllm
+    cd vllm
+    git checkout $VLLM_COMMIT_HASH
+    pip install -r <(sed '/^[torch]/d' requirements/build.txt)
+    VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
+    cd ..
+    
+    # Build vLLM-Gaudi from source
+    cd vllm-gaudi
     pip install -e .
-    ```
+    
+    # Build nixl
+    python install_nixl.sh
