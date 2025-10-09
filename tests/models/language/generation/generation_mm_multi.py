@@ -87,60 +87,6 @@ class PROMPT_DATA:
                 except Exception as e:
                     logger.warning(f"Failed to load image {img_path}: {e}")
 
-        elif isinstance(source, str):
-            if os.path.isdir(source):
-                # Load all images from directory
-                image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.gif', '*.tiff']
-                image_files = []
-                for ext in image_extensions:
-                    image_files.extend(glob.glob(os.path.join(source, ext)))
-                    image_files.extend(glob.glob(os.path.join(source, ext.upper())))
-
-                image_files.sort()  # Sort for consistent ordering
-                for img_path in image_files:
-                    try:
-                        img = Image.open(img_path)
-                        images.append(convert_image_mode(img, "RGB"))
-                    except Exception as e:
-                        logger.warning(f"Failed to load image {img_path}: {e}")
-            else:
-                # Single file path - load it multiple times or find similar files
-                try:
-                    img = Image.open(source)
-                    base_img = convert_image_mode(img, "RGB")
-                    # Create multiple variations
-                    for i in range(6):
-                        if i == 0:
-                            images.append(base_img)
-                        else:
-                            modified_img = base_img.copy()
-                            if i == 1:
-                                modified_img = modified_img.rotate(45)
-                            elif i == 2:
-                                modified_img = modified_img.rotate(90)
-                            elif i == 3:
-                                modified_img = modified_img.transpose(Image.FLIP_LEFT_RIGHT)
-                            elif i == 4:
-                                modified_img = modified_img.transpose(Image.FLIP_TOP_BOTTOM)
-                            else:
-                                # Adjust brightness
-                                from PIL import ImageEnhance
-                                enhancer = ImageEnhance.Brightness(modified_img)
-                                modified_img = enhancer.enhance(1.2)
-                            images.append(modified_img)
-                except Exception as e:
-                    logger.error(f"Failed to load image {source}: {e}")
-
-
-        if not images:
-            logger.warning("No images loaded, creating default colored images")
-            # Create 6 different colored images as fallback
-            colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255), (0, 255, 255)]
-            for color in colors:
-                img = Image.new('RGB', (224, 224), color)
-                images.append(img)
-
-
         logger.info(f"Loaded {len(images)} images for multi-image processing")
         return images
 
@@ -160,15 +106,16 @@ class PROMPT_DATA:
                     modality: str = "image",
                     media_source: str = "default",
                     num_prompts: int = 1,
+                    num_images: int = 1,
                     skip_vision_data=False):
 
         # Handle multi-image modality
         if modality == "multi_image":
             if "gemma" in model_name.lower():
                 # For Gemma models, use multiple image placeholders
-                pholder = "<start_of_image>" * 6  # 6 images
+                pholder = "<start_of_image>" * num_images  # 6 images
             else:
-                pholder = "<|image_pad|>" * 6  # 6 images
+                pholder = "<|image_pad|>" * num_images  # 6 images
         elif modality == "image":
             pholder = "<start_of_image>" if "gemma" in model_name.lower() else "<|image_pad|>"
         elif modality == "video":
@@ -261,6 +208,7 @@ def start_test(model_card_path: str):
             extra_engine_args = config.get("extra_engine_args", {})
             input_data_config = config.get("input_data_config", {})
             num_prompts = input_data_config.get("num_prompts", 1)
+            num_images = input_data_config.get("num_images", 6)
             media_source = input_data_config.get("media_source", "default")
 
             logger.info(
@@ -276,7 +224,8 @@ def start_test(model_card_path: str):
             inputs = data.get_prompts(model_name=model_name,
                                       modality=modality,
                                       media_source=media_source,
-                                      num_prompts=num_prompts)
+                                      num_prompts=num_prompts,
+                                      num_images=num_images)
 
             logger.info("*** Questions for modality %(modality)s: %(questions)s",
                         dict(modality=modality, questions=data._questions[modality]))
