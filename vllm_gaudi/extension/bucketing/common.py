@@ -54,12 +54,17 @@ class HPUBucketingManager():
         self.num_hpu_blocks = None
         self.max_model_len = max_model_len
         self.initialized = True
-
         self.fallback_bs_base_step = 2
         self.fallback_seq_base_step = 32
         self.fallback_blocks_base_step = 32
 
     ### GENERATE BUCKETS FUNCTIONS ###
+
+    def read_from_file(self, is_prompt):
+        file_name = get_config().VLLM_BUCKETING_FROM_FILE
+        from vllm_gaudi.extension.bucketing.file_strategy import (FileBucketingStrategy)
+        strategy = FileBucketingStrategy()
+        return strategy.get_buckets(file_name, is_prompt)
 
     def get_bucketing_strategy(self):
         strategy = None
@@ -78,6 +83,8 @@ class HPUBucketingManager():
 
     def generate_unified_buckets(self):
         if self.initialized:
+            if get_config().VLLM_BUCKETING_FROM_FILE:
+                assert "Unified attention doesn't support bucketing from file"
             from vllm_gaudi.extension.bucketing.unified import (UnifiedBucketingStrategy)
             strategy = UnifiedBucketingStrategy()
 
@@ -105,6 +112,9 @@ class HPUBucketingManager():
 
     def generate_prompt_buckets(self):
         if self.initialized:
+            if get_config().VLLM_BUCKETING_FROM_FILE:
+                self.prompt_buckets = self.read_from_file(is_prompt=True)
+                return
             strategy = self.get_bucketing_strategy()
 
             bs_cfg, query_cfg, ctx_cfg = strategy.get_prompt_cfgs(max_num_prefill_seqs=self.max_num_prefill_seqs,
@@ -127,6 +137,9 @@ class HPUBucketingManager():
 
     def generate_decode_buckets(self):
         if self.initialized:
+            if get_config().VLLM_BUCKETING_FROM_FILE:
+                self.decode_buckets = self.read_from_file(is_prompt=False)
+                return
             strategy = self.get_bucketing_strategy()
 
             bs_cfg, query_cfg, ctx_cfg = strategy.get_decode_cfgs(max_num_seqs=self.max_num_seqs,

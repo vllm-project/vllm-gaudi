@@ -1,0 +1,11 @@
+# This is a sample bucketing file
+# add bucketing as follows:
+# Prompt: (batch_size, query_len, context)
+# Decode: (batch_szie, 1, context)
+# Not supperted for unified attention
+
+(1, 1024, 0)
+(1, 512, 8)
+(64, 1, 1024)
+(32, 1, 512)
+(16, 1, 256)
