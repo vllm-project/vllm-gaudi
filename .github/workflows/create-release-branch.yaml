@@ -1,0 +1,402 @@
+# This workflow creates a new release branch, fetches a corresponding vLLM tag,
+# commits the tag's commit ID, and then runs a full suite of tests against the new branch.
+
+name: "Create Release Branch and Set vLLM Commit"
+
+on:
+  # This enables manual triggering of the workflow from the GitHub Actions UI.
+  workflow_dispatch:
+    inputs:
+      branch_name:
+        description: "The new release branch name (e.g., 'releases/v0.11.0')"
+        required: true
+        type: string
+
+# Required permissions for creating a branch and pushing a commit.
+permissions:
+  contents: write
+  issues: write # Added permission to allow creating issues
+
+jobs:
+  prepare-release-branch:
+    name: "Prepare Release Branch"
+    runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.extract_tag.outputs.tag_name }}
+      commit_id: ${{ steps.get_vllm_commit.outputs.commit_id }}
+      branch_name: ${{ steps.set_final_branch_name.outputs.branch_name }}
+
+    steps:
+      # Step 1: Check if the target branch already exists on the remote.
+      - name: "Check for existing branch"
+        id: check_branch
+        run: |
+          BRANCH_NAME="${{ github.event.inputs.branch_name }}"
+          if git ls-remote --exit-code --heads origin "$BRANCH_NAME" > /dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "✅ Branch '$BRANCH_NAME' already exists. Will use it for testing."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "➡️ Branch '$BRANCH_NAME' does not exist. Will create it."
+          fi
+
+      # Step 2: Checkout the correct code based on whether the branch exists.
+      - name: "Checkout existing branch"
+        if: steps.check_branch.outputs.exists == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch_name }}
+
+      - name: "Checkout base for new branch"
+        if: steps.check_branch.outputs.exists == 'false'
+        uses: actions/checkout@v4
+        with:
+          # This checks out the branch that the workflow was manually triggered on.
+          ref: ${{ github.ref_name }}
+
+      # Step 3: Extract tag name from the input. This is always needed for outputs.
+      - name: "Extract Tag Name"
+        id: extract_tag
+        run: |
+          BRANCH_NAME="${{ github.event.inputs.branch_name }}"
+          if [[ "$BRANCH_NAME" != releases/* ]]; then
+            echo "::error::Branch name must follow the 'releases/**' pattern."
+            exit 1
+          fi
+          TAG_NAME="${BRANCH_NAME#releases/}"
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "Extracted tag name: $TAG_NAME"
+
+      # Step 4: Get the vLLM commit ID. If branch exists, read from file. If not, fetch from the remote tag.
+      - name: "Get vLLM Commit ID"
+        id: get_vllm_commit
+        run: |
+          if [ "${{ steps.check_branch.outputs.exists }}" == 'true' ]; then
+            if [ -f "VLLM_STABLE_COMMIT" ]; then
+              VLLM_COMMIT_ID=$(tr -d '[:space:]' < VLLM_STABLE_COMMIT)
+              echo "Read vLLM commit from existing branch file: $VLLM_COMMIT_ID"
+            else
+              echo "::error::Branch exists but VLLM_STABLE_COMMIT file not found!"
+              exit 1
+            fi
+          else
+            TAG_NAME="${{ steps.extract_tag.outputs.tag_name }}"
+            VLLM_REPO="https://github.com/vllm-project/vllm.git"
+            VLLM_COMMIT_ID=$(git ls-remote "$VLLM_REPO" "refs/tags/$TAG_NAME" | cut -f1)
+            if [ -z "$VLLM_COMMIT_ID" ]; then
+              echo "::error::Could not find tag '$TAG_NAME' in the vLLM repository."
+              exit 1
+            fi
+            echo "Fetched vLLM commit ID for tag '$TAG_NAME': $VLLM_COMMIT_ID"
+          fi
+          echo "commit_id=$VLLM_COMMIT_ID" >> "$GITHUB_OUTPUT"
+
+      # Step 5: Configure Git user (only needed for new branch creation).
+      - name: "Configure Git"
+        if: steps.check_branch.outputs.exists == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # Step 6: Create and push the new branch only if it did not already exist.
+      - name: "Create and Push New Branch with Prefix"
+        if: steps.check_branch.outputs.exists == 'false'
+        run: |
+          BRANCH_NAME="pre_${{ github.event.inputs.branch_name }}"
+          git checkout -b "$BRANCH_NAME"
+          echo "${{ steps.get_vllm_commit.outputs.commit_id }}" > VLLM_STABLE_COMMIT
+          git add VLLM_STABLE_COMMIT
+          git commit -m "Set vLLM stable commit for ${{ steps.extract_tag.outputs.tag_name }}"
+          git push -u origin "$BRANCH_NAME"
+          echo "✅ Successfully created and pushed new branch '$BRANCH_NAME'."
+
+      # Step 7: Set the final branch name for subsequent jobs
+      - name: "Set Final Branch Name Output"
+        id: set_final_branch_name
+        run: |
+          if [ "${{ steps.check_branch.outputs.exists }}" == "true" ]; then
+            echo "branch_name=${{ github.event.inputs.branch_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "branch_name=pre_${{ github.event.inputs.branch_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+  setup_and_build:
+    runs-on: hourly-ci
+    needs: [prepare-release-branch]
+    steps:
+      - name: "Checkout the release branch"
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release-branch.outputs.branch_name }}
+      - name: Setup Docker environment and build image
+        run: |
+          echo "Attempting to build Docker image..."
+          docker build \
+            --no-cache \
+            --build-arg VLLM_COMMIT_ARG=${{ needs.prepare-release-branch.outputs.commit_id }} \
+            -t hpu-plugin-v1-${{ needs.prepare-release-branch.outputs.tag_name }} \
+            -f - . <<EOF
+          FROM vault.habana.ai/gaudi-docker/1.22.0/ubuntu24.04/habanalabs/pytorch-installer-2.7.1:latest
+
+          COPY ./ /workspace/vllm-gaudi
+          WORKDIR /workspace
+
+          ARG VLLM_COMMIT_ARG
+          RUN git clone https://github.com/vllm-project/vllm.git vllm
+          WORKDIR /workspace/vllm
+          RUN git checkout \$VLLM_COMMIT_ARG
+
+          RUN pip install pytest pytest_asyncio pytest-timeout
+          RUN pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git
+
+          ENV no_proxy=localhost,127.0.0.1
+          ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
+
+          RUN bash -c 'pip install -r <(sed "/^[torch]/d" requirements/build.txt)'
+          RUN VLLM_TARGET_DEVICE=empty pip install --no-build-isolation .
+
+          RUN python3 -m pip install -e tests/vllm_test_utils
+
+          WORKDIR /workspace/vllm-gaudi
+          RUN pip install -e .
+
+          WORKDIR /workspace
+          RUN ln -s /workspace/vllm/tests /workspace/tests \
+              && ln -s /workspace/vllm/examples /workspace/examples \
+              && ln -s /workspace/vllm/benchmarks /workspace/benchmarks
+          EOF
+          echo "Docker image built successfully."
+
+  run_unit_tests:
+    needs: [prepare-release-branch, setup_and_build]
+    runs-on: hourly-ci
+    steps:
+      - name: Run pytest in tests/unit_tests
+        run: |
+          EXITCODE=1
+          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-unit-tests-hourly-ci || true; }
+          trap 'remove_docker_containers; exit $EXITCODE;' EXIT
+          remove_docker_containers
+
+          echo "Running HPU plugin v1 unit tests"
+          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-unit-tests-hourly-ci --network=host \
+            -e HABANA_VISIBLE_DEVICES=all \
+            -e HF_HOME=/workspace/hf_cache \
+            -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
+            -v /mnt/hf_cache:/workspace/hf_cache \
+            hpu-plugin-v1-${{ needs.prepare-release-branch.outputs.tag_name }} \
+            /bin/bash -c "pytest -vvv --timeout=300 --durations=10 --durations-min=1.0 /workspace/vllm-gaudi/tests/unit_tests"
+
+          EXITCODE=$?
+          echo "Test script exited with code: $EXITCODE"
+
+  discover_tests:
+    runs-on: hourly-ci
+    needs: [prepare-release-branch]
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: "Checkout the release branch"
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release-branch.outputs.branch_name }}
+      - name: Discover test functions
+        id: set-matrix
+        run: |
+          TEST_FUNCTIONS=$( grep '^run_' ./tests/full_tests/ci_gsm8k_tests.sh | \
+              awk '{print $1}' | \
+              sed 's/()//' | \
+              jq -R . | jq -s -c . )
+
+          echo "Discovered test matrix: $TEST_FUNCTIONS"
+          if [ "$TEST_FUNCTIONS" = "[]" ]; then
+            echo "::error::No test functions were discovered. Failing the workflow."
+            exit 1
+          fi
+          echo "matrix=$TEST_FUNCTIONS" >> "$GITHUB_OUTPUT"
+
+  e2e:
+    needs: [prepare-release-branch, setup_and_build, discover_tests]
+    runs-on: hourly-ci
+    strategy:
+      fail-fast: false
+      matrix:
+        test_function: ${{ fromJson(needs.discover_tests.outputs.matrix) }}
+
+    steps:
+      - name: Run test suite - ${{ matrix.test_function }}
+        run: |
+          EXITCODE=1
+          CONTAINER_NAME="hpu-plugin-test-${{ matrix.test_function }}-${{ github.run_id }}"
+          remove_docker_containers() { docker rm -f $CONTAINER_NAME || true; }
+          trap 'remove_docker_containers; exit $EXITCODE;' EXIT
+          remove_docker_containers
+
+          echo "Running HPU plugin test: ${{ matrix.test_function }}"
+          docker run --rm --runtime=habana --name=$CONTAINER_NAME --network=host \
+            -e HABANA_VISIBLE_DEVICES=all \
+            -e HF_HOME=/workspace/hf_cache \
+            -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
+            -v /mnt/hf_cache:/workspace/hf_cache \
+            hpu-plugin-v1-${{ needs.prepare-release-branch.outputs.tag_name }} \
+            /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_gsm8k_tests.sh" "${{ matrix.test_function }}"
+
+          EXITCODE=$?
+          echo "Test script exited with code: $EXITCODE"
+
+  run_data_parallel_test:
+    needs: [prepare-release-branch, setup_and_build]
+    runs-on: hourly-ci
+    steps:
+      - name: Run Data Parallel test
+        run: |
+          EXITCODE=1
+          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-dp-tests-hourly-ci || true; }
+          trap 'remove_docker_containers; exit $EXITCODE;' EXIT
+          remove_docker_containers
+
+          echo "Running HPU plugin v1 dp tests"
+          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-dp-tests-hourly-ci --network=host \
+            -e HABANA_VISIBLE_DEVICES=all \
+            -e HF_HOME=/workspace/hf_cache \
+            -e VLLM_SKIP_WARMUP=true \
+            -e PT_HPU_LAZY_MODE=1 \
+            -e VLLM_USE_V1=1 \
+            -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
+            -v /mnt/hf_cache:/workspace/hf_cache \
+            hpu-plugin-v1-${{ needs.prepare-release-branch.outputs.tag_name }} \
+            /bin/bash -c "python -u /workspace/vllm-gaudi/examples/data_parallel.py --dp-size 2 --tp-size 2"
+
+          EXITCODE=$?
+          echo "Test script exited with code: $EXITCODE"
+
+  run_pd_disaggregate_test:
+    needs: [prepare-release-branch, setup_and_build]
+    runs-on: hourly-ci
+    steps:
+      - name: Run PD disaggregate test
+        run: |
+          EXITCODE=1
+          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-pd-tests-hourly-ci || true; }
+          trap 'remove_docker_containers; exit $EXITCODE;' EXIT
+          remove_docker_containers
+
+          echo "Running HPU plugin v1 nixl pd tests"
+          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-pd-tests-hourly-ci --network=host \
+            -e HABANA_VISIBLE_DEVICES=all \
+            -e HF_HOME=/workspace/hf_cache \
+            -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
+            -v /mnt/hf_cache:/workspace/hf_cache \
+            -v /mnt/wheels_cache:/workspace/wheels_cache \
+            hpu-plugin-v1-${{ needs.prepare-release-branch.outputs.tag_name }} \
+            /bin/bash -c "
+              pip install lm-eval[api] &&
+              cd /workspace/vllm-gaudi/tests/unit_tests &&
+              ./run_accuracy_test.sh
+            "
+          EXITCODE=$?
+          echo "Test script exited with code: $EXITCODE"
+
+  run_hpu_perf_tests:
+    needs: [prepare-release-branch, setup_and_build]
+    runs-on: hourly-ci
+    steps:
+      - name: Run Sharegpt performance tests with warmup
+        run: |
+          EXITCODE=1
+          CONTAINER_NAME="hpu-plugin-v1-test-perf-tests-${{ github.run_id }}"
+          remove_docker_containers() { docker rm -f $CONTAINER_NAME || true; }
+          trap 'remove_docker_containers; exit $EXITCODE;' EXIT
+          remove_docker_containers
+
+          echo "Running HPU plugin v1 perf tests"
+          docker run --rm --runtime=habana --name=$CONTAINER_NAME --network=host \
+            -e HABANA_VISIBLE_DEVICES=all \
+            -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
+            -e HF_HOME=/workspace/hf_cache \
+            -v /mnt/hf_cache:/workspace/hf_cache \
+            hpu-plugin-v1-${{ needs.prepare-release-branch.outputs.tag_name }} \
+            /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_perf_tests.sh"
+          
+          EXITCODE=$?
+          echo "Test script exited with code: $EXITCODE"
+
+  summarize_and_notify:
+    name: "Summarize Test Results and Notify"
+    runs-on: ubuntu-latest
+    if: needs.prepare-release-branch.result == 'success'
+    needs:
+      - prepare-release-branch
+      - run_unit_tests
+      - e2e
+      - run_data_parallel_test
+      - run_pd_disaggregate_test
+      - run_hpu_perf_tests
+    steps:
+      - name: "Generate Summary Report"
+        id: summary
+        if: needs.prepare-release-branch.result == 'success'
+        run: |
+          # Start with a clean report file and add the header
+          echo "## Test Summary for Branch: ${{ needs.prepare-release-branch.outputs.branch_name }}" > report.md
+          
+          # Append the link to the workflow run using a command group
+          {
+            echo ""
+            echo "See the full workflow run [here](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+            echo ""
+          } >> report.md
+          
+          FAILED_TESTS=""
+          FAILED_COUNT=0
+          
+          # This function now appends its result directly to the report file
+          check_status() {
+            JOB_NAME=$1
+            JOB_RESULT=$2
+            if [ "$JOB_RESULT" == "success" ]; then
+              echo "✅ $JOB_NAME: Passed" >> report.md
+            else
+              echo "❌ $JOB_NAME: ${JOB_RESULT^}" >> report.md
+              FAILED_TESTS+="* $JOB_NAME\n" # Collect failed test names for the summary
+              FAILED_COUNT=$((FAILED_COUNT+1))
+            fi
+          }
+          
+          check_status "Unit Tests" "${{ needs.run_unit_tests.result }}"
+          check_status "End-to-End Tests" "${{ needs.e2e.result }}"
+          check_status "Data Parallel Test" "${{ needs.run_data_parallel_test.result }}"
+          check_status "PD Disaggregate Test" "${{ needs.run_pd_disaggregate_test.result }}"
+          check_status "Performance Tests" "${{ needs.run_hpu_perf_tests.result }}"
+          
+          # Append the final summary section to the report file using a command group
+          {
+            echo ""
+            echo "---"
+            echo ""
+            if [ "$FAILED_COUNT" -gt 0 ]; then
+              SUBJECT="❌ Release Build Failed for ${{ needs.prepare-release-branch.outputs.branch_name }}"
+              echo "**Overall Status: FAILED**"
+              echo ""
+              echo "**${FAILED_COUNT} job(s) failed:**"
+              echo -e "$FAILED_TESTS"
+            else
+              SUBJECT="✅ Release Build Succeeded for ${{ needs.prepare-release-branch.outputs.branch_name }}"
+              echo "**Overall Status: PASSED**"
+              echo ""
+              echo "All tests passed successfully."
+            fi
+          } >> report.md
+
+          echo "Tested Branch: ${{ needs.prepare-release-branch.outputs.branch_name }}" >> report.md
+          
+          echo "SUBJECT=$SUBJECT" >> "$GITHUB_ENV"
+
+      - name: "Create GitHub Issue with Summary"
+        uses: peter-evans/create-issue-from-file@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          title: ${{ env.SUBJECT }}
+          content-filepath: ./report.md
+          # Optional: Add labels to the issue
+          labels: release-report, automated

@@ -47,7 +47,28 @@ Learn more:
     ```bash
     cd vllm-gaudi
     pip install -e .
+    cd ..
     ```
+
+4. (Optional) Install nixl:
+
+    ```bash
+    cd vllm-gaudi
+    python install_nixl.sh
+    cd ..
+    ```
+
+## Install with Docker file
+
+```bash
+docker build -t ubuntu.pytorch.vllm.nixl.latest \
+  -f .cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest github.com/vllm-project/vllm-gaudi
+docker run -it --rm --runtime=habana \
+  --name=ubuntu.pytorch.vllm.nixl.latest \
+  --network=host \
+  -e HABANA_VISIBLE_DEVICES=all \
+  vllm-gaudi-for-llmd /bin/bash
+```
 
 ### Full installation from source (vLLM and vLLM-Gaudi):
 
@@ -68,4 +89,7 @@ cd ..
 # Build vLLM-Gaudi from source
 cd vllm-gaudi
 pip install -e .
+
+# Build nixl
+python install_nixl.sh
 ```
