@@ -9,7 +9,6 @@ from PIL import Image
 from dataclasses import dataclass
 import yaml
 import os
-import glob
 from vllm_gaudi.extension.logger import logger as init_logger
 
 logger = init_logger()
@@ -19,23 +18,17 @@ logger = init_logger()
 class PROMPT_DATA:
     _questions = {
         "image": [
-            "What is the most prominent object in this image?", 
-            "Describe the scene in the image.",
-            "What is the weather like in the image?", 
-            "Write a short poem about this image."
+            "What is the most prominent object in this image?", "Describe the scene in the image.",
+            "What is the weather like in the image?", "Write a short poem about this image."
         ],
         "multi_image": [
             "Compare and contrast these images. What are the similarities and differences?",
             "Tell a story that connects all these images together.",
             "What common themes do you see across these images?",
-            "Describe the progression or sequence shown in these images.",
-            "Which image stands out the most and why?",
+            "Describe the progression or sequence shown in these images.", "Which image stands out the most and why?",
             "What emotions or moods are conveyed by these images collectively?"
         ],
-        "video": [
-            "Describe this video", 
-            "Which movie would you associate this video with?"
-        ]
+        "video": ["Describe this video", "Which movie would you associate this video with?"]
     }
 
     def __post_init__(self):
@@ -53,8 +46,7 @@ class PROMPT_DATA:
         return VideoAsset(name="baby_reading" if source == "default" else source, num_frames=16).np_ndarrays
 
     def _load_multiple_images(self, source: Union[str, List[str]]) -> List[Image.Image]:
-        images=[]
-
+        images = []
         """Load multiple images from various sources"""
         if source == "default":
             # Get all available ImageAsset names from the Literal type
@@ -135,14 +127,16 @@ class PROMPT_DATA:
 
         # For multi_image, data is a list of images
         if modality == "multi_image":
-            inputs = [{
-                "prompt": prompts[i % len(prompts)],
-                "multi_modal_data": {
-                    "image": data  # Pass list of images
-                },
-            } if not skip_vision_data else {
-                "prompt": questions[i % len(questions)],
-            } for i in range(num_prompts)]
+            inputs = [
+                {
+                    "prompt": prompts[i % len(prompts)],
+                    "multi_modal_data": {
+                        "image": data  # Pass list of images
+                    },
+                } if not skip_vision_data else {
+                    "prompt": questions[i % len(questions)],
+                } for i in range(num_prompts)
+            ]
         else:
             inputs = [{
                 "prompt": prompts[i % len(prompts)],
@@ -166,7 +160,7 @@ def run_model(model_name: str, inputs: Union[dict, list[dict]], modality: str, *
 
     extra_engine_args.setdefault("max_model_len", 32768)
     extra_engine_args.setdefault("max_num_seqs", 5)
-    
+
     # For multi-image, allow multiple images per prompt
     if modality == "multi_image":
         extra_engine_args.setdefault("limit_mm_per_prompt", {"image": 10})  # Allow up to 10 images
