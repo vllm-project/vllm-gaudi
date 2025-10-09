@@ -63,7 +63,7 @@ Use the following commands to run a Docker image. Make sure to update the versio
 === "Step 1: Get Last good commit on vllm"
 
    NOTE: vllm-gaudi is always follow latest vllm commit, however, vllm upstream
-   API update may crash vllm-gaudi, this commit saved is verified with vllm-gaudi
+   API update may crash vllm-gaudi,  this commit saved is verified with vllm-gaudi
    in a hourly basis
 
     ```bash{.console}
@@ -74,7 +74,7 @@ Use the following commands to run a Docker image. Make sure to update the versio
 
 === "Step 2: Install vLLM"
 
-    Install vLLM with `pip` or [from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source)
+    Install vLLM with `pip` or  [from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source)
     
     ```bash{.console}
     # Build vLLM from source for empty platform, reusing existing torch installation
@@ -88,7 +88,7 @@ Use the following commands to run a Docker image. Make sure to update the versio
 
 === "Step 3: Install vLLM Plugin"
 
-   Install vLLM-Gaudi from source:
+   Install  vLLM-Gaudi from source:
     ```{.console}
         cd vllm-gaudi
         pip install -e .

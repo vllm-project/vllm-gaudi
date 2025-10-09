@@ -58,7 +58,7 @@ Learn more: 🚀 [vLLM Plugin System Overview](https://docs.vllm.ai/en/latest/de
     cd ..
     ```
 
-4. Optionally: nixl installation follow the [link](https://vllm-gaudi.readthedocs.io/en/latest/getting_started/installation.html)
+4. Optionally: nixl installation follow the  [link](https://vllm-gaudi.readthedocs.io/en/latest/getting_started/installation.html)
 
 ## Contributing
 
