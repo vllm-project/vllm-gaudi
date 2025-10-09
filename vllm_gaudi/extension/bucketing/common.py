@@ -91,6 +91,10 @@ class HPUBucketingManager():
             shared_ctx_range = strategy.get_range(shared_ctx_cfg)
             unique_ctx_range = strategy.get_range(unique_ctx_cfg)
 
+            print("query_range", query_range)
+            print("shared_ctx_range", shared_ctx_range)
+            print("unique_ctx_range", unique_ctx_range)
+
             self.unified_buckets = generate_unified_buckets(query_range, shared_ctx_range, unique_ctx_range,
                                                             self.max_num_seqs, self.block_size, self.max_model_len)
 
@@ -337,12 +341,16 @@ def generate_unified_buckets(query_range, shared_ctx_range, unique_ctx_range, bs
             max_bs = min(bs, query)
             if math.ceil(shared_ctx * block_size // max_bs) <= max_model_len:
                 buckets.add((query, shared_ctx, unique_ctx, causal))
-        elif (query <= bs):
+        elif query <= bs:
             # non causal query = current bs
+            print(query, shared_ctx, unique_ctx, causal)
             if shared_ctx > 0 or unique_ctx > 0:
-                if shared_ctx == 0 or (query > 1 and \
-                    math.ceil(shared_ctx * block_size // (query // 2)) <= max_model_len):
-                    buckets.add((query, shared_ctx, unique_ctx, causal))
+                print("1")
+                if shared_ctx == 0 or (math.ceil(shared_ctx * block_size // (query // 2)) <= max_model_len):
+                    print("2", math.ceil(shared_ctx * block_size // (query // 2)), max_model_len)
+                    if shared_ctx > 0 or query <= unique_ctx:
+                        print("added")
+                        buckets.add((query, shared_ctx, unique_ctx, causal))
 
     return sorted(buckets)
 

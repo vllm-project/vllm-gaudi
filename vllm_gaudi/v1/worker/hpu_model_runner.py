@@ -860,16 +860,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if not get_config().use_bucketing:
             return query_len, shared_blocks, unique_blocks, logits
 
-        def bucketize(x, buckets):
-            if x < buckets[-1]:
-                return next(b for b in buckets if b >= x)
-            else:
-                return round_up(x, buckets[-1])
-
-        logits_buckets = [self.max_num_seqs]
-        logits = min(bucketize(logits, logits_buckets), query_len)
         new_bucket = self.bucketing_manager.find_unified_bucket(query_len, shared_blocks, unique_blocks, is_causal)
-        return (new_bucket[0], new_bucket[1], new_bucket[2], logits)
+        return (new_bucket[0], new_bucket[1], new_bucket[2], self.max_num_seqs)
 
     def create_lora_mask(self, input_tokens: torch.Tensor, lora_ids: list[int], is_prompt: bool):
         '''
@@ -1477,7 +1469,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # Merged prefill case: remove requests without logits
             req_id_output_token_ids_lst = [r for r in req_id_output_token_ids_lst if r[0] in logits_reqs]
         else:
-            if pad_to is not None:
+            if pad_to is not None and len(req_id_output_token_ids_lst) > 0:
                 while len(req_id_output_token_ids_lst) < pad_to:
                     req_id_output_token_ids_lst.append(req_id_output_token_ids_lst[0])
         return req_id_output_token_ids_lst
@@ -2376,6 +2368,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.debug_fwd(cfg)
         seen = cfg in self.seen_configs
         self.seen_configs.add(cfg)
+        if warmup_mode:
+            print(cfg)
         if not seen and not warmup_mode:
             logger.warning("Configuration: %s was not warmed-up!", cfg)
 
@@ -3787,9 +3781,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             decode_reqs_blocks = []
             prompt_reqs_query = []
             prompt_reqs_blocks: list = []
-
+            
             all_shared_blocks_ids = [block for block in range(shared_ctx_len)]
             unique_block = unique_ctx_len - 1
+            print(unique_block)
             # do not use unique block id
             if unique_block in all_shared_blocks_ids:
                 all_shared_blocks_ids.remove(unique_ctx_len - 1)
@@ -3820,13 +3815,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             for query, blocks in zip(prompt_reqs_query, prompt_reqs_blocks):
                 self._add_dummy_unified_request(requests, True, False, blocks, num_computed_tokens, query,
                                                 scheduled_tokens)
+            print(decode_reqs_query, decode_reqs_blocks, len(prompt_reqs_query), sum(prompt_reqs_query))
 
         else:
             remaining_samples = query_len
             base = shared_ctx_len // remaining_samples
             remain = shared_ctx_len % remaining_samples
-
             all_shared_blocks_ids = [block for block in range(shared_ctx_len)]
+            print(all_shared_blocks_ids)
             unique_block = unique_ctx_len - 1
             # do not use unique block id
             if unique_block in all_shared_blocks_ids:
@@ -3847,10 +3843,17 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 target = (i + 1) % remaining_samples
                 if block not in split_shared_blocks_ids[target]:
                     split_shared_blocks_ids[target].append(block)
-
+            
             # add unique id
-            min_idx = min(range(remaining_samples), key=lambda j: len(split_shared_blocks_ids[j]))
-            split_shared_blocks_ids[min_idx].append(unique_block)
+            if unique_ctx_len > 0:
+                min_idx = min(range(remaining_samples), key=lambda j: len(split_shared_blocks_ids[j]))
+                split_shared_blocks_ids[min_idx].append(unique_block)
+
+            for i in range(len(split_shared_blocks_ids)):
+                if not split_shared_blocks_ids[i]:
+                    split_shared_blocks_ids[i] = [unique_block - i]
+            
+            print(split_shared_blocks_ids)
 
             for request_blocks in split_shared_blocks_ids:
                 self._add_dummy_unified_request(requests, False, False, request_blocks, num_computed_tokens, 1,
