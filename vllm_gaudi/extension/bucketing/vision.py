@@ -3,22 +3,14 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-MODEL_CONFIGS = {
+MULTIMODAL_CONFIG = {
     # Batch-based models
     'gemma-3': {
         'is_batch_based': True,
         'buckets': [1, 2, 4, 8]
     },
-    'internvl': {
-        'is_batch_based': True,
-        'buckets': [1, 2, 4, 6, 8]
-    },
 
     # Pixel-based models
-    'qwen2.5-vl': {
-        'is_batch_based': False,
-        'buckets': [1600, 3136, 4096, 6400, 7744, 9216, 12544]
-    },
     'ovis2.5': {
         'is_batch_based': False,
         'buckets': [784, 1600, 3136, 4096, 6400, 7744, 9216, 12544]
@@ -32,7 +24,7 @@ class HPUVisionBucketManager:
     '''
 
     def __init__(self, model_name, is_batch_based=True):
-        config = self._get_model_config(model_name)
+        config = self._get_multimodal_config(model_name)
 
         self.is_batch_based = is_batch_based if is_batch_based is not None else config['is_batch_based']
 
@@ -46,12 +38,12 @@ class HPUVisionBucketManager:
                 multimodal_buckets = [int(x) for x in envvar.split(',')]
             self.multimodal_buckets = self._process_buckets(multimodal_buckets)
 
-    def _get_model_config(self, model_name):
+    def _get_multimodal_config(self, model_name):
         """Get configuration for model"""
         model_name_lower = model_name.lower()
 
         # Find matching config
-        for key, config in MODEL_CONFIGS.items():
+        for key, config in MULTIMODAL_CONFIG.items():
             if key.replace('-', '').replace('.', '') in model_name_lower.replace('-', '').replace('.', ''):
                 return config
 

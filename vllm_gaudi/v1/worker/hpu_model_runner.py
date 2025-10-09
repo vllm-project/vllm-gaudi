@@ -344,6 +344,10 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         self.is_mm_optimized = is_mm_optimized(self.model)
         self.sliding_window = vllm_config.model_config.get_sliding_window()
         self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
+        if self.interleaved_sliding_window:
+            self.use_window_sdpa = os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
+            self.slice_size = int(os.getenv("PT_HPU_SDPA_BC_FACTOR", "1024"))
+            self.slice_thld = int(os.environ.get('VLLM_FUSEDSDPA_SLIDE_THLD', '8192'))
 
         # for DP
         self.dummy_num_input_tokens = -1
@@ -353,18 +357,15 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         # Vision embedding can be also wrapped in HPU graph once all the dynamic shape is removed.
         # Performance can be greatly improved.
         if htorch.utils.internal.is_lazy() and \
-           MULTIMODAL_REGISTRY.supports_multimodal_inputs(vllm_config.model_config):
-            if self.is_mm_optimized:
-                if hasattr(self.model, 'vision_tower'):
-                    logger.info("[Multimodal] Wrapping vision_tower")
-                    self.model.vision_tower = htorch.hpu.wrap_in_hpu_graph(self.model.vision_tower,
-                                                                           disable_tensor_cache=False)
-                if hasattr(self.model, 'multi_modal_projector'):
-                    logger.info("[Multimodal] Wrapping multi_modal_projector")
-                    self.model.multi_modal_projector = \
-                            htorch.hpu.wrap_in_hpu_graph( \
-                            self.model.multi_modal_projector, \
-                            disable_tensor_cache=True)
+           MULTIMODAL_REGISTRY.supports_multimodal_inputs(vllm_config.model_config) and self.is_mm_optimized:
+            if hasattr(self.model, 'vision_tower'):
+                self.model.vision_tower = htorch.hpu.wrap_in_hpu_graph(self.model.vision_tower,
+                                                                       disable_tensor_cache=False)
+            if hasattr(self.model, 'multi_modal_projector'):
+                self.model.multi_modal_projector = \
+                        htorch.hpu.wrap_in_hpu_graph( \
+                        self.model.multi_modal_projector, \
+                        disable_tensor_cache=True)
 
     def _get_rotary_embedding_module(self, model: torch.nn.Module):
         """
@@ -435,8 +436,14 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         prefill_metadata = attn_metadata
         shift = 0
 
-        if self.prefill_use_fusedsdpa and attn_metadata.block_list is not None:
+        # FusedSDPA with window_size is only supported when the seq_len is multiple of the slice_size
+        if self.prefill_use_fusedsdpa and self.use_window_sdpa and \
+            seq_len >= self.slice_thld and self.slice_size != 0 and \
+            seq_len % self.slice_size == 0 and attn_metadata.block_list is None:
+            # no need to set sliding window mask, just use built-in window-sdpa
+            return attn_metadata
 
+        if self.prefill_use_fusedsdpa and attn_metadata.block_list is not None:
             context_lens_t = prefill_metadata.context_lens_tensor
 
             block_list = attn_metadata.block_list

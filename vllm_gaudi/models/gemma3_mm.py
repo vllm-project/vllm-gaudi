@@ -13,13 +13,14 @@ class HpuGemma3ForConditionalGeneration(Gemma3ForConditionalGeneration):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
+    # For HPU optimization, process the vision tower using buckets to reduce recipe recompilation overhead
     def _process_image_input(self, image_input: Gemma3ImageInputs) -> list[torch.Tensor]:
         assert self.vision_tower is not None
         pixel_values = image_input["pixel_values"]
         num_patches = image_input["num_patches"]
 
-        batch_breakdown = self.greedy_plan(pixel_values.shape[0],
-                                           [1, 2, 4, 8])  ##self.vision_buckets.multimodal_buckets)
+        batch_breakdown = self.vision_bucket_manager.greedy_plan(pixel_values.shape[0],
+                                                                 self.vision_bucket_manager.multimodal_buckets)
         start_idx = 0
         image_embeds_multibatches = []
 
