@@ -792,6 +792,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.block_size],
+            kernel_block_sizes=[self.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
             logitsprocs=build_logitsprocs(self.vllm_config, self.device, self.pin_memory, self.is_pooling_model,
                                           self.vllm_config.model_config.logits_processors),
@@ -3993,6 +3994,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     pin_memory=self.pin_memory,
                     vocab_size=self.model_config.get_vocab_size(),
                     block_sizes=[self.block_size],
+                    kernel_block_sizes=[self.block_size],
                     logitsprocs=build_logitsprocs(self.vllm_config, self.device, self.pin_memory, self.is_pooling_model,
                                                   self.vllm_config.model_config.logits_processors),
                 )
