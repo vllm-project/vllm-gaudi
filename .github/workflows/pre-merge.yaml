@@ -22,7 +22,6 @@ concurrency:
 jobs:
   gatekeeper:
     runs-on: ubuntu-latest
-    if: github.event.action == 'opened' || github.event.before != github.event.after
     permissions:
       # Required to read the status of checks and PR details
       checks: read
@@ -162,35 +161,11 @@ jobs:
         with:
           extra_args: --all-files --hook-stage manual
 
-  check-run-ci:
-    name: Check for relevant file changes
-    runs-on: ubuntu-latest
-    outputs:
-      # This output will be 'true' if files in the specified paths changed
-      run_gaudi_job: ${{ steps.changed-files.outputs.any_changed }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.event.pull_request.head.repo.full_name }}
-          ref: ${{ github.event.pull_request.head.ref }}
-          # Fetches the entire history to compare against the base of the PR
-          fetch-depth: 0
-
-      - name: Check for changes in specific paths
-        id: changed-files
-        uses: tj-actions/changed-files@v44
-        with:
-          files: |
-            vllm-gaudi/**
-            tests/**
-
   pre_merge_hpu_test_build:
     if: >
-        needs.check-run-ci.outputs.run_gaudi_job == 'true' &&
         !contains(github.event.pull_request.labels.*.name, 'skip-gaudi-tests')
     runs-on: ucb-vllm-cicd-g2
-    needs: [check-run-ci, pre-commit, discover_tests]
+    needs: [pre-commit, discover_tests]
     permissions:
       contents: read # Required to checkout code and read history
     outputs:
