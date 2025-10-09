@@ -16,6 +16,7 @@ import torch
 import torch.distributed
 import torch.nn.functional as F
 import torch.nn as nn
+from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 from vllm_gaudi.extension.defragmentation import OnlineDefragmenter
@@ -31,7 +32,7 @@ from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import (VllmConfig, update_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
-from vllm.forward_context import set_forward_context, DPMetadata
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
@@ -1513,7 +1514,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             block_bucket_size = \
                 self.bucketing_manager.find_decode_bucket(batch_size,
                                                           block_bucket_size)[2]
-            block_bucket_size += self.get_dp_padding(block_bucket_size)
+            #block_bucket_size += self.get_dp_padding(block_bucket_size)
 
             indices: list[Any]
             indices = [None] * block_bucket_size
@@ -1526,7 +1527,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             block_bucket_size = \
                 self.bucketing_manager.find_decode_bucket(batch_size,
                                                           len(block_list))[2]
-            block_bucket_size += self.get_dp_padding(block_bucket_size)
+
+            #block_bucket_size += self.get_dp_padding(block_bucket_size)
 
             def padding_fn(tensor, pad_value):
                 return pad_list(tensor, block_bucket_size, itertools.repeat(pad_value))
@@ -1644,9 +1646,37 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         for content in all_batch_contents:
             if len(content.req_ids) > 0:
                 num_real_prefill_batches += 1
+        #num_scheduled_tokens = np.array(num_scheduled_tokens_list, dtype=np.int32)
+        #total_num_scheduled_tokens = int(num_scheduled_tokens.sum())
+        total_num_scheduled_tokens = int(np.array(num_scheduled_tokens, dtype=np.int32).sum())
+        num_tokens_unpadded = total_num_scheduled_tokens
+        #num_tokens_padded = self._get_num_input_tokens(num_tokens_unpadded)
+        uniform_decode_query_len = (1 if not self.speculative_config else 1 +
+                                    self.speculative_config.num_speculative_tokens)
+        uniform_decode = 1  #(
+        #    max_num_scheduled_tokens == uniform_decode_query_len
+        #) and (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
+        ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
+            num_real_prefill_batches,  #num_real_prefill_batches,#num_scheduled_tokens,
+            total_num_scheduled_tokens,  #total_num_scheduled_tokens,
+            total_num_scheduled_tokens -
+            num_real_prefill_batches,  #total_num_scheduled_tokens,#num_real_prefill_batches,
+            #num_tokens_unpadded,
+            #num_tokens_padded,
+            #uniform_decode=uniform_decode,
+            #vllm_config=self.vllm_config,
+            self.parallel_config,
+            False,
+            uniform_decode,
+        )
+        print("iboiko444 num_tokens_across_dp", num_tokens_across_dp)
+        #num_pad_across_dp = self.get_dp_padding(num_real_prefill_batches)
+        #if num_tokens_across_dp is not None:
+        #    num_tokens_after_padding = int(num_tokens_across_dp[0])
+        if num_tokens_across_dp is not None:
+            num_tokens_after_padding = int(num_tokens_across_dp[0])
 
-        num_pad_across_dp = self.get_dp_padding(num_real_prefill_batches)
-        return all_batch_contents, num_pad_across_dp
+        return all_batch_contents, num_tokens_after_padding  #num_tokens_across_dp #num_pad_across_dp
 
     def _make_attn_bias(self, context_groups, token_groups):
         dtype = self.dtype
@@ -1691,9 +1721,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         has_context = sum(context_lens) > 0
         target_bs, target_seq, target_blocks = self._get_prompt_bucketing_fn()(query_lens, num_context_blocks)
 
-        target_bs += self.get_dp_padding(target_bs)
-        target_seq += self.get_dp_padding(target_seq)
-        target_blocks += self.get_dp_padding(target_blocks)
+        #target_bs += self.get_dp_padding(target_bs)
+        #target_seq += self.get_dp_padding(target_seq)
+        #target_blocks += self.get_dp_padding(target_blocks)
 
         # NOTE: If model does not support multimodal inputs, we pad here.
         # For models with multimodal support, we may want to get embeddings
@@ -1837,6 +1867,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         merge_contents(all_batches[0], *all_batches[1:])
 
         dummy_prefill_input_batches = None
+        #if num_pad_across_dp is not None:
         if num_pad_across_dp > 0:
             dummy_prefill_input_batches = \
                 self._create_dummy_prefill_batch_contents(num_pad_across_dp)
@@ -1871,7 +1902,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         padded_batch_size = self.bucketing_manager.find_decode_bucket(num_decodes, sum(num_blocks))[0]
 
         # dp aware padding
-        padded_batch_size += self.get_dp_padding(padded_batch_size)
+        #padded_batch_size += self.get_dp_padding(padded_batch_size)
 
         num_tokens_per_req = num_scheduled_tokens[:num_decodes]
         num_tokens = max(num_tokens_per_req)
@@ -2078,9 +2109,27 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # logic knows to ignore those indicies. Otherwise, the
         # padding data can be dummy since we have a causal mask.
 
-        num_pad_across_dp = self.get_dp_padding(num_decodes)
+        total_num_scheduled_tokens = int(np.array(num_scheduled_tokens, dtype=np.int32).sum())
+        num_tokens_unpadded = total_num_scheduled_tokens
+        ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
+            num_decodes,  #num_scheduled_tokens,
+            total_num_scheduled_tokens,  #total_num_scheduled_tokens,
+            total_num_scheduled_tokens - num_decodes,  #total_num_scheduled_tokens,#num_real_prefill_batches,
+            #num_tokens_unpadded,
+            #num_tokens_padded,
+            #uniform_decode=uniform_decode,
+            #vllm_config=self.vllm_config,
+            self.parallel_config,
+            False,
+            1,
+        )
+        print("iboiko2 num_tokens_across_dp", num_tokens_across_dp)
+        if num_tokens_across_dp is not None:
+            num_tokens_after_padding = int(num_tokens_across_dp[0])
+        #num_pad_across_dp = self.get_dp_padding(num_decodes)
         if num_decodes == 0:
-            if num_pad_across_dp > 0:
+            if num_tokens_after_padding > 0:
+                #if num_pad_across_dp > 0:
                 dummy_decode_input_data = self._create_dummy_decode_input_data()
                 return DecodeInputData(num_decodes=0), dummy_decode_input_data
             return DecodeInputData(num_decodes=0), None
@@ -2351,7 +2400,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if not seen and not warmup_mode:
                 logger.warning("Configuration: %s was not warmed-up!", cfg)
 
-    def get_dp_padding(self, num_tokens: int) -> int:
+    '''def get_dp_padding(self, num_tokens: int) -> int:
         dp_size = self.vllm_config.parallel_config.data_parallel_size
         dp_rank = self.vllm_config.parallel_config.data_parallel_rank
 
@@ -2361,6 +2410,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         num_tokens_across_dp = DPMetadata.num_tokens_across_dp(num_tokens, dp_size, dp_rank)
         max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp).item()
         return max_tokens_across_dp_cpu - num_tokens
+    '''
 
     def _check_unified_config(self, attn_metadata, logits_indices, warmup_mode):
         has_causal = 'c' if attn_metadata.causal_bias is not None else '-'
