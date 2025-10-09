@@ -4,7 +4,7 @@ from vllm.assets.image import ImageAsset, ImageAssetName
 from vllm.assets.video import VideoAsset
 from vllm.multimodal.image import convert_image_mode
 from dataclasses import asdict
-from typing import Union, List, get_args
+from typing import Union, get_args
 from PIL import Image
 from dataclasses import dataclass
 import yaml
@@ -45,13 +45,13 @@ class PROMPT_DATA:
         """Load video data"""
         return VideoAsset(name="baby_reading" if source == "default" else source, num_frames=16).np_ndarrays
 
-    def _load_multiple_images(self, source: Union[str, List[str]]) -> List[Image.Image]:
+    def _load_multiple_images(self, source: Union[str, list[str]]) -> list[Image.Image]:
         images = []
         """Load multiple images from various sources"""
         if source == "default":
             # Get all available ImageAsset names from the Literal type
             available_assets = list(get_args(ImageAssetName))
-            logger.info(f"Available ImageAssets: {available_assets}")
+            logger.info("Available ImageAssets: %(available_assets)s", {"available_assets": available_assets})
 
             # Load up to 6 different assets (or more if needed)
             target_count = 6
@@ -65,9 +65,11 @@ class PROMPT_DATA:
                     converted_img = convert_image_mode(img, "RGB")
                     images.append(converted_img)
                     loaded_count += 1
-                    logger.info(f"Successfully loaded ImageAsset: {asset_name} (Size: {converted_img.size})")
+                    logger.info("Successfully loaded ImageAsset: %(asset_name)s (Size: %(size)s)",
+                                dict(asset_name=asset_name, size=converted_img.size))
                 except Exception as e:
-                    logger.warning(f"Failed to load ImageAsset '{asset_name}': {e}")
+                    logger.warning("Failed to load ImageAsset '%(asset_name)s': %(e)s", dict(asset_name=asset_name,
+                                                                                             e=e))
                     continue
 
         elif isinstance(source, list):
@@ -77,9 +79,9 @@ class PROMPT_DATA:
                     img = Image.open(img_path)
                     images.append(convert_image_mode(img, "RGB"))
                 except Exception as e:
-                    logger.warning(f"Failed to load image {img_path}: {e}")
+                    logger.warning("Failed to load image %(img_path)s: %(e)s", dict(img_path=img_path, e=e))
 
-        logger.info(f"Loaded {len(images)} images for multi-image processing")
+        logger.info("Loaded %(num_images)s images for multi-image processing", {"num_images": len(images)})
         return images
 
     def _get_data(self, modality: str, source: str):
@@ -102,14 +104,8 @@ class PROMPT_DATA:
                     skip_vision_data=False):
 
         # Handle multi-image modality
-        if modality == "multi_image":
-            if "gemma" in model_name.lower():
-                # For Gemma models, use multiple image placeholders
-                pholder = "<start_of_image>" * num_images  # 6 images
-            else:
-                pholder = "<|image_pad|>" * num_images  # 6 images
-        elif modality == "image":
-            pholder = "<start_of_image>" if "gemma" in model_name.lower() else "<|image_pad|>"
+        if modality == "multi_image" or modality == "image":
+            pholder = "<start_of_image>" * num_images if "gemma" in model_name.lower() else "<|image_pad|>" * num_images
         elif modality == "video":
             pholder = "<video>" if "gemma" in model_name.lower() else "<|video_pad|>"
         else:
