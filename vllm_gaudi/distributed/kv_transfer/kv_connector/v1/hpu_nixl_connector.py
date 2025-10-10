@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (NixlConnectorWorker)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnectorWorker
 from vllm_gaudi.platform import logger
 import habana_frameworks.torch.core as htexp
 
