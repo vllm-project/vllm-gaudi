@@ -59,6 +59,7 @@ def get_features():
     supported_attn_impls = ['flex_impl', 'fsdpa_impl', 'naive_impl']
     bucketing_strategies = ['exponential_bucketing', 'linear_bucketing']
     features = [
+        Value('prefix_caching', dependencies=Any(Enabled('unified_attn'), Disabled('use_contiguous_pa')), env_var_type=boolean),
         Value('fp32_alibi_biases', True, env_var='VLLM_ALIBI_USE_FLOAT32_BIASES'),
         Value('fp32_softmax', ModelType('qwen2')),
         Value(
