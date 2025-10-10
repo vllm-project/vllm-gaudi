@@ -31,7 +31,7 @@ from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import (VllmConfig, update_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
-from vllm.forward_context import set_forward_context, DPMetadata
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
@@ -55,7 +55,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm.v1.utils import CpuGpuBuffer
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.distributed.parallel_state import get_pp_group, get_dp_group
 from vllm.model_executor.models.interfaces import (SupportsMultiModal, supports_eagle3, supports_transcription)
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
@@ -77,6 +77,7 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm_gaudi.extension.ops import LoraMask as LoraMask
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -2358,8 +2359,15 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if dp_size == 1:
             return 0
 
-        num_tokens_across_dp = DPMetadata.num_tokens_across_dp(num_tokens, dp_size, dp_rank)
-        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp).item()
+        device = current_platform.device_type
+        group = get_dp_group().device_group
+
+        num_tokens_across_dp = [0] * dp_size
+        num_tokens_across_dp[dp_rank] = num_tokens
+        num_tokens_tensor = torch.tensor(num_tokens_across_dp, device=device, dtype=torch.int32)
+        torch.distributed.all_reduce(num_tokens_tensor, group=group)
+
+        max_tokens_across_dp_cpu = torch.max(num_tokens_tensor.cpu()).item()
         return max_tokens_across_dp_cpu - num_tokens
 
     def _check_unified_config(self, attn_metadata, logits_indices, warmup_mode):
