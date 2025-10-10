@@ -2368,8 +2368,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.debug_fwd(cfg)
         seen = cfg in self.seen_configs
         self.seen_configs.add(cfg)
-        if warmup_mode:
-            print(cfg)
         if not seen and not warmup_mode:
             logger.warning("Configuration: %s was not warmed-up!", cfg)
 
@@ -3784,7 +3782,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             
             all_shared_blocks_ids = [block for block in range(shared_ctx_len)]
             unique_block = unique_ctx_len - 1
-            print(unique_block)
             # do not use unique block id
             if unique_block in all_shared_blocks_ids:
                 all_shared_blocks_ids.remove(unique_ctx_len - 1)
@@ -3815,14 +3812,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             for query, blocks in zip(prompt_reqs_query, prompt_reqs_blocks):
                 self._add_dummy_unified_request(requests, True, False, blocks, num_computed_tokens, query,
                                                 scheduled_tokens)
-            print(decode_reqs_query, decode_reqs_blocks, len(prompt_reqs_query), sum(prompt_reqs_query))
-
         else:
             remaining_samples = query_len
             base = shared_ctx_len // remaining_samples
             remain = shared_ctx_len % remaining_samples
             all_shared_blocks_ids = [block for block in range(shared_ctx_len)]
-            print(all_shared_blocks_ids)
             unique_block = unique_ctx_len - 1
             # do not use unique block id
             if unique_block in all_shared_blocks_ids:
@@ -3851,9 +3845,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
             for i in range(len(split_shared_blocks_ids)):
                 if not split_shared_blocks_ids[i]:
-                    split_shared_blocks_ids[i] = [unique_block - i]
-            
-            print(split_shared_blocks_ids)
+                    if unique_block - i >= 0:
+                        split_shared_blocks_ids[i] = [unique_block - i]
+                    else: 
+                        split_shared_blocks_ids[i] = [all_shared_blocks_ids[0]]
 
             for request_blocks in split_shared_blocks_ids:
                 self._add_dummy_unified_request(requests, False, False, request_blocks, num_computed_tokens, 1,
