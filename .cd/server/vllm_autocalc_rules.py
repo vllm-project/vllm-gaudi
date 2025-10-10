@@ -42,6 +42,9 @@ def calc_GPU_MEMORY_UTIL_TEMP(ctx):
 
 
 def calc_GPU_MEM_UTILIZATION(ctx):
+    # If user provided
+    if ctx.get('GPU_MEM_UTILIZATION') is not None:
+        return ctx['GPU_MEM_UTILIZATION']
     return math.floor(ctx['GPU_MEMORY_UTIL_TEMP'] * 100) / 100
 
 
@@ -78,8 +81,13 @@ def calc_DECODE_BLOCK_STEP_GRAPHS(ctx):
 
 
 def calc_NUM_DECODE_GRAPHS(ctx):
-    return ((ctx['DECODE_BS_RAMP_GRAPHS'] + ctx['DECODE_BS_STEP_GRAPHS']) *
-            (ctx['DECODE_BLOCK_RAMP_GRAPHS'] + ctx['DECODE_BLOCK_STEP_GRAPHS']))
+    # 3d update
+    decode_graphs = ((ctx['DECODE_BS_RAMP_GRAPHS'] + ctx['DECODE_BS_STEP_GRAPHS']) *
+                     (ctx['DECODE_BLOCK_RAMP_GRAPHS'] + ctx['DECODE_BLOCK_STEP_GRAPHS']))
+    if ctx['VLLM_CONTIGUOUS_PA']:
+        return decode_graphs
+    else:
+        return decode_graphs / 2
 
 
 def calc_PROMPT_BS_RAMP_GRAPHS(ctx):
@@ -99,12 +107,20 @@ def calc_PROMPT_SEQ_RAMP_GRAPHS(ctx):
 
 
 def calc_PROMPT_SEQ_STEP_GRAPHS(ctx):
-    return int(1 + (ctx['MAX_MODEL_LEN'] - ctx['VLLM_PROMPT_SEQ_BUCKET_STEP']) / ctx['VLLM_PROMPT_SEQ_BUCKET_STEP'])
+    return int(1 + (min(ctx['MAX_NUM_BATCHED_TOKENS'], ctx['MAX_MODEL_LEN']) - ctx['VLLM_PROMPT_SEQ_BUCKET_STEP']) /
+               ctx['VLLM_PROMPT_SEQ_BUCKET_STEP'])
 
 
 def calc_EST_NUM_PROMPT_GRAPHS(ctx):
-    return ((ctx['PROMPT_BS_RAMP_GRAPHS'] + ctx['PROMPT_BS_STEP_GRAPHS']) *
-            (ctx['PROMPT_SEQ_RAMP_GRAPHS'] + ctx['PROMPT_SEQ_STEP_GRAPHS']) / 2)
+    prompt_bs_graphs = ctx['PROMPT_BS_RAMP_GRAPHS'] + ctx['PROMPT_BS_STEP_GRAPHS']
+    prompt_seq_graphs = ctx['PROMPT_SEQ_RAMP_GRAPHS'] + ctx['PROMPT_SEQ_STEP_GRAPHS']
+    graphs_2d = prompt_bs_graphs * prompt_seq_graphs
+    if prompt_bs_graphs > 1:
+        graphs_2d = graphs_2d / 2
+    ctx_block_graphs_max = (ctx['MAX_MODEL_LEN'] - ctx['VLLM_PROMPT_SEQ_BUCKET_MIN']) / ctx['BLOCK_SIZE']
+    ctx_block_graphs_min = max(1, (ctx['MAX_MODEL_LEN'] - ctx['MAX_NUM_BATCHED_TOKENS']) / ctx['BLOCK_SIZE'])
+    graphs_3d = graphs_2d * (ctx_block_graphs_max + ctx_block_graphs_min) / 2
+    return graphs_3d
 
 
 def calc_EST_GRAPH_PROMPT_RATIO(ctx):
