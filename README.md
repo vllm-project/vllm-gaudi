@@ -27,6 +27,12 @@ This plugin follows the [[RFC]: Hardware pluggable](https://github.com/vllm-proj
 Learn more: 🚀 [vLLM Plugin System Overview](https://docs.vllm.ai/en/latest/design/plugin_system.html)
 
 ## Getting Started
+0. Preparation of the Setup
+
+    To set up the execution environment, please follow the instructions in the [Gaudi Installation Guide](https://docs.habana.ai/en/latest/Installation_Guide/index.html).
+    To achieve the best performance on HPU, please follow the methods outlined in the
+    [Optimizing Training Platform Guide](https://docs.habana.ai/en/latest/PyTorch/Model_Optimization_PyTorch/Optimization_in_Training_Platform.html).
+
 1. Get Last good commit on vllm
    NOTE: vllm-gaudi is always follow latest vllm commit, however, vllm upstream
    API update may crash vllm-gaudi, this commit saved is verified with vllm-gaudi
@@ -58,7 +64,7 @@ Learn more: 🚀 [vLLM Plugin System Overview](https://docs.vllm.ai/en/latest/de
     cd ..
     ```
 
-4. Optionally: nixl installation follow the  [link](https://vllm-gaudi.readthedocs.io/en/latest/getting_started/installation.html)
+4. To uncover all installation methods, sucha as NixL, follow the  [link](https://vllm-gaudi.readthedocs.io/en/latest/getting_started/installation.html)
 
 ## Contributing
 
