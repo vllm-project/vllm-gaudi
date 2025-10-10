@@ -86,6 +86,5 @@ def get_environment():
         Value('engine_version', _get_vllm_engine_version, env_var_type=str),
         Value('bridge_mode', _get_pt_bridge_mode, env_var_type=str, check=choice('eager', 'lazy')),
         VllmValue('model_type', str),
-        VllmValue('prefix_caching', boolean),
     ]
     return split_values_and_flags(values)
