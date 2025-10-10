@@ -16,9 +16,6 @@ def get_unified_attn_metadata(vllm_config, common_attn_metadata, batch_spec, que
         (nct if ql == 1 else sl)
         for ql, sl, nct in zip(batch_spec.query_lens, batch_spec.seq_lens, num_computed_tokens.tolist())
     ])
-    import pdb
-    pdb.set_trace()
-
     attn_metadata, _ = create_attention_metadata(num_computed_tokens, num_scheduled_tokens, num_prompt_tokens,
                                                  block_table, block_size, query_dtype)
     return attn_metadata

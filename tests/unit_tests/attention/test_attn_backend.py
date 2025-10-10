@@ -24,6 +24,7 @@ BATCH_SPECS = {
     "triple_decode": BatchSpec(seq_lens=[BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE], query_lens=[1, 1, 1]),
     "medium_decode": BatchSpec(seq_lens=[128, 256, 512, 1024, 128, 256, 512, 1024], query_lens=[1, 1, 1, 1, 1, 1, 1,
                                                                                                 1]),
+    "big_decode": BatchSpec(seq_lens=[BLOCK_SIZE * ((i % 10) + 1) for i in range(128)], query_lens=[1] * 128),
     "single_prefill": BatchSpec(seq_lens=[32], query_lens=[32]),
     "small_prefill": BatchSpec(seq_lens=[128, 128], query_lens=[128, 128]),
     "medium_prefill": BatchSpec(seq_lens=[256, 256, 256, 256], query_lens=[256, 256, 256, 256]),
@@ -213,8 +214,16 @@ def run_attention_backend(vllm_config, device: torch.device, common_attn_metadat
                               attn_metadata,
                               output=output)
     else:
-        query_reshaped = query.view(query.shape[0], -1) if query.dim() == 3 and backend == 'non_unified' else query
-        output = impl.forward(mock_layer, query_reshaped, key, value, kv_cache_as_tuple, attn_metadata, output=output)
+        query_reshaped = query.view(query.shape[0], -1) if query.dim() == 3 else query
+        key_reshaped = key.view(key.shape[0], -1) if key.dim() == 3 else key
+        value_reshaped = value.view(value.shape[0], -1) if value.dim() == 3 else value
+        output = impl.forward(mock_layer,
+                              query_reshaped,
+                              key_reshaped,
+                              value_reshaped,
+                              kv_cache_as_tuple,
+                              attn_metadata,
+                              output=output)
 
     if output.dim() == 2 or output.dim() == 3 and output.shape[1] == 1:
         output_reshaped = output.view(query.shape[0], query.shape[1], query.shape[2])
@@ -244,6 +253,10 @@ def run_attention_backend(vllm_config, device: torch.device, common_attn_metadat
     ("single_prefix_prefill", "realistic_large"),
     ("small_prefix_prefill", "small"),
     ("medium_prefix_prefill", "realistic_large"),
+    ("big_decode", "tiny"),
+    ("big_decode", "realistic_large"),
+    ("big_decode", "small"),
+    ("big_decode", "realistic_large"),
 ])
 @pytest.mark.parametrize("backend", ["unified", "non_unified"])
 def test_attention_correctness(batch_spec_name: str, mock_config_name: str, backend: str):
@@ -335,6 +348,12 @@ def test_attention_correctness(batch_spec_name: str, mock_config_name: str, back
     correlations = check_token_ordering_preservation(backend_result, sdpa_output)
     avg_correlation = sum(correlations) / len(correlations) if correlations else 0.0
     correlation_ok = avg_correlation > CORRELATION_THRESHOLD
-
+    cosine_sim = torch.nn.functional.cosine_similarity(backend_result.flatten().cpu(),
+                                                       sdpa_output.flatten().cpu(),
+                                                       dim=-1)
+    import math
+    cosine_sim_deg = math.degrees(math.acos(min(cosine_sim, 1.0)))
     assert correlation_ok, (f"FAIL: Low avg correlation {avg_correlation:.4f} < "
                             f"{CORRELATION_THRESHOLD}. Backend output not similar to SDPA ref.")
+    assert cosine_sim_deg < 10, (f"FAIL: Low cosine similarity {cosine_sim_deg:.4f} < 10. "
+                                 f"Backend output not similar to SDPA ref.")
