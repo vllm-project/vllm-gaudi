@@ -357,9 +357,7 @@ class Context:
 
         group_ids, group_offsets = indices_and_offsets(num_ctx_blocks)
         block_ids = fetch_2d(block_table, group_ids, group_offsets)
-        block_usages = torch.clamp(
-            total_tokens.index_select(0, group_ids) - group_offsets * block_size + 1, 1, block_size)
-
+        block_usages = torch.clamp(total_tokens.index_select(0, group_ids) - group_offsets * block_size, 1, block_size)
         ctx = Context(group_ids, group_offsets, block_ids, block_usages)
         all_shapes = [v.shape for v in ctx._values() if torch.is_tensor(v)]
         for t in all_shapes[1:]:
@@ -464,7 +462,6 @@ def create_attention_metadata(
     ctx = Context.create(cached_tokens, block_table, block_size)
     if ctx:
         shared_ctx, unique_ctx = ctx.split(num_scheduled_tokens)
-
         # Process shared blocks
         if shared_ctx:
             shared_blocks, orig_shared_blocks = torch.unique(shared_ctx.block_ids, return_inverse=True)
