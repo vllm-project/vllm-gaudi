@@ -11,8 +11,14 @@ def get_unified_attn_metadata(vllm_config, common_attn_metadata, batch_spec, que
     block_table = common_attn_metadata.block_table_tensor.cpu()
     num_computed_tokens = common_attn_metadata.num_computed_tokens_cpu
     num_scheduled_tokens = torch.tensor(batch_spec.query_lens)
-    # TODO: fix this
-    num_prompt_tokens = common_attn_metadata.seq_lens_cpu - common_attn_metadata.num_computed_tokens_cpu
+    # NOTE(kzawora): nasty hack - use num_computed_tokens as prompt_len for decodes (qlen == 1), use seq_len otherwise
+    num_prompt_tokens = torch.tensor([
+        (nct if ql == 1 else sl)
+        for ql, sl, nct in zip(batch_spec.query_lens, batch_spec.seq_lens, num_computed_tokens.tolist())
+    ])
+    import pdb
+    pdb.set_trace()
+
     attn_metadata, _ = create_attention_metadata(num_computed_tokens, num_scheduled_tokens, num_prompt_tokens,
                                                  block_table, block_size, query_dtype)
     return attn_metadata
