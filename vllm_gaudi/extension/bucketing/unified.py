@@ -36,7 +36,6 @@ def warmup_unified_range(cfg):
     if bmin == 0:
         buckets.add(bmin)
         bmin = 1
-        
 
     num_buckets_exp = limit
     first_step = bmax

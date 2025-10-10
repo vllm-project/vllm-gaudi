@@ -3787,7 +3787,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             decode_reqs_blocks = []
             prompt_reqs_query = []
             prompt_reqs_blocks: list = []
-            
+
             all_shared_blocks_ids = [block for block in range(shared_ctx_len)]
             unique_block = unique_ctx_len - 1
             # do not use unique block id
@@ -3845,7 +3845,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 target = (i + 1) % remaining_samples
                 if block not in split_shared_blocks_ids[target]:
                     split_shared_blocks_ids[target].append(block)
-            
+
             # add unique id
             if unique_ctx_len > 0:
                 min_idx = min(range(remaining_samples), key=lambda j: len(split_shared_blocks_ids[j]))
@@ -3855,7 +3855,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 if not split_shared_blocks_ids[i]:
                     if unique_block - i >= 0:
                         split_shared_blocks_ids[i] = [unique_block - i]
-                    else: 
+                    else:
                         split_shared_blocks_ids[i] = [all_shared_blocks_ids[0]]
 
             for request_blocks in split_shared_blocks_ids:
