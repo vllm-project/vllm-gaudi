@@ -1926,6 +1926,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 context_len = context_lens[idx]
                 position = context_len
                 if seq_data.mrope_position_delta is not None:
+                    seq_data.mrope_position_delta = int(seq_data.mrope_position_delta)
                     pos_for_mrope = MRotaryEmbedding \
                         .get_next_input_positions(
                             seq_data.mrope_position_delta,
