@@ -15,7 +15,7 @@ from vllm_gaudi.extension.runtime import get_config
 
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
-BLOCK_SIZE = 8
+BLOCK_SIZE = 16
 
 BATCH_SPECS = {
     "tiny_decode": BatchSpec(seq_lens=[BLOCK_SIZE // 2], query_lens=[1]),
@@ -24,7 +24,7 @@ BATCH_SPECS = {
     "triple_decode": BatchSpec(seq_lens=[BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE], query_lens=[1, 1, 1]),
     "medium_decode": BatchSpec(seq_lens=[128, 256, 512, 1024, 128, 256, 512, 1024], query_lens=[1, 1, 1, 1, 1, 1, 1,
                                                                                                 1]),
-    "big_decode": BatchSpec(seq_lens=[BLOCK_SIZE * ((i % 10) + 1) for i in range(128)], query_lens=[1] * 128),
+    "big_decode": BatchSpec(seq_lens=[BLOCK_SIZE * ((i % 10) + 1) for i in range(32)], query_lens=[1] * 32),
     "single_prefill": BatchSpec(seq_lens=[32], query_lens=[32]),
     "small_prefill": BatchSpec(seq_lens=[128, 128], query_lens=[128, 128]),
     "medium_prefill": BatchSpec(seq_lens=[256, 256, 256, 256], query_lens=[256, 256, 256, 256]),
@@ -187,7 +187,7 @@ def run_attention_backend(vllm_config, device: torch.device, common_attn_metadat
     else:
         kv_cache_as_tuple = (kv_cache[0], kv_cache[1])
 
-    if is_prompt:
+    if is_prompt and backend == 'non_unified':
         if query.dim() == 3:
             batch_size, num_heads, head_size = query.shape
             query_reshaped = query.view(batch_size, num_heads * head_size)
@@ -344,16 +344,28 @@ def test_attention_correctness(batch_spec_name: str, mock_config_name: str, back
     # 1) Use real attn_bias (For now, we use None to skip attn_bias in backend)
     # 2) Use _fsdpa_prompt_attention (For now we use _native_impl)
     # With above changes, backend_result should be similar to sdpa_output
-    CORRELATION_THRESHOLD = 0.8 if is_prefill_scenario(batch_spec) else 0.99
+    CORRELATION_THRESHOLD = 0.99
     correlations = check_token_ordering_preservation(backend_result, sdpa_output)
     avg_correlation = sum(correlations) / len(correlations) if correlations else 0.0
     correlation_ok = avg_correlation > CORRELATION_THRESHOLD
     cosine_sim = torch.nn.functional.cosine_similarity(backend_result.flatten().cpu(),
                                                        sdpa_output.flatten().cpu(),
                                                        dim=-1)
+    per_token_cos_sim = torch.nn.functional.cosine_similarity(backend_result.flatten(-2, -1).cpu(),
+                                                              sdpa_output.flatten(-2, -1).cpu(),
+                                                              dim=1)
     import math
-    cosine_sim_deg = math.degrees(math.acos(min(cosine_sim, 1.0)))
     assert correlation_ok, (f"FAIL: Low avg correlation {avg_correlation:.4f} < "
                             f"{CORRELATION_THRESHOLD}. Backend output not similar to SDPA ref.")
-    assert cosine_sim_deg < 10, (f"FAIL: Low cosine similarity {cosine_sim_deg:.4f} < 10. "
-                                 f"Backend output not similar to SDPA ref.")
+
+    PER_TOKEN_COS_SIM_THRESHOLD = 10
+    for i, sim in enumerate(per_token_cos_sim):
+        cos_sim_deg = math.degrees(math.acos(min(sim, 1.0)))
+        assert cos_sim_deg < PER_TOKEN_COS_SIM_THRESHOLD, (
+            f"FAIL: Low cosine similarity {cos_sim_deg:.4f} < {PER_TOKEN_COS_SIM_THRESHOLD}. "
+            f"Backend output not similar to SDPA ref for token {i}.")
+    GENERAL_COS_SIM_THRESHOLD = 10
+    cosine_sim_deg = math.degrees(math.acos(min(cosine_sim, 1.0)))
+    assert cosine_sim_deg < GENERAL_COS_SIM_THRESHOLD, (
+        f"FAIL: Low cosine similarity {cosine_sim_deg:.4f} < {GENERAL_COS_SIM_THRESHOLD}. "
+        f"Backend output not similar to SDPA ref.")

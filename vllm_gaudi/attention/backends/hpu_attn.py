@@ -882,5 +882,5 @@ class HPUUnifiedAttentionImpl(AttentionImpl):
             scale=self.scale,
             metadata=attn_metadata,
         )
-        #output = output.unflatten(0, (query_shape[0], query_shape[1])).flatten(-2, -1)
+        output = output.flatten(-2, -1)
         return output
