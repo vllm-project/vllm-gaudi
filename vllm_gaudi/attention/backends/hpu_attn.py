@@ -862,15 +862,17 @@ class HPUUnifiedAttentionImpl(AttentionImpl):
         attn_metadata: HPUUnifiedAttentionMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        import pdb
+        pdb.set_trace()
         key_cache, value_cache = kv_cache
-        query_shape = query.shape
-        if query.dim() == 3:
-            query = query.flatten(0, 1)
-            key = key.flatten(0, 1)
-            value = value.flatten(0, 1)
-        query = query.unflatten(-1, (-1, self.head_size))
-        key = key.unflatten(-1, (-1, self.head_size))
-        value = value.unflatten(-1, (-1, self.head_size))
+        # query_shape = query.shape
+        # if query.dim() == 3:
+        #     query = query.flatten(0, 1)
+        #     key = key.flatten(0, 1)
+        #     value = value.flatten(0, 1)
+        # query = query.unflatten(-1, (-1, self.head_size))
+        # key = key.unflatten(-1, (-1, self.head_size))
+        # value = value.unflatten(-1, (-1, self.head_size))
         key_cache = self.k_cache(key, key_cache, attn_metadata.slot_mapping)
         value_cache = self.v_cache(value, value_cache, attn_metadata.slot_mapping)
         output = unified_attn(
@@ -882,5 +884,5 @@ class HPUUnifiedAttentionImpl(AttentionImpl):
             scale=self.scale,
             metadata=attn_metadata,
         )
-        output = output.unflatten(0, (query_shape[0], query_shape[1])).flatten(-2, -1)
+        #        output = output.unflatten(0, (query_shape[0], query_shape[1])).flatten(-2, -1)
         return output

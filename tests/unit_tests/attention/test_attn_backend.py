@@ -213,8 +213,7 @@ def run_attention_backend(vllm_config, device: torch.device, common_attn_metadat
                               attn_metadata,
                               output=output)
     else:
-        query_reshaped = query.view(query.shape[0], -1) if query.dim() == 3 else query
-
+        query_reshaped = query.view(query.shape[0], -1) if query.dim() == 3 and backend == 'non_unified' else query
         output = impl.forward(mock_layer, query_reshaped, key, value, kv_cache_as_tuple, attn_metadata, output=output)
 
     if output.dim() == 2 or output.dim() == 3 and output.shape[1] == 1:
