@@ -163,42 +163,80 @@ class OnlineDefragmenter:
         for candidate in itertools.count(last):
             yield candidate
 
+    def _get_logical_id(self, p: int) -> int:
+        """ Return the logical ID for a physical ID from bwd_mapping_table """
+        return self.bwd_mapping_table[p]
+
     def defragment(self):
         """ Check block usage and defragment if necessary """
+        # Tail-compaction defragmentation that keeps low logical-ids at low physical addresses
         if not self.enabled:
             return
         if len(self.used_blocks) == 0:
             return
-        max_used = max(self.used_blocks.keys())
+
+        # 0. stats
         num_used = len(self.used_blocks)
-        pre_max_used = max_used
-        # Use threshold for fragmentation trigger
-        if max_used - self.threshold <= num_used:
+        max_phys = max(self.used_blocks.keys())
+        if max_phys - self.threshold <= num_used:
             return
-        free = self.free_blocks()
-        used = sorted(self.used_blocks.keys(), reverse=True)
 
-        to_swap: list[tuple[int, int]] = []
-        for used_block, free_block in zip(used, free):
-            if len(to_swap) == self.to_swap_pad_thresholds[-1] or free_block > used_block:
-                break
-            assert used_block in self.used_blocks
-            assert free_block not in self.used_blocks
-            to_swap.append((used_block, free_block))
+        # 1. Free blocks in the tail
+        tail_start = num_used
+        free_tail = []
+        for p in range(tail_start, max_phys + 1):
+            if p not in self.used_blocks:
+                free_tail.append(p)
+                if len(free_tail) == num_used:  # Enough holes
+                    break
 
-        for used_block, free_block in to_swap:
-            self.swap_refs(used_block, free_block)
-            orig_used_block = self.unresolve(used_block)
-            orig_free_block = self.unresolve(free_block)
-            self.update_mapping(orig_used_block, free_block)
-            self.update_mapping(orig_free_block, used_block)
+        if not free_tail:
+            if self.debug:
+                self.debug("No free blocks in tail, skipping defragmentation")
+            return
 
+        # 2. Victims (highest physical IDs)
+        victims = []
+        for p in range(max_phys, tail_start - 1, -1):
+            if p in self.used_blocks:
+                victims.append(p)
+                if len(victims) == len(free_tail):  # Stop when enough victims
+                    break
+
+        if len(victims) == 0:
+            if self.debug:
+                self.debug("No victims to swap, skipping defragmentation")
+            return
+
+        # 3. Sort victims by logical ID (ascending)
+        victims.sort(key=self._get_logical_id)
+
+        # 4. Build swap list
+        to_swap = list(zip(victims, free_tail))  # (used, free) pairs
+
+        if len(to_swap) < 4:  # Minimum swap threshold
+            if self.debug:
+                self.debug(f"Too few swaps ({len(to_swap)}), skipping defragmentation")
+            return
+
+        # 5. Update meta-data
+        for used_p, free_p in to_swap:
+            self.swap_refs(used_p, free_p)
+            orig_used = self.unresolve(used_p)
+            orig_free = self.unresolve(free_p)
+            self.update_mapping(orig_used, free_p)
+            self.update_mapping(orig_free, used_p)
+
+        # 6. Physical copy
         assert self.cache_utils is not None
-        to_swap_pad = next((x for x in self.to_swap_pad_thresholds if x >= len(to_swap)),
-                           self.to_swap_pad_thresholds[-1])
-        self.cache_utils.swap(to_swap, to_swap_pad)
+
+        pad = 2**(len(to_swap) - 1).bit_length()  # Dynamic padding
+        self.cache_utils.swap(to_swap, pad)
+
+        # 7. Debug print
         if self.debug:
-            max_used = max(self.used_blocks.keys())
-            num_used = len(self.used_blocks)
-            post_status = f'max_id_used={pre_max_used}->{max_used} num_used={num_used} swapped={len(to_swap)}/{to_swap_pad}'
-            self.debug(f'defragmentation done {post_status}')
+            new_max = max(self.used_blocks.keys())
+            frag_ratio = new_max / num_used if num_used > 0 else 0
+            self.debug(
+                f'defrag {max_phys}→{new_max}, used={num_used}, free={len(free_tail)}, copied={len(to_swap)}/{pad}, frag_ratio={frag_ratio:.2f}'
+            )
