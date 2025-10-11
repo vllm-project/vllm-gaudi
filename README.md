@@ -52,6 +52,10 @@ Learn more: 🚀 [vLLM Plugin System Overview](https://docs.vllm.ai/en/latest/de
     cd vllm
     git checkout $VLLM_COMMIT_HASH
     pip install -r <(sed '/^[torch]/d' requirements/build.txt)
+    wget -nv https://vault.habana.ai/artifactory/gaudi-installer/[latest-version]/habanalabs-installer.sh
+    chmod +x habanalabs-installer.sh
+    export HABANALABS_VIRTUAL_DIR=[YOUR_PYTHON_VENV]
+    ./habanalabs-installer.sh install --type pytorch --venv
     VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
     cd ..
     ```
