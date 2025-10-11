@@ -3,7 +3,7 @@
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (NixlConnectorWorker)
 from vllm_gaudi.platform import logger
-import habana_frameworks.torch.core as htexp
+import habana_frameworks.torch.utils.experimental as htexp
 
 
 def initialize_host_xfer_buffer(self, kv_caches: dict[str, torch.Tensor]) -> None:
