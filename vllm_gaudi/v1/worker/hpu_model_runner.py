@@ -57,7 +57,8 @@ from vllm.v1.worker.utils import bind_kv_cache
 from vllm.v1.utils import CpuGpuBuffer
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
 from vllm.distributed.parallel_state import get_pp_group, get_dp_group
-from vllm.model_executor.models.interfaces import (SupportsMultiModal, supports_eagle3, supports_transcription)
+from vllm.model_executor.models.interfaces import (SupportsMultiModal, supports_eagle3, supports_transcription,
+                                                   supports_mrope)
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.transformers_utils.config import is_interleaved
@@ -1114,6 +1115,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
                 hf_config = self.model_config.hf_config
 
+                assert supports_mrope(self.model.model), "M-RoPE support is not implemented."
                 self.requests[req_id].mrope_positions, \
                     self.requests[req_id].mrope_position_delta = \
                     self.model.model.get_mrope_input_positions(
