@@ -88,6 +88,7 @@ def _prepare_metadata(batch_size: int,
         pin_memory=is_pin_memory_available(),
         vocab_size=1024,
         block_sizes=[1],
+        kernel_block_sizes=[1],
     )
     if is_seeded_random:
         generator = torch.Generator(device=DEVICE)
