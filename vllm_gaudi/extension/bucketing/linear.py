@@ -109,7 +109,7 @@ def read_bucket_settings(phase: str, dim: str, **defaults):
                 used_dim = 'seq'  # Treat as if query used seq values
                 logger().warning(
                     f"{e} not set, using {fallback_env}={fallback_val} instead. "
-                    "This fallback behavior is deprecated and will be removed in future versions."
+                    "This fallback behavior is deprecated and will be removed in v0.12.0."
                 )
         resolved_val = int(val) if val is not None else d
         logger().info(f'{e}={resolved_val} (default:{d})')
