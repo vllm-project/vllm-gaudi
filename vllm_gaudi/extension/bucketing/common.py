@@ -139,8 +139,13 @@ class HPUBucketingManager():
             query_range = strategy.get_range(query_cfg)
             ctx_range = strategy.get_range(ctx_cfg)
 
-            if get_config().use_contiguous_pa and ctx_range[-1] < self.num_hpu_blocks:
-                ctx_range.append(self.num_hpu_blocks)
+            if get_config().use_contiguous_pa:
+                max_with_defrag = (math.ceil(self.max_model_len // self.block_size) * self.max_num_seqs) \
+                                  + get_config().VLLM_DEFRAG_THRESHOLD:
+                if get_config().VLLM_DEFRAG and ctx_range[-1] < max_with_defrag:
+                    ctx_range.append(max_with_defrag)
+                elif ctx_range[-1] < self.num_hpu_blocks:
+                    ctx_range.append(self.num_hpu_blocks)
 
             self.decode_buckets = generate_buckets(bs_range, query_range, ctx_range, False, self.max_model_len,
                                                    self.max_num_seqs, self.max_num_prefill_seqs,
