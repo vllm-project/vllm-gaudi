@@ -1,6 +1,6 @@
 # Dependencies for HPU code
-ray
 numexpr==2.13.1
+ray<2.49.0
 pandas
 numpy==1.26.4
 tabulate
