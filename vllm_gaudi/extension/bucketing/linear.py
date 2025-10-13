@@ -60,7 +60,7 @@ class LinearBucketingStrategy:
         decode_query_bucket_cfg = [1, 1, 1]
         decode_block_bucket_cfg = read_bucket_settings('decode',
                                                        'block',
-                                                       min=block_size,
+                                                       min=1,
                                                        step=block_size,
                                                        max=max_blocks)
         if decode_block_bucket_cfg[2] > max_blocks:
