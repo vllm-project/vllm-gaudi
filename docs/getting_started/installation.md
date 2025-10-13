@@ -106,6 +106,15 @@ Currently, multiple ways are provided which can be used to install vLLM with Int
     cd ..
     ```
 
+=== "Step 3: Install vLLM Plugin"
+
+    Install  vLLM-Gaudi from source:
+    ```bash
+    cd vllm-gaudi
+    pip install -e .
+    cd ..
+    ```
+
 ### Build and Install vLLM with nixl
 
 === "Install vLLM Plugin with nixl"
