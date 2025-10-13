@@ -2806,6 +2806,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 lora_logits_mask=None,
                 lora_mask=None,
                 warmup_mode=warmup_mode)
+        #from fpdb import ForkedPdb; ForkedPdb().set_trace()
         selected_req_ids = [batch.req_ids_cpu[idx] for idx in batch.logits_groups_cpu.tolist()]
         htorch.core.mark_step()
         sampling_metadata = self._prepare_sampling(batch_changed, selected_req_ids, pad_to=logits_device.shape[0])
@@ -2824,6 +2825,18 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         sampled_token_ids_cpu = sampled_token_ids_cpu.index_select(0, batch.logits_groups_cpu)
         self.input_batch.token_ids_cpu_tensor.index_put_((batch.logits_groups_cpu, batch.new_token_positions_cpu),
                                                          sampled_token_ids_cpu)
+
+        ######### UPDATE REQUEST STATE WITH GENERATED TOKENS #########
+        num_reqs = len(selected_req_ids)
+        for req_id in self.input_batch.req_ids[:num_reqs]:
+            req_state = self.requests[req_id]
+            i = self.input_batch.req_id_to_index[req_id]
+            seq_len = (req_state.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id])
+            token_ids = sampled_token_ids[i]
+            num_tokens = len(token_ids)
+            self.input_batch.token_ids_cpu[i, seq_len:seq_len + num_tokens] = token_ids
+            self.input_batch.num_tokens[i] += len(token_ids)
+            req_state.output_token_ids.extend(token_ids)
 
         model_runner_output = ModelRunnerOutput(
             req_ids=batch.req_ids_cpu,
