@@ -24,42 +24,36 @@ The advanced configuration is available via environment variables or YAML files.
 
 Follow the steps below to run the vLLM server or launch benchmarks on Gaudi using Docker Compose.
 
-1. Clone the vLLM fork repository and navigate to the appropriate directory
+### 1. Clone the vLLM fork repository and navigate to the appropriate directory
 
-   ```bash
-   git clone https://github.com/HabanaAI/vllm-fork.git
-   cd vllm-fork/.cd/
-   ```
+    git clone https://github.com/HabanaAI/vllm-fork.git
+    cd vllm-fork/.cd/
 
-   This ensures you have the required files and Docker Compose configurations.
+This ensures you have the required files and Docker Compose configurations.
 
-2. Set the following environment variables
+### 2. Set the following environment variables
 
-   | **Variable**                 | **Description** |
-   | -------                      |------- |
-   | `MODEL`                      | Choose a model name from the [`vllm supported models`][supported-models] list.  |
-   | `HF_TOKEN`                   | Your Hugging Face token (generate one at <https://huggingface.co>). |
-   | `DOCKER_IMAGE`               | The Docker image name or URL for the vLLM Gaudi container. When using the Gaudi repository, make sure to select Docker images with the *vllm-installer* prefix in the file name. |
+| **Variable** | **Description** |
+| --- |--- |
+| `MODEL` | Choose a model name from the [`vllm supported models`][supported-models] list.  |
+| `HF_TOKEN` | Your Hugging Face token (generate one at <https://huggingface.co>). |
+| `DOCKER_IMAGE` | The Docker image name or URL for the vLLM Gaudi container. When using the Gaudi repository, make sure to select Docker images with the *vllm-installer* prefix in the file name. |
 
-3. Run the vLLM server using Docker Compose
+### 3. Run the vLLM server using Docker Compose
 
-   ```bash
-   MODEL="Qwen/Qwen2.5-14B-Instruct" \
-   HF_TOKEN="<your huggingface token>" \
-   DOCKER_IMAGE="vault.habana.ai/gaudi-docker/|Version|/ubuntu22.04/habanalabs/vllm-installer-|PT_VERSION|:latest" \
-   docker compose up
-   ```
+    MODEL="Qwen/Qwen2.5-14B-Instruct" \
+    HF_TOKEN="<your huggingface token>" \
+    DOCKER_IMAGE="vault.habana.ai/gaudi-docker/|Version|/ubuntu22.04/habanalabs/vllm-installer-|PT_VERSION|:latest" \
+    docker compose up
 
-   To automatically run benchmarking for a selected model using default settings, add the  `--profile benchmark up` option
+To automatically run benchmarking for a selected model using default settings, add the  `--profile benchmark up` option
 
-   ```bash
-   MODEL="Qwen/Qwen2.5-14B-Instruct" \
-   HF_TOKEN="<your huggingface token>" \
-   DOCKER_IMAGE=="vault.habana.ai/gaudi-docker/|Version|/ubuntu22.04/habanalabs/vllm-installer-|PT_VERSION|:latest" \
-   docker compose --profile benchmark up
-   ```
+    MODEL="Qwen/Qwen2.5-14B-Instruct" \
+    HF_TOKEN="<your huggingface token>" \
+    DOCKER_IMAGE=="vault.habana.ai/gaudi-docker/|Version|/ubuntu22.04/habanalabs/vllm-installer-|PT_VERSION|:latest" \
+    docker compose --profile benchmark up
 
-   This command launches the vLLM server and runs the associated benchmark suite.
+This command launches the vLLM server and runs the associated benchmark suite.
 
 ## Advanced Options
 
@@ -76,7 +70,7 @@ For most users, the basic setup is sufficient, but advanced users may benefit fr
 
     | **Variable** | **Description** |
     |---|---|
-    |  `PT_HPU_LAZY_MODE`              | Enables Lazy execution mode, potentially improving performance by batching operations.                                           |
+    |  `PT_HPU_LAZY_MODE`              | Enables Lazy execution mode, potentially improving performance by batching operations. |
     |  `VLLM_SKIP_WARMUP`              | Skips the model warmup phase to reduce startup time (may affect initial latency).                     |
     |  `MAX_MODEL_LEN`                 | Sets the maximum supported sequence length for the model.               |    
     |  `MAX_NUM_SEQS`                  | Specifies the maximum number of sequences processed concurrently.       |
@@ -196,7 +190,7 @@ For most users, the basic setup is sufficient, but advanced users may benefit fr
 
     This method provides full flexibility over how the vLLM server is executed within the container.
 
-***
+---
 
 ## Supported Models
 
