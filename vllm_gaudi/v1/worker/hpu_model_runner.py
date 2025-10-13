@@ -2806,7 +2806,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 lora_logits_mask=None,
                 lora_mask=None,
                 warmup_mode=warmup_mode)
-        #from fpdb import ForkedPdb; ForkedPdb().set_trace()
         selected_req_ids = [batch.req_ids_cpu[idx] for idx in batch.logits_groups_cpu.tolist()]
         htorch.core.mark_step()
         sampling_metadata = self._prepare_sampling(batch_changed, selected_req_ids, pad_to=logits_device.shape[0])
