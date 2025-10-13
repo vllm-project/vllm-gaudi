@@ -28,6 +28,7 @@ from vllm_gaudi.extension.debug import init_debug_logger
 
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
+from vllm.attention.layer import MLAAttention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import (VllmConfig, update_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
@@ -47,7 +48,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv, is_pin_m
 from vllm.utils.jsontree import json_map_leaves
 from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy)
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec, KVCacheTensor)
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec, KVCacheTensor, MLAAttentionSpec)
 from vllm.v1.worker.kv_connector_model_runner_mixin import (KVConnectorModelRunnerMixin)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors, DraftTokenIds, ModelRunnerOutput,
                              AsyncModelRunnerOutput, KVConnectorOutput)
@@ -793,6 +794,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.block_size],
+            kernel_block_sizes=[self.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
             logitsprocs=build_logitsprocs(self.vllm_config, self.device, self.pin_memory, self.is_pooling_model,
                                           self.vllm_config.model_config.logits_processors),
@@ -974,25 +976,36 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         forward_ctx = self.vllm_config.compilation_config.static_forward_context
         block_size = self.vllm_config.cache_config.block_size
         kv_cache_spec: dict[str, KVCacheSpec] = {}
+        cache_dtype_str = self.vllm_config.cache_config.cache_dtype
         for layer_name, attn_module in forward_ctx.items():
             if isinstance(attn_module, FusedMoE):
                 continue
 
             # TODO: Support other attention modules, e.g., sliding window,
             # cross-attention
-            assert isinstance(attn_module, Attention)
-            if attn_module.attn_type == AttentionType.DECODER:
-                kv_cache_spec[layer_name] = FullAttentionSpec(block_size=block_size,
-                                                              num_kv_heads=attn_module.num_kv_heads,
-                                                              head_size=attn_module.head_size,
-                                                              dtype=self.kv_cache_dtype)
-            elif attn_module.attn_type in (AttentionType.ENCODER, AttentionType.ENCODER_ONLY):
-                # encoder-only attention does not need KV cache.
-                continue
-            elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
-                raise NotImplementedError
-            else:
-                raise ValueError(f"Unknown attention type: {attn_module.attn_type}")
+            if isinstance(attn_module, Attention):
+                if attn_module.attn_type == AttentionType.DECODER:
+                    kv_cache_spec[layer_name] = FullAttentionSpec(block_size=block_size,
+                                                                  num_kv_heads=attn_module.num_kv_heads,
+                                                                  head_size=attn_module.head_size,
+                                                                  dtype=self.kv_cache_dtype)
+                elif attn_module.attn_type in (AttentionType.ENCODER, AttentionType.ENCODER_ONLY):
+                    # encoder-only attention does not need KV cache.
+                    continue
+                elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
+                    raise NotImplementedError
+                else:
+                    raise ValueError(f"Unknown attention type: {attn_module.attn_type}")
+            elif isinstance(attn_module, MLAAttention):
+                if layer_name in kv_cache_spec:
+                    continue
+                kv_cache_spec[layer_name] = MLAAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=attn_module.head_size,
+                    dtype=self.kv_cache_dtype,
+                    cache_dtype_str=cache_dtype_str,
+                )
 
         return kv_cache_spec
 
@@ -1103,7 +1116,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
                 self.requests[req_id].mrope_positions, \
                     self.requests[req_id].mrope_position_delta = \
-                    MRotaryEmbedding.get_input_positions_tensor(
+                    self.model.model.get_mrope_input_positions(
                         self.requests[req_id].prompt_token_ids,
                         hf_config=hf_config,
                         image_grid_thw=image_grid_thw,
@@ -1913,6 +1926,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 context_len = context_lens[idx]
                 position = context_len
                 if seq_data.mrope_position_delta is not None:
+                    seq_data.mrope_position_delta = int(seq_data.mrope_position_delta)
                     pos_for_mrope = MRotaryEmbedding \
                         .get_next_input_positions(
                             seq_data.mrope_position_delta,
@@ -4005,6 +4019,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     pin_memory=self.pin_memory,
                     vocab_size=self.model_config.get_vocab_size(),
                     block_sizes=[self.block_size],
+                    kernel_block_sizes=[self.block_size],
                     logitsprocs=build_logitsprocs(self.vllm_config, self.device, self.pin_memory, self.is_pooling_model,
                                                   self.vllm_config.model_config.logits_processors),
                 )

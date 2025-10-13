@@ -173,9 +173,13 @@ class HpuPlatform(Platform):
             # requires enabling lazy collectives
             # see https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html  # noqa: E501
             os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
-        # If not set by user then for torch compile enable Runtime scale patching by default
-        elif os.environ.get('RUNTIME_SCALE_PATCHING') is None:
-            os.environ['RUNTIME_SCALE_PATCHING'] = '1'
+        else:
+            # If not set by user then for torch compile enable Runtime scale patching by default
+            if os.environ.get('RUNTIME_SCALE_PATCHING') is None:
+                os.environ['RUNTIME_SCALE_PATCHING'] = '1'
+            #This allows for utilization of Parallel Compilation feature
+            if os.environ.get('FUSER_ENABLE_MULTI_THREADED_INVOCATIONS') is None:
+                os.environ['FUSER_ENABLE_MULTI_THREADED_INVOCATIONS'] = '1'
 
     @classmethod
     def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str, model_config: ModelConfig) -> bool:
