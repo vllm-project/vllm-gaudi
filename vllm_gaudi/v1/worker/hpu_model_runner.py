@@ -2993,7 +2993,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
                 self.event_start = self.profiler.get_timestamp_us()
                 self.profiler.start("internal", "prefill")
-                # Align behavior of incomplete prompt with gpu_model_runner
+                # NOTE(tianmu-li): Align behavior of incomplete prompt with gpu_model_runner
                 # If logits_indices is smaller than req_id,
                 # add the last token position
                 if logits_indices.shape[0] < len(req_id):
