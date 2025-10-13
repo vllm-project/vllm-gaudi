@@ -212,10 +212,14 @@ class OnlineDefragmenter:
         victims.sort(key=self._get_logical_id)
 
         # 4. Build swap list
-        to_swap = list(zip(victims, free_tail))  # (used, free) pairs
+        to_swap = []
+        for v, f in zip(victims, free_tail):
+            if f > v:
+                break
+            to_swap.append((v, f))
 
         if len(to_swap) < 4:  # Minimum swap threshold
-            if self.debug:
+            if self.debug and to_swap:
                 self.debug(f"Too few swaps ({len(to_swap)}), skipping defragmentation")
             return
 
