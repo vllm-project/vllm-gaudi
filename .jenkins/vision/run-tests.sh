@@ -42,13 +42,12 @@ do
     export PT_HPU_ENABLE_LAZY_COLLECTIVES=true
     export VLLM_SKIP_WARMUP=true
     export TQDM_BAR_FORMAT="{desc}: {percentage:3.0f}% {bar:10} | {n_fmt}/{total_fmt} [{elapsed}<{remaining}]" 
-    RANDOM_SUFFIX=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 4; echo)
     JUNIT_FAMILY=""
     JUNIT_XML=""
     TIMEOUT_S=900 # 15 minutes timeout per test
     if [[ -n "$TEST_RESULTS_DIR" ]]; then
         LOG_DIR=$TEST_RESULTS_DIR
-        LOG_FILENAME="test_${MODEL_CONFIG}_${RANDOM_SUFFIX}.xml"
+        LOG_FILENAME="test_${MODEL_CONFIG}.xml"
         LOG_PATH="${LOG_DIR}/${LOG_FILENAME}"
         JUNIT_FAMILY="-o junit_family=xunit1"
         JUNIT_XML="--junitxml=${LOG_PATH}"
