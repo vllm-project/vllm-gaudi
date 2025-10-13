@@ -2376,7 +2376,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         max_tokens_across_dp_cpu = torch.max(num_tokens_tensor.cpu()).item()
         return max_tokens_across_dp_cpu - num_tokens
 
-    def _check_unified_config(self, attn_metadata, logits_indices, warmup_mode):
+    def _get_unified_config(self, attn_metadata, logits_indices):
         has_causal = 'c' if attn_metadata.causal_bias is not None else '-'
         has_shared = 's' if attn_metadata.shared_bias is not None else '-'
         has_unique = 'u' if attn_metadata.unique_bias is not None else '-'
@@ -2386,6 +2386,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         num_unique_blocks = attn_metadata.unique_blocks
         num_logits = logits_indices.size(0)
         cfg = (phase, qlen, num_shared_blocks, num_unique_blocks, num_logits)
+        return cfg
+
+    def _check_unified_config(self, attn_metadata, logits_indices, warmup_mode):
+        cfg = self._get_unified_config(attn_metadata, logits_indices)
         if self.debug_fwd:
             self.debug_fwd(cfg)
         seen = cfg in self.seen_configs
@@ -2786,57 +2790,68 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # Return empty ModelRunnerOuptut if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
         htorch.core.mark_step()
-        batch = self.prepare_unified_batch(scheduler_output)
+        with self.profiler.record_event('internal', 'prepare_unified_batch'):
+            batch = self.prepare_unified_batch(scheduler_output)
         htorch.core.mark_step()
-        non_flattened_hidden_states, aux_hidden_states, hidden_states, logits_device = \
-            self._execute_model_generic(
-                token_ids=batch.token_ids.unsqueeze(-1),
-                position_ids=batch.token_positions.unsqueeze(-1),
-                attn_metadata=batch.attn_metadata,
-                logits_indices=batch.logits_indices,
-                kv_caches=self.kv_caches,
-                lora_logits_mask=None,
-                lora_mask=None,
-                warmup_mode=warmup_mode)
+        if self.is_driver_worker:
+            unified_attn_cfg = self._get_unified_config(batch.attn_metadata, batch.logits_indices)
+            (phase, qlen, num_shared_blocks, num_unique_blocks, num_logits) = unified_attn_cfg
+            model_event_name = (
+                f"model_forward_{phase}_qlen{qlen}_nsb{num_shared_blocks}_nub{num_unique_blocks}_nlog{num_logits}")
+        else:
+            model_event_name = 'model_executable'
+        with self.profiler.record_event('internal', model_event_name):
+            non_flattened_hidden_states, aux_hidden_states, hidden_states, logits_device = \
+                self._execute_model_generic(
+                    token_ids=batch.token_ids.unsqueeze(-1),
+                    position_ids=batch.token_positions.unsqueeze(-1),
+                    attn_metadata=batch.attn_metadata,
+                    logits_indices=batch.logits_indices,
+                    kv_caches=self.kv_caches,
+                    lora_logits_mask=None,
+                    lora_mask=None,
+                    warmup_mode=warmup_mode)
         selected_req_ids = [batch.req_ids_cpu[idx] for idx in batch.logits_groups_cpu.tolist()]
         htorch.core.mark_step()
-        sampling_metadata = self._prepare_sampling(batch_changed, selected_req_ids, pad_to=logits_device.shape[0])
-        sampler_output = self.sampler(logits=logits_device, sampling_metadata=sampling_metadata)
+        with self.profiler.record_event('internal', 'unified_sampler'):
+            sampling_metadata = self._prepare_sampling(batch_changed, selected_req_ids, pad_to=logits_device.shape[0])
+            sampler_output = self.sampler(logits=logits_device, sampling_metadata=sampling_metadata)
 
-        sampled_token_ids_cpu = sampler_output.sampled_token_ids.cpu()
-        sampled_token_ids: list[list[int]] = [[] for _ in batch.req_ids_cpu]
-        for req_id, tokens in zip(selected_req_ids, sampled_token_ids_cpu.tolist()):
-            sampled_token_ids[self.input_batch.req_id_to_index[req_id]].extend(tokens)
+        with self.profiler.record_event('internal', 'unified_postprocess'):
+            sampled_token_ids_cpu = sampler_output.sampled_token_ids.cpu()
+            sampled_token_ids: list[list[int]] = [[] for _ in batch.req_ids_cpu]
+            for req_id, tokens in zip(selected_req_ids, sampled_token_ids_cpu.tolist()):
+                sampled_token_ids[self.input_batch.req_id_to_index[req_id]].extend(tokens)
 
-        #TODO: add support for multi-token output
-        assert sampled_token_ids_cpu.size(1) == 1, 'Currently only single token output is supported!'
-        sampled_token_ids_cpu = sampled_token_ids_cpu.flatten()
-        htorch.core.mark_step()
+            #TODO: add support for multi-token output
+            assert sampled_token_ids_cpu.size(1) == 1, 'Currently only single token output is supported!'
+            sampled_token_ids_cpu = sampled_token_ids_cpu.flatten()
+            htorch.core.mark_step()
 
-        sampled_token_ids_cpu = sampled_token_ids_cpu.index_select(0, batch.logits_groups_cpu)
-        self.input_batch.token_ids_cpu_tensor.index_put_((batch.logits_groups_cpu, batch.new_token_positions_cpu),
-                                                         sampled_token_ids_cpu)
+            sampled_token_ids_cpu = sampled_token_ids_cpu.index_select(0, batch.logits_groups_cpu)
+            self.input_batch.token_ids_cpu_tensor.index_put_((batch.logits_groups_cpu, batch.new_token_positions_cpu),
+                                                             sampled_token_ids_cpu)
 
-        ######### UPDATE REQUEST STATE WITH GENERATED TOKENS #########
-        num_reqs = len(selected_req_ids)
-        for req_id in self.input_batch.req_ids[:num_reqs]:
-            req_state = self.requests[req_id]
-            i = self.input_batch.req_id_to_index[req_id]
-            seq_len = (req_state.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id])
-            token_ids = sampled_token_ids[i]
-            num_tokens = len(token_ids)
-            self.input_batch.token_ids_cpu[i, seq_len:seq_len + num_tokens] = token_ids
-            self.input_batch.num_tokens[i] += len(token_ids)
-            req_state.output_token_ids.extend(token_ids)
+            ######### UPDATE REQUEST STATE WITH GENERATED TOKENS #########
+            num_reqs = len(selected_req_ids)
+            for req_id in self.input_batch.req_ids[:num_reqs]:
+                req_state = self.requests[req_id]
+                i = self.input_batch.req_id_to_index[req_id]
+                seq_len = (req_state.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id])
+                token_ids = sampled_token_ids[i]
+                num_tokens = len(token_ids)
+                self.input_batch.token_ids_cpu[i, seq_len:seq_len + num_tokens] = token_ids
+                self.input_batch.num_tokens[i] += len(token_ids)
+                req_state.output_token_ids.extend(token_ids)
 
-        model_runner_output = ModelRunnerOutput(
-            req_ids=batch.req_ids_cpu,
-            req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids=sampled_token_ids,
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=[],
-        )
+            model_runner_output = ModelRunnerOutput(
+                req_ids=batch.req_ids_cpu,
+                req_id_to_index=self.input_batch.req_id_to_index,
+                sampled_token_ids=sampled_token_ids,
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            )
         return model_runner_output
 
     @torch.inference_mode()
