@@ -52,6 +52,7 @@ def initialize_kv_cache(runner: HPUModelRunner):
         pin_memory=runner.pin_memory,
         vocab_size=runner.model_config.get_vocab_size(),
         block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
+        kernel_block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
     )
 
 
@@ -239,6 +240,7 @@ def test_update_states_request_resumed(model_runner, dist_init):
         req_ids=[req_id],
         resumed_from_preemption=[False],
         new_token_ids=[[]],
+        resumed_req_token_ids=[None],
         new_block_ids=([[0]], ),
         num_computed_tokens=[0],
         num_output_tokens=[0],

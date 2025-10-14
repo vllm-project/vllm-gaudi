@@ -38,6 +38,7 @@ def launch_lm_eval(eval_config):
         'batch_size': max_num_seqs,
         'enable_expert_parallel': eval_config.get('enable_expert_parallel', False),
         'chat_template_args': eval_config.get('chat_template_args', {}),
+        'seed': eval_config.get('seed', 42),
     }
     if kv_cache_dtype is not None:
         model_args['kv_cache_dtype'] = kv_cache_dtype
