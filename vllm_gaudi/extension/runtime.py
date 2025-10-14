@@ -74,7 +74,7 @@ def finalize_config():
         logger().warning(
             f"Following environment variables are considered experimental: {', '.join(experimental_flags)}")
         logger().warning(
-            "In future releases using those flags without VLLM_ENABLE_EXPERIMENTAL_FLAGS will trigger a fatal error.")
+            "From v0.12.0 release using those flags without VLLM_ENABLE_EXPERIMENTAL_FLAGS will trigger a fatal error.")
         logger().warning(footer)
 
     dump('Environment', environment_values)
