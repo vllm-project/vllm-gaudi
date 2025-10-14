@@ -53,9 +53,6 @@ def _get_vllm_hash(_):
         return "Error getting commit hash"
 
 
-def _get_vllm_commit():
-
-
 def _get_build(_):
     import re
     import subprocess
