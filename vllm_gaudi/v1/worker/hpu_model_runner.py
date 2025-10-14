@@ -97,7 +97,7 @@ logger = init_logger()
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
-hpu_buffer: list[list[torch.Tensor]] = []
+decoder_tp_ratio = int(os.getenv('DECODER_TP_RATIO', 1))
 
 
 class BucketingFailedException(Exception):
@@ -2835,6 +2835,26 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         )
         return model_runner_output
 
+    def rewrite_kv_based_on_transfer_layout(self, scheduler_output: "SchedulerOutput"):
+        if scheduler_output.kv_connector_metadata:
+            for req_id, meta in scheduler_output.kv_connector_metadata.reqs_to_save.items():
+                block_ids = meta.local_block_ids
+                for layer_idx in range(len(self.kv_caches)):
+                    k = self.kv_caches[layer_idx][0]
+                    v = self.kv_caches[layer_idx][1]
+                    gb, h, d = v.shape
+                    indices = torch.tensor(block_ids, device=v.device)
+                    gbhd = [int(gb / self.block_size), self.block_size, h, d]
+                    for kv_tensor in [k, v]:
+                        kv = kv_tensor.reshape(gbhd)
+                        kv_selected = torch.index_select(kv, 0, indices)
+                        bc, bs, h, d = kv_selected.shape
+                        shape = int(bs * h / decoder_tp_ratio * d)
+                        blocks = torch.chunk(kv_selected, 2, dim=2)
+                        vecs = [b.reshape([bc, shape]) for b in blocks]
+                        kv_selected = torch.concat(vecs, dim=1).reshape(kv_selected.shape)
+                        kv.index_copy_(dim=0, index=indices, source=kv_selected)
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -3068,6 +3088,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                              prompt_batch_idx=idx,
                                                                              is_prompt=True)
                     self.profiler.record_counter(self.event_start, counters)
+
+            if decoder_tp_ratio > 1:
+                self.rewrite_kv_based_on_transfer_layout(scheduler_output)
             if not warmup_mode:
                 self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = (self.get_finished_kv_transfers(scheduler_output))
@@ -4212,7 +4235,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             get_kv_transfer_group().register_kv_caches(kv_caches)
             if self.vllm_config.kv_transfer_config.kv_buffer_device == "cpu":
                 get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
-            global hpu_buffer
         htorch.hpu.synchronize()
 
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
@@ -4493,8 +4515,6 @@ def copy_kv_blocks(
     target_device = dst_device.type
 
     i = 0
-    global hpu_buffer
-    use_hpu_buffer = False
     for layer_name in src_kv_caches:
         key_cache = src_kv_caches[layer_name][0]
         value_cache = src_kv_caches[layer_name][1]
@@ -4507,14 +4527,10 @@ def copy_kv_blocks(
             if value_cache is not None:
                 value_cache = value_cache.flatten(0, 1)
 
-        if direction == "d2h" and use_hpu_buffer:
-            hpu_buffer[i][0] = key_cache.index_select(0, src_slot_mapping)
-            hpu_buffer[i][1] = value_cache.index_select(0, src_slot_mapping)
-        else:
-            dst_kv_caches[layer_name][0].index_put_((dst_slot_mapping, ),
-                                                    key_cache.index_select(0, src_slot_mapping).to(target_device))
-            dst_kv_caches[layer_name][1].index_put_((dst_slot_mapping, ),
-                                                    value_cache.index_select(0, src_slot_mapping).to(target_device))
+        dst_kv_caches[layer_name][0].index_put_((dst_slot_mapping, ),
+                                                key_cache.index_select(0, src_slot_mapping).to(target_device))
+        dst_kv_caches[layer_name][1].index_put_((dst_slot_mapping, ),
+                                                value_cache.index_select(0, src_slot_mapping).to(target_device))
         if direction == "d2h":
             dst_kv_caches[layer_name] = dst_kv_caches[layer_name].unflatten(1, (-1, block_size))
 
