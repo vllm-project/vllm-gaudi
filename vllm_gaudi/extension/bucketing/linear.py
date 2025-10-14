@@ -85,7 +85,7 @@ def read_bucket_settings(phase: str, dim: str, **defaults):
     """Read bucketing configuration from env variables.
 
     phase is either 'prompt' or 'decode'
-    dim is either 'bs', 'seq' or 'block'
+    dim is either 'bs', 'query' or 'block'
     param is either 'min', 'step' or 'max'
     example env variable: VLLM_DECODE_BS_BUCKET_STEP=128
     """
@@ -93,8 +93,6 @@ def read_bucket_settings(phase: str, dim: str, **defaults):
     env_vars = [f'VLLM_{phase}_{dim}_BUCKET_{p}'.upper() for p in params]
     default_values = [defaults[p] for p in params]
     values = []
-
-    used_dim = dim  # Track which dim was actually used
 
     for p, e, d in zip(params, env_vars, default_values):
         val = os.environ.get(e)
@@ -106,9 +104,8 @@ def read_bucket_settings(phase: str, dim: str, **defaults):
     
             if fallback_val is not None:
                 val = fallback_val
-                used_dim = 'seq'  # Treat as if query used seq values
                 logger().warning(
-                    f"{e} not set, using {fallback_env}={fallback_val} instead. "
+                    f"{e} not set, using {fallback_env} value ({fallback_val}) instead. "
                     "This fallback behavior is deprecated and will be removed in v0.12.0."
                 )
         resolved_val = int(val) if val is not None else d
