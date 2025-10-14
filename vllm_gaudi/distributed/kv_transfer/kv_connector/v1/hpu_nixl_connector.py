@@ -16,7 +16,10 @@ def initialize_host_xfer_buffer(self, kv_caches: dict[str, torch.Tensor]) -> Non
         for layer_name, kv_cache in kv_caches.items():
             if self.device_type == "hpu":
                 kv_shape = kv_cache[0].shape
-                kv_shape_new = (2, kv_shape[0] // self.block_size, self.block_size, *kv_shape[1:])
+                if self.use_mla:
+                    kv_shape_new = (kv_shape[0] // self.block_size, self.block_size, *kv_shape[1:])
+                else:
+                    kv_shape_new = (2, kv_shape[0] // self.block_size, self.block_size, *kv_shape[1:])
                 kv_dtype = kv_cache[0].dtype
                 xfer_buffers[layer_name] = torch.empty(kv_shape_new, dtype=kv_dtype, device="cpu")
             else:
