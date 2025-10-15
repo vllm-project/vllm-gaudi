@@ -158,6 +158,14 @@ run_gsm8k_granite_test() {
     echo "✅ Test with granite-8b passed."
 }
 
+# GSM8K on granite-8b (unified attn)
+run_gsm8k_granite_test_unified_attn() {
+    echo "➡️ Testing GSM8K on granite-8b with unified attention..."
+    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/granite-8b.yaml"
+    echo "✅ Test with granite-8b unified attention passed."
+}
+
 # GSM8K on granite-8b with async scheduling
 run_gsm8k_granite_async_test() {
     echo "➡️ Testing GSM8K on granite-8b with async scheduling..."
@@ -230,6 +238,7 @@ launch_all_tests() {
     run_compressed_w4a16_channelwise_test
     run_compressed_w4a16_moe_gidx_test
     run_gsm8k_granite_test
+    run_gsm8k_granite_test_unified_attn
     run_gsm8k_granite_async_test
     run_gsm8k_deepseek_test
     run_gsm8k_qwen3_30b_test
