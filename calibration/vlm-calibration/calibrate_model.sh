@@ -176,17 +176,14 @@ echo ""
 echo "2/3 Measuring scales"
 export QUANT_CONFIG=$FP8_DIR/$MODEL_NAME/maxabs_measure_$DEVICE_TYPE.json
 # quantization='None'
-# weights_load_device='hpu'
 # kv_cache_dtype='auto'
 quantization='inc'
-weights_load_device='cpu'
 kv_cache_dtype='auto'
 
 python3 vision_lm_eval.py \
     --max-model-len $max_model_len \
     --model-path $MODEL_PATH \
     --quantization $quantization \
-    --weights-load-device $weights_load_device \
     --kv-cache-dtype $kv_cache_dtype \
     --tensor-parallel-size $TP_SIZE \
     $EXTRA_FLAGS
@@ -197,14 +194,12 @@ echo ""
 echo "3/3 Quantize scales"
 export QUANT_CONFIG=$FP8_DIR/$MODEL_NAME/maxabs_quant_$DEVICE_TYPE.json
 quantization='inc'
-weights_load_device='cpu'
 kv_cache_dtype='fp8_inc'
 
 python3 vision_lm_eval.py \
     --max-model-len $max_model_len \
     --model-path $MODEL_PATH \
     --quantization $quantization \
-    --weights-load-device $weights_load_device \
     --kv-cache-dtype $kv_cache_dtype \
     --tensor-parallel-size $TP_SIZE \
     $EXTRA_FLAGS

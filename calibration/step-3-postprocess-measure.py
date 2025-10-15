@@ -21,7 +21,7 @@ def fix_cache_inputs(json_data, args):
         k_cache_name = "k_cache"
         v_cache_name = "v_cache"
         if args.deepseek:
-            attn_name = "mla_attn"
+            attn_name = "mla_attn.mla_attn"
             k_cache_name = "latent_cache_k"
 
         matmul_av_key = f'model.layers.{layer_index}.self_attn.{attn_name}.impl.matmul_av'

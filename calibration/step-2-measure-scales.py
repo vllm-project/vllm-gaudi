@@ -102,7 +102,9 @@ def get_dataset(args):
 
 
 def generate_responses(llm, input_batch, args, sampling_params=None, prompt_token_ids=None):
-    responses = llm.generate(input_batch, sampling_params, prompt_token_ids=prompt_token_ids, use_tqdm=True)
+    if prompt_token_ids:
+        input_batch = [{"prompt_token_ids": p} for p in prompt_token_ids]
+    responses = llm.generate(input_batch, sampling_params, use_tqdm=True)
 
     total_input_tokens = 0
     total_generated_tokens = 0
@@ -155,7 +157,6 @@ if __name__ == "__main__":
         max_num_seqs=args.batch_size,
         tensor_parallel_size=args.tensor_parallel_size,
         max_model_len=args.max_model_len,
-        max_num_prefill_seqs=args.max_num_prefill_seqs,
         trust_remote_code=True,
         distributed_executor_backend=args.distributed_executor_backend,
         enable_expert_parallel=args.expert_parallel,
