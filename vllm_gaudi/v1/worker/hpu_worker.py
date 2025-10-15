@@ -262,7 +262,7 @@ class HPUWorker(WorkerBase):
             self.step_profiler.start()
         with track_graph_compile('HPUWorker.execute_model') \
                 if self.gc_track_recompiles \
-                else contextlib.nullcontext():
+                else contextlib.nullcontext(), torch.no_grad():
             output = self.model_runner.execute_model(scheduler_output)
         # TODO(woosuk): Send the output to the engine process.
         if self.step_profiler:
