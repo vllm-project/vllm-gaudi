@@ -112,17 +112,17 @@ class HpuPlatform(Platform):
             vllm_config.model_config.dtype = torch.bfloat16
 
         if envs.VLLM_USE_V1:
-            from vllm.config import CompilationLevel, CUDAGraphMode
+            from vllm.config import CompilationMode, CUDAGraphMode
             compilation_config = vllm_config.compilation_config
             # Activate custom ops for v1.
             compilation_config.custom_ops = ["all"]
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             compilation_config.cudagraph_capture_sizes = []
 
-            if compilation_config.level != CompilationLevel.NO_COMPILATION:
-                logger.info("[HPU] Forcing CompilationLevel.NO_COMPILATION "
-                            "compilation level")
-                compilation_config.level = CompilationLevel.NO_COMPILATION
+            if compilation_config.mode != CompilationMode.NONE:
+                logger.info("[HPU] Forcing CompilationMode.NONE "
+                            "compilation mode")
+                compilation_config.mode = CompilationMode.NONE
 
             print(f"========={compilation_config.custom_ops=}===========")
 
