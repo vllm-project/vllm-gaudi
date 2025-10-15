@@ -4209,11 +4209,28 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self._PAD_SLOT_ID = num_blocks * self.block_size
 
         if has_kv_transfer_group():
-            get_kv_transfer_group().register_kv_caches(kv_caches)
+            get_kv_transfer_group().register_kv_caches(self.get_kv_caches_4D(kv_caches))
             if self.vllm_config.kv_transfer_config.kv_buffer_device == "cpu":
                 get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
             global hpu_buffer
         htorch.hpu.synchronize()
+
+    def get_kv_caches_4D(self, kv_caches) -> dict[str, torch.Tensor]:
+        kv_caches_4D: dict[str, torch.Tensor] = {}
+        for layer_name, cache_or_cachelist in kv_caches.items():
+            split_kv = isinstance(cache_or_cachelist, tuple)
+            caches = [cache_or_cachelist] if not split_kv else cache_or_cachelist
+            kv_per_layer = [] if split_kv else None
+            for cache in caches:
+                cache_in_4d = cache.view(-1, self.block_size, *cache.shape[1:])
+                if split_kv:
+                    kv_per_layer.append(cache_in_4d)
+                else:
+                    kv_per_layer = cache_in_4d
+                #NOTE(Chendi): Do not remove, call torch data_ptr to record physical address
+                cache.data_ptr()
+            kv_caches_4D[layer_name] = kv_per_layer
+        return kv_caches_4D
 
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
         model = self.get_model()
