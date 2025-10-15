@@ -8,10 +8,11 @@ import habana_frameworks.torch as htorch
 
 from vllm import envs
 
-from vllm.platforms import Platform, PlatformEnum, _Backend
+from vllm.platforms import Platform, PlatformEnum
 from vllm_gaudi.extension.runtime import get_config
 
 if TYPE_CHECKING:
+    from vllm.attention.backends.registry import _Backend
     from vllm.config import ModelConfig, VllmConfig
 else:
     ModelConfig = None
@@ -39,7 +40,7 @@ class HpuPlatform(Platform):
     additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int, dtype: torch.dtype,
+    def get_attn_backend_cls(cls, selected_backend: "_Backend", head_size: int, dtype: torch.dtype,
                              kv_cache_dtype: Optional[str], block_size: int, use_v1: bool, use_mla: bool,
                              has_sink: bool, use_sparse: bool) -> str:
         assert use_v1, 'Only V1 is supported!'
@@ -172,9 +173,13 @@ class HpuPlatform(Platform):
             # requires enabling lazy collectives
             # see https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html  # noqa: E501
             os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
-        # If not set by user then for torch compile enable Runtime scale patching by default
-        elif os.environ.get('RUNTIME_SCALE_PATCHING') is None:
-            os.environ['RUNTIME_SCALE_PATCHING'] = '1'
+        else:
+            # If not set by user then for torch compile enable Runtime scale patching by default
+            if os.environ.get('RUNTIME_SCALE_PATCHING') is None:
+                os.environ['RUNTIME_SCALE_PATCHING'] = '1'
+            #This allows for utilization of Parallel Compilation feature
+            if os.environ.get('FUSER_ENABLE_MULTI_THREADED_INVOCATIONS') is None:
+                os.environ['FUSER_ENABLE_MULTI_THREADED_INVOCATIONS'] = '1'
 
     @classmethod
     def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str, model_config: ModelConfig) -> bool:
