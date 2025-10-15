@@ -357,9 +357,7 @@ class Context:
 
         group_ids, group_offsets = indices_and_offsets(num_ctx_blocks)
         block_ids = fetch_2d(block_table, group_ids, group_offsets)
-        block_usages = torch.clamp(
-            total_tokens.index_select(0, group_ids) - group_offsets * block_size + 1, 1, block_size)
-
+        block_usages = torch.clamp(total_tokens.index_select(0, group_ids) - group_offsets * block_size, 1, block_size)
         ctx = Context(group_ids, group_offsets, block_ids, block_usages)
         all_shapes = [v.shape for v in ctx._values() if torch.is_tensor(v)]
         for t in all_shapes[1:]:
@@ -400,38 +398,55 @@ def hpu_tensor(tensor: torch.tensor, shape: tuple, pad_value: Union[int, float])
     return to_hpu(tensor)
 
 
-def create_unified_batch(req_ids: list[str], all_token_ids: torch.tensor, num_computed_tokens: torch.tensor,
-                         num_scheduled_tokens: torch.tensor, num_prompt_tokens: torch.tensor, block_table: torch.tensor,
-                         block_size: int, dtype: torch.dtype, bucketing_fn: Callable[[bool, int, int, int, int],
-                                                                                     tuple[int, int, int,
-                                                                                           int]]) -> UnifiedBatch:
-    """ Calculate all necessary tensors needed for batch scheduling """
+def create_attention_metadata(
+        num_computed_tokens: torch.tensor,
+        num_scheduled_tokens: torch.tensor,
+        num_prompt_tokens: torch.tensor,
+        block_table: torch.tensor,
+        block_size: int,
+        dtype: torch.dtype,
+        target_qlen: Optional[int] = None,
+        target_shared_blocks: Optional[int] = None,
+        target_unique_blocks: Optional[int] = None) -> tuple[HPUUnifiedAttentionMetadata, torch.tensor]:
+    """Create HPUUnifiedAttentionMetadata from batch parameters.
+    
+    This function derives all internal structures (token_groups, group_starts, contexts, etc.)
+    from the provided high-level parameters.
+    
+    Args:
+        num_computed_tokens: Number of tokens already computed for each request
+        num_scheduled_tokens: Number of tokens to schedule in this batch
+        num_prompt_tokens: Total prompt tokens for each request
+        block_table: Block allocation table
+        block_size: Size of each block
+        dtype: Data type for tensors
+        target_qlen: Target query length for padding (optional, computed if None)
+        target_shared_blocks: Target shared blocks count for padding (optional, computed if None)
+        target_unique_blocks: Target unique blocks count for padding (optional, computed if None)
+    
+    Returns:
+        tuple: (HPUUnifiedAttentionMetadata, token_slots)
+    """
+    default_causal_width = 512
+    fmin = torch.finfo(dtype).min
+    feps = torch.finfo(dtype).tiny
+
+    # Derive internal structures
     total_tokens = num_computed_tokens + num_scheduled_tokens
-    query_len = num_scheduled_tokens.sum().item()
     is_prompt = total_tokens <= num_prompt_tokens
     cached_tokens = num_computed_tokens + torch.where(is_prompt, 0, num_scheduled_tokens)
     contains_prompts = torch.any(is_prompt).item()
-    num_output_tokens = total_tokens - num_prompt_tokens + 1
-    num_output_tokens = torch.clamp(num_output_tokens, torch.zeros_like(num_scheduled_tokens), num_scheduled_tokens)
+    query_len = num_scheduled_tokens.sum().item()
     group_starts = torch.cumsum(num_scheduled_tokens, dim=0) - num_scheduled_tokens
 
     token_groups, token_offsets = indices_and_offsets(num_scheduled_tokens)
     token_positions = token_offsets + num_computed_tokens.index_select(0, token_groups)
-    token_ids = fetch_2d(all_token_ids, token_groups, token_positions)
 
+    # Compute token slots
     token_blocks = fetch_2d(block_table, token_groups, token_positions.floor_divide(block_size))
     token_slots = token_blocks * block_size + token_positions.fmod(block_size)
 
-    logits_groups, logits_offsets = indices_and_offsets(num_output_tokens)
-    start_logits_indices = torch.cumsum(num_scheduled_tokens, dim=0,
-                                        dtype=num_scheduled_tokens.dtype) - num_output_tokens
-    logits_indices = logits_offsets + start_logits_indices.index_select(0, logits_groups)
-    new_token_positions = total_tokens.index_select(0, logits_groups)
-
-    def first_dim(t: Optional[torch.tensor]) -> int:
-        """ Takes first dim size or 0 if tensor is None"""
-        return t.size(0) if t is not None else 0
-
+    # Initialize bias tensors
     causal_bias = None
     shared_blocks = None
     shared_bias = None
@@ -439,17 +454,18 @@ def create_unified_batch(req_ids: list[str], all_token_ids: torch.tensor, num_co
     unique_block_mapping = None
     unique_bias = None
 
+    # Create causal bias if batch contains prompts
     if contains_prompts:
         causal_bias = create_causal_bias(token_groups, token_positions, dtype)
 
+    # Process context blocks (shared and unique)
     ctx = Context.create(cached_tokens, block_table, block_size)
     if ctx:
         shared_ctx, unique_ctx = ctx.split(num_scheduled_tokens)
+        # Process shared blocks
         if shared_ctx:
             shared_blocks, orig_shared_blocks = torch.unique(shared_ctx.block_ids, return_inverse=True)
-
             shared_group_starts = group_starts.index_select(0, shared_ctx.group_ids)
-
             shared_tokens = num_scheduled_tokens.index_select(0, shared_ctx.group_ids)
             shared_token_indices, shared_token_offsets = indices_and_offsets(shared_tokens)
 
@@ -464,6 +480,7 @@ def create_unified_batch(req_ids: list[str], all_token_ids: torch.tensor, num_co
                                      device=shared_blocks.device)
             shared_bias.index_put_((shared_token_idx, shared_block_idx), shared_block_bias)
 
+        # Process unique blocks
         if unique_ctx:
             unique_blocks = torch.amax(unique_ctx.block_ids).item() + 1
             unique_bias = torch.full((unique_blocks, block_size),
@@ -479,13 +496,94 @@ def create_unified_batch(req_ids: list[str], all_token_ids: torch.tensor, num_co
                                               device=unique_ctx.block_ids.device)
             unique_block_mapping.index_copy_(0, unique_ctx.block_ids.to(torch.int64), unique_group_starts)
 
-    bucket = bucketing_fn(contains_prompts, first_dim(token_ids), first_dim(shared_blocks), unique_blocks,
-                          first_dim(logits_indices))
-    target_qlen, target_shared_blocks, target_unique_blocks, target_logits = bucket
+    # Compute target sizes if not provided (auto-size based on actual data)
+    if target_qlen is None:
+        target_qlen = query_len
+    if target_shared_blocks is None:
+        target_shared_blocks = shared_blocks.size(0) if shared_blocks is not None else 0
+    if target_unique_blocks is None:
+        target_unique_blocks = unique_blocks
 
-    default_causal_width = 512
-    fmin = torch.finfo(dtype).min
-    feps = torch.finfo(dtype).tiny
+    # Create and return metadata
+    metadata = HPUUnifiedAttentionMetadata(
+        block_size=block_size,
+        slot_mapping=hpu_tensor(token_slots, (target_qlen, ), -1),
+        causal_bias=hpu_tensor(causal_bias, (target_qlen, target_qlen), -math.inf),
+        causal_width=default_causal_width,
+        shared_blocks=hpu_tensor(shared_blocks, (target_shared_blocks, ), -1),
+        shared_bias=hpu_tensor(shared_bias, (target_qlen, target_shared_blocks, block_size), -math.inf),
+        unique_blocks=target_unique_blocks,
+        unique_block_mapping=hpu_tensor(unique_block_mapping, (target_unique_blocks, ), -1),
+        unique_bias=hpu_tensor(unique_bias, (target_unique_blocks, block_size), -math.inf),
+        fmin=to_hpu(fmin),
+        feps=to_hpu(feps),
+    )
+
+    return metadata, token_slots
+
+
+def create_unified_batch(req_ids: list[str], all_token_ids: torch.tensor, num_computed_tokens: torch.tensor,
+                         num_scheduled_tokens: torch.tensor, num_prompt_tokens: torch.tensor, block_table: torch.tensor,
+                         block_size: int, dtype: torch.dtype, bucketing_fn: Callable[[bool, int, int, int, int],
+                                                                                     tuple[int, int, int,
+                                                                                           int]]) -> UnifiedBatch:
+    """ Calculate all necessary tensors needed for batch scheduling """
+    total_tokens = num_computed_tokens + num_scheduled_tokens
+    is_prompt = total_tokens <= num_prompt_tokens
+    cached_tokens = num_computed_tokens + torch.where(is_prompt, 0, num_scheduled_tokens)
+    contains_prompts = torch.any(is_prompt).item()
+    num_output_tokens = total_tokens - num_prompt_tokens + 1
+    num_output_tokens = torch.clamp(num_output_tokens, torch.zeros_like(num_scheduled_tokens), num_scheduled_tokens)
+
+    token_groups, token_offsets = indices_and_offsets(num_scheduled_tokens)
+    token_positions = token_offsets + num_computed_tokens.index_select(0, token_groups)
+    token_ids = fetch_2d(all_token_ids, token_groups, token_positions)
+
+    logits_groups, logits_offsets = indices_and_offsets(num_output_tokens)
+    start_logits_indices = torch.cumsum(num_scheduled_tokens, dim=0,
+                                        dtype=num_scheduled_tokens.dtype) - num_output_tokens
+    logits_indices = logits_offsets + start_logits_indices.index_select(0, logits_groups)
+    new_token_positions = total_tokens.index_select(0, logits_groups)
+
+    def first_dim(t: Optional[torch.tensor]) -> int:
+        """ Takes first dim size or 0 if tensor is None"""
+        return t.size(0) if t is not None else 0
+
+    # Determine target sizes for bucketing
+    if bucketing_fn is not None:
+        # For bucketing, we need to compute actual sizes first
+        ctx = Context.create(cached_tokens, block_table, block_size)
+        actual_shared_blocks = 0
+        actual_unique_blocks = 0
+        if ctx:
+            shared_ctx, unique_ctx = ctx.split(num_scheduled_tokens)
+            if shared_ctx:
+                actual_shared_blocks = torch.unique(shared_ctx.block_ids).size(0)
+            if unique_ctx:
+                actual_unique_blocks = torch.amax(unique_ctx.block_ids).item() + 1
+
+        bucket = bucketing_fn(contains_prompts, first_dim(token_ids), actual_shared_blocks, actual_unique_blocks,
+                              first_dim(logits_indices))
+        target_qlen, target_shared_blocks, target_unique_blocks, target_logits = bucket
+    else:
+        target_qlen = None
+        target_shared_blocks = None
+        target_unique_blocks = None
+        target_logits = first_dim(logits_indices)
+
+    attn_metadata, token_slots = create_attention_metadata(num_computed_tokens=num_computed_tokens,
+                                                           num_scheduled_tokens=num_scheduled_tokens,
+                                                           num_prompt_tokens=num_prompt_tokens,
+                                                           block_table=block_table,
+                                                           block_size=block_size,
+                                                           dtype=dtype,
+                                                           target_qlen=target_qlen,
+                                                           target_shared_blocks=target_shared_blocks,
+                                                           target_unique_blocks=target_unique_blocks)
+
+    # Get actual target_qlen from metadata for padding token_ids/positions
+    if target_qlen is None:
+        target_qlen = first_dim(token_ids)
 
     return UnifiedBatch(req_ids_cpu=req_ids,
                         token_ids=hpu_tensor(token_ids, (target_qlen, ), -1),
@@ -493,17 +591,4 @@ def create_unified_batch(req_ids: list[str], all_token_ids: torch.tensor, num_co
                         new_token_positions_cpu=new_token_positions,
                         logits_indices=hpu_tensor(logits_indices, (target_logits, ), -1),
                         logits_groups_cpu=logits_groups,
-                        attn_metadata=HPUUnifiedAttentionMetadata(
-                            block_size=block_size,
-                            slot_mapping=hpu_tensor(token_slots, (target_qlen, ), -1),
-                            causal_bias=hpu_tensor(causal_bias, (target_qlen, target_qlen), -math.inf),
-                            causal_width=default_causal_width,
-                            shared_blocks=hpu_tensor(shared_blocks, (target_shared_blocks, ), -1),
-                            shared_bias=hpu_tensor(shared_bias, (target_qlen, target_shared_blocks, block_size),
-                                                   -math.inf),
-                            unique_blocks=target_unique_blocks,
-                            unique_block_mapping=hpu_tensor(unique_block_mapping, (target_unique_blocks, ), -1),
-                            unique_bias=hpu_tensor(unique_bias, (target_unique_blocks, block_size), -math.inf),
-                            fmin=to_hpu(fmin),
-                            feps=to_hpu(feps),
-                        ))
+                        attn_metadata=attn_metadata)
