@@ -2770,9 +2770,17 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         block_table = self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs, :max_blocks].clone()
         if self.defragmenter.enabled:
             block_table.apply_(self.defragmenter.resolve)
+        input_ids_hpu = None
+        num_decodes = 0
+        if self.use_async_scheduling:
+            pd_info = self._get_prompts_and_decodes(scheduler_output)
+            num_decodes = len(pd_info.decode_req_ids)
+            self._prepare_input_ids(scheduler_output)
+            input_ids_hpu = self.input_ids_hpu
+            
         return create_unified_batch(self.input_batch.req_ids, all_token_ids, num_computed_tokens, num_scheduled_tokens,
                                     num_prompt_tokens, block_table, self.block_size, self.dtype,
-                                    self.unified_bucketing_fn)
+                                    self.unified_bucketing_fn, input_ids_hpu, num_decodes)
 
     @torch.inference_mode()
     def unified_execute_model(
@@ -2785,8 +2793,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOuptut if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
+        ensure_decodes_first(self.input_batch)
         htorch.core.mark_step()
         batch = self.prepare_unified_batch(scheduler_output)
+        # NOTE(tianmu-li): Align behavior of incomplete prompt with gpu_model_runner
+        # If logits_indices is smaller than req_id, the last request is a chunked prompt request that
+        # hasn't finished in this step. We add the last token position to logits_indices to ensure
+        # the last token of the chunk is sampled. This sampled token will be discarded later
+        # logger.info(f"logits_indices shape: {batch.logits_indices.shape}, req_ids shape: {len(batch.req_ids_cpu)}")
         htorch.core.mark_step()
         non_flattened_hidden_states, aux_hidden_states, hidden_states, logits_device = \
             self._execute_model_generic(
@@ -2803,19 +2817,37 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         sampling_metadata = self._prepare_sampling(batch_changed, selected_req_ids, pad_to=logits_device.shape[0])
         sampler_output = self.sampler(logits=logits_device, sampling_metadata=sampling_metadata)
 
-        sampled_token_ids_cpu = sampler_output.sampled_token_ids.cpu()
+        # Copy some objects so they don't get modified after returning.
+        # This is important when using async scheduling.
+        req_ids_output_copy = self.input_batch.req_ids.copy()
+        req_id_to_index_output_copy = \
+            self.input_batch.req_id_to_index.copy()
+        
         sampled_token_ids: list[list[int]] = [[] for _ in batch.req_ids_cpu]
-        for req_id, tokens in zip(selected_req_ids, sampled_token_ids_cpu.tolist()):
-            sampled_token_ids[self.input_batch.req_id_to_index[req_id]].extend(tokens)
+        if self.use_async_scheduling:
+            sampled_token_ids_hpu = sampler_output.sampled_token_ids.view(-1, 1)
+            self.input_batch.prev_sampled_token_ids = sampled_token_ids_hpu.flatten()
+            invalid_req_indices = [] # FIXME
+            invalid_req_indices_set = set(invalid_req_indices)
+            self.input_batch.prev_sampled_token_ids_invalid_indices = invalid_req_indices_set
+            self.input_batch.prev_req_id_to_index = {
+                req_id: i
+                for i, req_id in enumerate(self.input_batch.req_ids) if i not in invalid_req_indices_set
+            }
 
-        #TODO: add support for multi-token output
-        assert sampled_token_ids_cpu.size(1) == 1, 'Currently only single token output is supported!'
-        sampled_token_ids_cpu = sampled_token_ids_cpu.flatten()
-        htorch.core.mark_step()
+        else:
+            sampled_token_ids_cpu = sampler_output.sampled_token_ids.cpu()
+            for req_id, tokens in zip(selected_req_ids, sampled_token_ids_cpu.tolist()):
+                sampled_token_ids[self.input_batch.req_id_to_index[req_id]].extend(tokens)
 
-        sampled_token_ids_cpu = sampled_token_ids_cpu.index_select(0, batch.logits_groups_cpu)
-        self.input_batch.token_ids_cpu_tensor.index_put_((batch.logits_groups_cpu, batch.new_token_positions_cpu),
-                                                         sampled_token_ids_cpu)
+            #TODO: add support for multi-token output
+            assert sampled_token_ids_cpu.size(1) == 1, 'Currently only single token output is supported!'
+            sampled_token_ids_cpu = sampled_token_ids_cpu.flatten()
+            htorch.core.mark_step()
+
+            sampled_token_ids_cpu = sampled_token_ids_cpu.index_select(0, batch.logits_groups_cpu)
+            self.input_batch.token_ids_cpu_tensor.index_put_((batch.logits_groups_cpu, batch.new_token_positions_cpu),
+                                                            sampled_token_ids_cpu)
 
         ######### UPDATE REQUEST STATE WITH GENERATED TOKENS #########
         num_reqs = len(selected_req_ids)
@@ -2828,6 +2860,22 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.input_batch.token_ids_cpu[i, seq_len:seq_len + num_tokens] = token_ids
             self.input_batch.num_tokens[i] += len(token_ids)
             req_state.output_token_ids.extend(token_ids)
+
+        if self.use_async_scheduling:
+            model_runner_output = ModelRunnerOutput(
+                req_ids=req_ids_output_copy,
+                req_id_to_index=req_id_to_index_output_copy,
+                sampled_token_ids=sampled_token_ids,
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            )
+            return AsyncHPUModelRunnerOutput(
+                model_runner_output=model_runner_output,
+                sampled_token_ids=sampled_token_ids_hpu,
+                invalid_req_indices=invalid_req_indices,
+                async_output_copy_stream=self.async_output_copy_stream,
+            )
 
         model_runner_output = ModelRunnerOutput(
             req_ids=batch.req_ids_cpu,

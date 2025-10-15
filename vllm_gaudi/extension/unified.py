@@ -408,7 +408,7 @@ def create_unified_batch(req_ids: list[str], all_token_ids: torch.tensor, num_co
                          num_scheduled_tokens: torch.tensor, num_prompt_tokens: torch.tensor, block_table: torch.tensor,
                          block_size: int, dtype: torch.dtype, bucketing_fn: Callable[[bool, int, int, int, int],
                                                                                      tuple[int, int, int,
-                                                                                           int]]) -> UnifiedBatch:
+                                                                                           int]], input_ids_hpu: Optional[torch.tensor] = None, num_decodes: Optional[int] = 0) -> UnifiedBatch:
     """ Calculate all necessary tensors needed for batch scheduling """
     total_tokens = num_computed_tokens + num_scheduled_tokens
     query_len = num_scheduled_tokens.sum().item()
@@ -491,8 +491,16 @@ def create_unified_batch(req_ids: list[str], all_token_ids: torch.tensor, num_co
     fmin = torch.finfo(dtype).min
     feps = torch.finfo(dtype).tiny
 
+    token_ids_device=hpu_tensor(token_ids, (target_qlen, ), -1)
+
+    # Async scheduling. 
+    if input_ids_hpu is not None:
+        token_ids_device[:num_decodes] = input_ids_hpu[:num_decodes]
+        pass
+    print(f"logits_indices cpu shape: {logits_indices.shape}, req_ids shape: {len(req_ids)}")
+
     return UnifiedBatch(req_ids_cpu=req_ids,
-                        token_ids=hpu_tensor(token_ids, (target_qlen, ), -1),
+                        token_ids=token_ids_device,
                         token_positions=hpu_tensor(token_positions, (target_qlen, ), -1),
                         new_token_positions_cpu=new_token_positions,
                         logits_indices=hpu_tensor(logits_indices, (target_logits, ), -1),
