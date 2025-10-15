@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 import habana_frameworks.torch as htorch
@@ -205,6 +205,38 @@ class HpuPlatform(Platform):
             return out
 
         return _synced_weight_loader
+
+    @classmethod
+    def insert_blocks_to_device(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: Union[tuple[torch.Tensor], torch.Tensor],
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from src_cache to dst_cache on HPU."""
+
+        _src_cache = src_cache[:, src_block_indices]
+        if isinstance(dst_cache, tuple):
+            for i in range(len(dst_cache)):
+                dst_cache[i].index_put_((dst_block_indices, ), _src_cache[i].to(dst_cache[i].device))
+        else:
+            dst_cache.index_put_((dst_block_indices, ), _src_cache.to(dst_cache.device))
+
+    @classmethod
+    def swap_out_blocks_to_host(
+        cls,
+        src_cache: Union[tuple[torch.Tensor], torch.Tensor],
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from HPU to host (CPU)."""
+        if isinstance(src_cache, tuple):
+            _src_cache = torch.stack([c[src_block_indices] for c in src_cache], dim=0)
+        else:
+            _src_cache = src_cache[src_block_indices]
+        dst_cache[:, dst_block_indices] = _src_cache.cpu()
 
     @classmethod
     def patch_for_pt27(cls) -> None:
