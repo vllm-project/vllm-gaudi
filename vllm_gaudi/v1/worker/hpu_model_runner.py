@@ -4468,20 +4468,20 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
 
 # --- Helper Functions ---
-
-
 def get_shape(data):
     """Recursively finds the shape of a nested tuple or list."""
+    if isinstance(data, torch.Tensor):
+        return data.shape
+
     if not isinstance(data, (list, tuple)):
-        return ()
+        return ()  # End of a non-tensor branch
+
     if not data:
         return (0, )
 
     first_dim = len(data)
-    # Recursively get the shape of the first element
     sub_shape = get_shape(data[0])
 
-    # Check for raggedness
     for item in data[1:]:
         if get_shape(item) != sub_shape:
             raise ValueError("Inconsistent dimensions: The structure is ragged.")
@@ -4489,13 +4489,13 @@ def get_shape(data):
     return (first_dim, ) + sub_shape
 
 
-def get_device(data):
+def _find_tensors_and_validate(data, attr_name):
     """
-    Finds the device of tensors within a nested structure, ensuring they are all the same.
+    A generic helper to find all tensors and validate a specific attribute
+    (like 'device' or 'dtype') ensuring they are all the same.
     """
-    found_device = None
+    found_attr = None
 
-    # Helper to recursively find all tensors
     def find_tensors(nested_data):
         if isinstance(nested_data, torch.Tensor):
             yield nested_data
@@ -4506,19 +4506,17 @@ def get_device(data):
     tensor_iterator = find_tensors(data)
 
     try:
-        # Get the device of the first tensor
         first_tensor = next(tensor_iterator)
-        found_device = first_tensor.device
+        found_attr = getattr(first_tensor, attr_name)
     except StopIteration:
-        # No tensors found, so device is None
-        return None
+        return None  # No tensors found
 
-    # Ensure all other tensors have the same device
     for tensor in tensor_iterator:
-        if tensor.device != found_device:
-            raise ValueError(f"Inconsistent devices: Found tensors on both '{found_device}' and '{tensor.device}'.")
+        current_attr = getattr(tensor, attr_name)
+        if current_attr != found_attr:
+            raise ValueError(f"Inconsistent {attr_name}: Found tensors with both '{found_attr}' and '{current_attr}'.")
 
-    return found_device
+    return found_attr
 
 
 class TensorTuple(tuple):
@@ -4538,7 +4536,8 @@ class TensorTuple(tuple):
         # This is done here because tuples are immutable.
         # We store them with a leading underscore.
         instance._shape = get_shape(instance)
-        instance._device = get_device(instance)
+        instance._device = _find_tensors_and_validate(instance, 'device')
+        instance._dtype = _find_tensors_and_validate(instance, 'dtype')
 
         return instance
 
@@ -4554,3 +4553,8 @@ class TensorTuple(tuple):
         Returns None if no tensors are present.
         """
         return self._device
+
+    @property
+    def dtype(self):
+        """Returns the torch.dtype of the tensors within the tuple."""
+        return self._dtype

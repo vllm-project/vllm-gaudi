@@ -215,7 +215,6 @@ class HpuPlatform(Platform):
         dst_block_indices: torch.Tensor,
     ) -> None:
         """Copy blocks from src_cache to dst_cache on HPU."""
-
         _src_cache = src_cache[:, src_block_indices]
         if isinstance(dst_cache, tuple):
             for i in range(len(dst_cache)):
