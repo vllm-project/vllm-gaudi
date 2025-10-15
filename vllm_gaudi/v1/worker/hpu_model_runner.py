@@ -1108,7 +1108,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
                 self.requests[req_id].mrope_positions, \
                     self.requests[req_id].mrope_position_delta = \
-                    MRotaryEmbedding.get_input_positions_tensor(
+                    self.model.model.get_mrope_input_positions(
                         self.requests[req_id].prompt_token_ids,
                         hf_config=hf_config,
                         image_grid_thw=image_grid_thw,
@@ -2999,19 +2999,24 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
                 self.event_start = self.profiler.get_timestamp_us()
                 self.profiler.start("internal", "prefill")
-                # Align behavior of incomplete prompt with gpu_model_runner
-                # If logits_indices is smaller than req_id,
-                # add the last token position
+                # NOTE(tianmu-li): Align behavior of incomplete prompt with gpu_model_runner
+                # If logits_indices is smaller than req_id, the last request is a chunked prompt request that
+                # hasn't finished in this step. We add the last token position to logits_indices to ensure
+                # the last token of the chunk is sampled. This sampled token will be discarded later
                 if logits_indices.shape[0] < len(req_id):
-                    if structured_output:
-                        logits_append = torch.tensor([torch.sum(prompt_len) - 1],
-                                                     device=token_ids.device,
-                                                     dtype=torch.int32)
-                        logits_indices = torch.cat([logits_indices, logits_append])
-                    elif self.use_async_scheduling:
-                        # Discard partial prefill logits for async scheduling
+                    if structured_output or self.use_async_scheduling:
+                        # When there are multiple requests in the batch (e.g. self.use_merged_prefill=True),
+                        # the last token position is the sum of all prompt lengths - 1
+                        # This logic also holds when there is only one request in the batch
+                        logits_indices_append = torch.tensor([torch.sum(prompt_len) - 1],
+                                                             device=token_ids.device,
+                                                             dtype=torch.int32)
+                        logits_indices = torch.cat([logits_indices, logits_indices_append])
+                    if self.use_async_scheduling:
+                        # Discard partial prefill logit for async scheduling
                         # Depends on 1 decode token/batch
-                        invalid_req_indices.append(num_decodes + idx)
+                        prefill_start_idx = num_decodes
+                        invalid_req_indices.append(prefill_start_idx + idx)
                 htorch.core.mark_step()
                 non_flattened_hidden_states, aux_hidden_states, \
                     sample_hidden_states, logits_device = \
@@ -3313,7 +3318,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             return AsyncHPUModelRunnerOutput(
                 model_runner_output=model_runner_output,
                 sampled_token_ids=sampled_token_ids,
-                invalid_req_indices=[],
+                invalid_req_indices=invalid_req_indices,
                 async_output_copy_stream=self.async_output_copy_stream,
             )
         model_runner_output = ModelRunnerOutput(
@@ -4204,7 +4209,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
             if self.vllm_config.kv_transfer_config.kv_buffer_device == "cpu":
-                get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
+                copy_kv_blocks_fn = copy_mla_kv_blocks if self.model_config.use_mla else copy_kv_blocks
+                get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks_fn)
             global hpu_buffer
         htorch.hpu.synchronize()
 
@@ -4457,6 +4463,69 @@ def _make_src_and_dst_indices(
     src_slot_mapping = torch.tensor(src_slot_mapping, device=src_device, dtype=torch.int64)
     dst_slot_mapping = torch.tensor(dst_slot_mapping, device=dst_device, dtype=torch.int64)
     return src_slot_mapping, dst_slot_mapping
+
+
+def copy_mla_kv_blocks(
+    src_kv_caches: dict[str, torch.Tensor],
+    dst_kv_caches: dict[str, torch.Tensor],
+    src_block_ids: list[int],
+    dst_block_ids: list[int],
+    direction: Literal["h2d", "d2h"],
+    block_size: int = 128,
+) -> None:
+    """Copy kv blocks between different buffers."""
+    if not src_kv_caches or not dst_kv_caches or \
+       not src_block_ids or not dst_block_ids or \
+       len(src_block_ids) != len(dst_block_ids):
+        return
+    assert len(src_block_ids) == len(dst_block_ids)
+    src_device = next(iter(src_kv_caches.values()))[0].device
+    dst_device = next(iter(dst_kv_caches.values()))[0].device
+
+    src_slot_mapping, dst_slot_mapping = _make_src_and_dst_indices(block_size=block_size,
+                                                                   src_block_ids=src_block_ids,
+                                                                   dst_block_ids=dst_block_ids,
+                                                                   src_device=src_device,
+                                                                   dst_device=dst_device)
+
+    start = time.perf_counter()
+    target_device = dst_device.type
+
+    i = 0
+    global hpu_buffer
+    use_hpu_buffer = False
+    for layer_name in src_kv_caches:
+        if isinstance(src_kv_caches[layer_name], tuple):
+            key_cache, _ = src_kv_caches[layer_name]
+        else:
+            key_cache = src_kv_caches[layer_name]
+        if direction == "d2h":
+            # NOTE(chendi): in order to keep host_buffer shape[0] same as tpu and gpu case
+            # so we need to flatten the dst_kv_caches
+            dst_kv_caches[layer_name] = dst_kv_caches[layer_name].flatten(0, 1)
+        else:
+            key_cache = key_cache.flatten(0, 1)
+
+        if direction == "d2h" and use_hpu_buffer:
+            hpu_buffer[i] = key_cache.index_select(0, src_slot_mapping)
+        elif direction == "d2h":
+            dst_kv_caches[layer_name].index_put_((dst_slot_mapping, ),
+                                                 key_cache.index_select(0, src_slot_mapping).to(target_device))
+        else:
+            dst_kv_caches[layer_name][0].index_put_((dst_slot_mapping, ),
+                                                    key_cache.index_select(0, src_slot_mapping).to(target_device))
+        if direction == "d2h":
+            dst_kv_caches[layer_name] = dst_kv_caches[layer_name].unflatten(0, (-1, block_size))
+
+        i = i + 1
+
+    torch.hpu.synchronize()
+
+    logger.debug("copy_kv_blocks: copy takes %s"
+                 "|direction=%s|pid=%s|block_size=%s"
+                 "|src_blocks=%s|dst_blocks=%s",
+                 time.perf_counter() - start, direction, os.getpid(), block_size, len(src_block_ids),
+                 len(dst_block_ids))
 
 
 def copy_kv_blocks(
