@@ -4535,6 +4535,10 @@ class TensorTuple(tuple):
     contained tensors reside on the same device.
     """
 
+    _shape: tuple[int, ...]
+    _device: Optional[torch.device]
+    _dtype: Optional[torch.dtype]
+
     def __new__(cls, iterable):
         # First, we create the actual tuple object instance
         instance = super().__new__(cls, iterable)
