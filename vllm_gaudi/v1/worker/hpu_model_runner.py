@@ -4204,7 +4204,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     else:
                         value_cache = None
                     for layer_name in kv_cache_tensor.shared_by:
-                        kv_caches[layer_name] = TensorTuple((key_cache, value_cache))
+                        kv_caches[layer_name] = (key_cache, value_cache)
                 else:
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.
@@ -4230,19 +4230,15 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
     def get_kv_caches_4D(self, kv_caches) -> dict[str, torch.Tensor]:
         kv_caches_4D: dict[str, torch.Tensor] = {}
         for layer_name, cache_or_cachelist in kv_caches.items():
-            split_kv = isinstance(cache_or_cachelist, tuple)
-            if split_kv:
-                k_cache = cache_or_cachelist[0].view(-1, self.block_size, *cache_or_cachelist[0].shape[1:])
-                v_cache = cache_or_cachelist[1].view(-1, self.block_size, *cache_or_cachelist[1].shape[1:])
+            kv_cache_per_layer = []
+            for cache in cache_or_cachelist:
+                if cache is None:
+                    continue
+                kv_cache_per_layer.append(cache.view(-1, self.block_size, *cache.shape[1:]))
                 #NOTE(Chendi): Do not remove, call torch data_ptr to record physical address
-                cache_or_cachelist[0].data_ptr()
-                cache_or_cachelist[1].data_ptr()
-                kv_caches_4D[layer_name] = TensorTuple((k_cache, v_cache))
-            else:
-                kv_cache = cache_or_cachelist.view(-1, self.block_size, *cache_or_cachelist.shape[1:])
-                #NOTE(Chendi): Do not remove, call torch data_ptr to record physical address
-                cache_or_cachelist.data_ptr()
-                kv_caches_4D[layer_name] = kv_cache
+                cache.data_ptr()
+            kv_caches_4D[layer_name] = TensorTuple(tuple(kv_cache_per_layer)) \
+                if len(kv_cache_per_layer) == 2 else kv_cache_per_layer[0]
         return kv_caches_4D
 
     def get_supported_generation_tasks(self) -> list[GenerationTask]:

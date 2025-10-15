@@ -215,12 +215,12 @@ class HpuPlatform(Platform):
         dst_block_indices: torch.Tensor,
     ) -> None:
         """Copy blocks from src_cache to dst_cache on HPU."""
-        _src_cache = src_cache[:, src_block_indices]
         if isinstance(dst_cache, tuple):
+            _src_cache = src_cache[:, src_block_indices]
             for i in range(len(dst_cache)):
                 dst_cache[i].index_put_((dst_block_indices, ), _src_cache[i].to(dst_cache[i].device))
         else:
-            dst_cache.index_put_((dst_block_indices, ), _src_cache.to(dst_cache.device))
+            dst_cache.index_put_((dst_block_indices, ), src_cache[src_block_indices].to(dst_cache.device))
 
     @classmethod
     def swap_out_blocks_to_host(
@@ -233,9 +233,9 @@ class HpuPlatform(Platform):
         """Copy blocks from HPU to host (CPU)."""
         if isinstance(src_cache, tuple):
             _src_cache = torch.stack([c[src_block_indices] for c in src_cache], dim=0)
+            dst_cache[:, dst_block_indices] = _src_cache.cpu()
         else:
-            _src_cache = src_cache[src_block_indices]
-        dst_cache[:, dst_block_indices] = _src_cache.cpu()
+            dst_cache[dst_block_indices] = src_cache[src_block_indices].cpu()
 
     @classmethod
     def patch_for_pt27(cls) -> None:

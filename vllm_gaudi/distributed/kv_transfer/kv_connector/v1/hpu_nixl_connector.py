@@ -10,7 +10,7 @@ original_data_ptr = torch.Tensor.data_ptr
 global_data_ptr_record = {}
 
 
-def _hpu_data_ptr(tensor_self, unregister=False) -> int:
+def _hpu_data_ptr(tensor_self) -> int:
     """
     A temporary replacement for tensor.data_ptr().
     
@@ -28,8 +28,6 @@ def _hpu_data_ptr(tensor_self, unregister=False) -> int:
             global_data_ptr_record[v_dataptr] = p_dataptr
         else:
             p_dataptr = global_data_ptr_record[v_dataptr]
-        if unregister:
-            del global_data_ptr_record[v_dataptr]
         return p_dataptr
 
     # Fallback to the original implementation for CPU tensors or host buffers
