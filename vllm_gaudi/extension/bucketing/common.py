@@ -241,11 +241,8 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
         values that are in and out of budget:
         bs < edge_case_bs < next bs and query < edge_case_query < next query
         '''
+
         candidates = [(bs_idx, ctx_idx), (bs_idx + 1, ctx_idx), (bs_idx, ctx_idx + 1), (bs_idx + 1, ctx_idx + 1)]
-        valid = bs_range[bs_idx] <= max_num_batched_tokens
-        if not valid:
-            omitted_buckets.add(("bs_range[bs_idx] <= max_num_batched_tokens", "-> bs, ctx: ", bs_idx, ctx_idx))
-            return {}
         valid_candidates = [(b_idx, q_idx) for b_idx, q_idx in candidates
                             if b_idx < len(bs_range) and q_idx < len(ctx_range)]
         return {(bs_range[b_idx], ctx_range[q_idx]) for b_idx, q_idx in valid_candidates}
@@ -253,26 +250,35 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
     # filter rules for buckets
     # prompt
     def not_over_max_model_len(bs, query, ctx):
-        if not query + ctx * block_size <= max_model_len:
+        smaller_than_limit = bs * (query + ctx * block_size) <= max_model_len
+        if not smaller_than_limit:
             omitted_buckets.add(
-                ("condition: query + ctx * block_size <= max_model_len", "-> bs, query, ctx: ", bs, query, ctx))
-        return query + ctx * block_size <= max_model_len
+                ("condition: bs * (query + ctx * block_size) <= max_model_len", "-> bs, query, ctx: ", bs, query, ctx))
+        return smaller_than_limit
+
+    def not_over_max_num_batched_tokens(bs, query, ctx):
+        smaller_than_limit = bs * query <= max_num_batched_tokens
+        if not smaller_than_limit:
+            omitted_buckets.add(
+                ("condition: bs * query <= max_num_batched_tokens", "-> bs, query, ctx: ", bs, query, ctx))
+        return smaller_than_limit
 
     def ctx_not_over_max_ctx_for_merged_prefill(bs, query, ctx):
-        if not ctx <= max_num_prefill_seqs * math.ceil(
-            (max_model_len - math.floor(query / max_num_prefill_seqs)) // block_size):
+        smaller_than_limit = ctx <= max_num_prefill_seqs * math.ceil(
+            (max_model_len - math.floor(query / max_num_prefill_seqs)) // block_size)
+        if not smaller_than_limit:
             omitted_buckets.add((
                 "ctx <= max_num_prefill_seqs * math.ceil((max_model_len - math.floor(query / max_num_prefill_seqs)) // block_size)",
                 "-> bs, query, ctx: ", bs, query, ctx))
-        return ctx <= max_num_prefill_seqs * math.ceil(
-            (max_model_len - math.floor(query / max_num_prefill_seqs)) // block_size)
+        return smaller_than_limit
 
     # decode
     def block_not_greater_than_max_model_len(bs, query, ctx):
-        if not ctx <= bs * math.ceil(max_model_len / block_size):
+        smaller_than_limit = ctx <= bs * math.ceil(max_model_len / block_size)
+        if not smaller_than_limit:
             omitted_buckets.add(
                 ("condition: ctx <= bs * math.ceil(max_model_len / block_size)", "-> bs, query, ctx: ", bs, query, ctx))
-        return ctx <= bs * math.ceil(max_model_len / block_size)
+        return smaller_than_limit
 
     def batch_size_smaller_than_blocks(bs, query, ctx):
         if not bs <= ctx:
@@ -283,7 +289,7 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
         "prompt": {
             # depends only on merged_prefill
             True: [ctx_not_over_max_ctx_for_merged_prefill],
-            False: [not_over_max_model_len],
+            False: [not_over_max_model_len, not_over_max_num_batched_tokens],
         },
         "decode": {
             # depends only on contiguous PA
