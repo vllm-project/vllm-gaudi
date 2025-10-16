@@ -1,0 +1,26 @@
+model_name: "google/gemma-3-27b-it"
+test_config:
+  # Single image test
+  - modality: image
+    extra_engine_args:
+      mm_processor_kwargs:
+          min_pixels: 802816                # 896x896
+          max_pixels: 1003520
+          fps: 1
+    input_data_config:
+      num_prompts: 4
+      media_source: default
+
+  # Multi-image test
+  - modality: multi_image
+    extra_engine_args:
+      mm_processor_kwargs:
+          min_pixels: 802816                # 896x896
+          max_pixels: 1003520
+          fps: 1
+      limit_mm_per_prompt:
+        image: 10                           # Allow up to 10 images per prompt
+    input_data_config:
+      num_prompts: 2
+      media_source: default                 # Uses default images
+      num_images: 6
