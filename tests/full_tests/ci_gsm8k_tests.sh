@@ -15,6 +15,9 @@ run_gemma3_test() {
     echo "➡️ Testing gemma-3-4b-it..."
     VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
     echo "✅ Test with multimodal-support with gemma-3-4b-it passed."
+    echo "➡️ Testing gemma-3-27b-it..."
+    VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm_multi.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-27b-it.yaml"
+    echo "✅ Test with multimodal-support with multiple images gemma-3-27b-it passed."
 }
 
 # Basic model test
