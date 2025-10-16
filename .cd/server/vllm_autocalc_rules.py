@@ -82,8 +82,12 @@ def calc_DECODE_BLOCK_STEP_GRAPHS(ctx):
 
 def calc_NUM_DECODE_GRAPHS(ctx):
     # 3d update
-    return ((ctx['DECODE_BS_RAMP_GRAPHS'] + ctx['DECODE_BS_STEP_GRAPHS']) *
-            (ctx['DECODE_BLOCK_RAMP_GRAPHS'] + ctx['DECODE_BLOCK_STEP_GRAPHS'])) / 2
+    decode_graphs = ((ctx['DECODE_BS_RAMP_GRAPHS'] + ctx['DECODE_BS_STEP_GRAPHS']) *
+                     (ctx['DECODE_BLOCK_RAMP_GRAPHS'] + ctx['DECODE_BLOCK_STEP_GRAPHS']))
+    if ctx['VLLM_CONTIGUOUS_PA']:
+        return decode_graphs
+    else:
+        return decode_graphs / 2
 
 
 def calc_PROMPT_BS_RAMP_GRAPHS(ctx):
