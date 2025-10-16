@@ -2777,7 +2777,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_decodes = len(pd_info.decode_req_ids)
             self._prepare_input_ids(scheduler_output)
             input_ids_hpu = self.input_ids_hpu
-            
+
         return create_unified_batch(self.input_batch.req_ids, all_token_ids, num_computed_tokens, num_scheduled_tokens,
                                     num_prompt_tokens, block_table, self.block_size, self.dtype,
                                     self.unified_bucketing_fn, input_ids_hpu, num_decodes)
@@ -2796,11 +2796,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         ensure_decodes_first(self.input_batch)
         htorch.core.mark_step()
         batch = self.prepare_unified_batch(scheduler_output)
-        # NOTE(tianmu-li): Align behavior of incomplete prompt with gpu_model_runner
-        # If logits_indices is smaller than req_id, the last request is a chunked prompt request that
-        # hasn't finished in this step. We add the last token position to logits_indices to ensure
-        # the last token of the chunk is sampled. This sampled token will be discarded later
-        # logger.info(f"logits_indices shape: {batch.logits_indices.shape}, req_ids shape: {len(batch.req_ids_cpu)}")
         htorch.core.mark_step()
         non_flattened_hidden_states, aux_hidden_states, hidden_states, logits_device = \
             self._execute_model_generic(
@@ -2822,19 +2817,18 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         req_ids_output_copy = self.input_batch.req_ids.copy()
         req_id_to_index_output_copy = \
             self.input_batch.req_id_to_index.copy()
-        
+
         sampled_token_ids: list[list[int]] = [[] for _ in batch.req_ids_cpu]
         if self.use_async_scheduling:
             sampled_token_ids_hpu = sampler_output.sampled_token_ids.view(-1, 1)
             self.input_batch.prev_sampled_token_ids = sampled_token_ids_hpu.flatten()
-            invalid_req_indices = [] # FIXME
+            invalid_req_indices = batch.invalid_req_indices
             invalid_req_indices_set = set(invalid_req_indices)
             self.input_batch.prev_sampled_token_ids_invalid_indices = invalid_req_indices_set
             self.input_batch.prev_req_id_to_index = {
                 req_id: i
                 for i, req_id in enumerate(self.input_batch.req_ids) if i not in invalid_req_indices_set
             }
-
         else:
             sampled_token_ids_cpu = sampler_output.sampled_token_ids.cpu()
             for req_id, tokens in zip(selected_req_ids, sampled_token_ids_cpu.tolist()):
@@ -2847,7 +2841,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
             sampled_token_ids_cpu = sampled_token_ids_cpu.index_select(0, batch.logits_groups_cpu)
             self.input_batch.token_ids_cpu_tensor.index_put_((batch.logits_groups_cpu, batch.new_token_positions_cpu),
-                                                            sampled_token_ids_cpu)
+                                                             sampled_token_ids_cpu)
 
         ######### UPDATE REQUEST STATE WITH GENERATED TOKENS #########
         num_reqs = len(selected_req_ids)
