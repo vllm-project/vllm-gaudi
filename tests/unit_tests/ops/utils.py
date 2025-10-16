@@ -34,7 +34,7 @@ def register_op(base_cls, oot_cls):
     CustomOp.op_registry_oot[base_cls.__name__] = oot_cls
 
 
-def create_row_parallel_linear(input_size, output_size, quant_config):
+def create_row_parallel_linear(input_size, output_size, quant_config=None):
     return RowParallelLinear(input_size=input_size,
                              output_size=output_size,
                              bias=False,
@@ -47,7 +47,7 @@ def create_row_parallel_linear(input_size, output_size, quant_config):
                              disable_tp=False)
 
 
-def create_fused_moe(quant_config):
+def create_fused_moe(quant_config=None):
     return FusedMoE(num_experts=128,
                     top_k=8,
                     hidden_size=512,
