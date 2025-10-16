@@ -27,7 +27,7 @@ usage() {
 }
 
 cleanup_tmp() {
-	if [[ $(pwd) == *vllm-hpu-extension/calibration ]]; then
+	if [[ $(pwd) == *vllm-gaudi/calibration ]]; then
 		echo "Clearing temporary directory"
 		rm -rf nc_workspace
 		rm -rf inc_tmp
@@ -165,13 +165,13 @@ if $MULTI_NODE_SETUP; then
         echo "Required TP size : $TP_SIZE" 
         echo "Available HPU's : $RAY_AVAILABLE_RESOURCES "
         echo "!! Exiting since not enough HPU resources available. You can run 'ray status' to see available resources"
-        echo "Refer https://github.com/HabanaAI/vllm-hpu-extension/tree/main/calibration#experimental-multi-node-fp8-calibration for multi-node runs"
+        echo "Refer https://vllm-gaudi.readthedocs.io/en/latest/configuration/multi_node.html for multi-node runs"
         exit 1
     fi
 
     if [[ ! -e $QUANT_CONFIG ]]; then
         echo " !! Exiting. Invalid QUANT_CONFIG env"
-        echo " Multi-node calibration requires QUANT_CONFIG to point to an empty buffer.json file. Refer https://github.com/HabanaAI/vllm-hpu-extension/tree/main/calibration#experimental-multi-node-fp8-calibration"
+        echo " Multi-node calibration requires QUANT_CONFIG to point to an empty buffer.json file. Refer https://vllm-gaudi.readthedocs.io/en/latest/configuration/multi_node.html"
         exit 1
     fi
 fi
