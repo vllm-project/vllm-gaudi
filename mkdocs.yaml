@@ -82,6 +82,7 @@ plugins:
 
 markdown_extensions:
   - attr_list
+  - sane_lists
   - md_in_html
   - admonition
   - pymdownx.details
