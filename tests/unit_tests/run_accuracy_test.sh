@@ -16,6 +16,7 @@ echo "Dependency installation complete."
 # Models to run
 MODELS=(
     "Qwen/Qwen3-0.6B"
+    "deepseek-ai/DeepSeek-V2-Lite-Chat"
 )
 #MODELS=(
 #	"meta-llama/Llama-3.1-8B"
