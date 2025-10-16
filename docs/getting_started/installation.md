@@ -107,7 +107,7 @@ Use the following commands to run a Docker image. Make sure to update the versio
 
     ```bash
     cd vllm-gaudi
-    python install_nixl.sh
+    python install_nixl.py
     cd ..
     ```
 
@@ -144,5 +144,5 @@ Use the following commands to run a Docker image. Make sure to update the versio
     pip install -e .
     
     # Build nixl
-    python install_nixl.sh
+    python install_nixl.py
     ```
