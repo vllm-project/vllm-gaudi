@@ -190,6 +190,7 @@ class EntrypointMain:
                 output_script_path="vllm_server.sh",
                 variables=variables,
                 log_dir="logs",
+                varlist_conf_path="server/server_output.env",
             ).create_and_run()
         elif self.mode == "benchmark":
             print("[INFO] Starting container in benchmark mode.")
