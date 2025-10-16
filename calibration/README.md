@@ -19,13 +19,11 @@ The calibration procedure works with any dataset that contains following fields:
 
 To run the ```calibrate_model.sh``` script, follow the steps below:
 
-1. Build and install latest [vllm-fork](https://github.com/HabanaAI/vllm-fork/blob/habana_main/README_GAUDI.md#build-and-install-vllm).
-2. Clone the vllm-hpu-extension repository and move to the ```calibration``` subdirectory:
+1. Build and install latest [vllm-plugin](https://vllm-gaudi.readthedocs.io/en/latest/getting_started/installation.html).
+2. Go ```calibration``` subdirectory:
 
 ```bash
-cd /root
-git clone https://github.com/HabanaAI/vllm-hpu-extension.git
-cd vllm-hpu-extension/calibration
+cd calibration
 pip install -r requirements.txt
 ```
 
@@ -57,7 +55,7 @@ PT_HPU_LAZY_MODE=1 ./calibrate_model.sh -m deepseek-ai/DeepSeek-R1  -d NeelNanda
 
 # Run inference with FP8 models
 
-An inference with FP8 precision models using vLLM has been described in [README_GAUDI](https://github.com/HabanaAI/vllm-fork/blob/habana_main/README_GAUDI.md#quantization-fp8-inference-and-model-calibration-process) file.
+An inference with FP8 precision models using vLLM has been described in [Documentation](https://vllm-gaudi.readthedocs.io/en/latest/configuration/model_calibration.html).
 
 # Multi-node FP8 Calibration
 
@@ -68,14 +66,14 @@ Following section details the procedure for calibrating models that do not fit i
 
 ## Step 1: Pre-requisites
 
-- Install latest [vllm-fork](https://github.com/HabanaAI/vllm-fork/blob/habana_main/README_GAUDI.md#build-and-install-vllm)
+- Install latest [vllm-plugin](https://vllm-gaudi.readthedocs.io/en/latest/getting_started/installation.html)
 - Ensure that all nodes in the multi-node setup are connected to an NFS mount (Network File System).
 - Create workspace directory on NFS, clone the calibration scripts repo and create an empty file `quant_config_buffer.json`.
 
 ```bash
 mkdir <nfs-mount-path>/my_workspace && cd <nfs-mount-path>/my_workspace
-git clone https://github.com/HabanaAI/vllm-hpu-extension.git && cd vllm-hpu-extension/calibration
-touch quant_config_buffer.json 
+cd <path-to-vllm-gaudi>/calibration
+touch quant_config_buffer.json
 ```
 
 - Check if all Gaudi NIC ports are up <br>
@@ -173,7 +171,7 @@ vllm serve meta-llama/Llama-3.1-405B-Instruct --quantization inc --kv-cache-dtyp
 ```
 
 > [!NOTE]
-> Detailed information about serving with vLLM (including multi-node serving) you can find in [README_GAUDI](https://github.com/HabanaAI/vllm-fork/blob/habana_main/README_GAUDI.md) within vllm-fork repo.
+> Detailed information about serving with vLLM (including multi-node serving) you can find in [Documentation](https://vllm-gaudi.readthedocs.io/en/latest/configuration/model_calibration.html).
 
 #### Advanced Usage for MoE Models
 

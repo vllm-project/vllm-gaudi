@@ -1,2 +1,2 @@
-lm_eval==0.4.8
+lm_eval
 datasets
