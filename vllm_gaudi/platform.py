@@ -218,9 +218,10 @@ class HpuPlatform(Platform):
         if isinstance(dst_cache, tuple):
             _src_cache = src_cache[:, src_block_indices]
             for i in range(len(dst_cache)):
-                dst_cache[i].index_put_((dst_block_indices, ), _src_cache[i].to(dst_cache[i].device))
+                dst_cache[i].index_copy_(0, dst_block_indices, _src_cache[i].to(dst_cache[i].device))
         else:
-            dst_cache.index_put_((dst_block_indices, ), src_cache[src_block_indices].to(dst_cache.device))
+            dst_cache.index_copy_(0, dst_block_indices, src_cache[src_block_indices].to(dst_cache.device))
+        torch.hpu.synchronize()
 
     @classmethod
     def swap_out_blocks_to_host(
