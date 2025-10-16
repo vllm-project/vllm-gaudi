@@ -3,6 +3,7 @@
 
 import pytest
 import torch
+import torch.nn as nn
 import habana_frameworks.torch as htorch
 from typing import NamedTuple
 from utils import temporary_op_registry_oot, register_op
@@ -41,7 +42,7 @@ class RotaryData(NamedTuple):
     """
     Data structure for rotary embedding test parameters.
     """
-    cls: type
+    cls: nn.Module
     dtype: torch.dtype
     device: str
 
