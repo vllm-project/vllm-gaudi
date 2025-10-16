@@ -7,8 +7,8 @@ import torch
 import habana_frameworks.torch as htorch
 from unittest.mock import patch, MagicMock
 from vllm_gaudi.utils import HPUCompileConfig
-from vllm_gaudi.ops.hpu_multihead_attn import HpuMultiHeadAttention
 from vllm.attention.layer import MultiHeadAttention
+from vllm_gaudi.ops.hpu_multihead_attn import HpuMultiHeadAttention
 
 
 @pytest.mark.parametrize("num_heads", [2, 8])
@@ -21,6 +21,7 @@ def test_multi_head_attention(num_heads, head_size, num_kv_heads) -> None:
     seq_len = 32
     # prepare native MultiHeadAttention module
     native_attn = MultiHeadAttention(num_heads, head_size, scale, num_kv_heads)
+    assert not isinstance(native_attn, HpuMultiHeadAttention)
 
     # Prepare oot HpuMultiHeadAttention module
     oot_attn = HpuMultiHeadAttention(num_heads, head_size, scale, num_kv_heads).to("hpu")

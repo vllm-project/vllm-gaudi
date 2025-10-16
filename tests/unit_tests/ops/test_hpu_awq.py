@@ -3,10 +3,9 @@
 
 import torch
 import habana_frameworks.torch as htorch
-from utils import get_data_path
+from utils import get_data_path, create_row_parallel_linear
 from vllm_gaudi.ops.hpu_awq import AWQHPULinearMethod, AWQHPUConfig
 from vllm_gaudi.utils import HPUCompileConfig
-from vllm.model_executor.layers.linear import RowParallelLinear
 
 
 def test_awq_linear_method(dist_init):
@@ -14,16 +13,7 @@ def test_awq_linear_method(dist_init):
     oot_quant_config = AWQHPUConfig.from_config(config)
 
     # Prepare linear layer with oot AWQHPULinearMethod
-    oot_op = RowParallelLinear(input_size=256,
-                               output_size=128,
-                               bias=False,
-                               input_is_parallel=True,
-                               skip_bias_add=False,
-                               params_dtype=torch.bfloat16,
-                               reduce_results=True,
-                               quant_config=oot_quant_config,
-                               return_bias=False,
-                               disable_tp=False).to("hpu")
+    oot_op = create_row_parallel_linear(input_size=256, output_size=128, quant_config=oot_quant_config).to("hpu")
     assert isinstance(oot_op.quant_method, AWQHPULinearMethod)
 
     # qweight, qzeros, scales were extracted from first RowParallelLinear of TheBloke/Llama-2-7B-Chat-AWQ
