@@ -112,17 +112,17 @@ class HpuPlatform(Platform):
             vllm_config.model_config.dtype = torch.bfloat16
 
         if envs.VLLM_USE_V1:
-            from vllm.config import CompilationLevel, CUDAGraphMode
+            from vllm.config import CompilationMode, CUDAGraphMode
             compilation_config = vllm_config.compilation_config
             # Activate custom ops for v1.
             compilation_config.custom_ops = ["all"]
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             compilation_config.cudagraph_capture_sizes = []
 
-            if compilation_config.level != CompilationLevel.NO_COMPILATION:
-                logger.info("[HPU] Forcing CompilationLevel.NO_COMPILATION "
-                            "compilation level")
-                compilation_config.level = CompilationLevel.NO_COMPILATION
+            if compilation_config.mode != CompilationMode.NONE:
+                logger.info("[HPU] Forcing CompilationMode.NONE "
+                            "compilation mode")
+                compilation_config.mode = CompilationMode.NONE
 
             print(f"========={compilation_config.custom_ops=}===========")
 
@@ -173,9 +173,13 @@ class HpuPlatform(Platform):
             # requires enabling lazy collectives
             # see https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html  # noqa: E501
             os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
-        # If not set by user then for torch compile enable Runtime scale patching by default
-        elif os.environ.get('RUNTIME_SCALE_PATCHING') is None:
-            os.environ['RUNTIME_SCALE_PATCHING'] = '1'
+        else:
+            # If not set by user then for torch compile enable Runtime scale patching by default
+            if os.environ.get('RUNTIME_SCALE_PATCHING') is None:
+                os.environ['RUNTIME_SCALE_PATCHING'] = '1'
+            #This allows for utilization of Parallel Compilation feature
+            if os.environ.get('FUSER_ENABLE_MULTI_THREADED_INVOCATIONS') is None:
+                os.environ['FUSER_ENABLE_MULTI_THREADED_INVOCATIONS'] = '1'
 
     @classmethod
     def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str, model_config: ModelConfig) -> bool:

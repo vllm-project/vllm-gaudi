@@ -58,11 +58,7 @@ class LinearBucketingStrategy:
 
         decode_bs_bucket_cfg = read_bucket_settings('decode', 'bs', min=1, step=32, max=max_num_seqs)
         decode_query_bucket_cfg = [1, 1, 1]
-        decode_block_bucket_cfg = read_bucket_settings('decode',
-                                                       'block',
-                                                       min=block_size,
-                                                       step=block_size,
-                                                       max=max_blocks)
+        decode_block_bucket_cfg = read_bucket_settings('decode', 'block', min=1, step=block_size, max=max_blocks)
         if decode_block_bucket_cfg[2] > max_blocks:
             logger().info(
                 f'VLLM_DECODE_BLOCK_BUCKET_MAX={decode_block_bucket_cfg[2]} is higher than max_blocks={max_blocks}. Your configuration VLLM_DECODE_BLOCK_BUCKET_MAX={decode_block_bucket_cfg[2]} will be overwritten to VLLM_DECODE_BLOCK_BUCKET_MAX={max_blocks}'
@@ -113,11 +109,11 @@ def warmup_range(config: Tuple[int, int, int]):
     """
     bmin, bstep, bmax = config
     add_zero_bucket = bmin == 0
-    if add_zero_bucket:
-        bmin = bstep
     assert bmin <= bmax, ("Min. batch size cannot be greater than max. "
                           "batch size. If you want to skip warmup, "
                           "set VLLM_SKIP_WARMUP=true")
+    if add_zero_bucket:
+        bmin = bstep
     base = itertools.repeat(2)
     ramp_up_acc = itertools.accumulate(base, func=operator.mul, initial=bmin)
     ramp_up_tw = itertools.takewhile(lambda x: x < bstep and x <= bmax, \
