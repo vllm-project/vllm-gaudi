@@ -34,6 +34,7 @@ def get_user_flags():
         Env('VLLM_DECODE_BLOCK_BUCKET_STEP', int),
         Env('VLLM_DECODE_BLOCK_BUCKET_MAX', int),
         Env('VLLM_DECODE_BLOCK_BUCKET_LIMIT', int),
+        Env('VLLM_BUCKETING_FROM_FILE', str),
 
         # Non-vllm flags that are also important to print
         Env('EXPERIMENTAL_WEIGHT_SHARING', str),
