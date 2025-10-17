@@ -2,6 +2,7 @@ import itertools
 import operator
 import os
 import math
+import ast
 from dataclasses import dataclass, field
 from typing import List, Tuple
 
@@ -16,18 +17,36 @@ class FileBucketingStrategy:
 
         with open(file_name, 'r') as f:
             for line in f:
-                bucket = line.strip()
-                if not bucket or bucket.startswith('#'):
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                
+                try:
+                    bucket = ast.literal_eval(line)
+                except:
+                    print(line)
+                    continue
+                
+
+                if not isinstance(bucket, tuple) or len(bucket) != 3:
+                    print('Skipping line due to incorrect format - ', bucket)
                     continue
 
-                bucket = bucket.strip('()')
-                cfg = bucket.split(',')
+                x_num = ensure_is_list(bucket[0])
+                y_num = ensure_is_list(bucket[1])
+                z_num = ensure_is_list(bucket[2])
 
-                x, y, z = map(int, cfg)
-
-                if y == 1:
-                    decode_buckets.append((x, y, z))
-                else:
-                    prompt_buckets.append((x, y, z))
+                for full_bucket in itertools.product(x_num, y_num, z_num):
+                    x, y, z = map(int, full_bucket)
+                    if y == 1:
+                        decode_buckets.append((x, y, z))
+                    else:
+                        prompt_buckets.append((x, y, z))
 
         return sorted(prompt_buckets) if is_prompt else sorted(decode_buckets)
+
+def ensure_is_list(value):
+    if isinstance(value, list):
+        return value
+    else:
+        return [value]
