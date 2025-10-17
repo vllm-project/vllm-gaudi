@@ -2,12 +2,12 @@
 set -xe
 
 # Models to run
-MODELS=(
-    "Qwen/Qwen3-0.6B"
-)
 #MODELS=(
-#	"meta-llama/Llama-3.1-8B"
+#    "Qwen/Qwen3-0.6B"
 #)
+MODELS=(
+	"meta-llama/Llama-3.1-8B-Instruct"
+)
 
 export VLLM_USE_V1=1
 export VLLM_SKIP_WARMUP="true"
@@ -87,9 +87,9 @@ run_tests_for_model() {
     GPU_ID=2
 
     # Calculate port number (base port + instance number)
-    PORT=$((8700 + i))
+    PORT=$((8300 + i))
     # Calculate side channel port. Avoid clash with with TP workers. 
-    SIDE_CHANNEL_PORT=$((6559 + i))
+    SIDE_CHANNEL_PORT=$((5559 + i))
 
     echo "Starting prefill instance $i on GPU $GPU_ID, port $PORT"
 
@@ -120,7 +120,7 @@ run_tests_for_model() {
     # Calculate GPU ID - we'll distribute across available GPUs, starting from after prefill GPUs
     #GPU_ID=$(((i + NUM_PREFILL_INSTANCES) % $(get_num_gpus)))
     # Calculate port number (base port + instance number)
-    PORT=$((8800 + i))
+    PORT=$((8400 + i))
     # Calculate side channel port
     SIDE_CHANNEL_PORT=$((5659 + i * $DECODER_TP_SIZE))
 
@@ -160,7 +160,7 @@ run_tests_for_model() {
   done
 
   # Build the command for the proxy server with all the hosts and ports
-  PROXY_CMD="python toy_proxy_server.py --port 9195"
+  PROXY_CMD="python toy_proxy_server.py --port 9192"
 
   # Add all prefill hosts and ports
   PROXY_CMD+=" --prefiller-hosts ${PREFILL_HOSTS[@]}"
@@ -175,7 +175,7 @@ run_tests_for_model() {
   $PROXY_CMD &
 
   # Wait for the proxy to start
-  sleep 20
+  sleep 10
   
 # curl -X POST -s http://localhost:9192/v1/completions \
 #	-H "Content-Type: application/json" \

@@ -20,7 +20,7 @@ export VLLM_USE_V1=1
 export VLLM_SKIP_WARMUP=True
 export PT_HPU_LAZY_MODE=1
 export HABANA_PROFILE=1 
-Enable full vLLM Profiler and instruct where to save the profiling:
+#Enable full vLLM Profiler and instruct where to save the profiling:
 export VLLM_PROFILER_ENABLED=1 
 export VLLM_TORCH_PROFILER_DIR=./
 
@@ -106,7 +106,7 @@ run_tests_for_model() {
     echo "Starting prefill instance $i on GPU $GPU_ID, port $PORT"
 
     # Build the command with or without model-specific args
-    BASE_CMD="RANK=0 UCX_TLS=rc,ud,ib VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
+    BASE_CMD="RANK=0 HABANA_VISIBLE_DEVICES=2 UCX_TLS=tcp VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
     --port $PORT \
     --long_prefill_token_threshold 8192 \
     --max_num_batched_tokens 8192 \
@@ -135,12 +135,12 @@ run_tests_for_model() {
     # Calculate port number (base port + instance number)
     PORT=$((8400))
     # Calculate side channel port
-    SIDE_CHANNEL_PORT=$((5659 + i * $DECODER_TP_SIZE))
+    SIDE_CHANNEL_PORT=$((5559 + i * $DECODER_TP_SIZE))
 
     echo "Starting decode instance $i on GPU $GPU_ID, port $PORT"
 
     # Build the command with or without model-specific args
-    BASE_CMD="RANK=1 UCX_TLS=rc,ud,ib VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
+    BASE_CMD="RANK=1 HABANA_VISIBLE_DEVICES=3 UCX_TLS=tcp VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
     --port $PORT \
     --gpu-memory-utilization 0.3 \
     --tensor-parallel-size $DECODER_TP_SIZE \
@@ -189,7 +189,7 @@ run_tests_for_model() {
   $PROXY_CMD &
 
   # Wait for the proxy to start
-  sleep 500
+  sleep 50
   
 # curl -X POST -s http://localhost:9191/v1/completions \
 #	-H "Content-Type: application/json" \
@@ -234,14 +234,14 @@ run_tests_for_model() {
    --random-output-len 5 \
    --num-prompts 10 \
    --burstiness 100 \
-   --request-rate 3.6 \
+   --request-rate 0.1 \
    --metric-percentiles 95 \
    --percentile-metrics ttft,tpot,itl,e2el \
    --backend openai \
    --endpoint /v1/completions \
    --ignore-eos 
   
-  sleep 1000
+  sleep 10
   curl -X POST http://localhost:8300/start_profile
   curl -X POST http://localhost:8400/start_profile
 
@@ -254,7 +254,7 @@ run_tests_for_model() {
    --random-output-len 5 \
    --num-prompts 10 \
    --burstiness 100 \
-   --request-rate 3.6 \
+   --request-rate 0.1 \
    --metric-percentiles 95 \
    --percentile-metrics ttft,tpot,itl,e2el \
    --backend openai \
@@ -262,11 +262,11 @@ run_tests_for_model() {
    --ignore-eos
 
 
-  sleep 500
+  sleep 10
   curl -X POST http://localhost:8300/stop_profile
   curl -X POST http://localhost:8400/stop_profile
 
-  sleep 500
+  sleep 10
   # Clean up before running next model
   cleanup_instances
   sleep 3
