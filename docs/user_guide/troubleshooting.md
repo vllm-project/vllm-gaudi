@@ -25,4 +25,5 @@ Vllm calculates maximum available concurrency for current environment based on k
 ```
 [kv_cache_utils.py:1091] Maximum concurrency for 4,352 tokens per request: 10.59x 
 ```
+
 So for this specific scenario correct value for --max_concurrency is 10
