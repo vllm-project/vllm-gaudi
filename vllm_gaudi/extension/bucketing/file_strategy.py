@@ -11,6 +11,7 @@ from vllm_gaudi.extension.runtime import get_config
 
 
 class FileBucketingStrategy:
+
     def get_buckets(self, file_name, is_prompt):
         prompt_buckets = []
         decode_buckets = []
@@ -20,13 +21,12 @@ class FileBucketingStrategy:
                 line = line.strip()
                 if not line or line.startswith('#'):
                     continue
-                
+
                 try:
                     bucket = ast.literal_eval(line)
                 except:
                     print(line)
                     continue
-                
 
                 if not isinstance(bucket, tuple) or len(bucket) != 3:
                     print('Skipping line due to incorrect format - ', bucket)
@@ -44,6 +44,7 @@ class FileBucketingStrategy:
                         prompt_buckets.append((x, y, z))
 
         return sorted(prompt_buckets) if is_prompt else sorted(decode_buckets)
+
 
 def ensure_is_list(value):
     if isinstance(value, list):

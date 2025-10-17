@@ -121,10 +121,11 @@ class HPUBucketingManager():
             else:
                 strategy = self.get_bucketing_strategy()
 
-                bs_cfg, query_cfg, ctx_cfg = strategy.get_prompt_cfgs(max_num_prefill_seqs=self.max_num_prefill_seqs,
-                                                                  block_size=self.block_size,
-                                                                  max_num_batched_tokens=self.max_num_batched_tokens,
-                                                                  max_model_len=self.max_model_len)
+                bs_cfg, query_cfg, ctx_cfg = strategy.get_prompt_cfgs(
+                    max_num_prefill_seqs=self.max_num_prefill_seqs,
+                    block_size=self.block_size,
+                    max_num_batched_tokens=self.max_num_batched_tokens,
+                    max_model_len=self.max_model_len)
 
                 bs_range = strategy.get_range(bs_cfg)
                 query_range = strategy.get_range(query_cfg)
@@ -151,11 +152,12 @@ class HPUBucketingManager():
             else:
                 strategy = self.get_bucketing_strategy()
 
-                bs_cfg, query_cfg, ctx_cfg = strategy.get_decode_cfgs(max_num_seqs=self.max_num_seqs,
-                                                                  block_size=self.block_size,
-                                                                  max_num_batched_tokens=self.max_num_batched_tokens,
-                                                                  max_model_len=self.max_model_len,
-                                                                  max_blocks=self.num_hpu_blocks)
+                bs_cfg, query_cfg, ctx_cfg = strategy.get_decode_cfgs(
+                    max_num_seqs=self.max_num_seqs,
+                    block_size=self.block_size,
+                    max_num_batched_tokens=self.max_num_batched_tokens,
+                    max_model_len=self.max_model_len,
+                    max_blocks=self.num_hpu_blocks)
 
                 bs_range = strategy.get_range(bs_cfg)
                 query_range = strategy.get_range(query_cfg)
@@ -248,8 +250,17 @@ def get_bucketing_manager():
     return instance
 
 
-def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len, max_num_seqs, max_num_prefill_seqs,
-                     max_num_batched_tokens, block_size, max_blocks, file_buckets=None):
+def generate_buckets(bs_range,
+                     query_range,
+                     ctx_range,
+                     is_prompt,
+                     max_model_len,
+                     max_num_seqs,
+                     max_num_prefill_seqs,
+                     max_num_batched_tokens,
+                     block_size,
+                     max_blocks,
+                     file_buckets=None):
     use_merged_prefill = get_config().merged_prefill
     use_contiguous_pa = get_config().use_contiguous_pa
 
@@ -298,7 +309,6 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
     # decode
     def block_not_greater_than_max_model_len(bs, query, ctx):
         smaller_than_limit = ctx <= bs * math.ceil(max_model_len / block_size)
-        print(ctx <= bs * math.ceil(max_model_len / block_size), bs * math.ceil(max_model_len / block_size))
         if not smaller_than_limit:
             omitted_buckets.add(
                 ("condition: ctx <= bs * math.ceil(max_model_len / block_size)", "-> bs, query, ctx: ", bs, query, ctx))
@@ -344,7 +354,7 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
         for bs_idx, bs in enumerate(bs_range):
             for ctx_idx, ctx in enumerate(ctx_range):
                 local_buckets = expand_to_neighbor_buckets(bs_idx, bs_range, ctx_idx, ctx_range,
-                                                       max_num_batched_tokens) if not is_prompt else {(bs, ctx)}
+                                                           max_num_batched_tokens) if not is_prompt else {(bs, ctx)}
                 buckets_2d.update(local_buckets)
 
         for bs, ctx in buckets_2d:
@@ -359,7 +369,7 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
         raise RuntimeError(
             "Generated 0 " + phase +
             " buckets. Please use default exponential bucketing, VLLM_EXPONENTIAL_BUCKETING=true or generate linear warmup flags according to README"
-            )
+        )
 
     return sorted(buckets)
 
