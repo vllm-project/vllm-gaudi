@@ -4519,7 +4519,7 @@ def copy_kv_blocks(
                 dst_kv_caches[layer_name][1][block_idx*block_size: (1+block_idx)*block_size] = value_cache[block_idx*block_size: (1+block_idx)*block_size].reshape(block_factor, n_kv_heads, remote_block_size, head_dim).permute(0,2,1,3).contiguous().reshape(block_size,n_kv_heads,head_dim).to("hpu")
                 #print('buke addr after:', dst_kv_caches[layer_name][0][block_idx*block_size: (1+block_idx)*block_size].data_ptr())
         else:
-            '''
+            #'''
             if direction == "d2h":
                 # NOTE(chendi): in order to keep host_buffer shape[0] same as tpu and gpu case
                 # so we need to flatten the dst_kv_caches
@@ -4543,6 +4543,7 @@ def copy_kv_blocks(
                 #import remote_pdb;remote_pdb.set_trace()
                 dst_kv_caches[layer_name][0].index_put_((dst_slot_mapping,), key_cache.index_select(0, src_slot_mapping).to(target_device))
                 dst_kv_caches[layer_name][1].index_put_((dst_slot_mapping,), value_cache.index_select(0, src_slot_mapping).to(target_device))
+            '''
         i = i+1
 
         #dst_kv_caches[layer_name][0][dst_slot_mapping] = key_cache[src_slot_mapping].to(target_device)

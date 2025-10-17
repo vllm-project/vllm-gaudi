@@ -921,26 +921,26 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
                 logger.debug(f'buke register gaudi memory for gdr: {base_addr=}|{hex(base_addr)=}|{cache.data_ptr()=}')
             else:
                 base_addr = cache.data_ptr()
-                if base_addr in seen_base_addresses:
-                    continue
+            if base_addr in seen_base_addresses:
+                continue
 
-                seen_base_addresses.append(base_addr)
-                curr_tensor_size_bytes = cache.numel() * cache.element_size()
+            seen_base_addresses.append(base_addr)
+            curr_tensor_size_bytes = cache.numel() * cache.element_size()
 
-                if tensor_size_bytes is None:
-                    tensor_size_bytes = curr_tensor_size_bytes
-                    self.num_blocks = cache.shape[0]
+            if tensor_size_bytes is None:
+                tensor_size_bytes = curr_tensor_size_bytes
+                self.num_blocks = cache.shape[0]
 
-                assert cache.shape[0] == self.num_blocks, (
+            assert cache.shape[0] == self.num_blocks, (
                     "All kv cache tensors must have the same number of blocks"
                 )
 
-                self.block_len_per_layer.append(
+            self.block_len_per_layer.append(
                     curr_tensor_size_bytes // self.num_blocks
-                )
-                self.slot_size_per_layer.append(
+            )
+            self.slot_size_per_layer.append(
                     self.block_len_per_layer[-1] // self.block_size
-                )
+            )
             region_len = self.num_blocks * self.block_len
             # NOTE: use tp_rank for device_id since multi-node TP
             # is rarely used.
@@ -1065,4 +1065,4 @@ def _hpu_data_ptr(tensor_self):
 torch.Tensor.data_ptr = _hpu_data_ptr
 
 NixlConnectorWorker.initialize_host_xfer_buffer = initialize_host_xfer_buffer
-NixlConnectorWorker.register_kv_caches = register_kv_caches
+#NixlConnectorWorker.register_kv_caches = register_kv_caches
