@@ -99,6 +99,8 @@ _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
 hpu_buffer: list[list[torch.Tensor]] = []
 
+is_hetero = os.getenv('PT_HPU_ENABLE_RESTORE_KV_LAYOUT', '0') == '1'
+block_factor = int(os.getenv('PT_HPU_BLOCK_SIZE_FACTOR', '1'))
 
 class BucketingFailedException(Exception):
     pass
@@ -4474,6 +4476,7 @@ def copy_kv_blocks(
     direction: Literal["h2d", "d2h"],
     block_size: int = 128,
 ) -> None:
+
     """Copy kv blocks between different buffers."""
     if not src_kv_caches or not dst_kv_caches or \
        not src_block_ids or not dst_block_ids or \
@@ -4483,47 +4486,72 @@ def copy_kv_blocks(
     src_device = next(iter(src_kv_caches.values()))[0].device
     dst_device = next(iter(dst_kv_caches.values()))[0].device
 
-    src_slot_mapping, dst_slot_mapping = _make_src_and_dst_indices(block_size=block_size,
-                                                                   src_block_ids=src_block_ids,
-                                                                   dst_block_ids=dst_block_ids,
-                                                                   src_device=src_device,
-                                                                   dst_device=dst_device)
+    src_slot_mapping, dst_slot_mapping = _make_src_and_dst_indices(
+        block_size=block_size,
+        src_block_ids=src_block_ids,
+        dst_block_ids=dst_block_ids,
+        src_device=src_device,
+        dst_device=dst_device)
 
     start = time.perf_counter()
     target_device = dst_device.type
 
     i = 0
     global hpu_buffer
-    use_hpu_buffer = False
+    use_hpu_buffer = False # (len(src_slot_mapping) == hpu_buffer[0][0].size(0)) and (hpu_buffer is not None)
     for layer_name in src_kv_caches:
         key_cache = src_kv_caches[layer_name][0]
         value_cache = src_kv_caches[layer_name][1]
-        if direction == "d2h":
-            # NOTE(chendi): in order to keep host_buffer shape[0] same as tpu and gpu case
-            # so we need to flatten the dst_kv_caches
-            dst_kv_caches[layer_name] = dst_kv_caches[layer_name].flatten(1, 2)
+        if is_hetero:
+            assert direction == "h2d", "hetero only supports h2d for now"
+            n_kv_heads, head_dim = key_cache.shape[-2:]
+            remote_block_size = block_size//block_factor
+            #block_factor, n_kv_heads, remote_block_size, head_dim = 8, 8, 16, 128
+            if len(src_block_ids) == src_block_ids[-1]-src_block_ids[0] + 1: # simple check if the indices are contiguous
+                block_idx = src_block_ids[0]
+                num_blocks = len(src_block_ids)
+                dst_kv_caches[layer_name][0][block_idx*block_size: (num_blocks+block_idx)*block_size] = key_cache[block_idx*block_size: (num_blocks+block_idx)*block_size].reshape(num_blocks*block_factor, n_kv_heads, remote_block_size, head_dim).permute(0,2,1,3).contiguous().reshape(num_blocks*block_size,n_kv_heads,head_dim)
+                dst_kv_caches[layer_name][1][block_idx*block_size: (num_blocks+block_idx)*block_size] = value_cache[block_idx*block_size: (num_blocks+block_idx)*block_size].reshape(num_blocks*block_factor, n_kv_heads, remote_block_size, head_dim).permute(0,2,1,3).contiguous().reshape(num_blocks*block_size,n_kv_heads,head_dim)
+                continue
+            for block_idx in src_block_ids:
+                #print('buke addr before:', dst_kv_caches[layer_name][0][block_idx*block_size: (1+block_idx)*block_size].data_ptr())
+                dst_kv_caches[layer_name][0][block_idx*block_size: (1+block_idx)*block_size] = key_cache[block_idx*block_size: (1+block_idx)*block_size].reshape(block_factor, n_kv_heads, remote_block_size, head_dim).permute(0,2,1,3).contiguous().reshape(block_size,n_kv_heads,head_dim).to("hpu")
+                dst_kv_caches[layer_name][1][block_idx*block_size: (1+block_idx)*block_size] = value_cache[block_idx*block_size: (1+block_idx)*block_size].reshape(block_factor, n_kv_heads, remote_block_size, head_dim).permute(0,2,1,3).contiguous().reshape(block_size,n_kv_heads,head_dim).to("hpu")
+                #print('buke addr after:', dst_kv_caches[layer_name][0][block_idx*block_size: (1+block_idx)*block_size].data_ptr())
         else:
-            key_cache = key_cache.flatten(0, 1)
-            if value_cache is not None:
-                value_cache = value_cache.flatten(0, 1)
+            '''
+            if direction == "d2h":
+                # NOTE(chendi): in order to keep host_buffer shape[0] same as tpu and gpu case
+                # so we need to flatten the dst_kv_caches
+                dst_kv_caches[layer_name] = dst_kv_caches[layer_name].flatten(1, 2)
+            else:
+                key_cache = key_cache.flatten(0, 1)
+                if value_cache is not None:
+                    value_cache = value_cache.flatten(0, 1)
 
-        if direction == "d2h" and use_hpu_buffer:
-            hpu_buffer[i][0] = key_cache.index_select(0, src_slot_mapping)
-            hpu_buffer[i][1] = value_cache.index_select(0, src_slot_mapping)
-        else:
             dst_kv_caches[layer_name][0].index_put_((dst_slot_mapping, ),
                                                     key_cache.index_select(0, src_slot_mapping).to(target_device))
             dst_kv_caches[layer_name][1].index_put_((dst_slot_mapping, ),
                                                     value_cache.index_select(0, src_slot_mapping).to(target_device))
-        if direction == "d2h":
-            dst_kv_caches[layer_name] = dst_kv_caches[layer_name].unflatten(1, (-1, block_size))
+            if direction == "d2h":
+                dst_kv_caches[layer_name] = dst_kv_caches[layer_name].unflatten(1, (-1, block_size))
+            '''
+            if direction == "d2h" and use_hpu_buffer:
+                hpu_buffer[i][0]=key_cache.index_select_(0,  src_slot_mapping)
+                hpu_buffer[i][1]=value_cache.index_select_(0,  src_slot_mapping)
+            else:
+                #import remote_pdb;remote_pdb.set_trace()
+                dst_kv_caches[layer_name][0].index_put_((dst_slot_mapping,), key_cache.index_select(0, src_slot_mapping).to(target_device))
+                dst_kv_caches[layer_name][1].index_put_((dst_slot_mapping,), value_cache.index_select(0, src_slot_mapping).to(target_device))
+        i = i+1
 
-        i = i + 1
+        #dst_kv_caches[layer_name][0][dst_slot_mapping] = key_cache[src_slot_mapping].to(target_device)
+        #dst_kv_caches[layer_name][1][dst_slot_mapping] = value_cache[src_slot_mapping].to(target_device)
+    #if use_hpu_buffer:
+        #tmp = hpu_buffer.to('cpu')
+        #dst_kv_caches = hpu_buffer.to('cpu')
+
 
     torch.hpu.synchronize()
 
-    logger.debug("copy_kv_blocks: copy takes %s"
-                 "|direction=%s|pid=%s|block_size=%s"
-                 "|src_blocks=%s|dst_blocks=%s",
-                 time.perf_counter() - start, direction, os.getpid(), block_size, len(src_block_ids),
-                 len(dst_block_ids))
+    logger.info(f"copy_kv_blocks: copy takes {time.perf_counter() - start}|{direction=}|{os.getpid()=}|{block_size=}|{len(src_block_ids)=}|{len(dst_block_ids)=}| {len(src_kv_caches)=} | ")
