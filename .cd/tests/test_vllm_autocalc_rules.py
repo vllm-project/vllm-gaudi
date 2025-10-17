@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import pytest
 import math
 
 import server.vllm_autocalc_rules as rules
@@ -110,14 +111,16 @@ def test_calc_DECODE_BLOCK_STEP_GRAPHS():
     assert rules.calc_DECODE_BLOCK_STEP_GRAPHS(ctx) == expected
 
 
-def test_calc_NUM_DECODE_GRAPHS():
+@pytest.mark.parametrize("cpa", ["true", "false"])
+def test_calc_NUM_DECODE_GRAPHS(cpa):
     ctx = {
         'DECODE_BS_RAMP_GRAPHS': 2,
         'DECODE_BS_STEP_GRAPHS': 3,
         'DECODE_BLOCK_RAMP_GRAPHS': 4,
-        'DECODE_BLOCK_STEP_GRAPHS': 5
+        'DECODE_BLOCK_STEP_GRAPHS': 5,
+        'VLLM_CONTIGUOUS_PA': cpa
     }
-    expected = (2 + 3) * (4 + 5)
+    expected = (2 + 3) * (4 + 5) if cpa else (2 + 3) * (4 + 5) / 2
     assert rules.calc_NUM_DECODE_GRAPHS(ctx) == expected
 
 
@@ -140,19 +143,23 @@ def test_calc_PROMPT_SEQ_RAMP_GRAPHS():
 
 
 def test_calc_PROMPT_SEQ_STEP_GRAPHS():
-    ctx = {'MAX_MODEL_LEN': 64, 'VLLM_PROMPT_SEQ_BUCKET_STEP': 8}
-    expected = int(1 + (64 - 8) / 8)
+    ctx = {'MAX_NUM_BATCHED_TOKENS': 32, 'MAX_MODEL_LEN': 64, 'VLLM_PROMPT_SEQ_BUCKET_STEP': 8}
+    expected = int(1 + (32 - 8) / 8)
     assert rules.calc_PROMPT_SEQ_STEP_GRAPHS(ctx) == expected
 
 
 def test_calc_EST_NUM_PROMPT_GRAPHS():
     ctx = {
-        'PROMPT_BS_RAMP_GRAPHS': 2,
-        'PROMPT_BS_STEP_GRAPHS': 3,
+        'PROMPT_BS_RAMP_GRAPHS': 1,
+        'PROMPT_BS_STEP_GRAPHS': 0,
         'PROMPT_SEQ_RAMP_GRAPHS': 4,
-        'PROMPT_SEQ_STEP_GRAPHS': 5
+        'PROMPT_SEQ_STEP_GRAPHS': 5,
+        'MAX_NUM_BATCHED_TOKENS': 2048,
+        'MAX_MODEL_LEN': 4352,
+        'VLLM_PROMPT_SEQ_BUCKET_MIN': 128,
+        'BLOCK_SIZE': 128,
     }
-    expected = ((2 + 3) * (4 + 5)) / 2
+    expected = ((1 + 0) * (4 + 5)) * (33 + 18) / 2
     assert rules.calc_EST_NUM_PROMPT_GRAPHS(ctx) == expected
 
 
