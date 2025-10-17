@@ -37,7 +37,7 @@ RUN mkdir -p $VLLM_PATH && \
     git remote add upstream https://github.com/vllm-project/vllm.git && \
     git fetch upstream --tags || true && \
     git checkout ${VLLM_PROJECT_COMMIT} && \
-    bash -c "pip install -r <(sed '/^[torch]/d' requirements/build.txt)" && \
+    bash -c "pip install -r <(sed '/^torch/d' requirements/build.txt)" && \
     VLLM_TARGET_DEVICE=empty pip install --no-build-isolation .
 
 # Clone the vllm-gaudi repository and install inside the container
