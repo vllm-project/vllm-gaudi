@@ -1,7 +1,7 @@
 ---
 title: Installation
 ---
-[](){ #installation }
+
 This guide provides instructions on running vLLM with Intel Gaudi devices.
 
 ## Requirements
@@ -16,10 +16,13 @@ This guide provides instructions on running vLLM with Intel Gaudi devices.
     [Optimizing Training Platform Guide](https://docs.habana.ai/en/latest/PyTorch/Model_Optimization_PyTorch/Optimization_in_Training_Platform.html).
 
 ## Running vLLM on Gaudi with Docker Compose
+
 Starting with the 1.22 release, we are introducing ready-to-run container images that bundle vLLM and Gaudi software. Please follow the [instruction](https://github.com/vllm-project/vllm-gaudi/tree/main/.cd) to quickly launch vLLM on Gaudi using a prebuilt Docker image and Docker Compose, with options for custom parameters and benchmarking.
 
 ## Quick Start Using Dockerfile
-# --8<-- [start:docker_quickstart]
+
+## --8<-- [start:docker_quickstart]
+
 Set up the container with the latest Intel Gaudi Software Suite release using the Dockerfile.
 
 === "Ubuntu"
@@ -34,11 +37,13 @@ Set up the container with the latest Intel Gaudi Software Suite release using th
     of [Install Driver and Software](https://docs.habana.ai/en/latest/Installation_Guide/Driver_Installation.html#install-driver-and-software) and "Configure Container
     Runtime" section of [Docker Installation](https://docs.habana.ai/en/latest/Installation_Guide/Installation_Methods/Docker_Installation.html#configure-container-runtime).
     Make sure you have ``habanalabs-container-runtime`` package installed and that ``habana`` container runtime is registered.
-# --8<-- [end:docker_quickstart]
+
+## --8<-- [end:docker_quickstart]
 
 ## Build from Source
 
 ### Environment Verification
+
 To verify that the Intel Gaudi software was correctly installed, run the following:
 
     $ hl-smi # verify that hl-smi is in your PATH and each Gaudi accelerator is visible
@@ -62,11 +67,12 @@ Use the following commands to run a Docker image. Make sure to update the versio
 
 === "Step 1: Get Last good commit on vllm"
 
-   NOTE: vllm-gaudi is always follow latest vllm commit, however, vllm upstream
-   API update may crash vllm-gaudi,  this commit saved is verified with vllm-gaudi
-   in a hourly basis
+    !!! note
+        Vllm-gaudi always follows the latest vllm commit. However, updates to the upstream vLLM
+        API may cause vLLM-Gaudi to crash. This saved commit has been verified with vLLM-Gaudi
+        on an hourly basis.
 
-    ```bash{.console}
+    ```bash
     git clone https://github.com/vllm-project/vllm-gaudi
     cd vllm-gaudi
     export VLLM_COMMIT_HASH=$(git show "origin/vllm/last-good-commit-for-vllm-gaudi:VLLM_STABLE_COMMIT" 2>/dev/null)
@@ -76,7 +82,7 @@ Use the following commands to run a Docker image. Make sure to update the versio
 
     Install vLLM with `pip` or  [from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source)
     
-    ```bash{.console}
+    ```bash
     # Build vLLM from source for empty platform, reusing existing torch installation
     git clone https://github.com/vllm-project/vllm
     cd vllm
@@ -88,14 +94,14 @@ Use the following commands to run a Docker image. Make sure to update the versio
 
 === "Step 3: Install vLLM Plugin"
 
-   Install  vLLM-Gaudi from source:
-    ```{.console}
-        cd vllm-gaudi
-        pip install -e .
-        cd ..
+    Install  vLLM-Gaudi from source:
+    ```bash
+    cd vllm-gaudi
+    pip install -e .
+    cd ..
     ```
 
-### Build and Install vLLM with nixl:
+### Build and Install vLLM with nixl
 
 === "Install vLLM Plugin with nixl"
 
@@ -107,7 +113,7 @@ Use the following commands to run a Docker image. Make sure to update the versio
 
 === "Install vLLM Gaudi and nixl with Docker file"
 
-    ```{.console}
+    ```bash
     docker build -t ubuntu.pytorch.vllm.nixl.latest \
       -f .cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest github.com/vllm-project/vllm-gaudi
     docker run -it --rm --runtime=habana \
@@ -119,7 +125,7 @@ Use the following commands to run a Docker image. Make sure to update the versio
 
 === "Full installation from source vLLM Gaudi with nixl"
 
-    ```{.console}
+    ```bash
     # Fetch last good commit on vllm
     git clone https://github.com/vllm-project/vllm-gaudi
     cd vllm-gaudi
