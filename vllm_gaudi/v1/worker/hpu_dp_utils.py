@@ -66,11 +66,9 @@ def set_hpu_dp_metadata(
     num_tokens: int,
 ):
     global _hpu_dp_metadata
-    try:
+
+    if vllm_config.parallel_config.data_parallel_size > 1:
         _hpu_dp_metadata = HPUDPMetadata.make(vllm_config, num_tokens)
-        yield
-    finally:
-        _hpu_dp_metadata = None
 
 
 def get_hpu_dp_metadata() -> HPUDPMetadata:
