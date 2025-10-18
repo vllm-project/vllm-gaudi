@@ -40,6 +40,9 @@ def initialize_host_xfer_buffer(self, kv_caches: dict[str, torch.Tensor]) -> Non
     """
     Initialize transfer buffer in CPU mem for accelerators
     NOT directly supported by NIXL (e.g., tpu)
+    
+    NOTE(Chendi): override to support HPU heterogeneousTP size.
+    We intended to prepare host_buffer with HND layout.
     """
     xfer_buffers: dict[str, torch.Tensor] = {}
     try:
