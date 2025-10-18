@@ -217,7 +217,7 @@ class HpuPlatform(Platform):
         """Copy blocks from src_cache to dst_cache on HPU."""
         if isinstance(dst_cache, tuple):
             _src_cache = src_cache[:, src_block_indices]
-            if _src_cache.shape[2:] != dst_cache.shape[2:]:
+            if _src_cache.shape[2:] != dst_cache.shape[2:]:  # type: ignore[attr-defined]
                 _src_cache = _src_cache.permute(0, 1, 3, 2, 4)
             for i in range(len(dst_cache)):
                 dst_cache[i].index_copy_(0, dst_block_indices, _src_cache[i].to(dst_cache[i].device))
@@ -237,7 +237,7 @@ class HpuPlatform(Platform):
         if isinstance(src_cache, tuple):
             _src_cache = torch.stack([c[src_block_indices] for c in src_cache], dim=0)
             # permute back to original shape
-            if _src_cache.shape[2:] != dst_cache.shape[2:]:
+            if _src_cache.shape[2:] != dst_cache.shape[2:]:  # type: ignore[attr-defined]
                 _src_cache = _src_cache.permute(0, 1, 3, 2, 4)
             dst_cache[:, dst_block_indices] = _src_cache.cpu()
         else:
