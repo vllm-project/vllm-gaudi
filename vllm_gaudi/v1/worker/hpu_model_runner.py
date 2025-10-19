@@ -1573,6 +1573,54 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 dst_start += target_len
         return mrope_position_tensor
 
+    # modified from: vllm/v1/worker/gpu_model_runner.py:_calc_mrope_positions
+    def get_unified_mrope_position_ids(self, req_ids: list[str], num_computed_tokens: torch.tensor,
+                                       num_scheduled_tokens: torch.tensor, num_prompt_tokens: torch.tensor,
+                                       target_len: int, padding_gen: int) -> torch.Tensor:
+        out_shape = (3, target_len)
+        mrope_position_tensor = torch.full(out_shape, padding_gen, dtype=torch.int32, device='cpu')
+        mrope_pos_ptr = 0
+        for index, req_id in enumerate(req_ids):
+            req = self.requests[req_id]
+            assert req.mrope_positions is not None
+
+            context_len = num_computed_tokens[index]
+            query_len = num_scheduled_tokens[index]
+            num_prompt_tokens = len(
+                req.prompt_token_ids)  # The gpu runner uses either prompt_token_ids or prompt_embeds # noqa 501
+
+            if context_len + query_len > num_prompt_tokens:
+                prompt_part_len = max(0, num_prompt_tokens - context_len)
+                completion_part_len = max(0, query_len - prompt_part_len)
+            else:
+                prompt_part_len = query_len
+                completion_part_len = 0
+
+            assert query_len == prompt_part_len + completion_part_len
+            if prompt_part_len > 0:
+                # prompt's mrope_positions are pre-computed
+                dst_start = mrope_pos_ptr
+                dst_end = mrope_pos_ptr + prompt_part_len
+                src_start = context_len
+                src_end = context_len + prompt_part_len
+                mrope_position_tensor[:, dst_start:dst_end].copy_(req.mrope_positions[:, src_start:src_end],
+                                                                  non_blocking=True)
+
+                mrope_pos_ptr += prompt_part_len
+            if completion_part_len > 0:
+                # compute completion's mrope_positions on-the-fly
+                dst_start = mrope_pos_ptr
+                dst_end = mrope_pos_ptr + completion_part_len
+                pos_for_mrope = MRotaryEmbedding.get_next_input_positions(
+                    mrope_position_delta=req.mrope_position_delta,
+                    context_len=context_len + prompt_part_len,
+                    seq_len=context_len + prompt_part_len + completion_part_len,
+                )
+                mrope_position_tensor[:, dst_start:dst_end] = torch.tensor(pos_for_mrope, dtype=torch.int32)
+                mrope_pos_ptr += completion_part_len
+
+        return mrope_position_tensor.to('hpu', non_blocking=True)
+
     def _skip_bucketing(self, seq_lens, num_blocks):
         return (len(seq_lens), 0, 0)
 
@@ -2771,9 +2819,20 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         block_table = self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs, :max_blocks].clone()
         if self.defragmenter.enabled:
             block_table.apply_(self.defragmenter.resolve)
-        return create_unified_batch(self.input_batch.req_ids, all_token_ids, num_computed_tokens, num_scheduled_tokens,
-                                    num_prompt_tokens, block_table, self.block_size, self.dtype,
-                                    self.unified_bucketing_fn)
+        batch = create_unified_batch(self.input_batch.req_ids, all_token_ids, num_computed_tokens, num_scheduled_tokens,
+                                     num_prompt_tokens, block_table, self.block_size, self.dtype,
+                                     self.unified_bucketing_fn)
+
+        if self.uses_mrope:
+            batch.token_positions = self.get_unified_mrope_position_ids(
+                self.input_batch.req_ids,
+                num_computed_tokens,
+                num_scheduled_tokens,
+                num_prompt_tokens,
+                target_len=batch.token_ids.size(0),
+                padding_gen=-1,
+            )
+        return batch
 
     @torch.inference_mode()
     def unified_execute_model(
@@ -2789,6 +2848,35 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         htorch.core.mark_step()
         batch = self.prepare_unified_batch(scheduler_output)
         htorch.core.mark_step()
+
+        inputs_embeds = None
+        model_mm_kwargs = None
+        if self.supports_mm_inputs:
+            # Run the multimodal encoder if any.
+            with self.profiler.record_event('internal', 'prepare_input_encoders'):
+                self._execute_mm_encoder(scheduler_output, self.input_batch.req_ids)
+
+            mm_embeds, is_mm_embed = self._gather_mm_embeddings(
+                scheduler_output,
+                self.input_batch.req_ids,
+                total_num_scheduled_tokens=None  # the fn will use the scheduled tokens # noqa E501
+            )
+            # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa E501
+            # This may require moving multimodal input preps into _prepare_inputs,        # noqa E501
+            # to avoid padding issues.
+            inputs_embeds = self.model.get_input_embeddings(
+                batch.token_ids,
+                multimodal_embeddings=mm_embeds,
+                is_multimodal=is_mm_embed,
+            )
+
+            model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
+            model_mm_kwargs = MultiModalKwargs.as_kwargs(
+                model_mm_kwargs,
+                device=self.device,
+            )
+
+        htorch.core.mark_step()
         non_flattened_hidden_states, aux_hidden_states, hidden_states, logits_device = \
             self._execute_model_generic(
                 token_ids=batch.token_ids.unsqueeze(-1),
@@ -2798,6 +2886,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 kv_caches=self.kv_caches,
                 lora_logits_mask=None,
                 lora_mask=None,
+                inputs_embeds=inputs_embeds.unsqueeze(-2) if inputs_embeds is not None else None,
+                model_mm_kwargs=model_mm_kwargs,
                 warmup_mode=warmup_mode)
         selected_req_ids = [batch.req_ids_cpu[idx] for idx in batch.logits_groups_cpu.tolist()]
         htorch.core.mark_step()
