@@ -1386,6 +1386,41 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         return mm_embeds, is_mm_embed
 
+    def _get_model_mm_inputs(
+        self,
+        token_ids: torch.Tensor,
+        total_num_scheduled_tokens: Optional[int],
+        scheduler_output: "SchedulerOutput",
+        req_ids: list[str],
+    ) -> tuple[torch.Tensor | None, dict[str, Any] | None]:
+        inputs_embeds = None
+        model_mm_kwargs = None
+        if self.supports_mm_inputs:
+            # Run the multimodal encoder if any.
+            with self.profiler.record_event('internal', 'prepare_input_encoders'):
+                self._execute_mm_encoder(scheduler_output, req_ids)
+
+            mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output,
+                                                                req_ids,
+                                                                total_num_scheduled_tokens=total_num_scheduled_tokens)
+            # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa
+            # This may require moving multimodal input preps into _prepare_inputs,        # noqa
+            # to avoid padding issues.
+            htorch.core.mark_step()
+            inputs_embeds = self.model.get_input_embeddings(
+                token_ids,
+                multimodal_embeddings=mm_embeds,
+                is_multimodal=is_mm_embed,
+            )
+
+            model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
+            model_mm_kwargs = MultiModalKwargs.as_kwargs(
+                model_mm_kwargs,
+                device=self.device,
+            )
+
+        return inputs_embeds, model_mm_kwargs
+
     def get_model(self) -> torch.nn.Module:
         assert self.model is not None
         return self.model
@@ -2847,35 +2882,17 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             return EMPTY_MODEL_RUNNER_OUTPUT
         htorch.core.mark_step()
         batch = self.prepare_unified_batch(scheduler_output)
+
+        # Prepare multimodal inputs if any
         htorch.core.mark_step()
-
-        inputs_embeds = None
-        model_mm_kwargs = None
-        if self.supports_mm_inputs:
-            # Run the multimodal encoder if any.
-            with self.profiler.record_event('internal', 'prepare_input_encoders'):
-                self._execute_mm_encoder(scheduler_output, self.input_batch.req_ids)
-
-            mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output,
-                                                                self.input_batch.req_ids,
-                                                                total_num_scheduled_tokens=batch.token_ids.shape[0])
-            # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa
-            # This may require moving multimodal input preps into _prepare_inputs,        # noqa
-            # to avoid padding issues.
-            htorch.core.mark_step()
-            inputs_embeds = self.model.get_input_embeddings(
-                batch.token_ids.unsqueeze(
-                    0
-                ),  # A little unorthodox at dim0 (instead of dim1 w.r.t unified_attn) but doesn't work otherwise. # noqa E501
-                multimodal_embeddings=mm_embeds,
-                is_multimodal=is_mm_embed,
-            )
-
-            model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
-            model_mm_kwargs = MultiModalKwargs.as_kwargs(
-                model_mm_kwargs,
-                device=self.device,
-            )
+        inputs_embeds, model_mm_kwargs = self._get_model_mm_inputs(
+            batch.token_ids.unsqueeze(
+                0  # A little unorthodox at dim0 (instead of dim1 w.r.t unified_attn) but doesn't work otherwise. # noqa E501
+            ),
+            batch.token_ids.shape[0],
+            scheduler_output,
+            self.input_batch.req_ids,
+        )
 
         htorch.core.mark_step()
         non_flattened_hidden_states, aux_hidden_states, hidden_states, logits_device = \
@@ -3074,30 +3091,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             for idx, (req_id, prompt_len, token_ids, position_ids, attn_metadata, logits_indices,
                       logits_requests) in enumerate(zip(*shallow_tuple(prefill_data))):
 
-                inputs_embeds = None
-                model_mm_kwargs = None
-                if self.supports_mm_inputs:
-                    # Run the multimodal encoder if any.
-                    with self.profiler.record_event('internal', 'prepare_input_encoders'):
-                        self._execute_mm_encoder(scheduler_output, req_id)
-
-                    mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output,
-                                                                        req_id,
-                                                                        total_num_scheduled_tokens=token_ids.shape[-1])
-                    # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa E501
-                    # This may require moving multimodal input preps into _prepare_inputs,        # noqa E501
-                    # to avoid padding issues.
-                    inputs_embeds = self.model.get_input_embeddings(
-                        token_ids,
-                        multimodal_embeddings=mm_embeds,
-                        is_multimodal=is_mm_embed,
-                    )
-
-                    model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
-                    model_mm_kwargs = MultiModalKwargs.as_kwargs(
-                        model_mm_kwargs,
-                        device=self.device,
-                    )
+                # Prepare multimodal inputs if any
+                inputs_embeds, model_mm_kwargs = self._get_model_mm_inputs(
+                    token_ids,
+                    token_ids.shape[-1],
+                    scheduler_output,
+                    req_id,
+                )
 
                 lora_mask, lora_logits_mask = self._configure_lora(token_ids, self.requests, req_id, True)
 
