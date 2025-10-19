@@ -2856,16 +2856,17 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             with self.profiler.record_event('internal', 'prepare_input_encoders'):
                 self._execute_mm_encoder(scheduler_output, self.input_batch.req_ids)
 
-            mm_embeds, is_mm_embed = self._gather_mm_embeddings(
-                scheduler_output,
-                self.input_batch.req_ids,
-                total_num_scheduled_tokens=None  # the fn will use the scheduled tokens # noqa E501
-            )
-            # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa E501
-            # This may require moving multimodal input preps into _prepare_inputs,        # noqa E501
+            mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output,
+                                                                self.input_batch.req_ids,
+                                                                total_num_scheduled_tokens=batch.token_ids.shape[0])
+            # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa
+            # This may require moving multimodal input preps into _prepare_inputs,        # noqa
             # to avoid padding issues.
+            htorch.core.mark_step()
             inputs_embeds = self.model.get_input_embeddings(
-                batch.token_ids,
+                batch.token_ids.unsqueeze(
+                    0
+                ),  # A little unorthodox at dim0 (instead of dim1 w.r.t unified_attn) but doesn't work otherwise. # noqa E501
                 multimodal_embeddings=mm_embeds,
                 is_multimodal=is_mm_embed,
             )
@@ -2886,7 +2887,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 kv_caches=self.kv_caches,
                 lora_logits_mask=None,
                 lora_mask=None,
-                inputs_embeds=inputs_embeds.unsqueeze(-2) if inputs_embeds is not None else None,
+                inputs_embeds=inputs_embeds,
                 model_mm_kwargs=model_mm_kwargs,
                 warmup_mode=warmup_mode)
         selected_req_ids = [batch.req_ids_cpu[idx] for idx in batch.logits_groups_cpu.tolist()]
