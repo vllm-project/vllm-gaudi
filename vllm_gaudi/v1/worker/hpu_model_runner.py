@@ -7,7 +7,7 @@ import math
 import os
 import time
 from dataclasses import dataclass, field, fields
-from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, Literal, cast)
+from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast)
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -44,7 +44,9 @@ from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingType
 from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv, is_pin_memory_available, LazyLoader)
+from vllm.utils import (LayerBlockType, cdiv, is_pin_memory_available)
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_map_leaves
 from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy)
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
@@ -79,6 +81,7 @@ from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm_gaudi.extension.ops import LoraMask as LoraMask
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.platforms import current_platform
+from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -4218,12 +4221,25 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self._PAD_SLOT_ID = num_blocks * self.block_size
 
         if has_kv_transfer_group():
-            get_kv_transfer_group().register_kv_caches(kv_caches)
+            get_kv_transfer_group().register_kv_caches(self.get_kv_caches_4D(kv_caches))
             if self.vllm_config.kv_transfer_config.kv_buffer_device == "cpu":
-                copy_kv_blocks_fn = copy_mla_kv_blocks if self.model_config.use_mla else copy_kv_blocks
-                get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks_fn)
+                get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
             global hpu_buffer
         htorch.hpu.synchronize()
+
+    def get_kv_caches_4D(self, kv_caches) -> dict[str, torch.Tensor]:
+        kv_caches_4D: dict[str, torch.Tensor] = {}
+        for layer_name, cache_or_cachelist in kv_caches.items():
+            kv_cache_per_layer = []
+            for cache in cache_or_cachelist:
+                if cache is None:
+                    continue
+                kv_cache_per_layer.append(cache.view(-1, self.block_size, *cache.shape[1:]))
+                #NOTE(Chendi): Do not remove, call torch data_ptr to record physical address
+                cache.data_ptr()
+            kv_caches_4D[layer_name] = TensorTuple(tuple(kv_cache_per_layer)) \
+                if len(kv_cache_per_layer) == 2 else kv_cache_per_layer[0]
+        return kv_caches_4D
 
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
         model = self.get_model()
@@ -4458,145 +4474,98 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         return draft_token_ids
 
 
-def _make_src_and_dst_indices(
-    block_size: int,
-    src_block_ids: list[int],
-    dst_block_ids: list[int],
-    src_device: Union[torch.device, str],
-    dst_device: Union[torch.device, str],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    #convert to slot mapping
-    src_slot_mapping = np.concatenate(
-        [np.arange(start=s * block_size, stop=(s + 1) * block_size) for s in src_block_ids])
-    dst_slot_mapping = np.concatenate(
-        [np.arange(start=d * block_size, stop=(d + 1) * block_size) for d in dst_block_ids])
+# --- Helper Functions ---
+def get_shape(data):
+    """Recursively finds the shape of a nested tuple or list."""
+    if isinstance(data, torch.Tensor):
+        return data.shape
 
-    src_slot_mapping = torch.tensor(src_slot_mapping, device=src_device, dtype=torch.int64)
-    dst_slot_mapping = torch.tensor(dst_slot_mapping, device=dst_device, dtype=torch.int64)
-    return src_slot_mapping, dst_slot_mapping
+    if not isinstance(data, (list, tuple)):
+        return ()  # End of a non-tensor branch
 
+    if not data:
+        return (0, )
 
-def copy_mla_kv_blocks(
-    src_kv_caches: dict[str, torch.Tensor],
-    dst_kv_caches: dict[str, torch.Tensor],
-    src_block_ids: list[int],
-    dst_block_ids: list[int],
-    direction: Literal["h2d", "d2h"],
-    block_size: int = 128,
-) -> None:
-    """Copy kv blocks between different buffers."""
-    if not src_kv_caches or not dst_kv_caches or \
-       not src_block_ids or not dst_block_ids or \
-       len(src_block_ids) != len(dst_block_ids):
-        return
-    assert len(src_block_ids) == len(dst_block_ids)
-    src_device = next(iter(src_kv_caches.values()))[0].device
-    dst_device = next(iter(dst_kv_caches.values()))[0].device
+    first_dim = len(data)
+    sub_shape = get_shape(data[0])
 
-    src_slot_mapping, dst_slot_mapping = _make_src_and_dst_indices(block_size=block_size,
-                                                                   src_block_ids=src_block_ids,
-                                                                   dst_block_ids=dst_block_ids,
-                                                                   src_device=src_device,
-                                                                   dst_device=dst_device)
+    for item in data[1:]:
+        if get_shape(item) != sub_shape:
+            raise ValueError("Inconsistent dimensions: The structure is ragged.")
 
-    start = time.perf_counter()
-    target_device = dst_device.type
-
-    i = 0
-    global hpu_buffer
-    use_hpu_buffer = False
-    for layer_name in src_kv_caches:
-        if isinstance(src_kv_caches[layer_name], tuple):
-            key_cache, _ = src_kv_caches[layer_name]
-        else:
-            key_cache = src_kv_caches[layer_name]
-        if direction == "d2h":
-            # NOTE(chendi): in order to keep host_buffer shape[0] same as tpu and gpu case
-            # so we need to flatten the dst_kv_caches
-            dst_kv_caches[layer_name] = dst_kv_caches[layer_name].flatten(0, 1)
-        else:
-            key_cache = key_cache.flatten(0, 1)
-
-        if direction == "d2h" and use_hpu_buffer:
-            hpu_buffer[i] = key_cache.index_select(0, src_slot_mapping)
-        elif direction == "d2h":
-            dst_kv_caches[layer_name].index_put_((dst_slot_mapping, ),
-                                                 key_cache.index_select(0, src_slot_mapping).to(target_device))
-        else:
-            dst_kv_caches[layer_name][0].index_put_((dst_slot_mapping, ),
-                                                    key_cache.index_select(0, src_slot_mapping).to(target_device))
-        if direction == "d2h":
-            dst_kv_caches[layer_name] = dst_kv_caches[layer_name].unflatten(0, (-1, block_size))
-
-        i = i + 1
-
-    torch.hpu.synchronize()
-
-    logger.debug("copy_kv_blocks: copy takes %s"
-                 "|direction=%s|pid=%s|block_size=%s"
-                 "|src_blocks=%s|dst_blocks=%s",
-                 time.perf_counter() - start, direction, os.getpid(), block_size, len(src_block_ids),
-                 len(dst_block_ids))
+    return (first_dim, ) + sub_shape
 
 
-def copy_kv_blocks(
-    src_kv_caches: dict[str, torch.Tensor],
-    dst_kv_caches: dict[str, torch.Tensor],
-    src_block_ids: list[int],
-    dst_block_ids: list[int],
-    direction: Literal["h2d", "d2h"],
-    block_size: int = 128,
-) -> None:
-    """Copy kv blocks between different buffers."""
-    if not src_kv_caches or not dst_kv_caches or \
-       not src_block_ids or not dst_block_ids or \
-       len(src_block_ids) != len(dst_block_ids):
-        return
-    assert len(src_block_ids) == len(dst_block_ids)
-    src_device = next(iter(src_kv_caches.values()))[0].device
-    dst_device = next(iter(dst_kv_caches.values()))[0].device
+def _find_tensors_and_validate(data, attr_name):
+    """
+    A generic helper to find all tensors and validate a specific attribute
+    (like 'device' or 'dtype') ensuring they are all the same.
+    """
+    found_attr = None
 
-    src_slot_mapping, dst_slot_mapping = _make_src_and_dst_indices(block_size=block_size,
-                                                                   src_block_ids=src_block_ids,
-                                                                   dst_block_ids=dst_block_ids,
-                                                                   src_device=src_device,
-                                                                   dst_device=dst_device)
+    def find_tensors(nested_data):
+        if isinstance(nested_data, torch.Tensor):
+            yield nested_data
+        elif isinstance(nested_data, (list, tuple)):
+            for item in nested_data:
+                yield from find_tensors(item)
 
-    start = time.perf_counter()
-    target_device = dst_device.type
+    tensor_iterator = find_tensors(data)
 
-    i = 0
-    global hpu_buffer
-    use_hpu_buffer = False
-    for layer_name in src_kv_caches:
-        key_cache = src_kv_caches[layer_name][0]
-        value_cache = src_kv_caches[layer_name][1]
-        if direction == "d2h":
-            # NOTE(chendi): in order to keep host_buffer shape[0] same as tpu and gpu case
-            # so we need to flatten the dst_kv_caches
-            dst_kv_caches[layer_name] = dst_kv_caches[layer_name].flatten(1, 2)
-        else:
-            key_cache = key_cache.flatten(0, 1)
-            if value_cache is not None:
-                value_cache = value_cache.flatten(0, 1)
+    try:
+        first_tensor = next(tensor_iterator)
+        found_attr = getattr(first_tensor, attr_name)
+    except StopIteration:
+        return None  # No tensors found
 
-        if direction == "d2h" and use_hpu_buffer:
-            hpu_buffer[i][0] = key_cache.index_select(0, src_slot_mapping)
-            hpu_buffer[i][1] = value_cache.index_select(0, src_slot_mapping)
-        else:
-            dst_kv_caches[layer_name][0].index_put_((dst_slot_mapping, ),
-                                                    key_cache.index_select(0, src_slot_mapping).to(target_device))
-            dst_kv_caches[layer_name][1].index_put_((dst_slot_mapping, ),
-                                                    value_cache.index_select(0, src_slot_mapping).to(target_device))
-        if direction == "d2h":
-            dst_kv_caches[layer_name] = dst_kv_caches[layer_name].unflatten(1, (-1, block_size))
+    for tensor in tensor_iterator:
+        current_attr = getattr(tensor, attr_name)
+        if current_attr != found_attr:
+            raise ValueError(f"Inconsistent {attr_name}: Found tensors with both '{found_attr}' and '{current_attr}'.")
 
-        i = i + 1
+    return found_attr
 
-    torch.hpu.synchronize()
 
-    logger.debug("copy_kv_blocks: copy takes %s"
-                 "|direction=%s|pid=%s|block_size=%s"
-                 "|src_blocks=%s|dst_blocks=%s",
-                 time.perf_counter() - start, direction, os.getpid(), block_size, len(src_block_ids),
-                 len(dst_block_ids))
+class TensorTuple(tuple):
+    """
+    A tuple subclass designed to hold nested torch.Tensors, providing
+    .shape and .device properties.
+    
+    It ensures that the nested structure is not ragged and that all
+    contained tensors reside on the same device.
+    """
+
+    _shape: tuple[int, ...]
+    _device: Optional[torch.device]
+    _dtype: Optional[torch.dtype]
+
+    def __new__(cls, iterable):
+        # First, we create the actual tuple object instance
+        instance = super().__new__(cls, iterable)
+
+        # Now, compute and attach the custom properties.
+        # This is done here because tuples are immutable.
+        # We store them with a leading underscore.
+        instance._shape = get_shape(instance)
+        instance._device = _find_tensors_and_validate(instance, 'device')
+        instance._dtype = _find_tensors_and_validate(instance, 'dtype')
+
+        return instance
+
+    @property
+    def shape(self):
+        """Returns the shape of the nested tuple structure."""
+        return self._shape
+
+    @property
+    def device(self):
+        """
+        Returns the torch.device of the tensors within the tuple.
+        Returns None if no tensors are present.
+        """
+        return self._device
+
+    @property
+    def dtype(self):
+        """Returns the torch.dtype of the tensors within the tuple."""
+        return self._dtype
