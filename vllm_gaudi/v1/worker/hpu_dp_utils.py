@@ -4,6 +4,7 @@ from vllm.config import VllmConfig
 from dataclasses import dataclass
 from typing import Optional
 from vllm.platforms import current_platform
+import habana_frameworks.torch as htorch
 
 
 @dataclass
@@ -61,18 +62,37 @@ _hpu_dp_metadata: Optional[HPUDPMetadata] = None
 
 
 @contextmanager
+def override_hpu_dp_metadata(hpu_dp_metadata: Optional[HPUDPMetadata]):
+    """A context manager that overrides the current HPU DP metadata.
+    This is used to override the HPU DP metadata for a specific
+    forward pass.
+    """
+    global _hpu_dp_metadata
+    prev_metadata = _hpu_dp_metadata
+    _hpu_dp_metadata = hpu_dp_metadata
+    try:
+        yield
+    finally:
+        _hpu_dp_metadata = prev_metadata
+
+
+@contextmanager
 def set_hpu_dp_metadata(
     vllm_config: VllmConfig,
     num_tokens: int,
 ):
-    global _hpu_dp_metadata
+    dp_metadata = None
+    if htorch.utils.internal.is_lazy(
+    ) and not vllm_config.model_config.enforce_eager and vllm_config.parallel_config.data_parallel_size > 1:
+        dp_metadata = HPUDPMetadata.make(vllm_config, num_tokens)
 
-    if vllm_config.parallel_config.data_parallel_size > 1:
-        _hpu_dp_metadata = HPUDPMetadata.make(vllm_config, num_tokens)
+    try:
+        with override_hpu_dp_metadata(dp_metadata):
+            yield
+    finally:
+        pass
 
 
 def get_hpu_dp_metadata() -> HPUDPMetadata:
     """Get the current HPU DP metadata."""
-    assert _hpu_dp_metadata is not None, ("HPU DP metadata is not set. "
-                                          "Please use `set_hpu_dp_metadata` to set the HPU DP metadata.")
     return _hpu_dp_metadata
