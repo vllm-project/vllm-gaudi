@@ -357,8 +357,12 @@ class Context:
 
         group_ids, group_offsets = indices_and_offsets(num_ctx_blocks)
         block_ids = fetch_2d(block_table, group_ids, group_offsets)
-        block_usages = torch.clamp(
-            total_tokens.index_select(0, group_ids) - group_offsets * block_size + 1, 1, block_size)
+        #NOTE(kzawora): Originally, we were clamping
+        # total_tokens.index_select(0, group_ids) - group_offsets * block_size + 1
+        # I'm not sure why +1 was there originally, but in non-block-aligned prefix-prefill scenarios
+        # it made causal mask not cover the first unused token.
+        # (e.g. with context 28, the 28th slot was unmasked, causing the effective context length to be 29)
+        block_usages = torch.clamp(total_tokens.index_select(0, group_ids) - group_offsets * block_size, 1, block_size)
 
         ctx = Context(group_ids, group_offsets, block_ids, block_usages)
         all_shapes = [v.shape for v in ctx._values() if torch.is_tensor(v)]
