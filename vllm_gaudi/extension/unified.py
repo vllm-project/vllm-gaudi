@@ -191,18 +191,28 @@ def partial_attn_unique(query: torch.tensor, blocks: torch.tensor, block_mapping
     block_mapping_2d = torch.nn.functional.one_hot(block_mapping, num_classes=batch_size).to(query.dtype)
 
     attn = torch.matmul(query, key.transpose(-1, -2))
-    attn = attn + bias.unsqueeze(1).unsqueeze(1).unsqueeze(1)
-    block_max = torch.maximum(attn.amax(-1), fmin)
-    attn = torch.exp(attn - block_max.unsqueeze(-1))
-    block_sum = attn.sum(-1)
+    block_bias = bias.unsqueeze(1).unsqueeze(1).unsqueeze(1)
+    attn, block_max, block_sum = torch.ops.hpu.block_softmax(attn, block_bias, block_mapping, fp8_exp=False)
+
     attn = torch.matmul(attn, value)
 
+    # Reshape outputs
+    block_max = block_max[:, :kv_heads].unsqueeze(-1).unsqueeze(-1)  # [num_blocks, kv_heads, 1, 1]
+    block_sum = block_sum[:, :kv_heads].unsqueeze(-1).unsqueeze(-1)  # [num_blocks, kv_heads, 1, 1]
+
     group_max = reduce_max(block_max, batch_size, block_mapping)
-    block_adjustment = torch.exp(block_max - group_max.index_select(0, block_mapping))
+
+    out_shape = list(block_max.shape)  # [num_blocks, kv_heads, 1, 1]
+
+    block_adjustment = torch.ops.hpu.block_softmax_adjustment(block_max, block_sum, block_mapping, batch_size,
+                                                              out_shape)
+
     block_sum = block_sum * block_adjustment
     group_sum = block2batch(block_sum, block_mapping_2d)
+
     attn = attn * block_adjustment.unsqueeze(-1)
     attn = block2batch(attn, block_mapping_2d)
+
     return (attn.flatten(1, 3), group_max.flatten(1, 3), group_sum.flatten(1, 3))
 
 
