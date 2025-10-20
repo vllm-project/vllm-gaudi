@@ -2,7 +2,7 @@ name: Basic HPU test suite
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
     branches: 
       - main
       - releases/**
@@ -162,6 +162,8 @@ jobs:
           extra_args: --all-files --hook-stage manual
 
   pre_merge_hpu_test_build:
+    if: >
+        !contains(github.event.pull_request.labels.*.name, 'skip-gaudi-tests')
     runs-on: ucb-vllm-cicd-g2
     needs: [pre-commit, discover_tests]
     permissions:
