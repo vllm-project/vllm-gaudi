@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 import habana_frameworks.torch as htorch
@@ -112,17 +112,17 @@ class HpuPlatform(Platform):
             vllm_config.model_config.dtype = torch.bfloat16
 
         if envs.VLLM_USE_V1:
-            from vllm.config import CompilationLevel, CUDAGraphMode
+            from vllm.config import CompilationMode, CUDAGraphMode
             compilation_config = vllm_config.compilation_config
             # Activate custom ops for v1.
             compilation_config.custom_ops = ["all"]
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             compilation_config.cudagraph_capture_sizes = []
 
-            if compilation_config.level != CompilationLevel.NO_COMPILATION:
-                logger.info("[HPU] Forcing CompilationLevel.NO_COMPILATION "
-                            "compilation level")
-                compilation_config.level = CompilationLevel.NO_COMPILATION
+            if compilation_config.mode != CompilationMode.NONE:
+                logger.info("[HPU] Forcing CompilationMode.NONE "
+                            "compilation mode")
+                compilation_config.mode = CompilationMode.NONE
 
             print(f"========={compilation_config.custom_ops=}===========")
 
@@ -205,6 +205,38 @@ class HpuPlatform(Platform):
             return out
 
         return _synced_weight_loader
+
+    @classmethod
+    def insert_blocks_to_device(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: Union[tuple[torch.Tensor], torch.Tensor],
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from src_cache to dst_cache on HPU."""
+        if isinstance(dst_cache, tuple):
+            _src_cache = src_cache[:, src_block_indices]
+            for i in range(len(dst_cache)):
+                dst_cache[i].index_copy_(0, dst_block_indices, _src_cache[i].to(dst_cache[i].device))
+        else:
+            dst_cache.index_copy_(0, dst_block_indices, src_cache[src_block_indices].to(dst_cache.device))
+        torch.hpu.synchronize()
+
+    @classmethod
+    def swap_out_blocks_to_host(
+        cls,
+        src_cache: Union[tuple[torch.Tensor], torch.Tensor],
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from HPU to host (CPU)."""
+        if isinstance(src_cache, tuple):
+            _src_cache = torch.stack([c[src_block_indices] for c in src_cache], dim=0)
+            dst_cache[:, dst_block_indices] = _src_cache.cpu()
+        else:
+            dst_cache[dst_block_indices] = src_cache[src_block_indices].cpu()
 
     @classmethod
     def patch_for_pt27(cls) -> None:

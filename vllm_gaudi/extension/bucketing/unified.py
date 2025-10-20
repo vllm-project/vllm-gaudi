@@ -14,8 +14,8 @@ class UnifiedBucketingStrategy():
 
     def get_unified_cfgs(self, bs, max_model_len, block_size, max_blocks, max_num_batched_tokens):
         # [min, max, turning_point]
-        query_cfg = [block_size, max_num_batched_tokens, bs]
-        max_shared_ctx = math.ceil(max_model_len // block_size) * bs
+        query_cfg = [1, max_num_batched_tokens, bs]
+        max_shared_ctx = min(math.ceil(max_model_len // block_size), max_blocks)
         shared_ctx_cfg = [0, max_shared_ctx, bs]
         max_unique_ctx = max_blocks
         unique_ctx_cfg = [0, max_unique_ctx, bs]
@@ -28,19 +28,24 @@ class UnifiedBucketingStrategy():
 
 def warmup_unified_range(cfg):
     bmin, bmax, turning_point = cfg
+    limit = 10
+    round_up = 128
 
     buckets: Set[Tuple[int, int]] = set()
 
     if bmin == 0:
         buckets.add(bmin)
+        bmin = 1
 
-    # alpha version: [bs/4, bs/2, bs, bt/4, bt/2, bt]
+    num_buckets_exp = limit
+    first_step = bmax
 
-    buckets.add(turning_point // 4)
-    buckets.add(turning_point // 2)
-    buckets.add(turning_point)
-    buckets.add(bmax // 4)
-    buckets.add(bmax // 2)
-    buckets.add(bmax)
+    for i in range(num_buckets_exp):
+        power_unpadded = bmin * np.float_power(first_step / bmin, (1. / float(num_buckets_exp - 1)) * i)
+        if i == limit - 1:
+            bucket = bmax
+        else:
+            bucket = math.ceil(power_unpadded / round_up) * round_up
+        buckets.add(bucket)
 
     return list(sorted(buckets))
