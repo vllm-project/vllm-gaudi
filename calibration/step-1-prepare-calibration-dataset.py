@@ -38,6 +38,9 @@ def main(args):
             padding_side="left",
             use_fast=False,
         )
+        # Llama4 models in Text Only mode fail with False if use_fast=False
+        if isinstance(tokenizer, bool):
+            raise ValueError("Tokenizer is a boolean")
     except (OSError, ValueError, RuntimeError, ImportError):
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             args.model,
