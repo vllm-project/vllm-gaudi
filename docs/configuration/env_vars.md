@@ -50,9 +50,9 @@ Additionally, there are HPU PyTorch Bridge environment variables impacting vLLM 
       - batch size min (`VLLM_PROMPT_BS_BUCKET_MIN`): `1`
       - batch size step (`VLLM_PROMPT_BS_BUCKET_STEP`): `32`
       - batch size max (`VLLM_PROMPT_BS_BUCKET_MAX`): `max_num_prefill_seqs`
-      - sequence length min (`VLLM_PROMPT_SEQ_BUCKET_MIN`): `block_size`
-      - sequence length step (`VLLM_PROMPT_SEQ_BUCKET_STEP`): `block_size`
-      - sequence length max (`VLLM_PROMPT_SEQ_BUCKET_MAX`): `max_model_len`
+      - query length min (`VLLM_PROMPT_QUERY_BUCKET_MIN`): `block_size`
+      - query length step (`VLLM_PROMPT_QUERY_BUCKET_STEP`): `block_size`
+      - query length max (`VLLM_PROMPT_QUERY_BUCKET_MAX`): `max_model_len`
       - sequence ctx min (`VLLM_PROMPT_CTX_BUCKET_MIN`): `0`
       - sequence ctx step (`VLLM_PROMPT_CTX_BUCKET_STEP`): `1`
       - sequence ctx max (`VLLM_PROMPT_CTX_BUCKET_MAX`): `(max_model_len - block_size) // block_size`
@@ -60,6 +60,6 @@ Additionally, there are HPU PyTorch Bridge environment variables impacting vLLM 
       - batch size min (`VLLM_DECODE_BS_BUCKET_MIN`): `1`
       - batch size step (`VLLM_DECODE_BS_BUCKET_STEP`): `32`
       - batch size max (`VLLM_DECODE_BS_BUCKET_MAX`): `max_num_seqs`
-      - block size min (`VLLM_DECODE_BLOCK_BUCKET_MIN`): `block_size`
+      - block size min (`VLLM_DECODE_BLOCK_BUCKET_MIN`): `1`
       - block size step (`VLLM_DECODE_BLOCK_BUCKET_STEP`): `block_size`
       - block size max (`VLLM_DECODE_BLOCK_BUCKET_MAX`): `max_blocks`
