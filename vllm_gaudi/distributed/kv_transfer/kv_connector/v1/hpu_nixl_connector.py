@@ -45,12 +45,12 @@ def initialize_host_xfer_buffer(self, kv_caches: dict[str, torch.Tensor]) -> Non
     We intended to prepare host_buffer with HND layout.
     """
     xfer_buffers: dict[str, torch.Tensor] = {}
+    inv_order = [0, 1, 3, 2, 4]
     try:
         for layer_name, kv_cache in kv_caches.items():
             kv_shape = kv_cache.shape
             kv_dtype = kv_cache.dtype
             if not self.use_mla:
-                inv_order = [0, 1, 3, 2, 4]
                 kv_shape = tuple(kv_shape[i] for i in inv_order)
             xfer_buffers[layer_name] = torch.empty(kv_shape, dtype=kv_dtype, device="cpu")
     except MemoryError as e:
