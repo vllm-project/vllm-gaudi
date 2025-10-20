@@ -75,7 +75,7 @@ Linear strategy is determined with 3 parameters only - `min`, `step` and `max`. 
 
 `min` determines the lowest value of the bucket. `step` determines the interval between buckets, and `max` determines the upper bound of the bucket. Furthermore, the interval between `min` and `step` has special handling: `min` is multiplied by consecutive powers of two until the multiplier is less than or equal to `step`. We refer to this as the ramp-up phase, which is used for handling lower batch sizes with minimal wastage, while allowing for larger padding on larger batch sizes.
 
-**Example with ramp-up**
+#### Example with ramp-up
 
 ```{.}
 min = 2, step = 32, max = 64
@@ -84,7 +84,7 @@ min = 2, step = 32, max = 64
 => buckets = ramp_up + stable => (2, 4, 8, 16, 32, 64)
 ```
 
-**Example without ramp-up**
+#### Example without ramp-up
 
 ```{.}
 min = 128, step = 128, max = 512
@@ -96,6 +96,7 @@ min = 128, step = 128, max = 512
 ### Unified Strategy
 
 Unified strategy is dedicated strategy for Unified Attention. It's buckets are determined by different dimensions:
+
 - `query length`: number of currently processed tokens, without context tokens
 - `shared num blocks`: context length counted in blocks, including only blocks that are either shared between at least two block tables (different requests) or is used by at least two tokens in query
 - `unique num blocks`: context length counted in blocks, including only blocks that are not shared between block tables and are used only by one token
