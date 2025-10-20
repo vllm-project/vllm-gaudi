@@ -12,6 +12,8 @@ MODELS=(
 export VLLM_USE_V1=1
 export VLLM_SKIP_WARMUP="true"
 export PT_HPU_LAZY_MODE=1
+export PT_HPUGRAPH_DISABLE_TENSOR_CACHE=true
+export HF_HOME=/software/data/pytorch/huggingface/
 
 # Number of prefill and decode instances to create
 NUM_PREFILL_INSTANCES=${NUM_PREFILL_INSTANCES:-1} # Default to 1
