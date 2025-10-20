@@ -8,7 +8,7 @@ from transformers import PretrainedConfig
 
 from vllm import LLM
 from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
-from vllm.utils import GiB_bytes
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
