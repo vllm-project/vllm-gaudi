@@ -93,6 +93,6 @@ def set_hpu_dp_metadata(
         pass
 
 
-def get_hpu_dp_metadata() -> HPUDPMetadata:
+def get_hpu_dp_metadata() -> Optional[HPUDPMetadata]:
     """Get the current HPU DP metadata."""
     return _hpu_dp_metadata
