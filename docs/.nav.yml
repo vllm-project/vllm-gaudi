@@ -15,7 +15,11 @@ nav:
       - user_guide/*
     - Configuration:
       - Summary: configuration/README.md
-      - configuration/*
+      - configuration/env_vars.md
+      - configuration/long_context.md
+      - configuration/model_calibration.md
+      - configuration/optimization.md
+      #- configuration/*
     - Models:
       - models/validated_models.md
     - Features:
