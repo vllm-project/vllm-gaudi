@@ -62,7 +62,7 @@ class LinearBucketingStrategy:
         max_decode_blocks = max(math.ceil(max_model_len * max_num_seqs // block_size), block_size)
         if contiguous_pa:
             max_decode_blocks = max_blocks
-        decode_block_bucket_cfg = read_bucket_settings('decode', 'block', min=1, step=block_size, max=max_blocks)
+        decode_block_bucket_cfg = read_bucket_settings('decode', 'block', min=1, step=block_size, max=max_decode_blocks)
         if decode_block_bucket_cfg[2] > max_blocks:
             logger().info(
                 f'VLLM_DECODE_BLOCK_BUCKET_MAX={decode_block_bucket_cfg[2]} is higher than max_blocks={max_blocks}. Your configuration VLLM_DECODE_BLOCK_BUCKET_MAX={decode_block_bucket_cfg[2]} will be overwritten to VLLM_DECODE_BLOCK_BUCKET_MAX={max_blocks}'
