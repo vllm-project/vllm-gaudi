@@ -344,12 +344,9 @@ def generate_buckets(bs_range,
     filters = get_filters(is_prompt, use_merged_prefill, use_contiguous_pa)
 
     if file_buckets:
-        print(file_buckets, "&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&")
         for bs, query, blocks in file_buckets:
-            print(bs, query, blocks)
             if all(bucket_filter(bs, query, blocks) for bucket_filter in filters):
                 buckets.add((bs, query, blocks))
-        print(buckets, "&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&")
     else:
         for bs_idx, bs in enumerate(bs_range):
             for ctx_idx, ctx in enumerate(ctx_range):
@@ -361,7 +358,6 @@ def generate_buckets(bs_range,
             for query in query_range:
                 if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
                     buckets.add((bs, query, ctx))
-    print(buckets, "&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&")
     if not buckets:
         phase = 'prompt' if is_prompt else 'decode'
         for bucket in omitted_buckets:

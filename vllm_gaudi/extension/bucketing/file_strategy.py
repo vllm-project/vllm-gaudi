@@ -23,8 +23,9 @@ class FileBucketingStrategy:
                     continue
 
                 try:
-                    bucket = ast.literal_eval(line)
-                except:
+                    bucket = eval(line, {"__builtins__": None}, {"range": range})
+                except Exception as e:
+                    print(f"Skipping line due to eval error: {e} - {line}")
                     continue
 
                 if not isinstance(bucket, tuple) or len(bucket) != 3:
@@ -41,8 +42,6 @@ class FileBucketingStrategy:
                         decode_buckets.append((x, y, z))
                     else:
                         prompt_buckets.append((x, y, z))
-        print(sorted(prompt_buckets) if is_prompt else sorted(decode_buckets))
-
         return sorted(prompt_buckets) if is_prompt else sorted(decode_buckets)
 
 
