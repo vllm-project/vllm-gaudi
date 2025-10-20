@@ -17,6 +17,7 @@ In dynamic inference serving scenarios, minimizing the number of graph compilati
 ## Bucketing Strategies
 
 Bucketing is focused on three dimensions:
+
 - `batch size`: number of samples in batch
 - `query lenght`: sequence length without context tokens
 - `num blocks`: context length counted in blocks
@@ -44,6 +45,7 @@ a `(2, 1, 512)` bucket, or the context length increases beyond 512 tokens. It wi
 ### Exponential Strategy  - Default
 
 Exponential strategy is the default warm-up mechanism. It is based on 4 parameters:
+
 - `min`: the smallest value
 - `step`: the rounding value for bucket boundaries
 - `max`: the largest value
@@ -60,7 +62,7 @@ Example distribution is shown below:
 min = 128, step = 128, max = 4096, limit = 13
 ```
 
-![exponential bucketing distribution for 4096 max query length](../../docs/assets/graphs/exponential_bucketing_example.png)
+![exponential bucketing distribution for 4096 max query length](../assets/graphs/exponential_bucketing_example.png)
 
 This strategy creates more buckets with smaller values closer to `min`. As the values increase toward `max`, the buckets become less frequent, meaning the distance between them gets larger. This helps prioritize warming up the smaller values more precisely, while still covering the full range.
 
@@ -114,7 +116,7 @@ Example distribution is shown below:
 batch size = 64, max num batched tokens = 4096
 ```
 
-![exponential bucketing distribution for 4096 max query length](../../docs/assets/graphs/unified_bucketing_example.png)
+![exponential bucketing distribution for 4096 max query length](../assets/graphs/unified_bucketing_example.png)
 
 Additionaly for context blocks, both shared and unique, `0` value will be added as well.
 
