@@ -75,7 +75,6 @@ def get_features():
         Value('use_contiguous_pa',
               Any(Disabled('prefix_caching'), Enabled('unified_attn')),
               env_var='VLLM_CONTIGUOUS_PA'),
-        Value('use_delayed_sampling', Engine('v0'), env_var='VLLM_DELAYED_SAMPLING'),
         Value('use_bucketing', True, env_var='VLLM_ENABLE_BUCKETING'),
         Value('exponential_bucketing', True),
         Value('linear_bucketing', True),
