@@ -665,7 +665,7 @@ def get_dp_padding(num_tokens: int, dp_size: int, dp_rank: int) -> int:
     num_tokens_tensor = torch.tensor(num_tokens_across_dp, device=device, dtype=torch.int32)
     torch.distributed.all_reduce(num_tokens_tensor, group=group)
 
-    max_tokens_across_dp_cpu = torch.max(num_tokens_tensor.cpu()).item()
+    max_tokens_across_dp_cpu = torch.max(num_tokens_tensor).item()
     return max_tokens_across_dp_cpu - num_tokens
 
 
