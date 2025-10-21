@@ -58,6 +58,8 @@ class VLLMKVCache(torch.nn.Module):
         else:
             return cache.index_select(0, blocks)
 
+    def fetch_from_cache_prompt(self, cache, blocks):
+        return cache.index_select(0, blocks)
 
 class VLLMFP8KVCache(VLLMKVCache):
 
