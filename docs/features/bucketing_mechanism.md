@@ -17,6 +17,7 @@ In dynamic inference serving scenarios, minimizing the number of graph compilati
 ## Bucketing Strategies
 
 Bucketing is focused on three dimensions:
+
 - `batch size`: number of samples in batch
 - `query lenght`: sequence length without context tokens
 - `num blocks`: context length counted in blocks
@@ -32,46 +33,6 @@ INFO 07-07 19:27:37 [common.py:85] Generated 42 decode buckets [bs, query, num_b
 > [!WARNING]
 > If a request exceeds the maximum bucket size in any dimension, it will be processed without padding, and its processing may require a graph compilation, potentially significantly increasing end-to-end latency.
 The boundaries of the buckets are user-configurable via environment variables, and upper bucket boundaries can be increased to avoid such scenario.
-
-For example, if a request with 3 sequences, each having a maximum sequence length of 412, is sent to an idle vLLM server, it will be padded and executed as a `(4, 512, 0)` prefill bucket, WHERE 4=bs, 512 .... This is because the `batch_size`
-(number of sequences) will be padded to 4 (the nearest batch size dimension higher than 3), and the maximum sequence length will be padded to 512 (the nearest sequence length dimension higher than 412). After the
-prefill stage, it will be executed as a `(4, 1, 512)` decode bucket and will remain in this bucket until either the batch dimension changes (e.g., due to a request being completed), in which case it will become
-a `(2, 1, 512)` bucket, or the context length increases beyond 512 tokens. It will become a `(4, 1, 640)` bucket at that point.
-
-> [!NOTE]
-> Bucketing is transparent to the user – padding in the sequence length dimension is never returned, and padding in the batch dimension does not create new requests.
-
-### Exponential Strategy  - Default
-
-Exponential strategy is the default warm-up mechanism. It is based on 4 parameters:
-- `min`: the smallest value
-- `step`: the rounding value for bucket boundaries
-- `max`: the largest value
-- `limit`: the maximum number of buckets
-
-> [!WARNING]
-> These parameters are not configurable by the user.
-
-The exponential bucketing strategy applies exponential spacing between buckets. The `min` and `max` values are always included in the warm-up, and the intermediate values are calculated using an exponent. The base remains unchanged. If duplicate values are generated, they are removed to ensure the warm-up process is as efficient as possible. All the values generated in this way, ranging from batch size, query length and context blocks, will be warmed up with each other.
-
-Example distribution is shown below:
-
-```{.}
-min = 128, step = 128, max = 4096, limit = 13
-```
-
-![exponential bucketing distribution for 4096 max query length](../../docs/assets/graphs/exponential_bucketing_example.png)
-
-This strategy creates more buckets with smaller values closer to `min`. As the values increase toward `max`, the buckets become less frequent, meaning the distance between them gets larger. This helps prioritize warming up the smaller values more precisely, while still covering the full range.
-
-### Linear Strategy
-
-> [!NOTE]
-> Starting from v1.22.0 Intel Gaudi Software release, Linear strategy is no longer the default warm-up mechanism.
-
-Linear strategy is determined with 3 parameters only - `min`, `step` and `max`. They can be set separately for the prompt and decode phase, and batch size and sequence length dimensions, by user.
-
-`min` determines the lowest value of the bucket. `step` determines the interval between buckets, and `max` determines the upper bound of the bucket. Furthermore, the interval between `min` and `step` has special handling: `min` is multiplied by consecutive powers of two until the multiplier is less than or equal to `step`. We refer to this as the ramp-up phase, which is used for handling lower batch sizes with minimal wastage, while allowing for larger padding on larger batch sizes.
 
 For example, if a request with 3 sequences, each having a maximum sequence length of 412, is sent to an idle vLLM server, it will be padded and executed as a `(4, 512, 0)` prefill bucket, WHERE 4=bs, 512 .... This is because the `batch_size`
 (number of sequences) will be padded to 4 (the nearest batch size dimension higher than 3), and the maximum sequence length will be padded to 512 (the nearest sequence length dimension higher than 412). After the
@@ -135,6 +96,7 @@ min = 128, step = 128, max = 512
 ### Unified Strategy
 
 Unified strategy is dedicated strategy for Unified Attention. It's buckets are determined by different dimensions:
+
 - `query length`: number of currently processed tokens, without context tokens
 - `shared num blocks`: context length counted in blocks, including only blocks that are either shared between at least two block tables (different requests) or is used by at least two tokens in query
 - `unique num blocks`: context length counted in blocks, including only blocks that are not shared between block tables and are used only by one token
@@ -155,7 +117,7 @@ Example distribution is shown below:
 batch size = 64, max num batched tokens = 4096
 ```
 
-![exponential bucketing distribution for 4096 max query length](../../docs/assets/graphs/unified_bucketing_example.png)
+![exponential bucketing distribution for 4096 max query length](../assets/graphs/unified_bucketing_example.png)
 
 Additionaly for context blocks, both shared and unique, `0` value will be added as well.
 
