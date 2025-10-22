@@ -604,11 +604,10 @@ def get_finished(self) -> tuple[set[str], set[str]]:
             for k, v in self.device_kv_caches.values():
                 local_block_ids = meta.local_block_ids
                 #print(f'buke {local_block_ids=}|{k.shape=}')
-                assert len(local_block_ids) == local_block_ids[-1]-local_block_ids[0] + 1 # simple check if the indices are contiguous
-                block_idx = local_block_ids[0]
-                num_blocks = len(local_block_ids)
-                k[block_idx*self.block_size: (num_blocks+block_idx)*self.block_size] = k[block_idx*self.block_size: (num_blocks+block_idx)*self.block_size].reshape(num_blocks*self.block_factor, n_kv_heads, remote_block_size, head_dim).permute(0,2,1,3).contiguous().reshape(num_blocks*self.block_size,n_kv_heads,head_dim)
-                v[block_idx*self.block_size: (num_blocks+block_idx)*self.block_size] = v[block_idx*self.block_size: (num_blocks+block_idx)*self.block_size].reshape(num_blocks*self.block_factor, n_kv_heads, remote_block_size, head_dim).permute(0,2,1,3).contiguous().reshape(num_blocks*self.block_size,n_kv_heads,head_dim)
+                for block_idx in local_block_ids:
+                    #import remote_pdb; remote_pdb.set_trace()
+                    k[block_idx*self.block_size: (1+block_idx)*self.block_size] = k[block_idx*self.block_size: (1+block_idx)*self.block_size].reshape(self.block_factor, n_kv_heads, remote_block_size, head_dim).permute(0,2,1,3).contiguous().reshape(self.block_size,n_kv_heads,head_dim)
+                    v[block_idx*self.block_size: (1+block_idx)*self.block_size] = v[block_idx*self.block_size: (1+block_idx)*self.block_size].reshape(self.block_factor, n_kv_heads, remote_block_size, head_dim).permute(0,2,1,3).contiguous().reshape(self.block_size,n_kv_heads,head_dim)
             #import remote_pdb; remote_pdb.set_trace()
             t2 = time.perf_counter()
             tt = t2-t1
@@ -1012,7 +1011,8 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
         num_blocks=self.num_blocks,
         block_len=self.block_len,
-        attn_backend_name=self.backend_name)
+        attn_backend_name=self.backend_name,
+        kv_cache_layout=self.kv_cache_layout)
     ready_event = threading.Event()
     self._nixl_handshake_listener_t = threading.Thread(
         target=self._nixl_handshake_listener,
