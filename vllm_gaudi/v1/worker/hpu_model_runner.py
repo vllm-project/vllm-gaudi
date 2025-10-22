@@ -4342,8 +4342,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                        common_attn_metadata)
 
                 draft_token_ids = draft_token_ids[:num_decodes]
-            # handle prefill
-            if prefill_data is not None:
+            else:
+                # prefill_data is not None:
                 # Currently, prefill is done one by one
                 draft_token_ids_prefill = []
                 hidden_states_prefill = []
