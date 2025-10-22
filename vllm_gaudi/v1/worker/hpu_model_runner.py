@@ -8,7 +8,7 @@ import os
 import time
 from dataclasses import dataclass, field, fields
 from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, Literal, cast)
-
+from vllm_gaudi import envs
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
 import numpy as np
@@ -584,6 +584,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.enable_bucketing = False if self.profiling_run else \
                                 self.enable_bucketing
         self.use_contiguous_pa = get_config().use_contiguous_pa
+        self.do_mark_step = envs.VLLM_HPU_FORCE_MARK_STEP
         self.skip_warmup = get_config().skip_warmup
 
         model_config = self.model_config
@@ -2870,7 +2871,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         inputs_embeds=inputs_embeds,
                         model_mm_kwargs=model_mm_kwargs,
                         warmup_mode=warmup_mode,)
-                htorch.core.mark_step()
+                if self.do_mark_step:
+                    htorch.core.mark_step()
                 non_flattened_hidden_states_prefills.append(non_flattened_hidden_states)
                 if self.use_aux_hidden_state_outputs:
                     aux_hidden_states_prefills.append(aux_hidden_states)
@@ -3205,9 +3207,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         hidden_layer_markstep_interval = int(os.getenv('VLLM_CONFIG_HIDDEN_LAYERS', '1'))
         model_config = getattr(self.model, "config", None)
-        modify_model_layers(self.model,
-                            get_target_layer_suffix_list(model_config.model_type if model_config is not None else None),
-                            hidden_layer_markstep_interval)
+        if self.do_mark_step:
+            modify_model_layers(
+                self.model,
+                get_target_layer_suffix_list(
+                    model_config.model_type if model_config is not None else None),
+                hidden_layer_markstep_interval)
         torch.hpu.synchronize()
 
         if not self.is_pooling_model:
@@ -4323,16 +4328,17 @@ def copy_kv_blocks(
     target_device = dst_device.type
 
     i = 0
-    global hpu_buffer
+    global hpu_buffer, is_hetero, block_factor
     use_hpu_buffer = False # (len(src_slot_mapping) == hpu_buffer[0][0].size(0)) and (hpu_buffer is not None)
     for layer_name in src_kv_caches:
         key_cache = src_kv_caches[layer_name][0]
         value_cache = src_kv_caches[layer_name][1]
+
         if is_hetero:
             assert direction == "h2d", "hetero only supports h2d for now"
             n_kv_heads, head_dim = key_cache.shape[-2:]
             remote_block_size = block_size//block_factor
-            #block_factor, n_kv_heads, remote_block_size, head_dim = 8, 8, 16, 128
+            # block_factor, n_kv_heads, remote_block_size, head_dim = 8, 8, 16, 128
             if len(src_block_ids) == src_block_ids[-1]-src_block_ids[0] + 1: # simple check if the indices are contiguous
                 block_idx = src_block_ids[0]
                 num_blocks = len(src_block_ids)
@@ -4353,6 +4359,12 @@ def copy_kv_blocks(
                 dst_kv_caches[layer_name][0].index_put_((dst_slot_mapping,), key_cache.index_select(0, src_slot_mapping).to(target_device))
                 dst_kv_caches[layer_name][1].index_put_((dst_slot_mapping,), value_cache.index_select(0, src_slot_mapping).to(target_device))
         i = i+1
+
+        #dst_kv_caches[layer_name][0][dst_slot_mapping] = key_cache[src_slot_mapping].to(target_device)
+        #dst_kv_caches[layer_name][1][dst_slot_mapping] = value_cache[src_slot_mapping].to(target_device)
+    #if use_hpu_buffer:
+        #tmp = hpu_buffer.to('cpu')
+        #dst_kv_caches = hpu_buffer.to('cpu')
 
     torch.hpu.synchronize()
 
