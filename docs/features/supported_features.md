@@ -31,8 +31,8 @@ title: Supported Features
 
 ## Coming Soon
 
-- Sliding window attention
-- P/D disaggregate support
-- In-place weight update
-- MLA with Unified Attention
-- Multinode support
+- [ ] Sliding window attention
+- [ ] P/D disaggregate support
+- [ ] In-place weight update
+- [ ] MLA with Unified Attention
+- [ ] Multinode support
