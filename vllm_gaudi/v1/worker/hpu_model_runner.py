@@ -93,8 +93,6 @@ logger = init_logger()
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
-hpu_buffer: list[list[torch.Tensor]] = []
-
 is_hetero = os.getenv('PT_HPU_ENABLE_RESTORE_KV_LAYOUT', '0') == '1'
 block_factor = int(os.getenv('PT_HPU_BLOCK_SIZE_FACTOR', '1'))
 
@@ -627,7 +625,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.head_size = self.model_config.get_head_size()
         self.hidden_size = self.model_config.get_hidden_size()
         self.is_pooling_model = model_config.pooler_config is not None
-        logger.debug("model config: ", self.model_config)
+        logger.debug(f"model config: {self.model_config=}")
 
         self.attn_backend = get_attn_backend(
             self.head_size,
@@ -4016,8 +4014,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
-            get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
-            global hpu_buffer
+            if get_kv_transfer_group().connector_worker.kv_buffer_device == "cpu":
+                get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
         htorch.hpu.synchronize()
 
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
@@ -4317,19 +4315,11 @@ def copy_kv_blocks(
     src_device = next(iter(src_kv_caches.values()))[0].device
     dst_device = next(iter(dst_kv_caches.values()))[0].device
 
-    src_slot_mapping, dst_slot_mapping = _make_src_and_dst_indices(
-        block_size=block_size,
-        src_block_ids=src_block_ids,
-        dst_block_ids=dst_block_ids,
-        src_device=src_device,
-        dst_device=dst_device)
-
     start = time.perf_counter()
     target_device = dst_device.type
 
     i = 0
-    global hpu_buffer, is_hetero, block_factor
-    use_hpu_buffer = False # (len(src_slot_mapping) == hpu_buffer[0][0].size(0)) and (hpu_buffer is not None)
+    global is_hetero, block_factor
     for layer_name in src_kv_caches:
         key_cache = src_kv_caches[layer_name][0]
         value_cache = src_kv_caches[layer_name][1]
@@ -4351,20 +4341,17 @@ def copy_kv_blocks(
                 dst_kv_caches[layer_name][1][block_idx*block_size: (1+block_idx)*block_size] = value_cache[block_idx*block_size: (1+block_idx)*block_size].reshape(block_factor, n_kv_heads, remote_block_size, head_dim).permute(0,2,1,3).contiguous().reshape(block_size,n_kv_heads,head_dim).to("hpu")
                 #print('buke addr after:', dst_kv_caches[layer_name][0][block_idx*block_size: (1+block_idx)*block_size].data_ptr())
         else:
-            if direction == "d2h" and use_hpu_buffer:
-                hpu_buffer[i][0]=key_cache.index_select_(0,  src_slot_mapping)
-                hpu_buffer[i][1]=value_cache.index_select_(0,  src_slot_mapping)
-            else:
-                #import remote_pdb;remote_pdb.set_trace()
-                dst_kv_caches[layer_name][0].index_put_((dst_slot_mapping,), key_cache.index_select(0, src_slot_mapping).to(target_device))
-                dst_kv_caches[layer_name][1].index_put_((dst_slot_mapping,), value_cache.index_select(0, src_slot_mapping).to(target_device))
-        i = i+1
+            src_slot_mapping, dst_slot_mapping = _make_src_and_dst_indices(
+                block_size=block_size,
+                src_block_ids=src_block_ids,
+                dst_block_ids=dst_block_ids,
+                src_device=src_device,
+                dst_device=dst_device)
 
-        #dst_kv_caches[layer_name][0][dst_slot_mapping] = key_cache[src_slot_mapping].to(target_device)
-        #dst_kv_caches[layer_name][1][dst_slot_mapping] = value_cache[src_slot_mapping].to(target_device)
-    #if use_hpu_buffer:
-        #tmp = hpu_buffer.to('cpu')
-        #dst_kv_caches = hpu_buffer.to('cpu')
+            dst_kv_caches[layer_name][0].index_put_((dst_slot_mapping,), key_cache.index_select(0, src_slot_mapping).to(target_device))
+            dst_kv_caches[layer_name][1].index_put_((dst_slot_mapping,), value_cache.index_select(0, src_slot_mapping).to(target_device))
+
+        i = i+1
 
     torch.hpu.synchronize()
 
