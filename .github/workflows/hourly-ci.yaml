@@ -25,7 +25,7 @@ jobs:
         # and saves it as an output variable
         run: |
           echo "This workflow will run on: ${{ runner.name }}"
-          echo "name=${{ runner.name }}" >> $GITHUB_OUTPUT
+          echo "name=${{ runner.name }}" >> "$GITHUB_OUTPUT"
 
   # JOB 2: (UPDATED) Sets up the environment and builds the Docker image.
   setup_and_build:

@@ -119,7 +119,7 @@ jobs:
         id: get_name
         run: |
           echo "This workflow will run on: ${{ runner.name }}"
-          echo "name=${{ runner.name }}" >> $GITHUB_OUTPUT
+          echo "name=${{ runner.name }}" >> "$GITHUB_OUTPUT"
 
   discover_tests:
     # --- UPDATED: Add discover_runner dependency ---
