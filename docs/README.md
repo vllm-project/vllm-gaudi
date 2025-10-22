@@ -22,4 +22,4 @@ This plugin follows the [[RFC]: Hardware pluggable](https://github.com/vllm-proj
 Learn more:
 
 📚 [Intel Gaudi Documentation](https://docs.habana.ai/en/v1.21.1/index.html)  
-🚀 [vLLM Plugin System Overview](https://docs.vllm.ai/en/latest/design/plugin_system.html)
+🚀 [vLLM Plugin System Overview](design/plugin_system.md)

@@ -24,7 +24,7 @@ vLLM Gaudi plugin (vllm-gaudi) integrates Intel Gaudi accelerators with vLLM to 
 
 This plugin follows the [[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162) and [[RFC]: Enhancing vLLM Plugin Architecture](https://github.com/vllm-project/vllm/issues/19161) principles, providing a modular interface for Intel Gaudi hardware.
 
-Learn more: 🚀 [vLLM Plugin System Overview](https://docs.vllm.ai/en/latest/design/plugin_system.html)
+Learn more: 🚀 [vLLM Plugin System Overview](https://vllm-gaudi.readthedocs.io/en/latest/design/plugin_system.html)
 
 ## Getting Started
 0. Preparation of the Setup
