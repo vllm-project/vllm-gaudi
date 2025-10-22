@@ -126,6 +126,9 @@ class HpuPlatform(Platform):
 
             print(f"========={compilation_config.custom_ops=}===========")
 
+        # Disable multi-stream for shared experts as no Stream on CPU
+        os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "0"
+
     @classmethod
     def is_pin_memory_available(cls):
         logger.warning("Pin memory is not supported on HPU.")
