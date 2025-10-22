@@ -830,6 +830,50 @@ def _get_block_descs_ids(self,
 
 NixlConnectorWorker._get_block_descs_ids = _get_block_descs_ids
 
+def start_load_kv(self, metadata: NixlConnectorMetadata):
+    """
+    Start loading by triggering non-blocking nixl_xfer.
+    We check for these trnxs to complete in each step().
+    """
+    s1 = time.perf_counter()
+    #logger.info(f'libin debug start_load_kv, {os.getenv('RANK')}')
+    for req_id, meta in metadata.reqs_to_recv.items():
+        if req_id not in self.req_recv_time.keys():
+            self.req_recv_time[req_id] = time.perf_counter()
+            # logger.info(f"libin debug start_load_kv starts {os.getenv('RANK')} for {req_id=}")
+        remote_engine_id = meta.remote_engine_id
+        logger.debug(
+            "start_load_kv for request %s from remote engine %s. "
+            "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
+            remote_engine_id, len(meta.local_block_ids),
+            len(meta.remote_block_ids))
+        if self.is_hetero or self.use_host_buffer:
+            self._recving_metadata[req_id] = meta
+        if remote_engine_id not in self._remote_agents:
+            # Initiate handshake with remote engine to exchange metadata.
+            with self._handshake_lock:
+                if remote_engine_id not in self._remote_agents:
+                    s2 = time.perf_counter()
+                    # logger.info(f"libin debug start_load_kv  {os.getenv('RANK')}, start handleshake before {s2 - s1} {req_id=}")
+                    self._background_nixl_handshake(
+                        req_id, remote_engine_id, meta)
+                    continue
+        s3 = time.perf_counter()
+        #logger.info(f'libin debug _read_blocks_for_req start {os.getenv('RANK')}, {req_id=} handshake time {s3-self.req_recv_time[req_id]}')
+        # Handshake already completed, start async read xfer.
+        self._read_blocks_for_req(req_id, meta)
+        #logger.info(f'libin debug _read_blocks_for_req end {os.getenv('RANK')}, {req_id=} async transfer {time.perf_counter() - s3}')
+    # Start transfers for requests whose handshakes have now finished.
+    while not self._ready_requests.empty():
+        s4 = time.perf_counter()
+        #logger.info(f'libin debug _read_blocks_for_req1 start {os.getenv('RANK')}')
+        self._read_blocks_for_req(*self._ready_requests.get_nowait())
+        #logger.info(f'libin debug _read_blocks_for_req1 end {os.getenv('RANK')} async transfer: {time.perf_counter() - s4}')
+    # Add to requests that are waiting to be read and track expiration.
+    self._reqs_to_send.update(metadata.reqs_to_send)
+
+NixlConnectorWorker.start_load_kv = start_load_kv
+
 def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
     """Register the KV Cache data in nixl."""
     _, first_kv_cache = next(iter(kv_caches.items()))
