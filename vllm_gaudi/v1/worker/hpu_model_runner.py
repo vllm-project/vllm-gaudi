@@ -25,6 +25,7 @@ from vllm_gaudi.extension.runtime import finalize_config, get_config
 from vllm_gaudi.extension.unified import (create_unified_batch)
 from vllm_gaudi.extension.utils import align_and_pad, pad_list, with_default
 from vllm_gaudi.extension.debug import init_debug_logger
+from vllm_gaudi.v1.worker.hpu_dp_utils import set_hpu_dp_metadata
 
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
@@ -535,14 +536,17 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         if model_mm_kwargs is not None:
             kwargs.update(model_mm_kwargs)
 
+        num_real_tokens = input_ids.size(0) * input_ids.size(1)
+
         if self.flatten_input:
             kwargs['input_ids'] = input_ids.view(-1)
         # here num_tokens and num_tokens_across_dp are dummy values which are
-        # used to skip sync between DP ranks
+        # used to skip sync in forward_context between DP ranks
         with set_forward_context(attn_meta,
                                  self.vllm_config,
                                  num_tokens=self.dummy_num_input_tokens,
-                                 num_tokens_across_dp=self.dummy_num_tokens_across_dp_cpu):
+                                 num_tokens_across_dp=self.dummy_num_tokens_across_dp_cpu), set_hpu_dp_metadata(
+                                     self.vllm_config, num_real_tokens):
             hidden_states = self.model(*args, **kwargs)
             if self._rotary_prepare_cos_sin is not None:
                 self._reset_rotary_cos_sin()
