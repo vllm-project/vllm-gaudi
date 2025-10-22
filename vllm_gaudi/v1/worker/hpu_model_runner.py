@@ -45,7 +45,8 @@ from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingType
 from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv, is_pin_memory_available)
+from vllm.utils import (LayerBlockType, cdiv, is_pin_memory_available)
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_map_leaves
 from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy)
@@ -4117,6 +4118,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         if not self.unified_attn and max_bucket > self.input_batch.max_num_reqs:
             self.input_batch = input_batch_bkp
+        # NOTE(kzawora): This is a nasty workaround - for whatever cache_utils-related reason,
+        # reusing defragmenter used in warmup causes accuracy drops, which is why we re-create
+        # and re-initialize it.
+        self.defragmenter = OnlineDefragmenter()
+        self.defragmenter.initialize(self.kv_caches, self.block_size)
 
     def shutdown_inc(self):
         can_finalize_inc = self._is_quant_with_inc() and \
