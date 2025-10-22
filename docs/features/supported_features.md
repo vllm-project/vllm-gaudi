@@ -1,7 +1,6 @@
 ---
 title: Supported Features
 ---
-[](){ #supported-features }
 
 ## Supported Features
 
