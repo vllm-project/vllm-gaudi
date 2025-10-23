@@ -8,7 +8,7 @@ import os
 import time
 from dataclasses import dataclass, field, fields
 from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, Literal, cast)
-
+from vllm_gaudi import envs
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
 import numpy as np
@@ -93,8 +93,8 @@ logger = init_logger()
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
-hpu_buffer: list[list[torch.Tensor]] = []
-
+is_hetero = os.getenv('PT_HPU_ENABLE_RESTORE_KV_LAYOUT', '0') == '1'
+block_factor = int(os.getenv('PT_HPU_BLOCK_SIZE_FACTOR', '1'))
 
 class BucketingFailedException(Exception):
     pass
@@ -582,6 +582,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.enable_bucketing = False if self.profiling_run else \
                                 self.enable_bucketing
         self.use_contiguous_pa = get_config().use_contiguous_pa
+        self.do_mark_step = envs.VLLM_HPU_FORCE_MARK_STEP
         self.skip_warmup = get_config().skip_warmup
 
         model_config = self.model_config
@@ -624,7 +625,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.head_size = self.model_config.get_head_size()
         self.hidden_size = self.model_config.get_hidden_size()
         self.is_pooling_model = model_config.pooler_config is not None
-        logger.debug("model config: ", self.model_config)
+        logger.debug(f"model config: {self.model_config=}")
 
         self.attn_backend = get_attn_backend(
             self.head_size,
@@ -2869,7 +2870,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         inputs_embeds=inputs_embeds,
                         model_mm_kwargs=model_mm_kwargs,
                         warmup_mode=warmup_mode,)
-                htorch.core.mark_step()
+                if self.do_mark_step:
+                    htorch.core.mark_step()
                 non_flattened_hidden_states_prefills.append(non_flattened_hidden_states)
                 if self.use_aux_hidden_state_outputs:
                     aux_hidden_states_prefills.append(aux_hidden_states)
@@ -3204,9 +3206,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         hidden_layer_markstep_interval = int(os.getenv('VLLM_CONFIG_HIDDEN_LAYERS', '1'))
         model_config = getattr(self.model, "config", None)
-        modify_model_layers(self.model,
-                            get_target_layer_suffix_list(model_config.model_type if model_config is not None else None),
-                            hidden_layer_markstep_interval)
+        if self.do_mark_step:
+            modify_model_layers(
+                self.model,
+                get_target_layer_suffix_list(
+                    model_config.model_type if model_config is not None else None),
+                hidden_layer_markstep_interval)
         torch.hpu.synchronize()
 
         if not self.is_pooling_model:
@@ -4015,8 +4020,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
-            get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
-            global hpu_buffer
+            if get_kv_transfer_group().connector_worker.kv_buffer_device == "cpu":
+                get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
         htorch.hpu.synchronize()
 
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
@@ -4306,6 +4311,7 @@ def copy_kv_blocks(
     direction: Literal["h2d", "d2h"],
     block_size: int = 128,
 ) -> None:
+
     """Copy kv blocks between different buffers."""
     if not src_kv_caches or not dst_kv_caches or \
        not src_block_ids or not dst_block_ids or \
@@ -4315,38 +4321,44 @@ def copy_kv_blocks(
     src_device = next(iter(src_kv_caches.values()))[0].device
     dst_device = next(iter(dst_kv_caches.values()))[0].device
 
-    src_slot_mapping, dst_slot_mapping = _make_src_and_dst_indices(block_size=block_size,
-                                                                   src_block_ids=src_block_ids,
-                                                                   dst_block_ids=dst_block_ids,
-                                                                   src_device=src_device,
-                                                                   dst_device=dst_device)
-
     start = time.perf_counter()
     target_device = dst_device.type
 
     i = 0
-    global hpu_buffer
-    use_hpu_buffer = False
+    global is_hetero, block_factor
     for layer_name in src_kv_caches:
         key_cache = src_kv_caches[layer_name][0]
         value_cache = src_kv_caches[layer_name][1]
 
-        if direction == "d2h" and use_hpu_buffer:
-            hpu_buffer[i][0] = key_cache.index_select(0, src_slot_mapping)
-            hpu_buffer[i][1] = value_cache.index_select(0, src_slot_mapping)
+        if is_hetero:
+            assert direction == "h2d", "hetero only supports h2d for now"
+            n_kv_heads, head_dim = key_cache.shape[-2:]
+            remote_block_size = block_size//block_factor
+            # block_factor, n_kv_heads, remote_block_size, head_dim = 8, 8, 16, 128
+            if len(src_block_ids) == src_block_ids[-1]-src_block_ids[0] + 1: # simple check if the indices are contiguous
+                block_idx = src_block_ids[0]
+                num_blocks = len(src_block_ids)
+                dst_kv_caches[layer_name][0][block_idx*block_size: (num_blocks+block_idx)*block_size] = key_cache[block_idx*block_size: (num_blocks+block_idx)*block_size].reshape(num_blocks*block_factor, n_kv_heads, remote_block_size, head_dim).permute(0,2,1,3).contiguous().reshape(num_blocks*block_size,n_kv_heads,head_dim)
+                dst_kv_caches[layer_name][1][block_idx*block_size: (num_blocks+block_idx)*block_size] = value_cache[block_idx*block_size: (num_blocks+block_idx)*block_size].reshape(num_blocks*block_factor, n_kv_heads, remote_block_size, head_dim).permute(0,2,1,3).contiguous().reshape(num_blocks*block_size,n_kv_heads,head_dim)
+                continue
+            for block_idx in src_block_ids:
+                #print('buke addr before:', dst_kv_caches[layer_name][0][block_idx*block_size: (1+block_idx)*block_size].data_ptr())
+                dst_kv_caches[layer_name][0][block_idx*block_size: (1+block_idx)*block_size] = key_cache[block_idx*block_size: (1+block_idx)*block_size].reshape(block_factor, n_kv_heads, remote_block_size, head_dim).permute(0,2,1,3).contiguous().reshape(block_size,n_kv_heads,head_dim).to("hpu")
+                dst_kv_caches[layer_name][1][block_idx*block_size: (1+block_idx)*block_size] = value_cache[block_idx*block_size: (1+block_idx)*block_size].reshape(block_factor, n_kv_heads, remote_block_size, head_dim).permute(0,2,1,3).contiguous().reshape(block_size,n_kv_heads,head_dim).to("hpu")
+                #print('buke addr after:', dst_kv_caches[layer_name][0][block_idx*block_size: (1+block_idx)*block_size].data_ptr())
         else:
-            #import remote_pdb;remote_pdb.set_trace()
-            dst_kv_caches[layer_name][0].index_put_((dst_slot_mapping, ),
-                                                    key_cache.index_select(0, src_slot_mapping).to(target_device))
-            dst_kv_caches[layer_name][1].index_put_((dst_slot_mapping, ),
-                                                    value_cache.index_select(0, src_slot_mapping).to(target_device))
+            src_slot_mapping, dst_slot_mapping = _make_src_and_dst_indices(
+                block_size=block_size,
+                src_block_ids=src_block_ids,
+                dst_block_ids=dst_block_ids,
+                src_device=src_device,
+                dst_device=dst_device)
 
-        i = i + 1
+            dst_kv_caches[layer_name][0].index_put_((dst_slot_mapping,), key_cache.index_select(0, src_slot_mapping).to(target_device))
+            dst_kv_caches[layer_name][1].index_put_((dst_slot_mapping,), value_cache.index_select(0, src_slot_mapping).to(target_device))
+
+        i = i+1
 
     torch.hpu.synchronize()
 
-    logger.debug("copy_kv_blocks: copy takes %s"
-                 "|direction=%s|pid=%s|block_size=%s"
-                 "|src_blocks=%s|dst_blocks=%s",
-                 time.perf_counter() - start, direction, os.getpid(), block_size, len(src_block_ids),
-                 len(dst_block_ids))
+    logger.info(f"copy_kv_blocks: copy takes {time.perf_counter() - start}|{direction=}|{os.getpid()=}|{block_size=}|{len(src_block_ids)=}|{len(dst_block_ids)=}| {len(src_kv_caches)=} | ")

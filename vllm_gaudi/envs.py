@@ -7,6 +7,7 @@ if TYPE_CHECKING:
     VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
     VLLM_HPU_USE_DELAYED_SAMPLING: bool = False
     VLLM_HPU_FORCE_CHANNEL_FP8: bool = True
+    VLLM_HPU_FORCE_MARK_STEP: bool = True
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -25,6 +26,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Convert block fp8 to channel fp8 for HPU
     "VLLM_HPU_FORCE_CHANNEL_FP8": lambda: os.environ.get("VLLM_HPU_FORCE_CHANNEL_FP8", "true").lower() in ("1", "true"),
+
+    # Do mark_step for HPU to split hpu graph or prevent fused kernel
+    "VLLM_HPU_FORCE_MARK_STEP": lambda: os.environ.get("VLLM_HPU_FORCE_MARK_STEP", "true").lower() in ("1", "true"),
 }
 
 # end-env-vars-definition
