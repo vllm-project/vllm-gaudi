@@ -302,7 +302,6 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
             return filters_map[phase][use_merged_prefill]
         else:
             return filters_map[phase][use_contiguous_pa]
-        return []
 
     buckets = set()
     buckets_2d = set()
