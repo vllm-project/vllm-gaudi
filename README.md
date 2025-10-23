@@ -54,7 +54,7 @@ We are delivering ready-to-run container images that include both vLLM and Gaudi
     git clone https://github.com/vllm-project/vllm
     cd vllm
     git checkout $VLLM_COMMIT_HASH
-    pip install -r <(sed '/^[torch]/d' requirements/build.txt)
+    pip install -r <(sed '/^torch/d' requirements/build.txt)
     VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
     cd ..
     ```
