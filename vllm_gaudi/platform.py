@@ -126,6 +126,9 @@ class HpuPlatform(Platform):
 
             print(f"========={compilation_config.custom_ops=}===========")
 
+        # Disable multi-stream for shared experts as no Stream on CPU
+        os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "0"
+
     @classmethod
     def is_pin_memory_available(cls):
         logger.warning("Pin memory is not supported on HPU.")
@@ -217,6 +220,8 @@ class HpuPlatform(Platform):
         """Copy blocks from src_cache to dst_cache on HPU."""
         if isinstance(dst_cache, tuple):
             _src_cache = src_cache[:, src_block_indices]
+            if _src_cache.shape[2:] != dst_cache.shape[2:]:  # type: ignore[attr-defined]
+                _src_cache = _src_cache.permute(0, 1, 3, 2, 4)
             for i in range(len(dst_cache)):
                 dst_cache[i].index_copy_(0, dst_block_indices, _src_cache[i].to(dst_cache[i].device))
         else:
@@ -234,6 +239,9 @@ class HpuPlatform(Platform):
         """Copy blocks from HPU to host (CPU)."""
         if isinstance(src_cache, tuple):
             _src_cache = torch.stack([c[src_block_indices] for c in src_cache], dim=0)
+            # permute back to original shape
+            if _src_cache.shape[2:] != dst_cache.shape[2:]:  # type: ignore[attr-defined]
+                _src_cache = _src_cache.permute(0, 1, 3, 2, 4)
             dst_cache[:, dst_block_indices] = _src_cache.cpu()
         else:
             dst_cache[dst_block_indices] = src_cache[src_block_indices].cpu()

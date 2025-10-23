@@ -494,6 +494,11 @@ def create_unified_batch(req_ids: list[str],
                           first_dim(logits_indices))
     target_qlen, target_shared_blocks, target_unique_blocks, target_logits = bucket
 
+    target_qlen += get_dp_padding_fn(target_qlen)
+    target_shared_blocks += get_dp_padding_fn(target_shared_blocks)
+    target_unique_blocks += get_dp_padding_fn(target_unique_blocks)
+    target_logits += get_dp_padding_fn(target_logits)
+
     default_causal_width = 512
     fmin = torch.finfo(dtype).min
     feps = torch.finfo(dtype).tiny
