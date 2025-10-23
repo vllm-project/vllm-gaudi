@@ -181,7 +181,6 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
     block_bias = block_bias.view(key.size(0), 1, 1, -1)
     sink = None
     if sinks is not None:
-        # sink = sinks.reshape(1, -1, 1, 1).expand(query.shape[0], -1, query.shape[-2], -1)
         sinks = sinks.reshape(sinks.shape[0], 1)
         sink = sinks.reshape(1, sinks.shape[0], 1, sinks.shape[1])
         sink = sink.expand(query.shape[0], -1, query.shape[-2], -1)
@@ -353,10 +352,10 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
         # TODO: causal + attn_bias is not yet supported
         is_causal = False
         valid_seq_lengths = None
+    # TODO - remove this once fsdpa op support fast mode for sliding window
     if window_size is not None:
         #causal window sdpa kernel only supports softmax None
         softmax_mode = 'None'
-        # padding_side ='left'
     args = [query, key, value, attn_bias, 0.0, is_causal,
                                 scale, softmax_mode, recompute_mode,
                                 valid_seq_lengths, padding_side]
@@ -367,7 +366,9 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
 
     attn_weights = fsdpa_op(*args)
     attn_weights = attn_weights.transpose(1, 2)
-    htcore.mark_step()
+    if sinks is not None:
+        # TODO - check if we can remove this
+        htcore.mark_step()
     return attn_weights
 
 
