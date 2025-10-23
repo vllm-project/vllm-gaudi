@@ -4433,14 +4433,14 @@ def copy_kv_blocks(
     for layer_name in src_kv_caches:
         key_cache = src_kv_caches[layer_name][0]
         value_cache = src_kv_caches[layer_name][1]
+        assert value_cache is not None, ("Copy kv blocks doesn't support MLA for now.")
         if direction == "d2h":
             # NOTE(chendi): in order to keep host_buffer shape[0] same as tpu and gpu case
             # so we need to flatten the dst_kv_caches
             dst_kv_caches[layer_name] = dst_kv_caches[layer_name].flatten(1, 2)
         else:
             key_cache = key_cache.flatten(0, 1)
-            if value_cache is not None:
-                value_cache = value_cache.flatten(0, 1)
+            value_cache = value_cache.flatten(0, 1)
 
         dst_kv_caches[layer_name][0].index_put_((dst_slot_mapping, ),
                                                 key_cache.index_select(0, src_slot_mapping).to(target_device))
