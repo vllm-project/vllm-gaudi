@@ -51,7 +51,7 @@ RUN \
     git fetch upstream --tags || true && \
     git checkout ${VLLM_PROJECT_COMMIT} && \
     # Install vllm-project/vllm
-    bash -c "pip install -r <(sed '/^[torch]/d' requirements/build.txt)" && \
+    bash -c "pip install -r <(sed '/^torch/d' requirements/build.txt)" && \
     VLLM_TARGET_DEVICE=empty pip install --no-build-isolation . && \
     # Install vllm-gaudi plugin
     cd $VLLM_PATH2 && \

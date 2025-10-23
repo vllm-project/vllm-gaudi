@@ -48,7 +48,8 @@ Learn more: 🚀 [vLLM Plugin System Overview](https://docs.vllm.ai/en/latest/de
     # Build vLLM from source for empty platform, reusing existing torch installation
     git clone https://github.com/vllm-project/vllm
     cd vllm
-    pip install -r <(sed '/^[torch]/d' requirements/build.txt)
+    git checkout $VLLM_COMMIT_HASH
+    pip install -r <(sed '/^torch/d' requirements/build.txt)
     VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
     cd ..
     ```

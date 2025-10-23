@@ -87,7 +87,7 @@ Use the following commands to run a Docker image. Make sure to update the versio
     git clone https://github.com/vllm-project/vllm
     cd vllm
     git checkout $VLLM_COMMIT_HASH
-    pip install -r <(sed '/^[torch]/d' requirements/build.txt)
+    pip install -r <(sed '/^torch/d' requirements/build.txt)
     VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
     cd ..
     ```
@@ -135,7 +135,7 @@ Use the following commands to run a Docker image. Make sure to update the versio
     git clone https://github.com/vllm-project/vllm
     cd vllm
     git checkout $VLLM_COMMIT_HASH
-    pip install -r <(sed '/^[torch]/d' requirements/build.txt)
+    pip install -r <(sed '/^torch/d' requirements/build.txt)
     VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
     cd ..
     
