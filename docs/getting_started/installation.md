@@ -76,6 +76,7 @@ Use the following commands to run a Docker image. Make sure to update the versio
     git clone https://github.com/vllm-project/vllm-gaudi
     cd vllm-gaudi
     export VLLM_COMMIT_HASH=$(git show "origin/vllm/last-good-commit-for-vllm-gaudi:VLLM_STABLE_COMMIT" 2>/dev/null)
+    cd ..
     ```
 
 === "Step 2: Install vLLM"
