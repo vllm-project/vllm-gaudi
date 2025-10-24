@@ -46,7 +46,8 @@ from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingType
 from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
-from vllm.utils import (LayerBlockType, cdiv, is_pin_memory_available)
+from vllm.utils import (LayerBlockType, cdiv)
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_map_leaves
@@ -825,7 +826,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             else:
                 raise ValueError("Unknown speculative decoding method: "
                                  f"{self.speculative_config.method}")
-            self.rejection_sampler = RejectionSampler()
+            self.rejection_sampler = RejectionSampler(self.sampler)
+
         # Keep in int64 to avoid overflow with long context
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.arange_np = np.arange(max(self.max_num_reqs + 1, self.max_model_len, self.max_num_tokens), dtype=np.int64)
@@ -2086,7 +2088,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                     device=self.device) if self.interleaved_sliding_window else None
 
         token_ids_device = async_h2d_copy(token_ids, device=self.device)
-        if self.use_async_scheduling:
+        # when DP also enabled, some DP ranks will exeucte dummy run with empty
+        # SchedulerOutput, in this case we need skip the prepare_input_ids
+        if self.use_async_scheduling and scheduler_output is not None:
             self._prepare_input_ids(scheduler_output)
             if num_tokens == 1:
                 token_ids_device[:num_decodes] = self.input_ids_hpu[:num_decodes].view(-1, 1)
@@ -2216,6 +2220,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
             # TODO: Optimize the CPU -> GPU copy.
             cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).to(self.device, non_blocking=True)
+            cu_num_sampled_tokens = torch.from_numpy(cu_num_sampled_tokens).to(self.device, non_blocking=True)
 
             ##################################################
             logits_indices = torch.from_numpy(logits_indices)
@@ -2231,6 +2236,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 draft_token_ids=draft_token_ids,
                 num_draft_tokens=num_draft_tokens.tolist(),
                 cu_num_draft_tokens=cu_num_draft_tokens,
+                cu_num_sampled_tokens=cu_num_sampled_tokens,
                 target_logits_indices=target_logits_indices_device,
                 bonus_logits_indices=bonus_logits_indices_device,
                 logits_indices=logits_indices,
@@ -3173,20 +3179,16 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         decode_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
                     else:
                         # Handling spec decode sampling.
-                        bonus_token_ids = \
-                            sampler_output.sampled_token_ids.squeeze()
-                        target_logits = logits_device[spec_decode_metadata.target_logits_indices]
-
-                        output_token_ids = self.rejection_sampler(
+                        sampler_output = self.rejection_sampler(
                             spec_decode_metadata,
                             None,  # draft_probs
-                            target_logits,
-                            bonus_token_ids,
+                            logits_device,
                             sampling_metadata,
                         )
+                        sampled_token_ids = sampler_output.sampled_token_ids
                         decode_sampled_token_ids = \
                             self.rejection_sampler.parse_output(
-                                output_token_ids,
+                                sampled_token_ids,
                                 self.input_batch.vocab_size,
                         )
                         # convert decode_sampled_token_ids as list of tensor
@@ -3195,7 +3197,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                             torch.tensor(v, device="cpu").int() for v in decode_sampled_token_ids
                         ]
                         decode_sampled_token_ids_device = \
-                            output_token_ids.to("hpu", non_blocking=True)
+                            sampled_token_ids.to("hpu", non_blocking=True)
                     decode_sampled_requests.extend(self.input_batch.req_ids[:num_decodes])
                     ##### Sampling End #####
 
@@ -3366,7 +3368,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 logprobs=logprobs,
                 prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
                 pooler_output=[],
-            )
+                kv_connector_output=KVConnectorOutput(
+                    finished_sending=finished_sending,
+                    finished_recving=finished_recving,
+                ))
             return AsyncHPUModelRunnerOutput(
                 model_runner_output=model_runner_output,
                 sampled_token_ids=sampled_token_ids,
