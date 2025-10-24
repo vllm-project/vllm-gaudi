@@ -1426,7 +1426,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             data = [list(itertools.chain(*data))]
         data = [pad_list(x, target_len, padding_gen) for x in data]
         padding_row = list(itertools.islice(padding_gen, target_len)) 
-        data = pad_list(data, target_bs, itertools.repeat(padding_row)
+        data = pad_list(data, target_bs, itertools.repeat(padding_row))
         return data
 
     def _align_and_pad_mrope_positions(self, req_ids: list[str], context_lens: list[int], query_lens: list[int],
