@@ -414,6 +414,7 @@ def create_unified_batch(req_ids: list[str],
                          block_size: int,
                          dtype: torch.dtype,
                          bucketing_fn: Callable[[bool, int, int, int, int], tuple[int, int, int, int]],
+                         get_dp_padding_fn: Callable[[int], int],
                          input_ids_hpu: Optional[torch.tensor] = None,
                          num_decodes: Optional[int] = 0) -> UnifiedBatch:
     """ Calculate all necessary tensors needed for batch scheduling """

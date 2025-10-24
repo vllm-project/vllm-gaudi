@@ -46,7 +46,8 @@ from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingType
 from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
-from vllm.utils import (LayerBlockType, cdiv, is_pin_memory_available)
+from vllm.utils import (LayerBlockType, cdiv)
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_map_leaves
@@ -1420,6 +1421,29 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         return bool(req_id in self.input_batch.req_type and \
             self.input_batch.req_type[req_id] == "decode")
 
+    def _get_num_decodes(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> int:
+        num_reqs = self.input_batch.num_reqs
+        assert num_reqs > 0
+        #TODO: remove later
+
+        num_decodes = 0
+        for i in range(num_reqs):
+            req_id = self.input_batch.req_ids[i]
+            assert req_id is not None
+
+            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
+            num_prompt_tokens = self.input_batch.num_prompt_tokens[i]
+
+            if num_computed_tokens < num_prompt_tokens and \
+                not self.is_decoder_only(req_id):
+                # This is prompt
+                continue
+            num_decodes += 1
+        return num_decodes
+
     def _get_prompts_and_decodes(
         self,
         scheduler_output: "SchedulerOutput",
@@ -2784,14 +2808,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         input_ids_hpu = None
         num_decodes = 0
         if self.use_async_scheduling:
-            pd_info = self._get_prompts_and_decodes(scheduler_output)
-            num_decodes = len(pd_info.decode_req_ids)
+            num_decodes = self._get_num_decodes(scheduler_output)
             self._prepare_input_ids(scheduler_output)
             input_ids_hpu = self.input_ids_hpu
 
         return create_unified_batch(self.input_batch.req_ids, all_token_ids, num_computed_tokens, num_scheduled_tokens,
                                     num_prompt_tokens, block_table, self.block_size, self.dtype,
-                                    self.unified_bucketing_fn, input_ids_hpu, num_decodes)
+                                    self.unified_bucketing_fn, self.get_dp_padding, input_ids_hpu, num_decodes)
 
     @torch.inference_mode()
     def unified_execute_model(
@@ -2804,7 +2827,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOuptut if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
-        ensure_decodes_first(self.input_batch)
         htorch.core.mark_step()
         batch = self.prepare_unified_batch(scheduler_output)
         htorch.core.mark_step()
