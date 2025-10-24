@@ -51,7 +51,7 @@ class CacheSwapUtils(torch.nn.Module):
         dsts = torch.tensor(dsts, dtype=torch.long, device='cpu').to('hpu', non_blocking=True)
         key_caches = [cache[0] for cache in self.kv_caches]
         self(srcs, dsts, key_caches)
-        if not is_mla:
+        if not self.is_mla:
             value_caches = [cache[1] for cache in self.kv_caches]
             self(srcs, dsts, value_caches)
 
