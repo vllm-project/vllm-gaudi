@@ -24,6 +24,7 @@ class CacheSwapUtils(torch.nn.Module):
         self.block_size = block_size
         self.kv_caches = tuple(kv_caches)
         self.block_slots = torch.arange(0, self.block_size, dtype=torch.long, device=kv_caches[0][0].device)
+        self.is_mla = all([cache[1] is None for cache in self.kv_caches])
 
     def forward(self, srcs: torch.tensor, dsts: torch.tensor, caches: list[torch.tensor]):
         """ Internal method wrapped in HPU/t.compile graphs"""
@@ -50,8 +51,9 @@ class CacheSwapUtils(torch.nn.Module):
         dsts = torch.tensor(dsts, dtype=torch.long, device='cpu').to('hpu', non_blocking=True)
         key_caches = [cache[0] for cache in self.kv_caches]
         self(srcs, dsts, key_caches)
-        value_caches = [cache[1] for cache in self.kv_caches]
-        self(srcs, dsts, value_caches)
+        if not self.is_mla:
+            value_caches = [cache[1] for cache in self.kv_caches]
+            self(srcs, dsts, value_caches)
 
 
 class OnlineDefragmenter:
