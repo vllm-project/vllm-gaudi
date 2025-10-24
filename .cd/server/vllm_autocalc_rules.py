@@ -155,10 +155,11 @@ def calc_MAX_NUM_SEQS(ctx):
         return max(1, ctx['MAX_NUM_SEQS'])
     # Otherwise, calculate
     val = (ctx['TENSOR_PARALLEL_SIZE'] * ctx['KV_CACHE_MEM'] / ctx['KV_CACHE_PER_SEQ'])
-    if ctx['DTYPE'] == 'fp8':
-        val = (max(1, math.floor(val / ctx['VLLM_DECODE_BS_BUCKET_STEP'])) * ctx['VLLM_DECODE_BS_BUCKET_STEP'])
+    # always round down for plugin as WA
+    if val < ctx['VLLM_DECODE_BS_BUCKET_STEP']:
+        val = pow(2, math.floor(math.log(val, 2)))
     else:
-        val = (math.ceil(val / ctx['VLLM_DECODE_BS_BUCKET_STEP']) * ctx['VLLM_DECODE_BS_BUCKET_STEP'])
+        val = max(1, math.floor(val / ctx['VLLM_DECODE_BS_BUCKET_STEP'])) * ctx['VLLM_DECODE_BS_BUCKET_STEP']
     # Special limit for Vision-Instruct models
     if ctx['MODEL'] in ['meta-llama/Llama-3.2-11B-Vision-Instruct', 'meta-llama/Llama-3.2-90B-Vision-Instruct'
                         ] and val > 128:

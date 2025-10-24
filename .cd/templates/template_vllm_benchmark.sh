@@ -25,7 +25,6 @@ vllm bench serve \
                 --model $MODEL \
                 --base-url http://localhost:8000 \
                 --endpoint $ENDPOINT \
-                --endpoint-type $BACKEND \
                 --backend $BACKEND \
                 --dataset-name $DATASET_NAME \
                 --dataset-path $DATASET\
