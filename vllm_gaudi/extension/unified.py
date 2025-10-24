@@ -202,10 +202,7 @@ def partial_attn_unique(query: torch.tensor, blocks: torch.tensor, block_mapping
 
     group_max = reduce_max(block_max, batch_size, block_mapping)
 
-    out_shape = list(block_max.shape)  # [num_blocks, kv_heads, 1, 1]
-
-    block_adjustment = torch.ops.hpu.block_softmax_adjustment(block_max, block_sum, block_mapping, batch_size,
-                                                              out_shape)
+    block_adjustment = torch.exp(block_max - group_max.index_select(0, block_mapping))
 
     block_sum = block_sum * block_adjustment
     group_sum = block2batch(block_sum, block_mapping_2d)
