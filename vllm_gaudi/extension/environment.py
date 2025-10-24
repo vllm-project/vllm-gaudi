@@ -4,9 +4,10 @@
 # This source code is licensed under the Apache 2.0 license found in the
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
+import os
 
 from .logger import logger
-from .config import Value, boolean, split_values_and_flags
+from .config import Value, boolean, split_values_and_flags, Any, Disabled, Enabled
 from .validation import choice, regex
 
 _VLLM_VALUES = {}
@@ -25,6 +26,31 @@ def _get_hw(_):
         return "cpu"
     logger().warning(f'Unknown device type: {device_type}')
     return None
+
+
+def _get_prefix(_):
+    if os.environ.get('VLLM_UNIFIED_ATTN'):
+        return True
+    conti_pa = os.environ.get('VLLM_CONTIGUOUS_PA')
+    if conti_pa is None:
+        return True
+    elif boolean(conti_pa) is True:
+        return False
+    return True
+
+
+def _get_vllm_hash(_):
+    import subprocess
+
+    try:
+        commit_hash = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('utf-8').strip()
+        try:
+            branch = subprocess.check_output(['git', 'rev-parse', '--abbrev-ref', 'HEAD']).decode('utf-8').strip()
+        except subprocess.CalledProcessError:
+            branch = "Error getting branch name"
+        return branch + "+" + commit_hash
+    except subprocess.CalledProcessError as e:
+        return "Error getting commit hash"
 
 
 def _get_build(_):
@@ -70,7 +96,9 @@ def _get_pt_bridge_mode(_):
     return 'lazy' if htorch.utils.internal.is_lazy() else 'eager'
 
 
-def VllmValue(name, env_var_type):
+def VllmValue(name, env_var_type, depend=None):
+    if depend is not None:
+        return Value(name, env_var_type=env_var_type, dependencies=depend)
     global _VLLM_VALUES
     return Value(name, lambda _: _VLLM_VALUES[name], env_var_type=env_var_type)
 
@@ -86,6 +114,7 @@ def get_environment():
         Value('engine_version', _get_vllm_engine_version, env_var_type=str),
         Value('bridge_mode', _get_pt_bridge_mode, env_var_type=str, check=choice('eager', 'lazy')),
         VllmValue('model_type', str),
-        VllmValue('prefix_caching', boolean),
+        VllmValue('prefix_caching', boolean, depend=_get_prefix),
+        Value('vllm_gaudi_commit', _get_vllm_hash, env_var_type=str)
     ]
     return split_values_and_flags(values)
