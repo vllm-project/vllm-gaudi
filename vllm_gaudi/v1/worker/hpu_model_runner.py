@@ -104,6 +104,7 @@ _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
 hpu_buffer: list[list[torch.Tensor]] = []
 
+
 class BucketingFailedException(Exception):
     pass
 
