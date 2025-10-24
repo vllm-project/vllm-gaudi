@@ -1421,10 +1421,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         return bool(req_id in self.input_batch.req_type and \
             self.input_batch.req_type[req_id] == "decode")
 
-    def _get_num_decodes(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> int:
+    def _get_num_decodes(self) -> int:
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
         #TODO: remove later
@@ -2808,7 +2805,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         input_ids_hpu = None
         num_decodes = 0
         if self.use_async_scheduling:
-            num_decodes = self._get_num_decodes(scheduler_output)
+            num_decodes = self._get_num_decodes()
             self._prepare_input_ids(scheduler_output)
             input_ids_hpu = self.input_ids_hpu
 
