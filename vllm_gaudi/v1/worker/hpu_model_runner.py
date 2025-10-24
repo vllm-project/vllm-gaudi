@@ -2,6 +2,7 @@
 import collections
 import contextlib
 import functools
+from functools import partial
 import itertools
 import math
 import os
@@ -25,6 +26,7 @@ from vllm_gaudi.extension.runtime import finalize_config, get_config
 from vllm_gaudi.extension.unified import (create_unified_batch)
 from vllm_gaudi.extension.utils import align_and_pad, pad_list, with_default
 from vllm_gaudi.extension.debug import init_debug_logger
+from vllm_gaudi.v1.worker.hpu_dp_utils import set_hpu_dp_metadata
 
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
@@ -535,14 +537,17 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         if model_mm_kwargs is not None:
             kwargs.update(model_mm_kwargs)
 
+        num_real_tokens = input_ids.size(0) * input_ids.size(1)
+
         if self.flatten_input:
             kwargs['input_ids'] = input_ids.view(-1)
         # here num_tokens and num_tokens_across_dp are dummy values which are
-        # used to skip sync between DP ranks
+        # used to skip sync in forward_context between DP ranks
         with set_forward_context(attn_meta,
                                  self.vllm_config,
                                  num_tokens=self.dummy_num_input_tokens,
-                                 num_tokens_across_dp=self.dummy_num_tokens_across_dp_cpu):
+                                 num_tokens_across_dp=self.dummy_num_tokens_across_dp_cpu), set_hpu_dp_metadata(
+                                     self.vllm_config, num_real_tokens):
             hidden_states = self.model(*args, **kwargs)
             if self._rotary_prepare_cos_sin is not None:
                 self._reset_rotary_cos_sin()
@@ -651,6 +656,22 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
 
 def round_up(value: int, k: int):
     return (value + k - 1) // k * k
+
+
+def get_dp_padding(num_tokens: int, dp_size: int, dp_rank: int) -> int:
+    if dp_size == 1:
+        return 0
+
+    device = current_platform.device_type
+    group = get_dp_group().device_group
+
+    num_tokens_across_dp = [0] * dp_size
+    num_tokens_across_dp[dp_rank] = num_tokens
+    num_tokens_tensor = torch.tensor(num_tokens_across_dp, device=device, dtype=torch.int32)
+    torch.distributed.all_reduce(num_tokens_tensor, group=group)
+
+    max_tokens_across_dp_cpu = torch.max(num_tokens_tensor).item()
+    return max_tokens_across_dp_cpu - num_tokens
 
 
 class HPUModelRunner(KVConnectorModelRunnerMixin):
@@ -855,6 +876,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         self.defragmenter = OnlineDefragmenter()
         self.debug_fwd = init_debug_logger('fwd')
+
+        self.get_dp_padding = partial(get_dp_padding,
+                                      dp_size=self.parallel_config.data_parallel_size,
+                                      dp_rank=self.parallel_config.data_parallel_rank)
 
         assert not (self.unified_attn and not self.use_contiguous_pa), 'Unified attn requires contiguous_pa!'
         assert not (self.unified_attn and not self.use_merged_prefill), 'Unified attn requires merged_prefill!'
@@ -1803,6 +1828,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             dtype=self.dtype,
             contiguous_kv=self.use_contiguous_pa,
             bucketing_fn=self.unified_bucketing_fn,
+            get_dp_padding_fn=self.get_dp_padding,
         )
 
         (token_ids_t, token_positions_t, logits_indices_t, logits_groups, attn_metadata) = batch_data
@@ -2213,6 +2239,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             dtype=self.dtype,
             contiguous_kv=self.use_contiguous_pa,
             bucketing_fn=self.unified_bucketing_fn,
+            get_dp_padding_fn=self.get_dp_padding,
         )
         (token_ids_t, token_positions_t, logits_indices_t, logits_groups, attn_metadata) = batch_data
         decode_input_data = DecodeInputData(
@@ -2360,24 +2387,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.seen_configs.add(cfg)
             if not seen and not warmup_mode:
                 logger.warning("Configuration: %s was not warmed-up!", cfg)
-
-    def get_dp_padding(self, num_tokens: int) -> int:
-        dp_size = self.vllm_config.parallel_config.data_parallel_size
-        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
-
-        if dp_size == 1:
-            return 0
-
-        device = current_platform.device_type
-        group = get_dp_group().device_group
-
-        num_tokens_across_dp = [0] * dp_size
-        num_tokens_across_dp[dp_rank] = num_tokens
-        num_tokens_tensor = torch.tensor(num_tokens_across_dp, device=device, dtype=torch.int32)
-        torch.distributed.all_reduce(num_tokens_tensor, group=group)
-
-        max_tokens_across_dp_cpu = torch.max(num_tokens_tensor.cpu()).item()
-        return max_tokens_across_dp_cpu - num_tokens
 
     def _check_unified_config(self, attn_metadata, logits_indices, warmup_mode):
         has_causal = 'c' if attn_metadata.causal_bias is not None else '-'
@@ -2772,9 +2781,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         block_table = self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs, :max_blocks].clone()
         if self.defragmenter.enabled:
             block_table.apply_(self.defragmenter.resolve)
+
         return create_unified_batch(self.input_batch.req_ids, all_token_ids, num_computed_tokens, num_scheduled_tokens,
                                     num_prompt_tokens, block_table, self.block_size, self.dtype,
-                                    self.unified_bucketing_fn)
+                                    self.unified_bucketing_fn, self.get_dp_padding)
 
     @torch.inference_mode()
     def unified_execute_model(
@@ -4114,6 +4124,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         if not self.unified_attn and max_bucket > self.input_batch.max_num_reqs:
             self.input_batch = input_batch_bkp
+        # NOTE(kzawora): This is a nasty workaround - for whatever cache_utils-related reason,
+        # reusing defragmenter used in warmup causes accuracy drops, which is why we re-create
+        # and re-initialize it.
+        self.defragmenter = OnlineDefragmenter()
+        self.defragmenter.initialize(self.kv_caches, self.block_size)
 
     def shutdown_inc(self):
         can_finalize_inc = self._is_quant_with_inc() and \
