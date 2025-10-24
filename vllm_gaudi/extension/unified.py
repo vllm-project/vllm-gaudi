@@ -417,8 +417,8 @@ def hpu_tensor(tensor: torch.tensor, shape: tuple, pad_value: Union[int, float])
 def create_unified_batch(req_ids: list[str], all_token_ids: torch.tensor, num_computed_tokens: torch.tensor,
                          num_scheduled_tokens: torch.tensor, num_prompt_tokens: torch.tensor, block_table: torch.tensor,
                          block_size: int, dtype: torch.dtype, bucketing_fn: Callable[[bool, int, int, int, int],
-                                                                                     tuple[int, int, int,
-                                                                                           int]]) -> UnifiedBatch:
+                                                                                     tuple[int, int, int, int]],
+                         get_dp_padding_fn: Callable[[int], int]) -> UnifiedBatch:
     """ Calculate all necessary tensors needed for batch scheduling """
     total_tokens = num_computed_tokens + num_scheduled_tokens
     query_len = num_scheduled_tokens.sum().item()
@@ -496,6 +496,11 @@ def create_unified_batch(req_ids: list[str], all_token_ids: torch.tensor, num_co
     bucket = bucketing_fn(contains_prompts, first_dim(token_ids), first_dim(shared_blocks), unique_blocks,
                           first_dim(logits_indices))
     target_qlen, target_shared_blocks, target_unique_blocks, target_logits = bucket
+
+    target_qlen += get_dp_padding_fn(target_qlen)
+    target_shared_blocks += get_dp_padding_fn(target_shared_blocks)
+    target_unique_blocks += get_dp_padding_fn(target_unique_blocks)
+    target_logits += get_dp_padding_fn(target_logits)
 
     default_causal_width = 512
     fmin = torch.finfo(dtype).min
