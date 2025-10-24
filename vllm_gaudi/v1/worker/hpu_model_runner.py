@@ -1425,8 +1425,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if target_bs == 1 and bs > 1:
             data = [list(itertools.chain(*data))]
         data = [pad_list(x, target_len, padding_gen) for x in data]
-        padding = itertools.islice(padding_gen, target_len)
-        data = pad_list(data, target_bs, itertools.repeat(padding))
+        padding_row = list(itertools.islice(padding_gen, target_len)) 
+        data = pad_list(data, target_bs, itertools.repeat(padding_row)
         return data
 
     def _align_and_pad_mrope_positions(self, req_ids: list[str], context_lens: list[int], query_lens: list[int],
@@ -2746,7 +2746,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         batch_changed = self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
-            if not has_kv_transfer_group():
+            if not has_kv_transfer_group() or warmup_mode == True:
                 # Return empty ModelRunnerOuptut if there's no work to do.
                 return EMPTY_MODEL_RUNNER_OUTPUT
             # For D case, wait until kv finish load here
@@ -2792,8 +2792,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         decode_sampled_requests = []
         #if not has_kv_transfer_group():
         #    assert not (num_prefills > 0 and num_decodes > 0)
-        with set_forward_context(None, self.vllm_config):
-            self.maybe_setup_kv_connector(scheduler_output)
+        if warmup_mode == False:
+            with set_forward_context(None, self.vllm_config):
+                self.maybe_setup_kv_connector(scheduler_output)
         finished_sending, finished_recving = set(), set()
 
         # NOTE(Chendi): used by spec decode draft model, since we are doing
@@ -2849,14 +2850,15 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 # If logits_indices is smaller than req_id,
                 # add the last token position
                 if logits_indices.shape[0] < len(req_id):
-                    if structured_output:
+                    if structured_output or self.use_async_scheduling:
                         logits_append = torch.tensor([torch.sum(prompt_len) - 1],
                                                      device=token_ids.device,
                                                      dtype=torch.int32)
                         logits_indices = torch.cat([logits_indices, logits_append])
-                    elif self.use_async_scheduling:
+                    if self.use_async_scheduling:
                         # Discard partial prefill logits for async scheduling
                         # Depends on 1 decode token/batch
+                        prefill_start_idx = num_decodes
                         invalid_req_indices.append(num_decodes + idx)
                 htorch.core.mark_step()
                 non_flattened_hidden_states, aux_hidden_states, \
@@ -2897,7 +2899,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                              prompt_batch_idx=idx,
                                                                              is_prompt=True)
                     self.profiler.record_counter(self.event_start, counters)
-            self.maybe_wait_for_kv_save()
+            if warmup_mode == False:
+                self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = (self.get_finished_kv_transfers(scheduler_output))
 
             if self.is_driver_worker and self.profiler.enabled:
@@ -3150,7 +3153,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             return AsyncHPUModelRunnerOutput(
                 model_runner_output=model_runner_output,
                 sampled_token_ids=sampled_token_ids,
-                invalid_req_indices=[],
+                invalid_req_indices=invalid_req_indices,
                 async_output_copy_stream=self.async_output_copy_stream,
             )
         model_runner_output = ModelRunnerOutput(
@@ -3906,6 +3909,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         if not self.unified_attn and max_bucket > self.input_batch.max_num_reqs:
             self.input_batch = input_batch_bkp
+        # NOTE(kzawora): This is a nasty workaround - for whatever cache_utils-related reason,
+        # reusing defragmenter used in warmup causes accuracy drops, which is why we re-create
+        # and re-initialize it.
+        self.defragmenter = OnlineDefragmenter()
+        self.defragmenter.initialize(self.kv_caches, self.block_size)
+
 
     def shutdown_inc(self):
         can_finalize_inc = self._is_quant_with_inc() and \
