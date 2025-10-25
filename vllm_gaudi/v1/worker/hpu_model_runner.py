@@ -346,11 +346,28 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         self.is_mm_optimized = is_mm_optimized(self.model)
         self.sliding_window = vllm_config.model_config.get_sliding_window()
         self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
+        if self.interleaved_sliding_window:
+            self.use_window_sdpa = os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
+            self.slice_size = int(os.getenv("PT_HPU_SDPA_BC_FACTOR", "1024"))
+            self.slice_thld = int(os.environ.get('VLLM_FUSEDSDPA_SLIDE_THLD', '8192'))
 
         # for DP
         self.dummy_num_input_tokens = -1
         self.num_tokens_across_dp = [self.dummy_num_input_tokens] * self.vllm_config.parallel_config.data_parallel_size
         self.dummy_num_tokens_across_dp_cpu = torch.tensor(self.num_tokens_across_dp, device='cpu', dtype=torch.int32)
+
+        # Vision embedding can be also wrapped in HPU graph once all the dynamic shape is removed.
+        # Performance can be greatly improved.
+        if htorch.utils.internal.is_lazy() and \
+           MULTIMODAL_REGISTRY.supports_multimodal_inputs(vllm_config.model_config) and self.is_mm_optimized:
+            if hasattr(self.model, 'vision_tower'):
+                self.model.vision_tower = htorch.hpu.wrap_in_hpu_graph(self.model.vision_tower,
+                                                                       disable_tensor_cache=False)
+            if hasattr(self.model, 'multi_modal_projector'):
+                self.model.multi_modal_projector = \
+                        htorch.hpu.wrap_in_hpu_graph( \
+                        self.model.multi_modal_projector, \
+                        disable_tensor_cache=True)
 
     def _get_rotary_embedding_module(self, model: torch.nn.Module):
         """
@@ -421,8 +438,14 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         prefill_metadata = attn_metadata
         shift = 0
 
-        if self.prefill_use_fusedsdpa and attn_metadata.block_list is not None:
+        # FusedSDPA with window_size is only supported when the seq_len is multiple of the slice_size
+        if self.prefill_use_fusedsdpa and self.use_window_sdpa and \
+            seq_len >= self.slice_thld and self.slice_size != 0 and \
+            seq_len % self.slice_size == 0 and attn_metadata.block_list is None:
+            # no need to set sliding window mask, just use built-in window-sdpa
+            return attn_metadata
 
+        if self.prefill_use_fusedsdpa and attn_metadata.block_list is not None:
             context_lens_t = prefill_metadata.context_lens_tensor
 
             block_list = attn_metadata.block_list
@@ -858,6 +881,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                               max_num_batched_tokens=self.max_num_batched_tokens,
                                               max_model_len=self.max_model_len)
             self.graphed_buckets: set[Any] = set()
+            self.graphed_multimodal_buckets: set[Any] = set()
         else:
             logger.info("Bucketing is OFF.")
         self._PAD_SLOT_ID = -1
@@ -1415,6 +1439,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         return mm_embeds, is_mm_embed
 
     def get_model(self) -> torch.nn.Module:
+        if isinstance(self.model, HpuModelAdapter):
+            return self.model.model
         assert self.model is not None
         return self.model
 
@@ -2991,7 +3017,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             logits_prompt = []
             logits_decode = []
             structured_output = True
-
         if self.use_async_scheduling:
             invalid_req_indices = []
         ######################### PREFILLS #########################
@@ -3006,10 +3031,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     # Run the multimodal encoder if any.
                     with self.profiler.record_event('internal', 'prepare_input_encoders'):
                         self._execute_mm_encoder(scheduler_output, req_id)
+                    htorch.core.mark_step()
 
                     mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output,
                                                                         req_id,
                                                                         total_num_scheduled_tokens=token_ids.shape[-1])
+                    htorch.core.mark_step()
+
                     # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa E501
                     # This may require moving multimodal input preps into _prepare_inputs,        # noqa E501
                     # to avoid padding issues.
@@ -3547,6 +3575,15 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                    f"free_mem:{free_mem}")
         logger.info(msg)
 
+    def log_warmup_multimodal(self, phase, i, max_i, batch_size, seq_len, img_args):
+        free_mem = format_bytes(HabanaMemoryProfiler.current_free_device_memory())
+        msg = (f"[Warmup][{phase}][{i+1}/{max_i}] "
+               f"batch_size:{batch_size} "
+               f"seq_len:{seq_len} "
+               f"img_args:{img_args} "
+               f"free_mem:{free_mem}")
+        logger.info(msg)
+
     def warmup_sampler(self):
         """
         Warmup the sampler with different temperature, top-p, and top-k values.
@@ -4028,6 +4065,70 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             decode_cfg = (decode_cfg[0], 1, decode_cfg[1])
         return prompt_cfg, decode_cfg
 
+    def _get_mm_dummy_batch(
+        self,
+        modality: str,
+        max_items_per_batch: int,
+    ) -> BatchedTensorInputs:
+        """Dummy data for profiling and precompiling multimodal models."""
+        assert self.mm_budget is not None
+
+        dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
+            model_config=self.model_config,
+            seq_len=self.max_model_len,
+            mm_counts={modality: 1},
+            cache=self.mm_budget.cache,
+        )
+        dummy_mm_data = dummy_decoder_data.multi_modal_data
+
+        # Result in the maximum GPU consumption of the model
+        dummy_mm_item = dummy_mm_data[modality][0]
+        dummy_mm_items = [dummy_mm_item] * max_items_per_batch
+
+        self.model.model = cast(SupportsMultiModal, self.model.model)
+        return next(mm_kwargs_group for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
+            dummy_mm_items,
+            device=self.device,
+            pin_memory=self.pin_memory,
+            merge_by_field_config=self.model.model.merge_by_field_config,
+        ))
+
+    def warmup_multimodal_graphs(self, buckets):
+
+        phase = 'Graph/Multimodal'
+        from vllm.v1.worker.utils import MultiModalBudget
+        self.mm_budget = MultiModalBudget(
+            self.model_config,
+            self.scheduler_config,
+            self.mm_registry,
+        ) if self.supports_mm_inputs else None
+
+        #self.mm_budget.mm_limits : {'image': 2}
+        for modality, max_items in self.mm_budget.mm_limits.items():
+            phase = f'Graph/Multimodal({modality})'
+            num_candidates = len(buckets)
+
+            for idx, img_arg in enumerate(buckets):
+                # Create dummy batch of multimodal inputs.
+                batched_dummy_mm_inputs = self._get_mm_dummy_batch(
+                    modality,
+                    img_arg,
+                )
+                #htorch.core.mark_step()
+                # Run multimodal encoder.
+                dummy_encoder_outputs = \
+                     self.model.get_multimodal_embeddings(
+                     **batched_dummy_mm_inputs)
+                #htorch.core.mark_step()
+
+                sanity_check_mm_encoder_outputs(
+                    dummy_encoder_outputs,
+                    expected_num_items=img_arg,
+                )
+
+                self.graphed_buckets.add(img_arg)
+                self.log_warmup_multimodal(phase, idx, num_candidates, 1, 0, img_arg)
+
     @torch.inference_mode()
     def warmup_model(self) -> None:
         if not self.enable_bucketing:
@@ -4038,6 +4139,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         else:
             self.bucketing_manager.generate_prompt_buckets()
             self.bucketing_manager.generate_decode_buckets()
+
+            if self.supports_mm_inputs:
+                # Delayed multimodal buckets during warmup until model is loaded.
+                from vllm_gaudi.extension.bucketing.vision import HPUVisionBucketManager
+                self.get_model().vision_bucket_manager = HPUVisionBucketManager(self.model_config.model)
+                msg = (f"Multimodal bucket : {self.get_model().vision_bucket_manager.multimodal_buckets}")
+                logger.info(msg)
 
             max_bucket = max(self.bucketing_manager.decode_buckets[-1][0], self.bucketing_manager.prompt_buckets[-1][0])
             if max_bucket > self.input_batch.max_num_reqs:
@@ -4080,6 +4188,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.profiler.start('internal', 'warmup')
         start_mem = HabanaMemoryProfiler.current_device_memory_usage()
         start_time = time.perf_counter()
+
+        # Most model's multimodal embedding has to be run without COMPILE ONLY mode.
+        if self.supports_mm_inputs:
+            self.warmup_multimodal_graphs(self.get_model().vision_bucket_manager.multimodal_buckets)
 
         compile_only_mode_context = functools.partial(bc.env_setting, "PT_COMPILE_ONLY_MODE", True)
         can_use_compile_only_mode = True
