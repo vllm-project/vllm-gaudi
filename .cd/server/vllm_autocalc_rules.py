@@ -16,6 +16,14 @@ def calc_PT_HPU_ENABLE_LAZY_COLLECTIVES(ctx):
     return ctx['TENSOR_PARALLEL_SIZE'] > 1
 
 
+def calc_VLLM_CONTIGUOUS_PA(ctx):
+    return not ctx['ENABLE_PREFIX_CACHING']
+
+
+def calc_VLLM_DEFRAG(ctx):
+    return bool(ctx['VLLM_CONTIGUOUS_PA'])
+
+
 def calc_MODEL_MEM_FROM_CONFIG(ctx):
     return float(ctx.get('MODEL_MEM_FROM_CONFIG'))
 
@@ -93,13 +101,15 @@ def calc_NUM_DECODE_GRAPHS(ctx):
 def calc_PROMPT_BS_RAMP_GRAPHS(ctx):
     return 1 + int(
         math.log(
-            min(ctx['MAX_NUM_PREFILL_SEQS'], ctx['VLLM_PROMPT_BS_BUCKET_STEP']) / ctx['VLLM_PROMPT_BS_BUCKET_MIN'], 2))
+            min(ctx['VLLM_PROMPT_BS_BUCKET_MAX'], ctx['VLLM_PROMPT_BS_BUCKET_STEP']) / ctx['VLLM_PROMPT_BS_BUCKET_MIN'],
+            2))
 
 
 def calc_PROMPT_BS_STEP_GRAPHS(ctx):
     return max(
         0,
-        int(1 + (ctx['MAX_NUM_PREFILL_SEQS'] - ctx['VLLM_PROMPT_BS_BUCKET_STEP']) / ctx['VLLM_PROMPT_BS_BUCKET_STEP']))
+        int(1 +
+            (ctx['VLLM_PROMPT_BS_BUCKET_MAX'] - ctx['VLLM_PROMPT_BS_BUCKET_STEP']) / ctx['VLLM_PROMPT_BS_BUCKET_STEP']))
 
 
 def calc_PROMPT_SEQ_RAMP_GRAPHS(ctx):
@@ -155,10 +165,11 @@ def calc_MAX_NUM_SEQS(ctx):
         return max(1, ctx['MAX_NUM_SEQS'])
     # Otherwise, calculate
     val = (ctx['TENSOR_PARALLEL_SIZE'] * ctx['KV_CACHE_MEM'] / ctx['KV_CACHE_PER_SEQ'])
-    if ctx['DTYPE'] == 'fp8':
-        val = (max(1, math.floor(val / ctx['VLLM_DECODE_BS_BUCKET_STEP'])) * ctx['VLLM_DECODE_BS_BUCKET_STEP'])
+    # always round down for plugin as WA
+    if val < ctx['VLLM_DECODE_BS_BUCKET_STEP']:
+        val = pow(2, math.floor(math.log(val, 2)))
     else:
-        val = (math.ceil(val / ctx['VLLM_DECODE_BS_BUCKET_STEP']) * ctx['VLLM_DECODE_BS_BUCKET_STEP'])
+        val = max(1, math.floor(val / ctx['VLLM_DECODE_BS_BUCKET_STEP'])) * ctx['VLLM_DECODE_BS_BUCKET_STEP']
     # Special limit for Vision-Instruct models
     if ctx['MODEL'] in ['meta-llama/Llama-3.2-11B-Vision-Instruct', 'meta-llama/Llama-3.2-90B-Vision-Instruct'
                         ] and val > 128:
@@ -184,6 +195,8 @@ PARAM_CALC_FUNCS = {
     "TENSOR_PARALLEL_SIZE": calc_TENSOR_PARALLEL_SIZE,
     "MAX_MODEL_LEN": calc_MAX_MODEL_LEN,
     "PT_HPU_ENABLE_LAZY_COLLECTIVES": calc_PT_HPU_ENABLE_LAZY_COLLECTIVES,
+    "VLLM_CONTIGUOUS_PA": calc_VLLM_CONTIGUOUS_PA,
+    "VLLM_DEFRAG": calc_VLLM_DEFRAG,
     "MODEL_MEM_FROM_CONFIG": calc_MODEL_MEM_FROM_CONFIG,
     "DEVICE_HPU_MEM": calc_DEVICE_HPU_MEM,
     "TOTAL_GPU_MEM": calc_TOTAL_GPU_MEM,
