@@ -34,10 +34,16 @@ def get_user_flags():
         Env('VLLM_DECODE_BLOCK_BUCKET_STEP', int),
         Env('VLLM_DECODE_BLOCK_BUCKET_MAX', int),
         Env('VLLM_DECODE_BLOCK_BUCKET_LIMIT', int),
+        Env('VLLM_BUCKETING_FROM_FILE', str),
 
         # Non-vllm flags that are also important to print
         Env('EXPERIMENTAL_WEIGHT_SHARING', str),
         Env('PT_HPU_WEIGHT_SHARING', str),
+
+        # Sliding window flags
+        Env('PT_HPU_SDPA_QKV_SLICE_MODE_FWD', boolean),
+        Env('PT_HPU_SDPA_BC_FACTOR', int),
+        Env('VLLM_FUSEDSDPA_SLIDE_THLD', int),
     ]
     return to_dict(flags)
 
