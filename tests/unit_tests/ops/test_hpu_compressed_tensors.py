@@ -10,6 +10,7 @@ from vllm_gaudi.ops.hpu_compressed_tensors import (HPUCompressedTensorsLinearMet
                                                    HPUCompressedTensorsWNA16, HPUCompressedTensorsWNA16MoEMethod)
 from vllm_gaudi.utils import HPUCompileConfig
 from vllm.forward_context import override_forward_context
+from safetensors import safe_open
 
 
 def test_compressed_tensors_linear_method_w8a8fp8(dist_init):
@@ -60,15 +61,10 @@ def test_compressed_tensors_linear_method_w8a8fp8(dist_init):
     # Weight and weight_scale_inv were extracted from first RowParallelLinear
     # layer of RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8-dynamic
     # (with adjusted shapes, to make tensors smaller)
-    weight = torch.load(get_data_path("data/compressed_tensors/linear_w8a8fp8_weight.pt"),
-                        weights_only=False,
-                        map_location="hpu")
-    oot_op.weight.copy_(weight)
-    weight_scale = torch.load(get_data_path("data/compressed_tensors/linear_w8a8fp8_weight_scale.pt"),
-                              weights_only=False,
-                              map_location="hpu")
-    oot_op.weight_scale.copy_(weight_scale)
-
+    with safe_open(get_data_path("data/compressed_tensors/linear_w8a8fp8.safetensors"), framework="pt",
+                   device="hpu") as f:
+        oot_op.weight.copy_(f.get_tensor("weight"))
+        oot_op.weight_scale.copy_(f.get_tensor("weight_scale"))
     oot_op.quant_method.process_weights_after_loading(oot_op)
 
     if not htorch.utils.internal.is_lazy():
@@ -78,12 +74,10 @@ def test_compressed_tensors_linear_method_w8a8fp8(dist_init):
     # Input and expected output
     # Output tensor holds data that was returned by cuda impl of CompressedTensorsLinearMethod for given input
     # (CompressedTensorsLinearMethod was triggered offline with the same input as below to get the ref_output)
-    input = torch.load(get_data_path("data/compressed_tensors/linear_w8a8fp8_input.pt"),
-                       weights_only=False,
-                       map_location="hpu")
-    ref_output = torch.load(get_data_path("data/compressed_tensors/linear_w8a8fp8_output.pt"),
-                            weights_only=False,
-                            map_location="hpu")
+    with safe_open(get_data_path("data/compressed_tensors/linear_w8a8fp8.safetensors"), framework="pt",
+                   device="hpu") as f:
+        input = f.get_tensor("input")
+        ref_output = f.get_tensor("ref_output")
 
     # Execute layer
     out = oot_op(input)
@@ -130,20 +124,12 @@ def test_compressed_tensors_linear_method_wna16(dist_init):
 
     # Weights were extracted from first RowParallelLinear layer of RedHatAI/Qwen3-8B-quantized.w4a16
     # (with adjusted shapes, to make tensors smaller)
-    weight_packed = torch.load(get_data_path("data/compressed_tensors/linear_wna16_weight_packed.pt"),
-                               weights_only=False,
-                               map_location="hpu")
-    oot_op.weight_packed.copy_(weight_packed)
-    weight_scale = torch.load(get_data_path("data/compressed_tensors/linear_wna16_weight_scale.pt"),
-                              weights_only=False,
-                              map_location="hpu")
-    oot_op.weight_scale.copy_(weight_scale)
-    weight_zero_point = torch.load(get_data_path("data/compressed_tensors/linear_wna16_weight_zero_point.pt"),
-                                   weights_only=False,
-                                   map_location="hpu")
-    oot_op.weight_zero_point.copy_(weight_zero_point)
-    oot_op.weight_shape.data = torch.tensor([256, 256], device='hpu:0')
-
+    with safe_open(get_data_path("data/compressed_tensors/linear_wna16.safetensors"), framework="pt",
+                   device="hpu") as f:
+        oot_op.weight_packed.copy_(f.get_tensor("weight_packed"))
+        oot_op.weight_scale.copy_(f.get_tensor("weight_scale"))
+        oot_op.weight_zero_point.copy_(f.get_tensor("weight_zero_point"))
+        oot_op.weight_shape.data = torch.tensor([256, 256], device='hpu:0')
     oot_op.quant_method.process_weights_after_loading(oot_op)
 
     if not htorch.utils.internal.is_lazy():
@@ -153,12 +139,10 @@ def test_compressed_tensors_linear_method_wna16(dist_init):
     # Input and expected output
     # Output tensor holds data that was returned by cuda impl of CompressedTensorsLinearMethod for given input
     # (CompressedTensorsLinearMethod was triggered offline with the same input as below to get the ref_output)
-    input = torch.load(get_data_path("data/compressed_tensors/linear_wna16_input.pt"),
-                       weights_only=False,
-                       map_location="hpu")
-    ref_output = torch.load(get_data_path("data/compressed_tensors/linear_wna16_output.pt"),
-                            weights_only=False,
-                            map_location="hpu")
+    with safe_open(get_data_path("data/compressed_tensors/linear_wna16.safetensors"), framework="pt",
+                   device="hpu") as f:
+        input = f.get_tensor("input")
+        ref_output = f.get_tensor("ref_output")
 
     # Execute layer
     out = oot_op(input)
@@ -203,32 +187,28 @@ def test_compressed_tensors_wna16_moe_method(dist_init):
 
     # Weights were extracted from first FusedMoE layer of RedHatAI/Qwen3-30B-A3B-quantized.w4a16
     # (with adjusted shapes, to make tensors smaller)
-    w2_weight_packed = torch.load(get_data_path("data/compressed_tensors/moe_wna16_w2_weight_packed.pt"),
-                                  weights_only=False,
-                                  map_location="hpu")
-    w2_weight_packed = torch.swapaxes(w2_weight_packed, 0, 1).repeat(128, 1, 1)
-    oot_op.w2_weight_packed.copy_(w2_weight_packed)
-    w13_weight_packed = torch.load(get_data_path("data/compressed_tensors/moe_wna16_w13_weight_packed.pt"),
-                                   weights_only=False,
-                                   map_location="hpu")
-    w13_weight_packed = torch.swapaxes(w13_weight_packed, 0, 1).repeat(128, 1, 1)
-    oot_op.w13_weight_packed.copy_(w13_weight_packed)
+    with safe_open(get_data_path("data/compressed_tensors/moe_wna16.safetensors"), framework="pt", device="hpu") as f:
+        w2_weight_packed = f.get_tensor("w2_weight_packed")
+        w2_weight_packed = torch.swapaxes(w2_weight_packed, 0, 1).repeat(128, 1, 1)
+        oot_op.w2_weight_packed.copy_(w2_weight_packed)
 
-    w2_weight_scale = torch.load(get_data_path("data/compressed_tensors/moe_wna16_w2_weight_scale.pt"),
-                                 weights_only=False,
-                                 map_location="hpu")
-    w2_weight_scale = torch.swapaxes(w2_weight_scale, 0, 1).repeat(128, 1, 1)
-    oot_op.w2_weight_scale.copy_(w2_weight_scale)
-    w13_weight_scale = torch.load(get_data_path("data/compressed_tensors/moe_wna16_w13_weight_scale.pt"),
-                                  weights_only=False,
-                                  map_location="hpu")
-    w13_weight_scale = torch.swapaxes(w13_weight_scale, 0, 1).repeat(128, 1, 1)
-    oot_op.w13_weight_scale.copy_(w13_weight_scale)
+        w13_weight_packed = f.get_tensor("w13_weight_packed")
+        w13_weight_packed = torch.swapaxes(w13_weight_packed, 0, 1).repeat(128, 1, 1)
+        oot_op.w13_weight_packed.copy_(w13_weight_packed)
 
-    w2_weight_shape = torch.tensor([512, 256], dtype=torch.bfloat16, device="hpu")
-    oot_op.w2_weight_shape.copy_(w2_weight_shape.repeat(128, 1))
-    w13_weight_shape = torch.tensor([256, 512], dtype=torch.bfloat16, device="hpu")
-    oot_op.w13_weight_shape.copy_(w13_weight_shape.repeat(128, 1))
+        w2_weight_scale = f.get_tensor("w2_weight_scale")
+        w2_weight_scale = torch.swapaxes(w2_weight_scale, 0, 1).repeat(128, 1, 1)
+        oot_op.w2_weight_scale.copy_(w2_weight_scale)
+
+        w13_weight_scale = f.get_tensor("w13_weight_scale")
+        w13_weight_scale = torch.swapaxes(w13_weight_scale, 0, 1).repeat(128, 1, 1)
+        oot_op.w13_weight_scale.copy_(w13_weight_scale)
+
+        w2_weight_shape = torch.tensor([512, 256], dtype=torch.bfloat16, device="hpu")
+        oot_op.w2_weight_shape.copy_(w2_weight_shape.repeat(128, 1))
+
+        w13_weight_shape = torch.tensor([256, 512], dtype=torch.bfloat16, device="hpu")
+        oot_op.w13_weight_shape.copy_(w13_weight_shape.repeat(128, 1))
 
     oot_op.quant_method.process_weights_after_loading(oot_op)
 
@@ -239,15 +219,10 @@ def test_compressed_tensors_wna16_moe_method(dist_init):
     # Input and expected output
     # Output tensor holds data that was returned by cuda impl of CompressedTensorsWNA16MarlinMoEMethod for given input
     # (CompressedTensorsWNA16MarlinMoEMethod was triggered offline with the same input as below to get the ref_output)
-    hidden_states = torch.load(get_data_path("data/compressed_tensors/moe_wna16_input_hidden_states.pt"),
-                               weights_only=False,
-                               map_location="hpu")
-    router_logits = torch.load(get_data_path("data/compressed_tensors/moe_wna16_input_router_logits.pt"),
-                               weights_only=False,
-                               map_location="hpu")
-    ref_output = torch.load(get_data_path("data/compressed_tensors/moe_wna16_output.pt"),
-                            weights_only=False,
-                            map_location="hpu")
+    with safe_open(get_data_path("data/compressed_tensors/moe_wna16.safetensors"), framework="pt", device="hpu") as f:
+        hidden_states = f.get_tensor("hidden_states")
+        router_logits = f.get_tensor("router_logits")
+        ref_output = f.get_tensor("ref_output")
 
     # Execute layer
     mock_ctx = MagicMock(spec=["dp_metadata"])
