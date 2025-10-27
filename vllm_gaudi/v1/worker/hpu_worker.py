@@ -79,7 +79,7 @@ class HPUWorker(WorkerBase):
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
-            from vllm.utils import init_cached_hf_modules
+            from vllm.utils.import_utils import init_cached_hf_modules
             init_cached_hf_modules()
 
         self.gc_track_recompiles = bool("PT_HPU_METRICS_GC_DETAILS" in os.environ
