@@ -149,9 +149,9 @@ cd vllm-gaudi/.cd/
 
    ```bash
    HF_TOKEN=<your huggingface token> \
-   VLLM_SERVER_CONFIG_FILE=server_configurations/server_text.yaml \
+   VLLM_SERVER_CONFIG_FILE=server/server_scenarios_text.yaml \
    VLLM_SERVER_CONFIG_NAME=llama31_8b_instruct \
-   VLLM_BENCHMARK_CONFIG_FILE=benchmark_configurations/benchmark_text.yaml \
+   VLLM_BENCHMARK_CONFIG_FILE=benchmark/benchmark_scenarios_text.yaml \
    VLLM_BENCHMARK_CONFIG_NAME=llama31_8b_instruct \
    docker compose --profile benchmark up
    ```
