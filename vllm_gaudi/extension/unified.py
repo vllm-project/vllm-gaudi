@@ -187,6 +187,7 @@ def partial_attn_unique(query: torch.tensor, blocks: torch.tensor, block_mapping
     kv_heads = cache_utils.kv_heads
 
     query = query.index_select(0, block_mapping).unflatten(1, (kv_heads, -1)).unsqueeze(-2)
+    head_dim = query.size(2)
     key, value = cache_utils.fetch_unique(blocks)
     block_mapping_2d = torch.nn.functional.one_hot(block_mapping, num_classes=batch_size).to(query.dtype)
 
@@ -197,8 +198,10 @@ def partial_attn_unique(query: torch.tensor, blocks: torch.tensor, block_mapping
     attn = torch.matmul(attn, value)
 
     # Reshape outputs
-    block_max = block_max[:, :kv_heads].unsqueeze(-1).unsqueeze(-1)  # [num_blocks, kv_heads, 1, 1]
-    block_sum = block_sum[:, :kv_heads].unsqueeze(-1).unsqueeze(-1)  # [num_blocks, kv_heads, 1, 1]
+    block_max = block_max[:, :kv_heads * head_dim].view(-1, kv_heads, head_dim,
+                                                        1)  # [num_blocks, kv_heads, head_dim, 1]
+    block_sum = block_sum[:, :kv_heads * head_dim].view(-1, kv_heads, head_dim,
+                                                        1)  # [num_blocks, kv_heads, head_dim, 1]
 
     group_max = reduce_max(block_max, batch_size, block_mapping)
 
