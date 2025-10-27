@@ -3505,7 +3505,15 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 # as they have been transferred to the MLAImpl.
                 if hasattr(self_attn, "mla_attn"):
                     mla_attn = self_attn.mla_attn
-                    duplicate_mods = ["kv_a_proj_with_mqa", "q_proj", "kv_b_proj", "o_proj"]
+                    # duplicate_mods = ["kv_a_proj_with_mqa", "q_proj", "kv_b_proj", "o_proj"]
+                    duplicate_mods = [
+                        "kv_a_proj_with_mqa",
+                        "q_proj",
+                        "kv_b_proj",
+                        "o_proj",
+                        "fused_qkv_a_proj",
+                        "q_b_proj",
+                    ]
                     for m in duplicate_mods:
                         if hasattr(self_attn, m) and hasattr(mla_attn, m):
                             delattr(self_attn, m)
