@@ -39,7 +39,10 @@ Learn more: 🚀 [vLLM Plugin System Overview](https://docs.vllm.ai/en/latest/de
    in a hourly basis
 
     ```bash
-    pip install vllm
+    git clone https://github.com/vllm-project/vllm-gaudi
+    cd vllm-gaudi
+    export VLLM_COMMIT_HASH=$(git show "origin/vllm/last-good-commit-for-vllm-gaudi:VLLM_STABLE_COMMIT" 2>/dev/null)
+    cd ..
     ```
 
     or
