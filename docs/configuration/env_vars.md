@@ -44,7 +44,7 @@ Additionally, there are HPU PyTorch Bridge environment variables impacting vLLM 
 - `PT_HPU_ENABLE_LAZY_COLLECTIVES`: must be set to `true` for tensor parallel inference with HPU Graphs. The default is `true`.
 - `PT_HPUGRAPH_DISABLE_TENSOR_CACHE`: must be set to `false` for LLaVA, qwen, and RoBERTa models. The default is `false`.
 - `VLLM_PROMPT_USE_FLEX_ATTENTION`: enabled only for the Llama model, allowing usage of `torch.nn.attention.flex_attention` instead of FusedSDPA. Requires `VLLM_PROMPT_USE_FUSEDSDPA=0`. The default is `false`.
-- `RUNTIME_SCALE_PATCHING=1`: Enables runtime scale patching feature (makes sense only for fp8 execution and is ignored for bf16). Enabled by default in Torch compile mode and disabled by default in Lazy mode.
+- `RUNTIME_SCALE_PATCHING`: Enables runtime scale patching feature (makes sense only for fp8 execution and is ignored for bf16). Enabled by default in Torch compile mode and disabled by default in Lazy mode.
 
 **Additional Performance Tuning Knobs - Linear Bucketing Strategy only:**
 
