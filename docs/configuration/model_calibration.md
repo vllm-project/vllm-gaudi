@@ -28,4 +28,4 @@ measurements for a given model. The quantization configuration is used during in
     - `VLLM_RPC_TIMEOUT` - to adjust the RPC protocol timeout used by the OpenAI-compatible API. This value is in microseconds, e.g., 600000 equals 10 minutes.
 
 !!! tip
-    When running FP8 models with `scale_format=scalar` and lazy mode (PT_HPU_LAZY_MODE=1) in order to reduce warmup time it is useful to set `RUNTIME_SCALE_PATCHING=1` . This may introduce a small performance degradation but warmup time should be significantly reduced. Runtime Scale PAtching is enabled by default for Torch compile. 
+    When running FP8 models with `scale_format=scalar` and lazy mode (`PT_HPU_LAZY_MODE=1`) in order to reduce warm up time it is useful to set `RUNTIME_SCALE_PATCHING=1` . This may introduce a small performance degradation but warm up time should be significantly reduced. Runtime Scale Patching is enabled by default for Torch compile. 
