@@ -229,6 +229,7 @@ launch_all_tests() {
     run_tp2_test
     run_mla_moe_test
     run_granite_inc_test
+    run_granite_inc_calibration_and_quantization_test
     run_deepseek_v2_inc_test
     run_deepseek_v2_inc_dynamic_tp2_test
     run_qwen3_inc_dynamic_test
