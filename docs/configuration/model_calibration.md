@@ -26,3 +26,6 @@ measurements for a given model. The quantization configuration is used during in
     When using FP8 models, you may experience timeouts caused by the long compilation time of FP8 operations. To mitigate this, set the following environment variables:
     - `VLLM_ENGINE_ITERATION_TIMEOUT_S` - to adjust the vLLM server timeout. You can set the value in seconds, e.g., 600 equals 10 minutes.
     - `VLLM_RPC_TIMEOUT` - to adjust the RPC protocol timeout used by the OpenAI-compatible API. This value is in microseconds, e.g., 600000 equals 10 minutes.
+
+!!! tip
+    When running FP8 models with `scale_format=scalar` and lazy mode (PT_HPU_LAZY_MODE=1) in order to reduce warmup time it is useful to set `RUNTIME_SCALE_PATCHING=1` . This may introduce a small performance degradation but warmup time should be significantly reduced. Runtime Scale PAtching is enabled by default for Torch compile. 
