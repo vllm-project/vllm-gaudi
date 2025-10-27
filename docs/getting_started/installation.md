@@ -83,6 +83,7 @@ Currently, multiple ways are provided which can be used to install vLLM with Int
     git clone https://github.com/vllm-project/vllm-gaudi
     cd vllm-gaudi
     export VLLM_COMMIT_HASH=$(git show "origin/vllm/last-good-commit-for-vllm-gaudi:VLLM_STABLE_COMMIT" 2>/dev/null)
+    cd ..
     ```
 
 === "Latest vLLM-fork"

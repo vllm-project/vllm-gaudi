@@ -22,7 +22,10 @@ Learn more:
 1. Install vLLM with `pip` or [from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source):  
 
     ```bash
-    pip install vllm
+    git clone https://github.com/vllm-project/vllm-gaudi
+    cd vllm-gaudi
+    export VLLM_COMMIT_HASH=$(git show "origin/vllm/last-good-commit-for-vllm-gaudi:VLLM_STABLE_COMMIT" 2>/dev/null)
+    cd ..
     ```
 
     or
