@@ -553,6 +553,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
 
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
+            self.is_prompt = False
             # Decoding run.
             if not self.sliding_window:
                 block_list = attn_metadata.block_list
