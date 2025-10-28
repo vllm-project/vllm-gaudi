@@ -1,4 +1,5 @@
 import vllm
+import os
 from vllm.entrypoints.llm import LLM
 
 RUN_20B_MODEL = True  # Set to False to run the 120B model instead
@@ -66,4 +67,6 @@ def _test_gpt_oss():
 
 
 def test_gpt_oss_1x():
+    os.environ['VLLM_PROMPT_USE_FUSEDSDPA'] = '0'
     _test_gpt_oss()
+    os.environ['VLLM_PROMPT_USE_FUSEDSDPA'] = '1'
