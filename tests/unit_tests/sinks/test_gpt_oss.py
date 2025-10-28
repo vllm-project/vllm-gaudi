@@ -45,7 +45,7 @@ def _test_gpt_oss():
     if RUN_20B_MODEL:
         llm = LLM(
             MODEL_PATH,
-            max_num_seqs=8 if not PT_PROFILE else max_num_seqs,
+            max_num_seqs=8,
             dtype='bfloat16',
             enforce_eager=True,
             max_model_len=512,
