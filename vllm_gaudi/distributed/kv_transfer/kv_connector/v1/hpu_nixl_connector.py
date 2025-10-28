@@ -164,8 +164,8 @@ def get_num_new_matched_tokens(
     params = request.kv_transfer_params
     logger.info(
         "NIXLConnector get_num_new_matched_tokens: "
-        "num_computed_tokens=%s, kv_transfer_params=%s",
-        num_computed_tokens, params)
+        "request_id=%s, num_computed_tokens=%s, kv_transfer_params=%s, timestamp=%s",
+        request.request_id, num_computed_tokens, params, str(time.perf_counter()))
     logger.debug(f'buke get_num_new_matched_tokens: {vars(request)=}')
     if params is not None and params.get("do_remote_prefill"):
         # Remote prefill: get all prompt blocks from remote.
@@ -599,7 +599,7 @@ def get_finished(self) -> tuple[set[str], set[str]]:
         remote_block_size = self.block_size // self.block_factor
         block_size, n_kv_heads, head_dim = self.block_shape
         for req_id in done_recving:
-            #print(req_id, self._recving_metadata)
+            logger.info(f"done_recving in get_finished for {req_id=} at {time.perf_counter()=}")
             meta = self._recving_metadata.pop(req_id)
             for k, v in self.device_kv_caches.values():
                 local_block_ids = meta.local_block_ids
@@ -785,6 +785,7 @@ def _read_blocks(self, local_block_ids: list[int],
     )
 
     # Begin async xfer.
+    logger.info(f"kv_cache real transfer starts for {request_id=} at {time.perf_counter()=}")
     self.nixl_wrapper.transfer(handle)
 
     # Use handle to check completion in future step().
