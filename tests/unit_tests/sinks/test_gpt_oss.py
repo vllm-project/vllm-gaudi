@@ -18,21 +18,19 @@ def do_sample(llm: LLM, original_output: str, rtol: float, atol: float, max_num_
     sampling_params = vllm.SamplingParams(
         temperature=0,
         max_tokens=20,
-        logprobs=1 if not PT_PROFILE else None,
     )
     outputs = llm.generate(prompts, sampling_params)
 
-    if not PT_PROFILE:
-        # Print the outputs.
-        generated_texts: list[str] = []
-        for output in outputs:
-            prompt = output.prompt
-            generated_text = output.outputs[0].text
-            generated_texts.append(generated_text)
-            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    # Print the outputs.
+    generated_texts: list[str] = []
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        generated_texts.append(generated_text)
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
-        assert prompts[0] + generated_texts[0] == original_output, "Generated text does not match the expected output."
-        return generated_texts
+    assert prompts[0] + generated_texts[0] == original_output, "Generated text does not match the expected output."
+    return generated_texts
 
 
 expected_output = [
