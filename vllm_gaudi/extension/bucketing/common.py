@@ -271,12 +271,15 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
         return ctx <= max_num_prefill_seqs * math.ceil(
             (max_model_len - math.floor(query / max_num_prefill_seqs)) // block_size)
 
+    def aligned_max_model_len(bs):
+        return bs * math.ceil(max_model_len / block_size)
+
     # decode
     def block_not_greater_than_max_model_len(bs, query, ctx):
-        if not ctx <= bs * math.ceil(max_model_len / block_size):
+        if not ctx <= aligned_max_model_len(bs):
             omitted_buckets.add(("condition: ctx <= bs * math.ceil(max_model_len / block_size)", "-> bs, quesry, ctx: ",
                                  bs, query, ctx))
-        return ctx <= bs * math.ceil(max_model_len / block_size)
+        return ctx <= aligned_max_model_len(bs)
 
     def batch_size_smaller_than_blocks(bs, query, ctx):
         if not bs <= ctx:
@@ -313,7 +316,10 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
                 expand_to_neighbor_buckets(bs_idx, bs_range, query_idx, query_range, max_num_batched_tokens))
 
     for bs, query in buckets_2d:
-        for ctx in ctx_range:
+        add_ctx_range = []
+        if not use_contiguous_pa and aligned_max_model_len(bs) not in ctx_range:
+            add_ctx_range.append(aligned_max_model_len(bs))
+        for ctx in ctx_range + add_ctx_range:
             if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
                 buckets.add((bs, query, ctx))
     if not buckets:
