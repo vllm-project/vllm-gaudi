@@ -37,16 +37,16 @@ class Fp8LinearMethod(OrigFp8LinearMethod):
 
             # If using w8a8, torch._scaled_mm needs per tensor, so
             # requantize the logical shards as a single weight.
-            if not self.use_marlin:
-                weight, weight_scale, input_scale = hpu_ops.process_fp8_weight_tensor_strategy(
-                    weight,
-                    weight_scale,
-                    layer.logical_widths,
-                    getattr(layer, "input_scale", None),
-                )
-                if self.act_q_static:
-                    assert input_scale is not None
-                    input_scale = input_scale.max()
+
+            weight, weight_scale, input_scale = hpu_ops.process_fp8_weight_tensor_strategy(
+                weight,
+                weight_scale,
+                layer.logical_widths,
+                getattr(layer, "input_scale", None),
+            )
+            if self.act_q_static:
+                assert input_scale is not None
+                input_scale = input_scale.max()
             weight = weight.t()
 
         # Update layer with new values.
