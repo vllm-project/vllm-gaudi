@@ -52,8 +52,8 @@ def block2batch(tensor, block_mapping, matmul_op=torch.matmul):
     return b2b_impl(tensor, block_mapping.t(), matmul_op)
 
 
-def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, sink, block_size, batch_size, 
-                 matmul_av_op, batch2block_matmul_op, block2batch_matmul_op):
+def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, sink, block_size, batch_size, matmul_av_op,
+                 batch2block_matmul_op, block2batch_matmul_op):
     # When fp32_softmax is enabled attn is left in fp32 after Q@K
     # We can return to native dtype after we renormalize and calculate the adjustments
     if block_bias is not None and attn.dtype != block_bias.dtype:
@@ -74,7 +74,7 @@ def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, sink, blo
         if attn.dtype == torch.float32:
             attn = attn.to(value.dtype)
         attn_shape = attn.shape
-        block_sums = attn.view(-1,attn_shape[-1]).sum(dim=-1, keepdim=True)
+        block_sums = attn.view(-1, attn_shape[-1]).sum(dim=-1, keepdim=True)
         attn_shape = list(attn_shape)
         attn_shape[-1] = 1
         block_sums = block_sums.view(attn_shape)
@@ -84,7 +84,7 @@ def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, sink, blo
             if attn_sink.dtype == torch.float32:
                 attn_sink = attn_sink.to(value.dtype)
             #TODO: Removing this .sum and using attn_sink directly
-            #results in wrong output which does not make sense. 
+            #results in wrong output which does not make sense.
             #Looks like a Synapse issue, need to investigate further.
             block_sums_sink = attn_sink.sum(dim=-1, keepdim=True)
             block_sums = block_sums + block_sums_sink
@@ -170,8 +170,8 @@ def flat_pa_mla(query, key_cache, value_cache, block_list, block_mapping, block_
     return attn
 
 
-def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias, block_groups, block_size, scale, 
-            matmul_qk_op, position_bias, matmul_av_op, batch2block_matmul_op, block2batch_matmul_op, keys_fetch_func, 
+def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias, block_groups, block_size, scale,
+            matmul_qk_op, position_bias, matmul_av_op, batch2block_matmul_op, block2batch_matmul_op, keys_fetch_func,
             values_fetch_func, sinks, **ignored_args):
     batch_size, _, hidden_size = query.shape
     _, kv_heads, head_size = key_cache.shape
@@ -210,13 +210,13 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
             attn = attn.to(dtype=position_bias.dtype)
         attn.add_(position_bias.unsqueeze(-2))
 
-    attn = pipelined_pa(attn, 
+    attn = pipelined_pa(attn,
                         value,
                         block_bias,
                         block_groups,
                         block_mapping,
                         sink,
-                        block_size, 
+                        block_size,
                         batch_size=batch_size,
                         matmul_av_op=matmul_av_op,
                         batch2block_matmul_op=batch2block_matmul_op,
@@ -359,9 +359,10 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
     if window_size is not None:
         #causal window sdpa kernel only supports softmax None
         softmax_mode = 'None'
-    args = [query, key, value, attn_bias, 0.0, is_causal,
-                                scale, softmax_mode, recompute_mode,
-                                valid_seq_lengths, padding_side]
+    args = [
+        query, key, value, attn_bias, 0.0, is_causal, scale, softmax_mode, recompute_mode, valid_seq_lengths,
+        padding_side
+    ]
     args += [window_size] if window_size else [None]
     # use sinks in fsdpa
     if sinks is not None:
@@ -500,7 +501,7 @@ class MoeMatmul(torch.nn.Module):
 
 class VllmMixtureOfExpertsOp(torch.nn.Module):
 
-    def __init__(self, num_total_experts, experts_min: int = 0, experts_max: int = 8, bias = None):
+    def __init__(self, num_total_experts, experts_min: int = 0, experts_max: int = 8, bias=None):
         super().__init__()
         self.w13_list = torch.nn.ModuleList([MoeMatmul() for _ in range(num_total_experts)])
         self.w2_list = torch.nn.ModuleList([MoeMatmul() for _ in range(num_total_experts)])
@@ -526,30 +527,28 @@ class VllmMixtureOfExpertsOp(torch.nn.Module):
         if self.moe_n_slice == 1:
             if self.bias is not None:
                 w1_bias_list = [self.w13_list[i].bias.squeeze() for i in experts_range]
-                w2_bias_list = [self.w2_list[i].bias.squeeze() for i in experts_range] 
-                return torch.ops.hpu.mixture_of_experts.bias_fused_weights(
-                    hidden_states=hidden_states,
-                    expert_routing_table=expert_routing_table,
-                    router_weights=router_weights,
-                    w12=w1_list,
-                    w3=w2_list,
-                    w12_bias = w1_bias_list,
-                    w3_bias = w2_bias_list,
-                    permuted_weights=permuted_weights,
-                    experts_min=self.experts_min,
-                    experts_max=self.experts_max)
+                w2_bias_list = [self.w2_list[i].bias.squeeze() for i in experts_range]
+                return torch.ops.hpu.mixture_of_experts.bias_fused_weights(hidden_states=hidden_states,
+                                                                           expert_routing_table=expert_routing_table,
+                                                                           router_weights=router_weights,
+                                                                           w12=w1_list,
+                                                                           w3=w2_list,
+                                                                           w12_bias=w1_bias_list,
+                                                                           w3_bias=w2_bias_list,
+                                                                           permuted_weights=permuted_weights,
+                                                                           experts_min=self.experts_min,
+                                                                           experts_max=self.experts_max)
             else:
-                return torch.ops.hpu.mixture_of_experts(
-                    hidden_states=hidden_states,
-                    expert_routing_table=expert_routing_table,
-                    router_weights=router_weights,
-                    w12=w1_list,
-                    w3=w2_list,
-                    permuted_weights=permuted_weights,
-                    activation=activation,
-                    experts_min=self.experts_min,
-                    experts_max=self.experts_max)
-                
+                return torch.ops.hpu.mixture_of_experts(hidden_states=hidden_states,
+                                                        expert_routing_table=expert_routing_table,
+                                                        router_weights=router_weights,
+                                                        w12=w1_list,
+                                                        w3=w2_list,
+                                                        permuted_weights=permuted_weights,
+                                                        activation=activation,
+                                                        experts_min=self.experts_min,
+                                                        experts_max=self.experts_max)
+
         for i in range(self.moe_n_slice):
             w1_list_slice = w1_list[i * self.num_expert_per_group:(i + 1) * self.num_expert_per_group]
             w2_list_slice = w2_list[i * self.num_expert_per_group:(i + 1) * self.num_expert_per_group]
@@ -557,38 +556,36 @@ class VllmMixtureOfExpertsOp(torch.nn.Module):
             max_expert = min_expert + self.num_expert_per_group - 1
             if self.bias is not None:
                 w1_bias_list = [self.w13_list[i].bias.squeeze() for i in experts_range]
-                w2_bias_list = [self.w2_list[i].bias.squeeze() for i in experts_range]                 
+                w2_bias_list = [self.w2_list[i].bias.squeeze() for i in experts_range]
                 w1_bias_list_slice = w1_bias_list[i * self.num_expert_per_group:(i + 1) * self.num_expert_per_group]
-                w2_bias_list_slice = w2_bias_list[i * self.num_expert_per_group:(i + 1) * self.num_expert_per_group]                
+                w2_bias_list_slice = w2_bias_list[i * self.num_expert_per_group:(i + 1) * self.num_expert_per_group]
                 slice_final_hidden_states = torch.ops.hpu.mixture_of_experts.bias_fused_weights(
                     hidden_states=hidden_states,
                     expert_routing_table=expert_routing_table,
                     router_weights=router_weights,
                     w12=w1_list,
                     w3=w2_list,
-                    w12_bias = w1_bias_list_slice,
-                    w3_bias = w2_bias_list_slice,
+                    w12_bias=w1_bias_list_slice,
+                    w3_bias=w2_bias_list_slice,
                     permuted_weights=permuted_weights,
                     experts_min=self.experts_min,
                     experts_max=self.experts_max)
-            else:            
-                slice_final_hidden_states = torch.ops.hpu.mixture_of_experts(
-                    hidden_states=hidden_states,
-                    expert_routing_table=expert_routing_table,
-                    router_weights=router_weights,
-                    w12=w1_list_slice,
-                    w3=w2_list_slice,
-                    permuted_weights=permuted_weights,
-                    activation=activation,
-                    experts_min=min_expert,
-                    experts_max=max_expert)
+            else:
+                slice_final_hidden_states = torch.ops.hpu.mixture_of_experts(hidden_states=hidden_states,
+                                                                             expert_routing_table=expert_routing_table,
+                                                                             router_weights=router_weights,
+                                                                             w12=w1_list_slice,
+                                                                             w3=w2_list_slice,
+                                                                             permuted_weights=permuted_weights,
+                                                                             activation=activation,
+                                                                             experts_min=min_expert,
+                                                                             experts_max=max_expert)
             if i == 0:
                 final_hidden_states = slice_final_hidden_states
             else:
                 final_hidden_states += slice_final_hidden_states
             htorch.core.mark_step()
         return final_hidden_states
-
 
 
 class DynamicFusedMOE(torch.nn.Module):

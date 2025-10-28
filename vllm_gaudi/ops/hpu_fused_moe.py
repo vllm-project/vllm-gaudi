@@ -16,6 +16,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         torch.hpu.synchronize()
         vllm_config = get_current_vllm_config()
         self.model_type = vllm_config.model_config.hf_config.model_type
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
         # custom handling for HPU
@@ -74,12 +75,8 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         else:
             import torch.nn.functional as F
             if self.model_type in ["gpt_oss"]:
-                topk_weights, topk_ids = torch.topk(router_logits,
-                                                    top_k,
-                                                    dim=-1)
-                topk_weights = F.softmax(topk_weights,
-                                         dim=-1,
-                                         dtype=torch.float32)
+                topk_weights, topk_ids = torch.topk(router_logits, top_k, dim=-1)
+                topk_weights = F.softmax(topk_weights, dim=-1, dtype=torch.float32)
             else:
                 topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
                 topk_weights, topk_ids = torch.topk(topk_weights, top_k, dim=-1)

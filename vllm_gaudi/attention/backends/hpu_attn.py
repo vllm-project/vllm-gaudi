@@ -221,11 +221,9 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                                       "TritonMLAImpl")
         self.sinks = sinks
         if sinks is not None:
-            assert sinks.shape[0] == num_heads, (
-                "Sinks must have the same number of heads as the number of "
-                f"heads in the layer. Sinks shape: {sinks.shape}, "
-                f"num_heads: {num_heads}."
-            )
+            assert sinks.shape[0] == num_heads, ("Sinks must have the same number of heads as the number of "
+                                                 f"heads in the layer. Sinks shape: {sinks.shape}, "
+                                                 f"num_heads: {num_heads}.")
 
     def forward(
         self,
@@ -464,11 +462,9 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                       "HPUAttentionImpl")
         self.sinks = sinks
         if sinks is not None:
-            assert sinks.shape[0] == num_heads, (
-                "Sinks must have the same number of heads as the number of "
-                f"heads in the layer. Sinks shape: {sinks.shape}, "
-                f"num_heads: {num_heads}."
-            )
+            assert sinks.shape[0] == num_heads, ("Sinks must have the same number of heads as the number of "
+                                                 f"heads in the layer. Sinks shape: {sinks.shape}, "
+                                                 f"num_heads: {num_heads}.")
 
     def _maybe_init_alibi_biases(
         self,
@@ -599,9 +595,9 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             if self.sliding_window:
                 # TODO - change 128 to proper window size
                 window_size = (
-                        128,
-                        0,
-                    )
+                    128,
+                    0,
+                )
                 common_args["window_size"] = window_size
 
             out = ops.prompt_attention(impl=self.prefill_impl,

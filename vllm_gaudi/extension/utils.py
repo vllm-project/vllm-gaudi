@@ -152,40 +152,14 @@ class ModuleFusedSDPA(torch.nn.Module):
         sinks=None,
     ):
         if window_size:
-            return self._hpu_kernel_fsdpa.apply(
-                query,
-                key,
-                value,
-                attn_mask,
-                dropout_p,
-                is_causal,
-                scale,
-                softmax_mode,
-                recompute_mode,
-                valid_sequence_lengths,
-                padding_side,
-                False,
-                False,
-                window_size,
-                sinks)
+            return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode,
+                                                recompute_mode, valid_sequence_lengths, padding_side, False, False,
+                                                window_size, sinks)
         else:
-            return self._hpu_kernel_fsdpa.apply(
-            query,
-            key,
-            value,
-            attn_mask,
-            dropout_p,
-            is_causal,
-            scale,
-            softmax_mode,
-            recompute_mode,
-            valid_sequence_lengths,
-            padding_side,
-            False,
-            False,
-            (-1,-1),
-            sinks
-        )
+            return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode,
+                                                recompute_mode, valid_sequence_lengths, padding_side, False, False,
+                                                (-1, -1), sinks)
+
 
 def pad_list(input, target_len, val_generator):
     padding = target_len - len(input)
