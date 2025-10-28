@@ -167,6 +167,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         qk_head_dim: int,
         v_head_dim: int,
         kv_b_proj: ColumnParallelLinear,
+        sinks: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> None:
         torch.nn.Module.__init__(self)
@@ -218,6 +219,13 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "TritonMLAImpl")
+        self.sinks = sinks
+        if sinks is not None:
+            assert sinks.shape[0] == num_heads, (
+                "Sinks must have the same number of heads as the number of "
+                f"heads in the layer. Sinks shape: {sinks.shape}, "
+                f"num_heads: {num_heads}."
+            )
 
     def forward(
         self,
@@ -389,6 +397,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
+        sinks: Optional[torch.Tensor] = None,
     ) -> None:
         super(AttentionImpl, self).__init__()
         if kv_sharing_target_layer_name is not None:
@@ -453,6 +462,13 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             raise NotImplementedError("Encoder self-attention "
                                       "is not implemented for "
                                       "HPUAttentionImpl")
+        self.sinks = sinks
+        if sinks is not None:
+            assert sinks.shape[0] == num_heads, (
+                "Sinks must have the same number of heads as the number of "
+                f"heads in the layer. Sinks shape: {sinks.shape}, "
+                f"num_heads: {num_heads}."
+            )
 
     def _maybe_init_alibi_biases(
         self,
@@ -534,6 +550,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
+            if key.dtype != key_cache.dtype:
+                key = key.to(key_cache.dtype)
+            if value.dtype != value_cache.dtype:
+                value = value.to(value_cache.dtype)
+            if query.dtype != key.dtype:
+                query = query.to(key.dtype)
             key_cache = self.k_cache(key, key_cache, slot_mapping)
             value_cache = self.v_cache(value, value_cache, slot_mapping)
 
@@ -570,13 +592,17 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
 
             common_args = self.common_attention_args(block_list, key_cache, value_cache, attn_metadata.block_size)
 
+            if self.sliding_window and hasattr(attn_metadata,
+                                               'window_attn_bias') and attn_metadata.window_attn_bias is not None \
+                                                and self.prefill_impl == 'naive_impl':
+                attn_bias = attn_metadata.window_attn_bias
             if self.sliding_window:
-                if hasattr(attn_metadata, 'window_attn_bias') and attn_metadata.window_attn_bias is not None:
-                    attn_bias = attn_metadata.window_attn_bias
-                else:
-                    attn_bias = None
-                    window_size = (self.sliding_window, 0)
-                    common_args['window_size'] = window_size
+                # TODO - change 128 to proper window size
+                window_size = (
+                        128,
+                        0,
+                    )
+                common_args["window_size"] = window_size
 
             out = ops.prompt_attention(impl=self.prefill_impl,
                                        query=query.view(query_shape),
@@ -641,6 +667,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             'key_cache': key_cache,
             'value_cache': value_cache,
             'block_size': block_size,
+            "sinks": self.sinks,
         }
 
     def forward_encoder_decoder(
