@@ -39,6 +39,7 @@ def get_user_flags():
         # Non-vllm flags that are also important to print
         Env('EXPERIMENTAL_WEIGHT_SHARING', str),
         Env('PT_HPU_WEIGHT_SHARING', str),
+        Env('RUNTIME_SCALE_PATCHING', str),
 
         # Sliding window flags
         Env('PT_HPU_SDPA_QKV_SLICE_MODE_FWD', boolean),
