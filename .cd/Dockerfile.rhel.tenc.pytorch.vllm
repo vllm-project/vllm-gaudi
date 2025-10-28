@@ -69,7 +69,7 @@ RUN \
     VLLM_TARGET_DEVICE=hpu pip install -v . --no-build-isolation
 # --- END: COMBINED RUN COMMAND ---
 
-# to be verify later PWolsza
+# to be verified later PWolsza
 # RUN pip3 install -v -e $VLLM_PATH/tests/vllm_test_utils
 
 # Install additional Python packages
