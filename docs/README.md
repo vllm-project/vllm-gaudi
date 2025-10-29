@@ -39,4 +39,4 @@ To get started with the Intel® Gaudi® vLLM Plugin:
 ### Learn more
 
 📚 [Intel Gaudi Documentation](https://docs.habana.ai/en/latest/index.html)  
-📦 [vLLM Plugin System Overview](https://docs.vllm.ai/en/latest/design/plugin_system.html)
+📦 [vLLM Plugin System Overview](design/plugin_system.md)
