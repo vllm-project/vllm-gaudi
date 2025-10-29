@@ -15,12 +15,12 @@ class LinearBucketingStrategy:
         use_merged_prefill = get_config().merged_prefill
         prefix_caching = get_config().prefix_caching
 
-        prompt_bs_bucket_cfg = read_bucket_settings('prompt', 'bs', min=1, step=32, max=max_num_prefill_seqs)
+        prompt_bs_bucket_cfg = read_bucket_settings('prompt', 'bs', min=1, step=1, max=max_num_prefill_seqs)
         prompt_query_bucket_cfg = read_bucket_settings('prompt',
                                                        'seq',
                                                        min=block_size,
                                                        step=block_size,
-                                                       max=max_model_len)
+                                                       max=max_num_batched_tokens)
         max_ctx = math.ceil((max_model_len - prompt_query_bucket_cfg[0]) // block_size)
         prompt_ctx_bucket_cfg = read_bucket_settings('prompt', 'ctx', min=0, step=1, max=max_ctx)
 
@@ -55,14 +55,14 @@ class LinearBucketingStrategy:
 
     def get_decode_cfgs(self, max_num_seqs, block_size, max_num_batched_tokens, max_model_len, max_blocks):
         prefix_caching = get_config().prefix_caching
+        contiguous_pa = get_config().use_contiguous_pa
 
         decode_bs_bucket_cfg = read_bucket_settings('decode', 'bs', min=1, step=32, max=max_num_seqs)
         decode_query_bucket_cfg = [1, 1, 1]
-        decode_block_bucket_cfg = read_bucket_settings('decode',
-                                                       'block',
-                                                       min=block_size,
-                                                       step=block_size,
-                                                       max=max_blocks)
+        max_decode_blocks = max(math.ceil(max_model_len * max_num_seqs // block_size), block_size)
+        if contiguous_pa:
+            max_decode_blocks = max_blocks
+        decode_block_bucket_cfg = read_bucket_settings('decode', 'block', min=1, step=block_size, max=max_decode_blocks)
         if decode_block_bucket_cfg[2] > max_blocks:
             logger().info(
                 f'VLLM_DECODE_BLOCK_BUCKET_MAX={decode_block_bucket_cfg[2]} is higher than max_blocks={max_blocks}. Your configuration VLLM_DECODE_BLOCK_BUCKET_MAX={decode_block_bucket_cfg[2]} will be overwritten to VLLM_DECODE_BLOCK_BUCKET_MAX={max_blocks}'
@@ -113,11 +113,11 @@ def warmup_range(config: Tuple[int, int, int]):
     """
     bmin, bstep, bmax = config
     add_zero_bucket = bmin == 0
-    if add_zero_bucket:
-        bmin = bstep
     assert bmin <= bmax, ("Min. batch size cannot be greater than max. "
                           "batch size. If you want to skip warmup, "
                           "set VLLM_SKIP_WARMUP=true")
+    if add_zero_bucket:
+        bmin = bstep
     base = itertools.repeat(2)
     ramp_up_acc = itertools.accumulate(base, func=operator.mul, initial=bmin)
     ramp_up_tw = itertools.takewhile(lambda x: x < bstep and x <= bmax, \
