@@ -46,7 +46,6 @@ from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingType
 from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
-from vllm.utils import LayerBlockType
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -773,8 +772,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         ###############################################################
 
         # Model-related.
-        self.num_attn_layers = self.model_config.get_num_layers_by_block_type(self.parallel_config,
-                                                                              LayerBlockType.attention)
+        self.num_attn_layers = self.model_config.get_num_layers_by_block_type(self.parallel_config, "attention")
         self.num_query_heads = self.model_config.get_num_attention_heads(self.parallel_config)
         self.num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         self.head_size = self.model_config.get_head_size()
