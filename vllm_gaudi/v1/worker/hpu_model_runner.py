@@ -4308,8 +4308,6 @@ def copy_kv_blocks(
                                                 key_cache.index_select(0, src_slot_mapping).to(target_device))
         dst_kv_caches[layer_name][1].index_put_((dst_slot_mapping, ),
                                                 value_cache.index_select(0, src_slot_mapping).to(target_device))
-        if direction == "d2h":
-            dst_kv_caches[layer_name] = dst_kv_caches[layer_name].unflatten(1, (-1, block_size))
 
         i = i + 1
 
