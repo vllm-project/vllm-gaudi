@@ -13,12 +13,11 @@ echo $VLLM_GAUDI_PREFIX
 # Gemma3 with image input
 run_gemma3_test() {
     echo "➡️ Testing gemma-3-4b-it..."
-    #VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
-    #echo "✅ Test with multimodal-support with gemma-3-4b-it passed."
-    #echo "➡️ Testing gemma-3-27b-it..."
-    #VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm_multi.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-27b-it.yaml"
-    #echo "✅ Test with multimodal-support with multiple images gemma-3-27b-it passed."
-    # echo "Skipping gemma-3-4b-it due to changes from https://github.com/vllm-project/vllm/pull/26715 
+    VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
+    echo "✅ Test with multimodal-support with gemma-3-4b-it passed."
+    echo "➡️ Testing gemma-3-4b-it with multiple images(applying sliding_window)..."
+    VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm_multi.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-27b-it.yaml"
+    echo "✅ Test with multimodal-support with multiple images gemma-3-27b-it passed."
 }
 
 # Basic model test
@@ -230,6 +229,7 @@ launch_all_tests() {
     run_tp2_test
     run_mla_moe_test
     run_granite_inc_test
+    run_granite_inc_calibration_and_quantization_test
     run_deepseek_v2_inc_test
     run_deepseek_v2_inc_dynamic_tp2_test
     run_qwen3_inc_dynamic_test

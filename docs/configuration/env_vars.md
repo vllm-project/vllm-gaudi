@@ -44,6 +44,7 @@ Additionally, there are HPU PyTorch Bridge environment variables impacting vLLM 
 - `PT_HPU_ENABLE_LAZY_COLLECTIVES`: must be set to `true` for tensor parallel inference with HPU Graphs. The default is `true`.
 - `PT_HPUGRAPH_DISABLE_TENSOR_CACHE`: must be set to `false` for LLaVA, qwen, and RoBERTa models. The default is `false`.
 - `VLLM_PROMPT_USE_FLEX_ATTENTION`: enabled only for the Llama model, allowing usage of `torch.nn.attention.flex_attention` instead of FusedSDPA. Requires `VLLM_PROMPT_USE_FUSEDSDPA=0`. The default is `false`.
+- `RUNTIME_SCALE_PATCHING`: Enables runtime scale patching feature (makes sense only for fp8 execution and is ignored for bf16). Enabled by default in Torch compile mode and disabled by default in Lazy mode.
 
 **Additional Performance Tuning Knobs - Linear Bucketing Strategy only:**
 
@@ -54,11 +55,11 @@ Additionally, there are HPU PyTorch Bridge environment variables impacting vLLM 
   - Default values:
     - Prompt:
       - batch size min (`VLLM_PROMPT_BS_BUCKET_MIN`): `1`
-      - batch size step (`VLLM_PROMPT_BS_BUCKET_STEP`): `32`
+      - batch size step (`VLLM_PROMPT_BS_BUCKET_STEP`): `1`
       - batch size max (`VLLM_PROMPT_BS_BUCKET_MAX`): `max_num_prefill_seqs`
-      - sequence length min (`VLLM_PROMPT_SEQ_BUCKET_MIN`): `block_size`
-      - sequence length step (`VLLM_PROMPT_SEQ_BUCKET_STEP`): `block_size`
-      - sequence length max (`VLLM_PROMPT_SEQ_BUCKET_MAX`): `max_model_len`
+      - query length min (`VLLM_PROMPT_SEQ_BUCKET_MIN`): `block_size`
+      - query length step (`VLLM_PROMPT_SEQ_BUCKET_STEP`): `block_size`
+      - query length max (`VLLM_PROMPT_SEQ_BUCKET_MAX`): `max_num_batched_tokens`
       - sequence ctx min (`VLLM_PROMPT_CTX_BUCKET_MIN`): `0`
       - sequence ctx step (`VLLM_PROMPT_CTX_BUCKET_STEP`): `1`
       - sequence ctx max (`VLLM_PROMPT_CTX_BUCKET_MAX`): `(max_model_len - block_size) // block_size`
@@ -68,4 +69,4 @@ Additionally, there are HPU PyTorch Bridge environment variables impacting vLLM 
       - batch size max (`VLLM_DECODE_BS_BUCKET_MAX`): `max_num_seqs`
       - block size min (`VLLM_DECODE_BLOCK_BUCKET_MIN`): `block_size`
       - block size step (`VLLM_DECODE_BLOCK_BUCKET_STEP`): `block_size`
-      - block size max (`VLLM_DECODE_BLOCK_BUCKET_MAX`): `max_blocks`
+      - block size max (`VLLM_DECODE_BLOCK_BUCKET_MAX`): `max_model_len * max_num_seqs // block_size` by default or `max_blocks` for CONTIGUOUS PA
