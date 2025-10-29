@@ -2,8 +2,11 @@ nav:
   - Home: 
     - vLLM x Intel Gaudi: README.md
     - Getting Started:
-      - getting_started/quickstart.md
-      - getting_started/installation.md
+      - Quick Start: 
+        - getting_started/quickstart.md
+        - getting_started/quickstart_configuration.md
+        - getting_started/executing_interference.md
+      - Installation: getting_started/installation.md
     - Quick Links:
       - User Guide: user_guide/README.md
       - Developer Guide: dev_guide/README.md
