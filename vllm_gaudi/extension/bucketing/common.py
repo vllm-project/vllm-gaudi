@@ -342,7 +342,6 @@ def generate_buckets(bs_range,
     omitted_buckets = set()
     filters = get_filters(is_prompt, use_merged_prefill, use_contiguous_pa)
 
-
     if file_buckets:
         for bs, query, blocks in file_buckets:
             if all(bucket_filter(bs, query, blocks) for bucket_filter in filters):
