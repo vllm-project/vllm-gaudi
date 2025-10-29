@@ -4036,6 +4036,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
     def _generate_profiling(self, prompt_cfg, decode_cfg):
         steps = 3
         profiler = setup_profiler(warmup=steps - 1, active=1)
+        if prompt_cfg and prompt_cfg not in self.bucketing_manager.prompt_buckets:
+            self.bucketing_manager.prompt_buckets.insert(0, prompt_cfg)
+        elif decode_cfg and decode_cfg not in self.bucketing_manager.decode_buckets:
+            self.bucketing_manager.decode_buckets.insert(0, decode_cfg)
         torch.hpu.synchronize()
         profiler.start()
         for _ in range(steps):
