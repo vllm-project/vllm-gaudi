@@ -69,10 +69,13 @@ cd vllm-gaudi/.cd/
    To improve memory access cohererence and release CPUs to other CPU only workloads like a vLLM serving with Llama3 8B,
    pin the CPU cores based on different CPU NUMA nodes by using an auto-generate docker-compose.override.yml file.
    Couple python libraries are needed for the python scripts, so install the required packages using following commnad.
+
    ```bash
    pip install -r vllm-fork/.cd/server/requirements_cpu_binding.txt
    ```
+
    Run below command to do CPU cores pinning via auto-generated docker-compose.override.yml file.
+
    ```bash
    cd vllm-fork/.cd/
    MODEL="Qwen/Qwen2.5-14B-Instruct" \

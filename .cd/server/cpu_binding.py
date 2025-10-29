@@ -2,22 +2,20 @@
 import os
 import csv
 from importlib import util
-from typing import Optional
 from enum import Enum
 from gaudi_topology import GaudiTopology
-from typing import List, Tuple
-REQUIRED_COLUMNS = ["model_id", "input_length", "output_length", "world_size", "data_type","num_allocated_cpu"]
+
+REQUIRED_COLUMNS = ["model_id", "input_length", "output_length", "world_size", "data_type", "num_allocated_cpu"]
+
 
 class BindingPolicy(Enum):
     Evenly_on_NUMAs = "evenly"
     NUMAs_with_cards = "close2cards"
 
 
-class CPU_Binding():
+class CPU_Binding:
 
-    def __init__(self,
-                 csv_path: str = "cpu_binding_gnr.csv",
-                 use_hyperthread: bool = False):
+    def __init__(self, csv_path: str = "cpu_binding_gnr.csv", use_hyperthread: bool = False):
         self.libnuma_found = util.find_spec("numa") is not None
         self.psutil_found = util.find_spec("psutil") is not None
         if self.libnuma_found and self.psutil_found:
@@ -28,7 +26,7 @@ class CPU_Binding():
             self.cpus_allow_list = psutil.Process().cpu_affinity()
             #print("cpu allow list:",self.cpus_allow_list)
             self.numa_size = info.get_num_configured_nodes()
-            self.cpu_count_per_numa =self.cpu_count // self.numa_size
+            self.cpu_count_per_numa = self.cpu_count // self.numa_size
 
             # Get CSV info
             with open(csv_path, newline="") as f:
@@ -38,7 +36,7 @@ class CPU_Binding():
                 raise ValueError(f"CSV missing required headers {REQUIRED_COLUMNS}. Found: {found}")
             model = os.environ.get("MODEL")
             if not model:
-                raise RuntimeError("Set environment variable MODEL to a model_id in the CSV (e.g., export MODEL='meta-llama/Llama-3.1-8B-Instruct').")
+                raise RuntimeError("Set environment variable MODEL to a model_id in the CSV.")
             input_tok = os.environ.get("INPUT_TOK")
             output_tok = os.environ.get("OUTPUT_TOK")
             con_req = os.environ.get("CONCURRENT_REQ")
@@ -57,7 +55,7 @@ class CPU_Binding():
             elif row["num_allocated_cpu"] == 'NA':
                 raise RuntimeError("Invalid NUM_CPU value. Set environment variable NUM_CPUS instead .")
             else:
-                self.num_allocated_cpu  = self.parse_int(row["num_allocated_cpu"], "num_allocated_cpu")
+                self.num_allocated_cpu = self.parse_int(row["num_allocated_cpu"], "num_allocated_cpu")
 
             # CPU
             # check allow node_to_cpus list
@@ -77,8 +75,8 @@ class CPU_Binding():
             # Gaudi
             topo = GaudiTopology()
             self.cards = topo.get_cards()
-            if self.cards != None:
-                self.gaudi_numa_list=[]
+            if self.cards is not None:
+                self.gaudi_numa_list = []
                 # Assume to use cards from 0 to 7
                 for card in self.cards[:self.world_size]:
                     if card['numa_node'] not in self.gaudi_numa_list:
@@ -91,36 +89,34 @@ class CPU_Binding():
     def parse_int(self, v: str, name: str) -> int:
         try:
             return int(v)
-        except Exception:
-            raise ValueError(f"Invalid integer for {name!r}: {v!r}")
+        except Exception as err:
+            raise ValueError(f"Invalid integer for {name!r}: {v!r}") from err
 
-    def pick_row_by_parameters(self, rows: List[dict], model: str, input_tok: str, output_tok: str, con_req: str) -> dict:
+    def pick_row_by_parameters(self, rows: list[dict], model: str, input_tok: str, output_tok: str,
+                               con_req: str) -> dict:
         matches = [
-                r for r in rows
-                if r.get("model_id", "").strip() == model
-                if r.get("input_length", "").strip() == input_tok
-                if r.get("output_length", "").strip() == output_tok
-                ]
+            r for r in rows if r.get("model_id", "").strip() == model if r.get("input_length", "").strip() == input_tok
+            if r.get("output_length", "").strip() == output_tok
+        ]
         if not matches:
-            available = ", ".join(sorted({r.get('model_id','') for r in rows}))
-            raise ValueError(f"MODEL '{model}', input_lenght '{input_tok}', output_length '{output_tok}' not found in CSV. Available: {available}")
+            available = ", ".join(sorted({r.get('model_id', '') for r in rows}))
+            raise ValueError(f"MODEL '{model}', input_length '{input_tok}', output_length '{output_tok}' "
+                             f"not found in CSV. Available: {available}")
         return matches[0]
 
-    def get_cpus_id_binding_based_on_numa_nodes(self,
-                                                rank: int) -> str:
+    def get_cpus_id_binding_based_on_numa_nodes(self, rank: int) -> str:
         """Return CPUs id binding based on NUMA nodes.
         """
         rank_to_cpus = ''
         if not self.libnuma_found or not self.psutil_found:
-            print(
-                "Auto thread-binding is not supported due to "
-                "the lack of package numa and psutil,"
-                "fallback to no thread-binding. To get better performance,"
-                "please try to manually bind threads.")
+            print("Auto thread-binding is not supported due to "
+                  "the lack of package numa and psutil,"
+                  "fallback to no thread-binding. To get better performance,"
+                  "please try to manually bind threads.")
             return rank_to_cpus
 
         if self.binding_policy is BindingPolicy.Evenly_on_NUMAs or self.cards is None:
-            divider = min (self.world_size, len(self.node_to_cpus))
+            divider = min(self.world_size, len(self.node_to_cpus))
             self.allocated_cpu_per_numa = self.num_allocated_cpu // divider
             node_id = rank
         elif self.binding_policy is BindingPolicy.NUMAs_with_cards:
@@ -136,10 +132,13 @@ class CPU_Binding():
 
         rank_to_cpus = ','.join(str(x) for x in rank_to_cpus_list)
         print("rank %d auto thread-binding list: %s", rank, rank_to_cpus)
-        self.node_to_idle_cpus[node_id] = [cpu for cpu in self.node_to_idle_cpus[node_id] if cpu not in rank_to_cpus_list]
+        self.node_to_idle_cpus[node_id] = [
+            cpu for cpu in self.node_to_idle_cpus[node_id] if cpu not in rank_to_cpus_list
+        ]
         return rank_to_cpus
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
     libnuma_found = util.find_spec("numa") is not None
     if libnuma_found:
         from numa import info
@@ -152,7 +151,6 @@ if __name__=="__main__":
     for i in range(max_needed_numa_size):
         rank_to_cpus = cpu_binder.get_cpus_id_binding_based_on_numa_nodes(i)
         print(rank_to_cpus)
-
 
     rank_to_idle_cpus = ','.join(str(x) for row in cpu_binder.node_to_idle_cpus for x in row)
     print(rank_to_idle_cpus)
