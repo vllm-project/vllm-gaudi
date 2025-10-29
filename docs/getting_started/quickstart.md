@@ -4,19 +4,19 @@ title: Basic Quick Start Guide
 
 # Basic Quick Start Guide
 
-The 1.22 release of vLLM on Intel® Gaudi® introduces ready-to-run container
+The 1.22 release of vLLM Hardware Plugin for Intel® Gaudi® introduces ready-to-run container
 images that package vLLM together with the Intel® Gaudi® software. This release
-enables a fast and simple launch of vLLM on Intel® Gaudi® using prebuilt Docker
+enables a fast and simple launch of vLLM Hardware Plugin for Intel® Gaudi® using prebuilt Docker
 images and Docker Compose, with support for custom runtime parameters and
 benchmarking.
 
-This guide explains the easiest way of running vLLM on Intel® Gaudi® on Ubuntu.
+This guide explains the easiest way of running vLLM Hardware Plugin for Intel® Gaudi® on Ubuntu.
 It includes features for model benchmarking, runtime customization, and
 selecting validated models such as LLaMA, Mistral, and Qwen. Advanced
 configuration can be performed through environment variables or YAML
 configuration files.
 
-If you prefer to build vLLM on Intel® Gaudi® from source or with a custom
+If you prefer to build vLLM Hardware Plugin for Intel® Gaudi® from source or with a custom
 Dockerfile, refer to the [Installation](installation.md) guide.
 
 ## Requirements
@@ -32,7 +32,7 @@ Additionally, ensure that the Intel® Gaudi® execution environment is properly 
 it is not, complete the setup by following the [Installation
 Guide](https://docs.habana.ai/en/latest/Installation_Guide/index.html) instructions.
 
-## Running vLLM on Intel® Gaudi® with Docker Compose
+## Running vLLM Hardware Plugin for Intel® Gaudi® with Docker Compose
 
 Follow these steps to run the vLLM server or launch benchmarks on Gaudi using Docker Compose.
 
@@ -98,9 +98,8 @@ Follow these steps to run the vLLM server or launch benchmarks on Gaudi using Do
 
 After completing this step, the vLLM server will be running, and the associated benchmark suite will start automatically. Optionally, to align the setup to your specific needs, you can use [advanced configuration options](quickstart_configuration.md). For most users, the basic setup is sufficient, but advanced users may benefit from additional customizations.
 
-After setting up and running vLLM on Intel® Gaudi®, you can begin performing inference to generate model outputs. For detailed instructions, see the [Executing Inference](executing_interference.md) guide.
+After setting up and running vLLM Hardware Plugin for Intel® Gaudi®, you can begin performing inference to generate model outputs. For detailed instructions, see the [Executing Inference](executing_interference.md) guide.
 
 To achieve the best performance on HPU, follow the methods outlined in the
 [Optimizing Training Platform
 Guide](https://docs.habana.ai/en/latest/PyTorch/Model_Optimization_PyTorch/Optimization_in_Training_Platform.html).
-
