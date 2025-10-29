@@ -101,13 +101,11 @@ def read_bucket_settings(phase: str, dim: str, **defaults):
             # Check if fallback 'seq' flag is set
             fallback_env = f'VLLM_{phase}_SEQ_BUCKET_{p}'.upper()
             fallback_val = os.environ.get(fallback_env)
-    
+
             if fallback_val is not None:
                 val = fallback_val
-                logger().warning(
-                    f"{e} not set, using {fallback_env} value ({fallback_val}) instead. "
-                    "This fallback behavior is deprecated and will be removed in v0.12.0."
-                )
+                logger().warning(f"{e} not set, using {fallback_env} value ({fallback_val}) instead. "
+                                 "This fallback behavior is deprecated and will be removed in v0.12.0.")
         resolved_val = int(val) if val is not None else d
         logger().info(f'{e}={resolved_val} (default:{d})')
         values.append(resolved_val)
