@@ -4,7 +4,7 @@ title: Supported Features
 
 # Supported Features
 
-This document summarizes the features currently supported by the vLLM on Intel® Gaudi® plugin, lists the features planned for future releases, and outlines the discontinued features with explanations for their deprecation.
+This document summarizes the features currently supported by the vLLM Hardware Plugin for Intel® Gaudi®, lists the features planned for future releases, and outlines the discontinued features with explanations for their deprecation.
 
 ## Supported Features
 

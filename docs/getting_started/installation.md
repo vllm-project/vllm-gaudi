@@ -4,13 +4,13 @@ title: Installation
 
 # Installation
 
-There are three ways to run vLLM on Intel® Gaudi® devices:
+There are three ways to run vLLM Hardware Plugin for Intel® Gaudi®:
 
 - **Using Docker Compose**: The easiest method that requires no image building and is supported only in 1.22 and later releases on Ubuntu. For more information and detailed instructions, see the [Quick Start](quickstart.md) guide.
 - **Using a Dockerfile**: Allows building a container with the Intel® Gaudi® software suite using the provided Dockerfile. This options is supported only on Ubuntu.
 - **Building from source**: Allows installing and running vLLM directly on your Intel® Gaudi® machine by building from source. It's supported as a standard installation and an enhanced setup with NIXL.
 
-This guide explains how to run vLLM on Intel® Gaudi® from source and using a Dockerfile.
+This guide explains how to run vLLM Hardware Plugin for Intel® Gaudi® from source and using a Dockerfile.
 
 ## Requirements
 
@@ -24,7 +24,7 @@ Additionally, ensure that the Gaudi execution environment is properly set up. If
 it is not, complete the setup by using the [Gaudi Installation
 Guide](https://docs.habana.ai/en/latest/Installation_Guide/index.html) instructions.
 
-## Running vLLM on Intel® Gaudi® Using Dockerfile
+## Running vLLM Hardware Plugin for Intel® Gaudi® Using Dockerfile
 
 ## --8<-- [start:docker_quickstart]
 
@@ -46,9 +46,9 @@ To achieve the best performance on HPU, please follow the methods outlined in th
 
 ## --8<-- [end:docker_quickstart]
 
-## Building vLLM on Intel® Gaudi® from Source
+## Building vLLM Hardware Plugin for Intel® Gaudi® from Source
 
-There are two ways to install vLLM on Intel® Gaudi® from source: a standard installation for typical usage, and an enhanced setup with NIXL for optimized performance with large-scale or distributed inference.
+There are two ways to install vLLM Hardware Plugin for Intel® Gaudi® from source: a standard installation for typical usage, and an enhanced setup with NIXL for optimized performance with large-scale or distributed inference.
 
 ### Standard Plugin Deployment
 
@@ -63,7 +63,7 @@ There are two ways to install vLLM on Intel® Gaudi® from source: a standard in
 
     For more information about verification, see [System Verification and Final Tests](https://docs.habana.ai/en/latest/Installation_Guide/System_Verification_and_Final_Tests.html).
 
-2. Run the latest Docker image from the Intel® Gaudi® vault as in the following code sample. Make sure to provide your versions of vLLM on Intel® Gaudi®, operating system, and PyTorch. Ensure that these versions are supported, according to the [Support Matrix](https://docs.habana.ai/en/latest/Support_Matrix/Support_Matrix.html).
+2. Run the latest Docker image from the Intel® Gaudi® vault as in the following code sample. Make sure to provide your versions of vLLM Hardware Plugin for Intel® Gaudi®, operating system, and PyTorch. Ensure that these versions are supported, according to the [Support Matrix](https://docs.habana.ai/en/latest/Support_Matrix/Support_Matrix.html).
 
     ```bash
     docker pull vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/pytorch-installer-2.7.1:latest
@@ -72,7 +72,7 @@ There are two ways to install vLLM on Intel® Gaudi® from source: a standard in
 
     For more information, see the [Intel Gaudi documentation](https://docs.habana.ai/en/latest/Installation_Guide/Bare_Metal_Fresh_OS.html#pull-prebuilt-containers).
 
-3. Get the last verified vLLM commit. While vLLM on Intel® Gaudi® follows the latest vLLM commits, upstream API updates may introduce compatibility issues. The saved commit has been thoroughly validated.
+3. Get the last verified vLLM commit. While vLLM Hardware Plugin for Intel® Gaudi® follows the latest vLLM commits, upstream API updates may introduce compatibility issues. The saved commit has been thoroughly validated.
 
     ```bash
     git clone https://github.com/vllm-project/vllm-gaudi
@@ -93,7 +93,7 @@ There are two ways to install vLLM on Intel® Gaudi® from source: a standard in
     cd ..
     ```
 
-5. Install the vLLM on Intel® Gaudi® plugin from source.
+5. Install vLLM Hardware Plugin for Intel® Gaudi® from source.
 
     ```bash
     cd vllm-gaudi
@@ -126,7 +126,7 @@ To achieve the best performance on HPU, please follow the methods outlined in th
     cd ..
     ```
 
-3. Install vLLM on Intel® Gaudi® and NIXL using a Docker file.
+3. Install vLLM Hardware Plugin for Intel® Gaudi® and NIXL using a Docker file.
 
     ```bash
     docker build -t ubuntu.pytorch.vllm.nixl.latest \
@@ -138,7 +138,7 @@ To achieve the best performance on HPU, please follow the methods outlined in th
       vllm-gaudi-for-llmd /bin/bash
     ```
 
-4. Get the last verified vLLM commit. While vLLM on Intel® Gaudi® follows the latest vLLM commits, upstream API updates may introduce compatibility issues. The saved commit has been thoroughly validated.
+4. Get the last verified vLLM commit. While vLLM Hardware Plugin for Intel® Gaudi® follows the latest vLLM commits, upstream API updates may introduce compatibility issues. The saved commit has been thoroughly validated.
 
     ```bash
     git clone https://github.com/vllm-project/vllm-gaudi
@@ -157,7 +157,7 @@ To achieve the best performance on HPU, please follow the methods outlined in th
     cd ..
     ```
 
-6. Install the vLLM on Intel® Gaudi® plugin from source.
+6. Install vLLM Hardware Plugin for Intel® Gaudi® from source.
 
     ```bash
     cd vllm-gaudi

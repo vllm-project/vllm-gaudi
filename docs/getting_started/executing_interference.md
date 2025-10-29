@@ -4,7 +4,7 @@ title: Executing Inference
 
 # Executing Inference
 
-After setting up and running vLLM on Intel® Gaudi®, you can begin performing inference to generate model outputs. This document demonstrates several ways to run inference, you can choose the approach that best fits your workflow.
+After setting up and running vLLM Hardware Plugin for Intel® Gaudi®, you can begin performing inference to generate model outputs. This document demonstrates several ways to run inference, you can choose the approach that best fits your workflow.
 
 ## Offline Batched Inference
 
