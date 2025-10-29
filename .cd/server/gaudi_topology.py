@@ -10,8 +10,9 @@
 import subprocess
 import re
 import os
-from typing import List, Dict, Optional
+from typing import Optional
 import shutil
+
 
 class GaudiTopology:
     """Utility class to discover Gaudi cards and their NUMA / CPU locality."""
@@ -23,24 +24,20 @@ class GaudiTopology:
     def _run_cmd(self, cmd: str) -> str:
         """Run a shell command and return stdout."""
         try:
-            result = subprocess.run(cmd, shell=True, check=True,
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    text=True)
+            result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
             return result.stdout
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Command failed: {cmd}\n{e.stderr}")
+            raise RuntimeError(f"Command failed: {cmd}\n{e.stderr}") from e
 
     # ------------------------------------------------------------------
-    def _parse_hl_smi_table(self, text: str) -> List[Dict]:
+    def _parse_hl_smi_table(self, text: str) -> list[dict]:
         """
         Parse hl-smi v1.22+ table format.
         Example line:
         |   0  HL-325L             N/A  | 0000:97:00.0     N/A | ...
         """
         cards = []
-        pattern = re.compile(
-            r'^\|\s*(\d+)\s+([A-Z0-9-]+)\s+N/A\s+\|\s*([0-9a-fA-F:.]+)\s+N/A\s*\|'
-        )
+        pattern = re.compile(r'^\|\s*(\d+)\s+([A-Z0-9-]+)\s+N/A\s+\|\s*([0-9a-fA-F:.]+)\s+N/A\s*\|')
         for line in text.splitlines():
             match = pattern.match(line)
             if not match:
@@ -48,15 +45,11 @@ class GaudiTopology:
             card_id, model, bus_id = match.groups()
             if not bus_id.startswith("0000:"):
                 bus_id = "0000:" + bus_id
-            cards.append({
-                "card_id": int(card_id),
-                "model": model,
-                "bus_id": bus_id
-            })
+            cards.append({"card_id": int(card_id), "model": model, "bus_id": bus_id})
         return cards
 
     # ------------------------------------------------------------------
-    def _get_sysfs_info(self, bus_id: str) -> Dict[str, Optional[str]]:
+    def _get_sysfs_info(self, bus_id: str) -> dict[str, Optional[str]]:
         """Fetch NUMA node and local CPU list from sysfs."""
         sys_path = f"/sys/bus/pci/devices/{bus_id}"
         info = {"numa_node": None, "local_cpulist": None}
@@ -73,7 +66,7 @@ class GaudiTopology:
         return info
 
     # ------------------------------------------------------------------
-    def _discover_cards(self) -> List[Dict]:
+    def _discover_cards(self) -> list[dict]:
         """Run hl-smi and discover Gaudi cards."""
         if shutil.which("hl-smi") is None:
             print("No hl-smi found")
@@ -87,16 +80,17 @@ class GaudiTopology:
         return cards
 
     # ------------------------------------------------------------------
-    def get_cards(self) -> List[Dict]:
+    def get_cards(self) -> list[dict]:
         """Return list of all discovered cards sorted by NUMA node (then card_id)."""
+
         def sort_key(c):
             # Convert numa_node to int when possible, else put N/A at the end
             try:
                 return (int(c["numa_node"]), c["card_id"])
             except (TypeError, ValueError):
                 return (999, c["card_id"])
-        return sorted(self.cards, key=sort_key)
 
+        return sorted(self.cards, key=sort_key)
 
     # ------------------------------------------------------------------
     def get_numa_for_card(self, card_id: int) -> Optional[str]:
@@ -113,6 +107,7 @@ class GaudiTopology:
             if c["card_id"] == card_id:
                 return c["local_cpulist"]
         return None
+
 
 # ------------------------------------------------------------------------------
 
