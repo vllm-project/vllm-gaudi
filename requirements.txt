@@ -1,7 +1,8 @@
 # Dependencies for HPU code
+numexpr==2.13.1
 ray
 pandas
-numpy==1.26.4
+numpy
 tabulate
 setuptools>=77.0.3,<80.0.0
 setuptools-scm>=8

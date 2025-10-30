@@ -357,8 +357,12 @@ class Context:
 
         group_ids, group_offsets = indices_and_offsets(num_ctx_blocks)
         block_ids = fetch_2d(block_table, group_ids, group_offsets)
-        block_usages = torch.clamp(
-            total_tokens.index_select(0, group_ids) - group_offsets * block_size + 1, 1, block_size)
+        #NOTE(kzawora): Originally, we were clamping
+        # total_tokens.index_select(0, group_ids) - group_offsets * block_size + 1
+        # I'm not sure why +1 was there originally, but in non-block-aligned prefix-prefill scenarios
+        # it made causal mask not cover the first unused token.
+        # (e.g. with context 28, the 28th slot was unmasked, causing the effective context length to be 29)
+        block_usages = torch.clamp(total_tokens.index_select(0, group_ids) - group_offsets * block_size, 1, block_size)
 
         ctx = Context(group_ids, group_offsets, block_ids, block_usages)
         all_shapes = [v.shape for v in ctx._values() if torch.is_tensor(v)]
@@ -403,8 +407,8 @@ def hpu_tensor(tensor: torch.tensor, shape: tuple, pad_value: Union[int, float])
 def create_unified_batch(req_ids: list[str], all_token_ids: torch.tensor, num_computed_tokens: torch.tensor,
                          num_scheduled_tokens: torch.tensor, num_prompt_tokens: torch.tensor, block_table: torch.tensor,
                          block_size: int, dtype: torch.dtype, bucketing_fn: Callable[[bool, int, int, int, int],
-                                                                                     tuple[int, int, int,
-                                                                                           int]]) -> UnifiedBatch:
+                                                                                     tuple[int, int, int, int]],
+                         get_dp_padding_fn: Callable[[int], int]) -> UnifiedBatch:
     """ Calculate all necessary tensors needed for batch scheduling """
     total_tokens = num_computed_tokens + num_scheduled_tokens
     query_len = num_scheduled_tokens.sum().item()
@@ -482,6 +486,11 @@ def create_unified_batch(req_ids: list[str], all_token_ids: torch.tensor, num_co
     bucket = bucketing_fn(contains_prompts, first_dim(token_ids), first_dim(shared_blocks), unique_blocks,
                           first_dim(logits_indices))
     target_qlen, target_shared_blocks, target_unique_blocks, target_logits = bucket
+
+    target_qlen += get_dp_padding_fn(target_qlen)
+    target_shared_blocks += get_dp_padding_fn(target_shared_blocks)
+    target_unique_blocks += get_dp_padding_fn(target_unique_blocks)
+    target_logits += get_dp_padding_fn(target_logits)
 
     default_causal_width = 512
     fmin = torch.finfo(dtype).min

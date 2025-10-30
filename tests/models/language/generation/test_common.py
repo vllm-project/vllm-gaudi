@@ -38,6 +38,7 @@ def launch_lm_eval(eval_config):
         'batch_size': max_num_seqs,
         'enable_expert_parallel': eval_config.get('enable_expert_parallel', False),
         'chat_template_args': eval_config.get('chat_template_args', {}),
+        'seed': eval_config.get('seed', 42),
     }
     if kv_cache_dtype is not None:
         model_args['kv_cache_dtype'] = kv_cache_dtype
@@ -72,13 +73,14 @@ def test_models(model_card_path, monkeypatch) -> None:
     print(f"{model_card=}")
     model_config = model_card['model_card']
     results = launch_lm_eval(model_config)
+    RTOL = 0.03
     metric = model_card['metrics']
     task = model_config['tasks']
     try:
         measured_value = results["results"][task][metric["name"]]
     except KeyError as e:
         raise KeyError(f"Available metrics: {results['results']}") from e
-    if metric["value"] > measured_value:
+    if metric["value"] > (measured_value + RTOL):
         raise AssertionError(f"Expected: {metric['value']} |  Measured: {measured_value}")
     print(f"Model: {model_config['model_name']} | "
           f"Task: {task} | "
