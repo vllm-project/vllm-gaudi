@@ -20,11 +20,11 @@ The following table lists the available variables:
 | **Variable**                    | **Description**                                                                           |
 | ------------------------------- | ----------------------------------------------------------------------------------------- |
 | `PT_HPU_LAZY_MODE`              | Enables Lazy execution mode, potentially improving performance by batching operations.    |
-| `VLLM_SKIP_WARMUP`              | Skips the model warmup phase to reduce startup time. It may affect initial latency.       |
+| `VLLM_SKIP_WARMUP`              | Skips the model warm-up phase to reduce startup time. It may affect initial latency.       |
 | `MAX_MODEL_LEN`                 | Sets the maximum supported sequence length for the model.                                 |
 | `MAX_NUM_SEQS`                  | Specifies the maximum number of sequences processed concurrently.                         |
 | `TENSOR_PARALLEL_SIZE`          | Defines the degree of tensor parallelism.                                                 |
-| `VLLM_EXPONENTIAL_BUCKETING`    | Enables or disables exponential bucketing for warmup strategy.                            |
+| `VLLM_EXPONENTIAL_BUCKETING`    | Enables or disables exponential bucketing for warm-up strategy.                            |
 | `VLLM_DECODE_BLOCK_BUCKET_STEP` | Configures the step size for decode block allocation, affecting memory granularity.       |
 | `VLLM_DECODE_BS_BUCKET_STEP`    | Sets the batch size step for decode operations, impacting how decode batches are grouped. |
 | `VLLM_PROMPT_BS_BUCKET_STEP`    | Adjusts the batch size step for prompt processing.                                        |

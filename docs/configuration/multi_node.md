@@ -1,5 +1,7 @@
 
-# Configuring multi-node environment
+# Configuring Multi-Node Environment
+
+This feature will be introduced in a future release.
 
 vLLM works with a multi-node environment setup via Ray. To run models on multiple nodes, follow this procedure.
 
@@ -50,7 +52,7 @@ For information on running FP8 models with a multi-node setup, see [this guide](
 
 ## Online Serving Examples
 
-For information about reproducing performance numbers with vLLM on Gaudi for various types of models and varying context lengths, refer to this [collection](https://github.com/HabanaAI/Gaudi-tutorials/tree/main/PyTorch/vLLM_Tutorials/Benchmarking_on_vLLM/Online_Static#quick-start) of static-batched online serving example scripts. The following models and example scripts are available for 2K and 4K context length scenarios:
+For information about reproducing performance numbers using vLLM Hardware Plugin for Intel® Gaudi® for various types of models and varying context lengths, refer to this [collection](https://github.com/HabanaAI/Gaudi-tutorials/tree/main/PyTorch/vLLM_Tutorials/Benchmarking_on_vLLM/Online_Static#quick-start) of static-batched online serving example scripts. The following models and example scripts are available for 2K and 4K context length scenarios:
 
 - deepseek-r1-distill-llama-70b_gaudi3_1.20_contextlen-2k
 - deepseek-r1-distill-llama-70b_gaudi3_1.20_contextlen-4k
