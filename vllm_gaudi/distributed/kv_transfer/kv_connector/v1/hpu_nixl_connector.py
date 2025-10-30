@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 import math
+import numpy as np
 import uuid
 import queue
 import threading
@@ -601,13 +602,31 @@ def get_finished(self) -> tuple[set[str], set[str]]:
         for req_id in done_recving:
             logger.info(f"done_recving in get_finished for {req_id=} at {time.perf_counter()=}")
             meta = self._recving_metadata.pop(req_id)
-            for k, v in self.device_kv_caches.values():
-                local_block_ids = meta.local_block_ids
-                #print(f'buke {local_block_ids=}|{k.shape=}')
-                for block_idx in local_block_ids:
-                    #import remote_pdb; remote_pdb.set_trace()
-                    k[block_idx*self.block_size: (1+block_idx)*self.block_size] = k[block_idx*self.block_size: (1+block_idx)*self.block_size].reshape(self.block_factor, n_kv_heads, remote_block_size, head_dim).permute(0,2,1,3).contiguous().reshape(self.block_size,n_kv_heads,head_dim)
-                    v[block_idx*self.block_size: (1+block_idx)*self.block_size] = v[block_idx*self.block_size: (1+block_idx)*self.block_size].reshape(self.block_factor, n_kv_heads, remote_block_size, head_dim).permute(0,2,1,3).contiguous().reshape(self.block_size,n_kv_heads,head_dim)
+
+            local_block_ids = meta.local_block_ids
+            slot_indices = torch.tensor(np.concatenate([  
+                np.arange(start=block_idx * self.block_size,  stop=(block_idx + 1) * self.block_size) \
+                for block_idx in local_block_ids  
+            ]), device=self.kv_buffer_device, dtype=torch.int64)
+            
+            for k, v in self.device_kv_caches.values():  
+                # Process all blocks in one operation  
+                k_blocks = k.index_select(0, slot_indices)  
+                k_reshaped = k_blocks.reshape(  
+                    len(local_block_ids), self.block_size, n_kv_heads, head_dim  
+                ).reshape(  
+                    len(local_block_ids) * self.block_factor, n_kv_heads, remote_block_size, head_dim  
+                ).permute(0, 2, 1, 3).contiguous().reshape(-1, n_kv_heads, head_dim)  
+                k.index_put_((slot_indices,), k_reshaped)  
+                
+                # Same for v  
+                v_blocks = v.index_select(0, slot_indices)  
+                v_reshaped = v_blocks.reshape(  
+                    len(local_block_ids), self.block_size, n_kv_heads, head_dim  
+                ).reshape(  
+                    len(local_block_ids) * self.block_factor, n_kv_heads, remote_block_size, head_dim  
+                ).permute(0, 2, 1, 3).contiguous().reshape(-1, n_kv_heads, head_dim)  
+                v.index_put_((slot_indices,), v_reshaped)
             #import remote_pdb; remote_pdb.set_trace()
             t2 = time.perf_counter()
             tt = t2-t1

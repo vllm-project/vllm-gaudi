@@ -1335,7 +1335,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # Must be prompt
             assert num_computed_tokens < num_prompt_tokens
             num_output_tokens = len(self.requests[req_id].output_token_ids)
-            # causing non-pd crash for concurrency 64
             #if not has_kv_transfer_group():
                 #P case num_output_tokens has non 0
                 #assert num_output_tokens == 0, \
