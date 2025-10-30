@@ -10,7 +10,7 @@ when encountering tensors with different shapes within the same topology. While 
 In dynamic inference serving scenarios, minimizing the number of graph compilations and reducing the risk of graph compilation occurring during server runtime is important. Currently, this is achieved by
 "bucketing" the model's forward pass across three dimensions.
 
-Bucketing significantly reduces the number of required graphs but does not handle graph compilation or device code generation. These tasks are performed during the warmup and HPU Graph capture phase.
+Bucketing significantly reduces the number of required graphs but does not handle graph compilation or device code generation. These tasks are performed during the warm-up and HPU Graph capture phase.
 
 ## Bucketing Strategies
 
@@ -55,7 +55,7 @@ The exponential strategy is the default warm-up mechanism. It is based on 4 para
 - `max`: The maximum value
 - `limit`: The maximum number of buckets
 
-The exponential bucketing strategy applies exponential spacing between buckets. The `min` and `max` values are always included in the warmup, and the intermediate values are calculated using an exponent. The base remains unchanged. If duplicate values are generated, they are removed to ensure the warm-up process is as efficient as possible. All the values generated in this way, ranging from batch size, query length and context blocks, will be warmed up with each other.
+The exponential bucketing strategy applies exponential spacing between buckets. The `min` and `max` values are always included in the warm-up, and the intermediate values are calculated using an exponent. The base remains unchanged. If duplicate values are generated, they are removed to ensure the warm-up process is as efficient as possible. All the values generated in this way, ranging from batch size, query length and context blocks, will be warmed up with each other.
 
 The following example presents a possible distribution:
 
@@ -100,7 +100,7 @@ These parameters can be configured separately by the user for the prompt and dec
 
 ### Unified Strategy
 
-The unified strategy is a dedicated to Unified Attention. Its buckets are determined by the following non-configurable parameters:
+The unified strategy is dedicated to Unified Attention. Its buckets are determined by the following non-configurable parameters:
 
 - `query length`: The number of currently processed tokens, excluding context tokens.
 - `shared num blocks`: The context length measured in blocks. It includes only blocks that are shared between at least two block tables, in different requests, or blocks used by at least two tokens in the query.

@@ -18,18 +18,18 @@ Set the following environment variables to avoid OOM/functional issues.  Additio
 - `VLLM_RPC_TIMEOUT=100000`
 - `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`
 
-## Warmup Buckets Preparation
+## Warm-up Buckets Preparation
 
-Exponential bucketing mechanism automatically prepares buckets for long context. Linear bucketing mechanism requires manual flags settings. The following table presents 32K context length flags examples for linear warmup:
+Exponential bucketing mechanism automatically prepares buckets for long context. Linear bucketing mechanism requires manual flags settings. The following table presents 32K context length flags examples for linear warm-up:
 
 | Flag | Suggested value | Notes |
 |------|-----------------|-------|
 | `VLLM_GRAPH_RESERVED_MEM` | `0.02` or `0.1` | It depends on the model and context length settings. Set to `0.02` for Llama3.1-8B or `0.1` for Llama3.1-70B. |
-| `VLLM_PROMPT_SEQ_BUCKET_MIN` | `24576` | The value depends on the warmup results. |
-| `VLLM_PROMPT_SEQ_BUCKET_STEP` | `2048` | The value depends on the warmup results. We recommend increasing it to a higher value for faster warmup. for Intel Gaudi 3, we suggest setting it to `16384`. |
+| `VLLM_PROMPT_SEQ_BUCKET_MIN` | `24576` | The value depends on the warm-up results. |
+| `VLLM_PROMPT_SEQ_BUCKET_STEP` | `2048` | The value depends on the warm-up results. We recommend increasing it to a higher value for faster warm-up. for Intel Gaudi 3, we suggest setting it to `16384`. |
 | `VLLM_PROMPT_SEQ_BUCKET_MAX` | `32768` | The value for context length is 32K; use 16384 for 16K. |
-| `VLLM_DECODE_BLOCK_BUCKET_MIN` | `1024` | The value depends on the warmup results. |
-| `VLLM_DECODE_BLOCK_BUCKET_STEP` | `1024` | The value depends on the warmup results. |
+| `VLLM_DECODE_BLOCK_BUCKET_MIN` | `1024` | The value depends on the warm-up results. |
+| `VLLM_DECODE_BLOCK_BUCKET_STEP` | `1024` | The value depends on the warm-up results. |
 | `VLLM_DECODE_BLOCK_BUCKET_MAX` | `33792` | Calculate the value of `max_num_seqs * max_decode_seq // self.block_size`, where `max_decode_seq` represents the sum of input and output sequences. For example: `128 *((32 + 1)* 1024) / 128` and `32 *((32 + 1)* 1024) / 128`. |
 
 ## Batch Size Settings
