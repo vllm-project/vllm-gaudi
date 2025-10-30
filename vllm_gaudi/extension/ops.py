@@ -302,10 +302,12 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
                             is_causal: bool,
                             attn_bias: Optional[torch.Tensor] = None,
                             valid_seq_lengths: Optional[torch.Tensor] = None,
+                            window_size: Optional[int] = None,
                             **ignored_args) -> torch.Tensor:
     query = query.transpose(1, 2)
     key = key.transpose(1, 2)
     value = value.transpose(1, 2)
+    padding_side = 'right'
     if get_config().fp32_softmax:
         softmax_mode = 'fp32'
     else:
@@ -317,8 +319,14 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
         # TODO: causal + attn_bias is not yet supported
         is_causal = False
         valid_seq_lengths = None
-    attn_weights = fsdpa_op(query, key, value, attn_bias, 0.0, is_causal, scale, softmax_mode, recompute_mode,
-                            valid_seq_lengths, 'right')
+
+    args = [
+        query, key, value, attn_bias, 0.0, is_causal, scale, softmax_mode, recompute_mode, valid_seq_lengths,
+        padding_side
+    ]
+    args += [window_size] if window_size else []
+    attn_weights = fsdpa_op(*args)
+
     attn_weights = attn_weights.transpose(1, 2)
     return attn_weights
 
@@ -1042,12 +1050,6 @@ def scaled_fp8_quant(
     if scale is None:
         raise "dynamic scaled_fp8_quant not implemented for HPU"
         # TODO: calculate scale to match gaudi2 240 range instead of 448
-        if use_per_token_if_dynamic:
-            scale = torch.empty((input.numel() // input.shape[-1], 1), device=input.device, dtype=torch.float32)
-            torch.ops._C.dynamic_per_token_scaled_fp8_quant(output, input, scale, scale_ub)
-        else:
-            scale = torch.zeros(1, device=input.device, dtype=torch.float32)
-            torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
         output = torch.ops.hpu.cast_to_fp8_v2(input, 1 / scale, False, False, dtype=torch.float8_e4m3fn)[0]
 
