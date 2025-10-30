@@ -374,7 +374,7 @@ def generate_buckets(bs_range,
     if file_buckets:
         for bs, query, blocks in file_buckets:
             if all(bucket_filter(bs, query, blocks) for bucket_filter in filters):
-                buckets.add(corrector(bs, query, ctx))
+                buckets.add(corrector(bs, query, blocks))
     else:
         for bs_idx, bs in enumerate(bs_range):
             for ctx_idx, ctx in enumerate(ctx_range):
