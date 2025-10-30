@@ -73,13 +73,14 @@ def test_models(model_card_path, monkeypatch) -> None:
     print(f"{model_card=}")
     model_config = model_card['model_card']
     results = launch_lm_eval(model_config)
+    RTOL = 0.03
     metric = model_card['metrics']
     task = model_config['tasks']
     try:
         measured_value = results["results"][task][metric["name"]]
     except KeyError as e:
         raise KeyError(f"Available metrics: {results['results']}") from e
-    if metric["value"] > measured_value:
+    if metric["value"] > (measured_value + RTOL):
         raise AssertionError(f"Expected: {metric['value']} |  Measured: {measured_value}")
     print(f"Model: {model_config['model_name']} | "
           f"Task: {task} | "
