@@ -23,7 +23,7 @@ from vllm_gaudi.extension.defragmentation import OnlineDefragmenter
 from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler, HabanaMemoryProfiler, HabanaProfilerCounterHelper,
                                            format_bytes, setup_profiler)
 from vllm_gaudi.extension.runtime import finalize_config, get_config
-from vllm_gaudi.extension.unified import (create_unified_batch)
+from vllm_gaudi.extension.unified_batch import create_unified_batch
 from vllm_gaudi.extension.utils import align_and_pad, pad_list, with_default
 from vllm_gaudi.extension.debug import init_debug_logger
 from vllm_gaudi.v1.worker.hpu_dp_utils import set_hpu_dp_metadata
@@ -341,6 +341,7 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         self._rotary_embed_module = self._get_rotary_embedding_module(self.model)
         self._rotary_prepare_cos_sin = self._get_prepare_cos_sin()
         self.unified_attn = get_config().unified_attn
+        self.unified_attn_persistent_ctx = None
         self.flatten_input = get_config().flatten_input
         self.is_mm_optimized = is_mm_optimized(self.model)
         self.sliding_window = vllm_config.model_config.get_sliding_window()
@@ -2824,7 +2825,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         return create_unified_batch(self.input_batch.req_ids, all_token_ids, num_computed_tokens, num_scheduled_tokens,
                                     num_prompt_tokens, block_table, self.block_size, self.dtype,
-                                    self.unified_bucketing_fn, self.get_dp_padding)
+                                    self.unified_attn_persistent_ctx, self.unified_bucketing_fn, self.get_dp_padding)
 
     @torch.inference_mode()
     def unified_execute_model(
@@ -4378,6 +4379,16 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if self.vllm_config.kv_transfer_config.kv_buffer_device == "cpu":
                 get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
             global hpu_buffer
+        if self.unified_attn:
+            with HabanaMemoryProfiler() as m:
+                from vllm_gaudi.extension.unified_batch import UnifiedBatchPersistentContext
+                max_num_shared_blocks = math.ceil(num_blocks * get_config().unified_attn_shared_cache_ratio)
+                self.unified_attn_persistent_ctx = UnifiedBatchPersistentContext(self.max_num_batched_tokens,
+                                                                                 max_num_shared_blocks, num_blocks,
+                                                                                 self.block_size, dtype)
+            logger.info("Allocating unified persistent batch took %.4f GB of host memory",
+                        m.consumed_host_memory / float(2**30))
+
         htorch.hpu.synchronize()
 
     def get_kv_caches_4D(self, kv_caches) -> dict[str, torch.Tensor]:
