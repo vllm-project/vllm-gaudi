@@ -14,7 +14,7 @@ class ExponentialBucketingStrategy():
 
     def check_for_user_flags(self, phase):
         dim = ['bs', 'seq'] if phase == 'prompt' else ['bs', 'block']
-        params = ['min', 'step', 'max', 'limit']
+        params = ['min', 'step', 'max']
         env_vars = [f'VLLM_{phase}_{dim}_BUCKET_{p}'.upper() for dim in dim for p in params]
         user_flags = []
         for e in env_vars:
