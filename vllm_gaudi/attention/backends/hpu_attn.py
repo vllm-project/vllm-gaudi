@@ -110,6 +110,30 @@ class HPUUnifiedAttentionBackend(HPUAttentionBackend):
         return HPUUnifiedAttentionMetadata
 
 
+class HPUMLAUnifiedAttentionBackend(HPUAttentionBackend):
+
+    @staticmethod
+    def get_name() -> str:
+        return "HPU_UA_MLA"
+
+    @staticmethod
+    def get_impl_cls() -> type["AttentionImpl"]:
+        return HPUMLAUnifiedAttentionImpl
+
+    @staticmethod
+    def get_metadata_cls() -> type["AttentionMetadata"]:
+        # NOTE(kzawora): no need to have MLA-specific metadata - we're reusing the regular UA one
+        return HPUUnifiedAttentionMetadata
+
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+    ) -> tuple[int, ...]:
+        return (num_blocks * block_size, head_size)
+
 @dataclass
 class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     """Metadata for HPUAttentionbackend."""
@@ -888,3 +912,100 @@ class HPUUnifiedAttentionImpl(AttentionImpl):
         )
         output = output.unflatten(0, (query_shape[0], query_shape[1])).flatten(-2, -1)
         return output
+
+
+class HPUMLAUnifiedAttentionImpl(MLACommonImpl[HPUUnifiedAttentionMetadata], torch.nn.Module):
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: Optional[list[float]],
+        sliding_window: Optional[int],
+        kv_cache_dtype: str,
+        logits_soft_cap: Optional[float],
+        attn_type: str,
+        kv_sharing_target_layer_name: Optional[str],
+        # MLA Specific Arguments
+        q_lora_rank: Optional[int],
+        kv_lora_rank: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        qk_head_dim: int,
+        v_head_dim: int,
+        kv_b_proj: ColumnParallelLinear,
+        **kwargs,
+    ) -> None:
+        torch.nn.Module.__init__(self)
+
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.scale = float(scale)
+        self.num_kv_heads = num_kv_heads
+        self.kv_cache_dtype = kv_cache_dtype
+
+        self.q_lora_rank = q_lora_rank
+        self.kv_lora_rank = kv_lora_rank
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.qk_head_dim = qk_head_dim
+        self.v_head_dim = v_head_dim
+        self.kv_b_proj = kv_b_proj
+
+        # NOTE(kzawora): restore this once https://github.com/vllm-project/vllm/pull/25385 is merged
+        #MLACommonImpl.__init__(self, num_heads, head_size, scale, num_kv_heads, alibi_slopes, sliding_window,
+        #                       kv_cache_dtype, logits_soft_cap, attn_type, kv_sharing_target_layer_name, **kwargs)
+
+        self.enable_fp8_attn = kv_cache_dtype == 'fp8_inc' and os.environ.get('QUANT_CONFIG', None) is None
+        unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
+        if any(unsupported_features):
+            raise NotImplementedError("HPUMLAUnifiedAttentionImpl does not support one of the following: "
+                                      "alibi_slopes, sliding_window, "
+                                      "logits_soft_cap")
+
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
+                                      "HPUMLAUnifiedAttentionImpl")
+
+    def forward(
+        self,
+        layer: AttentionLayer,
+        q: torch.Tensor,
+        k_c_normed: torch.Tensor,  # key in unified attn
+        k_pe: torch.Tensor,  # value in unified attn
+        kv_cache: torch.Tensor,
+        attn_metadata: HPUAttentionMetadata,
+        output: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if output is not None:
+            raise NotImplementedError("output is not yet supported for MLAImplBase")
+        from fpdb import ForkedPdb; ForkedPdb().set_trace()
+        is_prefill = attn_metadata.is_prompt
+        if not is_prefill:
+            # decode
+            q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+            # Convert from (B, N, P) to (N, B, P)
+            q_nope = q_nope.transpose(0, 1)
+            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+            decode_ql_nope = torch.bmm(q_nope, self.W_UK_T)
+            # Convert from (N, B, L) to (B, N, L)
+            decode_ql_nope = decode_ql_nope.transpose(0, 1)
+
+        slot_mapping = attn_metadata.slot_mapping.flatten() if attn_metadata.slot_mapping is not None else None
+
+        latent_vec_k = torch.concat((k_c_normed, k_pe.view(*k_c_normed.shape[:-1], self.qk_rope_head_dim)), dim=-1)
+        latent_vec_k = latent_vec_k.view(-1, self.qk_rope_head_dim + self.kv_lora_rank)
+
+        # write the latent and rope to kv cache
+        if kv_cache is not None and len(kv_cache) == 2:
+            self.latent_cache_k(latent_vec_k, kv_cache[0], slot_mapping)
+            k_cache = kv_cache[0]
+
+        if is_prefill:
+            return self._forward_prefill(q, latent_vec_k, k_cache, attn_metadata)
+        else:
+            return self._forward_decode(decode_ql_nope, q_pe, k_cache, attn_metadata)

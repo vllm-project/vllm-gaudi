@@ -46,15 +46,19 @@ class HpuPlatform(Platform):
         assert use_v1, 'Only V1 is supported!'
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on HPU.")
-        if use_mla:
-            logger.info("Using HPUAttentionMLA backend.")
-            return ("vllm_gaudi.attention.backends.hpu_attn."
-                    "HPUMLAAttentionBackend")
         elif get_config().unified_attn:
-            logger.info("Using UnifiedAttention backend.")
+            if use_mla:
+                logger.info("Using HPUMLAUnifiedAttention backend.")
+                return ("vllm_gaudi.attention.backends."
+                        "hpu_attn.HPUMLAUnifiedAttentionBackend")
+            logger.info("Using HPUUnifiedAttention backend.")
             return ("vllm_gaudi.attention.backends."
                     "hpu_attn.HPUUnifiedAttentionBackend")
         else:
+            if use_mla:
+                logger.info("Using HPUAttentionMLA backend.")
+                return ("vllm_gaudi.attention.backends.hpu_attn."
+                        "HPUMLAAttentionBackend")
             logger.info("Using HPUAttentionV1 backend.")
             return ("vllm_gaudi.v1.attention.backends."
                     "hpu_attn.HPUAttentionBackendV1")

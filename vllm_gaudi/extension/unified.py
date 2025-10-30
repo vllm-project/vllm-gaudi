@@ -240,7 +240,39 @@ class HPUUnifiedAttentionMetadata:
         return self.causal_bias is not None
 
 
+
 def unified_attn(query: torch.tensor, key: torch.tensor, value: torch.tensor, key_cache: torch.tensor,
+                 value_cache: torch.tensor, scale: float, metadata: HPUUnifiedAttentionMetadata) -> torch.tensor:
+    """Main entry point for unified attention"""
+
+    scaled_query = query * scale
+    cache_utils = CacheUtils(key_cache, value_cache, metadata.block_size)
+
+    causal = partial_attn_causal(query=scaled_query,
+                                 key=key,
+                                 value=value,
+                                 bias=metadata.causal_bias,
+                                 slice_size=metadata.causal_width,
+                                 fmin=metadata.fmin)
+    shared = partial_attn_shared(query=scaled_query,
+                                 blocks=metadata.shared_blocks,
+                                 bias=metadata.shared_bias,
+                                 fmin=metadata.fmin,
+                                 cache_utils=cache_utils)
+    unique = partial_attn_unique(query=scaled_query,
+                                 blocks=metadata.unique_blocks,
+                                 block_mapping=metadata.unique_block_mapping,
+                                 bias=metadata.unique_bias,
+                                 fmin=metadata.fmin,
+                                 cache_utils=cache_utils)
+
+    attn = merge(causal, shared, unique, feps=metadata.feps)
+    if attn is None:
+        return query
+    return attn
+
+
+def unified_attn_mla(query: torch.tensor, key: torch.tensor, value: torch.tensor, key_cache: torch.tensor,
                  value_cache: torch.tensor, scale: float, metadata: HPUUnifiedAttentionMetadata) -> torch.tensor:
     """Main entry point for unified attention"""
 
