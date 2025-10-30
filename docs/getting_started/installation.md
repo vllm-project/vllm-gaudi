@@ -76,6 +76,7 @@ Use the following commands to run a Docker image. Make sure to update the versio
     git clone https://github.com/vllm-project/vllm-gaudi
     cd vllm-gaudi
     export VLLM_COMMIT_HASH=$(git show "origin/vllm/last-good-commit-for-vllm-gaudi:VLLM_STABLE_COMMIT" 2>/dev/null)
+    cd ..
     ```
 
 === "Step 2: Install vLLM"
@@ -87,7 +88,7 @@ Use the following commands to run a Docker image. Make sure to update the versio
     git clone https://github.com/vllm-project/vllm
     cd vllm
     git checkout $VLLM_COMMIT_HASH
-    pip install -r <(sed '/^[torch]/d' requirements/build.txt)
+    pip install -r <(sed '/^torch/d' requirements/build.txt)
     VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
     cd ..
     ```
@@ -107,7 +108,7 @@ Use the following commands to run a Docker image. Make sure to update the versio
 
     ```bash
     cd vllm-gaudi
-    python install_nixl.sh
+    python install_nixl.py
     cd ..
     ```
 
@@ -135,7 +136,7 @@ Use the following commands to run a Docker image. Make sure to update the versio
     git clone https://github.com/vllm-project/vllm
     cd vllm
     git checkout $VLLM_COMMIT_HASH
-    pip install -r <(sed '/^[torch]/d' requirements/build.txt)
+    pip install -r <(sed '/^torch/d' requirements/build.txt)
     VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
     cd ..
     
@@ -144,5 +145,5 @@ Use the following commands to run a Docker image. Make sure to update the versio
     pip install -e .
     
     # Build nixl
-    python install_nixl.sh
+    python install_nixl.py
     ```
