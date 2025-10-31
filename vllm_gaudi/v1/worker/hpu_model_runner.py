@@ -2901,7 +2901,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     self.profiler.record_counter(self.event_start, counters)
             if warmup_mode == False:
                 self.maybe_wait_for_kv_save()
-            finished_sending, finished_recving = (self.get_finished_kv_transfers(scheduler_output))
+
 
             if self.is_driver_worker and self.profiler.enabled:
                 self.profiler_counter_helper.reset_prompt_seq_stats()
@@ -3141,6 +3141,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
         logprobs = None
 
+        finished_sending, finished_recving = (self.get_finished_kv_transfers(scheduler_output))
         if self.use_async_scheduling:
             model_runner_output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,  # CHECK
