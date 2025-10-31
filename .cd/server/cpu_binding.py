@@ -62,7 +62,8 @@ class CPU_Binding:
             self.node_to_cpus = []
             for i in range(self.numa_size):
                 from numa import info
-                node_intersect = [cpu for cpu in info.node_to_cpus(i) if cpu in self.cpus_allow_list]
+                filtered_node_to_cpus = self.filter_one_cpu_per_core(info.node_to_cpus(i))
+                node_intersect = [cpu for cpu in filtered_node_to_cpus if cpu in self.cpus_allow_list]
                 if bool(node_intersect):
                     self.node_to_cpus.append(list(node_intersect))
             self.node_to_idle_cpus = self.node_to_cpus.copy()
@@ -99,10 +100,32 @@ class CPU_Binding:
             if r.get("output_length", "").strip() == output_tok
         ]
         if not matches:
+            # fallback: match only by model_id
+            matches = [r for r in rows if r.get('model_id', '') == model]
+            print(f"Warning: using fallback entry for model '{model}' without exact input/output token match")
+        if not matches:
             available = ", ".join(sorted({r.get('model_id', '') for r in rows}))
             raise ValueError(f"MODEL '{model}', input_length '{input_tok}', output_length '{output_tok}' "
                              f"not found in CSV. Available: {available}")
         return matches[0]
+    def filter_one_cpu_per_core(self, cpus):
+        """
+        Given a list of CPU IDs (possibly with HT pairs),
+        return a filtered list with only one logical CPU per physical core.
+        """
+        seen_cores = set()
+        filtered = []
+        for cpu in sorted(cpus):
+            core_path = f"/sys/devices/system/cpu/cpu{cpu}/topology/core_id"
+            try:
+                with open(core_path) as f:
+                    core_id = int(f.read().strip())
+            except FileNotFoundError:
+                continue
+            if core_id not in seen_cores:
+                seen_cores.add(core_id)
+                filtered.append(cpu)
+        return filtered
 
     def get_cpus_id_binding_based_on_numa_nodes(self, rank: int) -> str:
         """Return CPUs id binding based on NUMA nodes.
@@ -116,8 +139,8 @@ class CPU_Binding:
             return rank_to_cpus
 
         if self.binding_policy is BindingPolicy.Evenly_on_NUMAs or self.cards is None:
-            divider = min(self.world_size, len(self.node_to_cpus))
-            self.allocated_cpu_per_numa = self.num_allocated_cpu // divider
+            #divider = min(self.world_size, len(self.node_to_cpus))
+            self.allocated_cpu_per_numa = self.num_allocated_cpu // len(self.node_to_cpus)
             node_id = rank
         elif self.binding_policy is BindingPolicy.NUMAs_with_cards:
             self.allocated_cpu_per_numa = self.num_allocated_cpu // len(self.gaudi_numa_list)
@@ -147,7 +170,10 @@ if __name__ == "__main__":
         numa_size = 1
     world_size = numa_size
     cpu_binder = CPU_Binding(use_hyperthread=False)
-    max_needed_numa_size = min(cpu_binder.world_size, cpu_binder.numa_size)
+    if cpu_binder.binding_policy is BindingPolicy.Evenly_on_NUMAs or cpu_binder.cards is None:
+        max_needed_numa_size = len(cpu_binder.node_to_cpus)
+    elif cpu_binder.binding_policy is BindingPolicy.NUMAs_with_cards:
+        max_needed_numa_size = min(cpu_binder.world_size, len(cpu_binder.node_to_cpus))
     for i in range(max_needed_numa_size):
         rank_to_cpus = cpu_binder.get_cpus_id_binding_based_on_numa_nodes(i)
         print(rank_to_cpus)
