@@ -6,6 +6,7 @@ from functools import partial
 import itertools
 import math
 import os
+import sys
 import time
 from dataclasses import dataclass, field, fields
 from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast)
@@ -2819,7 +2820,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         max_blocks = (max_seq + self.block_size - 1) // self.block_size
         all_token_ids = self.input_batch.token_ids_cpu_tensor[:num_reqs, :max_seq]
         # TODO: check if it's safe to always slice on first dim
-        block_table = self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs, :max_blocks].clone()
+        block_table = self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs, :max_blocks].clone().to(torch.int64)
         if self.defragmenter.enabled:
             block_table.apply_(self.defragmenter.resolve)
 
@@ -4211,6 +4212,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # the cache_size_limit and accumulated_cache_size_limit
             torch._dynamo.config.accumulated_cache_size_limit = max(cache_size_limit * 8,
                                                                     torch._dynamo.config.accumulated_cache_size_limit)
+            # NOTE(kzawora): I'm not exactly sure why, but if we don't set this in unified attention to a high enough
+            # value, we'll see warmup mode bypassing compilation and execute everything eagerly.
+            if self.unified_attn:
+                torch._dynamo.config.accumulated_recompile_limit = sys.maxsize
+                torch._dynamo.config.recompile_limit = sys.maxsize
 
         if self.skip_warmup:
             logger.info("Skipping warmup...")
