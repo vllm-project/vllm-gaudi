@@ -65,10 +65,8 @@ class Fp8LinearMethod(OrigFp8LinearMethod):
                 do_unpad=True,
                 force_channel_fp8=envs.VLLM_HPU_FORCE_CHANNEL_FP8,
             )
-        if layer.weight_scale.dim() > 1:
-            weight_scale = layer.weight_scale.transpose(0, 1)
-        else:
-            weight_scale = layer.weight_scale
+
+        weight_scale = layer.weight_scale.transpose(0, 1) if layer.weight_scale.dim() > 1 else layer.weight_scale
         input_scale = getattr(layer, 'input_scale', None)
         return hpu_ops.apply_fp8_linear_hpu(input=x,
                                             weight=layer.weight,
