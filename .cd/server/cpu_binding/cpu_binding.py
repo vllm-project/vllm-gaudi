@@ -108,6 +108,7 @@ class CPU_Binding:
             raise ValueError(f"MODEL '{model}', input_length '{input_tok}', output_length '{output_tok}' "
                              f"not found in CSV. Available: {available}")
         return matches[0]
+
     def filter_one_cpu_per_core(self, cpus):
         """
         Given a list of CPU IDs (possibly with HT pairs),

@@ -64,40 +64,6 @@ cd vllm-gaudi/.cd/
 
    This launches the vLLM server and runs the benchmark suite automatically.
 
-#### 2.1 (Optional) Running the Server with a Benchmark, and pinning CPU cores for memory access coherence
-
-   To improve memory access cohererence and release CPUs to other CPU only workloads like a vLLM serving with Llama3 8B,
-   pin the CPU cores based on different CPU NUMA nodes by using an auto-generate docker-compose.override.yml file.
-   Couple python libraries are needed for the python scripts, so install the required packages using following commnad.
-
-   ```bash
-   pip install -r vllm-fork/.cd/server/requirements_cpu_binding.txt
-   ```
-
-   Run below command to do CPU cores pinning via auto-generated docker-compose.override.yml file.
-
-   ```bash
-   cd vllm-fork/.cd/
-   MODEL="Qwen/Qwen2.5-14B-Instruct" \
-   HF_TOKEN="<your huggingface token>" \
-   DOCKER_IMAGE="vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/vllm-installer-2.7.1:latest" \
-   python3 server/generate_cpu_binding_from_csv.py --settings server/cpu_binding.csv --output ./docker-compose.override.yml \
-   docker compose --profile benchmark -f docker-compose.yml -f docker-compose.override.yml up
-   ```
-
-   To also pin idle CPUs to another service like vllm-cpu-service, please give the service name to update
-   docker-compose.override.yml in order to bind another service to idle cpus.
-   Here is an exmaple to bind idle cpu for vllm-cpu-service service while docker-compose.vllm-cpu-service.yml defines cpu service.
-
-   ```bash
-   cd vllm-fork/.cd/
-   MODEL="Qwen/Qwen2.5-14B-Instruct" \
-   HF_TOKEN="<your huggingface token>" \
-   DOCKER_IMAGE="vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/vllm-installer-2.7.1:latest" \
-   python3 server/generate_cpu_binding_from_csv.py --settings server/cpu_binding.csv --output ./docker-compose.override.yml --cpuservice vllm-cpu-service \
-   docker compose --profile benchmark -f docker-compose.yml -f docker-compose.vllm-cpu-service.yml -f docker-compose.override.yml up
-   ```
-
 ### 3. Run the server using Docker Compose with custom parameters
 
    To override default settings, you can provide additional parameters when starting the server. This is a more advanced approach:
@@ -193,7 +159,41 @@ cd vllm-gaudi/.cd/
    > [!NOTE]
    > When using configuration files, you do not need to set the `MODEL` environment variable, as the model name is specified within the configuration file. However, you must still provide your `HF_TOKEN`.
 
-### 7. Running the Server Directly with Docker
+### 7.  Advance Options with pinning CPU cores for memory access coherence
+
+   To improve memory access cohererence and release CPUs to other CPU only workloads like a vLLM serving with Llama3 8B,  
+   pin the CPU cores based on different CPU NUMA nodes by using an auto-generate docker-compose.override.yml file.  
+   Validated Xeon Processors as for now: Intel Xeon 6960P, and Intel Xeon PLATINUM 8568Y+.  
+  
+   Couple python libraries are needed for the python scripts, so install the required packages using following commnad.  
+
+   ```bash
+   pip install -r vllm-gaudi/.cd/server/cpu_binding/requirements_cpu_binding.txt
+   ```
+
+   Run below command to do CPU cores pinning via auto-generated docker-compose.override.yml file.
+
+   ```bash
+   export MODEL="Qwen/Qwen2.5-14B-Instruct"
+   export HF_TOKEN="<your huggingface token>"
+   export DOCKER_IMAGE="<docker image url>"
+   python3 server/cpu_binding/generate_cpu_binding_from_csv.py --settings server/cpu_binding/cpu_binding_gnr.csv --output ./docker-compose.override.yml
+   docker compose --profile benchmark up
+   ```
+
+   To also pin idle CPUs to another service like vllm-cpu-service, please give the service name to update
+   docker-compose.override.yml in order to bind another service to idle cpus.
+   Here is an exmaple to bind idle cpu for vllm-cpu-service service while docker-compose.vllm-cpu-service.yml defines cpu service.
+
+   ```bash
+   export MODEL="Qwen/Qwen2.5-14B-Instruct"
+   export HF_TOKEN="<your huggingface token>"
+   export DOCKER_IMAGE="<docker image url>"
+   python3 server/cpu_binding/generate_cpu_binding_from_csv.py --settings server/cpu_binding/cpu_binding_gnr.csv --output ./docker-compose.override.yml --cpuservice vllm-cpu-service
+   docker compose --profile benchmark -f docker-compose.yml -f docker-compose.vllm-cpu-service.yml -f docker-compose.override.yml up
+   ```
+
+### 8. Running the Server Directly with Docker
 
    For full control, you can run the server using the `docker run` command. This approach allows you to specify any native Docker parameters as needed.
 
