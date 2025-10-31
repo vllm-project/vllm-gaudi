@@ -244,7 +244,7 @@ def test_update_states_request_resumed(model_runner, dist_init):
         new_block_ids=([[0]], ),
         num_computed_tokens=[0],
         num_output_tokens=[0],
-        all_token_ids={req_id: scheduler_output.scheduled_new_reqs[0].prompt_token_ids},
+        all_token_ids={},
     )
 
     scheduler_output = SchedulerOutput(
