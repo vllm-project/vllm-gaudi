@@ -240,7 +240,7 @@ def test_update_states_request_resumed(model_runner, dist_init):
         req_ids=[req_id],
         resumed_req_ids={req_id},
         new_token_ids=[[]],
-        new_block_ids=[([0],)],
+        new_block_ids=[([0], )],
         num_computed_tokens=[0],
         num_output_tokens=[0],
         all_token_ids={},
