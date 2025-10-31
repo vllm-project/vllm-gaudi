@@ -7,7 +7,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 # Import CPU_Binding directly from sibling cpu_binding.py
-from cpu_binding import CPU_Binding
+from cpu_binding import CPU_Binding, BindingPolicy
 
 SERVICE_NAME = "vllm-server"  # single service
 XSET_NAME = "vllm_server_cpu"  # x-sets key/anchor
@@ -19,7 +19,10 @@ def build_cpuset_and_limit(csv_path: str):
     cpus_list = ''
     idle_cpus_list = ''
     cpu_binder = CPU_Binding(csv_path=csv_path, use_hyperthread=False)
-    max_needed_numa_size = min(cpu_binder.world_size, cpu_binder.numa_size)
+    if cpu_binder.binding_policy is BindingPolicy.Evenly_on_NUMAs or cpu_binder.cards is None:
+        max_needed_numa_size = len(cpu_binder.node_to_cpus)
+    elif cpu_binder.binding_policy is BindingPolicy.NUMAs_with_cards:
+        max_needed_numa_size = min(cpu_binder.world_size, len(cpu_binder.node_to_cpus))
     for rank in range(max_needed_numa_size):
         rank_to_cpus = cpu_binder.get_cpus_id_binding_based_on_numa_nodes(rank)
         if rank_to_cpus not in cpus_list:
