@@ -1,6 +1,6 @@
 from functools import cache
 import os
-from vllm.utils import make_tensor_with_pad, TORCH_DTYPE_TO_NUMPY_DTYPE
+from vllm.utils.torch_utils import make_tensor_with_pad, TORCH_DTYPE_TO_NUMPY_DTYPE
 from vllm_gaudi.extension.runtime import get_config
 from typing import (Any, Optional, TypeVar, Union)
 import torch
@@ -56,6 +56,19 @@ def async_h2d_copy(source, dest_tensor=None, dtype=None, device='hpu'):
         raise ValueError("dtype must be specified when source is not a tensor")
     cpu_tensor = torch.tensor(source, dtype=dtype, device='cpu')
     return cpu_tensor.to(device, non_blocking=True)
+
+
+def async_h2d_update(source: torch.Tensor, dest: torch.Tensor, indices: list[int], device='hpu'):
+    """
+    Asynchronously update specific rows of a device tensor from a CPU tensor.
+
+    Args:
+        source: CPU tensor with data to copy
+        dest: Device tensor to update
+        indices: List of row indices in dest to update
+        device: Target device
+    """
+    dest[indices] = source[indices].to(device, non_blocking=True)
 
 
 def make_ndarray_with_pad_align(

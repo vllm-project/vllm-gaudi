@@ -16,15 +16,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Contiguous cache fetching to avoid using costly gather operation on
     # Gaudi3. This is only applicable to HPU contiguous cache. If set to true,
     # contiguous cache fetch will be used.
-    "VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH": lambda: os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() in
-    ("1", "true"),
+    "VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH":
+    lambda: os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() in ("1", "true"),
 
     # Use delayed sampling for HPU to reduce host cpu overhead
     # between each step.
-    "VLLM_HPU_USE_DELAYED_SAMPLING": lambda: os.environ.get("VLLM_DELAYED_SAMPLING", "false").lower() in ("1", "true"),
+    "VLLM_HPU_USE_DELAYED_SAMPLING":
+    lambda: os.environ.get("VLLM_DELAYED_SAMPLING", "false").lower() in ("1", "true"),
 
     # Convert block fp8 to channel fp8 for HPU
-    "VLLM_HPU_FORCE_CHANNEL_FP8": lambda: os.environ.get("VLLM_HPU_FORCE_CHANNEL_FP8", "true").lower() in ("1", "true"),
+    # If `QUANT_CONFIG` is set, this will be forced to false.
+    "VLLM_HPU_FORCE_CHANNEL_FP8":
+    lambda: os.environ.get("VLLM_HPU_FORCE_CHANNEL_FP8", "true").lower() in
+    ("1", "true") and os.environ.get("QUANT_CONFIG", None) is None,
 }
 
 # end-env-vars-definition

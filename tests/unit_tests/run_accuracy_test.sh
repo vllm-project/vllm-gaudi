@@ -1,9 +1,22 @@
 #!/bin/bash
-set -xe
+set -e
+
+# --- Install Nixl ---
+echo "Installing lm-eval dependency..."
+python ../../install_nixl.py
+echo "Dependency installation complete."
+
+
+# --- Install Dependencies ---
+echo "Installing lm-eval dependency..."
+pip install lm-eval[api]
+echo "Dependency installation complete."
+
 
 # Models to run
 MODELS=(
     "Qwen/Qwen3-0.6B"
+    "deepseek-ai/DeepSeek-V2-Lite-Chat"
 )
 #MODELS=(
 #	"meta-llama/Llama-3.1-8B"
@@ -13,11 +26,20 @@ export VLLM_USE_V1=1
 export VLLM_SKIP_WARMUP="true"
 export PT_HPU_LAZY_MODE=1
 
+NIXL_BUFFER_DEVICE=${NIXL_BUFFER_DEVICE:-"cpu"}
+VLLM_NIXL_BACKEND=${VLLM_NIXL_BACKEND:-"UCX"}
+
+if [ "$VLLM_NIXL_BACKEND" == "UCX" ]; then
+  export VLLM_NIXL_DEVICE_TO_DEVICE=false
+else
+  export VLLM_NIXL_DEVICE_TO_DEVICE=true
+fi
+
 # Number of prefill and decode instances to create
 NUM_PREFILL_INSTANCES=${NUM_PREFILL_INSTANCES:-1} # Default to 1
 NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-1}   # Default to 1
 PREFILLER_TP_SIZE=${PREFILLER_TP_SIZE:-1}
-DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
+DECODER_TP_SIZE=${DECODER_TP_SIZE:-2}
 
 # Find the git repository root directory
 #GIT_ROOT=$(git rev-parse --show-toplevel)
@@ -100,7 +122,7 @@ run_tests_for_model() {
     --max_num_batched_tokens 8192 \
     --gpu-memory-utilization 0.3 \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
-    --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"cpu\"}'"
+    --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"${NIXL_BUFFER_DEVICE}\", \"kv_connector_extra_config\":{\"backends\":[\"${VLLM_NIXL_BACKEND}\"]}}'"
 
     if [ -n "$model_args" ]; then
     FULL_CMD="$BASE_CMD $model_args"
@@ -133,7 +155,7 @@ run_tests_for_model() {
     --max_num_batched_tokens 8192 \
     --gpu-memory-utilization 0.3 \
     --tensor-parallel-size $DECODER_TP_SIZE \
-    --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"cpu\"}'"
+    --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"${NIXL_BUFFER_DEVICE}\", \"kv_connector_extra_config\":{\"backends\":[\"${VLLM_NIXL_BACKEND}\"]}}'"
 
     if [ -n "$model_args" ]; then
     FULL_CMD="$BASE_CMD $model_args"

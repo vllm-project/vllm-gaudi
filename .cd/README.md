@@ -78,6 +78,7 @@ cd vllm-gaudi/.cd/
 - `VLLM_DECODE_BS_BUCKET_STEP` - Determines the batch size step for decode operations, influencing how batches are grouped and processed.
 - `VLLM_PROMPT_BS_BUCKET_STEP` - Sets the batch size step for prompt processing, impacting how prompt batches are handled.
 - `VLLM_PROMPT_SEQ_BUCKET_STEP` - Controls the step size for prompt sequence allocation, affecting how sequences are bucketed for processing.
+- `VLLM_PROMPT_CTX_BUCKET_STEP` - Controls the step size for prompt ctx allocation, affecting how ctx blocks are bucketed for processing.
 
    **Example usage:**
 
@@ -148,9 +149,9 @@ cd vllm-gaudi/.cd/
 
    ```bash
    HF_TOKEN=<your huggingface token> \
-   VLLM_SERVER_CONFIG_FILE=server_configurations/server_text.yaml \
+   VLLM_SERVER_CONFIG_FILE=server/server_scenarios_text.yaml \
    VLLM_SERVER_CONFIG_NAME=llama31_8b_instruct \
-   VLLM_BENCHMARK_CONFIG_FILE=benchmark_configurations/benchmark_text.yaml \
+   VLLM_BENCHMARK_CONFIG_FILE=benchmark/benchmark_scenarios_text.yaml \
    VLLM_BENCHMARK_CONFIG_NAME=llama31_8b_instruct \
    docker compose --profile benchmark up
    ```

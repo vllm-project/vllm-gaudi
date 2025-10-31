@@ -18,23 +18,33 @@ def get_user_flags():
         Env('VLLM_PROMPT_BS_BUCKET_MIN', int),
         Env('VLLM_PROMPT_BS_BUCKET_STEP', int),
         Env('VLLM_PROMPT_BS_BUCKET_MAX', int),
-        Env('VLLM_PROMPT_BS_BUCKET_LIMIT', int),
+        Env('VLLM_PROMPT_QUERY_BUCKET_MIN', int),
+        Env('VLLM_PROMPT_QUERY_BUCKET_STEP', int),
+        Env('VLLM_PROMPT_QUERY_BUCKET_MAX', int),
         Env('VLLM_PROMPT_SEQ_BUCKET_MIN', int),
         Env('VLLM_PROMPT_SEQ_BUCKET_STEP', int),
         Env('VLLM_PROMPT_SEQ_BUCKET_MAX', int),
-        Env('VLLM_PROMPT_SEQ_BUCKET_LIMIT', int),
+        Env('VLLM_PROMPT_CTX_BUCKET_MIN', int),
+        Env('VLLM_PROMPT_CTX_BUCKET_STEP', int),
+        Env('VLLM_PROMPT_CTX_BUCKET_MAX', int),
         Env('VLLM_DECODE_BS_BUCKET_MIN', int),
         Env('VLLM_DECODE_BS_BUCKET_STEP', int),
         Env('VLLM_DECODE_BS_BUCKET_MAX', int),
-        Env('VLLM_DECODE_BS_BUCKET_LIMIT', int),
         Env('VLLM_DECODE_BLOCK_BUCKET_MIN', int),
         Env('VLLM_DECODE_BLOCK_BUCKET_STEP', int),
         Env('VLLM_DECODE_BLOCK_BUCKET_MAX', int),
         Env('VLLM_DECODE_BLOCK_BUCKET_LIMIT', int),
+        Env('VLLM_BUCKETING_FROM_FILE', str),
 
         # Non-vllm flags that are also important to print
         Env('EXPERIMENTAL_WEIGHT_SHARING', str),
         Env('PT_HPU_WEIGHT_SHARING', str),
+        Env('RUNTIME_SCALE_PATCHING', str),
+
+        # Sliding window flags
+        Env('PT_HPU_SDPA_QKV_SLICE_MODE_FWD', boolean),
+        Env('PT_HPU_SDPA_BC_FACTOR', int),
+        Env('VLLM_FUSEDSDPA_SLIDE_THLD', int),
     ]
     return to_dict(flags)
 
@@ -83,5 +93,6 @@ def get_features():
         Value('fullgraph_compilation', False, env_var='VLLM_T_COMPILE_FULLGRAPH', env_var_type=boolean),
         Value('unified_attn', False),
         Value('scale_adjustment', True, env_var='VLLM_SCALE_ADJUSTMENT', env_var_type=boolean),
+        Value('flatten_input', Any(ModelType('qwen3_moe'), ModelType('granitemoe'), ModelType('glm4_moe'))),
     ]
     return split_values_and_flags(features)

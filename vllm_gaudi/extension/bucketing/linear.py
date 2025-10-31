@@ -15,14 +15,14 @@ class LinearBucketingStrategy:
         use_merged_prefill = get_config().merged_prefill
         prefix_caching = get_config().prefix_caching
 
-        prompt_bs_bucket_cfg = read_bucket_settings('prompt', 'bs', min=1, step=32, max=max_num_prefill_seqs)
+        prompt_bs_bucket_cfg = read_bucket_settings('prompt', 'bs', min=1, step=1, max=max_num_prefill_seqs)
         prompt_query_bucket_cfg = read_bucket_settings('prompt',
-                                                       'seq',
+                                                       'query',
                                                        min=block_size,
                                                        step=block_size,
-                                                       max=max_model_len)
+                                                       max=max_num_batched_tokens)
         max_ctx = math.ceil((max_model_len - prompt_query_bucket_cfg[0]) // block_size)
-        prompt_ctx_bucket_cfg = [0, 1, max_ctx]
+        prompt_ctx_bucket_cfg = read_bucket_settings('prompt', 'ctx', min=0, step=1, max=max_ctx)
 
         if use_merged_prefill:
             prev_prompt_bs_bucket_cfg = tuple(prompt_bs_bucket_cfg)
@@ -32,7 +32,11 @@ class LinearBucketingStrategy:
             prompt_bs_bucket_cfg = (1, 1, 1)
             query_min, query_step, _ = prev_prompt_query_bucket_cfg
             prompt_query_bucket_cfg = (query_min, query_step * 4, max_num_batched_tokens)
-            prompt_ctx_bucket_cfg = (0, 4, max_ctx * max_num_prefill_seqs)
+            prompt_ctx_bucket_cfg = read_bucket_settings('prompt',
+                                                         'ctx',
+                                                         min=0,
+                                                         step=4,
+                                                         max=max_ctx * max_num_prefill_seqs)
 
             msg = ('Merged prefill is enabled!\n'
                    'Overriding prompt bucketing settings!\n'
@@ -51,14 +55,19 @@ class LinearBucketingStrategy:
 
     def get_decode_cfgs(self, max_num_seqs, block_size, max_num_batched_tokens, max_model_len, max_blocks):
         prefix_caching = get_config().prefix_caching
+        contiguous_pa = get_config().use_contiguous_pa
 
         decode_bs_bucket_cfg = read_bucket_settings('decode', 'bs', min=1, step=32, max=max_num_seqs)
         decode_query_bucket_cfg = [1, 1, 1]
-        decode_block_bucket_cfg = read_bucket_settings('decode',
-                                                       'block',
-                                                       min=block_size,
-                                                       step=block_size,
-                                                       max=max_blocks)
+        max_decode_blocks = max(math.ceil(max_model_len * max_num_seqs // block_size), block_size)
+        if contiguous_pa:
+            max_decode_blocks = max_blocks
+        decode_block_bucket_cfg = read_bucket_settings('decode', 'block', min=1, step=block_size, max=max_decode_blocks)
+        if decode_block_bucket_cfg[2] > max_blocks:
+            logger().info(
+                f'VLLM_DECODE_BLOCK_BUCKET_MAX={decode_block_bucket_cfg[2]} is higher than max_blocks={max_blocks}. Your configuration VLLM_DECODE_BLOCK_BUCKET_MAX={decode_block_bucket_cfg[2]} will be overwritten to VLLM_DECODE_BLOCK_BUCKET_MAX={max_blocks}'
+            )
+            decode_block_bucket_cfg[2] = max_blocks
 
         msg = ("Decode bucket config (min, step, max_warmup) "
                f"bs:{decode_bs_bucket_cfg}, "
@@ -76,16 +85,31 @@ def read_bucket_settings(phase: str, dim: str, **defaults):
     """Read bucketing configuration from env variables.
 
     phase is either 'prompt' or 'decode'
-    dim is either 'bs', 'seq' or 'block'
+    dim is either 'bs', 'query' or 'block'
     param is either 'min', 'step' or 'max'
     example env variable: VLLM_DECODE_BS_BUCKET_STEP=128
     """
     params = ['min', 'step', 'max']
     env_vars = [f'VLLM_{phase}_{dim}_BUCKET_{p}'.upper() for p in params]
     default_values = [defaults[p] for p in params]
-    values = [int(os.environ.get(e, d)) for e, d in zip(env_vars, default_values)]
-    for e, v, d in zip(env_vars, values, default_values):
-        logger().info(f'{e}={v} (default:{d})')
+    values = []
+
+    for p, e, d in zip(params, env_vars, default_values):
+        val = os.environ.get(e)
+
+        if val is None and dim == 'query':
+            # Check if fallback 'seq' flag is set
+            fallback_env = f'VLLM_{phase}_SEQ_BUCKET_{p}'.upper()
+            fallback_val = os.environ.get(fallback_env)
+
+            if fallback_val is not None:
+                val = fallback_val
+                logger().warning(f"{e} not set, using {fallback_env} value ({fallback_val}) instead. "
+                                 "This fallback behavior is deprecated and will be removed in v0.12.0.")
+        resolved_val = int(val) if val is not None else d
+        logger().info(f'{e}={resolved_val} (default:{d})')
+        values.append(resolved_val)
+
     return values
 
 
@@ -104,11 +128,11 @@ def warmup_range(config: Tuple[int, int, int]):
     """
     bmin, bstep, bmax = config
     add_zero_bucket = bmin == 0
-    if add_zero_bucket:
-        bmin = bstep
     assert bmin <= bmax, ("Min. batch size cannot be greater than max. "
                           "batch size. If you want to skip warmup, "
                           "set VLLM_SKIP_WARMUP=true")
+    if add_zero_bucket:
+        bmin = bstep
     base = itertools.repeat(2)
     ramp_up_acc = itertools.accumulate(base, func=operator.mul, initial=bmin)
     ramp_up_tw = itertools.takewhile(lambda x: x < bstep and x <= bmax, \

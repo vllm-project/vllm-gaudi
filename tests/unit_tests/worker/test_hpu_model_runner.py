@@ -11,7 +11,7 @@ from vllm.attention import Attention
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig, SchedulerConfig, VllmConfig, set_current_vllm_config)
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
-from vllm.utils import GiB_bytes
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_utils import (estimate_max_model_len, get_kv_cache_configs)
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData, SchedulerOutput)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor)
@@ -34,7 +34,6 @@ def initialize_kv_cache(runner: HPUModelRunner):
         num_kv_heads=runner.model_config.get_num_kv_heads(runner.parallel_config),
         head_size=runner.model_config.get_head_size(),
         dtype=runner.kv_cache_dtype,
-        use_mla=False,
     )
     tensor_size = attn_spec.page_size_bytes * NUM_BLOCKS
     kv_cache_config = KVCacheConfig(
@@ -53,6 +52,7 @@ def initialize_kv_cache(runner: HPUModelRunner):
         pin_memory=runner.pin_memory,
         vocab_size=runner.model_config.get_vocab_size(),
         block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
+        kernel_block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
     )
 
 
@@ -240,8 +240,10 @@ def test_update_states_request_resumed(model_runner, dist_init):
         req_ids=[req_id],
         resumed_from_preemption=[False],
         new_token_ids=[[]],
+        resumed_req_token_ids=[None],
         new_block_ids=([[0]], ),
         num_computed_tokens=[0],
+        num_output_tokens=[0],
     )
 
     scheduler_output = SchedulerOutput(

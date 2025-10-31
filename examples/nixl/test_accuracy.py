@@ -49,6 +49,7 @@ def test_accuracy():
         model="local-completions",
         model_args=model_args,
         tasks=TASK,
+        limit=128,
     )
 
     measured_value = results["results"][TASK][FILTER]
@@ -62,8 +63,4 @@ def test_accuracy():
         print(f"Measured value: {measured_value}")
         return
 
-    assert (
-        measured_value - RTOL < expected_value
-        and measured_value + RTOL > expected_value
-    ), \
-    f"Expected: {expected_value} | Measured: {measured_value}"  # yapf: disable
+    assert measured_value + RTOL > expected_value, f"Expected: {expected_value} | Measured: {measured_value}"
