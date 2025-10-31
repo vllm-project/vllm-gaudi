@@ -318,7 +318,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
             fsdpa_op=self.fused_scaled_dot_product_attention.apply \
             if self.fused_scaled_dot_product_attention is not None else None)
         # remove padding
-        output = output.view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]
+        output = output.view(batch_size, -1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]
 
         return output.reshape(-1, self.num_heads * v.shape[-1])
 
