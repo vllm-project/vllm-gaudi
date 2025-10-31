@@ -321,6 +321,26 @@ def NixlConnectorWorker__init__(self, vllm_config: VllmConfig, engine_id: str):
     self.block_factor = int(os.getenv('PT_HPU_BLOCK_SIZE_FACTOR', '1'))
     self.block_shape = None
     self.is_hetero = os.getenv('PT_HPU_ENABLE_RESTORE_KV_LAYOUT', '0') == '1'
+    self.tp_rank = get_tensor_model_parallel_rank()
+    self.world_size = get_tensor_model_parallel_world_size()
+    self.tp_group = get_tp_group()
+    #Check UCX_NET_DEVICES environment variable
+    kv_net_devices: str = os.getenv('UCX_NET_DEVICES', '')
+    if kv_net_devices:
+        separator = ','
+        net_device_list = kv_net_devices.split(separator)
+        ratio = len(net_device_list) / float(self.world_size)
+        net_begin_index = int( math.floor(ratio * self.tp_rank))
+        net_end_index = int( math.ceil(ratio * (self.tp_rank + 1)))
+        net_devices=list()
+        for index, net_device in enumerate(net_device_list):
+            if index >= net_begin_index and index < net_end_index:
+                net_devices.append(net_device)
+        os.environ['UCX_NET_DEVICES'] = \
+            separator.join(str(net_device) for net_device in net_devices)
+        logger.info("The hpu device currently identified as tp_rank#%d/tp_size#%d will use %s", \
+                self.tp_rank, self.world_size, os.getenv('UCX_NET_DEVICES', ''))
+
     # Agent.
     self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), None)
     # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
@@ -337,9 +357,6 @@ def NixlConnectorWorker__init__(self, vllm_config: VllmConfig, engine_id: str):
 
     # Metadata.
     self.engine_id: EngineId = engine_id
-    self.tp_rank = get_tensor_model_parallel_rank()
-    self.world_size = get_tensor_model_parallel_world_size()
-    self.tp_group = get_tp_group()
     self.num_blocks = 0
 
     # KV Caches and nixl tracking data.
