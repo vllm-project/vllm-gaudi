@@ -20,7 +20,16 @@ nav:
       - Summary: configuration/README.md
       - configuration/env_vars.md
       - configuration/long_context.md
-      - configuration/model_calibration.md
+      - configuration/calibration.md
+      - Calibration: 
+        - configuration/calibration/calibration.md
+        - configuration/calibration/calibration_one_node.md
+        - configuration/calibration/calibration_multi_node.md
+      - Quantization and Inference: 
+        - configuration/quantization/quantization.md
+        - configuration/quantization/inc.md
+        - configuration/quantization/auto_awq.md
+        - configuration/quantization/gptqmodel.md
       - configuration/optimization.md
       - configuration/pipeline_parallelism.md
       #- configuration/*
@@ -30,7 +39,6 @@ nav:
       - features/supported_features.md
       - features/compatibility_matrix.md
       - features/*
-      - features/quantization
   - Developer Guide:
     - Summary: dev_guide/README.md
     - General:
