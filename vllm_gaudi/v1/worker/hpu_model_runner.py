@@ -2931,7 +2931,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         return None
 
     @torch.inference_mode
-    def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput:
+    def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         if self.scheduler_output is None:
             # Nothing to do (PP non-final rank case), output isn't used.
             return None  # noqa
@@ -3289,18 +3289,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             logits = torch.cat(logits_combined, dim=0)
             # Apply structured output bitmasks if present
             if grammar_output is not None:
-                #if scheduler_output.structured_output_request_ids:
                 self.apply_grammar_bitmask(scheduler_output, grammar_output, logits)
-            '''self.execute_model_state = ExecuteModelState(
-                scheduler_output,
-                logits,
-                #spec_decode_metadata,
-                #spec_decode_common_attn_metadata,
-                #hidden_states,
-                #sample_hidden_states,
-                #aux_hidden_states,
-                #kv_connector_output,
-            )'''
+
             sampler_output, _sampling_metadata = self._run_sampling(batch_changed, logits,
                                                                     pd_info.prompt_req_ids + pd_info.decode_req_ids,
                                                                     logits.shape[0])
