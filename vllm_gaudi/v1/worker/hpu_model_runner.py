@@ -2930,7 +2930,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.warmup_mode = warmup_mode
         return None
 
-    @torch.no_grad()
+    @torch.inference_mode
     def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput:
         if self.scheduler_output is None:
             # Nothing to do (PP non-final rank case), output isn't used.
