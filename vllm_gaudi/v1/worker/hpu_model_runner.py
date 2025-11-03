@@ -3069,9 +3069,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # postprocessing. Should it be done for all requests?
         structured_output = False
         spec_decode_num_tokens = None
-        logits_prompt = []
-        logits_decode = []
-        structured_output = True
+        if grammar_output is not None:
+            logits_prompt = []
+            logits_decode = []
+            structured_output = True
         if self.use_async_scheduling:
             invalid_req_indices = []
         ######################### PREFILLS #########################
