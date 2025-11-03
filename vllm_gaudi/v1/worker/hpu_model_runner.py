@@ -7,8 +7,13 @@ import itertools
 import math
 import os
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field, fields
 from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast)
+if os.getenv("QUANT_CONFIG", None) is not None:
+    from neural_compressor.torch.quantization import finalize_calibration
+else:
+    finalize_calibration = None
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -102,6 +107,8 @@ logger = init_logger()
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
 hpu_buffer: list[list[torch.Tensor]] = []
+
+shutdown_inc_called = False
 
 
 class BucketingFailedException(Exception):
@@ -4275,13 +4282,20 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.defragmenter = OnlineDefragmenter()
         self.defragmenter.initialize(self.kv_caches, self.block_size)
 
-    def shutdown_inc(self):
-        can_finalize_inc = self._is_quant_with_inc() and \
-            (self.model.model is not None) and \
-            self.inc_initialized_successfully and \
-            not self._is_inc_finalized
+    def shutdown_inc(self,
+                     suppress=suppress,
+                     finalize_calibration=finalize_calibration):
+        global shutdown_inc_called
+        if shutdown_inc_called:
+            return
+        shutdown_inc_called = True
+        can_finalize_inc = False
+        with suppress(AttributeError):
+            can_finalize_inc = self._is_quant_with_inc() and \
+                (self.model.model is not None) and \
+                self.inc_initialized_successfully and \
+                not self._is_inc_finalized
         if can_finalize_inc:
-            from neural_compressor.torch.quantization import (finalize_calibration)
             finalize_calibration(self.model.model)
             self._is_inc_finalized = True
 
