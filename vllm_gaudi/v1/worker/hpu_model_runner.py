@@ -4282,9 +4282,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.defragmenter = OnlineDefragmenter()
         self.defragmenter.initialize(self.kv_caches, self.block_size)
 
-    def shutdown_inc(self,
-                     suppress=suppress,
-                     finalize_calibration=finalize_calibration):
+    def shutdown_inc(self, suppress=suppress, finalize_calibration=finalize_calibration):
         global shutdown_inc_called
         if shutdown_inc_called:
             return
