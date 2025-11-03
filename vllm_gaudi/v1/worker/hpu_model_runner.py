@@ -82,7 +82,6 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm_gaudi.extension.ops import LoraMask as LoraMask
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
-from vllm.platforms import current_platform
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 
 if TYPE_CHECKING:
@@ -685,12 +684,11 @@ def get_dp_padding(num_tokens: int, dp_size: int, dp_rank: int) -> int:
     if dp_size == 1:
         return 0
 
-    device = current_platform.device_type
-    group = get_dp_group().device_group
+    group = get_dp_group().cpu_group
 
     num_tokens_across_dp = [0] * dp_size
     num_tokens_across_dp[dp_rank] = num_tokens
-    num_tokens_tensor = torch.tensor(num_tokens_across_dp, device=device, dtype=torch.int32)
+    num_tokens_tensor = torch.tensor(num_tokens_across_dp, dtype=torch.int32)
     torch.distributed.all_reduce(num_tokens_tensor, group=group)
 
     max_tokens_across_dp_cpu = torch.max(num_tokens_tensor).item()
