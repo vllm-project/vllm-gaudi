@@ -8,7 +8,7 @@ import math
 import os
 import time
 from dataclasses import dataclass, field, fields
-from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast)
+from typing import (TYPE_CHECKING, Any, NamedTuple, Callable, Optional, TypeAlias, Union, cast)
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -83,6 +83,7 @@ from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm_gaudi.extension.ops import LoraMask as LoraMask
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -695,6 +696,20 @@ def get_dp_padding(num_tokens: int, dp_size: int, dp_rank: int) -> int:
     return max_tokens_across_dp_cpu - num_tokens
 
 
+class ExecuteModelState(NamedTuple):
+    """Ephemeral cached state transferred between execute_model() and
+    sample_tokens(), after execute_model() returns None."""
+
+    scheduler_output: "SchedulerOutput"
+    logits: torch.Tensor
+    #spec_decode_metadata: SpecDecodeMetadata | None
+    #spec_decode_common_attn_metadata: CommonAttentionMetadata | None
+    #hidden_states: torch.Tensor
+    #sample_hidden_states: torch.Tensor
+    #aux_hidden_states: list[torch.Tensor] | None
+    #kv_connector_output: KVConnectorOutput | None
+
+
 class HPUModelRunner(KVConnectorModelRunnerMixin):
 
     def __init__(
@@ -909,6 +924,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                       dp_size=self.parallel_config.data_parallel_size,
                                       dp_rank=self.parallel_config.data_parallel_rank)
 
+        # Ephemeral state transferred between execute_model() and sample_tokens().
+        self.execute_model_state: ExecuteModelState | None = None
         assert not (self.unified_attn and not self.use_contiguous_pa), 'Unified attn requires contiguous_pa!'
         assert not (self.unified_attn and not self.use_merged_prefill), 'Unified attn requires merged_prefill!'
 
@@ -2577,13 +2594,38 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         quant_config = os.getenv("QUANT_CONFIG", None) is not None
         return (self.model_config.quantization == "inc" or quant_config)
 
+    @torch.inference_mode
+    def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        if self.execute_model_state is None:
+            # Nothing to do (PP non-final rank case), output isn't used.
+            return None  # noqa
+
+        # Unpack ephemeral state.
+        (
+            scheduler_output,
+            logits,
+            #spec_decode_metadata,
+            #spec_decode_common_attn_metadata,
+            #hidden_states,
+            #sample_hidden_states,
+            #aux_hidden_states,
+            #kv_connector_output,
+        ) = self.execute_model_state
+        # Clear ephemeral state.
+        self.execute_model_state = None
+
+        # Apply structured output bitmasks if present.
+        if grammar_output is not None:
+            self.apply_grammar_bitmask(scheduler_output, grammar_output, self.input_batch, logits)
+
     # Copied from vllm/v1/worker/gpu_model_runner.py
     def apply_grammar_bitmask(
         self,
         scheduler_output: "SchedulerOutput",
+        grammar_output: GrammarOutput,
         logits: torch.Tensor,
     ):
-        grammar_bitmask = scheduler_output.grammar_bitmask
+        grammar_bitmask = grammar_output.grammar_bitmask
         if grammar_bitmask is None:
             return
 
@@ -2602,7 +2644,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         for req_id, batch_index in seq:
             logit_index = batch_index + cumulative_offset
             cumulative_offset += len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
-            if req_id in scheduler_output.structured_output_request_ids:
+            if req_id in grammar_output.structured_output_request_ids:
                 struct_out_req_batch_indices[req_id] = logit_index
 
         out_indices = []
@@ -2611,7 +2653,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         sorted_bitmask = np.zeros_like(grammar_bitmask, shape=(logits.shape[0], grammar_bitmask.shape[1]))
         cumulative_index = 0
 
-        for req_id in scheduler_output.structured_output_request_ids:
+        for req_id in grammar_output.structured_output_request_ids:
             logit_index = struct_out_req_batch_indices[req_id]
             num_spec_tokens = len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
             for i in range(1 + num_spec_tokens):
@@ -2905,7 +2947,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         warmup_mode: bool = False,
-    ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput]:
+    ) -> ModelRunnerOutput | None:
+        #if self.execute_model_state is not None:
+        #    raise RuntimeError(
+        #        "State error: sample_tokens() must be called "
+        #        "after execute_model() returns None."
+        #    )
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if self.unified_attn:
             return self.unified_execute_model(scheduler_output, warmup_mode)
         # NOTE(kzawora): Since scheduler doesn't differentiate between prefills
@@ -2966,7 +3014,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.run_defragmenter(scheduler_output, warmup_mode)
 
         batch_changed = self._update_states(scheduler_output)
-        if not scheduler_output.total_num_scheduled_tokens:
+        if not num_scheduled_tokens:
             if not has_kv_transfer_group() or warmup_mode:
                 # Return empty ModelRunnerOuptut if there's no work to do.
                 return EMPTY_MODEL_RUNNER_OUTPUT
@@ -3030,10 +3078,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # postprocessing. Should it be done for all requests?
         structured_output = False
         spec_decode_num_tokens = None
-        if scheduler_output.grammar_bitmask is not None:
-            logits_prompt = []
-            logits_decode = []
-            structured_output = True
+        logits_prompt = []
+        logits_decode = []
+        structured_output = True
         if self.use_async_scheduling:
             invalid_req_indices = []
         ######################### PREFILLS #########################
@@ -3250,11 +3297,20 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             logits_combined = logits_decode + logits_prompt
             logits = torch.cat(logits_combined, dim=0)
             # Apply structured output bitmasks if present
-            if scheduler_output.structured_output_request_ids:
-                self.apply_grammar_bitmask(scheduler_output, logits)
+            self.execute_model_state = ExecuteModelState(
+                scheduler_output,
+                logits,
+                #spec_decode_metadata,
+                #spec_decode_common_attn_metadata,
+                #hidden_states,
+                #sample_hidden_states,
+                #aux_hidden_states,
+                #kv_connector_output,
+            )
             sampler_output, _sampling_metadata = self._run_sampling(batch_changed, logits,
                                                                     pd_info.prompt_req_ids + pd_info.decode_req_ids,
                                                                     logits.shape[0])
+
             # Deal with the case of incomplete prompt
             for i in range(logits.shape[0] - num_decodes):
                 prefill_sampled_token_ids.append(sampler_output.sampled_token_ids[num_decodes + i].flatten())
@@ -3408,7 +3464,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             ))
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()
-
         return model_runner_output
 
     def load_model(self) -> None:
@@ -4015,7 +4070,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self._execute_dummy_scenario(requests, scheduled_tokens)
 
     def _execute_dummy_scenario(self, requests, scheduled_tokens):
-        from vllm.v1.core.sched.output import (SchedulerOutput, CachedRequestData)
+        from vllm.v1.core.sched.output import (CachedRequestData, SchedulerOutput)
 
         sched_output = SchedulerOutput(
             scheduled_new_reqs=requests,
@@ -4027,8 +4082,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_common_prefix_blocks=0,
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
-            structured_output_request_ids={},
-            grammar_bitmask=None,
         )
         cleanup = SchedulerOutput(
             scheduled_new_reqs=[],
@@ -4040,8 +4093,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_common_prefix_blocks=0,
             finished_req_ids=set(req.req_id for req in requests),
             free_encoder_mm_hashes=[],
-            structured_output_request_ids={},
-            grammar_bitmask=None,
         )
         self.execute_model(sched_output, warmup_mode=True)
         self.execute_model(cleanup, warmup_mode=True)
