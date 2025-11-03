@@ -2623,6 +2623,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         grammar_output: GrammarOutput,
+        input_batch: InputBatch,
         logits: torch.Tensor,
     ):
         grammar_bitmask = grammar_output.grammar_bitmask
