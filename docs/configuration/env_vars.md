@@ -73,8 +73,6 @@ The following table lists the available variables with their default values:
 | Decode | block size step (`VLLM_DECODE_BLOCK_BUCKET_STEP`) | `block_size`                                 |
 | Decode | block size max (`VLLM_DECODE_BLOCK_BUCKET_MAX`)   | `max_model_len * max_num_seqs // block_size` <br> by default or `max_blocks` <br> if `VLLM_CONTIGUOUS_PA = True` |
 
-## Linear Warm-up Flags
-
 When a deployed workload does not use the full context a model can handle, we
 recommend you to limit the maximum values upfront, based on the expected input
 and output token lengths that will be generated after serving the vLLM server.
