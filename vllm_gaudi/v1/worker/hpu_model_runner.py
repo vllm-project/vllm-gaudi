@@ -926,6 +926,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
+        self.warmup_mode = False
+        self.scheduler_output = None
         assert not (self.unified_attn and not self.use_contiguous_pa), 'Unified attn requires contiguous_pa!'
         assert not (self.unified_attn and not self.use_merged_prefill), 'Unified attn requires merged_prefill!'
 
@@ -2594,36 +2596,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         quant_config = os.getenv("QUANT_CONFIG", None) is not None
         return (self.model_config.quantization == "inc" or quant_config)
 
-    @torch.inference_mode
-    def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        if self.execute_model_state is None:
-            # Nothing to do (PP non-final rank case), output isn't used.
-            return None  # noqa
-
-        # Unpack ephemeral state.
-        (
-            scheduler_output,
-            logits,
-            #spec_decode_metadata,
-            #spec_decode_common_attn_metadata,
-            #hidden_states,
-            #sample_hidden_states,
-            #aux_hidden_states,
-            #kv_connector_output,
-        ) = self.execute_model_state
-        # Clear ephemeral state.
-        self.execute_model_state = None
-
-        # Apply structured output bitmasks if present.
-        if grammar_output is not None:
-            self.apply_grammar_bitmask(scheduler_output, grammar_output, self.input_batch, logits)
-
     # Copied from vllm/v1/worker/gpu_model_runner.py
     def apply_grammar_bitmask(
         self,
         scheduler_output: "SchedulerOutput",
         grammar_output: GrammarOutput,
-        input_batch: InputBatch,
         logits: torch.Tensor,
     ):
         grammar_bitmask = grammar_output.grammar_bitmask
@@ -2949,6 +2926,19 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         warmup_mode: bool = False,
     ) -> ModelRunnerOutput | None:
+        self.scheduler_output = scheduler_output
+        self.warmup_mode = warmup_mode
+        return None
+
+    @torch.no_grad()
+    def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput:
+        if self.scheduler_output is None:
+            # Nothing to do (PP non-final rank case), output isn't used.
+            return None  # noqa
+        scheduler_output = self.scheduler_output
+        warmup_mode = self.warmup_mode
+        self.scheduler_output = None
+        self.warmup_mode = False
         #if self.execute_model_state is not None:
         #    raise RuntimeError(
         #        "State error: sample_tokens() must be called "
@@ -3298,7 +3288,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             logits_combined = logits_decode + logits_prompt
             logits = torch.cat(logits_combined, dim=0)
             # Apply structured output bitmasks if present
-            self.execute_model_state = ExecuteModelState(
+            if grammar_output is not None:
+                #if scheduler_output.structured_output_request_ids:
+                self.apply_grammar_bitmask(scheduler_output, grammar_output, logits)
+            '''self.execute_model_state = ExecuteModelState(
                 scheduler_output,
                 logits,
                 #spec_decode_metadata,
@@ -3307,7 +3300,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 #sample_hidden_states,
                 #aux_hidden_states,
                 #kv_connector_output,
-            )
+            )'''
             sampler_output, _sampling_metadata = self._run_sampling(batch_changed, logits,
                                                                     pd_info.prompt_req_ids + pd_info.decode_req_ids,
                                                                     logits.shape[0])
