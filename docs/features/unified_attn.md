@@ -22,16 +22,16 @@ To get the main idea behind the algorithm, let's work on a concrete example. Ass
 * we're using scaled dot product attention:
 $$\text{Attention}(Q, K, V, B) = \text{softmax}\left( s \cdot QK^\top + B \right) V$$
 
-![](../../docs/assets/unified_attn/block_table.png)
+![](../assets/unified_attn/block_table.png)
 
 We can observe two things:
 
 1. some of the blocks are only used by a single token, and some are shared
-1. some of the key values have been just calculated and are available alongside queries and don't need to be fetched from the cache
+2. some of the key values have been just calculated and are available alongside queries and don't need to be fetched from the cache
 
 In a naive implementation we would just multiply whole query times key and value and use appropriate bias to mask unused fields, but that would be very inneficient especially for decodes where usually we have only a single token per sample in a batch and there's almost no overlap between used blocks. We could slice the query and key into chunks and multiply only those regions that have relevant data, but that's currently difficult to achieve due to technical reasons. Instead we can divide the work into 3 separate parts and merge the results at the end.
 
-![](../../docs/assets/unified_attn/block_table_annotated.png)
+![](../assets/unified_attn/block_table_annotated.png)
 
 ## Splitting softmax
 
@@ -40,7 +40,7 @@ $$\text{softmax}(x_i) = \frac{e^{x_i-c}}{\sum_{j} e^{x_j-c}}, c = max(x_i)$$
 The problem here lies in the denominator as it contains the sum of all terms. Fortunately we can split the calculation into two separate softmax and then readjust the results and combine them. Let's say we have:
 $$z_1, z_2\text{ - local softmax results} \\ c_1, c_2 \text{ - local maxima} \\ s_1, s_2 \text{ - local sums}$$
 We can then calculate:
-$$c = max(c_1, c_2) \\ adj_i = e^{c_i-c} \\ s = s_1 * adj_1 + s_2 * adj_2\\ z_i\prime = \frac{z_i*s_i*adj_i}{s} $$
+$$c = max(c_1, c_2) \\ adj_i = e^{c_i-c} \\ s = s_1 *adj_1 + s_2* adj_2\\ z_i\prime = \frac{z_i*s_i*adj_i}{s} $$
 
 This way we can calculate parts of softmax and later readjust and recombine the values into the final result. There are two other tricks that we can use. Since we're going to divide by the global sum anyway we can skip dividing by local sums followed by multiplying by local sums during readjustment and keep intermediate 'softmax' values without division. Additionally since readjustment is multiplication by a constant we can utilize the facts that:
 $$(sA)B=s(AB) \\ [A; B; C+D] \times [A; C+D; E] = [A; B; C] \times [A; C; E] + [A; B; D] \times [A; D; E] = [A; B; E]$$
@@ -50,11 +50,11 @@ and move softmax readjustment after multiplication by V in attention calculation
 
 Causal attention is used to calculate attention values between currently computed Q, K and V. Since we data has been recently calculated, we don't need to fetch it from kv-cache. Prompt lengths are usually much longer then max_num_seqs. This means, in practice, we don't need to distinguish which tokens are used in prompts and which in decodes and use the whole Q relying on attn bias to mask out unnecessary tokens. Since we're using all query tokens one after another it works similarily to merged prefill feature. Here's an example how the computed causal bias might look like:
 
-![](../../docs/assets/unified_attn/causal.png)
+![](../assets/unified_attn/causal.png)
 
 One optimization that is used here is that we can divide query into equal slices that use different lengths of key:
 
-![](../../docs/assets/unified_attn/causal_sliced.png)
+![](../assets/unified_attn/causal_sliced.png)
 
 This way we can skip parts of the computation where index(key) > index(query). In the current implementation slice size is constant and is set to 512 based on experimental results.
 
