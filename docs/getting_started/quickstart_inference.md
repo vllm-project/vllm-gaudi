@@ -81,10 +81,8 @@ Then, use the OpenAI Python client or curl:
 === "OpenAI Python client"
     ```python
     from openai import OpenAI
-
     def main():
         client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
-
         result = client.completions.create(
             model="meta-llama/Llama-3.1-8B-Instruct",
             prompt="Explain quantum computing in simple terms:",
@@ -92,7 +90,6 @@ Then, use the OpenAI Python client or curl:
             temperature=0.7
         )
         print(result.choices[0].text)
-
     if __name__ == "__main__":
         main()
     ```
@@ -124,10 +121,8 @@ Then, use the OpenAI Python client or curl:
 === "OpenAI Python client"
     ```python
     from openai import OpenAI
-
     def main():
         client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
-
         chat = client.chat.completions.create(
             model="meta-llama/Llama-3.1-8B-Instruct",
             messages=[
@@ -138,7 +133,6 @@ Then, use the OpenAI Python client or curl:
             temperature=0.7
         )
         print(chat.choices[0].message.content)
-
     if __name__ == "__main__":
         main()
     ```
