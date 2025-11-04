@@ -3,8 +3,8 @@
 
 # Parameterize base image components for RHEL 9.4/9.6 and TencentOS 3.1
 ARG DOCKER_URL=vault.habana.ai/gaudi-docker
-ARG VERSION=1.21.2
-ARG BASE_NAME=rhel9.2
+ARG VERSION=1.21.5
+ARG BASE_NAME=rhel9.4
 ARG PT_VERSION=2.6.0
 ARG REVISION=latest
 ARG REPO_TYPE=habanalabs
@@ -45,7 +45,7 @@ RUN mkdir -p $VLLM_PATH && \
     git remote add upstream https://github.com/vllm-project/vllm.git && \
     git fetch upstream --tags || true && \
     git checkout ${VLLM_PROJECT_COMMIT} && \
-    bash -c "pip install -r <(sed '/^torch/d' requirements/build.txt)" && \
+    pip install -r <(sed '/^torch/d' requirements/build.txt) && \
     VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
 
 # Clone the vllm-gaudi repository and install inside the container
@@ -55,7 +55,7 @@ RUN mkdir -p $VLLM_PATH2 && \
     git checkout ${VLLM_GAUDI_COMMIT} && \
     VLLM_TARGET_DEVICE=hpu && pip install -v -e $VLLM_PATH2
 
-    # to be enabled later PWolsza
+# to be verified later PWolsza
 # RUN pip3 install -v -e $VLLM_PATH/tests/vllm_test_utils
 
 # Install additional Python packages
