@@ -82,7 +82,6 @@ def get_features():
         Value('use_contiguous_pa',
               Any(Disabled('prefix_caching'), Enabled('unified_attn')),
               env_var='VLLM_CONTIGUOUS_PA'),
-        Value('use_delayed_sampling', Engine('v0'), env_var='VLLM_DELAYED_SAMPLING'),
         Value('use_bucketing', True, env_var='VLLM_ENABLE_BUCKETING'),
         Value('exponential_bucketing', True),
         Value('linear_bucketing', True),
@@ -94,5 +93,9 @@ def get_features():
         Value('unified_attn', False),
         Value('scale_adjustment', True, env_var='VLLM_SCALE_ADJUSTMENT', env_var_type=boolean),
         Value('flatten_input', Any(ModelType('qwen3_moe'), ModelType('granitemoe'), ModelType('glm4_moe'))),
+        Value('unified_attn_shared_cache_ratio',
+              1.,
+              env_var='VLLM_UNIFIED_ATTENTION_SHARED_CACHE_RATIO',
+              env_var_type=float),
     ]
     return split_values_and_flags(features)
