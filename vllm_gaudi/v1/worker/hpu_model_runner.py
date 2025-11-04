@@ -1342,7 +1342,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         ):
             if req_id not in self.encoder_cache:
                 self.encoder_cache[req_id] = {}
-
+           
+            logger.info(f"SHIV DEBUG {pos_info.is_embed=}")
+            if pos_info.is_embed is not None:
+                logger.info(f"SHIV DEBUG {pos_info.is_embed.device=}")
             self.encoder_cache[mm_hash] = scatter_mm_placeholders(
                 output,
                 is_embed=pos_info.is_embed.to(
@@ -1878,6 +1881,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             dummy_prefill_input_batches = \
                 self._create_dummy_prefill_batch_contents(num_pad_across_dp)
             merge_contents(dummy_prefill_input_batches[0], *dummy_prefill_input_batches[1:])
+        
         return all_batches[0], dummy_prefill_input_batches[0] if dummy_prefill_input_batches else None
 
     def _prepare_unified_prefill_inputs(self,
@@ -2959,6 +2963,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                          warmup_mode)
         prefill_data, \
             dummy_prefill_input_data_batches_across_dp = prefill_input_data
+
+        image_index_tensor = None
+        if self.is_mm_optimized:
+            is_image_flatten = (
+                input_tokens_tensor == self.image_token_id).flatten()
+            image_index_tensor = is_image_flatten.nonzero().squeeze(-1)
+
         num_pad_prefill_batch_across_dp = \
             0 if dummy_prefill_input_data_batches_across_dp is None \
             else len(dummy_prefill_input_data_batches_across_dp.request_ids)
@@ -2994,6 +3005,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         if self.use_async_scheduling:
             invalid_req_indices = []
+        from habana_frameworks.torch.hpu import metric_global as metric_global
+        gc_metric = metric_global("graph_compilation")
+
         ######################### PREFILLS #########################
         if num_prefills > 0:
             htorch.core.mark_step()
@@ -3002,23 +3016,41 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
                 inputs_embeds = None
                 model_mm_kwargs = None
+                stat1 = gc_metric.stats()[0][1]
+                logger.info(f"SHIV DEBUG >>>>>>>>>>>>> start of prefill {stat1=}") 
                 if self.supports_mm_inputs:
                     # Run the multimodal encoder if any.
                     with self.profiler.record_event('internal', 'prepare_input_encoders'):
                         self._execute_mm_encoder(scheduler_output, req_id)
+                    stat2 = gc_metric.stats()[0][1]
+                    logger.info(f"SHIV DEBUG >>>>>>>>>>>>> {stat2=} b4 gather embedding {stat2-stat1}") 
+                    htorch.core.mark_step()
 
                     mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output,
                                                                         req_id,
                                                                         total_num_scheduled_tokens=token_ids.shape[-1])
+                    htorch.core.mark_step()
+                    stat3 = gc_metric.stats()[0][1]
+                    logger.info(f"SHIV DEBUG >>>>>>>>>>>>> {stat3=} after gather embedding {stat3-stat2}") 
+
                     # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa E501
                     # This may require moving multimodal input preps into _prepare_inputs,        # noqa E501
                     # to avoid padding issues.
-                    inputs_embeds = self.model.get_input_embeddings(
-                        token_ids,
-                        multimodal_embeddings=mm_embeds,
-                        is_multimodal=is_mm_embed,
-                    )
+                    #is_mm_embed = is_mm_embed.to(torch.device("cpu"))
+                    logger.info(f"SHIV DEBUG devices === {token_ids.device=} {is_mm_embed.device=}")
+                    if 'image_index' in kwargs:
+                        inputs_embeds = self.model.get_input_embeddings_hpu(
+                            token_ids, kwargs['image_index'], mm_embeds)
+                        kwargs.pop("image_index", None)
+                    else: 
+                        inputs_embeds = self.model.get_input_embeddings(
+                            token_ids,
+                            multimodal_embeddings=mm_embeds,
+                            is_multimodal=is_mm_embed,
+                        )
 
+                    stat4 = gc_metric.stats()[0][1]
+                    logger.info(f"SHIV DEBUG >>>>>>>>>>>>> {stat4=} after input embedding {stat4-stat3}") 
                     model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
                     model_mm_kwargs = MultiModalKwargs.as_kwargs(
                         model_mm_kwargs,
@@ -3059,7 +3091,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         model_mm_kwargs=model_mm_kwargs,
                         warmup_mode=warmup_mode,)
                 htorch.core.mark_step()
-                non_flattened_hidden_states_prefills.append(non_flattened_hidden_states)
+                stat5 = gc_metric.stats()[0][1]
+                logger.info(f"SHIV DEBUG >>>>>>>>>>>>> {stat5=} after execute generic {stat5-stat4}") 
                 if self.use_aux_hidden_state_outputs:
                     aux_hidden_states_prefills.append(aux_hidden_states)
                 sample_hidden_states_prefills.append(sample_hidden_states)
