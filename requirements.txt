@@ -1,10 +1,6 @@
 # Dependencies for HPU code
-numexpr==2.13.1
-ray<2.49.0
-pandas
-numpy==1.26.4
-tabulate
-setuptools>=77.0.3,<80.0.0
-setuptools-scm>=8
-numba
+ray>=2.48.0
+pandas>=2.2.3
+numba>=0.58.0
+numpy>=1.26.0
 transformers>=4.1,<4.56.0

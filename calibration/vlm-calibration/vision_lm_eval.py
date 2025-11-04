@@ -5,7 +5,7 @@ multi-image input on vision language models for text generation,
 using the chat template defined by the model.
 """
 
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.engine.arg_utils import AsyncEngineArgs
 
 from lm_eval import tasks, evaluator

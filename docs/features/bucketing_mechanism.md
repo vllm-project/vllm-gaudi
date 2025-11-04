@@ -17,6 +17,7 @@ In dynamic inference serving scenarios, minimizing the number of graph compilati
 ## Bucketing Strategies
 
 Bucketing is focused on three dimensions:
+
 - `batch size`: number of samples in batch
 - `query lenght`: sequence length without context tokens
 - `num blocks`: context length counted in blocks
@@ -44,6 +45,7 @@ a `(2, 1, 512)` bucket, or the context length increases beyond 512 tokens. It wi
 ### Exponential Strategy  - Default
 
 Exponential strategy is the default warm-up mechanism. It is based on 4 parameters:
+
 - `min`: the smallest value
 - `step`: the rounding value for bucket boundaries
 - `max`: the largest value
@@ -60,7 +62,7 @@ Example distribution is shown below:
 min = 128, step = 128, max = 4096, limit = 13
 ```
 
-![exponential bucketing distribution for 4096 max query length](../../docs/assets/graphs/exponential_bucketing_example.png)
+![exponential bucketing distribution for 4096 max query length](../assets/graphs/exponential_bucketing_example.png)
 
 This strategy creates more buckets with smaller values closer to `min`. As the values increase toward `max`, the buckets become less frequent, meaning the distance between them gets larger. This helps prioritize warming up the smaller values more precisely, while still covering the full range.
 
@@ -73,7 +75,7 @@ Linear strategy is determined with 3 parameters only - `min`, `step` and `max`. 
 
 `min` determines the lowest value of the bucket. `step` determines the interval between buckets, and `max` determines the upper bound of the bucket. Furthermore, the interval between `min` and `step` has special handling: `min` is multiplied by consecutive powers of two until the multiplier is less than or equal to `step`. We refer to this as the ramp-up phase, which is used for handling lower batch sizes with minimal wastage, while allowing for larger padding on larger batch sizes.
 
-**Example with ramp-up**
+#### Example with ramp-up
 
 ```{.}
 min = 2, step = 32, max = 64
@@ -82,7 +84,7 @@ min = 2, step = 32, max = 64
 => buckets = ramp_up + stable => (2, 4, 8, 16, 32, 64)
 ```
 
-**Example without ramp-up**
+#### Example without ramp-up
 
 ```{.}
 min = 128, step = 128, max = 512
@@ -94,6 +96,7 @@ min = 128, step = 128, max = 512
 ### Unified Strategy
 
 Unified strategy is dedicated strategy for Unified Attention. It's buckets are determined by different dimensions:
+
 - `query length`: number of currently processed tokens, without context tokens
 - `shared num blocks`: context length counted in blocks, including only blocks that are either shared between at least two block tables (different requests) or is used by at least two tokens in query
 - `unique num blocks`: context length counted in blocks, including only blocks that are not shared between block tables and are used only by one token
@@ -114,7 +117,7 @@ Example distribution is shown below:
 batch size = 64, max num batched tokens = 4096
 ```
 
-![exponential bucketing distribution for 4096 max query length](../../docs/assets/graphs/unified_bucketing_example.png)
+![exponential bucketing distribution for 4096 max query length](../assets/graphs/unified_bucketing_example.png)
 
 Additionaly for context blocks, both shared and unique, `0` value will be added as well.
 

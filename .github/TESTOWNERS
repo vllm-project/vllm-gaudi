@@ -1,4 +1,4 @@
 # This file defines a list of users who can trigger Jenkins CI. 
 # Users defined in CODEOWNERS can trigger CI without being listed here.
 
-@PatrykWo @kamil-kaczor @kfojcik-intel @ksmusz @wuxun-zhang @xuechendi @attafosu @ulivne @Kacper-Pietkun @iboiko-habana @jkaniecki
+@PatrykWo @kamil-kaczor @kfojcik-intel @ksmusz @wuxun-zhang @xuechendi @attafosu @ulivne @Kacper-Pietkun @iboiko-habana @jkaniecki @jbyczkow @wpyszka
