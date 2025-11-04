@@ -13,15 +13,15 @@ logger = init_logger()
 @dataclass
 class UnifiedBatch:
     req_ids_cpu: list[str]
-    token_ids: torch.tensor
-    token_positions: torch.tensor
-    new_token_positions_cpu: torch.tensor
-    logits_indices: torch.tensor
-    logits_groups_cpu: torch.tensor
+    token_ids: torch.Tensor
+    token_positions: torch.Tensor
+    new_token_positions_cpu: torch.Tensor
+    logits_indices: torch.Tensor
+    logits_groups_cpu: torch.Tensor
     attn_metadata: HPUUnifiedAttentionMetadata
 
 
-def to_hpu(data: Optional[Union[torch.tensor, list]], dtype: Optional[torch.dtype] = None) -> torch.tensor:
+def to_hpu(data: Optional[Union[torch.Tensor, list]], dtype: Optional[torch.dtype] = None) -> torch.Tensor:
     """Copy either data or a cpu tensor to hpu"""
     if data is None:
         return None
@@ -150,7 +150,7 @@ class Context:
 
 
 def hpu_tensor(tensor: np.ndarray | None, shape: tuple, pad_value: Union[int, float],
-               dtype: torch.dtype) -> torch.tensor:
+               dtype: torch.dtype) -> torch.Tensor:
     """ Pad if necessary and move tensor to HPU"""
     if tensor is None:
         return None
