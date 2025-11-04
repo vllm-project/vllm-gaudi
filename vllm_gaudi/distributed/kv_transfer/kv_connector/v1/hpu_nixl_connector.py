@@ -123,7 +123,8 @@ def NixlConnectorScheduler__init__(self, vllm_config: VllmConfig, engine_id: str
         vllm_config.kv_transfer_config.kv_buffer_device == "cpu"
     logger.info("Initializing NIXL Scheduler %s", engine_id)
     self.hetero_blk_id_wa = os.getenv('PT_HPU_HETERO_BLOCK_ID_WA', '1') == '1'
-
+    self.is_hetero2 = os.getenv('PT_HPU_GPU_HETERO2', '0') == '1'
+    self.block_factor = int(os.getenv('PT_HPU_BLOCK_SIZE_FACTOR', '1'))
     # Requests that need to start recv/send.
     # New requests are added by update_state_after_alloc in
     # the scheduler. Used to make metadata passed to Worker.
@@ -294,7 +295,10 @@ def request_finished(
         # Prefill request on remote. It will be read from D upon completion
         self._reqs_need_send[request.request_id] = time.perf_counter(
         ) + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
-
+    
+    if self.is_hetero2:
+        computed_block_ids = [i for x in computed_block_ids+[computed_block_ids[-1]+1] for i in range(x * self.block_factor, (x + 1) * self.block_factor)]
+        print('buke: ', computed_block_ids)
     return delay_free_blocks, dict(
         do_remote_prefill=True,
         do_remote_decode=False,
@@ -321,6 +325,9 @@ def NixlConnectorWorker__init__(self, vllm_config: VllmConfig, engine_id: str):
     self.block_factor = int(os.getenv('PT_HPU_BLOCK_SIZE_FACTOR', '1'))
     self.block_shape = None
     self.is_hetero = os.getenv('PT_HPU_ENABLE_RESTORE_KV_LAYOUT', '0') == '1'
+    self.is_hetero2 = os.getenv('PT_HPU_GPU_HETERO2', '0') == '1'
+    if self.is_hetero2:
+        self.block_size = self.block_size // 8
     self.tp_rank = get_tensor_model_parallel_rank()
     self.world_size = get_tensor_model_parallel_world_size()
     self.tp_group = get_tp_group()
@@ -431,7 +438,7 @@ def NixlConnectorWorker__init__(self, vllm_config: VllmConfig, engine_id: str):
     self._handshake_lock = threading.RLock()
 
     self.vllm_config = vllm_config
-    self.block_size = vllm_config.cache_config.block_size
+    #self.block_size = vllm_config.cache_config.block_size // 8
     self.model_config = vllm_config.model_config
     self.cache_config = vllm_config.cache_config
 
@@ -1084,7 +1091,8 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
     # NIXL_INIT_AGENT to be used for preparations of local descs.
     self.src_xfer_side_handle = self.nixl_wrapper.prep_xfer_dlist(
         "NIXL_INIT_AGENT", descs)
-
+    
+    print('buke layout: ', self.kv_cache_layout) 
     # After KV Caches registered, listen for new connections.
     metadata = NixlAgentMetadata(
         engine_id=self.engine_id,
@@ -1092,7 +1100,7 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
         num_blocks=self.num_blocks,
         block_len=self.block_len,
-        attn_backend_name=self.backend_name,
+        attn_backend_name= "FLASH_ATTN_VLLM_V1" if self.is_hetero2 else self.backend_name,
         kv_cache_layout=self.kv_cache_layout)
     ready_event = threading.Event()
     self._nixl_handshake_listener_t = threading.Thread(
