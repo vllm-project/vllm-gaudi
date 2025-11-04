@@ -264,7 +264,7 @@ def generate_buckets(bs_range,
     use_merged_prefill = get_config().merged_prefill
     use_contiguous_pa = get_config().use_contiguous_pa
 
-    def expand_to_neighbor_buckets(bs_idx, bs_range, query_idx, query_range, max_num_batched_tokens):
+    def expand_to_neighbor_buckets(bs_idx, bs_range, ctx_idx, ctx_range, max_num_batched_tokens):
         '''
         Expand 2d bucket (bs, query) to include:
         - itself
@@ -275,11 +275,15 @@ def generate_buckets(bs_range,
         values that are in and out of budget:
         bs < edge_case_bs < next bs and query < edge_case_query < next query
         '''
-        candidates = [(bs_idx, query_idx), (bs_idx + 1, query_idx), (bs_idx, query_idx + 1),
-                      (bs_idx + 1, query_idx + 1)]
+        candidates = [(bs_idx, ctx_idx), (bs_idx + 1, ctx_idx), (bs_idx, ctx_idx + 1), (bs_idx + 1, ctx_idx + 1)]
+        valid = bs_range[bs_idx] <= max_num_batched_tokens
+
+        if not valid:
+            omitted_buckets.add(("bs_range[bs_idx] <= max_num_batched_tokens", "-> bs, ctx: ", bs_idx, ctx_idx))
+            return {}
         valid_candidates = [(b_idx, q_idx) for b_idx, q_idx in candidates
-                            if (b_idx < len(bs_range) and q_idx < len(query_range))]
-        return {(bs_range[b_idx], query_range[q_idx]) for b_idx, q_idx in valid_candidates}
+                            if b_idx < len(bs_range) and q_idx < len(ctx_range)]
+        return {(bs_range[b_idx], ctx_range[q_idx]) for b_idx, q_idx in valid_candidates}
 
     # filter rules for buckets
     # prompt
@@ -301,15 +305,15 @@ def generate_buckets(bs_range,
             (max_model_len - math.floor(query / max_num_prefill_seqs)) // block_size):
             omitted_buckets.add((
                 "ctx <= max_num_prefill_seqs * math.ceil((max_model_len - math.floor(query / max_num_prefill_seqs)) // block_size)",
-                "-> bs, quesry, ctx: ", bs, query, ctx))
+                "-> bs, query, ctx: ", bs, query, ctx))
         return ctx <= max_num_prefill_seqs * math.ceil(
             (max_model_len - math.floor(query / max_num_prefill_seqs)) // block_size)
 
     # decode
     def block_not_greater_than_max_model_len(bs, query, ctx):
         if not ctx <= bs * math.ceil(max_model_len / block_size):
-            omitted_buckets.add(("condition: ctx <= bs * math.ceil(max_model_len / block_size)", "-> bs, quesry, ctx: ",
-                                 bs, query, ctx))
+            omitted_buckets.add(
+                ("condition: ctx <= bs * math.ceil(max_model_len / block_size)", "-> bs, query, ctx: ", bs, query, ctx))
         return ctx <= bs * math.ceil(max_model_len / block_size)
 
     def batch_size_smaller_than_blocks(bs, query, ctx):
@@ -334,8 +338,8 @@ def generate_buckets(bs_range,
         phase = "prompt" if is_prompt else "decode"
         if is_prompt:
             return filters_map[phase][use_merged_prefill]
-        else:
-            return filters_map[phase][use_contiguous_pa]
+
+        return filters_map[phase][use_contiguous_pa]
 
     buckets = set()
     buckets_2d = set()
