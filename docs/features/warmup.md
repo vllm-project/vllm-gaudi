@@ -83,8 +83,8 @@ Warmup ensures that common hyperparameter combinations are compiled ahead of tim
 
 This warm-up process is skipped when:
 
-* `VLLM_SKIP_WARMUP` is set to true.
-* The engine is configured to enforce eager execution in a mode where no graph capture or compilation is desired and the sampler still runs the first time on demand, but without a separate warm-up call.
+- `VLLM_SKIP_WARMUP` is set to true.
+- The engine is configured to enforce eager execution in a mode where no graph capture or compilation is desired and the sampler still runs the first time on demand, but without a separate warm-up call.
 
 When introducing new sampling behaviors, such as nucleus filtering, penalties, or speculative metadata, update `sampling_configs` in `warmup_sampler` to ensure the corresponding graph paths are precompiled and ready.
 
@@ -98,14 +98,14 @@ Implemented in `warmup_sampler`, the warm-up routine systematically exercises th
 
 2. Define 12 sampling configurations covering the following settings. Each configuration should appear twice — once with `batch_changed=True` and once with `batch_changed=False` — to exercise any internal fast-path or cache invalidation logic tied to batch resizing.
 
-   * Greedy: `temperature=0.0`
-   * Typical random sampling: `temperature=1.0`
-   * Creative settings:` 0.7/0.9/top-k=50`
-   * Conservative: `0.3/0.95/top-k=20`
-   * High temperature: `1.2/0.8/top-k=100`
-   * Top-p only variants: e.g. `0.8/0.85/top-k=0`
+   - Greedy: `temperature=0.0`
+   - Typical random sampling: `temperature=1.0`
+   - Creative settings:`0.7/0.9/top-k=50`
+   - Conservative: `0.3/0.95/top-k=20`
+   - High temperature: `1.2/0.8/top-k=100`
+   - Top-p only variants: e.g. `0.8/0.85/top-k=0`
 
-3. Prepare dummy data for each batch size by creating a hidden state tensor with shape `(batch_size, hidden_size)` and compute logits using `model.compute_logits`. 
+3. Prepare dummy data for each batch size by creating a hidden state tensor with shape `(batch_size, hidden_size)` and compute logits using `model.compute_logits`.
 
 4. Instantiate at least one dummy request object for each batch size, providing placeholder prompt tokens and a single KV block.
 
@@ -161,10 +161,10 @@ You can disable either the warm-up step itself or the entire defragmentation fea
 
 Related environment variables:
 
-* `VLLM_DEFRAG_THRESHOLD`: Sets the fragmentation trigger heuristic. The default value is 32; lower values make compaction more aggressive.
-* `VLLM_DEFRAG_WITH_GRAPHS`: Determines whether swap paths are compiled or graphed. By default, this follows `bridge_mode == eager`.
-* `VLLM_DEBUG=defrag`: Enables verbose defragmentation debug logging.
-* `VLLM_SKIP_WARMUP`: Disables all warm-up stages including defragmentation.
+- `VLLM_DEFRAG_THRESHOLD`: Sets the fragmentation trigger heuristic. The default value is 32; lower values make compaction more aggressive.
+- `VLLM_DEFRAG_WITH_GRAPHS`: Determines whether swap paths are compiled or graphed. By default, this follows `bridge_mode == eager`.
+- `VLLM_DEBUG=defrag`: Enables verbose defragmentation debug logging.
+- `VLLM_SKIP_WARMUP`: Disables all warm-up stages including defragmentation.
 
 !!! note
     Disabling the defragmenter warm-up does not turn off defragmentation itself, unless unified attention or the feature is entirely disabled. It simply skips ahead-of-time graph preparation, which may shift the compilation cost to the first live fragmentation event.

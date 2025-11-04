@@ -81,16 +81,13 @@ The linear strategy is determined with 3 parameters: `min`, `step` and `max`, wh
 These parameters can be configured separately by the user for the prompt and decode phases, as well as for the batch size and sequence length dimensions. The interval between `min` and `step` has special handling: `min` is multiplied by consecutive powers of two until the multiplier is less than or equal to `step`. We refer to this as the ramp-up phase, which is used for handling lower batch sizes with minimal wastage, while allowing for larger padding on larger batch sizes.
 
 === "Example with ramp-up"
-
     ```{.}
     min = 2, step = 32, max = 64
     => ramp_up = (2, 4, 8, 16)
     => stable = (32, 64)
     => buckets = ramp_up + stable => (2, 4, 8, 16, 32, 64)
     ```
-
 === "Example without ramp-up"
-
     ```{.}
     min = 128, step = 128, max = 512
     => ramp_up = ()

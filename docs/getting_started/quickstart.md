@@ -98,7 +98,7 @@ Follow these steps to run the vLLM server or launch benchmarks on Gaudi using Do
 
 After completing this step, the vLLM server will be running, and the associated benchmark suite will start automatically. Optionally, to align the setup to your specific needs, you can use [advanced configuration options](quickstart_configuration.md). For most users, the basic setup is sufficient, but advanced users may benefit from additional customizations.
 
-After setting up and running vLLM Hardware Plugin for Intel® Gaudi®, you can begin performing inference to generate model outputs. For detailed instructions, see the [Executing Inference](executing_interference.md) guide.
+After setting up and running vLLM Hardware Plugin for Intel® Gaudi®, you can begin performing inference to generate model outputs. For detailed instructions, see the [Executing Inference](quickstart_inference.md) guide.
 
 To achieve the best performance on HPU, follow the methods outlined in the
 [Optimizing Training Platform

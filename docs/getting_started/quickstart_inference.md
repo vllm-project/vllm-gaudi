@@ -1,7 +1,3 @@
----
-title: Executing Inference
----
-
 # Executing Inference
 
 After setting up and running vLLM Hardware Plugin for Intel® Gaudi®, you can begin performing inference to generate model outputs. This document demonstrates several ways to run inference, you can choose the approach that best fits your workflow.
@@ -83,7 +79,6 @@ python -m vllm.entrypoints.openai.api_server \
 Then, use the OpenAI Python client or curl:
 
 === "OpenAI Python client"
-
     ```python
     from openai import OpenAI
 
@@ -101,9 +96,7 @@ Then, use the OpenAI Python client or curl:
     if __name__ == "__main__":
         main()
     ```
-
 === "Curl"
-
     ```bash
     curl http://localhost:8000/v1/completions \
         -H "Content-Type: application/json" \
@@ -129,7 +122,6 @@ python -m vllm.entrypoints.openai.api_server \
 Then, use the OpenAI Python client or curl:
 
 === "OpenAI Python client"
-
     ```python
     from openai import OpenAI
 
@@ -150,9 +142,7 @@ Then, use the OpenAI Python client or curl:
     if __name__ == "__main__":
         main()
     ```
-
 === "Curl"
-
     ```bash
     curl http://localhost:8000/v1/chat/completions \
         -H "Content-Type: application/json" \

@@ -28,7 +28,6 @@ This document lists the supported diagnostic and profiling, as well as performan
 | ------------------ | ------------------------ | ------------- |
 | `VLLM_SKIP_WARMUP` | Skips the warm-up phase. | `false`       |
 
-
 ## Additional Parameters
 
 | Parameter name                | Description                                                                                                                                                                                   | Default value |
@@ -49,9 +48,10 @@ HPU PyTorch bridge environment variables impacting vLLM execution:
 ## Additional Performance Tuning Parameters for Linear Bucketing Strategy
 
 `VLLM_{phase}_{dim}_BUCKET_{param}` is a collection of environment variables configuring ranges of linear bucketing mechanism, where:
-  - `{phase}` is either `PROMPT` or `DECODE`
-  - `{dim}` is either `BS`, `SEQ` or `BLOCK`
-  - `{param}` is either `MIN`, `STEP` or `MAX`
+
+- `{phase}` is either `PROMPT` or `DECODE`
+- `{dim}` is either `BS`, `SEQ` or `BLOCK`
+- `{param}` is either `MIN`, `STEP` or `MAX`
 
 The following table lists the available variables with their default values:
 
