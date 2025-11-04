@@ -3,9 +3,9 @@ title: Validated Models
 ---
 [](){ #validated-models }
 
-The following configurations have been validated to function with Gaudi 2 or Gaudi 3 devices with random or greedy sampling. Configurations that are not listed may or may not work.
+The following configurations have been validated to function with Intel® Gaudi® 2 and Intel® Gaudi® 3 AI accelerator with random or greedy sampling. Configurations that are not listed may work but have not been extensively tested.
 
-| **Model**   | **Tensor Parallelism [x HPU]**   | **Datatype**    | **Validated on**    |
+| Model   | Tensor parallelism [x HPU]   | Datatype    | Validated AI accelerator    |
 |:---    |:---:    |:---:    |:---:  |
 | [meta-llama/Meta-Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct)     | 1    | BF16, FP8    | Gaudi 2, Gaudi 3|
 | [meta-llama/Meta-Llama-3.1-70B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B-Instruct)     | 2, 4, 8    | BF16, FP8, FP16 (Gaudi 2)    |Gaudi 2, Gaudi 3|
