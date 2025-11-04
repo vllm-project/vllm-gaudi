@@ -70,22 +70,36 @@ def calc_EST_HPU_BLOCKS(ctx):
 
 
 def calc_DECODE_BS_RAMP_GRAPHS(ctx):
-    return 1 + int(math.log(ctx['VLLM_DECODE_BS_BUCKET_STEP'] / ctx['VLLM_DECODE_BS_BUCKET_MIN'], 2))
+    if ctx['VLLM_EXPONENTIAL_BUCKETING']:
+        return 1 + math.ceil(math.log(ctx['EST_MAX_NUM_SEQS'], 2))
+    else:
+        return 1 + int(math.log(ctx['VLLM_DECODE_BS_BUCKET_STEP'] / ctx['VLLM_DECODE_BS_BUCKET_MIN'], 2))
 
 
 def calc_DECODE_BS_STEP_GRAPHS(ctx):
-    return max(
-        0, int(1 + (ctx['EST_MAX_NUM_SEQS'] - ctx['VLLM_DECODE_BS_BUCKET_STEP']) / ctx['VLLM_DECODE_BS_BUCKET_STEP']))
+    if ctx['VLLM_EXPONENTIAL_BUCKETING']:
+        return 0
+    else:
+        return max(
+            0,
+            int(1 + (ctx['EST_MAX_NUM_SEQS'] - ctx['VLLM_DECODE_BS_BUCKET_STEP']) / ctx['VLLM_DECODE_BS_BUCKET_STEP']))
 
 
 def calc_DECODE_BLOCK_RAMP_GRAPHS(ctx):
-    return 1 + int(math.log(ctx['VLLM_DECODE_BLOCK_BUCKET_STEP'] / ctx['VLLM_DECODE_BLOCK_BUCKET_MIN'], 2))
+    if ctx['VLLM_EXPONENTIAL_BUCKETING']:
+        return 1 + math.ceil(math.log(ctx['EST_HPU_BLOCKS'], 2))
+    else:
+        return 1 + int(math.log(ctx['VLLM_DECODE_BLOCK_BUCKET_STEP'] / ctx['VLLM_DECODE_BLOCK_BUCKET_MIN'], 2))
 
 
 def calc_DECODE_BLOCK_STEP_GRAPHS(ctx):
-    return max(
-        0,
-        int(1 + (ctx['EST_HPU_BLOCKS'] - ctx['VLLM_DECODE_BLOCK_BUCKET_STEP']) / ctx['VLLM_DECODE_BLOCK_BUCKET_STEP']))
+    if ctx['VLLM_EXPONENTIAL_BUCKETING']:
+        return 0
+    else:
+        return max(
+            0,
+            int(1 +
+                (ctx['EST_HPU_BLOCKS'] - ctx['VLLM_DECODE_BLOCK_BUCKET_STEP']) / ctx['VLLM_DECODE_BLOCK_BUCKET_STEP']))
 
 
 def calc_NUM_DECODE_GRAPHS(ctx):
@@ -99,26 +113,38 @@ def calc_NUM_DECODE_GRAPHS(ctx):
 
 
 def calc_PROMPT_BS_RAMP_GRAPHS(ctx):
-    return 1 + int(
-        math.log(
-            min(ctx['VLLM_PROMPT_BS_BUCKET_MAX'], ctx['VLLM_PROMPT_BS_BUCKET_STEP']) / ctx['VLLM_PROMPT_BS_BUCKET_MIN'],
-            2))
+    if ctx['VLLM_EXPONENTIAL_BUCKETING']:
+        return 1 + math.ceil(math.log(ctx['VLLM_PROMPT_BS_BUCKET_MAX'], 2))
+    else:
+        return 1 + int(
+            math.log(
+                min(ctx['VLLM_PROMPT_BS_BUCKET_MAX'], ctx['VLLM_PROMPT_BS_BUCKET_STEP']) /
+                ctx['VLLM_PROMPT_BS_BUCKET_MIN'], 2))
 
 
 def calc_PROMPT_BS_STEP_GRAPHS(ctx):
-    return max(
-        0,
-        int(1 +
-            (ctx['VLLM_PROMPT_BS_BUCKET_MAX'] - ctx['VLLM_PROMPT_BS_BUCKET_STEP']) / ctx['VLLM_PROMPT_BS_BUCKET_STEP']))
+    if ctx['VLLM_EXPONENTIAL_BUCKETING']:
+        return 0
+    else:
+        return max(
+            0,
+            int(1 + (ctx['VLLM_PROMPT_BS_BUCKET_MAX'] - ctx['VLLM_PROMPT_BS_BUCKET_STEP']) /
+                ctx['VLLM_PROMPT_BS_BUCKET_STEP']))
 
 
 def calc_PROMPT_SEQ_RAMP_GRAPHS(ctx):
-    return 1 + int(math.log(ctx['VLLM_PROMPT_SEQ_BUCKET_STEP'] / ctx['VLLM_PROMPT_SEQ_BUCKET_MIN'], 2))
+    if ctx['VLLM_EXPONENTIAL_BUCKETING']:
+        return 1 + math.ceil(math.log(ctx['MAX_NUM_BATCHED_TOKENS'], 2))
+    else:
+        return 1 + int(math.log(ctx['VLLM_PROMPT_SEQ_BUCKET_STEP'] / ctx['VLLM_PROMPT_SEQ_BUCKET_MIN'], 2))
 
 
 def calc_PROMPT_SEQ_STEP_GRAPHS(ctx):
-    return int(1 + (min(ctx['MAX_NUM_BATCHED_TOKENS'], ctx['MAX_MODEL_LEN']) - ctx['VLLM_PROMPT_SEQ_BUCKET_STEP']) /
-               ctx['VLLM_PROMPT_SEQ_BUCKET_STEP'])
+    if ctx['VLLM_EXPONENTIAL_BUCKETING']:
+        return 0
+    else:
+        return int(1 + (min(ctx['MAX_NUM_BATCHED_TOKENS'], ctx['MAX_MODEL_LEN']) - ctx['VLLM_PROMPT_SEQ_BUCKET_STEP']) /
+                   ctx['VLLM_PROMPT_SEQ_BUCKET_STEP'])
 
 
 def calc_EST_NUM_PROMPT_GRAPHS(ctx):
@@ -127,23 +153,31 @@ def calc_EST_NUM_PROMPT_GRAPHS(ctx):
     graphs_2d = prompt_bs_graphs * prompt_seq_graphs
     if prompt_bs_graphs > 1:
         graphs_2d = graphs_2d / 2
-    ctx_block_graphs_max = (ctx['MAX_MODEL_LEN'] - ctx['VLLM_PROMPT_SEQ_BUCKET_MIN']) / ctx['BLOCK_SIZE']
-    ctx_block_graphs_min = max(1, (ctx['MAX_MODEL_LEN'] - ctx['MAX_NUM_BATCHED_TOKENS']) / ctx['BLOCK_SIZE'])
+    ctx_blocks_max = max(1, (ctx['MAX_MODEL_LEN'] - ctx['VLLM_PROMPT_SEQ_BUCKET_MIN']) / ctx['BLOCK_SIZE'])
+    ctx_blocks_min = max(1, (ctx['MAX_MODEL_LEN'] - ctx['MAX_NUM_BATCHED_TOKENS']) / ctx['BLOCK_SIZE'])
+    if ctx['VLLM_EXPONENTIAL_BUCKETING']:
+        ctx_block_graphs_max = 2 if ctx_blocks_max == 1 else math.ceil(math.log(ctx_blocks_max, 2))
+        ctx_block_graphs_min = 2 if ctx_blocks_min == 1 else math.ceil(math.log(ctx_blocks_min, 2))
+    else:
+        ctx_block_graphs_max = max(1, ctx_blocks_max / ctx['VLLM_PROMPT_CTX_BUCKET_STEP'])  # ctx step
+        ctx_block_graphs_min = max(1, ctx_blocks_min / ctx['VLLM_PROMPT_CTX_BUCKET_STEP'])  # ctx step
     graphs_3d = graphs_2d * (ctx_block_graphs_max + ctx_block_graphs_min) / 2
     return graphs_3d
 
 
 def calc_EST_GRAPH_PROMPT_RATIO(ctx):
-    return math.ceil(ctx['EST_NUM_PROMPT_GRAPHS'] /
-                     (ctx['EST_NUM_PROMPT_GRAPHS'] + ctx['NUM_DECODE_GRAPHS']) * 100) / 100
+    est_prompt_graph_mem = ctx['EST_NUM_PROMPT_GRAPHS'] * ctx['APPROX_MEM_PER_GRAPH_MB']
+    est_decode_graph_mem = ctx['NUM_DECODE_GRAPHS'] * ctx['APPROX_MEM_PER_GRAPH_MB']
+    est_graph_prompt_ratio = est_prompt_graph_mem / (est_prompt_graph_mem + est_decode_graph_mem)
+    return est_graph_prompt_ratio
 
 
 def calc_VLLM_GRAPH_PROMPT_RATIO(ctx):
-    return math.ceil(min(max(ctx['EST_GRAPH_PROMPT_RATIO'], 0.1), 0.9) * 10) / 10
+    return math.ceil(min(max(ctx['EST_GRAPH_PROMPT_RATIO'], 0.01), 0.99) * 100) / 100
 
 
 def calc_DECODE_GRAPH_TARGET_GB(ctx):
-    return math.ceil(ctx['NUM_DECODE_GRAPHS'] * ctx['APPROX_MEM_PER_GRAPH_MB'] / 1024 * 10) / 10
+    return math.ceil(ctx['NUM_DECODE_GRAPHS'] * ctx['APPROX_MEM_PER_GRAPH_MB'] / 1024 * 100) / 100
 
 
 def calc_EST_GRAPH_RESERVE_MEM(ctx):
