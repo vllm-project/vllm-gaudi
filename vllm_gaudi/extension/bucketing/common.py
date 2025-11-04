@@ -329,13 +329,11 @@ def generate_buckets(bs_range,
                 "-> bs, query, ctx: ", bs, query, ctx))
         return smaller_than_limit
 
-    # decode
-    def block_not_greater_than_max_model_len(bs, query, ctx):
-        smaller_than_limit = ctx <= bs * math.ceil(max_model_len / block_size)
-        if not smaller_than_limit:
-            omitted_buckets.add(
-                ("condition: ctx <= bs * math.ceil(max_model_len / block_size)", "-> bs, query, ctx: ", bs, query, ctx))
-        return smaller_than_limit
+    def no_corrections(bs, query, ctx):
+        return (bs, query, ctx)
+
+    def correct_for_max_model_len(bs, query, ctx):
+        return (bs, query, min(ctx, bs * math.ceil(max_model_len / block_size)))
 
     def batch_size_smaller_than_blocks(bs, query, ctx):
         if not bs <= ctx:
@@ -351,7 +349,7 @@ def generate_buckets(bs_range,
         "decode": {
             # depends only on contiguous PA
             True: [],
-            False: [block_not_greater_than_max_model_len, batch_size_smaller_than_blocks],
+            False: [batch_size_smaller_than_blocks],
         }
     }
 
@@ -361,15 +359,22 @@ def generate_buckets(bs_range,
             return filters_map[phase][use_merged_prefill]
         return filters_map[phase][use_contiguous_pa]
 
+    def get_corrector(is_prompt, use_contiguous_pa):
+        if is_prompt or use_contiguous_pa:
+            return no_corrections
+        else:
+            return correct_for_max_model_len
+
     buckets = set()
     buckets_2d = set()
     omitted_buckets = set()
     filters = get_filters(is_prompt, use_merged_prefill, use_contiguous_pa)
+    corrector = get_corrector(is_prompt, use_contiguous_pa)
 
     if file_buckets:
         for bs, query, blocks in file_buckets:
             if all(bucket_filter(bs, query, blocks) for bucket_filter in filters):
-                buckets.add((bs, query, blocks))
+                buckets.add(corrector(bs, query, blocks))
     else:
         for bs_idx, bs in enumerate(bs_range):
             for ctx_idx, ctx in enumerate(ctx_range):
@@ -380,7 +385,7 @@ def generate_buckets(bs_range,
         for bs, ctx in buckets_2d:
             for query in query_range:
                 if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
-                    buckets.add((bs, query, ctx))
+                    buckets.add(corrector(bs, query, ctx))
     if not buckets:
         phase = 'prompt' if is_prompt else 'decode'
         for bucket in omitted_buckets:

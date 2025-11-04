@@ -65,5 +65,5 @@ def test_generate_decode_buckets():
     blocks_range = [128, 256, 384, 512, 640, 768, 896, 1024, 1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048]
     buckets = generate_buckets(bs_range, [1, 1, 1], blocks_range, False, max_model_len, bs, prompt_bs,
                                max_num_batched_tokens, block_size, max_blocks)
-    assert len(buckets) == 15
+    assert len(buckets) == 18
     assert all(ctx <= bs * (max_model_len // block_size) for bs, _, ctx in buckets)
