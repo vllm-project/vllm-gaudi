@@ -1488,17 +1488,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
             num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
             num_prompt_tokens = self.input_batch.num_prompt_tokens[i]
-            num_all_tokens = self.input_batch.num_tokens[i]
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             if num_computed_tokens < num_prompt_tokens and \
                 not self.is_decoder_only(req_id):
                 # This is prompt
                 break
-
-            if num_computed_tokens < num_all_tokens and num_scheduled_tokens != 1 and \
-                not self.is_decoder_only(req_id):
-                break
-                #from fpdb import ForkedPdb; ForkedPdb().set_trace()
 
             # This is decode
             # NOTE(chendi): To support spec decode,
@@ -1697,15 +1691,15 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             #NOTE(kzawora): In non-preemption scenario,
             # self.input_batch.num_prompt_tokens[batch_idx] == self.input_batch.num_tokens[batch_idx].
             # In preemption scenario num_tokens will also include the tokens emitted before preemption
-            num_all_tokens = self.input_batch.num_tokens[batch_idx]
-            num_output_logits = max(0, seq_num_computed_tokens + seq_num_scheduled_tokens - num_all_tokens + 1)
+            num_prompt_tokens = self.input_batch.num_prompt_tokens[batch_idx]
+            num_output_logits = max(0, seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1)
             logits_positions = list(range(seq_num_scheduled_tokens - num_output_logits, seq_num_scheduled_tokens))
 
             new_batch_contents = BatchContents(
                 req_ids=[req_id],
                 token_ids=[token_ids],
                 context_lens=[seq_num_computed_tokens],
-                prompt_lens=[num_all_tokens],
+                prompt_lens=[num_prompt_tokens],
                 blocks=[blocks],
                 logits_positions=[logits_positions],
             )

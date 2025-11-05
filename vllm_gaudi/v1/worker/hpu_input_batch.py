@@ -262,8 +262,8 @@ class InputBatch:
         # as that is used as basis for recomputing prefill.
         # This also assumes that preemption is complete and reduces num_computed_tokens to 0 and preempted sequences
         # don't retain any originally used cache blocks.
-        #if request.num_computed_tokens == 0:
-        #    self.num_prompt_tokens[req_index] = num_prompt_tokens + len(request.output_token_ids)
+        if request.num_computed_tokens == 0:
+            self.num_prompt_tokens[req_index] = num_prompt_tokens + len(request.output_token_ids)
 
         # Number of token ids in token_ids_cpu.
         # NOTE(woosuk): This may include spec decode tokens.
