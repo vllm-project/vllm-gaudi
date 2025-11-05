@@ -4642,11 +4642,9 @@ class HPUAttentionMetadataProcessor:
         Initialize the attention metadata processor.
         """
         self.prefill_use_fusedsdpa = get_config().prompt_attn_impl == 'fsdpa_impl'
-        self.recompute_cos_sin = os.getenv('VLLM_COS_SIN_RECOMPUTE', 'false').lower() in ['1', 'true']
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
         self.dtype = vllm_config.model_config.dtype
-        self.flatten_input = get_config().flatten_input
         self.sliding_window = vllm_config.model_config.get_sliding_window()
         self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
         self.unified_attn = get_config().unified_attn
@@ -4684,7 +4682,9 @@ class HPUAttentionMetadataProcessor:
         prefill_metadata = attn_metadata
 
         seq_lens_t = prefill_metadata.seq_lens_tensor
+        assert seq_lens_t is not None, "seq_lens_tensor is required to build attn_bias"
         context_lens_t = prefill_metadata.context_lens_tensor
+        assert context_lens_t is not None, "context_lens_tensor is required to build attn_bias"
 
         block_list = attn_metadata.block_list
         max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
@@ -4740,6 +4740,7 @@ class HPUAttentionMetadataProcessor:
 
         if self.prefill_use_fusedsdpa and attn_metadata.block_list is not None:
             context_lens_t = prefill_metadata.context_lens_tensor
+            assert context_lens_t is not None, "context_lens_tensor is required to build attn_bias"
 
             block_list = attn_metadata.block_list
             max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
@@ -4878,7 +4879,7 @@ class HPUAttentionMetadataProcessor:
 
         if attn_metadata.is_prompt:
             attn_metadata = self._set_attn_bias(attn_metadata, batch_size, seq_len, src_device, dst_device, dtype, trim)
-            if self.interleaved_sliding_window and self.sliding_window is not None:
+            if self.interleaved_sliding_window:
                 attn_metadata = self._set_attn_bias_for_sliding_window(attn_metadata, batch_size, seq_len,
                                                                        self.sliding_window, src_device, dst_device,
                                                                        dtype, trim)
