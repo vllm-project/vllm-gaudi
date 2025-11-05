@@ -3475,7 +3475,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
-
+        if self.execute_model_state is not None:
+            raise RuntimeError("State error: sample_tokens() must be called "
+                               "after execute_model() returns None.")
         (
             scheduler_output,
             prefill_data,
