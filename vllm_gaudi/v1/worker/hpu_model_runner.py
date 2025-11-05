@@ -9,7 +9,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field, fields
-from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast)
+from typing import (TYPE_CHECKING, Any, NamedTuple, Callable, Optional, TypeAlias, Union, cast)
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -84,6 +84,7 @@ from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm_gaudi.extension.ops import LoraMask as LoraMask
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
+from vllm.v1.core.sched.output import GrammarOutput
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -697,6 +698,37 @@ def get_dp_padding(num_tokens: int, dp_size: int, dp_rank: int) -> int:
     return max_tokens_across_dp_cpu - num_tokens
 
 
+class ExecuteModelState(NamedTuple):
+    """Ephemeral cached state transferred between execute_model() and
+    sample_tokens(), after execute_model() returns None."""
+
+    scheduler_output: "SchedulerOutput"
+    prefill_data: "PrefillInputData"
+    decode_data: "DecodeInputData"
+    pd_info: "PromptDecodeInfo"
+    finished_sending: "set"
+    finished_recving: "set"
+    decode_non_flattened_hidden_states: "torch.Tensor"
+    decode_aux_hidden_states: None
+    decode_sample_hidden_states: "torch.Tensor"
+    decode_logits_device: "torch.Tensor"
+    non_flattened_hidden_states_prefills: list[torch.Tensor] = []
+    aux_hidden_states_prefills: list[torch.Tensor] = []
+    sample_hidden_states_prefills: list[torch.Tensor] = [],
+    req_id_list: list[list] = []
+    logits_device_list: list[torch.Tensor] = []
+    logits_requests_list: list[list] = []
+    spec_decode_metadata_list: list[SpecDecodeMetadata] = []
+    batch_changed: bool = False
+
+    #spec_decode_metadata: SpecDecodeMetadata | None
+    #spec_decode_common_attn_metadata: CommonAttentionMetadata | None
+    #hidden_states: torch.Tensor
+    #sample_hidden_states: torch.Tensor
+    #aux_hidden_states: list[torch.Tensor] | None
+    #kv_connector_output: KVConnectorOutput | None
+
+
 class HPUModelRunner(KVConnectorModelRunnerMixin):
 
     def __init__(
@@ -910,6 +942,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.get_dp_padding = partial(get_dp_padding,
                                       dp_size=self.parallel_config.data_parallel_size,
                                       dp_rank=self.parallel_config.data_parallel_rank)
+
+        # Ephemeral state transferred between execute_model() and sample_tokens().
+        self.execute_model_state: ExecuteModelState | None = None
 
         assert not (self.unified_attn and not self.use_contiguous_pa), 'Unified attn requires contiguous_pa!'
         assert not (self.unified_attn and not self.use_merged_prefill), 'Unified attn requires merged_prefill!'
@@ -2900,6 +2935,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             prompt_logprobs_dict={},
             pooler_output=[],
         )
+
         return model_runner_output
 
     @torch.inference_mode()
@@ -2998,7 +3034,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         pd_info = self._get_prompts_and_decodes(scheduler_output)
         num_decodes = len(pd_info.decode_req_ids)
         num_prefills = len(pd_info.prompt_req_ids)
-        num_reqs = num_decodes + num_prefills
+        #num_reqs = num_decodes + num_prefills
         with self.profiler.record_event('internal', 'prepare_input_tensors'):
             prefill_input_data, decode_input_data = self._prepare_inputs(scheduler_output, num_prefills, num_decodes,
                                                                          warmup_mode)
@@ -3010,10 +3046,15 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         decode_data, dummy_decode_input_data_across_dp = decode_input_data
         #FIXME(kzawora): Currently there's no handling of logprobs. Fix that
         # later.
-        prefill_sampled_token_ids = []
-        prefill_sampled_requests = []
-        decode_sampled_token_ids = []
-        decode_sampled_requests = []
+        #prefill_sampled_token_ids = []
+        #prefill_sampled_requests = []
+        #decode_sampled_token_ids = []
+        #decode_sampled_requests = []
+
+        req_id_list = []
+        logits_device_list = []
+        logits_requests_list = []
+        spec_decode_metadata_list = []
         #if not has_kv_transfer_group():
         #    assert not (num_prefills > 0 and num_decodes > 0)
         # skip kv_connector if dummy run
@@ -3027,15 +3068,15 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         non_flattened_hidden_states_prefills = []
         aux_hidden_states_prefills = []
         sample_hidden_states_prefills = []
-        decode_sampled_token_ids_device = None
+        #decode_sampled_token_ids_device = None
         # NOTE(tianmu-li): For structured output, combine logits before
         # postprocessing. Should it be done for all requests?
         structured_output = False
-        spec_decode_num_tokens = None
-        if scheduler_output.grammar_bitmask is not None:
-            logits_prompt = []
-            logits_decode = []
-            structured_output = True
+        #spec_decode_num_tokens = None
+        #if scheduler_output.grammar_bitmask is not None:
+        #logits_prompt = []
+        #logits_decode = []
+        #structured_output = True
         if self.use_async_scheduling:
             invalid_req_indices = []
         ######################### PREFILLS #########################
@@ -3043,7 +3084,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             htorch.core.mark_step()
             for idx, (req_id, prompt_len, token_ids, position_ids, attn_metadata, logits_indices,
                       logits_requests) in enumerate(zip(*shallow_tuple(prefill_data))):
-
+                req_id_list.append(req_id)
+                logits_requests_list.append(logits_requests)
                 inputs_embeds = None
                 model_mm_kwargs = None
                 if self.supports_mm_inputs:
@@ -3105,13 +3147,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         inputs_embeds=inputs_embeds,
                         model_mm_kwargs=model_mm_kwargs,
                         warmup_mode=warmup_mode,)
+                logits_device_list.append(logits_device)
                 htorch.core.mark_step()
                 non_flattened_hidden_states_prefills.append(non_flattened_hidden_states)
                 if self.use_aux_hidden_state_outputs:
                     aux_hidden_states_prefills.append(aux_hidden_states)
                 sample_hidden_states_prefills.append(sample_hidden_states)
                 # Skip separate sampling for structured output
-                if structured_output:
+                '''if structured_output:
                     logits_prompt.append(logits_device)
                     prefill_sampled_requests.extend(logits_requests)
                 else:
@@ -3124,7 +3167,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                                    logits_device.shape[0],
                                                                                    logits_requests)
                             prefill_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
-                            prefill_sampled_requests.extend(logits_requests)
+                            prefill_sampled_requests.extend(logits_requests)'''
                 if self.is_driver_worker and self.profiler.enabled:
                     # Stop recording 'execute_model_generic' event
                     self.profiler.end()
@@ -3181,8 +3224,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 lora_mask,
                 warmup_mode=warmup_mode)
             htorch.core.mark_step()
-
-            if structured_output:
+            '''if structured_output:
                 logits_decode.append(logits_device[:num_decodes])
                 decode_sampled_requests.extend(self.input_batch.req_ids[:num_decodes])
             else:
@@ -3219,7 +3261,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                             sampled_token_ids.to("hpu", non_blocking=True)
                     decode_sampled_requests.extend(self.input_batch.req_ids[:num_decodes])
                     ##### Sampling End #####
-
+            '''
             if self.is_driver_worker and self.profiler.enabled:
                 # Stop recording 'execute_model' event
                 self.profiler.end()
@@ -3246,8 +3288,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                        None,
                                                                        warmup_mode=warmup_mode)
             htorch.core.mark_step()
-
-        if structured_output:
+        '''if structured_output:
             # Scheduler places cached before prompt
             logits_combined = logits_decode + logits_prompt
             logits = torch.cat(logits_combined, dim=0)
@@ -3270,10 +3311,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 sampled_token_ids = torch.cat(decode_sampled_token_ids + prefill_sampled_token_ids).view(-1, 1)
             else:
                 sampled_token_ids = torch.empty((0, 1), dtype=torch.int32, device=self.device)
-
+        '''
         # Copy some objects so they don't get modified after returning.
         # This is important when using async scheduling.
-        req_ids_output_copy = self.input_batch.req_ids.copy()
+        '''req_ids_output_copy = self.input_batch.req_ids.copy()
         req_id_to_index_output_copy = \
             self.input_batch.req_id_to_index.copy()
 
@@ -3317,13 +3358,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     postprocessed_sampled_token_ids[
                         self.input_batch.req_id_to_index[req_id]] += sampled_token_ids_list[start_idx:start_idx +
                                                                                             num_tokens]
-                    start_idx += num_tokens
+                    start_idx += num_tokens'''
 
         ################## RETURN ##################
         # NOTE(kzawora): idk what happens if part of batch doesn't have logprobs
 
         ######### UPDATE REQUEST STATE WITH GENERATED TOKENS #########
-        for req_id in self.input_batch.req_ids[:num_reqs]:
+        '''for req_id in self.input_batch.req_ids[:num_reqs]:
             req_state = self.requests[req_id]
             i = self.input_batch.req_id_to_index[req_id]
             seq_len = (req_state.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id])
@@ -3407,10 +3448,297 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             kv_connector_output=KVConnectorOutput(
                 finished_sending=finished_sending,
                 finished_recving=finished_recving,
-            ))
+            ))'''
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()
 
+        self.execute_model_state = ExecuteModelState(
+            scheduler_output,
+            prefill_data,
+            decode_data,
+            pd_info,
+            finished_sending,
+            finished_recving,
+            non_flattened_hidden_states,
+            aux_hidden_states,
+            sample_hidden_states,
+            logits_device,
+            non_flattened_hidden_states_prefills,
+            aux_hidden_states_prefills,
+            sample_hidden_states_prefills,
+            req_id_list,
+            logits_device_list,
+            logits_requests_list,
+            spec_decode_metadata_list,
+            batch_changed,
+        )
+        return None
+        #return model_runner_output
+
+    @torch.inference_mode()
+    def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
+
+        (
+            scheduler_output,
+            prefill_data,
+            decode_data,
+            pd_info,
+            finished_sending,
+            finished_recving,
+            decode_non_flattened_hidden_states,
+            decode_aux_hidden_states,
+            decode_sample_hidden_states,
+            decode_logits_device,
+            non_flattened_hidden_states_prefills,
+            aux_hidden_states_prefills,
+            sample_hidden_states_prefills,
+            req_id_list,
+            logits_device_list,
+            logits_requests_list,
+            spec_decode_metadata_list,
+            batch_changed,
+        ) = self.execute_model_state
+        self.execute_model_state = None
+        if scheduler_output is None:
+            # Nothing to do (PP non-final rank case), output isn't used.
+            return None  # noqa
+        logits_prompt = []
+        logits_decode = []
+        prefill_sampled_requests = []
+        num_decodes = len(pd_info.decode_req_ids)
+        num_prefills = len(pd_info.prompt_req_ids)
+        num_reqs = num_decodes + num_prefills
+        structured_output = False
+        spec_decode_num_tokens = None
+        prefill_sampled_token_ids = []
+        prefill_sampled_requests = []
+        decode_sampled_token_ids = []
+        decode_sampled_requests = []
+        if self.use_async_scheduling:
+            invalid_req_indices = []
+        ######################### PREFILLS #########################
+        if num_prefills > 0:
+            htorch.core.mark_step()
+            for index in range(len(req_id_list)):
+                # prefill
+                if structured_output:
+                    logits_prompt.append(logits_device_list[index])
+                    prefill_sampled_requests.extend(logits_requests_list[index])
+                else:
+                    # If there are no logits, there is nothing to sample.
+                    # This can happen with chunked prefill when a chunk does
+                    # not complete the prompt and no logits are generated.
+                    if logits_device_list[index].numel() > 0:
+                        with self.profiler.record_event('internal', "sampler"):
+                            sampler_output, sampling_metadata = self._run_sampling(batch_changed,
+                                                                                   logits_device_list[index],
+                                                                                   req_id_list[index],
+                                                                                   logits_device_list[index].shape[0],
+                                                                                   logits_requests_list[index])
+                            prefill_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
+                            prefill_sampled_requests.extend(logits_requests_list[index])
+
+        ######################### DECODES #########################
+        # Decodes run as one single batch with [padded_decode_bs, 1]
+        if num_decodes > 0:
+            assert decode_data is not None
+            if structured_output:
+                logits_decode.append(decode_logits_device[:num_decodes])
+                decode_sampled_requests.extend(self.input_batch.req_ids[:num_decodes])
+            else:
+                with self.profiler.record_event('internal', "sampler"):
+                    ##### Sampling Start #####
+                    spec_decode_metadata = decode_data.spec_decode_metadata
+                    sampler_output, sampling_metadata = self._run_sampling(
+                        batch_changed, decode_logits_device if spec_decode_metadata is None else
+                        decode_logits_device[spec_decode_metadata.bonus_logits_indices], pd_info.decode_req_ids,
+                        decode_logits_device.shape[0])
+
+                    if spec_decode_metadata is None:
+                        decode_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
+                    else:
+                        # Handling spec decode sampling.
+                        sampler_output = self.rejection_sampler(
+                            spec_decode_metadata,
+                            None,  # draft_probs
+                            logits_device_list,
+                            sampling_metadata,
+                        )
+                        sampled_token_ids = sampler_output.sampled_token_ids
+                        decode_sampled_token_ids = \
+                            self.rejection_sampler.parse_output(
+                                sampled_token_ids,
+                                self.input_batch.vocab_size,
+                        )
+                        # convert decode_sampled_token_ids as list of tensor
+                        spec_decode_num_tokens = [len(v) for v in decode_sampled_token_ids]
+                        decode_sampled_token_ids = [
+                            torch.tensor(v, device="cpu").int() for v in decode_sampled_token_ids
+                        ]
+                        decode_sampled_token_ids_device = \
+                            sampled_token_ids.to("hpu", non_blocking=True)
+                    decode_sampled_requests.extend(self.input_batch.req_ids[:num_decodes])
+                    ##### Sampling End #####
+
+        if structured_output:
+            # Scheduler places cached before prompt
+            logits_combined = logits_decode + logits_prompt
+            logits = torch.cat(logits_combined, dim=0)
+            # Apply structured output bitmasks if present
+            if scheduler_output.structured_output_request_ids:
+                self.apply_grammar_bitmask(scheduler_output, logits)
+            sampler_output, _sampling_metadata = self._run_sampling(batch_changed, logits,
+                                                                    pd_info.prompt_req_ids + pd_info.decode_req_ids,
+                                                                    logits.shape[0])
+            # Deal with the case of incomplete prompt
+            for i in range(logits.shape[0] - num_decodes):
+                prefill_sampled_token_ids.append(sampler_output.sampled_token_ids[num_decodes + i].flatten())
+            decode_sampled_token_ids.append(sampler_output.sampled_token_ids[:num_decodes].flatten())
+        elif self.use_async_scheduling:
+            # For async scheduling: keep tokens on HPU and avoid CPU sync
+            # Concatenate decode and prefill tokens on HPU
+            if decode_sampled_token_ids or prefill_sampled_token_ids:
+                decode_sampled_token_ids = [tensor[:num_decodes] for tensor in decode_sampled_token_ids]
+                # Note: this will cause an issue with the current spec decode impl, as they are on different devices
+                sampled_token_ids = torch.cat(decode_sampled_token_ids + prefill_sampled_token_ids).view(-1, 1)
+            else:
+                sampled_token_ids = torch.empty((0, 1), dtype=torch.int32, device=self.device)
+
+        # Copy some objects so they don't get modified after returning.
+        # This is important when using async scheduling.
+        req_ids_output_copy = self.input_batch.req_ids.copy()
+        req_id_to_index_output_copy = \
+            self.input_batch.req_id_to_index.copy()
+
+        max_req_index = max(self.input_batch.req_id_to_index.values())
+        postprocessed_sampled_token_ids: list[list[int]] = [[] for _ in range(max_req_index + 1)]
+        if self.use_async_scheduling:
+            self.input_batch.prev_sampled_token_ids = sampled_token_ids.flatten()
+            # self.input_batch.prev_sampled_token_ids_invalid_indices
+            invalid_req_indices_set = set(invalid_req_indices)
+            self.input_batch.prev_sampled_token_ids_invalid_indices = \
+                invalid_req_indices_set
+            self.input_batch.prev_req_id_to_index = {
+                req_id: i
+                for i, req_id in enumerate(self.input_batch.req_ids) if i not in invalid_req_indices_set
+            }
+            # For the output, postprocessed_sampled_token_ids will be filled during serialization
+        else:
+            prefill_sampled_token_ids_device = prefill_sampled_token_ids
+            # From this point onward, all operations are done on CPU.
+            # We already have tokens. Let's copy the data to
+            # CPU as is, and then discard padded tokens.
+            with self.profiler.record_event('internal', "sampler_postprocessing"):
+                prefill_sampled_token_ids = [tensor.cpu() for tensor in prefill_sampled_token_ids]
+                if spec_decode_num_tokens is not None:
+                    decode_sampled_token_ids = [tensor.cpu() for tensor in decode_sampled_token_ids]
+                else:
+                    decode_sampled_token_ids = [tensor.cpu()[:num_decodes] for tensor in decode_sampled_token_ids]
+                if decode_sampled_token_ids + prefill_sampled_token_ids:
+                    sampled_token_ids_list = torch.cat(decode_sampled_token_ids + prefill_sampled_token_ids).tolist()
+                else:
+                    sampled_token_ids_list = []
+                sampled_token_requests = \
+                    decode_sampled_requests + prefill_sampled_requests
+                max_req_index = max(self.input_batch.req_id_to_index.values())
+                # NOTE(Chendi): in post-processing, spec_decode might
+                # return more than 1 token during decode.
+                start_idx = 0
+                for i, req_id in enumerate(sampled_token_requests):
+                    num_tokens = spec_decode_num_tokens[
+                        i] if spec_decode_num_tokens is not None and i < num_decodes else 1
+                    postprocessed_sampled_token_ids[
+                        self.input_batch.req_id_to_index[req_id]] += sampled_token_ids_list[start_idx:start_idx +
+                                                                                            num_tokens]
+                    start_idx += num_tokens
+
+        ################## RETURN ##################
+        ######### UPDATE REQUEST STATE WITH GENERATED TOKENS #########
+        for req_id in self.input_batch.req_ids[:num_reqs]:
+            req_state = self.requests[req_id]
+            i = self.input_batch.req_id_to_index[req_id]
+            seq_len = (req_state.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id])
+            token_ids = postprocessed_sampled_token_ids[i]
+            num_tokens = len(token_ids)
+            self.input_batch.token_ids_cpu[i, seq_len:seq_len + num_tokens] = token_ids
+            self.input_batch.num_tokens[i] += len(token_ids)
+            req_state.output_token_ids.extend(token_ids)
+        # NOTE(chendi): enable cache based on PR(#20291)
+        # Cache the sampled tokens in the model runner, so that the scheduler
+        # doesn't need to send them back.
+        # NOTE(woosuk): As an exception, when using PP, the scheduler sends
+        # the sampled tokens back, because there's no direct communication
+        # between the first-stage worker and the last-stage worker.
+        for req_idx, sampled_ids in enumerate(postprocessed_sampled_token_ids[:num_reqs]):
+            if not sampled_ids:
+                continue
+
+            start_idx = self.input_batch.num_tokens_no_spec[req_idx]
+            end_idx = start_idx + len(sampled_ids)
+            # NOTE(adobrzyn): assert for full max prompt length including
+            # max_model_len and one token that's going to be generated
+            # especially needed for biggest prompt in warm-up phase
+            full_max_prompt = self.max_model_len + 1
+            assert end_idx <= full_max_prompt, ("Sampled token IDs exceed the max model length. "
+                                                f"Total number of tokens: {end_idx} > max_model_len: "
+                                                f"{full_max_prompt}")
+
+            self.input_batch.token_ids_cpu[req_idx, start_idx:end_idx] = sampled_ids
+            self.input_batch.num_tokens_no_spec[req_idx] = end_idx
+            self.input_batch.num_tokens[req_idx] = end_idx
+            req_id = self.input_batch.req_ids[req_idx]
+            req_state = self.requests[req_id]
+            req_state.output_token_ids.extend(sampled_ids)
+
+        ################## Spec Decode ##################
+        # Now, we will call drafter to propose draft token ids
+        if self.speculative_config:
+            self._draft_token_ids = self.propose_draft_token_ids(
+                scheduler_output, postprocessed_sampled_token_ids, prefill_sampled_token_ids_device,
+                decode_sampled_token_ids_device, sampling_metadata, decode_non_flattened_hidden_states,
+                decode_sample_hidden_states, decode_aux_hidden_states, non_flattened_hidden_states_prefills,
+                sample_hidden_states_prefills, aux_hidden_states_prefills, num_decodes,
+                prefill_data if num_prefills > 0 else None, decode_data if num_decodes > 0 else None)
+        ################## Spec Decode end ##################
+
+        # Create output.
+        all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
+        # prompt_logprobs_dict: dict[
+        #    str, Optional[LogprobsTensors]] = self._get_prompt_logprobs_dict(
+        #        prefill_hidden_states_device, scheduler_output)
+        prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
+        all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
+        logprobs = None
+
+        if self.use_async_scheduling:
+            model_runner_output = ModelRunnerOutput(
+                req_ids=req_ids_output_copy,  # CHECK
+                req_id_to_index=req_id_to_index_output_copy,
+                sampled_token_ids=postprocessed_sampled_token_ids,
+                logprobs=logprobs,
+                prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
+                pooler_output=[],
+                kv_connector_output=KVConnectorOutput(
+                    finished_sending=finished_sending,
+                    finished_recving=finished_recving,
+                ))
+            return AsyncHPUModelRunnerOutput(
+                model_runner_output=model_runner_output,
+                sampled_token_ids=sampled_token_ids,
+                invalid_req_indices=invalid_req_indices,
+                async_output_copy_stream=self.async_output_copy_stream,
+            )
+        model_runner_output = ModelRunnerOutput(
+            req_ids=all_req_ids,
+            req_id_to_index=self.input_batch.req_id_to_index,
+            sampled_token_ids=postprocessed_sampled_token_ids,
+            logprobs=logprobs,
+            prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
+            pooler_output=[],
+            kv_connector_output=KVConnectorOutput(
+                finished_sending=finished_sending,
+                finished_recving=finished_recving,
+            ))
         return model_runner_output
 
     def load_model(self) -> None:
@@ -4029,8 +4357,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_common_prefix_blocks=0,
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
-            structured_output_request_ids={},
-            grammar_bitmask=None,
         )
         cleanup = SchedulerOutput(
             scheduled_new_reqs=[],
@@ -4042,8 +4368,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_common_prefix_blocks=0,
             finished_req_ids=set(req.req_id for req in requests),
             free_encoder_mm_hashes=[],
-            structured_output_request_ids={},
-            grammar_bitmask=None,
         )
         self.execute_model(sched_output, warmup_mode=True)
         self.execute_model(cleanup, warmup_mode=True)
