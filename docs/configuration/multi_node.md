@@ -7,14 +7,14 @@ vLLM works with a multi-node environment setup via Ray. To run models on multipl
 
 ## Prerequisites
 
-Before you start, install the latest [vllm-fork](https://github.com/HabanaAI/vllm-fork/blob/habana_main/README_GAUDI.md#build-and-install-vllm).
+Before you start, install the latest plugin.
 
 ## Configuration Procedure
 
 1. Check if all Gaudi NIC ports are up using the following commands on the host, not inside the container.
 
     ```bash
-    cd /opt/habanalabs/qual/gaudi2/bin 
+    cd /opt/habanalabs/qual/gaudi3/bin 
     ./manage_network_ifs.sh --status 
     # All the ports should be in 'up' state. Try flipping the state
     ./manage_network_ifs.sh --down 
@@ -48,7 +48,7 @@ Before you start, install the latest [vllm-fork](https://github.com/HabanaAI/vll
     vllm serve meta-llama/Llama-3.1-405B-Instruct --dtype bfloat16 --max-model-len  2048 --block-size 128 --max-num-seqs 32 --tensor-parallel-size 16 --distributed-executor-backend ray
     ```
 
-For information on running FP8 models with a multi-node setup, see [this guide](https://github.com/HabanaAI/vllm-hpu-extension/blob/main/calibration/README.md).
+For information on running FP8 models with a multi-node setup, see [this guide]().
 
 ## Online Serving Examples
 

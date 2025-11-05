@@ -7,9 +7,9 @@ title: vLLM with Intel Gaudi Frequently Asked Questions
 
 ### What are the system requirements for running vLLM on Intel® Gaudi®?
 
-- Ubuntu 22.04 LTS OS.
+- Ubuntu 22.04 LTS OS or Ubuntu 24.04 LTS OS.
 - Python 3.10.
-- Intel Gaudi 2 or Intel Gaudi 3 AI accelerator.
+- Intel® Gaudi® 2 or Intel® Gaudi® 3 AI accelerator.
 - Intel Gaudi software version 1.23.0 and above.
 
 ### What is vLLM plugin and where can I find this GitHub repository?
@@ -61,23 +61,21 @@ For more details, see [Quick Start Using Dockerfile](../getting_started/quicksta
 
 - There are two different installation methods:
 
-- (Recommended) Install the stable version from the HabanaAIvLLM-fork GitHub repo. This version is most suitable for production deployments.
+- (Recommended) Running vLLM Hardware Plugin for Intel® Gaudi® Using Dockerfile. This version is most suitable for production deployments.
 
-- Install the latest version from the HabanaAI/vLLM-fork GitHub repo. This version is suitable for developers who would like to work on experimental code and new features that are still being tested.
-
-- Install from the main vLLM source GitHub repo. This version is suitable for developers who would like to work with the official vLLM-project but may not have the latest Intel Gaudi features.
+- Building vLLM Hardware Plugin for Intel® Gaudi® from Source. This version is suitable for developers who would like to work on experimental code and new features that are still being tested.
 
 ## Examples and Model Support
 
-### Which models and configurations have been validated on Gaudi 2 and Gaudi 3 devices?
+### Which models and configurations have been validated on Intel® Gaudi® 2 and Intel® Gaudi® 3 devices?
 
-- Various Llama 2, Llama 3 and Llama 3.1 models (7B, 8B and 70B versions). Refer to Llama-3.1 jupyter notebook example.
+- Various Llama 3 and Llama 3.1 models (7B, 8B and 70B versions). Refer to Llama-3.1 jupyter notebook example.
 
 - Mistral and Mixtral models.
 
 - Different tensor parallelism configurations (single HPU, 2x, and 8x HPU).
 
-- See [Supported Configurations](https://github.com/HabanaAI/vllm-fork/blob/v1.22.1/README_GAUDI.md#supported-configurations) for more details.
+- See [Validated Models](../models/validated_models.md) for more details.
 
 ## Features and Support
 
@@ -111,7 +109,7 @@ For more details, see [Quick Start Using Dockerfile](../getting_started/quicksta
 
 - See [Execution Modes]() for more details.
 
-### How does the bucketing mechanism work in vLLM for Intel Gaudi?
+### How does the bucketing mechanism work in vLLM for Intel® Gaudi®?
 
 - The bucketing mechanism optimizes performance by grouping tensor shapes. This reduces the number of required graphs and minimizes compilations during server runtime.
 

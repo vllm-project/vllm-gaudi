@@ -70,7 +70,7 @@ This strategy creates more buckets with smaller values closer to `min`. As the v
 ### Linear Strategy
 
 !!! note
-    Starting from v1.22.0 Intel Gaudi Software release, Linear strategy is no longer the default warm-up mechanism.
+    Starting from v1.22.0 Intel® Gaudi® Software release, Linear strategy is no longer the default warm-up mechanism.
 
 The linear strategy is determined with 3 parameters: `min`, `step` and `max`, where:
 
