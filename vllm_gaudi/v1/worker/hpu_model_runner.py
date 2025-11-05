@@ -718,7 +718,6 @@ class ExecuteModelState(NamedTuple):
     req_id_list: list[list] = []
     logits_device_list: list[torch.Tensor] = []
     logits_requests_list: list[list] = []
-    spec_decode_metadata_list: list[SpecDecodeMetadata] = []
     batch_changed: bool = False
 
     #spec_decode_metadata: SpecDecodeMetadata | None
@@ -3052,7 +3051,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         req_id_list = []
         logits_device_list = []
         logits_requests_list = []
-        spec_decode_metadata_list = []
+        #spec_decode_metadata_list = []
         #if not has_kv_transfer_group():
         #    assert not (num_prefills > 0 and num_decodes > 0)
         # skip kv_connector if dummy run
@@ -3467,7 +3466,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             req_id_list,
             logits_device_list,
             logits_requests_list,
-            spec_decode_metadata_list,
             batch_changed,
         )
         return None
@@ -3493,7 +3491,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             req_id_list,
             logits_device_list,
             logits_requests_list,
-            spec_decode_metadata_list,
             batch_changed,
         ) = self.execute_model_state
         self.execute_model_state = None
