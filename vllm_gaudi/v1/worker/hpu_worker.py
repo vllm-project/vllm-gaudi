@@ -69,6 +69,7 @@ class HPUWorker(WorkerBase):
 
         self.local_rank = local_rank
         self.rank = rank
+        self.parallel_config.rank = rank
         self.distributed_init_method = distributed_init_method
         self.is_driver_worker = is_driver_worker
 
