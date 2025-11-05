@@ -343,8 +343,6 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         self.unified_attn_persistent_ctx = None
         self.flatten_input = get_config().flatten_input
         self.is_mm_optimized = is_mm_optimized(self.model)
-        self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
-        self.metadata_processor = HPUAttentionMetadataProcessor(vllm_config)
 
         # for DP
         self.dummy_num_input_tokens = -1
@@ -407,10 +405,6 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         if 'warmup_mode' in kwargs:
             kwargs.pop('warmup_mode')
         input_ids = kwargs['input_ids']
-        if not self.unified_attn:
-            kwargs['attn_metadata'] = self.metadata_processor.process_metadata(kwargs['attn_metadata'],
-                                                                               input_ids.size(0), input_ids.size(1),
-                                                                               input_ids.device, self.dtype)
         if self._rotary_prepare_cos_sin is not None:
             self._rotary_prepare_cos_sin(kwargs['positions'], recompute_cos_sin=self.recompute_cos_sin)
         attn_meta = kwargs.pop('attn_metadata')
@@ -481,6 +475,16 @@ def subtuple(obj: object, typename: str, to_copy: list[str], to_override: Option
     if typename not in _TYPE_CACHE:
         _TYPE_CACHE[typename] = {'type': collections.namedtuple(typename, ' '.join(fields)), 'fields': fields}
     return _TYPE_CACHE[typename]['type'](**values)  # type: ignore
+
+
+def metadata_update_with_trim(obj: object, typename: str, trim: bool, **to_override):
+    if trim:
+        return custom_tuple_replace(obj, typename, **to_override)
+
+    for key in to_override:
+        assert hasattr(obj, key), f"Field {key} must exist in untrimmed metadata."
+        setattr(obj, key, to_override[key])
+    return obj
 
 
 def custom_tuple_replace(obj: object, typename: str, **to_override):
@@ -774,6 +778,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         assert not (self.unified_attn and not self.use_contiguous_pa), 'Unified attn requires contiguous_pa!'
         assert not (self.unified_attn and not self.use_merged_prefill), 'Unified attn requires merged_prefill!'
+
+        self.metadata_processor = HPUAttentionMetadataProcessor(vllm_config)
 
     def _make_buffer(self, *size: Union[int, torch.SymInt], dtype: torch.dtype, numpy: bool = True) -> CpuGpuBuffer:
         return CpuGpuBuffer(*size, dtype=dtype, device=self.device, pin_memory=self.pin_memory, with_numpy=numpy)
@@ -1689,6 +1695,15 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                      block_list=context_blocks_t,
                                                                      attn_bias=attn_bias,
                                                                      block_size=self.block_size)
+
+        attn_metadata = self.metadata_processor.process_metadata(attn_metadata,
+                                                                 token_ids.size(0),
+                                                                 token_ids.size(1),
+                                                                 'cpu',
+                                                                 token_ids.device,
+                                                                 self.dtype,
+                                                                 trim=False)
+
         return PrefillInputData(request_ids=[req_ids],
                                 prompt_lens=[query_lens],
                                 token_ids=[token_ids],
@@ -1979,21 +1994,31 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             spec_decode_metadata = None
         logits_indices_device = async_h2d_copy(logits_indices, device=self.device)
 
+        attn_metadata = HPUAttentionMetadataV1.make_decode_metadata(
+            block_list=block_list_device,
+            block_usage=block_usage_device,
+            block_groups=block_groups_device,
+            input_positions=None,
+            slot_mapping=slot_mapping_device,
+            block_size=self.block_size,
+            window_block_list=window_block_list_device,
+            window_block_usage=window_block_usage_device,
+            window_block_groups=window_block_groups_device,
+        ),
+
+        attn_metadata = self.metadata_processor.process_metadata(attn_metadata,
+                                                                 token_ids_device.size(0),
+                                                                 token_ids_device.size(1),
+                                                                 'cpu',
+                                                                 token_ids.device,
+                                                                 self.dtype,
+                                                                 trim=False)
+
         return DecodeInputData(num_decodes=num_decodes,
                                token_ids=token_ids_device,
                                position_ids=positions_device,
                                logits_indices=logits_indices_device,
-                               attn_metadata=HPUAttentionMetadataV1.make_decode_metadata(
-                                   block_list=block_list_device,
-                                   block_usage=block_usage_device,
-                                   block_groups=block_groups_device,
-                                   input_positions=None,
-                                   slot_mapping=slot_mapping_device,
-                                   block_size=self.block_size,
-                                   window_block_list=window_block_list_device,
-                                   window_block_usage=window_block_usage_device,
-                                   window_block_groups=window_block_groups_device,
-                               ),
+                               attn_metadata=attn_metadata,
                                spec_decode_metadata=spec_decode_metadata)
 
     def _prepare_decode_inputs(self,
@@ -2330,7 +2355,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         else:
             # no hpu graphs for t.compile?
             use_graphs = False
-        trimmed_attn_metadata = attn_metadata if self.unified_attn else trim_attn_metadata(attn_metadata)
+
         if self.is_driver_worker:
             model_event_name = ("model_forward_"
                                 f"bs{batch_size}_"
@@ -2339,6 +2364,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                 f"graphs{'T' if use_graphs else 'F'}")
         else:
             model_event_name = 'model_executable'
+        trimmed_attn_metadata = trim_attn_metadata(attn_metadata)
         with self.profiler.record_event('internal', model_event_name):
             hidden_states = self.model.forward(input_ids=token_ids,
                                                positions=position_ids,
@@ -4614,13 +4640,6 @@ class HPUAttentionMetadataProcessor:
     ):
         """
         Initialize the attention metadata processor.
-
-        Args:
-            block_size: Size of KV cache blocks
-            dtype: Data type for attention operations
-            prefill_use_fusedsdpa: Whether to use fused SDPA for prefill
-            sliding_window: Sliding window size (None if not using sliding window)
-            interleaved_sliding_window: Whether to use interleaved sliding window
         """
         self.prefill_use_fusedsdpa = get_config().prompt_attn_impl == 'fsdpa_impl'
         self.recompute_cos_sin = os.getenv('VLLM_COS_SIN_RECOMPUTE', 'false').lower() in ['1', 'true']
@@ -4630,14 +4649,16 @@ class HPUAttentionMetadataProcessor:
         self.flatten_input = get_config().flatten_input
         self.sliding_window = vllm_config.model_config.get_sliding_window()
         self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
+        self.unified_attn = get_config().unified_attn
 
         if self.interleaved_sliding_window:
             self.use_window_sdpa = os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
             self.slice_size = int(os.getenv("PT_HPU_SDPA_BC_FACTOR", "1024"))
             self.slice_thld = int(os.environ.get('VLLM_FUSEDSDPA_SLIDE_THLD', '8192'))
 
-    def _set_attn_bias(self, attn_metadata: HPUAttentionMetadataV1, batch_size: int, seq_len: int, device: torch.device,
-                       dtype: torch.dtype) -> HPUAttentionMetadataV1:
+    def _set_attn_bias(self, attn_metadata: HPUAttentionMetadataV1, batch_size: int, seq_len: int,
+                       src_device: torch.device, dst_device: torch.device, dtype: torch.dtype,
+                       trim: bool) -> HPUAttentionMetadataV1:
         """
         Set attention bias for prompt phase.
 
@@ -4668,23 +4689,28 @@ class HPUAttentionMetadataProcessor:
         block_list = attn_metadata.block_list
         max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
         max_context_len = max_context_len * self.block_size
-        past_mask = torch.arange(0, max_context_len, dtype=torch.int32, device=device)
+        past_mask = torch.arange(0, max_context_len, dtype=torch.int32, device=src_device)
         past_mask = (past_mask.view(1, -1).expand(batch_size, -1).ge(context_lens_t.view(-1, 1)).view(
             batch_size, 1, -1).expand(batch_size, seq_len, -1).view(batch_size, 1, seq_len, -1))
 
-        len_mask = (torch.arange(0, seq_len, device=device, dtype=torch.int32).view(1, seq_len).ge(
+        len_mask = (torch.arange(0, seq_len, device=src_device, dtype=torch.int32).view(1, seq_len).ge(
             seq_lens_t.unsqueeze(-1)).view(batch_size, 1, 1, seq_len))
-        causal_mask = torch.triu(torch.ones((batch_size, 1, seq_len, seq_len), device=device, dtype=torch.bool),
+        causal_mask = torch.triu(torch.ones((batch_size, 1, seq_len, seq_len), device=src_device, dtype=torch.bool),
                                  diagonal=1)
         mask = causal_mask.logical_or(len_mask)
         mask = torch.concat((past_mask, mask), dim=-1)
         attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(mask, -math.inf))
-        attn_metadata = custom_tuple_replace(prefill_metadata, "TrimmedAttentionMetadata", attn_bias=attn_bias)
+        if src_device != dst_device:
+            attn_bias = attn_bias.to(dst_device, non_blocking=True)
+        attn_metadata = metadata_update_with_trim(prefill_metadata,
+                                                  "TrimmedAttentionMetadata",
+                                                  trim=trim,
+                                                  attn_bias=attn_bias)
         return attn_metadata
 
     def _set_attn_bias_for_sliding_window(self, attn_metadata: HPUAttentionMetadataV1, batch_size: int, seq_len: int,
-                                          window_size: int, device: torch.device,
-                                          dtype: torch.dtype) -> HPUAttentionMetadataV1:
+                                          window_size: int, src_device: torch.device, dst_device: torch.device,
+                                          dtype: torch.dtype, trim: bool) -> HPUAttentionMetadataV1:
         """
         Set attention bias for sliding window attention in prompt phase.
 
@@ -4719,13 +4745,13 @@ class HPUAttentionMetadataProcessor:
             max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
             max_context_len = max_context_len * self.block_size
 
-            invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=device) - 1
-            past_indices = torch.arange(max_context_len, device=device)
+            invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=src_device) - 1
+            past_indices = torch.arange(max_context_len, device=src_device)
             past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
                          (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
 
             # Create boolean sliding window mask
-            causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=shift)
+            causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=src_device), diagonal=shift)
             causal_mask = torch.triu(causal_mask, diagonal=shift - window_size + 1)
             causal_mask = causal_mask.view(batch_size, 1, seq_len, seq_len)
 
@@ -4736,25 +4762,29 @@ class HPUAttentionMetadataProcessor:
             # causal_mask = causal_mask.logical_and(len_mask)
 
             mask = torch.concat((past_mask, causal_mask), dim=-1)
-            attn_bias = torch.where(mask, torch.tensor(0.0, dtype=dtype, device=device),
-                                    torch.tensor(float('-inf'), dtype=dtype, device=device))
+            attn_bias = torch.where(mask, torch.tensor(0.0, dtype=dtype, device=src_device),
+                                    torch.tensor(float('-inf'), dtype=dtype, device=src_device))
         else:
             # CAUSAL MASK without removing padding (CAUSAL+sliding window)
             # removing padding cause accuracy issue for images input
-            tensor = torch.full((batch_size, 1, seq_len, seq_len), device=device, dtype=dtype, fill_value=1)
+            tensor = torch.full((batch_size, 1, seq_len, seq_len), device=src_device, dtype=dtype, fill_value=1)
             mask = torch.tril(tensor, diagonal=shift)
             mask = torch.triu(mask, diagonal=shift - window_size + 1)
             attn_bias = torch.log(mask)
 
+        if src_device != dst_device:
+            attn_bias = attn_bias.to(dst_device, non_blocking=True)
         attn_metadata = prefill_metadata._replace(window_attn_bias=attn_bias)
         return attn_metadata
 
     def _set_block_mapping(self,
                            metadata: HPUAttentionMetadataV1,
                            batch_size: int,
-                           device: torch.device,
+                           src_device: torch.device,
+                           dst_device: torch.device,
                            dtype: torch.dtype,
-                           is_window_block: bool = False) -> HPUAttentionMetadataV1:
+                           is_window_block: bool = False,
+                           trim: bool = False) -> HPUAttentionMetadataV1:
         """
         Set block mapping for decode phase.
 
@@ -4777,7 +4807,7 @@ class HPUAttentionMetadataProcessor:
             block_usage = metadata.block_usage
             block_groups = metadata.block_groups
 
-        mask = torch.arange(0, self.block_size, device=device, dtype=torch.int32).unsqueeze(0)
+        mask = torch.arange(0, self.block_size, device=src_device, dtype=torch.int32).unsqueeze(0)
         mask = mask >= block_usage.unsqueeze(-1)
         attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(mask, -math.inf))
 
@@ -4793,25 +4823,39 @@ class HPUAttentionMetadataProcessor:
             oob_values = block_groups.lt(0)
             block_mapping.masked_fill_(oob_values.unsqueeze(-1), 0)
             block_groups.masked_fill_(oob_values, batch_size)
+            if src_device != dst_device:
+                block_groups = block_groups.to(dst_device, non_blocking=True)
             if is_window_block:
-                metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata", window_block_groups=block_groups)
+                metadata = metadata_update_with_trim(metadata,
+                                                     "TrimmedAttentionMetadata",
+                                                     trim=trim,
+                                                     window_block_groups=block_groups)
             else:
-                metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata", block_groups=block_groups)
+                metadata = metadata_update_with_trim(metadata,
+                                                     "TrimmedAttentionMetadata",
+                                                     trim=trim,
+                                                     block_groups=block_groups)
         block_mapping = block_mapping.to(dtype)
+        if src_device != dst_device:
+            block_mapping = block_mapping.to(dst_device, non_blocking=True)
+            attn_bias = attn_bias.to(dst_device, non_blocking=True)
         if is_window_block:
-            metadata = custom_tuple_replace(metadata,
-                                            "TrimmedAttentionMetadata",
-                                            window_block_mapping=block_mapping,
-                                            window_attn_bias=attn_bias)
+            metadata = metadata_update_with_trim(metadata,
+                                                 "TrimmedAttentionMetadata",
+                                                 trim=trim,
+                                                 window_block_mapping=block_mapping,
+                                                 window_attn_bias=attn_bias)
         else:
-            metadata = custom_tuple_replace(metadata,
-                                            "TrimmedAttentionMetadata",
-                                            block_mapping=block_mapping,
-                                            attn_bias=attn_bias)
+            metadata = metadata_update_with_trim(metadata,
+                                                 "TrimmedAttentionMetadata",
+                                                 trim=trim,
+                                                 block_mapping=block_mapping,
+                                                 attn_bias=attn_bias)
         return metadata
 
     def process_metadata(self, attn_metadata: HPUAttentionMetadataV1, batch_size: int, seq_len: int,
-                         device: torch.device, dtype: torch.dtype) -> HPUAttentionMetadataV1:
+                         src_device: torch.device, dst_device: torch.device, dtype: torch.dtype,
+                         trim: bool) -> HPUAttentionMetadataV1:
         """
         Post-process attention metadata with appropriate masks and mappings.
 
@@ -4829,19 +4873,24 @@ class HPUAttentionMetadataProcessor:
         Returns:
             Post-processed attention metadata with additional tensors
         """
+        if self.unified_attn:
+            return attn_metadata
+
         if attn_metadata.is_prompt:
-            attn_metadata = self._set_attn_bias(attn_metadata, batch_size, seq_len, device, dtype)
+            attn_metadata = self._set_attn_bias(attn_metadata, batch_size, seq_len, src_device, dst_device, dtype, trim)
             if self.interleaved_sliding_window and self.sliding_window is not None:
                 attn_metadata = self._set_attn_bias_for_sliding_window(attn_metadata, batch_size, seq_len,
-                                                                       self.sliding_window, device, dtype)
+                                                                       self.sliding_window, src_device, dst_device,
+                                                                       dtype, trim)
         else:
-            attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype)
+            attn_metadata = self._set_block_mapping(attn_metadata, batch_size, src_device, dst_device, dtype, trim)
             if self.interleaved_sliding_window:
-                attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype, True)
+                attn_metadata = self._set_block_mapping(attn_metadata, batch_size, src_device, dst_device, dtype, True,
+                                                        trim)
         return attn_metadata
 
     def process_metadata_dict(self, attn_metadata: dict, batch_size: int, seq_len: int, device: torch.device,
-                              dtype: torch.dtype) -> dict:
+                              dtype: torch.dtype, trim: bool) -> dict:
         """
         Post-process a dictionary of attention metadata (for multi-layer models).
 
@@ -4861,7 +4910,7 @@ class HPUAttentionMetadataProcessor:
         from vllm_gaudi.extension.logger import logger
 
         first_attn_metadata = next(iter(attn_metadata.values()))
-        updated_attn_metadata = self.process_metadata(first_attn_metadata, batch_size, seq_len, device, dtype)
+        updated_attn_metadata = self.process_metadata(first_attn_metadata, batch_size, seq_len, device, dtype, trim)
 
         for key in attn_metadata:
             if attn_metadata[key] is first_attn_metadata:
@@ -4869,5 +4918,5 @@ class HPUAttentionMetadataProcessor:
             else:
                 msg = f"Different attn_metadata encountered on layer {key}. Processing it individually."
                 logger.warning(msg)
-                attn_metadata[key] = self.process_metadata(attn_metadata[key], batch_size, seq_len, device, dtype)
+                attn_metadata[key] = self.process_metadata(attn_metadata[key], batch_size, seq_len, device, dtype, trim)
         return attn_metadata
