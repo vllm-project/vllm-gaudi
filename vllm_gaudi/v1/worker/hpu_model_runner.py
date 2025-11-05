@@ -1524,7 +1524,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
             num_prompt_tokens = self.input_batch.num_prompt_tokens[i]
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-
             if num_computed_tokens < num_prompt_tokens and \
                 not self.is_decoder_only(req_id):
                 # This is prompt
@@ -1553,11 +1552,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
             # Must be prompt
             assert num_computed_tokens < num_prompt_tokens
-            num_output_tokens = len(self.requests[req_id].output_token_ids)
-            if not has_kv_transfer_group():
-                #P case num_output_tokens has non 0
-                assert num_output_tokens == 0, \
-                    f'req_id: {req_id}, {num_output_tokens}'
+            # NOTE(kzawora): In preempted sequences, num_output_tokens can be > 0, and still be a valid prefill
 
             prompt_req_ids.append(req_id)
             prompt_scheduled_tokens.append(num_scheduled_tokens)
@@ -1713,26 +1708,29 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         for batch_idx in range(num_decodes, num_reqs):
             req_id = self.input_batch.req_ids[batch_idx]
-            context_len = self.input_batch.num_computed_tokens_cpu[batch_idx]
-            query_len = num_scheduled_tokens[batch_idx]
+            seq_num_computed_tokens = self.input_batch.num_computed_tokens_cpu[batch_idx]
+            seq_num_scheduled_tokens = num_scheduled_tokens[batch_idx]
 
-            token_ids = self.input_batch.token_ids_cpu[batch_idx, context_len:context_len + query_len].tolist()
+            token_ids = self.input_batch.token_ids_cpu[batch_idx, seq_num_computed_tokens:seq_num_computed_tokens +
+                                                       seq_num_scheduled_tokens].tolist()
 
-            num_blocks = round_up(context_len + query_len, self.block_size) // self.block_size
+            num_blocks = round_up(seq_num_computed_tokens + seq_num_scheduled_tokens,
+                                  self.block_size) // self.block_size
             blocks = block_table_cpu_tensor[batch_idx, :num_blocks].tolist()
             if not warmup:
                 blocks = [self.defragmenter.resolve(b) for b in blocks]
-
-            prompt_tokens = self.input_batch.num_prompt_tokens[batch_idx]
-            # TODO: Fix non-prompt case
-            num_output_logits = max(0, context_len + query_len - prompt_tokens + 1)
-            logits_positions = list(range(query_len - num_output_logits, query_len))
+            #NOTE(kzawora): In non-preemption scenario,
+            # self.input_batch.num_prompt_tokens[batch_idx] == self.input_batch.num_tokens[batch_idx].
+            # In preemption scenario num_tokens will also include the tokens emitted before preemption
+            num_prompt_tokens = self.input_batch.num_prompt_tokens[batch_idx]
+            num_output_logits = max(0, seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1)
+            logits_positions = list(range(seq_num_scheduled_tokens - num_output_logits, seq_num_scheduled_tokens))
 
             new_batch_contents = BatchContents(
                 req_ids=[req_id],
                 token_ids=[token_ids],
-                context_lens=[context_len],
-                prompt_lens=[prompt_tokens],
+                context_lens=[seq_num_computed_tokens],
+                prompt_lens=[num_prompt_tokens],
                 blocks=[blocks],
                 logits_positions=[logits_positions],
             )
@@ -3372,7 +3370,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_tokens = len(token_ids)
             self.input_batch.token_ids_cpu[i, seq_len:seq_len + num_tokens] = token_ids
             self.input_batch.num_tokens[i] += len(token_ids)
-            req_state.output_token_ids.extend(token_ids)
+
         # NOTE(chendi): enable cache based on PR(#20291)
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
