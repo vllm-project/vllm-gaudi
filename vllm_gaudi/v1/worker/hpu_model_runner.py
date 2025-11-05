@@ -346,6 +346,8 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         self.is_mm_optimized = is_mm_optimized(self.model)
         self.sliding_window = vllm_config.model_config.get_sliding_window()
         self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
+        self.metadata_processor = HPUAttentionMetadataProcessor(self.block_size, self.dtype, self.prefill_use_fusedsdpa,
+                                                                self.sliding_window, self.interleaved_sliding_window)
         if self.interleaved_sliding_window:
             self.use_window_sdpa = os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
             self.slice_size = int(os.getenv("PT_HPU_SDPA_BC_FACTOR", "1024"))
@@ -400,141 +402,6 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         if hasattr(self._rotary_embed_module, "sin"):
             delattr(self._rotary_embed_module, "sin")
 
-    def _set_attn_bias(self, attn_metadata, batch_size, seq_len, device, dtype):
-        if (attn_metadata is None or (self.prefill_use_fusedsdpa and attn_metadata.block_list is None)
-                or not attn_metadata.is_prompt):
-            return attn_metadata
-
-        if attn_metadata.attn_bias is not None:
-            return attn_metadata
-
-        prefill_metadata = attn_metadata
-
-        seq_lens_t = prefill_metadata.seq_lens_tensor
-        context_lens_t = prefill_metadata.context_lens_tensor
-
-        block_list = attn_metadata.block_list
-        max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
-        max_context_len = max_context_len * self.block_size
-        past_mask = torch.arange(0, max_context_len, dtype=torch.int32, device=device)
-        past_mask = (past_mask.view(1, -1).expand(batch_size, -1).ge(context_lens_t.view(-1, 1)).view(
-            batch_size, 1, -1).expand(batch_size, seq_len, -1).view(batch_size, 1, seq_len, -1))
-
-        len_mask = (torch.arange(0, seq_len, device=device, dtype=torch.int32).view(1, seq_len).ge(
-            seq_lens_t.unsqueeze(-1)).view(batch_size, 1, 1, seq_len))
-        causal_mask = torch.triu(torch.ones((batch_size, 1, seq_len, seq_len), device=device, dtype=torch.bool),
-                                 diagonal=1)
-        mask = causal_mask.logical_or(len_mask)
-        mask = torch.concat((past_mask, mask), dim=-1)
-        attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(mask, -math.inf))
-        attn_metadata = custom_tuple_replace(prefill_metadata, "TrimmedAttentionMetadata", attn_bias=attn_bias)
-        return attn_metadata
-
-    def _set_attn_bias_for_sliding_window(self, attn_metadata, batch_size, seq_len, window_size, device, dtype):
-
-        if (attn_metadata is None or not attn_metadata.is_prompt):
-            return attn_metadata
-
-        prefill_metadata = attn_metadata
-        shift = 0
-
-        # FusedSDPA with window_size is only supported when the seq_len is multiple of the slice_size
-        if self.prefill_use_fusedsdpa and self.use_window_sdpa and \
-            seq_len >= self.slice_thld and self.slice_size != 0 and \
-            seq_len % self.slice_size == 0 and attn_metadata.block_list is None:
-            # no need to set sliding window mask, just use built-in window-sdpa
-            return attn_metadata
-
-        if self.prefill_use_fusedsdpa and attn_metadata.block_list is not None:
-            context_lens_t = prefill_metadata.context_lens_tensor
-
-            block_list = attn_metadata.block_list
-            max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
-            max_context_len = max_context_len * self.block_size
-
-            invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=device) - 1
-            past_indices = torch.arange(max_context_len, device=device)
-            past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
-                         (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
-
-            # Create boolean sliding window mask
-            causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=shift)
-            causal_mask = torch.triu(causal_mask, diagonal=shift - window_size + 1)
-            causal_mask = causal_mask.view(batch_size, 1, seq_len, seq_len)
-
-            # TODO: Investigate further - Removing Padding cause accuracy issue
-            # seq_lens_t = prefill_metadata.seq_lens_tensor
-            # len_mask = (torch.arange(0, seq_len, device=device, dtype=torch.int32).view(1, seq_len).lt(
-            #     seq_lens_t.unsqueeze(-1)).view(batch_size, 1, 1, seq_len))
-            # causal_mask = causal_mask.logical_and(len_mask)
-
-            mask = torch.concat((past_mask, causal_mask), dim=-1)
-            attn_bias = torch.where(mask, torch.tensor(0.0, dtype=dtype, device=device),
-                                    torch.tensor(float('-inf'), dtype=dtype, device=device))
-        else:
-            # CAUSAL MASK without removing padding (CAUSAL+sliding window)
-            # removing padding cause accuracy issue for images input
-            tensor = torch.full((batch_size, 1, seq_len, seq_len), device=device, dtype=dtype, fill_value=1)
-            mask = torch.tril(tensor, diagonal=shift)
-            mask = torch.triu(mask, diagonal=shift - window_size + 1)
-            attn_bias = torch.log(mask)
-
-        attn_metadata = prefill_metadata._replace(window_attn_bias=attn_bias)
-        return attn_metadata
-
-    def _set_block_mapping(self, metadata, batch_size, device, dtype, is_window_block=False):
-        if is_window_block:
-            block_usage = metadata.window_block_usage
-            block_groups = metadata.window_block_groups
-        else:
-            block_usage = metadata.block_usage
-            block_groups = metadata.block_groups
-
-        mask = torch.arange(0, self.block_size, device=device, dtype=torch.int32).unsqueeze(0)
-        mask = mask >= block_usage.unsqueeze(-1)
-        attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(mask, -math.inf))
-
-        if not is_fake_hpu():
-            block_mapping = torch.nn.functional.one_hot(block_groups, num_classes=batch_size)
-        else:
-            # Unfortunately one_hot on CPU
-            # doesn't handle out of bounds classes so we need to convert
-            # all negative values to 0 (block_mapping) or bs (block_groups)
-            block_groups = block_groups.to(torch.long)
-            block_mapping = torch.nn.functional.relu(block_groups)
-            block_mapping = torch.nn.functional.one_hot(block_mapping, num_classes=batch_size)
-            oob_values = block_groups.lt(0)
-            block_mapping.masked_fill_(oob_values.unsqueeze(-1), 0)
-            block_groups.masked_fill_(oob_values, batch_size)
-            if is_window_block:
-                metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata", window_block_groups=block_groups)
-            else:
-                metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata", block_groups=block_groups)
-        block_mapping = block_mapping.to(dtype)
-        if is_window_block:
-            metadata = custom_tuple_replace(metadata,
-                                            "TrimmedAttentionMetadata",
-                                            window_block_mapping=block_mapping,
-                                            window_attn_bias=attn_bias)
-        else:
-            metadata = custom_tuple_replace(metadata,
-                                            "TrimmedAttentionMetadata",
-                                            block_mapping=block_mapping,
-                                            attn_bias=attn_bias)
-        return metadata
-
-    def _update_metadata(self, attn_metadata, batch_size, seq_len, device, dtype):
-        if attn_metadata.is_prompt:
-            attn_metadata = self._set_attn_bias(attn_metadata, batch_size, seq_len, device, dtype)
-            if self.interleaved_sliding_window:
-                attn_metadata = self._set_attn_bias_for_sliding_window(attn_metadata, batch_size, seq_len,
-                                                                       self.sliding_window, device, dtype)
-        else:
-            attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype)
-            if self.interleaved_sliding_window:
-                attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype, True)
-        return attn_metadata
-
     def forward(self, *args, **kwargs):
         # TODO(kzawora): something goes VERY WRONG when operating on
         # kwargs['attn_metadata'].slot_mapping, compared to untrimmed metadata
@@ -548,8 +415,9 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
             kwargs.pop('warmup_mode')
         input_ids = kwargs['input_ids']
         if not self.unified_attn:
-            kwargs['attn_metadata'] = self._update_metadata(kwargs['attn_metadata'], input_ids.size(0),
-                                                            input_ids.size(1), input_ids.device, self.dtype)
+            kwargs['attn_metadata'] = self.metadata_processor.process_metadata(kwargs['attn_metadata'],
+                                                                               input_ids.size(0), input_ids.size(1),
+                                                                               input_ids.device, self.dtype)
         if self._rotary_prepare_cos_sin is not None:
             self._rotary_prepare_cos_sin(kwargs['positions'], recompute_cos_sin=self.recompute_cos_sin)
         attn_meta = kwargs.pop('attn_metadata')
@@ -4735,3 +4603,280 @@ class TensorTuple(tuple):
     def dtype(self):
         """Returns the torch.dtype of the tensors within the tuple."""
         return self._dtype
+
+
+class HPUAttentionMetadataProcessor:
+    """
+    Processor class for post-processing HPU attention metadata.
+    
+    This class takes already-built attention metadata and augments it with
+    additional tensors such as attention bias masks and block mappings that
+    are required for efficient attention computation on HPU. It does NOT build
+    the metadata from scratch - it post-processes existing metadata structures.
+    """
+
+    def __init__(
+        self,
+        block_size: int,
+        dtype: torch.dtype,
+        prefill_use_fusedsdpa: Optional[bool] = None,
+        sliding_window: Optional[int] = None,
+        interleaved_sliding_window: bool = False,
+    ):
+        """
+        Initialize the attention metadata processor.
+
+        Args:
+            block_size: Size of KV cache blocks
+            dtype: Data type for attention operations
+            prefill_use_fusedsdpa: Whether to use fused SDPA for prefill
+            sliding_window: Sliding window size (None if not using sliding window)
+            interleaved_sliding_window: Whether to use interleaved sliding window
+        """
+        self.block_size = block_size
+        self.dtype = dtype
+        self.prefill_use_fusedsdpa = prefill_use_fusedsdpa if prefill_use_fusedsdpa is not None \
+            else (get_config().prompt_attn_impl == 'fsdpa_impl')
+        self.sliding_window = sliding_window
+        self.interleaved_sliding_window = interleaved_sliding_window
+
+        if self.interleaved_sliding_window:
+            self.use_window_sdpa = os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
+            self.slice_size = int(os.getenv("PT_HPU_SDPA_BC_FACTOR", "1024"))
+            self.slice_thld = int(os.environ.get('VLLM_FUSEDSDPA_SLIDE_THLD', '8192'))
+
+    def _set_attn_bias(self, attn_metadata: HPUAttentionMetadataV1, batch_size: int, seq_len: int, device: torch.device,
+                       dtype: torch.dtype) -> HPUAttentionMetadataV1:
+        """
+        Set attention bias for prompt phase.
+
+        Creates causal attention masks with proper handling of padding and context.
+
+        Args:
+            attn_metadata: Input attention metadata
+            batch_size: Batch size
+            seq_len: Sequence length
+            device: Device to create tensors on
+            dtype: Data type for the bias tensor
+
+        Returns:
+            Updated attention metadata with attn_bias set
+        """
+        if (attn_metadata is None or (self.prefill_use_fusedsdpa and attn_metadata.block_list is None)
+                or not attn_metadata.is_prompt):
+            return attn_metadata
+
+        if attn_metadata.attn_bias is not None:
+            return attn_metadata
+
+        prefill_metadata = attn_metadata
+
+        seq_lens_t = prefill_metadata.seq_lens_tensor
+        context_lens_t = prefill_metadata.context_lens_tensor
+
+        block_list = attn_metadata.block_list
+        max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
+        max_context_len = max_context_len * self.block_size
+        past_mask = torch.arange(0, max_context_len, dtype=torch.int32, device=device)
+        past_mask = (past_mask.view(1, -1).expand(batch_size, -1).ge(context_lens_t.view(-1, 1)).view(
+            batch_size, 1, -1).expand(batch_size, seq_len, -1).view(batch_size, 1, seq_len, -1))
+
+        len_mask = (torch.arange(0, seq_len, device=device, dtype=torch.int32).view(1, seq_len).ge(
+            seq_lens_t.unsqueeze(-1)).view(batch_size, 1, 1, seq_len))
+        causal_mask = torch.triu(torch.ones((batch_size, 1, seq_len, seq_len), device=device, dtype=torch.bool),
+                                 diagonal=1)
+        mask = causal_mask.logical_or(len_mask)
+        mask = torch.concat((past_mask, mask), dim=-1)
+        attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(mask, -math.inf))
+        attn_metadata = custom_tuple_replace(prefill_metadata, "TrimmedAttentionMetadata", attn_bias=attn_bias)
+        return attn_metadata
+
+    def _set_attn_bias_for_sliding_window(self, attn_metadata: HPUAttentionMetadataV1, batch_size: int, seq_len: int,
+                                          window_size: int, device: torch.device,
+                                          dtype: torch.dtype) -> HPUAttentionMetadataV1:
+        """
+        Set attention bias for sliding window attention in prompt phase.
+
+        Args:
+            attn_metadata: Input attention metadata
+            batch_size: Batch size
+            seq_len: Sequence length
+            window_size: Sliding window size
+            device: Device to create tensors on
+            dtype: Data type for the bias tensor
+
+        Returns:
+            Updated attention metadata with window_attn_bias set
+        """
+        if (attn_metadata is None or not attn_metadata.is_prompt):
+            return attn_metadata
+
+        prefill_metadata = attn_metadata
+        shift = 0
+
+        # FusedSDPA with window_size is only supported when the seq_len is multiple of the slice_size
+        if self.prefill_use_fusedsdpa and self.use_window_sdpa and \
+            seq_len >= self.slice_thld and self.slice_size != 0 and \
+            seq_len % self.slice_size == 0 and attn_metadata.block_list is None:
+            # no need to set sliding window mask, just use built-in window-sdpa
+            return attn_metadata
+
+        if self.prefill_use_fusedsdpa and attn_metadata.block_list is not None:
+            context_lens_t = prefill_metadata.context_lens_tensor
+
+            block_list = attn_metadata.block_list
+            max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
+            max_context_len = max_context_len * self.block_size
+
+            invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=device) - 1
+            past_indices = torch.arange(max_context_len, device=device)
+            past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
+                         (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+
+            # Create boolean sliding window mask
+            causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=shift)
+            causal_mask = torch.triu(causal_mask, diagonal=shift - window_size + 1)
+            causal_mask = causal_mask.view(batch_size, 1, seq_len, seq_len)
+
+            # TODO: Investigate further - Removing Padding cause accuracy issue
+            # seq_lens_t = prefill_metadata.seq_lens_tensor
+            # len_mask = (torch.arange(0, seq_len, device=device, dtype=torch.int32).view(1, seq_len).lt(
+            #     seq_lens_t.unsqueeze(-1)).view(batch_size, 1, 1, seq_len))
+            # causal_mask = causal_mask.logical_and(len_mask)
+
+            mask = torch.concat((past_mask, causal_mask), dim=-1)
+            attn_bias = torch.where(mask, torch.tensor(0.0, dtype=dtype, device=device),
+                                    torch.tensor(float('-inf'), dtype=dtype, device=device))
+        else:
+            # CAUSAL MASK without removing padding (CAUSAL+sliding window)
+            # removing padding cause accuracy issue for images input
+            tensor = torch.full((batch_size, 1, seq_len, seq_len), device=device, dtype=dtype, fill_value=1)
+            mask = torch.tril(tensor, diagonal=shift)
+            mask = torch.triu(mask, diagonal=shift - window_size + 1)
+            attn_bias = torch.log(mask)
+
+        attn_metadata = prefill_metadata._replace(window_attn_bias=attn_bias)
+        return attn_metadata
+
+    def _set_block_mapping(self,
+                           metadata: HPUAttentionMetadataV1,
+                           batch_size: int,
+                           device: torch.device,
+                           dtype: torch.dtype,
+                           is_window_block: bool = False) -> HPUAttentionMetadataV1:
+        """
+        Set block mapping for decode phase.
+
+        Creates block mapping and attention bias for paged attention during decode.
+
+        Args:
+            metadata: Input attention metadata
+            batch_size: Batch size
+            device: Device to create tensors on
+            dtype: Data type for tensors
+            is_window_block: Whether this is for window blocks
+
+        Returns:
+            Updated attention metadata with block_mapping and attn_bias set
+        """
+        if is_window_block:
+            block_usage = metadata.window_block_usage
+            block_groups = metadata.window_block_groups
+        else:
+            block_usage = metadata.block_usage
+            block_groups = metadata.block_groups
+
+        mask = torch.arange(0, self.block_size, device=device, dtype=torch.int32).unsqueeze(0)
+        mask = mask >= block_usage.unsqueeze(-1)
+        attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(mask, -math.inf))
+
+        if not is_fake_hpu():
+            block_mapping = torch.nn.functional.one_hot(block_groups, num_classes=batch_size)
+        else:
+            # Unfortunately one_hot on CPU
+            # doesn't handle out of bounds classes so we need to convert
+            # all negative values to 0 (block_mapping) or bs (block_groups)
+            block_groups = block_groups.to(torch.long)
+            block_mapping = torch.nn.functional.relu(block_groups)
+            block_mapping = torch.nn.functional.one_hot(block_mapping, num_classes=batch_size)
+            oob_values = block_groups.lt(0)
+            block_mapping.masked_fill_(oob_values.unsqueeze(-1), 0)
+            block_groups.masked_fill_(oob_values, batch_size)
+            if is_window_block:
+                metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata", window_block_groups=block_groups)
+            else:
+                metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata", block_groups=block_groups)
+        block_mapping = block_mapping.to(dtype)
+        if is_window_block:
+            metadata = custom_tuple_replace(metadata,
+                                            "TrimmedAttentionMetadata",
+                                            window_block_mapping=block_mapping,
+                                            window_attn_bias=attn_bias)
+        else:
+            metadata = custom_tuple_replace(metadata,
+                                            "TrimmedAttentionMetadata",
+                                            block_mapping=block_mapping,
+                                            attn_bias=attn_bias)
+        return metadata
+
+    def process_metadata(self, attn_metadata: HPUAttentionMetadataV1, batch_size: int, seq_len: int,
+                         device: torch.device, dtype: torch.dtype) -> HPUAttentionMetadataV1:
+        """
+        Post-process attention metadata with appropriate masks and mappings.
+
+        This is the main entry point for processing attention metadata. It augments
+        the metadata with attention bias masks (for prompt phase) or block mappings
+        (for decode phase), with support for sliding window attention.
+
+        Args:
+            attn_metadata: Input attention metadata (already built)
+            batch_size: Batch size
+            seq_len: Sequence length (for prompt phase)
+            device: Device to create tensors on
+            dtype: Data type for tensors
+
+        Returns:
+            Post-processed attention metadata with additional tensors
+        """
+        if attn_metadata.is_prompt:
+            attn_metadata = self._set_attn_bias(attn_metadata, batch_size, seq_len, device, dtype)
+            if self.interleaved_sliding_window and self.sliding_window is not None:
+                attn_metadata = self._set_attn_bias_for_sliding_window(attn_metadata, batch_size, seq_len,
+                                                                       self.sliding_window, device, dtype)
+        else:
+            attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype)
+            if self.interleaved_sliding_window:
+                attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype, True)
+        return attn_metadata
+
+    def process_metadata_dict(self, attn_metadata: dict, batch_size: int, seq_len: int, device: torch.device,
+                              dtype: torch.dtype) -> dict:
+        """
+        Post-process a dictionary of attention metadata (for multi-layer models).
+
+        This method optimizes the processing by checking if all metadata objects in the
+        dictionary are the same instance, and if so, processes only once.
+
+        Args:
+            attn_metadata: Dictionary mapping layer names to attention metadata
+            batch_size: Batch size
+            seq_len: Sequence length (for prompt phase)
+            device: Device to create tensors on
+            dtype: Data type for tensors
+
+        Returns:
+            Dictionary with post-processed attention metadata
+        """
+        from vllm_gaudi.extension.logger import logger
+
+        first_attn_metadata = next(iter(attn_metadata.values()))
+        updated_attn_metadata = self.process_metadata(first_attn_metadata, batch_size, seq_len, device, dtype)
+
+        for key in attn_metadata:
+            if attn_metadata[key] is first_attn_metadata:
+                attn_metadata[key] = updated_attn_metadata
+            else:
+                msg = f"Different attn_metadata encountered on layer {key}. Processing it individually."
+                logger.warning(msg)
+                attn_metadata[key] = self.process_metadata(attn_metadata[key], batch_size, seq_len, device, dtype)
+        return attn_metadata
