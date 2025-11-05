@@ -3504,6 +3504,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             return None  # noqa
         logits_prompt = []
         logits_decode = []
+        if grammar_output.grammar_bitmask is not None:
+            structured_output = True
         prefill_sampled_requests = []
         num_decodes = len(pd_info.decode_req_ids)
         num_prefills = len(pd_info.prompt_req_ids)
