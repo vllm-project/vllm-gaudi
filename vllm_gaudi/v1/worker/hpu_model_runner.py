@@ -1516,12 +1516,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
 
             # Must be prompt
-            # assert num_computed_tokens < num_prompt_tokens
-            # num_output_tokens = len(self.requests[req_id].output_token_ids)
-            #if not has_kv_transfer_group():
-            #    #P case num_output_tokens has non 0
-            #    assert num_output_tokens == 0, \
-            #        f'req_id: {req_id}, {num_output_tokens}'
+            assert num_computed_tokens < num_prompt_tokens
+            # NOTE(kzawora): In preempted sequences, num_output_tokens can be > 0, and still be a valid prefill
 
             prompt_req_ids.append(req_id)
             prompt_scheduled_tokens.append(num_scheduled_tokens)
@@ -3333,7 +3329,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_tokens = len(token_ids)
             self.input_batch.token_ids_cpu[i, seq_len:seq_len + num_tokens] = token_ids
             self.input_batch.num_tokens[i] += len(token_ids)
-            #req_state.output_token_ids.extend(token_ids)
+
         # NOTE(chendi): enable cache based on PR(#20291)
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
