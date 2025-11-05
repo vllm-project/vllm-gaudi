@@ -2004,7 +2004,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             window_block_list=window_block_list_device,
             window_block_usage=window_block_usage_device,
             window_block_groups=window_block_groups_device,
-        ),
+        )
 
         attn_metadata = self.metadata_processor.process_metadata(attn_metadata,
                                                                  token_ids_device.size(0),
