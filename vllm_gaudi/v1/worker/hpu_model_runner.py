@@ -333,7 +333,6 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
     def __init__(self, model, vllm_config):
         super().__init__()
         self.model = model
-        self.prefill_use_fusedsdpa = get_config().prompt_attn_impl == 'fsdpa_impl'
         self.recompute_cos_sin = os.getenv('VLLM_COS_SIN_RECOMPUTE', 'false').lower() in ['1', 'true']
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
@@ -344,14 +343,8 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         self.unified_attn_persistent_ctx = None
         self.flatten_input = get_config().flatten_input
         self.is_mm_optimized = is_mm_optimized(self.model)
-        self.sliding_window = vllm_config.model_config.get_sliding_window()
         self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
-        self.metadata_processor = HPUAttentionMetadataProcessor(self.block_size, self.dtype, self.prefill_use_fusedsdpa,
-                                                                self.sliding_window, self.interleaved_sliding_window)
-        if self.interleaved_sliding_window:
-            self.use_window_sdpa = os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
-            self.slice_size = int(os.getenv("PT_HPU_SDPA_BC_FACTOR", "1024"))
-            self.slice_thld = int(os.environ.get('VLLM_FUSEDSDPA_SLIDE_THLD', '8192'))
+        self.metadata_processor = HPUAttentionMetadataProcessor(vllm_config)
 
         # for DP
         self.dummy_num_input_tokens = -1
@@ -4617,11 +4610,7 @@ class HPUAttentionMetadataProcessor:
 
     def __init__(
         self,
-        block_size: int,
-        dtype: torch.dtype,
-        prefill_use_fusedsdpa: Optional[bool] = None,
-        sliding_window: Optional[int] = None,
-        interleaved_sliding_window: bool = False,
+        vllm_config: VllmConfig,
     ):
         """
         Initialize the attention metadata processor.
@@ -4633,12 +4622,14 @@ class HPUAttentionMetadataProcessor:
             sliding_window: Sliding window size (None if not using sliding window)
             interleaved_sliding_window: Whether to use interleaved sliding window
         """
-        self.block_size = block_size
-        self.dtype = dtype
-        self.prefill_use_fusedsdpa = prefill_use_fusedsdpa if prefill_use_fusedsdpa is not None \
-            else (get_config().prompt_attn_impl == 'fsdpa_impl')
-        self.sliding_window = sliding_window
-        self.interleaved_sliding_window = interleaved_sliding_window
+        self.prefill_use_fusedsdpa = get_config().prompt_attn_impl == 'fsdpa_impl'
+        self.recompute_cos_sin = os.getenv('VLLM_COS_SIN_RECOMPUTE', 'false').lower() in ['1', 'true']
+        self.vllm_config = vllm_config
+        self.block_size = vllm_config.cache_config.block_size
+        self.dtype = vllm_config.model_config.dtype
+        self.flatten_input = get_config().flatten_input
+        self.sliding_window = vllm_config.model_config.get_sliding_window()
+        self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
 
         if self.interleaved_sliding_window:
             self.use_window_sdpa = os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
