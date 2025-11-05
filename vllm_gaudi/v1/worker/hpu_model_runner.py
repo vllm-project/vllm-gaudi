@@ -3068,7 +3068,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         #decode_sampled_token_ids_device = None
         # NOTE(tianmu-li): For structured output, combine logits before
         # postprocessing. Should it be done for all requests?
-        structured_output = False
+        structured_output = True  #False
         #spec_decode_num_tokens = None
         #if scheduler_output.grammar_bitmask is not None:
         #logits_prompt = []
@@ -3501,7 +3501,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         logits_decode = []
         if grammar_output is not None:
             structured_output = True
-        prefill_sampled_requests = []
         num_decodes = len(pd_info.decode_req_ids)
         num_prefills = len(pd_info.prompt_req_ids)
         num_reqs = num_decodes + num_prefills
