@@ -4666,7 +4666,8 @@ class HPUAttentionMetadataProcessor:
             attn_metadata: Input attention metadata
             batch_size: Batch size
             seq_len: Sequence length
-            device: Device to create tensors on
+            src_device: Device to create tensors on
+            dst_device: Device to move tensors to
             dtype: Data type for the bias tensor
 
         Returns:
@@ -4719,7 +4720,8 @@ class HPUAttentionMetadataProcessor:
             batch_size: Batch size
             seq_len: Sequence length
             window_size: Sliding window size
-            device: Device to create tensors on
+            src_device: Device to create tensors on
+            dst_device: Device to move tensors to
             dtype: Data type for the bias tensor
 
         Returns:
@@ -4889,8 +4891,8 @@ class HPUAttentionMetadataProcessor:
 
         return attn_metadata
 
-    def process_metadata_dict(self, attn_metadata: dict, batch_size: int, seq_len: int, device: torch.device,
-                              dtype: torch.dtype, trim: bool) -> dict:
+    def process_metadata_dict(self, attn_metadata: dict, batch_size: int, seq_len: int, src_device: torch.device,
+                              dst_device: torch.device, dtype: torch.dtype, trim: bool) -> dict:
         """
         Post-process a dictionary of attention metadata (for multi-layer models).
 
@@ -4901,7 +4903,8 @@ class HPUAttentionMetadataProcessor:
             attn_metadata: Dictionary mapping layer names to attention metadata
             batch_size: Batch size
             seq_len: Sequence length (for prompt phase)
-            device: Device to create tensors on
+            src_device: Device to create tensors on
+            dst_device: Device to move tensors to
             dtype: Data type for tensors
 
         Returns:
@@ -4910,7 +4913,8 @@ class HPUAttentionMetadataProcessor:
         from vllm_gaudi.extension.logger import logger
 
         first_attn_metadata = next(iter(attn_metadata.values()))
-        updated_attn_metadata = self.process_metadata(first_attn_metadata, batch_size, seq_len, device, dtype, trim)
+        updated_attn_metadata = self.process_metadata(first_attn_metadata, batch_size, seq_len, src_device, dst_device,
+                                                      dtype, trim)
 
         for key in attn_metadata:
             if attn_metadata[key] is first_attn_metadata:
@@ -4918,5 +4922,6 @@ class HPUAttentionMetadataProcessor:
             else:
                 msg = f"Different attn_metadata encountered on layer {key}. Processing it individually."
                 logger.warning(msg)
-                attn_metadata[key] = self.process_metadata(attn_metadata[key], batch_size, seq_len, device, dtype, trim)
+                attn_metadata[key] = self.process_metadata(attn_metadata[key], batch_size, seq_len, src_device,
+                                                           dst_device, dtype, trim)
         return attn_metadata
