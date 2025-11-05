@@ -3475,28 +3475,29 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        if self.execute_model_state is not None:
+        if self.execute_model_state is None:
             raise RuntimeError("State error: sample_tokens() must be called "
                                "after execute_model() returns None.")
-        (
-            scheduler_output,
-            prefill_data,
-            decode_data,
-            pd_info,
-            finished_sending,
-            finished_recving,
-            decode_non_flattened_hidden_states,
-            decode_aux_hidden_states,
-            decode_sample_hidden_states,
-            decode_logits_device,
-            non_flattened_hidden_states_prefills,
-            aux_hidden_states_prefills,
-            sample_hidden_states_prefills,
-            req_id_list,
-            logits_device_list,
-            logits_requests_list,
-            batch_changed,
-        ) = self.execute_model_state
+        else:
+            (
+                scheduler_output,
+                prefill_data,
+                decode_data,
+                pd_info,
+                finished_sending,
+                finished_recving,
+                decode_non_flattened_hidden_states,
+                decode_aux_hidden_states,
+                decode_sample_hidden_states,
+                decode_logits_device,
+                non_flattened_hidden_states_prefills,
+                aux_hidden_states_prefills,
+                sample_hidden_states_prefills,
+                req_id_list,
+                logits_device_list,
+                logits_requests_list,
+                batch_changed,
+            ) = self.execute_model_state
         self.execute_model_state = None
         if scheduler_output is None:
             # Nothing to do (PP non-final rank case), output isn't used.
