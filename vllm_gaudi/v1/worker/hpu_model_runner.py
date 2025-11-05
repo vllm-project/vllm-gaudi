@@ -2010,7 +2010,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                  token_ids_device.size(0),
                                                                  token_ids_device.size(1),
                                                                  torch.device('cpu'),
-                                                                 token_ids.device,
+                                                                 token_ids_device.device,
                                                                  self.dtype,
                                                                  trim=False)
 
@@ -4886,8 +4886,13 @@ class HPUAttentionMetadataProcessor:
                                                                        self.sliding_window, src_device, dst_device,
                                                                        dtype, trim)
         else:
-            attn_metadata = self._set_block_mapping(attn_metadata, batch_size, src_device, dst_device, dtype,
-                                                    self.interleaved_sliding_window, trim)
+            attn_metadata = self._set_block_mapping(attn_metadata, batch_size, src_device, dst_device, dtype, False,
+                                                    trim)
+            # NOTE(kzawora): I'm not sure why we set block mapping twice for sliding window
+            # - we should check if that can be reduced to a single call.
+            if self.interleaved_sliding_window:
+                attn_metadata = self._set_block_mapping(attn_metadata, batch_size, src_device, dst_device, dtype, True,
+                                                        trim)
 
         return attn_metadata
 
