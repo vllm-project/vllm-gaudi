@@ -1184,7 +1184,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
-            resumed_from_preemption = req_id in req_data.resumed_req_ids
+            if hasattr(req_data, "resumed_req_ids"):
+                resumed_from_preemption = req_id in req_data.resumed_req_ids
+            else:
+                resumed_from_preemption = False
             req_state.num_computed_tokens = num_computed_tokens
 
             if not is_last_rank:
