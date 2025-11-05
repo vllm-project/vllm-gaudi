@@ -2615,9 +2615,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
     def apply_grammar_bitmask(
         self,
         scheduler_output: "SchedulerOutput",
+        grammar_output: GrammarOutput,
         logits: torch.Tensor,
     ):
-        grammar_bitmask = scheduler_output.grammar_bitmask
+        #grammar_bitmask = scheduler_output.grammar_bitmask
+        grammar_bitmask = grammar_output.grammar_bitmask
         if grammar_bitmask is None:
             return
 
@@ -2940,7 +2942,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         warmup_mode: bool = False,
-    ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput]:
+    ) -> Union[ModelRunnerOutput]:
         if self.unified_attn:
             return self.unified_execute_model(scheduler_output, warmup_mode)
         # NOTE(kzawora): Since scheduler doesn't differentiate between prefills
@@ -3507,11 +3509,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         structured_output = False
         spec_decode_num_tokens = None
         prefill_sampled_token_ids = []
-        prefill_sampled_requests = []
+        prefill_sampled_requests: list[torch.Tensor] = []
         decode_sampled_token_ids = []
         decode_sampled_requests = []
         if self.use_async_scheduling:
-            invalid_req_indices = []
+            invalid_req_indices: list[torch.Tensor] = []
         ######################### PREFILLS #########################
         if num_prefills > 0:
             htorch.core.mark_step()
@@ -3582,7 +3584,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             logits = torch.cat(logits_combined, dim=0)
             # Apply structured output bitmasks if present
             if scheduler_output.structured_output_request_ids:
-                self.apply_grammar_bitmask(scheduler_output, logits)
+                self.apply_grammar_bitmask(scheduler_output, grammar_output, logits)
             sampler_output, _sampling_metadata = self._run_sampling(batch_changed, logits,
                                                                     pd_info.prompt_req_ids + pd_info.decode_req_ids,
                                                                     logits.shape[0])
