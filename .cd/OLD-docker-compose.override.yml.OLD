@@ -1,0 +1,7 @@
+# Copyright (C) 2025 Habana Labs, Ltd. an Intel Company
+# SPDX-License-Identifier: Apache-2.0
+
+services:
+  vllm-server:
+    volumes:
+      - /mnt/weka/:/mnt/hf_cache
