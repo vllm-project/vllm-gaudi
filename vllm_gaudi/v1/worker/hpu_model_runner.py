@@ -714,7 +714,7 @@ class ExecuteModelState(NamedTuple):
     decode_logits_device: "torch.Tensor"
     non_flattened_hidden_states_prefills: list[torch.Tensor] = []
     aux_hidden_states_prefills: list[torch.Tensor] = []
-    sample_hidden_states_prefills: list[torch.Tensor] = [],
+    sample_hidden_states_prefills: list[torch.Tensor] = []
     req_id_list: list[list] = []
     logits_device_list: list[torch.Tensor] = []
     logits_requests_list: list[list] = []
