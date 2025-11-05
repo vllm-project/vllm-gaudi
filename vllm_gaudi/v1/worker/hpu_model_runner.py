@@ -4614,13 +4614,6 @@ class HPUAttentionMetadataProcessor:
     ):
         """
         Initialize the attention metadata processor.
-
-        Args:
-            block_size: Size of KV cache blocks
-            dtype: Data type for attention operations
-            prefill_use_fusedsdpa: Whether to use fused SDPA for prefill
-            sliding_window: Sliding window size (None if not using sliding window)
-            interleaved_sliding_window: Whether to use interleaved sliding window
         """
         self.prefill_use_fusedsdpa = get_config().prompt_attn_impl == 'fsdpa_impl'
         self.recompute_cos_sin = os.getenv('VLLM_COS_SIN_RECOMPUTE', 'false').lower() in ['1', 'true']
@@ -4663,7 +4656,9 @@ class HPUAttentionMetadataProcessor:
         prefill_metadata = attn_metadata
 
         seq_lens_t = prefill_metadata.seq_lens_tensor
+        assert seq_lens_t is not None, "seq_lens_tensor is required to build attn_bias"
         context_lens_t = prefill_metadata.context_lens_tensor
+        assert context_lens_t is not None, "context_lens_tensor is required to build attn_bias"
 
         block_list = attn_metadata.block_list
         max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
@@ -4714,6 +4709,7 @@ class HPUAttentionMetadataProcessor:
 
         if self.prefill_use_fusedsdpa and attn_metadata.block_list is not None:
             context_lens_t = prefill_metadata.context_lens_tensor
+            assert context_lens_t is not None, "context_lens_tensor is required to build attn_bias"
 
             block_list = attn_metadata.block_list
             max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
