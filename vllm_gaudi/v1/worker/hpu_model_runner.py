@@ -794,6 +794,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if self.supports_mm_inputs:
             self.is_mm_embed = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
         self.is_multimodal_raw_input_supported = (model_config.is_multimodal_raw_input_only_model)
+        self.image_token_id = 151667 if 'InternVLChatModel' in str(type(self.model.model)) else self.model.model.config.image_token_id
 
         # Lazy initialization
         # self.model: nn.Module  # set after load_model
@@ -3014,6 +3015,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             is_image_flatten = (
                 input_tokens_tensor == self.image_token_id).flatten()
             image_index_tensor = is_image_flatten.nonzero().squeeze(-1)
+            logger.info(f"SHIV DEBUG MULTIMODAL {self.image_token_id=}, {image_index_tensor.shape=}")
 
         num_pad_prefill_batch_across_dp = \
             0 if dummy_prefill_input_data_batches_across_dp is None \
