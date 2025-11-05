@@ -1699,7 +1699,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         attn_metadata = self.metadata_processor.process_metadata(attn_metadata,
                                                                  token_ids.size(0),
                                                                  token_ids.size(1),
-                                                                 'cpu',
+                                                                 torch.device('cpu'),
                                                                  token_ids.device,
                                                                  self.dtype,
                                                                  trim=False)
@@ -2009,7 +2009,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         attn_metadata = self.metadata_processor.process_metadata(attn_metadata,
                                                                  token_ids_device.size(0),
                                                                  token_ids_device.size(1),
-                                                                 'cpu',
+                                                                 torch.device('cpu'),
                                                                  token_ids.device,
                                                                  self.dtype,
                                                                  trim=False)
@@ -4884,10 +4884,9 @@ class HPUAttentionMetadataProcessor:
                                                                        self.sliding_window, src_device, dst_device,
                                                                        dtype, trim)
         else:
-            attn_metadata = self._set_block_mapping(attn_metadata, batch_size, src_device, dst_device, dtype, trim)
-            if self.interleaved_sliding_window:
-                attn_metadata = self._set_block_mapping(attn_metadata, batch_size, src_device, dst_device, dtype, True,
-                                                        trim)
+            attn_metadata = self._set_block_mapping(attn_metadata, batch_size, src_device, dst_device, dtype,
+                                                    self.interleaved_sliding_window, trim)
+
         return attn_metadata
 
     def process_metadata_dict(self, attn_metadata: dict, batch_size: int, seq_len: int, device: torch.device,
