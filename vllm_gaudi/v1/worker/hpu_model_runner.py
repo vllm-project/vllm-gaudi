@@ -8,6 +8,7 @@ import math
 import os
 import sys
 import time
+from tqdm import tqdm
 from dataclasses import dataclass, field, fields
 from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast)
 
@@ -3743,45 +3744,42 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         logger.info("Defragmenter warmup completed successfully")
 
     def warmup_graphs(self, buckets, is_prompt, kv_caches, starting_mem=0, total_batch_seq=0.001):
-        from tqdm import tqdm
-
         total_mem = starting_mem
         idx = 0
         num_candidates = len(buckets)
         captured_all = True
         developer_settings = get_config().VLLM_ENABLE_EXPERIMENTAL_FLAGS
-        for idx, (batch_size, seq_len, num_blocks) in tqdm(enumerate(reversed(buckets)), 
-                                                           desc="Processing warmup",
-                                                           unit="item"):
-            if seq_len > self.max_num_tokens:
-                continue
-            # Graph memory usage is proportional to seq dimension in a batch
-            phase = f"Graph/{'prompt' if is_prompt else 'decode'}"
-            if is_prompt:
-                batch_seq = batch_size * seq_len * num_blocks if num_blocks else batch_size * seq_len
-            else:
-                batch_seq = batch_size
-
-            graphed_bucket = (batch_size, seq_len, num_blocks, is_prompt)
-            if graphed_bucket in self.graphed_buckets:
-                continue
-            self.graphed_buckets.add(graphed_bucket)
-            if developer_settings:
-                self.log_warmup(phase, idx, num_candidates, batch_size, seq_len, num_blocks)                
-            prompt_cfg, decode_cfg = None, None
-            with HabanaMemoryProfiler() as mem_prof:
+        with tqdm(total=num_candidates, desc="Processing warmup", unit="item"):
+            for idx, (batch_size, seq_len, num_blocks) in enumerate(reversed(buckets)):
+                if seq_len > self.max_num_tokens:
+                    continue
+                # Graph memory usage is proportional to seq dimension in a batch
+                phase = f"Graph/{'prompt' if is_prompt else 'decode'}"
                 if is_prompt:
-                    prompt_cfg = (batch_size, seq_len, num_blocks)
+                    batch_seq = batch_size * seq_len * num_blocks if num_blocks else batch_size * seq_len
                 else:
-                    decode_cfg = (batch_size, 1, num_blocks)
-                self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
-            # TODO(kzawora): align_workers
-            used_mem = mem_prof.consumed_device_memory
-            total_mem += used_mem
-            total_batch_seq += batch_seq
+                    batch_seq = batch_size
 
-            pbar.set_postfix_str(f"{idx}/{num_candidates}")
-            pbar.update(1)
+                graphed_bucket = (batch_size, seq_len, num_blocks, is_prompt)
+                if graphed_bucket in self.graphed_buckets:
+                    continue
+                self.graphed_buckets.add(graphed_bucket)
+                if developer_settings:
+                    self.log_warmup(phase, idx, num_candidates, batch_size, seq_len, num_blocks)                
+                prompt_cfg, decode_cfg = None, None
+                with HabanaMemoryProfiler() as mem_prof:
+                    if is_prompt:
+                        prompt_cfg = (batch_size, seq_len, num_blocks)
+                    else:
+                        decode_cfg = (batch_size, 1, num_blocks)
+                    self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
+                # TODO(kzawora): align_workers
+                used_mem = mem_prof.consumed_device_memory
+                total_mem += used_mem
+                total_batch_seq += batch_seq
+
+                pbar.set_postfix_str(f"{idx}/{num_candidates}")
+                pbar.update(1)
 
         return total_mem, total_batch_seq, captured_all
 
