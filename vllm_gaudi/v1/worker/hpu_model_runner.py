@@ -3429,6 +3429,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             with HabanaMemoryProfiler() as m_inc:
                 from neural_compressor.torch.quantization import (FP8Config, convert, prepare)
                 config = FP8Config.from_json_file(os.getenv("QUANT_CONFIG", ""))
+                disable_mark_scales_as_const = os.getenv("VLLM_DISABLE_MARK_SCALES_AS_CONST", "false") in ("1", "true")
                 self._inc_preprocess()
                 if config.measure:
                     self.model = prepare(self.model, config)
@@ -3437,7 +3438,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 else:
                     raise ValueError("Unknown quantization config mode,"
                                      "please validate quantization config file")
-                htcore.hpu_initialize(self.model, mark_only_scales_as_const=True)
+                if not disable_mark_scales_as_const:
+                    htcore.hpu_initialize(self.model, mark_only_scales_as_const=True)
             self.inc_initialized_successfully = True
             self.model_memory_usage = m_inc.consumed_device_memory
             logger.info("Preparing model with INC took %.4f GB", self.model_memory_usage / float(2**30))
