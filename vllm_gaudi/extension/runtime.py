@@ -63,6 +63,7 @@ def finalize_config():
 
     user_flags = filter_defined(detected, USER_FLAGS)
     experimental_flags = filter_defined(detected, EXPERIMENTAL_FLAGS)
+    experimental_flags = [flag for flag in experimental_flags if flag not in user_flags]
     environment_values = filter_defined(detected, ENVIRONMENT_VALUES)
     feature_values = filter_defined(detected, FEATURE_VALUES)
 
@@ -76,6 +77,7 @@ def finalize_config():
         logger().warning(
             "From v0.12.0 release using those flags without VLLM_ENABLE_EXPERIMENTAL_FLAGS will trigger a fatal error.")
         logger().warning(footer)
+
 
     dump('Environment', environment_values)
     dump('Features', feature_values)

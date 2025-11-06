@@ -3743,11 +3743,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         logger.info("Defragmenter warmup completed successfully")
 
     def warmup_graphs(self, buckets, is_prompt, kv_caches, starting_mem=0, total_batch_seq=0.001):
+        from tqdm import tqdm
+
         total_mem = starting_mem
         idx = 0
         num_candidates = len(buckets)
         captured_all = True
-        for idx, (batch_size, seq_len, num_blocks) in enumerate(reversed(buckets)):
+        developer_settings = get_config().VLLM_ENABLE_EXPERIMENTAL_FLAGS
+        for idx, (batch_size, seq_len, num_blocks) in tqdm(enumerate(reversed(buckets)), desc="Processing warmup"):
             if seq_len > self.max_num_tokens:
                 continue
             # Graph memory usage is proportional to seq dimension in a batch
@@ -3761,7 +3764,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if graphed_bucket in self.graphed_buckets:
                 continue
             self.graphed_buckets.add(graphed_bucket)
-            self.log_warmup(phase, idx, num_candidates, batch_size, seq_len, num_blocks)
+            if developer_settings:
+                self.log_warmup(phase, idx, num_candidates, batch_size, seq_len, num_blocks)                
             prompt_cfg, decode_cfg = None, None
             with HabanaMemoryProfiler() as mem_prof:
                 if is_prompt:
