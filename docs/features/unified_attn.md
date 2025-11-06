@@ -60,7 +60,7 @@ This makes it possible to move softmax readjustment after the multiplication by 
 
 ## Causal Attention
 
-Causal attention is used to calculate attention values between currently computed Q, K, and V. Since this data has been recently calculated, it does not need to be fetched from the KV cache. Prompt lengths are usually much longer then `max_num_seqs`. This means that we do not need to distinguish which tokens are used in prompts and which in decodes and use the whole Q relying on attention bias to mask out unnecessary tokens. Since we use all query tokens sequentially, it works similarly to the merged prefill feature. The following example presents how the computed causal bias may look like:
+Causal attention is used to calculate attention values between currently computed Q, K, and V. Since this data has been recently calculated, it does not need to be fetched from the KV cache. Prompt lengths are usually much longer than `max_num_seqs`. This means that we do not need to distinguish which tokens are used in prompts and which in decodes and use the whole Q relying on attention bias to mask out unnecessary tokens. Since we use all query tokens sequentially, it works similarly to the merged prefill feature. The following example presents how the computed causal bias may look like:
 
 ![](../assets/unified_attn/causal.png) 
 
