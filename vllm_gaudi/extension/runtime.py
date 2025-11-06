@@ -63,7 +63,7 @@ def finalize_config():
 
     user_flags = filter_defined(detected, USER_FLAGS)
     experimental_flags = filter_defined(detected, EXPERIMENTAL_FLAGS)
-    experimental_flags = [flag for flag in experimental_flags if flag not in user_flags]
+    experimental_flags = {k: v for k, v in user_flags.items() if k not in user_flags}
     environment_values = filter_defined(detected, ENVIRONMENT_VALUES)
     feature_values = filter_defined(detected, FEATURE_VALUES)
 

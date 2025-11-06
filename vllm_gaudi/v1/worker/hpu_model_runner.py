@@ -3787,13 +3787,15 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
     def warmup_unified_graphs(self, buckets, kv_cache):
         idx = 0
         num_candidates = len(buckets)
+        developer_settings = get_config().VLLM_ENABLE_EXPERIMENTAL_FLAGS
         with tqdm(total=num_candidates, desc="Unified Attention warmup", unit="item") as pbar:
             for idx, (query, shared_ctx, unique_ctx, is_causal) in enumerate(reversed(buckets)):
                 unified_cfg = (query, shared_ctx, unique_ctx, is_causal)
                 if unified_cfg in self.graphed_buckets:
                     continue
                 self.graphed_buckets.add(unified_cfg)
-                self.log_warmup("Unified CFG", idx, num_candidates, query, shared_ctx, unique_ctx, is_causal)
+                if developer_settings:
+                    self.log_warmup("Unified CFG", idx, num_candidates, query, shared_ctx, unique_ctx, is_causal)
                 self._prepare_dummy_unified_scenario(unified_cfg)
                 pbar.set_postfix_str(f"{idx}/{num_candidates}")
                 pbar.update(1)
