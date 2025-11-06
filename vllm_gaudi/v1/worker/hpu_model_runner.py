@@ -3440,7 +3440,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_tokens = len(token_ids)
             self.input_batch.token_ids_cpu[i, seq_len:seq_len + num_tokens] = token_ids
             self.input_batch.num_tokens[i] += len(token_ids)
-            req_state.output_token_ids.extend(token_ids)
         # NOTE(chendi): enable cache based on PR(#20291)
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
