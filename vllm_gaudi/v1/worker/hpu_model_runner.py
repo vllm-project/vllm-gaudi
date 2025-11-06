@@ -4351,13 +4351,24 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     v_cache_shape = None if self.model_config.use_mla \
                         else kv_cache_shape
                     dtype = kv_cache_spec.dtype
+                    if dtype == torch.float8_e4m3fn and os.environ.get('QUANT_CONFIG', None) is not None:
+                        create_dynamic_scales = True
+                    else:
+                        create_dynamic_scales = False
+                    kv_scale_shape = kv_cache_shape[:-1] + (1, )
                     key_cache = torch.zeros(kv_cache_shape, dtype=dtype, device=self.device)
+                    key_scale = torch.ones(kv_scale_shape, dtype=torch.bfloat16, device=self.device) if \
+                        create_dynamic_scales else None
                     if v_cache_shape is not None:
                         value_cache = torch.zeros(v_cache_shape, dtype=dtype, device=self.device)
+                        value_scale = torch.ones(kv_scale_shape, dtype=torch.bfloat16, device=self.device) if \
+                            create_dynamic_scales else None
                     else:
                         value_cache = None
+                        value_scale = None
+
                     for layer_name in kv_cache_tensor.shared_by:
-                        kv_caches[layer_name] = (key_cache, value_cache)
+                        kv_caches[layer_name] = (key_cache, value_cache, key_scale, value_scale)
                 else:
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.
