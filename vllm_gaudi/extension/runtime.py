@@ -78,7 +78,6 @@ def finalize_config():
             "From v0.12.0 release using those flags without VLLM_ENABLE_EXPERIMENTAL_FLAGS will trigger a fatal error.")
         logger().warning(footer)
 
-
     dump('Environment', environment_values)
     dump('Features', feature_values)
     dump('User flags', user_flags)

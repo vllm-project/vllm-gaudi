@@ -3768,7 +3768,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     continue
                 self.graphed_buckets.add(graphed_bucket)
                 if developer_settings:
-                    self.log_warmup(phase, idx, num_candidates, batch_size, seq_len, num_blocks)                
+                    self.log_warmup(phase, idx, num_candidates, batch_size, seq_len, num_blocks)
                 prompt_cfg, decode_cfg = None, None
                 with HabanaMemoryProfiler() as mem_prof:
                     if is_prompt:
