@@ -163,7 +163,7 @@ class Env:
 
 class ExperimentalEnv(Env):
     def __call__(self, _):
-        if get_from_env('VLLM_ENABLE_EXPERIMENTAL_FLAGS'):
+        if Env('VLLM_ENABLE_EXPERIMENTAL_FLAGS', boolean)():
             return super(ExperimentalEnv, self).__call__()
         return None
 
