@@ -32,7 +32,7 @@ In this example, you can observe that:
 
 In a simple implementation we would just multiply the entire query by the key and value and use appropriate bias to mask unused fields. However, this approach is highly inefficient, especially for decodes, where usually there is only a single token per sample in a batch and there is almost no overlap between used blocks. 
 
-An alternative could be to slice queries and keys into chunks and multiply only the relevant regions. Although, this approach is currently technically challenging to implement. 
+An alternative could be to slice queries and keys into chunks and multiply only the relevant regions. Although this approach is currently technically challenging to implement. 
 
 Instead, we divide the computation into 3 separate parts and merge the results at the end.
 
