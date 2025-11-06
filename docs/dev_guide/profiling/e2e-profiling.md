@@ -100,7 +100,7 @@ To execute E2E profiling, use one of the following procedures.
     --model "facebook/opt-125m" --tensor-parallel-size 1 \
     --max-num-seqs 128 --dtype bfloat16 \
     --max-model-len 256
-    ```              
+    ```
 
 5. Install the `datasets` package.
 
@@ -108,10 +108,10 @@ To execute E2E profiling, use one of the following procedures.
     pip install datasets
     ```
 
-6. Send requests for profiling using the [vllm-fork](https://github.com/HabanaAI/vllm-fork) repository.
+6. Send requests for profiling using the vLLM serving.
 
     ```bash
-    python benchmarks/benchmark_serving.py \
+    vllm bench serve \
             --backend vllm \
             --model "facebook/opt-125m" \
             --port 8080 \
