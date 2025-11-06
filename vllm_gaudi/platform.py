@@ -168,6 +168,8 @@ class HpuPlatform(Platform):
             return "VRAM"
         else:
             return "DRAM"
+    def is_sleep_mode_available(cls) -> bool:
+        return True
 
     @classmethod
     def set_torch_compile(cls) -> None:
