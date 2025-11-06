@@ -125,13 +125,13 @@ def test_calc_NUM_DECODE_GRAPHS(cpa):
 
 
 def test_calc_PROMPT_BS_RAMP_GRAPHS():
-    ctx = {'MAX_NUM_PREFILL_SEQS': 16, 'VLLM_PROMPT_BS_BUCKET_STEP': 8, 'VLLM_PROMPT_BS_BUCKET_MIN': 2}
+    ctx = {'VLLM_PROMPT_BS_BUCKET_MAX': 16, 'VLLM_PROMPT_BS_BUCKET_STEP': 8, 'VLLM_PROMPT_BS_BUCKET_MIN': 2}
     expected = 1 + int(math.log(min(16, 8) / 2, 2))
     assert rules.calc_PROMPT_BS_RAMP_GRAPHS(ctx) == expected
 
 
 def test_calc_PROMPT_BS_STEP_GRAPHS():
-    ctx = {'MAX_NUM_PREFILL_SEQS': 32, 'VLLM_PROMPT_BS_BUCKET_STEP': 8}
+    ctx = {'VLLM_PROMPT_BS_BUCKET_MAX': 32, 'VLLM_PROMPT_BS_BUCKET_STEP': 8}
     expected = max(0, int(1 + (32 - 8) / 8))
     assert rules.calc_PROMPT_BS_STEP_GRAPHS(ctx) == expected
 

@@ -23,7 +23,7 @@ from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler, HabanaMemory
                                            format_bytes, setup_profiler)
 from vllm_gaudi.extension.runtime import finalize_config, get_config
 from vllm_gaudi.extension.unified import (create_unified_batch)
-from vllm_gaudi.extension.utils import pad_list, with_default
+from vllm_gaudi.extension.utils import align_and_pad, pad_list, with_default
 from vllm_gaudi.extension.debug import init_debug_logger
 
 from vllm.attention.backends.abstract import AttentionType
@@ -1416,16 +1416,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         block_usage = torch.tensor(block_usage, dtype=self.model_config.dtype, device='cpu')
         return block_list, block_groups, block_usage
 
-    def _align_and_pad(self, data, bucketing, padding_gen):
-        bs = len(data)
-        target_bs, target_len = bucketing
-        if target_bs == 1 and bs > 1:
-            data = [list(itertools.chain(*data))]
-        data = [pad_list(x, target_len, padding_gen) for x in data]
-        padding = itertools.islice(padding_gen, target_len)
-        data = pad_list(data, target_bs, itertools.repeat(padding))
-        return data
-
     def _align_and_pad_mrope_positions(self, req_ids: list[str], context_lens: list[int], query_lens: list[int],
                                        bucketing: tuple[int, int], padding_gen: int) -> torch.Tensor:
         target_bs, target_len = bucketing
@@ -1582,7 +1572,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # For models with multimodal support, we may want to get embeddings
         # for the valid tokens before padding.
         # This would require getting multimodal input embeddings here as well
-        token_ids = self._align_and_pad(contents.token_ids, (target_bs, target_seq), itertools.repeat(-1))
+        token_ids = align_and_pad(contents.token_ids, (target_bs, target_seq), itertools.repeat(-1))
         # Update query_lens and context_lens after padding
         query_lens.extend([0] * (target_bs - len(query_lens)))
         context_lens.extend([0] * (target_bs - len(context_lens)))
@@ -1599,11 +1589,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             )
 
         else:
-            token_positions = self._align_and_pad(token_positions, (target_bs, target_seq), itertools.repeat(-1))
-        token_slots = self._align_and_pad(token_slots, (target_bs, target_seq), itertools.repeat(-1))
-        token_groups = self._align_and_pad(token_groups, (target_bs, target_seq), itertools.repeat(-1))
-        context_blocks = self._align_and_pad(context_blocks, (target_bs, target_blocks), itertools.repeat(-1))
-        context_groups = self._align_and_pad(context_groups, (target_bs, target_blocks), itertools.repeat(-1))
+            token_positions = align_and_pad(token_positions, (target_bs, target_seq), itertools.repeat(-1))
+        token_slots = align_and_pad(token_slots, (target_bs, target_seq), itertools.repeat(-1))
+        token_groups = align_and_pad(token_groups, (target_bs, target_seq), itertools.repeat(-1))
+        context_blocks = align_and_pad(context_blocks, (target_bs, target_blocks), itertools.repeat(-1))
+        context_groups = align_and_pad(context_groups, (target_bs, target_blocks), itertools.repeat(-1))
 
         # TODO: cycle through dummy slots and blocks
         # dummy_slots = itertools.cycle(
@@ -4318,8 +4308,6 @@ def copy_kv_blocks(
                                                 key_cache.index_select(0, src_slot_mapping).to(target_device))
         dst_kv_caches[layer_name][1].index_put_((dst_slot_mapping, ),
                                                 value_cache.index_select(0, src_slot_mapping).to(target_device))
-        if direction == "d2h":
-            dst_kv_caches[layer_name] = dst_kv_caches[layer_name].unflatten(1, (-1, block_size))
 
         i = i + 1
 
