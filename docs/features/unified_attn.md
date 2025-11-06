@@ -30,9 +30,9 @@ In this example, you can observe that:
 - Some blocks are used only by a single token, while others are shared.
 - Some of the recently calculated key values are available alongside the queries, eliminating the need to fetch them from a cache.
 
-In a simple implementation we would just multiply the entire query by the key and value and use appropriate bias to mask unused fields. However, this approach is highly inefficient, especially for decodes, where usually there is only a single token per sample in a batch and there is almost no overlap between used blocks. 
+In a simple implementation we would just multiply the entire query by the key and value and use appropriate bias to mask unused fields. However, this approach is highly inefficient, especially for decodes, where usually there is only a single token per sample in a batch and there is almost no overlap between used blocks.
 
-An alternative could be to slice queries and keys into chunks and multiply only the relevant regions. Although this approach is currently technically challenging to implement. 
+An alternative could be to slice queries and keys into chunks and multiply only the relevant regions. Although this approach is currently technically challenging to implement.
 
 Instead, we divide the computation into 3 separate parts and merge the results at the end.
 
@@ -50,7 +50,7 @@ $$z_1, z_2\text{ - local softmax results} \\ c_1, c_2 \text{ - local maxima} \\ 
 
 We can then calculate the following:
 
-$$c = max(c_1, c_2) \\ adj_i = e^{c_i-c} \\ s = s_1 * adj_1 + s_2 * adj_2\\ z_i\prime = \frac{z_i*s_i*adj_i}{s} $$
+$$c = max(c_1, c_2) \\ adj_i = e^{c_i-c} \\ s = s_1 *adj_1 + s_2* adj_2\\ z_i\prime = \frac{z_i*s_i*adj_i}{s} $$
 
 This way, we calculate parts of softmax and later readjust and recombine the values into the final result. There are two other optimizations that we can use. As the process ultimately involves division by the global sum, we can skip the division by local sums followed by multiplying by local sums during readjustment, preserving intermediate softmax values without division. Additionally, since readjustment involves multiplication by a constant, we can use the following rules:
 
@@ -62,7 +62,7 @@ This makes it possible to move softmax readjustment after the multiplication by 
 
 Causal attention is used to calculate attention values between currently computed Q, K, and V. Since this data has been recently calculated, it does not need to be fetched from the KV cache. Prompt lengths are usually much longer than `max_num_seqs`. This means that we do not need to distinguish which tokens are used in prompts and which in decodes and use the whole Q relying on attention bias to mask out unnecessary tokens. Since we use all query tokens sequentially, it works similarly to the merged prefill feature. The following example presents how the computed causal bias may look like:
 
-![](../assets/unified_attn/causal.png) 
+![](../assets/unified_attn/causal.png)
 
 We can divide query into equal slices so that each slice uses keys of different lengths:
 
@@ -103,15 +103,15 @@ Each of those code paths returns a triplet: either (`local_attn`, `local_max`, `
 
 One of the main benefits of Unified Attention is that it does not distinguish between prompt and decode tokens and the whole attention pass can be computed by a single function without breaking synapse graphs. This means that we no longer need to do any kind of preprocessing of scheduler output, such as sorting and separating prompts and decodes. The active code paths in Unified Attention are determined by the presence of specific bias tensors in the attention metadata:
 
-* `causal_bias` => causal attention is enabled
-* `shared_bias` => shared attention is enabled
-* `unique_bias` => unique attention is enabled
+- `causal_bias` => causal attention is enabled
+- `shared_bias` => shared attention is enabled
+- `unique_bias` => unique attention is enabled
 
 This means that there are 8 possible code paths, which is reflected when printing the specific configuration being run. For example, phase string of "csu" means that all 3 code paths are used whereas '--u' means that only Unique Attention is being run.
 
 Most of the model forward code relies only on `query_len`. Two other dimensions are important when calculating Unified Attention - `num_shared_blocks` and `num_unique_blocks`. When `contiguous_pa` is enabled for Unified Attention, which is currently enforced, `num_unique_blocks` equals the size of the KV cache slice that needs to be use. This value depends on the `max(block_id)` currently in use.
 
-The next consideration is whether to include `causal_attn`. This depends on presence of prompt samples in the batch. If at least a single prompt is present, causal attention is enabled. 
+The next consideration is whether to include `causal_attn`. This depends on presence of prompt samples in the batch. If at least a single prompt is present, causal attention is enabled.
 
 Finally, aside from the model forward pass, the process also depends on the number of logits to fetch, since not all token logits should be passed to the sampler. This is usually padded to `max_num_seqs`, but the code allows creating a more detailed bucketing scheme in the future.
 
