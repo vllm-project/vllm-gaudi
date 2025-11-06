@@ -111,7 +111,7 @@ This means that there are 8 possible code paths, which is reflected when printin
 
 Most of the model forward code relies only on `query_len`. Two other dimensions are important when calculating Unified Attention - `num_shared_blocks` and `num_unique_blocks`. When `contiguous_pa` is enabled for Unified Attention, which is currently enforced, `num_unique_blocks` equals the size of the KV cache slice that needs to be use. This value depends on the `max(block_id)` currently in use.
 
-The next consideration is whether to include` causal_attn`. This depends on presence of prompt samples in the batch. If at least a single prompt is present, causal attention is enabled. 
+The next consideration is whether to include `causal_attn`. This depends on presence of prompt samples in the batch. If at least a single prompt is present, causal attention is enabled. 
 
 Finally, aside from the model forward pass, the process also depends on the number of logits to fetch, since not all token logits should be passed to the sampler. This is usually padded to `max_num_seqs`, but the code allows creating a more detailed bucketing scheme in the future.
 
