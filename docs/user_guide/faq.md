@@ -61,11 +61,9 @@ For more details, see [Quick Start Using Dockerfile](../getting_started/quicksta
 
 - There are two different installation methods:
 
-- (Recommended) Install the stable version from the HabanaAIvLLM-fork GitHub repo. This version is most suitable for production deployments.
+- (Recommended) Running vLLM Hardware Plugin for Intel® Gaudi® Using Dockerfile. This version is most suitable for production deployments.
 
-- Install the latest version from the HabanaAI/vLLM-fork GitHub repo. This version is suitable for developers who would like to work on experimental code and new features that are still being tested.
-
-- Install from the main vLLM source GitHub repo. This version is suitable for developers who would like to work with the official vLLM-project but may not have the latest Intel Gaudi features.
+- Building vLLM Hardware Plugin for Intel® Gaudi® from Source. This version is suitable for developers who would like to work on experimental code and new features that are still being tested.
 
 ## Examples and Model Support
 
@@ -77,7 +75,7 @@ For more details, see [Quick Start Using Dockerfile](../getting_started/quicksta
 
 - Different tensor parallelism configurations (single HPU, 2x, and 8x HPU).
 
-- See [Supported Configurations](https://github.com/HabanaAI/vllm-fork/blob/v1.22.1/README_GAUDI.md#supported-configurations) for more details.
+- See [Validated Models](../models/validated_models.md) for more details.
 
 ## Features and Support
 

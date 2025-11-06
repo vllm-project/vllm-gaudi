@@ -36,7 +36,7 @@ Guide](https://docs.habana.ai/en/latest/Installation_Guide/index.html) instructi
 
 Follow these steps to run the vLLM server or launch benchmarks on Gaudi using Docker Compose.
 
-1. Clone the vLLM fork repository to get the required files and Docker Compose configurations.
+1. Clone the vLLM plugin repository to get the required files and Docker Compose configurations.
 
     ```bash
     git clone https://github.com/vllm-project/vllm-gaudi.git
