@@ -20,7 +20,6 @@ nav:
       - Summary: configuration/README.md
       - configuration/env_vars.md
       - configuration/long_context.md
-      - configuration/calibration.md
       - Calibration: 
         - configuration/calibration/calibration.md
         - configuration/calibration/calibration_one_node.md
