@@ -139,6 +139,10 @@ class HpuPlatform(Platform):
         return True
 
     @classmethod
+    def is_sleep_mode_available(cls) -> bool:
+        return True
+
+    @classmethod
     def set_torch_compile(cls) -> None:
         # NOTE: PT HPU lazy backend (PT_HPU_LAZY_MODE = 1)
         # does not support torch.compile
