@@ -72,7 +72,7 @@ This way, we can skip parts of the computation where `index(key)` is greater tha
 
 ## Shared Attention
 
-Shared attention is used when multiple tokens share a single context block. This is usually the case when there is a prompt with parts of the context cached or during decoding when multiple samples share a common prefix. Since shared blocks are used more then once, all of them are fetched and multiplied by all query tokens. Usually, the number of shared blocks is relatively small compared to whole KV cache, which makes fetching them better than relying on tricks, such as `contiguous_pa`. The main challenge is creating the `shared_bias`.
+Shared attention is used when multiple tokens share a single context block. This is usually the case when there is a prompt with parts of the context cached or during decoding when multiple samples share a common prefix. Since shared blocks are used more than once, all of them are fetched and multiplied by all query tokens. Usually, the number of shared blocks is relatively small compared to whole KV cache, which makes fetching them better than relying on tricks, such as `contiguous_pa`. The main challenge is creating the `shared_bias`.
 
 ## Unique Attention
 
