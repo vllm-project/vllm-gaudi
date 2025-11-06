@@ -3749,8 +3749,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         num_candidates = len(buckets)
         captured_all = True
         developer_settings = get_config().VLLM_ENABLE_EXPERIMENTAL_FLAGS
-        phase = {'Prompt' if is_prompt else 'Decode'}
-        desc = phase + " warmup processing: "
+        phase = 'Prompt' if is_prompt else 'Decode'
+        desc = f'{phase} warmup processing: '
         with tqdm(total=num_candidates, desc=desc, unit="item") as pbar:
             for idx, (batch_size, seq_len, num_blocks) in enumerate(reversed(buckets)):
                 if seq_len > self.max_num_tokens:
