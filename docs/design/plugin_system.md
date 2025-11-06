@@ -75,7 +75,7 @@ The `register_ops()` function, defined in `vllm_gaudi/__init__.py`, registers al
 
 ```python
 def register_ops():
-    """Register custom options for the HPU platform"""
+    """Register custom operations for the HPU platform"""
     import vllm_gaudi.v1.sample.hpu_rejection_sampler  # noqa: F401
     import vllm_gaudi.distributed.kv_transfer.kv_connector.v1.hpu_nixl_connector  # noqa: F401
     import vllm_gaudi.ops.hpu_fused_moe  # noqa: F401
@@ -89,14 +89,14 @@ def register_ops():
     import vllm_gaudi.ops.hpu_multihead_attn  # noqa: F401
 ```
 
-These custom operations are imported, not called, to register them with vLLM’s operation registry so they can be used across the inference pipeline.
+These custom operations are imported (not called) to register them with vLLM’s operation registry so they can be used across the inference pipeline.
 
 ## Plugin Discovery and Loading
 
 When vLLM starts, it performs the following steps:
 
 1. Scans for platform plugins to discover all `vllm.platform_plugins` entry points.
-2. Executes each plugin's registration function.
+2. Executes each plugin's `register()` function.
 3. Chooses the appropriate platform based on hardware and registration results.
 4. Discovers and loads all `vllm.general_plugins` entry points.
 5. Initializes the selected platform with all registered custom operations.
