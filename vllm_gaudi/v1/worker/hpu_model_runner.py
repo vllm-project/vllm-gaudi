@@ -3597,7 +3597,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                    f"query_len:{second_dim} "
                    f"num_blocks:{third_dim} "
                    f"free_mem:{free_mem}")
-        logger.info(msg)
+        tqdm.write(msg)
 
     def log_warmup_multimodal(self, phase, i, max_i, batch_size, seq_len, img_args):
         free_mem = format_bytes(HabanaMemoryProfiler.current_free_device_memory())
@@ -3750,7 +3750,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         num_candidates = len(buckets)
         captured_all = True
         developer_settings = get_config().VLLM_ENABLE_EXPERIMENTAL_FLAGS
-        for idx, (batch_size, seq_len, num_blocks) in tqdm(enumerate(reversed(buckets)), desc="Processing warmup"):
+        for idx, (batch_size, seq_len, num_blocks) in tqdm(enumerate(reversed(buckets)), 
+                                                           desc="Processing warmup",
+                                                           unit="item"):
             if seq_len > self.max_num_tokens:
                 continue
             # Graph memory usage is proportional to seq dimension in a batch
@@ -3777,6 +3779,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             used_mem = mem_prof.consumed_device_memory
             total_mem += used_mem
             total_batch_seq += batch_seq
+
+            pbar.set_postfix_str(f"{idx}/{num_candidates}")
+            pbar.update(1)
 
         return total_mem, total_batch_seq, captured_all
 
