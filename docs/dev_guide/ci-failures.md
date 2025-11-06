@@ -43,7 +43,7 @@ All pull requests that do not interfere with code, such as documentation changes
 ## Hourly Checks and Tests
 In the [vllm-gaudi](https://github.com/vllm-project/vllm-gaudi) repository hourly tests are available in `Hourly Commit Check and Tests` under the `Actions` tab. This tab also allows developers to manually trigger hourly tests on a selected branch.
 
-If the last hourly test fails, it indicates that the `main` branch is not compatible with the latest commit from the upstream `main` branch. To find the last good commit, see [last good commit](https://github.com/vllm-project/vllm-gaudi/blob/vllm/last-good-commit-for-vllm-gaudi/VLLM_STABLE_COMMIT). Failing hourly checks are fixed by developers as soon as possible.
+If the last hourly test fails, it indicates that the `main` branch is not compatible with the latest commit from the upstream `main` branch. To find the last good commit, see [last good commit](https://github.com/vllm-project/vllm-gaudi/tree/vllm/last-good-commit-for-vllm-gaudi/VLLM_STABLE_COMMIT). Failing hourly checks are fixed by developers as soon as possible.
 
 ## Troubleshooting
 
