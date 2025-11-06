@@ -3749,12 +3749,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         num_candidates = len(buckets)
         captured_all = True
         developer_settings = get_config().VLLM_ENABLE_EXPERIMENTAL_FLAGS
-        with tqdm(total=num_candidates, desc="Processing warmup", unit="item"):
+        phase = {'Prompt' if is_prompt else 'Decode'}
+        desc = phase + " warmup processing: "
+        with tqdm(total=num_candidates, desc=desc, unit="item") as pbar:
             for idx, (batch_size, seq_len, num_blocks) in enumerate(reversed(buckets)):
                 if seq_len > self.max_num_tokens:
                     continue
                 # Graph memory usage is proportional to seq dimension in a batch
-                phase = f"Graph/{'prompt' if is_prompt else 'decode'}"
                 if is_prompt:
                     batch_seq = batch_size * seq_len * num_blocks if num_blocks else batch_size * seq_len
                 else:
@@ -3786,13 +3787,16 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
     def warmup_unified_graphs(self, buckets, kv_cache):
         idx = 0
         num_candidates = len(buckets)
-        for idx, (query, shared_ctx, unique_ctx, is_causal) in enumerate(reversed(buckets)):
-            unified_cfg = (query, shared_ctx, unique_ctx, is_causal)
-            if unified_cfg in self.graphed_buckets:
-                continue
-            self.graphed_buckets.add(unified_cfg)
-            self.log_warmup("Unified CFG", idx, num_candidates, query, shared_ctx, unique_ctx, is_causal)
-            self._prepare_dummy_unified_scenario(unified_cfg)
+        with tqdm(total=num_candidates, desc="Unified Attention warmup", unit="item") as pbar:
+            for idx, (query, shared_ctx, unique_ctx, is_causal) in enumerate(reversed(buckets)):
+                unified_cfg = (query, shared_ctx, unique_ctx, is_causal)
+                if unified_cfg in self.graphed_buckets:
+                    continue
+                self.graphed_buckets.add(unified_cfg)
+                self.log_warmup("Unified CFG", idx, num_candidates, query, shared_ctx, unique_ctx, is_causal)
+                self._prepare_dummy_unified_scenario(unified_cfg)
+                pbar.set_postfix_str(f"{idx}/{num_candidates}")
+                pbar.update(1)
 
     def _add_dummy_request(self,
                            requests,
