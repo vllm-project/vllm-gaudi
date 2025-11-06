@@ -36,7 +36,7 @@ To run FP8 inference with vLLM, use the following command:
 
 ```bash
 export QUANT_CONFIG=/path/to/quant/config/inc/meta-llama-3.1-405b-instruct/maxabs_quant_g3.json
-vllm serve meta-llama/Llama-3.1-405B-Instruct --dtype bfloat16 --max-model-len  2048 --block-size 128 --max-num-seqs 32 --quantization inc --kv-cache-dtype fp8_inc --weights-load-device cpu --tensor-parallel-size 8
+vllm serve meta-llama/Llama-3.1-405B-Instruct --dtype bfloat16 --max-model-len  2048 --block-size 128 --max-num-seqs 32 --quantization inc --kv-cache-dtype fp8_inc --tensor-parallel-size 8
 ```
 
 Where:
@@ -61,14 +61,6 @@ To run offline inference follow these steps:
     from vllm import LLM
 
     llm = LLM("llama3.1/Meta-Llama-3.1-8B-Instruct", quantization="inc", kv_cache_dtype="fp8_inc")
-    ```
-
-3. Call the `shutdown` method of the `model_executor` at the end of the run.
-
-    ```python
-    # Call llm.generate on the required prompts and sampling parameters.
-    ...
-    llm.llm_engine.model_executor.shutdown()
     ```
 
 ## Model Weight Loading Process

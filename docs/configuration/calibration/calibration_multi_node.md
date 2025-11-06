@@ -18,11 +18,13 @@ To perform calibration, follow these steps in a [Gaudi Pytorch container](https:
 
 1. Build and install the latest version of vLLM Hardware Plugin for Intel® Gaudi® by following the [Installation](../getting_started/installation.md) procedure.
 
-2. Create workspace directory on NFS, clone the calibration scripts repository, and create an empty `quant_config_buffer.json` file.
+2. Create workspace directory on NFS, clone the calibration scripts repository, and create an empty `quant_config_buffer.json` file in the calibration directory.
 
     ```bash
     mkdir <nfs-mount-path>/my_workspace && cd <nfs-mount-path>/my_workspace
-    cd <path-to-vllm-gaudi>/calibration
+    git clone https://github.com/vllm-project/vllm-gaudi
+    cd vllm-gaudi/calibration
+    pip install -r requirements.txt
     touch quant_config_buffer.json
     ```
 
@@ -87,7 +89,7 @@ To perform calibration, follow these steps in a [Gaudi Pytorch container](https:
 
     ```bash
     export QUANT_CONFIG='<nfs-path-to-calibration-output>/fp8_output/llama-3.1-405b-instruct/maxabs_quant_g2.json'
-    vllm serve meta-llama/Llama-3.1-405B-Instruct --quantization inc --kv-cache-dtype fp8_inc --weights-load-device cpu --tensor-parallel-size 8 --max-model-len 2048
+    vllm serve meta-llama/Llama-3.1-405B-Instruct --quantization inc --kv-cache-dtype fp8_inc --tensor-parallel-size 8 --max-model-len 2048
     ```
 
 ## Recommendations for Advanced Usage for MoE Models
@@ -106,7 +108,7 @@ The following example demonstrates calibration with DeepSeek-R1 on 8 cards, foll
 
 ```bash
 # Unify measurements: TP8 -> TP1
-python step-5-unify_measurements.py -m  /path/to/measurements/deepseek-r1/g3/ -r 1 -o /path/to/measurements/deepseek-r1/g3-unified-tp1/  -u -s
+python step-5-unify_measurements.py -m /path/to/measurements/deepseek-r1/g3/ -r 1 -o /path/to/measurements/deepseek-r1/g3-unified-tp1/ -u -s
 
 # (Optional) Postprocess unified TP1
 python step-3-postprocess-measure.py -m /path/to/measurements/deepseek-r1/g3-unified-tp1/ -o /path/to/measurements/deepseek-r1/g3-unified-tp1-post/ -d
