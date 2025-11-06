@@ -19,7 +19,7 @@ While you can collect hardware traces, we do not recommend doing so during profi
 
     ```bash
     export VLLM_TORCH_PROFILER_DIR=/tmp
-    ```        
+    ```
 
 3. Start the vLLM server. The following example uses the `facebook/opt-125m` model, `TP=1`, and the maximum batch size `128`.
 
@@ -62,7 +62,7 @@ While you can collect hardware traces, we do not recommend doing so during profi
 
     ```bash
     hl-prof-config --use-template profile_api --hw-trace off
-    ```        
+    ```
 
 2. Set the output directory.
 
@@ -84,12 +84,12 @@ While you can collect hardware traces, we do not recommend doing so during profi
 
     ```bash
     pip install datasets
-    ```         
+    ```
 
-5. Send requests for profiling using the [vllm-fork](https://github.com/HabanaAI/vllm-fork) repository.
+5. Send requests for profiling using the the vLLM serving.
 
     ```bash
-    python benchmarks/benchmark_serving.py \
+    vllm bench serve \
         --backend vllm \
         --model "facebook/opt-125m" \
         --port 8080 \
