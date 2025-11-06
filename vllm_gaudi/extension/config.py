@@ -143,8 +143,12 @@ class Env:
         self.value_type = value_type
         self.check = check
 
+    @cache
+    def get_from_env(self, n):        
+        return os.environ.get(n)
+
     def __call__(self, _):
-        value = os.environ.get(self.name)
+        value = self.get_from_env(self.name)
         if value is not None:
             try:
                 value = self.value_type(value)
@@ -154,6 +158,13 @@ class Env:
             except Exception as e:
                 msg = f'{self.name}: exception during construction: {e}'
                 raise RuntimeError(msg)
+        return None
+
+
+class ExperimentalEnv(Env):
+    def __call__(self, _):
+        if get_from_env('VLLM_ENABLE_EXPERIMENTAL_FLAGS'):
+            return super(ExperimentalEnv, self).__call__()
         return None
 
 
