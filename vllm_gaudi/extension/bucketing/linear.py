@@ -128,10 +128,12 @@ def warmup_range(config: Tuple[int, int, int]):
     """
     bmin, bstep, bmax = config
     add_zero_bucket = bmin == 0
-    assert bmin <= bmax, ("Min. batch size cannot be greater than max. "
+    assert bmin < bmax, ("Min. batch size cannot be greater than max. "
                           "batch size. If you want to skip warmup, "
                           "set VLLM_SKIP_WARMUP=true")
     if add_zero_bucket:
+        if bmin == 0 and bmax == 0:
+            return [0]
         bmin = bstep
     base = itertools.repeat(2)
     ramp_up_acc = itertools.accumulate(base, func=operator.mul, initial=bmin)
