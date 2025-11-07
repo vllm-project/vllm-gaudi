@@ -7,6 +7,7 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 
 class HpuEagleProposer(EagleProposer):
+
     def propose(
         self,
         target_token_ids,
