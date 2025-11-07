@@ -131,3 +131,39 @@ The following example presents a setup where every bucket is logged separately i
 (EngineCore_DP0 pid=805) INFO 09-23 12:32:53 [hpu_model_runner.py:3320] [Warmup][Unified CFG][3/375] query_len:2048 shared_blocks:256 unique_blocks:1445 (causal) free_mem:11.16 GiB
 (EngineCore_DP0 pid=805) INFO 09-23 12:32:56 [hpu_model_runner.py:3320] [Warmup][Unified CFG][4/375] query_len:2048 shared_blocks:256 unique_blocks:32 (causal) free_mem:11.16 GiB
 ```
+
+
+### Buckets from file
+
+Bucketing from file allows to manually set precise buckets that are going to be used through a configuration file. 
+
+To use file set `VLLM_BUCKETING_FROM_FILE` flag to path to your desired file. 
+
+There are 3 ways to specify buckets in file:
+
+1. **Precise bucket** - only this one, specific bucket will be prepared.
+```{.}
+(1, 2048, 0)
+(64, 1, 1024)
+```
+would give us two buckets in total: `(1, 2048, 0)` and `(64, 1, 1024)`.
+
+2. **List** - Each element will be prepared with each element from list
+```{.}
+(1, [256, 512], [0, 4, 8])
+```
+would give us six buckets in total from Cartesian product: `(1, 256, 0)`, `(1, 256, 4)`, `(1, 256, 8)`, `(1, 512, 0)`, `(1, 512, 4)` and `(1, 512, 8)`.
+
+3. **Range** - similiar to list, but instead of manually setting each element we can use python's range function. 
+```{.}
+(1, 1, range(256, 512, 128))
+```
+would give us three buckets in total: `(1, 1, 256)`, `(1, 1, 384)` and `(1, 1, 512)`.
+
+All those 3 approches can be used with each other. For example `([64, 128, 256], 1, range(512, 1024, 32))` is a vaild configuration.
+
+Each bucket (or configuration) have to be in seperate line. 
+
+There is a sample bucketing file shown in [bucketing_file.txt](https://github.com/vllm-project/vllm-gaudi/blob/main/vllm_gaudi/extension/bucketing/bucketing_file.txt).
+
+Bucketing from file is **NOT** supported for unified attention for now. 

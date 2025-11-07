@@ -21,6 +21,8 @@ This document lists the supported diagnostic and profiling, as well as performan
 | ---------------------------- | ------------------------------------------------------------- | ------------- |
 | `VLLM_GRAPH_RESERVED_MEM`    | Percentage of memory dedicated to HPUGraph capture.           | `0.1`         |
 | `VLLM_EXPONENTIAL_BUCKETING` | Enables exponential bucket spacing instead of linear spacing. | `true`        |
+| `VLLM_BUCKETING_FROM_FILE`   | Enables reading bucket configuration from file | `None`        |
+
 
 ## Experimental Parameters
 
