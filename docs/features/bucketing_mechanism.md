@@ -154,7 +154,7 @@ would give us two buckets in total: `(1, 2048, 0)` and `(64, 1, 1024)`.
 ```
 would give us six buckets in total from Cartesian product: `(1, 256, 0)`, `(1, 256, 4)`, `(1, 256, 8)`, `(1, 512, 0)`, `(1, 512, 4)` and `(1, 512, 8)`.
 
-3. **Range** - similiar to list, but instead of manually setting each element we can use python's range function. 
+3. **Range** - similar to list, but instead of manually setting each element we can use python's range function. 
 ```{.}
 (1, 1, range(256, 512, 128))
 ```
