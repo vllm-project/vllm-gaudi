@@ -12,7 +12,7 @@ from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 @contextlib.contextmanager
 def temporary_op_registry_oot():
     """
-    Contextmanager which allows to temporarly modify the op registry content.
+    Contextmanager which allows to temporarily modify the op registry content.
     It clears current op_registry_oot and restors its content on exit.
     It is usefull for testing purposes, e.g. to deregister hpu version
     of the op. (Because when running tests, if registration happened in one
