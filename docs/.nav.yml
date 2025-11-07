@@ -1,6 +1,6 @@
 nav:
   - Home: 
-    - vLLM x Intel Gaudi: README.md
+    - vLLM Hardware Plugin for Intel® Gaudi®: README.md
     - Getting Started:
       - Quick Start: 
         - getting_started/quickstart.md
@@ -34,8 +34,14 @@ nav:
   - Developer Guide:
     - Summary: dev_guide/README.md
     - General:
-      - glob: dev_guide/*
-        flatten_single_child_sections: true
+      - dev_guide/ci-failures.md
+      - Profiling:
+        - Summary: dev_guide/profiling/profiling.md
+        - dev_guide/profiling/e2e-profiling.md
+        - dev_guide/profiling/high-level-profiling.md
+        - dev_guide/profiling/pytorch-profiling-async.md
+        - dev_guide/profiling/pytorch-profiling-script.md
+        - dev_guide/profiling/profiling-prompt-decode.md
     - Design Documents:
       - design/*
   - API Reference:
