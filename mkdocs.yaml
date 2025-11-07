@@ -1,4 +1,4 @@
-site_name: vLLM x Intel Gaudi
+site_name: vLLM Hardware Plugin for Intel® Gaudi®
 exclude_docs: |
   *.inc.md
   *.template.md
