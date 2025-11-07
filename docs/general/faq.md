@@ -53,7 +53,7 @@ Intel develops and maintains its own vLLM plugin project called vLLM Hardware Pl
 
 Use the `Dockerfile.ubuntu.pytorch.vllm` file provided in the [.cd directory on GitHub](https://github.com/vllm-project/vllm-gaudi/tree/main/.cd) to build and run a container with the latest Intel® Gaudi® software release.
 
-For more details, see [Quick Start Using Dockerfile](../getting_started/quickstart.md).
+For more details, see [Quick Start Using Dockerfile](../getting_started/quickstart/quickstart.md).
 
 ## Building and Installing vLLM
 
@@ -69,7 +69,7 @@ There are two different installation methods:
 
 ### Which models and configurations have been validated on Intel® Gaudi® 2 and Intel® Gaudi® 3 devices?
 
-The list of validated models is available in the [Validated Models](../models/validated_models.md) document. The list includes models such as:
+The list of validated models is available in the [Validated Models](../getting_started/validated_models.md) document. The list includes models such as:
 
 - Llama 2, Llama 3, and Llama 3.1 (7B, 8B, and 70B versions). Refer to Llama-3.1 jupyter notebook example.
 

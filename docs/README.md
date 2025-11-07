@@ -31,12 +31,12 @@ The vLLM Hardware Plugin for Intel® Gaudi® offers the following key benefits:
 
 To get started with vLLM Hardware Plugin for Intel® Gaudi®:
 
-- [ ] **Set up your environment** using the [quickstart](getting_started/quickstart.md) guide and use  the plugin locally or in your containerized environment.
-- [ ] **Run inference** using supported models, such as Llama 3.1, Mixtral, or DeepSeek.
-- [ ] **Explore advanced features**, such as FP8 quantization, recipe caching, and expert parallelism.
-- [ ] **Join the community** by contributing to the [vLLM-Gaudi](https://github.com/vllm-project/vllm-gaudi) GitHub repository.
+- [ ] **Set up your environment** using the [quickstart](getting_started/quickstart/quickstart.md) and plugin locally or in your containerized environment.
+- [ ] **Run inference** using supported models like Llama 3.1, Mixtral, or DeepSeek.
+- [ ] **Explore advanced features** such as FP8 quantization, recipe caching, and expert parallelism.
+- [ ] **Join the community** by contributing to the [vLLM-Gaudi GitHub repo](https://github.com/vllm-project/vllm-gaudi).
 
 For more information, see:
 
-- 📚 [Intel Gaudi Documentation](https://docs.habana.ai/en/latest/index.html)  
-- 📦 [vLLM Plugin System Overview](design/plugin_system.md)
+- 📚 [Intel® Gaudi® Documentation](https://docs.habana.ai/en/latest/index.html)  
+- 📦 [vLLM Plugin System Overview](https://docs.vllm.ai/en/latest/design/plugin_system/)
