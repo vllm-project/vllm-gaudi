@@ -148,10 +148,9 @@ cd vllm-gaudi/.cd/
 
    ```bash
    HF_TOKEN=<your huggingface token> \
-   DOCKER_IMAGE="vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/vllm-installer-2.7.1:latest" \  
-   VLLM_SERVER_CONFIG_FILE=server/server_text.yaml \
+   VLLM_SERVER_CONFIG_FILE=server/server_scenarios_text.yaml \
    VLLM_SERVER_CONFIG_NAME=llama31_8b_instruct \
-   VLLM_BENCHMARK_CONFIG_FILE=benchmark/benchmark_text.yaml \
+   VLLM_BENCHMARK_CONFIG_FILE=benchmark/benchmark_scenarios_text.yaml \
    VLLM_BENCHMARK_CONFIG_NAME=llama31_8b_instruct \
    docker compose --profile benchmark up
    ```

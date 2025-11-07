@@ -24,10 +24,7 @@ vLLM Gaudi plugin (vllm-gaudi) integrates Intel Gaudi accelerators with vLLM to 
 
 This plugin follows the [[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162) and [[RFC]: Enhancing vLLM Plugin Architecture](https://github.com/vllm-project/vllm/issues/19161) principles, providing a modular interface for Intel Gaudi hardware.
 
-Learn more: 🚀 [vLLM Plugin System Overview](https://docs.vllm.ai/en/latest/design/plugin_system.html)
-
-## Running vLLM on Gaudi with Docker Compose
-We are delivering ready-to-run container images that include both vLLM and Gaudi software. Please follow the [instruction](https://github.com/vllm-project/vllm-gaudi/tree/releases/v0.11.0/.cd) to quickly launch vLLM on Gaudi using a prebuilt Docker image and Docker Compose, with options for custom parameters and benchmarking.
+Learn more: 🚀 [vLLM Plugin System Overview](https://vllm-gaudi.readthedocs.io/en/latest/design/plugin_system.html)
 
 ## Getting Started
 0. Preparation of the Setup
@@ -45,6 +42,7 @@ We are delivering ready-to-run container images that include both vLLM and Gaudi
     git clone https://github.com/vllm-project/vllm-gaudi
     cd vllm-gaudi
     export VLLM_COMMIT_HASH=$(git show "origin/vllm/last-good-commit-for-vllm-gaudi:VLLM_STABLE_COMMIT" 2>/dev/null)
+    cd ..
     ```
 
 2. Install vLLM with `pip` or [from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source):
@@ -54,7 +52,7 @@ We are delivering ready-to-run container images that include both vLLM and Gaudi
     git clone https://github.com/vllm-project/vllm
     cd vllm
     git checkout $VLLM_COMMIT_HASH
-    pip install -r <(sed '/^[torch]/d' requirements/build.txt)
+    pip install -r <(sed '/^torch/d' requirements/build.txt)
     VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
     cd ..
     ```
