@@ -160,7 +160,7 @@ would give us six buckets in total from Cartesian product: `(1, 256, 0)`, `(1, 2
 ```
 would give us three buckets in total: `(1, 1, 256)`, `(1, 1, 384)` and `(1, 1, 512)`.
 
-All those 3 approches can be used with each other. For example `([64, 128, 256], 1, range(512, 1024, 32))` is a vaild configuration.
+All those 3 approaches can be used with each other. For example `([64, 128, 256], 1, range(512, 1024, 32))` is a valid configuration.
 
 Each bucket (or configuration) have to be in seperate line. 
 
