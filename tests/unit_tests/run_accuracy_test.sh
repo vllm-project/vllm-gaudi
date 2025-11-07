@@ -1,4 +1,8 @@
 #!/bin/bash
+
+#Temporary test case disablement because of PR28012
+exit 1
+
 set -e
 
 # --- Install Nixl ---
