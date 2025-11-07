@@ -195,7 +195,7 @@ class UnifiedBatchPersistentContext:
 
         self.causal_bias_generator = HPUCausalBiasGenerator()
         self.shared_bias_generator = HPUSharedBiasGenerator()
-        self.graphed = False
+        self.graphed = True
         if self.graphed:
             config = get_config()
             if config.bridge_mode == 'lazy':
@@ -215,7 +215,6 @@ class UnifiedBatchPersistentContext:
 
 
 class HPUBiasGenerator(torch.nn.Module):
-    """ KV-cache swapping utilities """
 
     def __init__(self):
         super().__init__()
@@ -238,11 +237,19 @@ class HPUCausalBiasGenerator(HPUBiasGenerator):
 
 class HPUSharedBiasGenerator(HPUBiasGenerator):
 
-    def forward(self, block_usages: torch.tensor, block_size: torch.tensor, dtype: torch.dtype) -> torch.tensor:
+    def forward(self, block_usages: torch.tensor, hpu_shared_token_idx: torch.tensor,
+                hpu_shared_block_idx: torch.tensor, block_size: torch.tensor, dtype: torch.dtype, target_qlen,
+                target_shared_blocks) -> torch.tensor:
         """ Generate block bias based on block_usage """
         block_len_range = torch.arange(1, block_size + 1, dtype=block_usages.dtype, device=block_usages.device)
         block_mask = block_len_range.unsqueeze(0) > block_usages.unsqueeze(-1)
-        return self.mask_to_bias_torch(block_mask, dtype=dtype)
+        hpu_shared_block_bias = self.mask_to_bias_torch(block_mask, dtype=dtype)
+        hpu_shared_bias = torch.full((target_qlen, target_shared_blocks, block_size),
+                                     -math.inf,
+                                     dtype=dtype,
+                                     device='hpu')
+        hpu_shared_bias.index_put_((hpu_shared_token_idx, hpu_shared_block_idx), hpu_shared_block_bias)
+        return hpu_shared_bias
 
 
 def create_unified_batch(req_ids: list[str],
@@ -256,7 +263,7 @@ def create_unified_batch(req_ids: list[str],
                          persistent_ctx: UnifiedBatchPersistentContext,
                          bucketing_fn: Callable[[bool, int, int, int, int], tuple[int, int, int, int]],
                          get_dp_padding_fn: Callable[[int], int],
-                         generate_biases_on_cpu: bool = True) -> UnifiedBatch:
+                         hpu_bias_acceleration: bool = True) -> UnifiedBatch:
     """ Calculate all necessary tensors needed for batch scheduling """
     # Track original dtypes before converting to numpy
     token_ids_dtype = all_token_ids.dtype
@@ -315,7 +322,7 @@ def create_unified_batch(req_ids: list[str],
     unique_bias = None
     do_shared = False
 
-    if contains_prompts and generate_biases_on_cpu:
+    if contains_prompts and not hpu_bias_acceleration:
         causal_bias = create_causal_bias(token_groups, token_positions, np_dtype, persistent_ctx.causal_bias)
 
     ctx = Context.create(cached_tokens, block_table, block_size)
@@ -333,8 +340,7 @@ def create_unified_batch(req_ids: list[str],
             shared_token_idx = shared_group_starts[shared_token_indices] + shared_token_offsets
             shared_block_idx = orig_shared_blocks[shared_token_indices]
             shared_block_usage = shared_ctx.block_usages[shared_token_indices]
-            # FIXME(kzawora): remove True once shared bias generation works
-            if generate_biases_on_cpu or True:
+            if not hpu_bias_acceleration:
                 shared_block_bias = generate_bias(shared_block_usage, block_size, np_dtype,
                                                   persistent_ctx.block_len_range, persistent_ctx.shared_block_bias)
 
@@ -383,7 +389,7 @@ def create_unified_batch(req_ids: list[str],
         feps=to_hpu(feps),
     )
 
-    if not generate_biases_on_cpu:
+    if hpu_bias_acceleration:
         if contains_prompts:
             # NOTE(kzawora): all tensors are pre-padded and work on [target_qlen, ] shapes, and the generated mask is [target_qlen, target_qlen] tensor
             padding_mask = np.full((target_qlen, ), True, dtype=bool)
@@ -393,28 +399,17 @@ def create_unified_batch(req_ids: list[str],
             hpu_token_positions = hpu_tensor(token_positions, (target_qlen, ), -1, slot_mapping_dtype)
             attn_metadata.causal_bias = persistent_ctx.causal_bias_generator(hpu_token_groups, hpu_token_positions,
                                                                              hpu_padding_mask, dtype)
-        # FIXME(kzawora): in e2e scenarios this produces the following error:
-        # File "vllm-gaudi/vllm_gaudi/extension/unified.py", line 172, in partial_attn_shared
-        #     attn = attn + bias
-        #            ~~~~~^~~~~~
-        # RuntimeError: Incompatible input shapes, broadcast not possible. Tensor1 Size: 4096 8192 32 Tensor2 Size: 1024 8192 1
-        # need to fix that, we're falling back to CPU computation for now
-        if do_shared and False:
-            max_num_shared_blocks = persistent_ctx.shared_bias.shape[1]
-            # NOTE(kzawora): this is weird - max_num_shared_blocks*block_size *should* cover most usecases, but if there's
-            # a lot of sharing, we can exceed that - let's recompile instead of crashing there
-            shared_block_usage_shape = (max(max_num_shared_blocks * block_size, shared_block_usage.shape[0]), )
-            hpu_shared_block_usage = hpu_tensor(shared_block_usage, shared_block_usage_shape, -1, slot_mapping_dtype)
-            hpu_shared_block_bias = persistent_ctx.shared_bias_generator(hpu_shared_block_usage, block_size, dtype)
-            hpu_shared_token_idx = hpu_tensor(shared_token_idx, shared_block_usage_shape, -1, slot_mapping_dtype)
-            hpu_shared_block_idx = hpu_tensor(shared_block_idx, shared_block_usage_shape, -1, slot_mapping_dtype)
-            hpu_shared_bias = torch.full((query_len, shared_blocks.size, block_size),
-                                         -math.inf,
-                                         dtype=dtype,
-                                         device='hpu')
-            hpu_shared_bias.index_put_((hpu_shared_token_idx, hpu_shared_block_idx), hpu_shared_block_bias)
+        if do_shared:
+            # NOTE(kzawora): this is kinda unfortunate - we're temporarily using shared_block_usage.shape[0] as dynamic dimension
+            # because padding it too high will cause terrible performance (and this dimension indicates how many scatter writes we'll do)
+            shared_tokens_shape = (shared_block_usage.shape[0], )
+            hpu_shared_block_usage = hpu_tensor(shared_block_usage, shared_tokens_shape, -1, slot_mapping_dtype)
+            hpu_shared_token_idx = hpu_tensor(shared_token_idx, shared_tokens_shape, -1, slot_mapping_dtype)
+            hpu_shared_block_idx = hpu_tensor(shared_block_idx, shared_tokens_shape, -1, slot_mapping_dtype)
+            hpu_shared_bias = persistent_ctx.shared_bias_generator(hpu_shared_block_usage, hpu_shared_token_idx,
+                                                                   hpu_shared_block_idx, block_size, dtype, target_qlen,
+                                                                   target_shared_blocks)
             attn_metadata.shared_bias = hpu_shared_bias
-            #import pdb; pdb.set_trace()
 
     # Convert numpy arrays to HPU tensors with proper dtypes
     unified_batch = UnifiedBatch(
@@ -425,5 +420,4 @@ def create_unified_batch(req_ids: list[str],
         logits_indices=hpu_tensor(logits_indices, (target_logits, ), -1, logits_indices_dtype),
         logits_groups_cpu=torch.from_numpy(logits_groups).to(logits_indices_dtype),
         attn_metadata=attn_metadata)
-    #torch.hpu.synchronize()
     return unified_batch
