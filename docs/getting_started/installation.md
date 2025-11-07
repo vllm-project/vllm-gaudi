@@ -61,8 +61,8 @@ There are two ways to install vLLM Hardware Plugin for Intel® Gaudi® from sour
 
 2. Run the latest Docker image from the Intel® Gaudi® vault as in the following code sample. Make sure to provide your versions of vLLM Hardware Plugin for Intel® Gaudi®, operating system, and PyTorch. Ensure that these versions are supported, according to the [Support Matrix](https://docs.habana.ai/en/latest/Support_Matrix/Support_Matrix.html).
   
-        docker pull vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/pytorch-installer-2.7.1:latest
-        docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --ipc=host vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/pytorch-installer-2.7.1:latest
+        docker pull vault.habana.ai/gaudi-docker/1.23.0/ubuntu24.04/habanalabs/vllm-plugin-2.9.0:latest
+        docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --ipc=host vault.habana.ai/gaudi-docker/1.23.0/ubuntu24.04/habanalabs/vllm-plugin-2.9.0:latest
   
     For more information, see the [Intel Gaudi documentation](https://docs.habana.ai/en/latest/Installation_Guide/Bare_Metal_Fresh_OS.html#pull-prebuilt-containers).
   
