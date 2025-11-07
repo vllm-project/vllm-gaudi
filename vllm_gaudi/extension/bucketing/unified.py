@@ -29,7 +29,7 @@ class UnifiedBucketingStrategy():
 def warmup_unified_range(cfg):
     bmin, bmax, turning_point = cfg
     limit = 10
-    round_up = 128
+    round_up = turning_point
 
     buckets: Set[Tuple[int, int]] = set()
 
