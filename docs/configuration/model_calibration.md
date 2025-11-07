@@ -1,6 +1,6 @@
 # Quantization, FP8 Inference and Model Calibration Process
 
-To run quantized models using vLLM Hardware Plugin for Intel® Gaudi®, you need measurement files, which you can get by following the FP8 model calibration procedure available in the [FP8 Calibration and Inference with vLLM](https://docs.habana.ai/en/v1.21.0/PyTorch/Inference_on_PyTorch/vLLM_Inference/vLLM_FP8_Inference.html) guide. For an end-to-end example tutorial for quantizing a BF16 Llama 3.1 model to FP8 and then inferencing, see this [this guide](https://github.com/HabanaAI/Gaudi-tutorials/blob/main/PyTorch/vLLM_Tutorials/FP8_Quantization_using_INC/FP8_Quantization_using_INC.ipynb).
+To run quantized models using vLLM Hardware Plugin for Intel® Gaudi®, you need measurement files, which you can get by following the FP8 model calibration procedure available in the [FP8 Calibration and Inference with vLLM](https://docs.habana.ai/en/latest/PyTorch/vLLM_Inference/vLLM_FP8_Inference.html) guide.
 
 Once you have completed the model calibration process and collected the measurements, you can run FP8 inference with vLLM using the following commands:
 
