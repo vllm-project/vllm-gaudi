@@ -1185,7 +1185,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
-            resumed_from_preemption = req_id in req_data.resumed_req_ids
+            resumed_from_preemption = req_id in getattr(req_data, "resumed_req_ids", set())
             req_state.num_computed_tokens = num_computed_tokens
 
             if not is_last_rank:
@@ -3138,7 +3138,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     self.profiler.record_counter(self.event_start, counters)
             if not warmup_mode:
                 self.maybe_wait_for_kv_save()
-            finished_sending, finished_recving = (self.get_finished_kv_transfers(scheduler_output))
 
             if self.is_driver_worker and self.profiler.enabled:
                 self.profiler_counter_helper.reset_prompt_seq_stats()
@@ -3377,6 +3376,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
         all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
         logprobs = None
+
+        if not warmup_mode:
+            finished_sending, finished_recving = self.get_finished_kv_transfers(scheduler_output)
 
         if self.use_async_scheduling:
             model_runner_output = ModelRunnerOutput(
