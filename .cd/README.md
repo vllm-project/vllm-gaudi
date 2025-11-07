@@ -27,7 +27,7 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
 
 ### 0. Clone the Repository
 
-Before proceeding with any of the steps below, make sure to clone the vLLM fork repository and navigate to the `.cd` directory. This ensures you have all necessary files and scripts for running the server or benchmarks.
+Before proceeding with any of the steps below, make sure to clone the vLLM plugin repository and navigate to the `.cd` directory. This ensures you have all necessary files and scripts for running the server or benchmarks.
 
 ```bash
 git clone https://github.com/vllm-project/vllm-gaudi.git
