@@ -2663,7 +2663,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             grammar_bitmask.to("cpu"),
             indices=out_indices if not skip_out_indices else None,
         )'''
-        xgr_cpu.apply_token_bitmask_inplace_cpu(logits, grammar_bitmask, indices=index_tensor)
+        xgr_cpu.apply_token_bitmask_inplace_cpu(logits_cpu, grammar_bitmask.to("cpu"), indices=index_tensor)
         logits.copy_(logits_cpu.to(self.device, non_blocking=True).to(logits.dtype))
 
     def _configure_lora(self, input, requests, req_ids, is_prompt):
@@ -2916,7 +2916,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         warmup_mode: bool = False,
-    ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput]:
+    ) -> ModelRunnerOutput | None:
 
         self.run_defragmenter(scheduler_output, warmup_mode)
 
