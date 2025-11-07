@@ -2,12 +2,12 @@ nav:
   - Getting Started:
     - README.md
     - Quick Start: 
-      - getting_started/quickstart.md
-      - getting_started/quickstart_configuration.md
-      - getting_started/quickstart_inference.md
+      - getting_started/quickstart/quickstart.md
+      - getting_started/quickstart/quickstart_configuration.md
+      - getting_started/quickstart/quickstart_inference.md
     - Installation: getting_started/installation.md
-    - general/compatibility_matrix.md
-    - general/validated_models.md  
+    - getting_started/compatibility_matrix.md
+    - getting_started/validated_models.md
   - Configuration Guides:
     - configuration/env_vars.md
     - configuration/long_context.md
@@ -27,9 +27,8 @@ nav:
     - features/*
     - features/quantization
   - Developer Guides:
-    - design/plugin_system.md
+    - dev_guide/plugin_system.md
     - dev_guide/ci-failures.md
-    - dev_guide/profiling.md
     - Profiling:
       - dev_guide/profiling/profiling.md
       - dev_guide/profiling/e2e-profiling.md
@@ -42,5 +41,5 @@ nav:
     - Contents:
       - glob: api/vllm_gaudi/*
         preserve_directory_names: true
-  - user_guide/troubleshooting.md
-  - user_guide/faq.md
+  - general/troubleshooting.md
+  - general/faq.md

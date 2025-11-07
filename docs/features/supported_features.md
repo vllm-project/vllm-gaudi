@@ -10,7 +10,7 @@ This document summarizes the features currently supported by the vLLM Hardware P
 
 | **Feature**   | **Description**   | **References**  |
 |---    |---    |---    |
-| Offline batched inference     | Supports offline inference using the LLM class from vLLM Python API.    | [Quickstart](https://docs.vllm.ai/en/stable/getting_started/quickstart.html#offline-batched-inference), [Example](https://docs.vllm.ai/en/stable/examples/offline_inference/batch_llm_inference.html)   |
+| Offline batched inference     | Supports offline inference using the LLM class from vLLM Python API.    | [Quickstart](../getting_started/quickstart/quickstart_inference.md#offline-batched-inference), [Example](https://docs.vllm.ai/en/stable/examples/offline_inference/batch_llm_inference.html)   |
 | Online inference via the OpenAI-Compatible Server     | Supports online inference through an HTTP server that implements the OpenAI Chat and Completions API.    | [Documentation](https://docs.vllm.ai/en/stable/serving/openai_compatible_server.html), [Example](https://docs.vllm.ai/en/stable/serving/openai_compatible_server.html)    |
 | HPU autodetection     | Enables automatic target platform detection for HPU users at vLLM startup.     | N/A   |
 | Paged KV cache with algorithms enabled for Intel® Gaudi® accelerators   | Provides a custom paged attention and cache operators implementations optimized for Intel® Gaudi® devices.   | N/A   |
