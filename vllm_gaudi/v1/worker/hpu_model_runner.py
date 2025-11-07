@@ -84,6 +84,7 @@ from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm_gaudi.extension.ops import LoraMask as LoraMask
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
+from vllm.v1.core.sched.output import GrammarOutput
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -911,6 +912,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                       dp_size=self.parallel_config.data_parallel_size,
                                       dp_rank=self.parallel_config.data_parallel_rank)
 
+        self.scheduler_output: SchedulerOutput | None = None
+        self.warmup_mode: bool = False
+        self.batch_changed: bool = False
+        
         assert not (self.unified_attn and not self.use_contiguous_pa), 'Unified attn requires contiguous_pa!'
         assert not (self.unified_attn and not self.use_merged_prefill), 'Unified attn requires merged_prefill!'
 
@@ -2602,7 +2607,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         for req_id, batch_index in seq:
             logit_index = batch_index + cumulative_offset
             cumulative_offset += len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
-            if req_id in scheduler_output.structured_output_request_ids:
+            if req_id in grammar_output.structured_output_request_ids:
                 struct_out_req_batch_indices[req_id] = logit_index
 
         out_indices = []
@@ -2828,14 +2833,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
     def unified_execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-        warmup_mode: bool = False,
+        grammar_output: "GrammarOutput" = None,
+        warmup_mode: bool = False
     ) -> ModelRunnerOutput:
-        self.run_defragmenter(scheduler_output, warmup_mode)
-        batch_changed = self._update_states(scheduler_output)
-        if not scheduler_output.total_num_scheduled_tokens:
-            # Return empty ModelRunnerOuptut if there's no work to do.
-            return EMPTY_MODEL_RUNNER_OUTPUT
-        htorch.core.mark_step()
+        batch_changed = self.batch_changed
         with self.profiler.record_event('internal', 'prepare_unified_batch'):
             batch = self.prepare_unified_batch(scheduler_output)
         htorch.core.mark_step()
@@ -2900,14 +2901,19 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         )
         return model_runner_output
 
+    
+    
     @torch.inference_mode()
-    def execute_model(
+    def general_execute_model(
         self,
         scheduler_output: "SchedulerOutput",
+        grammar_output: "GrammarOutput" = None,
         warmup_mode: bool = False,
     ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput]:
-        if self.unified_attn:
-            return self.unified_execute_model(scheduler_output, warmup_mode)
+        #if self.unified_attn:
+        #    return self.unified_execute_model(scheduler_output, warmup_mode)
+        
+        
         # NOTE(kzawora): Since scheduler doesn't differentiate between prefills
         # and decodes, we must handle mixed batches. In _update_states we make
         # sure that first self.input_batch.num_decodes requests are decodes,
@@ -2963,15 +2969,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # On CPU, sanitize [tokD0, tokD1, tokD2, 0, tokP0, tokP1, tokP2, 0] -> [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2] # noqa
         # Return [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2]
 
-        self.run_defragmenter(scheduler_output, warmup_mode)
-
-        batch_changed = self._update_states(scheduler_output)
-        if not scheduler_output.total_num_scheduled_tokens:
-            if not has_kv_transfer_group() or warmup_mode:
-                # Return empty ModelRunnerOuptut if there's no work to do.
-                return EMPTY_MODEL_RUNNER_OUTPUT
-            # For D case, wait until kv finish load here
-            return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+        batch_changed = self.batch_changed
         if self.input_batch.pooling_params:
             (input_ids, position_ids, num_scheduled_tokens, attn_metadata,
              total_scheduled_tokens) = self._prepare_inputs_for_pooling(scheduler_output)
@@ -3030,7 +3028,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # postprocessing. Should it be done for all requests?
         structured_output = False
         spec_decode_num_tokens = None
-        if scheduler_output.grammar_bitmask is not None:
+        if grammar_output is not None:
             logits_prompt = []
             logits_decode = []
             structured_output = True
@@ -3249,7 +3247,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             logits_combined = logits_decode + logits_prompt
             logits = torch.cat(logits_combined, dim=0)
             # Apply structured output bitmasks if present
-            if scheduler_output.structured_output_request_ids:
+            if grammar_output:
                 self.apply_grammar_bitmask(scheduler_output, logits)
             sampler_output, _sampling_metadata = self._run_sampling(batch_changed, logits,
                                                                     pd_info.prompt_req_ids + pd_info.decode_req_ids,
@@ -3412,6 +3410,49 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             get_kv_transfer_group().clear_connector_metadata()
 
         return model_runner_output
+    
+    
+    @torch.inference_mode()
+    def execute_model(
+        self,
+        scheduler_output: "SchedulerOutput",
+        warmup_mode: bool = False,
+    ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput]:
+       
+
+        self.run_defragmenter(scheduler_output, warmup_mode)
+
+        batch_changed = self._update_states(scheduler_output)
+        if not scheduler_output.total_num_scheduled_tokens:
+            if not has_kv_transfer_group() or warmup_mode:
+                # Return empty ModelRunnerOuptut if there's no work to do.
+                return EMPTY_MODEL_RUNNER_OUTPUT
+            # For D case, wait until kv finish load here
+            return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+        if warmup_mode:
+            grammar_output=None
+            if self.unified_attn:
+                return self.unified_execute_model(scheduler_output, grammar_output, warmup_mode)
+            return self.general_execute_model(scheduler_output, grammar_output, warmup_mode)
+        self.scheduler_output = scheduler_output
+        self.warmup_mode = warmup_mode
+        self.batch_changed = batch_changed
+
+        return None
+
+
+    def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        if self.scheduler_output is None:
+            # Nothing to do (PP non-final rank case), output isn't used.
+            return None  # noqa
+        scheduler_output = self.scheduler_output
+        warmup_mode = self.warmup_mode
+        self.scheduler_output = None
+        self.warmup_mode = False
+
+        if self.unified_attn:
+            return self.unified_execute_model(scheduler_output, grammar_output, warmup_mode)
+        return self.general_execute_model(scheduler_output, grammar_output, warmup_mode)
 
     def load_model(self) -> None:
         import habana_frameworks.torch.core as htcore
@@ -4031,8 +4072,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_common_prefix_blocks=0,
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
-            structured_output_request_ids={},
-            grammar_bitmask=None,
         )
         cleanup = SchedulerOutput(
             scheduled_new_reqs=[],
@@ -4044,8 +4083,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_common_prefix_blocks=0,
             finished_req_ids=set(req.req_id for req in requests),
             free_encoder_mm_hashes=[],
-            structured_output_request_ids={},
-            grammar_bitmask=None,
         )
         self.execute_model(sched_output, warmup_mode=True)
         self.execute_model(cleanup, warmup_mode=True)

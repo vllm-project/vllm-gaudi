@@ -33,7 +33,7 @@ from vllm_gaudi.extension.logger import logger as init_logger
 logger = init_logger()
 
 if TYPE_CHECKING:
-    from vllm.v1.core.scheduler import SchedulerOutput
+    from vllm.v1.core.scheduler import GrammarOutput, SchedulerOutput
 
 
 def setup_step_profiler(steps):
@@ -249,6 +249,9 @@ class HPUWorker(WorkerBase):
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
+
+    def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput:
+        return self.model_runner.sample_tokens(grammar_output)
 
     @torch.inference_mode()
     def execute_model(
