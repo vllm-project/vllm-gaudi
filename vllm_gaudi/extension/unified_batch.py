@@ -167,7 +167,7 @@ def hpu_tensor(tensor: np.ndarray | None, shape: tuple, pad_value: Union[int, fl
 
 class UnifiedBatchPersistentContext:
 
-    def __init__(self, max_num_batched_tokens, max_shared_blocks, max_unique_blocks, block_size, dtype):
+    def __init__(self, max_num_batched_tokens, max_shared_blocks, max_unique_blocks, block_size, dtype, profiler):
         # Convert torch dtype to numpy dtype
         if hasattr(dtype, 'numpy_dtype'):
             np_dtype = dtype.numpy_dtype
@@ -179,7 +179,7 @@ class UnifiedBatchPersistentContext:
             np_dtype = np.float32  # numpy doesn't have bfloat16, use float32 as placeholder
         else:
             np_dtype = np.float32
-
+        self.profiler = profiler
         # Intermediate numpy arrays for computation - these ARE reused across batches
         self.shared_bias = np.full((max_num_batched_tokens, max_shared_blocks, block_size), -math.inf, dtype=np_dtype)
 
@@ -271,11 +271,12 @@ def create_unified_batch(req_ids: list[str],
     logits_indices_dtype = num_scheduled_tokens.dtype
     slot_mapping_dtype = block_table.dtype
     # Convert to numpy
-    all_token_ids = all_token_ids.numpy()
-    num_computed_tokens = num_computed_tokens.numpy()
-    num_scheduled_tokens = num_scheduled_tokens.numpy()
-    num_prompt_tokens = num_prompt_tokens.numpy()
-    block_table = block_table.numpy()
+    with persistent_ctx.profiler.record_event('internal', 'torch2numpy'):
+        all_token_ids = all_token_ids.numpy()
+        num_computed_tokens = num_computed_tokens.numpy()
+        num_scheduled_tokens = num_scheduled_tokens.numpy()
+        num_prompt_tokens = num_prompt_tokens.numpy()
+        block_table = block_table.numpy()
 
     # Convert torch dtype to numpy dtype for internal operations
     if hasattr(dtype, 'numpy_dtype'):
@@ -289,26 +290,27 @@ def create_unified_batch(req_ids: list[str],
     else:
         np_dtype = np.float32
 
-    total_tokens = num_computed_tokens + num_scheduled_tokens
-    query_len = int(num_scheduled_tokens.sum())
-    is_prompt = total_tokens <= num_prompt_tokens
-    cached_tokens = num_computed_tokens + np.where(is_prompt, 0, num_scheduled_tokens)
-    contains_prompts = bool(np.any(is_prompt))
-    num_output_tokens = total_tokens - num_prompt_tokens + 1
-    num_output_tokens = np.clip(num_output_tokens, np.zeros_like(num_scheduled_tokens), num_scheduled_tokens)
-    group_starts = np.cumsum(num_scheduled_tokens) - num_scheduled_tokens
+    with persistent_ctx.profiler.record_event('internal', 'common_prep'):
+        total_tokens = num_computed_tokens + num_scheduled_tokens
+        query_len = int(num_scheduled_tokens.sum())
+        is_prompt = total_tokens <= num_prompt_tokens
+        cached_tokens = num_computed_tokens + np.where(is_prompt, 0, num_scheduled_tokens)
+        contains_prompts = bool(np.any(is_prompt))
+        num_output_tokens = total_tokens - num_prompt_tokens + 1
+        num_output_tokens = np.clip(num_output_tokens, np.zeros_like(num_scheduled_tokens), num_scheduled_tokens)
+        group_starts = np.cumsum(num_scheduled_tokens) - num_scheduled_tokens
 
-    token_groups, token_offsets = indices_and_offsets(num_scheduled_tokens)
-    token_positions = token_offsets + num_computed_tokens[token_groups]
-    token_ids = fetch_2d(all_token_ids, token_groups, token_positions)
+        token_groups, token_offsets = indices_and_offsets(num_scheduled_tokens)
+        token_positions = token_offsets + num_computed_tokens[token_groups]
+        token_ids = fetch_2d(all_token_ids, token_groups, token_positions)
 
-    token_blocks = fetch_2d(block_table, token_groups, token_positions // block_size)
-    token_slots = token_blocks * block_size + (token_positions % block_size)
+        token_blocks = fetch_2d(block_table, token_groups, token_positions // block_size)
+        token_slots = token_blocks * block_size + (token_positions % block_size)
 
-    logits_groups, logits_offsets = indices_and_offsets(num_output_tokens)
-    start_logits_indices = np.cumsum(num_scheduled_tokens, dtype=num_scheduled_tokens.dtype) - num_output_tokens
-    logits_indices = logits_offsets + start_logits_indices[logits_groups]
-    new_token_positions = total_tokens[logits_groups]
+        logits_groups, logits_offsets = indices_and_offsets(num_output_tokens)
+        start_logits_indices = np.cumsum(num_scheduled_tokens, dtype=num_scheduled_tokens.dtype) - num_output_tokens
+        logits_indices = logits_offsets + start_logits_indices[logits_groups]
+        new_token_positions = total_tokens[logits_groups]
 
     def first_dim(t: Optional[np.ndarray]) -> int:
         """ Takes first dim size or 0 if tensor is None"""
@@ -323,101 +325,133 @@ def create_unified_batch(req_ids: list[str],
     do_shared = False
 
     if contains_prompts and not hpu_bias_acceleration:
-        causal_bias = create_causal_bias(token_groups, token_positions, np_dtype, persistent_ctx.causal_bias)
+        with persistent_ctx.profiler.record_event('internal', 'causal_cpu_prep'):
+            causal_bias = create_causal_bias(token_groups, token_positions, np_dtype, persistent_ctx.causal_bias)
 
     ctx = Context.create(cached_tokens, block_table, block_size)
     if ctx:
         shared_ctx, unique_ctx = ctx.split(num_scheduled_tokens)
         if shared_ctx:
-            do_shared = True
-            shared_blocks, orig_shared_blocks = np.unique(shared_ctx.block_ids, return_inverse=True)
+            with persistent_ctx.profiler.record_event('internal', 'shared_cpu_prep'):
+                do_shared = True
+                shared_blocks, orig_shared_blocks = np.unique(shared_ctx.block_ids, return_inverse=True)
 
-            shared_group_starts = group_starts[shared_ctx.group_ids]
+                shared_group_starts = group_starts[shared_ctx.group_ids]
 
-            shared_tokens = num_scheduled_tokens[shared_ctx.group_ids]
-            shared_token_indices, shared_token_offsets = indices_and_offsets(shared_tokens)
+                shared_tokens = num_scheduled_tokens[shared_ctx.group_ids]
+                shared_token_indices, shared_token_offsets = indices_and_offsets(shared_tokens)
 
-            shared_token_idx = shared_group_starts[shared_token_indices] + shared_token_offsets
-            shared_block_idx = orig_shared_blocks[shared_token_indices]
-            shared_block_usage = shared_ctx.block_usages[shared_token_indices]
-            if not hpu_bias_acceleration:
-                shared_block_bias = generate_bias(shared_block_usage, block_size, np_dtype,
-                                                  persistent_ctx.block_len_range, persistent_ctx.shared_block_bias)
+                shared_token_idx = shared_group_starts[shared_token_indices] + shared_token_offsets
+                shared_block_idx = orig_shared_blocks[shared_token_indices]
+                shared_block_usage = shared_ctx.block_usages[shared_token_indices]
+                if not hpu_bias_acceleration:
+                    with persistent_ctx.profiler.record_event('internal', 'shared_bias_cpu_prep'):
+                        shared_block_bias = generate_bias(shared_block_usage, block_size, np_dtype,
+                                                          persistent_ctx.block_len_range,
+                                                          persistent_ctx.shared_block_bias)
 
-                shared_bias = persistent_ctx.shared_bias[:query_len, :shared_blocks.shape[0], :block_size]
-                shared_bias.fill(-math.inf)
-                shared_bias[shared_token_idx, shared_block_idx] = shared_block_bias
+                        shared_bias = persistent_ctx.shared_bias[:query_len, :shared_blocks.shape[0], :block_size]
+                        shared_bias.fill(-math.inf)
+                        shared_bias[shared_token_idx, shared_block_idx] = shared_block_bias
 
         if unique_ctx:
-            unique_blocks = int(unique_ctx.block_ids.max()) + 1
-            unique_bias = persistent_ctx.unique_bias[:unique_blocks, :block_size]
-            unique_bias.fill(-math.inf)
-            unique_block_bias = generate_bias(unique_ctx.block_usages, block_size, np_dtype,
-                                              persistent_ctx.block_len_range, persistent_ctx.unique_block_bias)
-            unique_bias[unique_ctx.block_ids] = unique_block_bias
-            unique_group_starts = group_starts[unique_ctx.group_ids]
-            unique_block_mapping = persistent_ctx.unique_block_mapping[:unique_blocks]
-            unique_block_mapping.fill(-1)
-            unique_block_mapping[unique_ctx.block_ids] = unique_group_starts
+            with persistent_ctx.profiler.record_event('internal', 'unique_cpu_prep'):
+                unique_blocks = int(unique_ctx.block_ids.max()) + 1
+                unique_bias = persistent_ctx.unique_bias[:unique_blocks, :block_size]
+                unique_bias.fill(-math.inf)
+                unique_block_bias = generate_bias(unique_ctx.block_usages, block_size, np_dtype,
+                                                  persistent_ctx.block_len_range, persistent_ctx.unique_block_bias)
+                unique_bias[unique_ctx.block_ids] = unique_block_bias
+                unique_group_starts = group_starts[unique_ctx.group_ids]
+                unique_block_mapping = persistent_ctx.unique_block_mapping[:unique_blocks]
+                unique_block_mapping.fill(-1)
+                unique_block_mapping[unique_ctx.block_ids] = unique_group_starts
 
-    bucket = bucketing_fn(contains_prompts, first_dim(token_ids), first_dim(shared_blocks), unique_blocks,
-                          first_dim(logits_indices))
-    target_qlen, target_shared_blocks, target_unique_blocks, target_logits = bucket
+    with persistent_ctx.profiler.record_event('internal', 'bucketing'):
+        bucket = bucketing_fn(contains_prompts, first_dim(token_ids), first_dim(shared_blocks), unique_blocks,
+                              first_dim(logits_indices))
+        target_qlen, target_shared_blocks, target_unique_blocks, target_logits = bucket
 
-    target_qlen += get_dp_padding_fn(target_qlen)
-    target_shared_blocks += get_dp_padding_fn(target_shared_blocks)
-    target_unique_blocks += get_dp_padding_fn(target_unique_blocks)
-    target_logits += get_dp_padding_fn(target_logits)
+        target_qlen += get_dp_padding_fn(target_qlen)
+        target_shared_blocks += get_dp_padding_fn(target_shared_blocks)
+        target_unique_blocks += get_dp_padding_fn(target_unique_blocks)
+        target_logits += get_dp_padding_fn(target_logits)
 
     default_causal_width = 512
     fmin = torch.finfo(dtype).min
     feps = torch.finfo(dtype).tiny
 
-    attn_metadata = HPUUnifiedAttentionMetadata(
-        block_size=block_size,
-        slot_mapping=hpu_tensor(token_slots, (target_qlen, ), -1, slot_mapping_dtype),
-        causal_bias=hpu_tensor(causal_bias,
-                               (target_qlen, target_qlen), -math.inf, dtype) if causal_bias is not None else None,
-        causal_width=default_causal_width,
-        shared_blocks=hpu_tensor(shared_blocks, (target_shared_blocks, ), -1, slot_mapping_dtype),
-        shared_bias=hpu_tensor(shared_bias, (target_qlen, target_shared_blocks,
-                                             block_size), -math.inf, dtype) if shared_bias is not None else None,
-        unique_blocks=target_unique_blocks,
-        unique_block_mapping=hpu_tensor(unique_block_mapping, (target_unique_blocks, ), -1, slot_mapping_dtype),
-        unique_bias=hpu_tensor(unique_bias, (target_unique_blocks, block_size), -math.inf, dtype),
-        fmin=to_hpu(fmin),
-        feps=to_hpu(feps),
-    )
+    with persistent_ctx.profiler.record_event('internal', 'attn_metadata_prep'):
+        attn_metadata = HPUUnifiedAttentionMetadata(
+            block_size=block_size,
+            slot_mapping=hpu_tensor(token_slots, (target_qlen, ), -1, slot_mapping_dtype),
+            causal_bias=hpu_tensor(causal_bias,
+                                   (target_qlen, target_qlen), -math.inf, dtype) if causal_bias is not None else None,
+            causal_width=default_causal_width,
+            shared_blocks=hpu_tensor(shared_blocks, (target_shared_blocks, ), -1, slot_mapping_dtype),
+            shared_bias=hpu_tensor(shared_bias, (target_qlen, target_shared_blocks,
+                                                 block_size), -math.inf, dtype) if shared_bias is not None else None,
+            unique_blocks=target_unique_blocks,
+            unique_block_mapping=hpu_tensor(unique_block_mapping, (target_unique_blocks, ), -1, slot_mapping_dtype),
+            unique_bias=hpu_tensor(unique_bias, (target_unique_blocks, block_size), -math.inf, dtype),
+            fmin=to_hpu(fmin),
+            feps=to_hpu(feps),
+        )
 
     if hpu_bias_acceleration:
         if contains_prompts:
-            # NOTE(kzawora): all tensors are pre-padded and work on [target_qlen, ] shapes, and the generated mask is [target_qlen, target_qlen] tensor
-            padding_mask = np.full((target_qlen, ), True, dtype=bool)
-            padding_mask[:token_groups.shape[0]].fill(False)
-            hpu_padding_mask = hpu_tensor(padding_mask, (target_qlen, ), True, torch.bool)
-            hpu_token_groups = hpu_tensor(token_groups, (target_qlen, ), -1, slot_mapping_dtype)
-            hpu_token_positions = hpu_tensor(token_positions, (target_qlen, ), -1, slot_mapping_dtype)
-            attn_metadata.causal_bias = persistent_ctx.causal_bias_generator(hpu_token_groups, hpu_token_positions,
-                                                                             hpu_padding_mask, dtype)
+            with persistent_ctx.profiler.record_event('internal', 'causal_hpu_prep'):
+                # NOTE(kzawora): all tensors are pre-padded and work on [target_qlen, ] shapes, and the generated mask is [target_qlen, target_qlen] tensor
+                padding_mask = np.full((target_qlen, ), True, dtype=bool)
+                padding_mask[:token_groups.shape[0]].fill(False)
+                hpu_padding_mask = hpu_tensor(padding_mask, (target_qlen, ), True, torch.bool)
+                hpu_token_groups = hpu_tensor(token_groups, (target_qlen, ), -1, slot_mapping_dtype)
+                hpu_token_positions = hpu_tensor(token_positions, (target_qlen, ), -1, slot_mapping_dtype)
+                attn_metadata.causal_bias = persistent_ctx.causal_bias_generator(hpu_token_groups, hpu_token_positions,
+                                                                                 hpu_padding_mask, dtype)
         if do_shared:
-            # NOTE(kzawora): this is kinda unfortunate - we're temporarily using shared_block_usage.shape[0] as dynamic dimension
-            # because padding it too high will cause terrible performance (and this dimension indicates how many scatter writes we'll do)
-            shared_tokens_shape = (shared_block_usage.shape[0], )
-            hpu_shared_block_usage = hpu_tensor(shared_block_usage, shared_tokens_shape, -1, slot_mapping_dtype)
-            hpu_shared_token_idx = hpu_tensor(shared_token_idx, shared_tokens_shape, -1, slot_mapping_dtype)
-            hpu_shared_block_idx = hpu_tensor(shared_block_idx, shared_tokens_shape, -1, slot_mapping_dtype)
-            hpu_shared_bias = persistent_ctx.shared_bias_generator(hpu_shared_block_usage, hpu_shared_token_idx,
-                                                                   hpu_shared_block_idx, block_size, dtype, target_qlen,
-                                                                   target_shared_blocks)
-            attn_metadata.shared_bias = hpu_shared_bias
+            # NOTE(kzawora): this is kinda janky, but for a good reason - the number of shared tokens can vary significantly,
+            # and it impacts whether it's even worth running on HPU.
+            # On HPU, we need to avoid dynamic shapes == we need to pad number of shared tokens.
+            # It's currently padded to target_shared_blocks * block_size
+            # We set some simple heuristics to decide whether to run on HPU or fallback to CPU:
+            # 1. Check the number of shared tokens. If it's greater than the padded number of shared tokens, we fallback to CPU.
+            # 2. Check the padding ratio - if the padding exceeds 50% of actual size, we fallback to CPU.
+
+            actual_num_shared_tokens = shared_block_usage.shape[0]
+            padded_num_shared_tokens = target_shared_blocks * block_size
+            acceptable_padding = 0.5 * padded_num_shared_tokens
+            is_acceptable = (padded_num_shared_tokens - actual_num_shared_tokens) <= acceptable_padding
+            # in case we have too many or too little shared tokens, we fall back to cpu generation
+            if padded_num_shared_tokens < actual_num_shared_tokens or not is_acceptable:
+                with persistent_ctx.profiler.record_event('internal', 'shared_bias_cpu_fallback'):
+                    shared_block_bias = generate_bias(shared_block_usage, block_size, np_dtype,
+                                                      persistent_ctx.block_len_range, persistent_ctx.shared_block_bias)
+                    shared_bias = persistent_ctx.shared_bias[:query_len, :shared_blocks.shape[0], :block_size]
+                    shared_bias.fill(-math.inf)
+                    shared_bias[shared_token_idx, shared_block_idx] = shared_block_bias
+                    attn_metadata.shared_bias = hpu_tensor(shared_bias, (target_qlen, target_shared_blocks, block_size),
+                                                           -math.inf, dtype)
+            else:
+                with persistent_ctx.profiler.record_event('internal', 'shared_bias_hpu_prep'):
+                    # do HPU-accelerated shared mask generation
+                    shared_tokens_shape = (padded_num_shared_tokens, )
+                    hpu_shared_block_usage = hpu_tensor(shared_block_usage, shared_tokens_shape, -1, slot_mapping_dtype)
+                    hpu_shared_token_idx = hpu_tensor(shared_token_idx, shared_tokens_shape, -1, slot_mapping_dtype)
+                    hpu_shared_block_idx = hpu_tensor(shared_block_idx, shared_tokens_shape, -1, slot_mapping_dtype)
+                    hpu_shared_bias = persistent_ctx.shared_bias_generator(hpu_shared_block_usage, hpu_shared_token_idx,
+                                                                           hpu_shared_block_idx, block_size, dtype,
+                                                                           target_qlen, target_shared_blocks)
+                    attn_metadata.shared_bias = hpu_shared_bias
 
     # Convert numpy arrays to HPU tensors with proper dtypes
-    unified_batch = UnifiedBatch(
-        req_ids_cpu=req_ids,
-        token_ids=hpu_tensor(token_ids, (target_qlen, ), -1, token_ids_dtype),
-        token_positions=hpu_tensor(token_positions, (target_qlen, ), -1, token_positions_dtype),
-        new_token_positions_cpu=torch.from_numpy(new_token_positions).to(token_positions_dtype),
-        logits_indices=hpu_tensor(logits_indices, (target_logits, ), -1, logits_indices_dtype),
-        logits_groups_cpu=torch.from_numpy(logits_groups).to(logits_indices_dtype),
-        attn_metadata=attn_metadata)
+    with persistent_ctx.profiler.record_event('internal', 'unified_batch_prep'):
+        unified_batch = UnifiedBatch(
+            req_ids_cpu=req_ids,
+            token_ids=hpu_tensor(token_ids, (target_qlen, ), -1, token_ids_dtype),
+            token_positions=hpu_tensor(token_positions, (target_qlen, ), -1, token_positions_dtype),
+            new_token_positions_cpu=torch.from_numpy(new_token_positions).to(token_positions_dtype),
+            logits_indices=hpu_tensor(logits_indices, (target_logits, ), -1, logits_indices_dtype),
+            logits_groups_cpu=torch.from_numpy(logits_groups).to(logits_indices_dtype),
+            attn_metadata=attn_metadata)
     return unified_batch
