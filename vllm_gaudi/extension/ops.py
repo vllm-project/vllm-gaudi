@@ -11,7 +11,6 @@ import torch.nn.functional as F
 import math
 import habana_frameworks.torch.core as htcore
 from vllm_gaudi.extension.runtime import get_config
-from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
 
 import habana_frameworks.torch.utils.experimental as htexp
 import types
@@ -1086,6 +1085,9 @@ def requantize_with_max_scale(weight: torch.Tensor, weight_scale: torch.Tensor,
     if unfused_module_in_checkpoint:
         start = 0
         for idx, logical_width in enumerate(logical_widths):
+            # Skip any component with zero width.
+            if logical_width == 0:
+                continue
             end = start + logical_width
             weight_dq = per_tensor_dequantize(weight[start:end, :], weight_scale[idx])
             weight[start:end, :], _ = scaled_fp8_quant(weight_dq, max_w_scale)
