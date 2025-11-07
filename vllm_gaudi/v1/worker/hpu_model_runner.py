@@ -2624,7 +2624,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     grammar_bitmask[cumulative_index + i]
                 out_indices.append(logit_index + i)
             cumulative_index += 1 + num_spec_tokens
-        #grammar_bitmask = sorted_bitmask
+
         # Copy async to device as tensor.
         grammar_bitmask = torch.from_numpy(sorted_bitmask).to(logits.device, non_blocking=True)
 
@@ -2633,7 +2633,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # since the bitmask is already aligned with the logits.
         skip_out_indices = grammar_bitmask.shape[0] == logits.shape[0]
 
-        #index_tensor = None
+        index_tensor = None
         if not skip_out_indices:
             # xgrammar expects a python list of indices but it will actually work with
             # a tensor. If we copy the tensor ourselves here we can do it in a non_blocking
