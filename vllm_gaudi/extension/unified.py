@@ -210,9 +210,16 @@ def partial_attn_unique(query: torch.tensor, blocks: torch.tensor, block_mapping
 class HPUUnifiedAttentionMetadata:
     block_size: int
     slot_mapping: torch.tensor
+    #    do_causal: bool
+    #    causal_token_groups: Optional[torch.tensor]
+    #    causal_token_positions: Optional[torch.tensor]
     causal_bias: Optional[torch.tensor]
     causal_width: int
+    #    do_shared: bool
     shared_blocks: Optional[torch.tensor]
+    #    shared_token_idx: Optional[torch.tensor]
+    #    shared_block_idx: Optional[torch.tensor]
+    #    shared_block_usage: Optional[torch.tensor]
     shared_bias: Optional[torch.tensor]
     unique_blocks: Optional[torch.tensor] | Optional[int]
     unique_block_mapping: Optional[torch.tensor]
