@@ -3256,7 +3256,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             logits = torch.cat(logits_combined, dim=0)
             # Apply structured output bitmasks if present
             if grammar_output:
-                self.apply_grammar_bitmask(scheduler_output, grammar_output, self.input_batch, logits)
+                self.apply_grammar_bitmask(scheduler_output, grammar_output, logits)
             sampler_output, _sampling_metadata = self._run_sampling(batch_changed, logits,
                                                                     pd_info.prompt_req_ids + pd_info.decode_req_ids,
                                                                     logits.shape[0])
