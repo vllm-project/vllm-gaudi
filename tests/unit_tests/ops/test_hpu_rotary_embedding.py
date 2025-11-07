@@ -51,7 +51,7 @@ def run_rotary_embedding_test(native_rotary_data: RotaryData, oot_rotary_data: R
                               hidden_size: int, **kwargs) -> None:
     """
     Common code for running rotary embedding tests. It compares output of
-    natve operator and out-of-tree custom operator. It allows to
+    native operator and out-of-tree custom operator. It allows to
     specify separate device for native operator and custom operator, 
     because for example native Llama4VisionRotaryEmbedding cannot be 
     used on hpu as it uses complex datatype. The same applies to dtype.
