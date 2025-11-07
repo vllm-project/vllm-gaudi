@@ -1,5 +1,5 @@
 ---
-title: vLLM with Intel Gaudi Frequently Asked Questions
+title: Frequently Asked Questions
 ---
 [](){ #faq }
 
@@ -12,15 +12,15 @@ title: vLLM with Intel Gaudi Frequently Asked Questions
 - Intel Gaudi 2 or Intel Gaudi 3 AI accelerator.
 - Intel Gaudi software version 1.23.0 and above.
 
-### What is vLLM plugin and where can I find this GitHub repository?
+### What is the vLLM plugin and where can I find its GitHub repository?
 
-- Intel develops and maintains its own vLLM plugin project called [vLLM-gaudi](https://github.com/vllm-project/vllm-gaudi).
+Intel develops and maintains its own vLLM plugin project called vLLM Hardware Plugin for Intel® Gaudi® and located in the [vLLM-gaudi](https://github.com/vllm-project/vllm-gaudi) repository on GitHub.
 
-### How do I verify that the Intel Gaudi software is installed correctly?
+### How do I verify that the Intel® Gaudi® software is installed correctly?
 
-- Run ``hl-smi`` to check if Gaudi accelerators are visible. Refer to [System Verifications and Final Tests](https://docs.habana.ai/en/latest/Installation_Guide/System_Verification_and_Final_Tests.html#system-verification) for more details.
+1. Run ``hl-smi`` to check if Intel® Gaudi® accelerators are visible. Refer to [System Verifications and Final Tests](https://docs.habana.ai/en/latest/Installation_Guide/System_Verification_and_Final_Tests.html#system-verification) for more details.
 
-- Run ``apt list --installed | grep habana`` to verify installed packages. The output should look similar to the below:
+2. Run ``apt list --installed | grep habana`` to verify installed packages. The output should look similar to the following example:
 
     ```text
     $ apt list --installed | grep habana
@@ -34,7 +34,7 @@ title: vLLM with Intel Gaudi Frequently Asked Questions
     habanalabs-tools
     ```
 
-- Check the installed Python packages by running ``pip list | grep habana`` and ``pip list | grep neural``. The output should look similar to the below:
+3. Check the installed Python packages by running ``pip list | grep habana`` and ``pip list | grep neural``. The output should look similar to this example:
 
     ```text
     $ pip list | grep habana
@@ -51,7 +51,7 @@ title: vLLM with Intel Gaudi Frequently Asked Questions
 
 ### How can I quickly set up the environment for vLLM using Docker?
 
-Use the Dockerfile.ubuntu.pytorch.vllm file provided in the vllm-plugin/vllm-gaudi/.cd GitHub repo to build and run a container with the latest Intel Gaudi software release.
+Use the `Dockerfile.ubuntu.pytorch.vllm` file provided in the [.cd directory on GitHub](https://github.com/vllm-project/vllm-gaudi/tree/main/.cd) to build and run a container with the latest Intel® Gaudi® software release.
 
 For more details, see [Quick Start Using Dockerfile](../getting_started/quickstart.md).
 
@@ -59,74 +59,58 @@ For more details, see [Quick Start Using Dockerfile](../getting_started/quicksta
 
 ### How can I install vLLM on Intel Gaudi?
 
-- There are two different installation methods:
+There are two different installation methods:
 
-- (Recommended) Running vLLM Hardware Plugin for Intel® Gaudi® Using Dockerfile. This version is most suitable for production deployments.
+- [Running vLLM Hardware Plugin for Intel® Gaudi® using a Dockerfile](../getting_started/installation.md#running-vllm-hardware-plugin-for-intel-gaudi-using-dockerfile): We recommend this method as it is the most suitable option for production deployments.
 
-- Building vLLM Hardware Plugin for Intel® Gaudi® from Source. This version is suitable for developers who would like to work on experimental code and new features that are still being tested.
+- [Building vLLM Hardware Plugin for Intel® Gaudi® from source](../getting_started/installation.md#building-vllm-hardware-plugin-for-intel-gaudi-from-source): This method is intended for developers working with experimental code or new features that are still under testing.
 
 ## Examples and Model Support
 
-### Which models and configurations have been validated on Gaudi 2 and Gaudi 3 devices?
+### Which models and configurations have been validated on Intel® Gaudi® 2 and Intel® Gaudi® 3 devices?
 
-- Various Llama 2, Llama 3 and Llama 3.1 models (7B, 8B and 70B versions). Refer to Llama-3.1 jupyter notebook example.
+The list of validated models is available in the [Validated Models](../models/validated_models.md) document. The list includes models such as:
+
+- Llama 2, Llama 3, and Llama 3.1 (7B, 8B, and 70B versions). Refer to Llama-3.1 jupyter notebook example.
 
 - Mistral and Mixtral models.
 
-- Different tensor parallelism configurations (single HPU, 2x, and 8x HPU).
+- Different tensor parallelism configurations , such as single HPU, 2x, and 8x HPU.
 
-- See [Validated Models](../models/validated_models.md) for more details.
+## Features Support
 
-## Features and Support
+### Which key features does vLLM support on Intel® Gaudi®?
 
-### Which key features does vLLM support on Intel Gaudi?
+The list of the supported features is available in the [Supported Features](../features/supported_features.md) document. It includes features such as:
 
-- Offline Batched Inference.
+- Offline Batched Inference
 
-- OpenAI-Compatible Server.
+- OpenAI-Compatible Server
 
-- Paged KV cache optimized for Gaudi devices.
+- Paged KV cache optimized for Intel® Gaudi® devices
 
-- Speculative decoding (experimental).
+- Speculative decoding (experimental)
 
-- Tensor parallel inference.
+- Tensor parallel inference
 
 - FP8 models and KV Cache quantization and calibration with Intel® Neural Compressor (INC). See [FP8 Calibration and Inference with vLLM](../features/quantization/inc.md) for more details.
 
-- See [Supported Features](../features/supported_features.md) for more details.
-
 ## Performance Tuning
 
-### Which execution modes does vLLM support on Intel Gaudi?
+### Which execution modes does the plugin support?
 
-- PyTorch Eager mode (default).
+- PyTorch Eager mode (default)
 
-- torch.compile (default).
+- torch.compile (default)
 
-- HPU Graphs (recommended for best performance).
+- HPU Graphs (recommended for best performance)
 
-- PyTorch Lazy mode.
+- PyTorch Lazy mode
 
-- See [Execution Modes]() for more details.
+### How does the bucketing mechanism work in vLLM Hardware Plugin for Intel® Gaudi®?
 
-### How does the bucketing mechanism work in vLLM for Intel Gaudi?
-
-- The bucketing mechanism optimizes performance by grouping tensor shapes. This reduces the number of required graphs and minimizes compilations during server runtime.
-
-- Buckets are determined by parameters for batch size and sequence length.
-
-- See [Bucketing Mechanism](../features/bucketing_mechanism.md) for more details.
+The bucketing mechanism optimizes performance by grouping tensor shapes. This reduces the number of required graphs and minimizes compilations during server runtime. Buckets are determined by parameters for batch size and sequence length. For more information, see [Bucketing Mechanism](../features/bucketing_mechanism.md).
 
 ### What should I do if a request exceeds the maximum bucket size?
 
-- Consider increasing the upper bucket boundaries using environment variables to avoid potential latency increases due to graph compilation.
-
-## Troubleshooting
-
-### How to troubleshoot Out-of-Memory errors encountered while running vLLM on Intel Gaudi?
-
-- Increase ``--gpu-memory-utilization`` (default: 0.9) - This addresses insufficient available memory per card.
-
-- Increase ``--tensor-parallel-size`` (default: 1) - This approach shards model weights across the devices and may help in loading a model (which is too big for a single card) across multiple cards.
-
-- Disable HPU Graphs completely (switch to any other execution mode) to maximize KV Cache space allocation.
+Consider increasing the upper bucket boundaries using environment variables to avoid potential latency increases due to graph compilation.
