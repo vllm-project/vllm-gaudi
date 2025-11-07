@@ -6,7 +6,7 @@ title: Installation
 
 There are three ways to run vLLM Hardware Plugin for Intel® Gaudi®:
 
-- **Using Docker Compose**: The easiest method that requires no image building and is supported only in 1.22 and later releases on Ubuntu. For more information and detailed instructions, see the [Quick Start](quickstart.md) guide.
+- **Using Docker Compose**: The easiest method that requires no image building and is supported only in 1.22 and later releases on Ubuntu. For more information and detailed instructions, see the [Quick Start](quickstart/quickstart.md) guide.
 - **Using a Dockerfile**: Allows building a container with the Intel® Gaudi® software suite using the provided Dockerfile. This options is supported only on Ubuntu.
 - **Building from source**: Allows installing and running vLLM directly on your Intel® Gaudi® machine by building from source. It's supported as a standard installation and an enhanced setup with NIXL.
 

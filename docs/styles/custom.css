@@ -1,0 +1,25 @@
+.md-nav__item--section > .md-nav__link, .md-nav__title {
+    font-weight: 700;
+    font-size: 0.9em;
+    color: rgb(77, 77, 77) !important;
+    text-transform: uppercase;
+}
+
+.md-nav__item--section > .md-nav {
+    margin-block-start: 0.5em;
+    margin-block-end: 0.5em;
+}
+
+.md-nav--primary .md-nav__title {
+    display: none;
+}
+
+.md-sidebar--primary {
+    padding: 0.6rem 0;
+}
+
+.md-header {
+  box-shadow: none;
+  border-bottom: 1px solid #0000001a;
+  transition: box-shadow 0.4s ease, border-bottom-color 0.4s ease, border-bottom-width 0.4s ease;
+}
