@@ -12,7 +12,7 @@ This guide will help you quickly get started with vLLM to perform:
 
 - Python 3.10
 - Intel Gaudi 2 or 3 AI accelerators
-- Intel Gaudi software version 1.21.0 or above
+- Intel Gaudi software version 1.23.0 or above
 
 !!! note
     To set up the execution environment, please follow the instructions in the [Gaudi Installation Guide](https://docs.habana.ai/en/latest/Installation_Guide/index.html).
