@@ -162,7 +162,7 @@ would give us three buckets in total: `(1, 1, 256)`, `(1, 1, 384)` and `(1, 1, 5
 
 All those 3 approaches can be used with each other. For example `([64, 128, 256], 1, range(512, 1024, 32))` is a valid configuration.
 
-Each bucket (or configuration) have to be in seperate line. 
+Each bucket (or configuration) has to be in separate line. 
 
 There is a sample bucketing file shown in [bucketing_file.txt](https://github.com/vllm-project/vllm-gaudi/blob/main/vllm_gaudi/extension/bucketing/bucketing_file.txt).
 
