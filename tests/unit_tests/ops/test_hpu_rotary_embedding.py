@@ -184,7 +184,7 @@ def test_linear_scaling_rotary_embedding(
 @pytest.mark.parametrize("base", BASES)
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("scaling_factor", SCALING_FACTORS)
-def test_dynamic_ntk_scaling_rotary_rmbedding(
+def test_dynamic_ntk_scaling_rotary_embedding(
     seq_length: int,
     hidden_size: int,
     head_size: int,
