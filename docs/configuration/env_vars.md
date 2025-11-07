@@ -23,7 +23,6 @@ This document lists the supported diagnostic and profiling, as well as performan
 | `VLLM_EXPONENTIAL_BUCKETING` | Enables exponential bucket spacing instead of linear spacing. | `true`        |
 | `VLLM_BUCKETING_FROM_FILE`   | Enables reading bucket configuration from file | `None`        |
 
-
 ## Experimental Parameters
 
 | Parameter name     | Description              | Default value |
