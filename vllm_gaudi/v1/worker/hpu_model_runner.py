@@ -915,7 +915,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.scheduler_output: SchedulerOutput | None = None
         self.warmup_mode: bool = False
         self.batch_changed: bool = False
-        
+
         assert not (self.unified_attn and not self.use_contiguous_pa), 'Unified attn requires contiguous_pa!'
         assert not (self.unified_attn and not self.use_merged_prefill), 'Unified attn requires merged_prefill!'
 
@@ -2586,11 +2586,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
     def apply_grammar_bitmask(
         self,
         scheduler_output: "SchedulerOutput",
+        grammar_output: GrammarOutput,
         logits: torch.Tensor,
     ):
-        grammar_bitmask = scheduler_output.grammar_bitmask
-        if grammar_bitmask is None:
-            return
+
+        grammar_bitmask = grammar_output.grammar_bitmask
 
         # We receive the structured output bitmask from the scheduler,
         # compacted to contain bitmasks only for structured output requests.
@@ -2616,7 +2616,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         sorted_bitmask = np.zeros_like(grammar_bitmask, shape=(logits.shape[0], grammar_bitmask.shape[1]))
         cumulative_index = 0
 
-        for req_id in scheduler_output.structured_output_request_ids:
+        for req_id in grammar_output.structured_output_request_ids:
             logit_index = struct_out_req_batch_indices[req_id]
             num_spec_tokens = len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
             for i in range(1 + num_spec_tokens):
@@ -2624,16 +2624,26 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     grammar_bitmask[cumulative_index + i]
                 out_indices.append(logit_index + i)
             cumulative_index += 1 + num_spec_tokens
-        grammar_bitmask = sorted_bitmask
+        #grammar_bitmask = sorted_bitmask
+        # Copy async to device as tensor.
+        grammar_bitmask = torch.from_numpy(sorted_bitmask).to(logits.device, non_blocking=True)
 
         # If the grammar bitmask and the logits have the same shape
         # we don't need to pass indices to the kernel,
         # since the bitmask is already aligned with the logits.
         skip_out_indices = grammar_bitmask.shape[0] == logits.shape[0]
 
+        #index_tensor = None
+        if not skip_out_indices:
+            # xgrammar expects a python list of indices but it will actually work with
+            # a tensor. If we copy the tensor ourselves here we can do it in a non_blocking
+            # manner and there should be no cpu sync within xgrammar.
+            index_tensor = torch.tensor(out_indices, dtype=torch.int32, device="cpu", pin_memory=True)
+            index_tensor = index_tensor.to(logits.device, non_blocking=True)
+
         # Serialization of np.ndarray is much more efficient than a tensor,
         # so we receive it in that format.
-        grammar_bitmask = torch.from_numpy(grammar_bitmask).contiguous()
+        #grammar_bitmask = torch.from_numpy(grammar_bitmask).contiguous()
 
         # Force use of the torch.compile implementation from xgrammar to work
         # around issues with the Triton kernel in concurrent structured output
@@ -2648,11 +2658,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # NOTE(tianmu-li): xgr_torch_compile uses torch.inductor by default.
         # Have to use the CPU backend, which has its overhead.
         logits_cpu = logits.cpu().to(torch.float32)
-        xgr_cpu.apply_token_bitmask_inplace_cpu(
+        '''xgr_cpu.apply_token_bitmask_inplace_cpu(
             logits_cpu,
             grammar_bitmask.to("cpu"),
             indices=out_indices if not skip_out_indices else None,
-        )
+        )'''
+        #xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=index_tensor)
+        xgr_cpu.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=index_tensor)
         logits.copy_(logits_cpu.to(self.device, non_blocking=True).to(logits.dtype))
 
     def _configure_lora(self, input, requests, req_ids, is_prompt):
@@ -2830,12 +2842,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                     self.unified_attn_persistent_ctx, self.unified_bucketing_fn, self.get_dp_padding)
 
     @torch.inference_mode()
-    def unified_execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
-        grammar_output: "GrammarOutput" = None,
-        warmup_mode: bool = False
-    ) -> ModelRunnerOutput:
+    def unified_execute_model(self,
+                              scheduler_output: "SchedulerOutput",
+                              grammar_output: "GrammarOutput" = None,
+                              warmup_mode: bool = False) -> ModelRunnerOutput:
         batch_changed = self.batch_changed
         with self.profiler.record_event('internal', 'prepare_unified_batch'):
             batch = self.prepare_unified_batch(scheduler_output)
@@ -2899,10 +2909,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             prompt_logprobs_dict={},
             pooler_output=[],
         )
+
         return model_runner_output
 
-    
-    
     @torch.inference_mode()
     def general_execute_model(
         self,
@@ -2912,8 +2921,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
     ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput]:
         #if self.unified_attn:
         #    return self.unified_execute_model(scheduler_output, warmup_mode)
-        
-        
+
         # NOTE(kzawora): Since scheduler doesn't differentiate between prefills
         # and decodes, we must handle mixed batches. In _update_states we make
         # sure that first self.input_batch.num_decodes requests are decodes,
@@ -3248,7 +3256,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             logits = torch.cat(logits_combined, dim=0)
             # Apply structured output bitmasks if present
             if grammar_output:
-                self.apply_grammar_bitmask(scheduler_output, logits)
+                self.apply_grammar_bitmask(scheduler_output, grammar_output, self.input_batch, logits)
             sampler_output, _sampling_metadata = self._run_sampling(batch_changed, logits,
                                                                     pd_info.prompt_req_ids + pd_info.decode_req_ids,
                                                                     logits.shape[0])
@@ -3410,15 +3418,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             get_kv_transfer_group().clear_connector_metadata()
 
         return model_runner_output
-    
-    
+
     @torch.inference_mode()
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
         warmup_mode: bool = False,
     ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput]:
-       
 
         self.run_defragmenter(scheduler_output, warmup_mode)
 
@@ -3429,17 +3435,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 return EMPTY_MODEL_RUNNER_OUTPUT
             # For D case, wait until kv finish load here
             return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
-        if warmup_mode:
-            grammar_output=None
-            if self.unified_attn:
-                return self.unified_execute_model(scheduler_output, grammar_output, warmup_mode)
-            return self.general_execute_model(scheduler_output, grammar_output, warmup_mode)
         self.scheduler_output = scheduler_output
         self.warmup_mode = warmup_mode
         self.batch_changed = batch_changed
 
         return None
-
 
     def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         if self.scheduler_output is None:
@@ -4085,6 +4085,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             free_encoder_mm_hashes=[],
         )
         self.execute_model(sched_output, warmup_mode=True)
+        self.sample_tokens(None)
         self.execute_model(cleanup, warmup_mode=True)
 
     def _generate_profiling(self, prompt_cfg, decode_cfg):
