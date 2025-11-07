@@ -331,7 +331,8 @@ def create_unified_batch(req_ids: list[str],
             shared_token_idx = shared_group_starts[shared_token_indices] + shared_token_offsets
             shared_block_idx = orig_shared_blocks[shared_token_indices]
             shared_block_usage = shared_ctx.block_usages[shared_token_indices]
-            if generate_biases_on_cpu:
+            # FIXME(kzawora): remove True once shared bias generation works
+            if generate_biases_on_cpu or True:
                 shared_block_bias = generate_bias(shared_block_usage, block_size, np_dtype,
                                                   persistent_ctx.block_len_range, persistent_ctx.shared_block_bias)
 
@@ -386,7 +387,13 @@ def create_unified_batch(req_ids: list[str],
             hpu_token_positions = hpu_tensor(token_positions, (target_qlen, ), -1, slot_mapping_dtype)
             attn_metadata.causal_bias = persistent_ctx.causal_bias_generator(hpu_token_groups, hpu_token_positions,
                                                                              dtype)
-        if do_shared:
+        # FIXME(kzawora): in e2e scenarios this produces the following error:
+        # File "vllm-gaudi/vllm_gaudi/extension/unified.py", line 172, in partial_attn_shared
+        #     attn = attn + bias
+        #            ~~~~~^~~~~~
+        # RuntimeError: Incompatible input shapes, broadcast not possible. Tensor1 Size: 4096 8192 32 Tensor2 Size: 1024 8192 1
+        # need to fix that, we're falling back to CPU computation for now
+        if do_shared and False:
             max_num_shared_blocks = persistent_ctx.shared_bias.shape[1]
             # NOTE(kzawora): this is weird - max_num_shared_blocks*block_size *should* cover most usecases, but if there's
             # a lot of sharing, we can exceed that - let's recompile instead of crashing there
