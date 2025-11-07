@@ -195,22 +195,23 @@ class UnifiedBatchPersistentContext:
 
         self.causal_bias_generator = HPUCausalBiasGenerator()
         self.shared_bias_generator = HPUSharedBiasGenerator()
-
-        config = get_config()
-        if config.bridge_mode == 'lazy':
-            self.causal_bias_generator = htorch.hpu.wrap_in_hpu_graph(self.causal_bias_generator,
-                                                                      disable_tensor_cache=True)
-            self.shared_bias_generator = htorch.hpu.wrap_in_hpu_graph(self.shared_bias_generator,
-                                                                      disable_tensor_cache=True)
-        elif config.bridge_mode == 'eager':
-            self.causal_bias_generator = torch.compile(self.causal_bias_generator,
-                                                       backend='hpu_backend',
-                                                       fullgraph=True,
-                                                       dynamic=False)
-            self.shared_bias_generator = torch.compile(self.shared_bias_generator,
-                                                       backend='hpu_backend',
-                                                       fullgraph=True,
-                                                       dynamic=False)
+        self.graphed = False
+        if self.graphed:
+            config = get_config()
+            if config.bridge_mode == 'lazy':
+                self.causal_bias_generator = htorch.hpu.wrap_in_hpu_graph(self.causal_bias_generator,
+                                                                          disable_tensor_cache=True)
+                self.shared_bias_generator = htorch.hpu.wrap_in_hpu_graph(self.shared_bias_generator,
+                                                                          disable_tensor_cache=True)
+            elif config.bridge_mode == 'eager':
+                self.causal_bias_generator = torch.compile(self.causal_bias_generator,
+                                                           backend='hpu_backend',
+                                                           fullgraph=True,
+                                                           dynamic=False)
+                self.shared_bias_generator = torch.compile(self.shared_bias_generator,
+                                                           backend='hpu_backend',
+                                                           fullgraph=True,
+                                                           dynamic=False)
 
 
 class HPUBiasGenerator(torch.nn.Module):
@@ -226,11 +227,12 @@ class HPUBiasGenerator(torch.nn.Module):
 
 class HPUCausalBiasGenerator(HPUBiasGenerator):
 
-    def forward(self, groups: torch.tensor, positions: torch.tensor, dtype: torch.dtype) -> torch.tensor:
+    def forward(self, groups: torch.tensor, positions: torch.tensor, padding_mask: torch.tensor,
+                dtype: torch.dtype) -> torch.tensor:
         """Create causal bias from groups and positions"""
         group_mask = groups.unsqueeze(-1) != groups.unsqueeze(0)
         position_mask = positions.unsqueeze(-1) < positions.unsqueeze(0)
-        causal_mask = (group_mask | position_mask)
+        causal_mask = (group_mask | position_mask) | padding_mask
         return self.mask_to_bias_torch(causal_mask, dtype)
 
 
@@ -254,7 +256,7 @@ def create_unified_batch(req_ids: list[str],
                          persistent_ctx: UnifiedBatchPersistentContext,
                          bucketing_fn: Callable[[bool, int, int, int, int], tuple[int, int, int, int]],
                          get_dp_padding_fn: Callable[[int], int],
-                         generate_biases_on_cpu: bool = False) -> UnifiedBatch:
+                         generate_biases_on_cpu: bool = True) -> UnifiedBatch:
     """ Calculate all necessary tensors needed for batch scheduling """
     # Track original dtypes before converting to numpy
     token_ids_dtype = all_token_ids.dtype
@@ -383,10 +385,14 @@ def create_unified_batch(req_ids: list[str],
 
     if not generate_biases_on_cpu:
         if contains_prompts:
+            # NOTE(kzawora): all tensors are pre-padded and work on [target_qlen, ] shapes, and the generated mask is [target_qlen, target_qlen] tensor
+            padding_mask = np.full((target_qlen, ), True, dtype=bool)
+            padding_mask[:token_groups.shape[0]].fill(False)
+            hpu_padding_mask = hpu_tensor(padding_mask, (target_qlen, ), True, torch.bool)
             hpu_token_groups = hpu_tensor(token_groups, (target_qlen, ), -1, slot_mapping_dtype)
             hpu_token_positions = hpu_tensor(token_positions, (target_qlen, ), -1, slot_mapping_dtype)
             attn_metadata.causal_bias = persistent_ctx.causal_bias_generator(hpu_token_groups, hpu_token_positions,
-                                                                             dtype)
+                                                                             hpu_padding_mask, dtype)
         # FIXME(kzawora): in e2e scenarios this produces the following error:
         # File "vllm-gaudi/vllm_gaudi/extension/unified.py", line 172, in partial_attn_shared
         #     attn = attn + bias
@@ -419,5 +425,5 @@ def create_unified_batch(req_ids: list[str],
         logits_indices=hpu_tensor(logits_indices, (target_logits, ), -1, logits_indices_dtype),
         logits_groups_cpu=torch.from_numpy(logits_groups).to(logits_indices_dtype),
         attn_metadata=attn_metadata)
-    #    torch.hpu.synchronize()
+    #torch.hpu.synchronize()
     return unified_batch
