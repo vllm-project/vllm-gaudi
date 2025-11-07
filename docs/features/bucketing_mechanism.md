@@ -135,35 +135,41 @@ The following example presents a setup where every bucket is logged separately i
 
 ### Buckets from file
 
-Bucketing from file allows to manually set precise buckets that are going to be used through a configuration file. 
+Bucketing from file allows to manually set precise buckets that are going to be used through a configuration file.
 
-To use file set `VLLM_BUCKETING_FROM_FILE` flag to path to your desired file. 
+To use file set `VLLM_BUCKETING_FROM_FILE` flag to path to your desired file.
 
 There are 3 ways to specify buckets in file:
 
 1. **Precise bucket** - only this one, specific bucket will be prepared.
+
 ```{.}
 (1, 2048, 0)
 (64, 1, 1024)
 ```
+
 would give us two buckets in total: `(1, 2048, 0)` and `(64, 1, 1024)`.
 
 2. **List** - Each element will be prepared with each element from list
+
 ```{.}
 (1, [256, 512], [0, 4, 8])
 ```
+
 would give us six buckets in total from Cartesian product: `(1, 256, 0)`, `(1, 256, 4)`, `(1, 256, 8)`, `(1, 512, 0)`, `(1, 512, 4)` and `(1, 512, 8)`.
 
-3. **Range** - similar to list, but instead of manually setting each element we can use python's range function. 
+3. **Range** - similar to list, but instead of manually setting each element we can use python's range function.
+
 ```{.}
 (1, 1, range(256, 512, 128))
 ```
+
 would give us three buckets in total: `(1, 1, 256)`, `(1, 1, 384)` and `(1, 1, 512)`.
 
 All those 3 approaches can be used with each other. For example `([64, 128, 256], 1, range(512, 1024, 32))` is a valid configuration.
 
-Each bucket (or configuration) has to be in separate line. 
+Each bucket (or configuration) has to be in separate line.
 
 There is a sample bucketing file shown in [bucketing_file.txt](https://github.com/vllm-project/vllm-gaudi/blob/main/vllm_gaudi/extension/bucketing/bucketing_file.txt).
 
-Bucketing from file is **NOT** supported for unified attention for now. 
+Bucketing from file is **NOT** supported for unified attention for now.
