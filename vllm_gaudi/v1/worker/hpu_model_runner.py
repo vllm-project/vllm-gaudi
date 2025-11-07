@@ -2663,7 +2663,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             grammar_bitmask.to("cpu"),
             indices=out_indices if not skip_out_indices else None,
         )'''
-        #xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=index_tensor)
         xgr_cpu.apply_token_bitmask_inplace_cpu(logits, grammar_bitmask, indices=index_tensor)
         logits.copy_(logits_cpu.to(self.device, non_blocking=True).to(logits.dtype))
 
@@ -2913,14 +2912,39 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         return model_runner_output
 
     @torch.inference_mode()
-    def general_execute_model(
+    def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-        grammar_output: "GrammarOutput" = None,
         warmup_mode: bool = False,
     ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput]:
-        #if self.unified_attn:
-        #    return self.unified_execute_model(scheduler_output, warmup_mode)
+
+        self.run_defragmenter(scheduler_output, warmup_mode)
+
+        batch_changed = self._update_states(scheduler_output)
+        if not scheduler_output.total_num_scheduled_tokens:
+            if not has_kv_transfer_group() or warmup_mode:
+                # Return empty ModelRunnerOuptut if there's no work to do.
+                return EMPTY_MODEL_RUNNER_OUTPUT
+            # For D case, wait until kv finish load here
+            return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+        self.scheduler_output = scheduler_output
+        self.warmup_mode = warmup_mode
+        self.batch_changed = batch_changed
+
+        return None
+
+    @torch.inference_mode()
+    def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        if self.scheduler_output is None:
+            # Nothing to do (PP non-final rank case), output isn't used.
+            return None  # noqa
+        scheduler_output = self.scheduler_output
+        warmup_mode = self.warmup_mode
+        self.scheduler_output = None
+        self.warmup_mode = False
+
+        if self.unified_attn:
+            return self.unified_execute_model(scheduler_output, warmup_mode)
 
         # NOTE(kzawora): Since scheduler doesn't differentiate between prefills
         # and decodes, we must handle mixed batches. In _update_states we make
@@ -3418,41 +3442,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             get_kv_transfer_group().clear_connector_metadata()
 
         return model_runner_output
-
-    @torch.inference_mode()
-    def execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
-        warmup_mode: bool = False,
-    ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput]:
-
-        self.run_defragmenter(scheduler_output, warmup_mode)
-
-        batch_changed = self._update_states(scheduler_output)
-        if not scheduler_output.total_num_scheduled_tokens:
-            if not has_kv_transfer_group() or warmup_mode:
-                # Return empty ModelRunnerOuptut if there's no work to do.
-                return EMPTY_MODEL_RUNNER_OUTPUT
-            # For D case, wait until kv finish load here
-            return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
-        self.scheduler_output = scheduler_output
-        self.warmup_mode = warmup_mode
-        self.batch_changed = batch_changed
-
-        return None
-
-    def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        if self.scheduler_output is None:
-            # Nothing to do (PP non-final rank case), output isn't used.
-            return None  # noqa
-        scheduler_output = self.scheduler_output
-        warmup_mode = self.warmup_mode
-        self.scheduler_output = None
-        self.warmup_mode = False
-
-        if self.unified_attn:
-            return self.unified_execute_model(scheduler_output, grammar_output, warmup_mode)
-        return self.general_execute_model(scheduler_output, grammar_output, warmup_mode)
 
     def load_model(self) -> None:
         import habana_frameworks.torch.core as htcore
