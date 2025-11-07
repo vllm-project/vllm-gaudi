@@ -4616,35 +4616,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # Return dummy draft tokens (as there may be prefill sequences in the same request)
             return torch.zeros(len(sampled_token_ids), self.speculative_config.num_speculative_tokens,
                                dtype=torch.int64, device=self.device)
-        assert decode_data.spec_decode_metadata is not None
-        assert decode_data.position_ids is not None
-        num_draft_tokens = \
-            decode_data.spec_decode_metadata.num_draft_tokens
-        max_num_draft_tokens = max(num_draft_tokens)
-        common_attn_metadata = decode_data.attn_metadata
 
-        num_picked_token_indices = []
-        last_token_indices = []
-        starting_index = 0
-        num_rejected_tokens = [
-            n + 1 - len(sampled_token_ids[i]) if n > 0 else 0 for i, n in
-            enumerate(num_draft_tokens)
-        ]
-        for i, n in enumerate(num_draft_tokens):
-            r = num_rejected_tokens[i]
-            step = max_num_draft_tokens + 1
-            for j in range(step):
-                if j == n - r:
-                    last_token_indices.append(starting_index + j)
-                if j < n + 1 - r:
-                    num_picked_token_indices.append(starting_index + j)
-                else:
-                    num_picked_token_indices.append(-1)
-            starting_index += step
-        hidden_states_indices = torch.tensor(num_picked_token_indices,
-                                             device=self.device)
-        last_token_indices = torch.tensor(last_token_indices,
-                                          device=self.device)
+        assert decode_data.position_ids is not None
+        common_attn_metadata = decode_data.attn_metadata
+        common_attn_metadata, hidden_states_indices, last_token_indices = \
+            self.drafter.prepare_inputs(common_attn_metadata,
+                                        decode_data.spec_decode_metadata,
+                                        sampled_token_ids)
 
         target_token_ids = decode_sampled_token_ids_tensor.reshape(-1, 1)[
             hidden_states_indices]
