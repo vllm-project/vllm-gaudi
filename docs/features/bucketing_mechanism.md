@@ -132,7 +132,6 @@ The following example presents a setup where every bucket is logged separately i
 (EngineCore_DP0 pid=805) INFO 09-23 12:32:56 [hpu_model_runner.py:3320] [Warmup][Unified CFG][4/375] query_len:2048 shared_blocks:256 unique_blocks:32 (causal) free_mem:11.16 GiB
 ```
 
-
 ### Buckets from file
 
 Bucketing from file allows to manually set precise buckets that are going to be used through a configuration file.
@@ -150,7 +149,7 @@ There are 3 ways to specify buckets in file:
 
 would give us two buckets in total: `(1, 2048, 0)` and `(64, 1, 1024)`.
 
-2. **List** - Each element will be prepared with each element from list
+1. **List** - Each element will be prepared with each element from list
 
 ```{.}
 (1, [256, 512], [0, 4, 8])
@@ -158,7 +157,7 @@ would give us two buckets in total: `(1, 2048, 0)` and `(64, 1, 1024)`.
 
 would give us six buckets in total from Cartesian product: `(1, 256, 0)`, `(1, 256, 4)`, `(1, 256, 8)`, `(1, 512, 0)`, `(1, 512, 4)` and `(1, 512, 8)`.
 
-3. **Range** - similar to list, but instead of manually setting each element we can use python's range function.
+1. **Range** - similar to list, but instead of manually setting each element we can use python's range function.
 
 ```{.}
 (1, 1, range(256, 512, 128))
