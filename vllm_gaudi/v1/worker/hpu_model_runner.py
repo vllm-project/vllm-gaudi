@@ -582,6 +582,11 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
                                                multimodal_embeddings=multimodal_embeddings,
                                                is_multimodal=is_multimodal)
 
+    def get_input_embeddings_hpu(self, input_ids, multimodal_embeddings=None, is_multimodal=False):
+        return self.model.get_input_embeddings_hpu(input_ids=input_ids,
+                                               multimodal_embeddings=multimodal_embeddings,
+                                               is_multimodal=is_multimodal)
+    
     def get_multimodal_embeddings(self, **batched_mm_inputs):
         return self.model.get_multimodal_embeddings(**batched_mm_inputs)
 
@@ -794,7 +799,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if self.supports_mm_inputs:
             self.is_mm_embed = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
         self.is_multimodal_raw_input_supported = (model_config.is_multimodal_raw_input_only_model)
-        self.image_token_id = 151667 if 'InternVLChatModel' in str(type(self.model.model)) else self.model.model.config.image_token_id
 
         # Lazy initialization
         # self.model: nn.Module  # set after load_model
@@ -3012,8 +3016,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         image_index_tensor = None
         if self.is_mm_optimized:
+            logger.info(f"SHIV DEBUG MULTIMODAL {self.image_token_id=}, {prefill_data.token_ids=}")
             is_image_flatten = (
-                input_tokens_tensor == self.image_token_id).flatten()
+                prefill_data.token_ids[0].squeeze().flatten() == self.image_token_id)
+            logger.info(f"SHIV DEBUG MULTIMODAL {is_image_flatten=} ")
+            is_image_flatten = is_image_flatten.flatten()
             image_index_tensor = is_image_flatten.nonzero().squeeze(-1)
             logger.info(f"SHIV DEBUG MULTIMODAL {self.image_token_id=}, {image_index_tensor.shape=}")
 
@@ -3084,24 +3091,27 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     # to avoid padding issues.
                     #is_mm_embed = is_mm_embed.to(torch.device("cpu"))
                     logger.info(f"SHIV DEBUG devices === {token_ids.device=} {is_mm_embed.device=}")
-                    if 'image_index' in kwargs:
+
+                    stat4 = gc_metric.stats()[0][1]
+                    logger.info(f"SHIV DEBUG >>>>>>>>>>>>> {stat4=} after input embedding {stat4-stat3}") 
+                    model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
+                    if image_index_tensor is not None:
+                        model_mm_kwargs['image_index'] = image_index_tensor
+                    model_mm_kwargs = MultiModalKwargs.as_kwargs(
+                        model_mm_kwargs,
+                        device=self.device,
+                    )
+                    logger.info(f"SHIV DEBUG {type(self.model)=}, {dir(self.model)=}") 
+                    if 'image_index' in model_mm_kwargs:
                         inputs_embeds = self.model.get_input_embeddings_hpu(
-                            token_ids, kwargs['image_index'], mm_embeds)
-                        kwargs.pop("image_index", None)
+                            token_ids, model_mm_kwargs['image_index'], mm_embeds)
+                        model_mm_kwargs.pop("image_index", None)
                     else: 
                         inputs_embeds = self.model.get_input_embeddings(
                             token_ids,
                             multimodal_embeddings=mm_embeds,
                             is_multimodal=is_mm_embed,
                         )
-
-                    stat4 = gc_metric.stats()[0][1]
-                    logger.info(f"SHIV DEBUG >>>>>>>>>>>>> {stat4=} after input embedding {stat4-stat3}") 
-                    model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
-                    model_mm_kwargs = MultiModalKwargs.as_kwargs(
-                        model_mm_kwargs,
-                        device=self.device,
-                    )
 
                 lora_mask, lora_logits_mask = self._configure_lora(token_ids, self.requests, req_id, True)
 
@@ -3522,6 +3532,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self._maybe_compile(self.model)
         self.model_memory_usage = m.consumed_device_memory
         logger.info("Compilation took %.4f GB", self.model_memory_usage / float(2**30))
+        self.is_mm_optimized = is_mm_optimized(self.model)    
+        self.image_token_id = 151667 if 'InternVLChatModel' in str(type(self.model.model)) else self.model.model.config.image_token_id
 
     def _maybe_compile(self, *args, **kwargs):
         """Entrypoint for a torch.compilation of the model"""

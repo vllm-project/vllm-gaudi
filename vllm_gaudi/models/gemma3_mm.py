@@ -1,9 +1,13 @@
+from typing import Optional
+
 import torch
 from vllm.config import VllmConfig
 from vllm.model_executor.models.gemma3_mm import (Gemma3ForConditionalGeneration, Gemma3MultiModalProcessor,
                                                   Gemma3ProcessingInfo, Gemma3DummyInputsBuilder, Gemma3ImageInputs)
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from .utils import merge_multimodal_embeddings_static
 
 @MULTIMODAL_REGISTRY.register_processor(Gemma3MultiModalProcessor,
                                         info=Gemma3ProcessingInfo,
@@ -46,3 +50,19 @@ class HpuGemma3ForConditionalGeneration(Gemma3ForConditionalGeneration):
             image_embeds = self.multi_modal_projector(image_features)
 
         return [e.flatten(0, 1) for e in image_embeds.split(num_patches.tolist())]
+
+    def get_input_embeddings_hpu(
+        self,
+        input_ids: torch.Tensor,
+        image_index_tensor: torch.Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> torch.Tensor:
+        logger.info("SHIV DEBUG inside get_input_embeddings_hpu")
+        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None:
+            inputs_embeds = merge_multimodal_embeddings_static(
+                image_index_tensor,
+                inputs_embeds,
+                multimodal_embeddings,
+            )
+        return inputs_embeds
