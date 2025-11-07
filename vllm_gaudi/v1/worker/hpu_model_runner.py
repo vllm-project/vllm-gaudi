@@ -2664,7 +2664,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             indices=out_indices if not skip_out_indices else None,
         )'''
         #xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=index_tensor)
-        xgr_cpu.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=index_tensor)
+        xgr_cpu.apply_token_bitmask_inplace_cpu(logits, grammar_bitmask, indices=index_tensor)
         logits.copy_(logits_cpu.to(self.device, non_blocking=True).to(logits.dtype))
 
     def _configure_lora(self, input, requests, req_ids, is_prompt):
