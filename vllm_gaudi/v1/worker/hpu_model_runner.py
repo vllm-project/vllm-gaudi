@@ -827,8 +827,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     logger.warning("EagleProposer only supports num_speculative_tokens=1. "
                                    "Overriding the config.")
                     self.speculative_config.num_speculative_tokens = 1
-                self.drafter = HpuEagleProposer(
-                    self.vllm_config, self.device, self)  # type: ignore
+                self.drafter = HpuEagleProposer(self.vllm_config, self.device, self)  # type: ignore
                 if self.speculative_config.method == "eagle3":
                     self.use_aux_hidden_state_outputs = True
             elif self.speculative_config.method == "medusa":
@@ -4608,7 +4607,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         hidden_states: torch.Tensor,
         aux_hidden_states: Optional[torch.Tensor],
         num_decodes: int,
-        decode_data: Optional[DecodeInputData],
+        decode_data: DecodeInputData,
     ):
         if decode_data.spec_decode_metadata is None:
             # No sequence scheduled any spec decode tokens
@@ -4624,23 +4623,19 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                         decode_data.spec_decode_metadata,
                                         sampled_token_ids)
 
-        target_token_ids = decode_sampled_token_ids_tensor.reshape(-1, 1)[
-            hidden_states_indices]
+        target_token_ids = decode_sampled_token_ids_tensor.reshape(-1, 1)[hidden_states_indices]
         target_positions = decode_data.position_ids[hidden_states_indices]
 
         if self.use_aux_hidden_state_outputs and \
                 aux_hidden_states is not None:
-            target_hidden_states = torch.cat(
-                [h[hidden_states_indices] for h in aux_hidden_states], dim=-1)
+            target_hidden_states = torch.cat([h[hidden_states_indices] for h in aux_hidden_states], dim=-1)
         else:
             target_hidden_states = hidden_states[hidden_states_indices]
 
         if target_hidden_states.dim() == 2:
             target_hidden_states = target_hidden_states.unsqueeze(1)
-        draft_token_ids, hidden_states = self.drafter.propose(
-            target_token_ids, target_positions,
-            target_hidden_states, last_token_indices,
-            common_attn_metadata)
+        draft_token_ids, hidden_states = self.drafter.propose(target_token_ids, target_positions, target_hidden_states,
+                                                              last_token_indices, common_attn_metadata)
 
         draft_token_ids = draft_token_ids[:num_decodes]
         return draft_token_ids, hidden_states
@@ -4672,10 +4667,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         target_token_ids = target_token_ids.unsqueeze(0)
         if target_hidden_states.dim() == 2:
             target_hidden_states = target_hidden_states.unsqueeze(0)
-        _draft_token_ids, _hidden_states = self.drafter.propose(
-            target_token_ids, position_ids,
-            target_hidden_states, logits_indices,
-            attn_metadata)
+        _draft_token_ids, _hidden_states = self.drafter.propose(target_token_ids, position_ids, target_hidden_states,
+                                                                logits_indices, attn_metadata)
         return _draft_token_ids, _hidden_states
 
     def propose_ngram_draft_token_ids(
