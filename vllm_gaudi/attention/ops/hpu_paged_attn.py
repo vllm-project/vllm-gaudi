@@ -5,7 +5,7 @@
 ###############################################################################
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 from vllm_gaudi.extension import cache_ops, ops
@@ -63,7 +63,7 @@ class HPUPagedAttention:
 
     @staticmethod
     def split_kv_cache(
-        kv_cache: Tuple,
+        kv_cache: tuple,
         num_kv_heads: int,
         head_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
