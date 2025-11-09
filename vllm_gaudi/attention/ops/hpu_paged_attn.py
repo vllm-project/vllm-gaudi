@@ -102,9 +102,9 @@ class HPUPagedAttention:
         dst_key_scales = dst_kv_cache[2]
         src_value_scales = src_kv_cache[3]
         dst_value_scales = dst_kv_cache[3]
-        if src_key_scales:
+        if src_key_scales is not None:
             cache_ops.swap_blocks(src_key_scales, dst_key_scales, src_to_dsts)
-        if src_value_scales:
+        if src_value_scales is not None:
             cache_ops.swap_blocks(src_value_scales, dst_value_scales, src_to_dsts)
 
     @staticmethod
