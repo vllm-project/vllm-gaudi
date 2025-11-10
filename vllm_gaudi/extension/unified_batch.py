@@ -198,7 +198,8 @@ def create_unified_batch(req_ids: list[str], all_token_ids: torch.Tensor, num_co
                          block_size: int, dtype: torch.dtype, persistent_ctx: UnifiedBatchPersistentContext,
                          bucketing_fn: Callable[[bool, int, int, int, int],
                                                 tuple[int, int, int,
-                                                      int]], get_dp_padding_fn: Callable[[int], int]) -> UnifiedBatch:
+                                                      int]], get_dp_padding_fn: Callable[[int], int],
+                        input_ids_hpu: Optional[torch.Tensor] = None, num_decodes: int = 0) -> UnifiedBatch:
     """ Calculate all necessary tensors needed for batch scheduling """
     # Track original dtypes before converting to numpy
     token_ids_dtype = all_token_ids.dtype

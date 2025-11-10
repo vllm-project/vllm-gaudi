@@ -2848,7 +2848,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         return create_unified_batch(self.input_batch.req_ids, all_token_ids, num_computed_tokens, num_scheduled_tokens,
                                     num_prompt_tokens, block_table, self.block_size, self.dtype,
-                                    self.unified_attn_persistent_ctx, self.unified_bucketing_fn, self.get_dp_padding)
+                                    self.unified_attn_persistent_ctx, self.unified_bucketing_fn, self.get_dp_padding,
+                                    input_ids_hpu, num_decodes)
 
     @torch.inference_mode()
     def unified_execute_model(
@@ -2889,7 +2890,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             sampling_metadata = self._prepare_sampling(batch_changed, selected_req_ids, pad_to=logits_device.shape[0])
             sampler_output = self.sampler(logits=logits_device, sampling_metadata=sampling_metadata)
 
-<<<<<<< HEAD
         # Copy some objects so they don't get modified after returning.
         # This is important when using async scheduling.
         req_ids_output_copy = self.input_batch.req_ids.copy()
@@ -2908,35 +2908,32 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 for i, req_id in enumerate(self.input_batch.req_ids) if i not in invalid_req_indices_set
             }
         else:
-            sampled_token_ids_cpu = sampler_output.sampled_token_ids.cpu()
-=======
-        with self.profiler.record_event('internal', 'unified_postprocess'):
-            sampled_token_ids_cpu = sampler_output.sampled_token_ids.cpu()
-            sampled_token_ids: list[list[int]] = [[] for _ in batch.req_ids_cpu]
->>>>>>> origin/main
-            for req_id, tokens in zip(selected_req_ids, sampled_token_ids_cpu.tolist()):
-                sampled_token_ids[self.input_batch.req_id_to_index[req_id]].extend(tokens)
+            with self.profiler.record_event('internal', 'unified_postprocess'):
+                sampled_token_ids_cpu = sampler_output.sampled_token_ids.cpu()
+                sampled_token_ids: list[list[int]] = [[] for _ in batch.req_ids_cpu]
+                for req_id, tokens in zip(selected_req_ids, sampled_token_ids_cpu.tolist()):
+                    sampled_token_ids[self.input_batch.req_id_to_index[req_id]].extend(tokens)
 
-            #TODO: add support for multi-token output
-            assert sampled_token_ids_cpu.size(1) == 1, 'Currently only single token output is supported!'
-            sampled_token_ids_cpu = sampled_token_ids_cpu.flatten()
-            htorch.core.mark_step()
+                #TODO: add support for multi-token output
+                assert sampled_token_ids_cpu.size(1) == 1, 'Currently only single token output is supported!'
+                sampled_token_ids_cpu = sampled_token_ids_cpu.flatten()
+                htorch.core.mark_step()
 
-            sampled_token_ids_cpu = sampled_token_ids_cpu.index_select(0, batch.logits_groups_cpu)
-            self.input_batch.token_ids_cpu_tensor.index_put_((batch.logits_groups_cpu, batch.new_token_positions_cpu),
-                                                             sampled_token_ids_cpu)
+                sampled_token_ids_cpu = sampled_token_ids_cpu.index_select(0, batch.logits_groups_cpu)
+                self.input_batch.token_ids_cpu_tensor.index_put_((batch.logits_groups_cpu, batch.new_token_positions_cpu),
+                                                                sampled_token_ids_cpu)
 
-            ######### UPDATE REQUEST STATE WITH GENERATED TOKENS #########
-            num_reqs = len(selected_req_ids)
-            for req_id in self.input_batch.req_ids[:num_reqs]:
-                req_state = self.requests[req_id]
-                i = self.input_batch.req_id_to_index[req_id]
-                seq_len = (req_state.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id])
-                token_ids = sampled_token_ids[i]
-                num_tokens = len(token_ids)
-                self.input_batch.token_ids_cpu[i, seq_len:seq_len + num_tokens] = token_ids
-                self.input_batch.num_tokens[i] += len(token_ids)
-                req_state.output_token_ids.extend(token_ids)
+                ######### UPDATE REQUEST STATE WITH GENERATED TOKENS #########
+                num_reqs = len(selected_req_ids)
+                for req_id in self.input_batch.req_ids[:num_reqs]:
+                    req_state = self.requests[req_id]
+                    i = self.input_batch.req_id_to_index[req_id]
+                    seq_len = (req_state.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id])
+                    token_ids = sampled_token_ids[i]
+                    num_tokens = len(token_ids)
+                    self.input_batch.token_ids_cpu[i, seq_len:seq_len + num_tokens] = token_ids
+                    self.input_batch.num_tokens[i] += len(token_ids)
+                    req_state.output_token_ids.extend(token_ids)
 
         if self.use_async_scheduling:
             model_runner_output = ModelRunnerOutput(
