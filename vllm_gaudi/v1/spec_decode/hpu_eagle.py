@@ -23,7 +23,6 @@ class HpuEagleProposer(EagleProposer):
                     target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
-        # htorch.core.mark_step()
         ret_hidden_states = self.model(
             input_ids=target_token_ids,
             positions=target_positions,
@@ -31,7 +30,7 @@ class HpuEagleProposer(EagleProposer):
             inputs_embeds=None,
             attn_metadata=common_attn_metadata,
         )
-        # htorch.core.mark_step()
+
         if self.method in ("deepseek_mtp", "ernie_mtp"):
             last_hidden_states = ret_hidden_states
             hidden_states = last_hidden_states
