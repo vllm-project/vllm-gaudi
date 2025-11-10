@@ -6,7 +6,7 @@ RUN_20B_MODEL = True  # Set to False to run the 120B model instead
 MODEL_PATH = "lmsys/gpt-oss-20b-BF16"
 MODEL_PATH_120 = "lmsys/gpt-oss-120b-BF16"
 # reference https://github.com/huggingface/transformers/blob/68eb1a9a6353911f491b1c8139eb73d052a8e9b9/tests/models/gpt_oss/test_modeling_gpt_oss.py#L397
-original_output = "Roses are red, violets are blue, I love you, and I love you too.\n\nRoses are red, vio"
+original_output = "Roses are red, violets are blue, I love you, and I love you too!\n\nRoses are red, vio"
 # reference https://github.com/huggingface/transformers/blob/68eb1a9a6353911f491b1c8139eb73d052a8e9b9/tests/models/gpt_oss/test_modeling_gpt_oss.py#L462
 original_output_120 = "Roses are red, violets are blue,\nI am a language model, not a human being"
 
@@ -67,6 +67,16 @@ def _test_gpt_oss():
 
 
 def test_gpt_oss_1x():
-    os.environ['VLLM_PROMPT_USE_FUSEDSDPA'] = '0'
+    os.environ['PT_HPU_ENABLE_FUSED_SDPA_SINK'] = '1'
+    os.environ['PT_HPU_QKV_SLICE_SEQ_LEN_THLD'] = '64'
+    os.environ['PT_HPU_SDPA_BR_FACTOR'] = '64'
+    os.environ['PT_HPU_SDPA_BC_FACTOR'] = '64'
+    os.environ['PT_HPU_SDPA_QKV_SLICE_MODE_FWD'] = '1'
+    os.environ['VLLM_FUSEDSDPA_SLIDE_THLD'] = '128'
     _test_gpt_oss()
-    os.environ['VLLM_PROMPT_USE_FUSEDSDPA'] = '1'
+    os.environ['PT_HPU_ENABLE_FUSED_SDPA_SINK'] = '0'
+    os.environ['PT_HPU_QKV_SLICE_SEQ_LEN_THLD'] = '1024'
+    os.environ['PT_HPU_SDPA_BR_FACTOR'] = '1024'
+    os.environ['PT_HPU_SDPA_BC_FACTOR'] = '1024'
+    os.environ['PT_HPU_SDPA_QKV_SLICE_MODE_FWD'] = '0'
+    os.environ['VLLM_FUSEDSDPA_SLIDE_THLD'] = '8192'

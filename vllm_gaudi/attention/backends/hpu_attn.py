@@ -589,15 +589,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             common_args = self.common_attention_args(block_list, key_cache, value_cache, attn_metadata.block_size)
 
             if self.sliding_window and hasattr(attn_metadata,
-                                               'window_attn_bias') and attn_metadata.window_attn_bias is not None \
-                                                and self.prefill_impl == 'naive_impl':
+                                               'window_attn_bias') and attn_metadata.window_attn_bias is not None:
                 attn_bias = attn_metadata.window_attn_bias
-            if self.sliding_window:
-                # TODO - change 128 to proper window size
-                window_size = (
-                    128,
-                    0,
-                )
+            elif self.sliding_window:
+                window_size = (self.sliding_window, 0)
                 common_args["window_size"] = window_size
 
             out = ops.prompt_attention(impl=self.prefill_impl,
