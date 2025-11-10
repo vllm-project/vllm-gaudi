@@ -1131,12 +1131,6 @@ def scaled_fp8_quant(
     if scale is None:
         raise "dynamic scaled_fp8_quant not implemented for HPU"
         # TODO: calculate scale to match gaudi2 240 range instead of 448
-        if use_per_token_if_dynamic:
-            scale = torch.empty((input.numel() // input.shape[-1], 1), device=input.device, dtype=torch.float32)
-            torch.ops._C.dynamic_per_token_scaled_fp8_quant(output, input, scale, scale_ub)
-        else:
-            scale = torch.zeros(1, device=input.device, dtype=torch.float32)
-            torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
         output = torch.ops.hpu.cast_to_fp8_v2(input, 1 / scale, False, False, dtype=torch.float8_e4m3fn)[0]
 
