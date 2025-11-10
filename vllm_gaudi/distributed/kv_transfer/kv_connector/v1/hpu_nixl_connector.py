@@ -618,13 +618,16 @@ def get_finished(self) -> tuple[set[str], set[str]]:
             "Rank %s, get_finished: %s requests done sending "
             "and %s requests done recving", self.tp_rank,
             len(done_sending), len(done_recving))
+        for req_id in done_sending:
+            logger.info(f"req_id={req_id} Get new notifs and done_sending at {time.perf_counter()}")
+
     if self.is_hetero and self.kv_buffer_device == "hpu":
         #import remote_pdb; remote_pdb.set_trace()
         t1 = time.perf_counter()
         remote_block_size = self.block_size // self.block_factor
         block_size, n_kv_heads, head_dim = self.block_shape
         for req_id in done_recving:
-            logger.info(f"done_recving in get_finished for {req_id=} at {time.perf_counter()=}")
+            logger.info(f"req_id={req_id} Get_finished done_recving at {time.perf_counter()}")
             meta = self._recving_metadata.pop(req_id)
 
             local_block_ids = meta.local_block_ids
@@ -678,6 +681,7 @@ def get_finished(self) -> tuple[set[str], set[str]]:
             count, envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT)
         del self._reqs_to_send[req_id]
         done_sending.add(req_id)
+        logger.info(f"req_id={req_id} Timeout and done_sending at {time.perf_counter()}")
 
     return done_sending, done_recving
 
@@ -818,6 +822,7 @@ def _read_blocks(self, local_block_ids: list[int],
     assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
     # Prepare transfer with Nixl.
+    make_preped_xfer_bgn = time.perf_counter()
     handle = self.nixl_wrapper.make_prepped_xfer(
         "READ",
         local_xfer_side_handle,
@@ -828,7 +833,8 @@ def _read_blocks(self, local_block_ids: list[int],
     )
 
     # Begin async xfer.
-    logger.info(f"kv_cache real transfer starts for {request_id=} at {time.perf_counter()=}")
+    make_preped_xfer_end = time.perf_counter()
+    logger.info(f"req_id={request_id} Finish nixl_wrapper.make_prepped_xfer at {make_preped_xfer_end} after {make_preped_xfer_end - make_preped_xfer_bgn} seconds")
     self.nixl_wrapper.transfer(handle)
 
     # Use handle to check completion in future step().

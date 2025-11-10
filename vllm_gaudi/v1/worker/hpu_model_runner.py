@@ -2861,6 +2861,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         prefill_start_idx = num_decodes
                         invalid_req_indices.append(num_decodes + idx)
                 htorch.core.mark_step()
+                prefill_execute_bgn = time.perf_counter()
                 non_flattened_hidden_states, aux_hidden_states, \
                     sample_hidden_states, logits_device = \
                     self._execute_model_generic(
@@ -2873,6 +2874,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         warmup_mode=warmup_mode,)
                 if self.do_mark_step:
                     htorch.core.mark_step()
+                prefill_execute_end = time.perf_counter()
+                logger.info(f"req_id={req_id} finishes prefill execute at {prefill_execute_end} after {prefill_execute_end - prefill_execute_bgn} seconds")
                 non_flattened_hidden_states_prefills.append(non_flattened_hidden_states)
                 if self.use_aux_hidden_state_outputs:
                     aux_hidden_states_prefills.append(aux_hidden_states)
