@@ -19,6 +19,7 @@ class UnifiedBatch:
     logits_indices: torch.Tensor
     logits_groups_cpu: torch.Tensor
     attn_metadata: HPUUnifiedAttentionMetadata
+    invalid_req_indices: list[int]
 
 
 def to_hpu(data: Optional[Union[torch.Tensor, list]], dtype: Optional[torch.dtype] = None) -> torch.Tensor:
@@ -193,13 +194,19 @@ class UnifiedBatchPersistentContext:
         self.causal_bias = np.full((max_num_batched_tokens, max_num_batched_tokens), -math.inf, dtype=np_dtype)
 
 
-def create_unified_batch(req_ids: list[str], all_token_ids: torch.Tensor, num_computed_tokens: torch.Tensor,
-                         num_scheduled_tokens: torch.Tensor, num_prompt_tokens: torch.Tensor, block_table: torch.Tensor,
-                         block_size: int, dtype: torch.dtype, persistent_ctx: UnifiedBatchPersistentContext,
-                         bucketing_fn: Callable[[bool, int, int, int, int],
-                                                tuple[int, int, int,
-                                                      int]], get_dp_padding_fn: Callable[[int], int],
-                        input_ids_hpu: Optional[torch.Tensor] = None, num_decodes: int = 0) -> UnifiedBatch:
+def create_unified_batch(req_ids: list[str],
+                         all_token_ids: torch.Tensor,
+                         num_computed_tokens: torch.Tensor,
+                         num_scheduled_tokens: torch.Tensor,
+                         num_prompt_tokens: torch.Tensor,
+                         block_table: torch.Tensor,
+                         block_size: int,
+                         dtype: torch.dtype,
+                         persistent_ctx: UnifiedBatchPersistentContext,
+                         bucketing_fn: Callable[[bool, int, int, int, int], tuple[int, int, int, int]],
+                         get_dp_padding_fn: Callable[[int], int],
+                         input_ids_hpu: Optional[torch.Tensor] = None,
+                         num_decodes: int = 0) -> UnifiedBatch:
     """ Calculate all necessary tensors needed for batch scheduling """
     # Track original dtypes before converting to numpy
     token_ids_dtype = all_token_ids.dtype
@@ -306,25 +313,46 @@ def create_unified_batch(req_ids: list[str], all_token_ids: torch.Tensor, num_co
     fmin = torch.finfo(dtype).min
     feps = torch.finfo(dtype).tiny
 
+    token_ids_device = hpu_tensor(token_ids, (target_qlen, ), -1, token_ids_dtype)
+    logits_indices_device = hpu_tensor(logits_indices, (target_logits, ), -1, logits_indices_dtype)
+
+    # Async scheduling.
+    invalid_req_indices = []
+    if input_ids_hpu is not None:
+        token_ids_device[:num_decodes] = input_ids_hpu[:num_decodes]
+        # NOTE(tianmu-li): Align behavior of incomplete prompt with gpu_model_runner
+        # If logits_indices is smaller than req_id, the last request is a chunked prompt request that
+        # hasn't finished in this step. We add the last token position to logits_indices to ensure
+        # the last token of the chunk is sampled. This sampled token will be discarded later
+        if logits_indices.shape[0] < len(req_ids):
+            # Use query_len - 1 to fill the missing logits_indices
+            logits_indices_append = np.full((1, ), query_len - 1, dtype=logits_indices.dtype)
+            logits_indices_append = hpu_tensor(logits_indices_append, (1, ), -1, logits_indices_dtype)
+            logits_indices_device = torch.cat([logits_indices_device, logits_indices_append])
+            # Discard partial prefill logit for async scheduling
+            # Depends on 1 decode token/batch
+            invalid_req_indices.append(len(req_ids) - 1)
+
     # Convert numpy arrays to HPU tensors with proper dtypes
-    return UnifiedBatch(req_ids_cpu=req_ids,
-                        token_ids=hpu_tensor(token_ids, (target_qlen, ), -1, token_ids_dtype),
-                        token_positions=hpu_tensor(token_positions, (target_qlen, ), -1, token_positions_dtype),
-                        new_token_positions_cpu=torch.from_numpy(new_token_positions).to(token_positions_dtype),
-                        logits_indices=hpu_tensor(logits_indices, (target_logits, ), -1, logits_indices_dtype),
-                        logits_groups_cpu=torch.from_numpy(logits_groups).to(logits_indices_dtype),
-                        attn_metadata=HPUUnifiedAttentionMetadata(
-                            block_size=block_size,
-                            slot_mapping=hpu_tensor(token_slots, (target_qlen, ), -1, slot_mapping_dtype),
-                            causal_bias=hpu_tensor(causal_bias, (target_qlen, target_qlen), -math.inf, dtype),
-                            causal_width=default_causal_width,
-                            shared_blocks=hpu_tensor(shared_blocks, (target_shared_blocks, ), -1, slot_mapping_dtype),
-                            shared_bias=hpu_tensor(shared_bias, (target_qlen, target_shared_blocks, block_size),
-                                                   -math.inf, dtype),
-                            unique_blocks=target_unique_blocks,
-                            unique_block_mapping=hpu_tensor(unique_block_mapping, (target_unique_blocks, ), -1,
-                                                            slot_mapping_dtype),
-                            unique_bias=hpu_tensor(unique_bias, (target_unique_blocks, block_size), -math.inf, dtype),
-                            fmin=to_hpu(fmin),
-                            feps=to_hpu(feps),
-                        ))
+    return UnifiedBatch(
+        req_ids_cpu=req_ids,
+        token_ids=token_ids_device,
+        token_positions=hpu_tensor(token_positions, (target_qlen, ), -1, token_positions_dtype),
+        new_token_positions_cpu=torch.from_numpy(new_token_positions).to(token_positions_dtype),
+        logits_indices=logits_indices_device,
+        logits_groups_cpu=torch.from_numpy(logits_groups).to(logits_indices_dtype),
+        attn_metadata=HPUUnifiedAttentionMetadata(
+            block_size=block_size,
+            slot_mapping=hpu_tensor(token_slots, (target_qlen, ), -1, slot_mapping_dtype),
+            causal_bias=hpu_tensor(causal_bias, (target_qlen, target_qlen), -math.inf, dtype),
+            causal_width=default_causal_width,
+            shared_blocks=hpu_tensor(shared_blocks, (target_shared_blocks, ), -1, slot_mapping_dtype),
+            shared_bias=hpu_tensor(shared_bias, (target_qlen, target_shared_blocks, block_size), -math.inf, dtype),
+            unique_blocks=target_unique_blocks,
+            unique_block_mapping=hpu_tensor(unique_block_mapping, (target_unique_blocks, ), -1, slot_mapping_dtype),
+            unique_bias=hpu_tensor(unique_bias, (target_unique_blocks, block_size), -math.inf, dtype),
+            fmin=to_hpu(fmin),
+            feps=to_hpu(feps),
+        ),
+        invalid_req_indices=invalid_req_indices,
+    )
