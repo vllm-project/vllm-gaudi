@@ -1,53 +1,74 @@
 # CI Failures
 
-## CI
+If you want to contribute to the vLLM Hardware Plugin for Intel® Gaudi® project, familiarize with our process to understand how automated testing and integration are handled.
 
-For all PRs that are created in vllm-gaudi repository all checks in CI are required:
-- pre-commit & DCO
+## CI Validation
+
+Pull requests created in the [vllm-gaudi](https://github.com/vllm-project/vllm-gaudi) repository require the following CI checks:
+
+- Pre-commit and DCO
 - HPU tests
-- HPU Gaudi tests
+- HPU Intel® Gaudi® tests
 
-### Pre-commit & DCO
-To install run:
+### Pre-Commit and DCO
 
-```pre-commit install```
+We use the `pre-commit` hook to ensure each commit meets certain standards before it is added to the repository. To install it, run this command:
 
-This way all of your commits should be correctly formated and signed-off. If you need to manually sign off your commits, remember to use ```git commit -s``` to pass DCO.
+```bash
+pre-commit install
+```
 
-### HPU tests
-HPU tests consist of several unit tests:
-- pre merge tests
-- unit tests
-- perf test
-- feature tests
-- e2e tests
+This ensures that all of your commits are correctly formatted and signed off. If you need to manually sign off your commits, use `git commit -s` to pass DCO.
 
-All of the above tests are mandatory. Those tests operate in fast fail mode, meaning if one test fails, all of the others won't be triggered.
+### HPU Tests
 
-### HPU Gaudi tests
-Additional Gaudi tests are expectd to pass, but aren't mandatory. Those tests are being run on internal Jenkins system, so results are internal only. Those tests can be run by CODEOWNERs and TESTOWNERs only.
+HPU tests consist of the following tests:
 
-## Docs Pull Requests
-All PRs that do not interfere in code, like docstring changes or README updates can be merged without HPU tests and Gaudi tests. It is still required to pass pre-commit check.
+- Pre-merge tests
+- Unit tests
+- Performance test
+- Feature tests
+- E2E tests
+
+All of the these tests are mandatory and operate in fast fail mode, meaning if one test fails, next tests will not be triggered.
+
+### HPU Intel® Gaudi® Tests
+
+Additional Intel® Gaudi® tests are expected to pass, but are not mandatory. Only code owners and test owners can run these tests on the internal Jenkins system. The results are internal.
+
+## Documentation Validation
+
+All pull requests that do not interfere with code, such as documentation changes or readme updates, can be merged without HPU tests and Intel® Gaudi® tests. However, they need to pass the pre-commit check.
 
 ## Hourly Checks and Tests
-On vllm-gaudi repository hourly tests can be found in ```Hourly Commit Check and Tests``` under ```Actions``` tab. This tab also allows developers to manually trigger hourly tests on selected branch.
+In the [vllm-gaudi](https://github.com/vllm-project/vllm-gaudi) repository hourly tests are available in `Hourly Commit Check and Tests` under the `Actions` tab. This tab also allows developers to manually trigger hourly tests on a selected branch.
 
-If the last hourly test is failing it means that vllm-gaudi main branch doesn't work with upstream newest main commit. To find last good commit check [last good commit](https://github.com/vllm-project/vllm-gaudi/blob/vllm/last-good-commit-for-vllm-gaudi/VLLM_STABLE_COMMIT).
-
-Failing hourly checks will be fixed by developers as soon as possible.
+If the last hourly test fails, it indicates that the `main` branch is not compatible with the latest commit from the upstream `main` branch. To find the last good commit, see [last good commit](https://github.com/vllm-project/vllm-gaudi/tree/vllm/last-good-commit-for-vllm-gaudi/VLLM_STABLE_COMMIT). Failing hourly checks are fixed by developers as soon as possible.
 
 ## Troubleshooting
-### Unreleated failures
-Sometimes there may be some issues that are unreleated to your specific changes in code. Often causeb by connection problems. In this case failed checks should be reruned. Those errors are:
-- ```Error response from daemon: No such container```
-- ```ValueError: Unsupported device: the device type is 7.```
-- ```[Device not found] Device acquire failed.```
 
-### Accuracy and functionality issues
-Accuracy issues can be tracked in HPU Gaudi tests with gsm8k runs. If any check fails with accuracy - too low accuracy compare to the one measured, or functionality issues, the **PR can't be merged** until solved.
+Follow these instructions to fix common CI failure issues.
 
-### Pre-commit failures
-To run pre-commit test manually run:
+### Unrelated Failures
 
-```pre-commit run --show-diff-on-failure --color=always --all-files --hook-stage manual```
+Sometimes you may see issues that are unrelated to your code changes, often caused by temporary connection problems. These issues trigger errors, such as the following:
+
+`Error response from daemon: No such container`
+
+`ValueError: Unsupported device: the device type is 7.`
+
+`[Device not found] Device acquire failed.`
+
+If you see such errors, simply rerun the failed checks.
+
+### Accuracy and Functionality Issues
+
+Accuracy issues can be tracked in HPU Intel® Gaudi® tests with the `gsm8k` runs. If any functionality or accuracy issues are detected in a pull request, such as too low accuracy in comparison to the one measured, it can not be merged until the issue is resolved.
+
+### Pre-Commit Failures
+
+To manually run pre-commit test, use the following command:
+
+```bash
+pre-commit run --show-diff-on-failure --color=always --all-files --hook-stage manual
+```
