@@ -326,8 +326,10 @@ def create_unified_batch(req_ids: list[str],
         # the last token of the chunk is sampled. This sampled token will be discarded later
         if logits_indices.shape[0] < len(req_ids):
             # Use query_len - 1 to fill the missing logits_indices
-            logits_indices_append = np.full((1, ), query_len - 1, dtype=logits_indices.dtype)
-            logits_indices_append = hpu_tensor(logits_indices_append, (1, ), -1, logits_indices_dtype)
+            logits_indices_append = torch.full((1, ),
+                                               query_len - 1,
+                                               dtype=logits_indices_dtype,
+                                               device=logits_indices_device.device)
             logits_indices_device = torch.cat([logits_indices_device, logits_indices_append])
             # Discard partial prefill logit for async scheduling
             # Depends on 1 decode token/batch

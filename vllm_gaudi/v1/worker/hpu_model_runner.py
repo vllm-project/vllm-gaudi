@@ -3143,9 +3143,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         # When there are multiple requests in the batch (e.g. self.use_merged_prefill=True),
                         # the last token position is the sum of all prompt lengths - 1
                         # This logic also holds when there is only one request in the batch
-                        logits_indices_append = torch.tensor([torch.sum(prompt_len) - 1],
-                                                             device=token_ids.device,
-                                                             dtype=torch.int32)
+                        logits_indices_append = torch.full((1, ),
+                                                           torch.sum(prompt_len) - 1,
+                                                           device=logits_indices.device,
+                                                           dtype=logits_indices.dtype)
                         logits_indices = torch.cat([logits_indices, logits_indices_append])
                     if self.use_async_scheduling:
                         # Discard partial prefill logit for async scheduling
