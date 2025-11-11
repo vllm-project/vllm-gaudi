@@ -650,14 +650,14 @@ def get_finished(self) -> tuple[set[str], set[str]]:
                 k_reshaped = k_blocks.reshape(  
                     len(local_block_ids) * self.block_factor, n_kv_heads, remote_block_size, head_dim  
                 ).permute(0, 2, 1, 3).contiguous().reshape(-1, n_kv_heads, head_dim)  
-                k.index_put_((slot_indices,), k_reshaped)  
+                k.index_copy_(0, slot_indices, k_reshaped)
                 
                 # Same for v  
                 v_blocks = v.index_select(0, slot_indices)  
                 v_reshaped = v_blocks.reshape(  
                     len(local_block_ids) * self.block_factor, n_kv_heads, remote_block_size, head_dim  
                 ).permute(0, 2, 1, 3).contiguous().reshape(-1, n_kv_heads, head_dim)  
-                v.index_put_((slot_indices,), v_reshaped)
+                v.index_copy_(0, slot_indices, v_reshaped)
             #import remote_pdb; remote_pdb.set_trace()
             t2 = time.perf_counter()
             tt = t2-t1
