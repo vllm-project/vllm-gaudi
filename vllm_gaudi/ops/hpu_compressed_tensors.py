@@ -5,6 +5,7 @@ from compressed_tensors import CompressionFormat
 
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, FusedMoEConfig)
 from compressed_tensors.quantization import (QuantizationStrategy)
 
@@ -112,8 +113,8 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         layer.weight = torch.nn.Parameter(layer.weight.t(), requires_grad=False)
 
         if layer.scheme.is_static_input_scheme:
-            # required by torch.compile to be torch.nn.Parameter
-            layer.input_scale = torch.nn.Parameter(layer.input_scale.data, requires_grad=False)
+            # required by torch.compile to be torch.nn.Parameter, only per-tensor supported
+            layer.input_scale = torch.nn.Parameter(layer.input_scale.max(), requires_grad=False)
 
     def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int, output_partition_sizes: list[int],
                        input_size: int, output_size: int, params_dtype: torch.dtype, **extra_weight_attrs):
@@ -703,3 +704,6 @@ compressed_tensors_moe.CompressedTensorsWNA16MoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod
 compressed_tensors_moe.CompressedTensorsWNA16MarlinMoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod # Override default WNA16 MoE method
+
+# support weight_loader_v2
+WEIGHT_LOADER_V2_SUPPORTED.append("HPUCompressedTensorsLinearMethod")
