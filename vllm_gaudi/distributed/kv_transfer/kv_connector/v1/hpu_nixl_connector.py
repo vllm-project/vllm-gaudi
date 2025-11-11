@@ -648,8 +648,6 @@ def get_finished(self) -> tuple[set[str], set[str]]:
                 # Process all blocks in one operation  
                 k_blocks = k.index_select(0, slot_indices)  
                 k_reshaped = k_blocks.reshape(  
-                    len(local_block_ids), self.block_size, n_kv_heads, head_dim  
-                ).reshape(  
                     len(local_block_ids) * self.block_factor, n_kv_heads, remote_block_size, head_dim  
                 ).permute(0, 2, 1, 3).contiguous().reshape(-1, n_kv_heads, head_dim)  
                 k.index_put_((slot_indices,), k_reshaped)  
@@ -657,8 +655,6 @@ def get_finished(self) -> tuple[set[str], set[str]]:
                 # Same for v  
                 v_blocks = v.index_select(0, slot_indices)  
                 v_reshaped = v_blocks.reshape(  
-                    len(local_block_ids), self.block_size, n_kv_heads, head_dim  
-                ).reshape(  
                     len(local_block_ids) * self.block_factor, n_kv_heads, remote_block_size, head_dim  
                 ).permute(0, 2, 1, 3).contiguous().reshape(-1, n_kv_heads, head_dim)  
                 v.index_put_((slot_indices,), v_reshaped)
@@ -797,8 +793,8 @@ def _read_blocks(self, local_block_ids: list[int],
     # workers will issue xfers to parts of the P worker remote kv caches.
 
     # Get descs ids.
-    local_block_descs_ids: list[int] = []
-    remote_block_descs_ids: list[int] = []
+    local_block_descs_ids: np.ndarray
+    remote_block_descs_ids: np.ndarray
 
     if self.block_factor > 1:
         local_sub_block_ids = [b for x in local_block_ids for b in range(x * self.block_factor, (x + 1) * self.block_factor)]
@@ -824,6 +820,8 @@ def _read_blocks(self, local_block_ids: list[int],
     else:
         # TODO(mgoin): remove this once we have hybrid memory allocator
         # Optimization for models with local attention (Llama 4)
+        local_descs_list = []
+        remote_descs_list = []
         for layer_idx, block_window in enumerate(
                 self.block_window_per_layer):
             # For each layer:
@@ -842,9 +840,11 @@ def _read_blocks(self, local_block_ids: list[int],
                 self.engine_id, layer_local_block_ids, layer_idx)
             layer_remote_desc_ids = self._get_block_descs_ids(
                 dst_engine_id, layer_remote_block_ids, layer_idx)
+            local_descs_list.append(layer_local_desc_ids)
+            remote_descs_list.append(layer_remote_desc_ids)
 
-            local_block_descs_ids.extend(layer_local_desc_ids)
-            remote_block_descs_ids.extend(layer_remote_desc_ids)
+            local_block_descs_ids = np.concatenate(local_descs_list)
+            remote_block_descs_ids = np.concatenate(remote_descs_list)
 
     assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
@@ -871,41 +871,6 @@ def _read_blocks(self, local_block_ids: list[int],
 
 
 NixlConnectorWorker._read_blocks = _read_blocks
-
-def _get_block_descs_ids(self,
-                         engine_id: str,
-                         block_ids: list[int],
-                         layer_idx: Optional[int] = None) -> list[int]:
-    """
-    Get the descs ids for a set of block ids.
-    If layer_idx is provided, we use the region_ids for the given layer.
-    Otherwise, we use all regions.
-    """
-    if layer_idx is None:
-        region_ids = range(self.num_regions)
-    else:
-        assert layer_idx < self.num_layers
-        if self.num_layers < self.num_regions:
-            # If we have more regions than layers, we assume that
-            # the regions are organized as [K0, V0, K1, V1, ...]
-            # and we select K_i and V_i
-            assert 2 * self.num_layers == self.num_regions
-            region_ids = range(2 * layer_idx, 2 * layer_idx + 2)
-        else:
-            # Otherwise, we assume we have MLA and select i-th layer
-            assert self.num_layers == self.num_regions
-            region_ids = range(layer_idx, layer_idx + 1)
-
-    num_blocks = self.dst_num_blocks[engine_id]
-
-    # Compute the desc ids for each block.
-    descs_ids: list[int] = []
-    for reg_id in region_ids:
-        for block_id in block_ids:
-            descs_ids.append(reg_id * num_blocks + block_id)
-    return descs_ids
-
-NixlConnectorWorker._get_block_descs_ids = _get_block_descs_ids
 
 def start_load_kv(self, metadata: NixlConnectorMetadata):
     """
