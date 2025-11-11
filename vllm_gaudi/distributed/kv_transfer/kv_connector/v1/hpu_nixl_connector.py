@@ -103,7 +103,7 @@ def add_new_req(
         tp_size=kv_transfer_params.get("tp_size", 1),
         is_mem_hit=kv_transfer_params.get("is_mem_hit", False),
     )
-    if save_to_host:
+    if save_to_host or os.getenv('PT_HPU_GPU_HETERO2', '0') == '1':
         self.reqs_to_save[request_id] = _req
     if load_remote_cache:
         self.reqs_to_recv[request_id] = _req
@@ -139,6 +139,8 @@ def wait_for_save(self):
     assert self.connector_worker is not None
     assert isinstance(self._connector_metadata, NixlConnectorMetadata)
     self.connector_worker.rewrite_kv_based_on_transfer_layout(self._connector_metadata)
+    if self.connector_worker.is_hetero2:
+        self.connector_worker.rewrite_kv_based_on_transfer_layout_hetero(self._connector_metadata)
     if self.connector_worker.use_host_buffer and \
        self.connector_worker.copy_blocks:
         self.connector_worker.save_kv_to_host(self._connector_metadata)
@@ -196,13 +198,16 @@ def update_state_after_alloc(self, request: "Request",
     logger.debug(f'buke update_state_after_alloc: {vars(request)=}')
     if not params:
         return
-    if self.use_host_buffer and params.get("do_remote_decode"):
+    if (self.is_hetero2 or self.use_host_buffer) and params.get("do_remote_decode"):
         # NOTE: when accelerator is not directly supported by Nixl,
         # prefilled blocks need to be saved to host memory before transfer.
 
         # figure out full computed blocks to save
         block_ids = blocks.get_block_ids()[0]
-        all_full = request.num_tokens % self.block_size == 0
+        if self.is_hetero2:
+            all_full = True
+        else:
+            all_full = request.num_tokens % self.block_size == 0
         full_block_ids = (block_ids if all_full else block_ids[:-1])
         # TODO: skip the blocks that are already in the host xfer buffer.
         # Currently, the host xfer buffer block is 1-to-1 mapped to device
@@ -286,6 +291,8 @@ def request_finished(
 
     # Get computed blocks.
     all_full = request.num_computed_tokens % self.block_size == 0
+    if self.is_hetero2:
+        all_full = True
     computed_block_ids = block_ids if all_full else block_ids[:-1]
 
     # If prompt < block_size, no xfer so free blocks immediately.
@@ -297,8 +304,11 @@ def request_finished(
         ) + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
     
     if self.is_hetero2:
-        computed_block_ids = [i for x in computed_block_ids+[computed_block_ids[-1]+1] for i in range(x * self.block_factor, (x + 1) * self.block_factor)]
-        print('buke: ', computed_block_ids)
+        computed_block_ids = [i for x in computed_block_ids for i in range(x * self.block_factor, (x + 1) * self.block_factor)]
+        logger.debug('buke: ', computed_block_ids)
+        remote_block_ids_num = math.ceil(request.num_prompt_tokens / (self.block_size // self.block_factor))
+        computed_block_ids = computed_block_ids[:remote_block_ids_num]
+        logger.debug('buke computed_block_ids to: ', remote_block_ids_num, computed_block_ids)
     return delay_free_blocks, dict(
         do_remote_prefill=True,
         do_remote_decode=False,
@@ -326,8 +336,6 @@ def NixlConnectorWorker__init__(self, vllm_config: VllmConfig, engine_id: str):
     self.block_shape = None
     self.is_hetero = os.getenv('PT_HPU_ENABLE_RESTORE_KV_LAYOUT', '0') == '1'
     self.is_hetero2 = os.getenv('PT_HPU_GPU_HETERO2', '0') == '1'
-    if self.is_hetero2:
-        self.block_size = self.block_size // 8
     self.tp_rank = get_tensor_model_parallel_rank()
     self.world_size = get_tensor_model_parallel_world_size()
     self.tp_group = get_tp_group()
@@ -710,6 +718,25 @@ def rewrite_kv_based_on_transfer_layout(self, metadata: NixlConnectorMetadata):
         torch.hpu.synchronize()
 
 NixlConnectorWorker.rewrite_kv_based_on_transfer_layout = rewrite_kv_based_on_transfer_layout
+
+def rewrite_kv_based_on_transfer_layout_hetero(self, metadata: NixlConnectorMetadata):
+    s = time.perf_counter()
+    for req_id, meta in metadata.reqs_to_save.items():
+        local_block_ids = meta.local_block_ids
+        slot_indices = torch.tensor(np.concatenate([
+                np.arange(start=block_idx * self.block_size,  stop=(block_idx + 1) * self.block_size) \
+                for block_idx in local_block_ids
+            ]), device=self.kv_buffer_device, dtype=torch.int64)
+        for k, v in self.device_kv_caches.values():
+            _, n_kv_heads, head_dim = self.block_shape
+            k[slot_indices] = k[slot_indices].reshape(-1, self.block_size//self.block_factor, n_kv_heads, head_dim).permute(0, 2, 1, 3).contiguous().view(-1, n_kv_heads, head_dim)
+            # Same for v  
+            v[slot_indices] = v[slot_indices].reshape(-1, self.block_size//self.block_factor, n_kv_heads, head_dim).permute(0, 2, 1, 3).contiguous().view(-1, n_kv_heads, head_dim)
+    if len(metadata.reqs_to_save) > 0:
+        torch.hpu.synchronize()
+    logger.debug('buke time consumes in rewrite:', time.perf_counter()-s)
+NixlConnectorWorker.rewrite_kv_based_on_transfer_layout_hetero = rewrite_kv_based_on_transfer_layout_hetero
+
 
 def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
     logger.debug(
@@ -1098,14 +1125,13 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
     self.src_xfer_side_handle = self.nixl_wrapper.prep_xfer_dlist(
         "NIXL_INIT_AGENT", descs)
     
-    print('buke layout: ', self.kv_cache_layout) 
     # After KV Caches registered, listen for new connections.
     metadata = NixlAgentMetadata(
         engine_id=self.engine_id,
         agent_metadata=self.nixl_wrapper.get_agent_metadata(),
         kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
-        num_blocks=self.num_blocks,
-        block_len=self.block_len,
+        num_blocks=self.num_blocks * self.block_factor if self.is_hetero2 else self.num_blocks,
+        block_len=self.block_len//self.block_factor if self.is_hetero2 else self.block_len,
         attn_backend_name= "FLASH_ATTN_VLLM_V1" if self.is_hetero2 else self.backend_name,
         kv_cache_layout=self.kv_cache_layout)
     ready_event = threading.Event()
