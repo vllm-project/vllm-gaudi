@@ -84,6 +84,7 @@ from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm_gaudi.extension.ops import LoraMask as LoraMask
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
+from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnectorMetadata
 
 if TYPE_CHECKING:
@@ -3141,7 +3142,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                              prompt_batch_idx=idx,
                                                                              is_prompt=True)
                     self.profiler.record_counter(self.event_start, counters)
-            if not warmup_mode and isinstance(scheduler_output.kv_connector_metadata, NixlConnectorMetadata):
+
+            if not warmup_mode and \
+                (isinstance(scheduler_output.kv_connector_metadata, NixlConnectorMetadata) or \
+                isinstance(scheduler_output.kv_connector_metadata, LMCacheConnectorMetadata)):
+                logger.info(f"libin debug maybe_wait_for_kv_save")
                 self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = (self.get_finished_kv_transfers(scheduler_output))
 
