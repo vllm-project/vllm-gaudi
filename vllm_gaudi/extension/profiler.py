@@ -2,6 +2,7 @@
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
 ###############################################################################
 
+import contextlib
 import gc
 import gzip
 import json
@@ -19,6 +20,7 @@ from habana_frameworks.torch import torch
 
 from vllm_gaudi.extension.utils import is_fake_hpu
 from .logger import logger
+from vllm_gaudi.extension.runtime import get_config
 
 
 class FileWriter(threading.Thread):
@@ -142,8 +144,7 @@ class HabanaHighLevelProfiler:
     event_cache: List[Any] = []
 
     def __init__(self, vllm_instance_id=None):
-        self.enabled = os.getenv('VLLM_PROFILER_ENABLED', 'false').lower() == 'true' and int(os.getenv('RANK',
-                                                                                                       '0')) == 0
+        self.enabled = get_config().high_level_profiler_enabled and int(os.getenv('RANK', '0')) == 0
         self.pid = os.getpid()
         if self.enabled:
             self.vllm_instance_id = vllm_instance_id if vllm_instance_id is not None \
@@ -158,6 +159,8 @@ class HabanaHighLevelProfiler:
             file_writer.start()
         if os.getenv('VLLM_PROFILER_ENABLED') == 'full':
             self.enabled = True  # don't save separate high-level traces
+        self.gc_track_recompiles = get_config().track_graph_compilation
+        self.num_graph_compilations = 0
 
     def _dump_with_sep(self, entry):
         entry = json.dumps(entry) + ','
@@ -256,10 +259,44 @@ class HabanaHighLevelProfiler:
     def record_event(self, type, name, args=None):
         if self.enabled:
             self.start(type, name, args)
-            yield
+            with self.track_graph_compile(type, args) \
+                if self.gc_track_recompiles \
+                else contextlib.nullcontext():
+                yield
             self.end()
         else:
             yield
+
+    def record_block(self, type, name, ts, dur, args=None):
+        if self.enabled:
+            event = {
+                'pid': self.pid,
+                'tid': self.event_tid[type],
+                'ph': 'X',
+                'name': name,
+                'ts': ts,
+                'dur': dur,
+                'args': args
+            }
+            self._dump_with_sep(event)
+
+    @contextmanager
+    def track_graph_compile(self, type, args=None):
+        start = self.get_timestamp_us()
+        import habana_frameworks.torch as htorch
+        from habana_frameworks.torch.hpu.metrics import metric_localcontext
+        with metric_localcontext("graph_compilation") as gc:
+            yield
+            htorch.hpu.synchronize()
+        if gc.stats()[0][1] != 0:
+            compile_start_time = start
+            for recipe in gc.stats()[3][1]:
+                recipe_name = recipe[0]
+                compile_time = recipe[1]
+                self.num_graph_compilations += 1
+                self.record_counter(compile_start_time, {'cumulative_graph_compilations': self.num_graph_compilations})
+                self.record_block(type, 'GRAPH COMPILE: ' + recipe_name, compile_start_time, compile_time, args)
+                compile_start_time += compile_time
 
 
 # Adapted from https://stackoverflow.com/a/49361727

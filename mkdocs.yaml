@@ -1,4 +1,4 @@
-site_name: vLLM x Intel Gaudi
+site_name: vLLM Hardware Plugin for Intel® Gaudi®
 exclude_docs: |
   *.inc.md
   *.template.md
@@ -30,10 +30,8 @@ theme:
     - content.code.copy
     - content.tabs.link
     - navigation.tracking
-    - navigation.tabs
     - navigation.sections
     - navigation.prune
-    - navigation.top
     - search.highlight
     - search.share
     - toc.follow
@@ -114,9 +112,11 @@ markdown_extensions:
   - pymdownx.tasklist:
       custom_checkbox: true
 
-
+extra_css:
+  - styles/custom.css
 extra_javascript:
   - https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS_HTML
+  - styles/custom.js
 
 # Makes the url format end in .html rather than act as a dir
 # So index.md generates as index.html and is available under URL /index.html

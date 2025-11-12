@@ -12,7 +12,7 @@ ARG TORCH_TYPE_SUFFIX
 
 FROM ${DOCKER_URL}/${VERSION}/${BASE_NAME}/${REPO_TYPE}/pytorch-${TORCH_TYPE_SUFFIX}installer-${PT_VERSION}:${REVISION}
 
-# Parameterize commit/branch for vllm-fork checkout
+# Parameterize commit/branch for vllm-plugin checkout
 ARG VLLM_GAUDI_COMMIT=main
 # leave empty to use last-good-commit-for-vllm-gaudi
 ARG VLLM_PROJECT_COMMIT=

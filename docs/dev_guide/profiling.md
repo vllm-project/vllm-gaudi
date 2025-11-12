@@ -1,3 +1,0 @@
-# Profiling vLLM
-
-WIP
