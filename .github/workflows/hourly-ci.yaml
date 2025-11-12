@@ -264,6 +264,7 @@ jobs:
               pip install lm-eval[api] &&
               cd /workspace/vllm-gaudi/tests/unit_tests &&
               ./run_accuracy_test.sh
+            "
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
   
