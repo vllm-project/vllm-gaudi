@@ -49,6 +49,7 @@ from vllm.sampling_params import SamplingType
 from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_map_leaves
 from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy)
@@ -103,6 +104,9 @@ logger = init_logger()
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
 hpu_buffer: list[list[torch.Tensor]] = []
+HPU_TORCH_DTYPE_TO_STR_DTYPE = {
+    torch.bfloat16: "bfloat16",
+}
 
 
 class BucketingFailedException(Exception):
@@ -736,7 +740,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.device = device
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
-        self.kv_cache_dtype = None
+        if cache_config.cache_dtype == "auto":
+            self.kv_cache_dtype = self.dtype
+        else:
+            self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+        self.kv_cache_dtype_str = HPU_TORCH_DTYPE_TO_STR_DTYPE[self.kv_cache_dtype]
         self.is_pooling_model = model_config.pooler_config is not None
 
         self.sliding_window = model_config.get_sliding_window()
@@ -779,7 +787,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.attn_backend = get_attn_backend(
             self.head_size,
             self.dtype,
-            self.kv_cache_dtype,
+            self.kv_cache_dtype_str,
             self.block_size,
             use_mla=self.model_config.use_mla,
         )

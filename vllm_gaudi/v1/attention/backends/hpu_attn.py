@@ -5,7 +5,7 @@
 ###############################################################################
 
 from dataclasses import dataclass
-from typing import (Optional)
+from typing import Optional
 
 import torch
 
@@ -17,7 +17,7 @@ from vllm.attention.backends.registry import (register_backend, AttentionBackend
 logger = init_logger()
 
 
-@register_backend(AttentionBackendEnum.CUSTOM)
+@register_backend(AttentionBackendEnum.CUSTOM, "HPU_ATTN_V1")
 class HPUAttentionBackendV1(HPUAttentionBackend):
 
     @staticmethod
