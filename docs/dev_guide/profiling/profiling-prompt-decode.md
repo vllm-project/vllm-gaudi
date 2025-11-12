@@ -2,7 +2,7 @@
 
 This method provides basic CPU and HPU profiling information, such as timeline and duration of operations.
 
-## Profiling
+## Executing Profiling
 
 To execute the profiling, follow these steps:
 

@@ -17,7 +17,7 @@ configuration can be performed through environment variables or YAML
 configuration files.
 
 If you prefer to build vLLM Hardware Plugin for Intel® Gaudi® from source or with a custom
-Dockerfile, refer to the [Installation](installation.md) guide.
+Dockerfile, refer to the [Installation](../installation.md) guide.
 
 ## Requirements
 
