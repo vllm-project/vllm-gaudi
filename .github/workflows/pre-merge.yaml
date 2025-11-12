@@ -106,8 +106,26 @@ jobs:
           echo "Failing this job to prevent the main CI from running."
           exit 1
 
+  # --- NEW JOB ---
+  # This job runs first on the self-hosted pool, picks a runner,
+  # and outputs its name so all other jobs can target it.
+  discover_runner:
+    needs: gatekeeper
+    runs-on: pr-ci
+    outputs:
+      runner_name: ${{ steps.get_name.outputs.name }}
+    steps:
+      - name: Get runner name
+        id: get_name
+        run: |
+          echo "This workflow will run on: ${{ runner.name }}"
+          echo "name=${{ runner.name }}" >> "$GITHUB_OUTPUT"
+
   discover_tests:
-    runs-on: ucb-vllm-cicd-g2
+    # --- UPDATED: Add discover_runner dependency ---
+    needs: discover_runner
+    # --- UPDATED: Run on the specific node ---
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
@@ -123,9 +141,9 @@ jobs:
           # naming convention, excluding the main 'run_all_tests' function itself.
           # The final list is formatted into a JSON array required for the matrix strategy.
           TEST_FUNCTIONS=$( grep '^run_' ./tests/full_tests/ci_gsm8k_tests.sh | \
-                   awk '{print $1}' | \
-                   sed 's/()//' | \
-                   jq -R . | jq -s -c . )
+                      awk '{print $1}' | \
+                      sed 's/()//' | \
+                      jq -R . | jq -s -c . )
 
           echo "Discovered test matrix: $TEST_FUNCTIONS"
           # Fail the job if no tests were found.
@@ -136,7 +154,7 @@ jobs:
           echo "matrix=$TEST_FUNCTIONS" >> "$GITHUB_OUTPUT"
 
   pre-commit:
-    # This job now runs in parallel with the build job
+    # This job runs in parallel with the build job
     needs: gatekeeper
     runs-on: ubuntu-latest
     steps:
@@ -164,8 +182,10 @@ jobs:
   pre_merge_hpu_test_build:
     if: >
         !contains(github.event.pull_request.labels.*.name, 'skip-gaudi-tests')
-    runs-on: ucb-vllm-cicd-g2
-    needs: [pre-commit, discover_tests]
+    # --- UPDATED: Add discover_runner dependency ---
+    needs: [pre-commit, discover_tests, discover_runner]
+    # --- UPDATED: Run on the specific node ---
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     permissions:
       contents: read # Required to checkout code and read history
     outputs:
@@ -317,8 +337,10 @@ jobs:
           echo "Docker image built successfully."
 
   hpu_unit_tests:
-    runs-on: ucb-vllm-cicd-g2
-    needs: pre_merge_hpu_test_build
+    # --- UPDATED: Add discover_runner dependency ---
+    needs: [pre_merge_hpu_test_build, discover_runner]
+    # --- UPDATED: Run on the specific node ---
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Run pytest in tests/unit_tests
         run: |
@@ -339,10 +361,10 @@ jobs:
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
   hpu_pd_tests:
-    runs-on: ucb-vllm-cicd-g2
-    # This is a final job that runs after the build and unit tests 
-    # Unit tests are supposed to fail fast if anything goes wrong, removing the need for this job to run.
-    needs: [pre_merge_hpu_test_build, hpu_unit_tests]
+    # --- UPDATED: Add discover_runner dependency ---
+    needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_runner]
+    # --- UPDATED: Run on the specific node ---
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Run test scripts
         run: |
@@ -357,7 +379,7 @@ jobs:
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
-            -v /mnt/wheels_cache:/workspace/wheels_cache \
+            -v /mnt/wheels_cache:/tmp/wheels_cache \
             hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
             /bin/bash -c "
                 pip install lm-eval[api] &&
@@ -368,10 +390,10 @@ jobs:
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
   hpu_perf_tests:
-    runs-on: ucb-vllm-cicd-g2
-    # This is a final job that runs after the build and unit tests 
-    # Unit tests are supposed to fail fast if anything goes wrong, removing the need for this job to run.
-    needs: [pre_merge_hpu_test_build, hpu_unit_tests]
+    # --- UPDATED: Add discover_runner dependency ---
+    needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_runner]
+    # --- UPDATED: Run on the specific node ---
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Run test scripts
         run: |
@@ -392,10 +414,10 @@ jobs:
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
   hpu_dp_tests:
-    runs-on: ucb-vllm-cicd-g2
-    # This is a final job that runs after the build and unit tests 
-    # Unit tests are supposed to fail fast if anything goes wrong, removing the need for this job to run.
-    needs: [pre_merge_hpu_test_build, hpu_unit_tests]
+    # --- UPDATED: Add discover_runner dependency ---
+    needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_runner]
+    # --- UPDATED: Run on the specific node ---
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Run test scripts
         run: |
@@ -419,8 +441,10 @@ jobs:
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
   e2e:
-    runs-on: ucb-vllm-cicd-g2
-    needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_tests]
+    # --- UPDATED: Add discover_runner dependency ---
+    needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_tests, discover_runner]
+    # --- UPDATED: Run on the specific node ---
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     strategy:
       fail-fast: false
       matrix:
@@ -450,8 +474,10 @@ jobs:
           echo "Test script exited with code: $EXITCODE"
   
   pre_merge_hpu_test:
-    runs-on: ucb-vllm-cicd-g2
-    needs: [hpu_unit_tests, e2e, hpu_perf_tests]
+    # --- UPDATED: Add discover_runner dependency ---
+    needs: [hpu_unit_tests, e2e, hpu_perf_tests, discover_runner]
+    # --- UPDATED: Run on the specific node ---
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     # This job is required to pass for pre-merge CI. By itself it does nothing, and will only pass if all jobs specified in "needs" list pass.
     steps:
       - name: Succeeded if all previous jobs passed
@@ -475,4 +501,3 @@ jobs:
             ### ✅ CI Passed
             All checks passed successfully against the following vllm commit:
             **`${{ needs.pre_merge_hpu_test_build.outputs.target_commit }}`**
-

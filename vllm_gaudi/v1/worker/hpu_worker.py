@@ -25,7 +25,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCach
 from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerOutput)
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.utils import is_fake_hpu
-from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, bool_helper
+from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_gaudi.extension.logger import logger as init_logger
@@ -79,11 +79,10 @@ class HPUWorker(WorkerBase):
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
-            from vllm.utils import init_cached_hf_modules
+            from vllm.utils.import_utils import init_cached_hf_modules
             init_cached_hf_modules()
 
-        self.gc_track_recompiles = bool("PT_HPU_METRICS_GC_DETAILS" in os.environ
-                                        and bool_helper(os.getenv("PT_HPU_METRICS_GC_DETAILS")))
+        self.gc_track_recompiles = get_config().track_graph_compilation and not get_config().high_level_profiler_enabled
         self.step = 0
         self.profile_steps = get_config().VLLM_PROFILE_STEPS
         self.step_profiler = setup_step_profiler(self.profile_steps)
