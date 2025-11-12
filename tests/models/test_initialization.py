@@ -71,9 +71,7 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
         return 1, 0, scheduler_kv_cache_config
 
     with (patch.object(V0LLMEngine, "_initialize_kv_caches", _initialize_kv_caches_v0),
-          patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1), monkeypatch.context() as m):
-        if model_info.v0_only:
-            m.setenv("VLLM_USE_V1", "0")
+          patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1)):
         LLM(
             model_info.default,
             tokenizer=model_info.tokenizer,

@@ -11,21 +11,6 @@ from ..utils import create_new_process_for_each_test
 
 
 @create_new_process_for_each_test()
-def test_plugin(
-    monkeypatch: pytest.MonkeyPatch,
-    dummy_opt_path: str,
-):
-    # V1 shuts down rather than raising an error here.
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "0")
-        m.setenv("VLLM_PLUGINS", "")
-
-        match = "Cannot find model module"
-        with pytest.raises(ValueError, match=match):
-            LLM(model=dummy_opt_path, load_format="dummy")
-
-
-@create_new_process_for_each_test()
 def test_oot_registration_text_generation(
     monkeypatch: pytest.MonkeyPatch,
     dummy_opt_path: str,
