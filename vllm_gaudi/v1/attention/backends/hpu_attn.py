@@ -5,22 +5,24 @@
 ###############################################################################
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import (Optional)
 
 import torch
 
 from vllm.attention.backends.abstract import AttentionMetadata, AttentionImpl
 from vllm_gaudi.attention.backends.hpu_attn import (HPUAttentionBackend, HPUAttentionImpl, HPUAttentionMetadata)
 from vllm_gaudi.extension.logger import logger as init_logger
+from vllm.attention.backends.registry import (register_backend, AttentionBackendEnum)
 
 logger = init_logger()
 
 
+@register_backend(AttentionBackendEnum.CUSTOM)
 class HPUAttentionBackendV1(HPUAttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "HPU_ATTN_V1"
+        return "CUSTOM"
 
     @staticmethod
     def get_impl_cls() -> type["AttentionImpl"]:
