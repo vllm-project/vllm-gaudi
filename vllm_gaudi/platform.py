@@ -44,6 +44,7 @@ class HpuPlatform(Platform):
                              kv_cache_dtype: Optional[str], block_size: int, use_v1: bool, use_mla: bool,
                              has_sink: bool, use_sparse: bool) -> str:
         assert use_v1, 'Only V1 is supported!'
+        from vllm.attention.backends.registry import (register_backend, AttentionBackendEnum)
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on HPU.")
         if use_mla:
@@ -55,6 +56,8 @@ class HpuPlatform(Platform):
             return ("vllm_gaudi.attention.backends."
                     "hpu_attn.HPUUnifiedAttentionBackend")
         else:
+            register_backend(AttentionBackendEnum.CUSTOM,
+                             "vllm_gaudi.v1.attention.backends.hpu_attn.HPUAttentionBackendV1")
             logger.info("Using HPUAttentionV1 backend.")
             return ("vllm_gaudi.v1.attention.backends."
                     "hpu_attn.HPUAttentionBackendV1")
