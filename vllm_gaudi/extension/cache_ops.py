@@ -17,7 +17,7 @@ def swap_blocks(src, dst, block_mapping):
     src_indices = block_mapping[0]
     dst_indices = block_mapping[1]
 
-    dst.index_put_(dst_indices, src.index_select(0, src_indices))
+    dst.index_copy_(0, dst_indices, src.index_select(0, src_indices))
 
     htorch.core.mark_step()
     torch.hpu.synchronize()
@@ -35,8 +35,8 @@ def copy_blocks(key_caches, value_caches, block_mapping):
         # read once, write once - no overlap
         k_values = key_cache.index_select(0, src)  # gather
         v_values = value_cache.index_select(0, src)
-        key_cache.index_put_([dst], k_values)  # scatter
-        value_cache.index_put_([dst], v_values)
+        key_cache.index_copy_(0, dst, k_values)  # scatter
+        value_cache.index_copy_(0, dst, v_values)
 
     if key_caches[0].device.type == 'hpu':
         htorch.core.mark_step()
