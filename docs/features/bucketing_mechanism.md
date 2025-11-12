@@ -132,43 +132,34 @@ The following example presents a setup where every bucket is logged separately i
 (EngineCore_DP0 pid=805) INFO 09-23 12:32:56 [hpu_model_runner.py:3320] [Warmup][Unified CFG][4/375] query_len:2048 shared_blocks:256 unique_blocks:32 (causal) free_mem:11.16 GiB
 ```
 
-### Buckets from file
+### Specifying Buckets in a File
 
-Bucketing from file allows to manually set precise buckets that are going to be used through a configuration file.
+File-based bucketing allows you to manually configure precise buckets by specifying them in a configuration file. To use this approach, set the `VLLM_BUCKETING_FROM_FILE` flag to the path of your configuration file.
 
-To use file set `VLLM_BUCKETING_FROM_FILE` flag to path to your desired file.
+You can define buckets in a file using three approaches.
 
-There are 3 ways to specify buckets in file:
-
-1. **Precise bucket** - only this one, specific bucket will be prepared.
+- **Precise bucket**: Prepares only one, specific bucket. The following example creates two buckets in total: `(1, 2048, 0)` and `(64, 1, 1024)`.
 
 ```{.}
 (1, 2048, 0)
 (64, 1, 1024)
 ```
 
-would give us two buckets in total: `(1, 2048, 0)` and `(64, 1, 1024)`.
-
-1. **List** - Each element will be prepared with each element from list
+- **List**: Prepares each bucket from the Cartesian product of the elements in the provided list. The following example creates six buckets: `(1, 256, 0)`, `(1, 256, 4)`, `(1, 256, 8)`, `(1, 512, 0)`, `(1, 512, 4)`, and `(1, 512, 8)`.
 
 ```{.}
 (1, [256, 512], [0, 4, 8])
 ```
 
-would give us six buckets in total from Cartesian product: `(1, 256, 0)`, `(1, 256, 4)`, `(1, 256, 8)`, `(1, 512, 0)`, `(1, 512, 4)` and `(1, 512, 8)`.
-
-1. **Range** - similar to list, but instead of manually setting each element we can use python's range function.
+- **Range**: Works similarly to the list, but instead of manually setting each element, you can use python's range function. The following example creates three buckets: `(1, 1, 256)`, `(1, 1, 384)`, and `(1, 1, 512)`.
 
 ```{.}
 (1, 1, range(256, 512, 128))
 ```
 
-would give us three buckets in total: `(1, 1, 256)`, `(1, 1, 384)` and `(1, 1, 512)`.
+You can mix these three approaches in a single file, for example `([64, 128, 256], 1, range(512, 1024, 32))` is a valid configuration.
 
-All those 3 approaches can be used with each other. For example `([64, 128, 256], 1, range(512, 1024, 32))` is a valid configuration.
+Each bucket or a configuration has to be provided in a separate line. You can find a sample bucketing in [bucketing_file.txt](https://github.com/vllm-project/vllm-gaudi/blob/main/vllm_gaudi/extension/bucketing/bucketing_file.txt).
 
-Each bucket (or configuration) has to be in separate line.
-
-There is a sample bucketing file shown in [bucketing_file.txt](https://github.com/vllm-project/vllm-gaudi/blob/main/vllm_gaudi/extension/bucketing/bucketing_file.txt).
-
-Bucketing from file is **NOT** supported for unified attention for now.
+!!! note
+    Currently, bucketing from a file is not supported for unified attention.
