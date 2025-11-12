@@ -25,6 +25,7 @@ from vllm_gaudi.extension.logger import logger as init_logger
 from vllm_gaudi.extension.unified import (unified_attn, HPUUnifiedAttentionMetadata)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.attention.backends.registry import (register_backend, AttentionBackendEnum)
+from vllm._aiter_ops import rocm_aiter_ops
 
 logger = init_logger()
 
@@ -209,6 +210,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         self.prefill_impl = get_config().prompt_attn_impl
         assert self.prefill_impl != 'fsdpa_impl' or alibi_slopes is None, \
             'Prefill with FusedSDPA not supported with alibi slopes!'
+        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
