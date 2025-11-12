@@ -250,7 +250,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         latent_vec_k = latent_vec_k.view(-1, self.qk_rope_head_dim + self.kv_lora_rank)
 
         # write the latent and rope to kv cache
-        if kv_cache is not None and len(kv_cache) == 2:
+        if kv_cache is not None and len(kv_cache) >= 2:
             self.latent_cache_k(latent_vec_k, kv_cache[0], slot_mapping)
             k_cache = kv_cache[0]
 
