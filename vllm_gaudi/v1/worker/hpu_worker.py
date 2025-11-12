@@ -246,7 +246,7 @@ class HPUWorker(WorkerBase):
         # Don't run the warmup if in eager or if the model is already warmed up
         if not self.model_config.enforce_eager \
             and not self.model_runner.graphed_buckets:
-                self.model_runner.warmup_model()
+            self.model_runner.warmup_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
