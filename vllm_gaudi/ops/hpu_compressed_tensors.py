@@ -9,7 +9,7 @@ from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, FusedMoEConfig)
 from compressed_tensors.quantization import (QuantizationStrategy)
 
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (convert_to_channelwise)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (convert_to_channelwise, all_close_1d)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter, ModelWeightParameter, PerTensorScaleParameter,
                                            BasevLLMParameter, GroupQuantScaleParameter, PackedColumnParameter,
                                            PackedvLLMParameter, RowvLLMParameter)
