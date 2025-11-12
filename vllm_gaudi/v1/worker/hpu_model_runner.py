@@ -104,9 +104,7 @@ logger = init_logger()
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
 hpu_buffer: list[list[torch.Tensor]] = []
-HPU_TORCH_DTYPE_TO_STR_DTYPE = {
-    torch.bfloat16: "bfloat16",
-}
+HPU_TORCH_DTYPE_TO_STR_DTYPE = {torch.bfloat16: "bfloat16", torch.float8_e4m3fn: "fp8_e4m3fn"}
 
 
 class BucketingFailedException(Exception):
