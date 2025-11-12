@@ -98,7 +98,7 @@ run_qwen3_moe_compressed_tensor_dynamic_scaling_test() {
 # RedHatAI/Meta-Llama-3-8B-Instruct-FP8 Per-tensor F8 static scales
 run_llama3_per_tensor_scaling_test() {
     echo "➡️ Testing RedHatAI/Meta-Llama-3-8B-Instruct-FP8 + per tensor scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Meta-Llama-3-8B-Instruct-FP8 --trust-remote-code
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Meta-Llama-3-8B-Instruct-FP8 --trust-remote-code
     echo "✅ Test with RedHatAI/Meta-Llama-3-8B-Instruct-FP8 + per tensor scaling successful."
 }
 
