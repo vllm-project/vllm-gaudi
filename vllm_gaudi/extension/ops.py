@@ -1100,8 +1100,6 @@ def process_fp8_weight_tensor_strategy(
     input_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Process weights for tensor-wise quantization strategy."""
-    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-        _maybe_pad_fp8_weight, )
 
     # Requantize with max scale
     weight_scale, weight = requantize_with_max_scale(
@@ -1110,7 +1108,6 @@ def process_fp8_weight_tensor_strategy(
         logical_widths=logical_widths,
     )
 
-    weight = _maybe_pad_fp8_weight(weight)
     return weight, weight_scale, input_scale
 
 
