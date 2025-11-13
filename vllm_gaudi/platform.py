@@ -12,7 +12,6 @@ from vllm.platforms import Platform, PlatformEnum
 from vllm_gaudi.extension.runtime import get_config
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import _Backend
     from vllm.config import ModelConfig, VllmConfig
 else:
     ModelConfig = None
@@ -43,7 +42,7 @@ class HpuPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend: "_Backend",
+        selected_backend: "AttentionBackendEnum",
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: Optional[str],
