@@ -486,7 +486,7 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         else:
             tensor = torch.full((batch_size, 1, seq_len, seq_len), device=device, dtype=dtype, fill_value=1)
             mask = torch.tril(tensor, diagonal=shift)
-            idx = torch.arange(seq_len, dtype=dtype, device=device)
+            idx = torch.arange(seq_len, device=device)
             chunk_id = idx // chunk_size
             same_chunk = chunk_id.unsqueeze(0) == chunk_id.unsqueeze(1)
             same_chunk = same_chunk.unsqueeze(0).unsqueeze(0)
