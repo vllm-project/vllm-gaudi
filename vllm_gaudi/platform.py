@@ -52,8 +52,6 @@ class HpuPlatform(Platform):
         use_sparse: bool,
         attn_type: str | None = None,
     ) -> str:
-        assert use_v1, 'Only V1 is supported!'
-
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on HPU.")
         if use_mla:
