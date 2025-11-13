@@ -80,28 +80,3 @@ vLLM warm-up time is determined by the number of HPU graphs that must be compile
 ## Exponential Bucketing
 
 The `VLLM_EXPONENTIAL_BUCKETING=True` flag, enabled by default starting with the vLLM `1.21.0-post1` release, switches the bucketing strategy from linear to exponential. This can reduce the number of buckets and warm-up time by up to 80%, while generally maintaining comparable inference performance. In some configurations, however, it may lead to a slight performance drop due to increased padding. This setting is particularly effective for BF16 and FP8 models. To use linear bucketing instead, set `VLLM_EXPONENTIAL_BUCKETING=False`.
-
-## Experimental Features
-
-### Runtime Scale Patching
-
-Warm-up time for FP8 models is significantly longer than for BF16 due to additional graph
-compilations triggered by varying constant scale values in quantized model layers.
-
-You can reduce the FP8 warm-up time by setting the `RUNTIME_SCALE_PATCHING=1` environment variable and
-selecting a hardware-aligned per-tensor `scale_method` provided by the `INC JSON config <json-options>`.
-This feature is recommended for larger models, such as 70B and 405B. When combined with
-`VLLM_EXPONENTIAL_BUCKETING` for FP8 models, it can reduce warm-up time by up to 90%.
-
-!!!note
-    This feature reduces FP8 warm-up time but may lower model throughput by 5-20%. Future releases will improve performance and extend support to more options. Currently, the feature is supported with Lazy mode (`PT_HPU_LAZY_MODE=1`) and `torch.compile`. It supports Llama workloads using FP8 execution of Linear and FSDPA layers, and casting ops between BF16 and FP8. MoE and Convolution options are not yet supported.
-
-### Trivial Scales Optimization
-
-The `PT_HPU_H2D_TRIVIAL_SCALES_MODE` flag controls the optimization of trivial scales, such as scale values equal to 1.0, in the `RUNTIME_SCALE_PATCHING` mode. Enabling this optimization can increase warm-up and compilation time because additional graphs are generated, but it may improve runtime performance by reducing the number of multiplication operations.
-
-The following values are supported:
-
-- `0`: No optimization (default).
-- `1`: Removes scales equal to 1.0 in `cast_to_fp8_v2` and `cast_from_fp8`, disabling the corresponding `mult_fwd` (multiplication) node.
-- `2`: Applies the same optimization as mode `1`, and additionally removes reciprocal scales in `fp8_gemm_v2`.
