@@ -267,7 +267,7 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
                 logger.warning_once("Found input_scales that are not equal for "
                                     "fp8 MoE layer. Using the maximum across experts "
                                     "for each layer.")
-                layer.w13_input_scale = torch.nn.Parameter(layer.w13_input_scale.max(), requires_grad=False)
+            layer.w13_input_scale = torch.nn.Parameter(layer.w13_input_scale.max(), requires_grad=False)
 
         if self.weight_quant.strategy == QuantizationStrategy.TENSOR:
             assert layer.w13_weight_scale is not None
