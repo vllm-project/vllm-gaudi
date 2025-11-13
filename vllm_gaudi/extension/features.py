@@ -12,7 +12,6 @@ from vllm_gaudi.extension.validation import for_all, choice
 
 def get_user_flags():
     flags = [
-        Env('VLLM_USE_V1', boolean),
         Env('VLLM_ENABLE_EXPERIMENTAL_FLAGS', boolean),
         Env('VLLM_EXPONENTIAL_BUCKETING', boolean),
         Env('VLLM_PROMPT_BS_BUCKET_MIN', int),
@@ -97,5 +96,7 @@ def get_features():
               1.,
               env_var='VLLM_UNIFIED_ATTENTION_SHARED_CACHE_RATIO',
               env_var_type=float),
+        Value('high_level_profiler_enabled', False, env_var='VLLM_PROFILER_ENABLED', env_var_type=boolean),
+        Value('track_graph_compilation', False, env_var='PT_HPU_METRICS_GC_DETAILS', env_var_type=boolean),
     ]
     return split_values_and_flags(features)
