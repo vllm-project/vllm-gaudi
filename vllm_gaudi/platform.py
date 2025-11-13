@@ -50,7 +50,7 @@ class HpuPlatform(Platform):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
-        attn_type: str | None = None,
+        #attn_type: str | None = None,
     ) -> str:
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on HPU.")
