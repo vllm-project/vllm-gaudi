@@ -7,12 +7,6 @@ import gc
 from lm_eval.models.vllm_causallms import VLLM
 import os
 
-# These have unsupported head_dim for FA. We do not
-# not have a clean way to fall back, so we fail with
-# a clear msg when it happens.
-# https://github.com/vllm-project/vllm/issues/14524
-REQUIRES_V0 = ["microsoft/phi-2", "stabilityai/stablelm-3b-4e1t"]
-
 
 def launch_lm_eval(eval_config):
     trust_remote_code = eval_config.get('trust_remote_code', False)
