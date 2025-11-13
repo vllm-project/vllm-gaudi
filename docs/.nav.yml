@@ -9,7 +9,7 @@ nav:
     - getting_started/compatibility_matrix.md
     - getting_started/validated_models.md
   - Configuration Guides:
-    - configuration/env_vars.md
+    - configuration/env_variables.md
     - configuration/long_context.md
     - Calibration: 
       - configuration/calibration/calibration.md
@@ -21,10 +21,16 @@ nav:
       - configuration/quantization/auto_awq.md
       - configuration/quantization/gptqmodel.md
     - configuration/pipeline_parallelism.md
+    - Warm-up:
+      - configuration/warm-up/warm-up.md
+      - configuration/warm-up/sampler_warm-up.md
+      - configuration/warm-up/defragmenter_warm-up.md
+      - configuration/warm-up/managing_warm-up.md
   - Features:
     - features/supported_features.md
-    - features/*
-    - features/quantization
+    - features/bucketing_mechanism.md
+    - features/floating_point_8.md
+    - features/inified_attn.md
   - Developer Guides:
     - dev_guide/plugin_system.md
     - dev_guide/ci-failures.md
