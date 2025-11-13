@@ -13,12 +13,12 @@ from vllm_gaudi.extension.runtime import get_config
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
+    from vllm.attention.backends.registry import AttentionBackendEnum
 else:
     ModelConfig = None
     VllmConfig = None
 
 from vllm_gaudi.extension.logger import logger as init_logger
-from vllm.attention.backends.registry import (register_backend, AttentionBackendEnum)
 
 logger = init_logger()
 
@@ -50,26 +50,19 @@ class HpuPlatform(Platform):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
-        #attn_type: str | None = None,
+        attn_type: str | None = None,
     ) -> str:
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on HPU.")
         if use_mla:
-            register_backend(AttentionBackendEnum.CUSTOM,
-                             "vllm_gaudi.attention.backends.hpu_attn.HPUMLAAttentionBackend")
             logger.info("Using HPUAttentionMLA backend.")
             return ("vllm_gaudi.attention.backends.hpu_attn."
                     "HPUMLAAttentionBackend")
         elif get_config().unified_attn:
-            register_backend(
-                AttentionBackendEnum.CUSTOM,
-                "vllm_gaudi.attention.backends.vllm_gaudi.attention.backends.hpu_attn.HPUUnifiedAttentionBackend")
             logger.info("Using UnifiedAttention backend.")
             return ("vllm_gaudi.attention.backends."
                     "hpu_attn.HPUUnifiedAttentionBackend")
         else:
-            register_backend(AttentionBackendEnum.CUSTOM,
-                             "vllm_gaudi.v1.attention.backends.hpu_attn.HPUAttentionBackendV1")
             logger.info("Using HPUAttentionV1 backend.")
             return ("vllm_gaudi.v1.attention.backends."
                     "hpu_attn.HPUAttentionBackendV1")
