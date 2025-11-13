@@ -3,6 +3,7 @@ import habana_frameworks.torch as htorch
 import torch
 from compressed_tensors import CompressionFormat
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
@@ -193,9 +194,7 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
         CompressedTensorsMoEMethod.__init__(self, moe)
         self.quant_config = quant_config
         self.weight_quant = self.quant_config.target_scheme_map["Linear"].get("weights")
-        self.input_quant = self.quant_config.target_scheme_map["Linear"].get(
-            "input_activations"
-        )
+        self.input_quant = self.quant_config.target_scheme_map["Linear"].get("input_activations")
 
         per_tensor = (
             self.weight_quant.strategy == QuantizationStrategy.TENSOR
