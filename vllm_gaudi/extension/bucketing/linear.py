@@ -17,7 +17,7 @@ class LinearBucketingStrategy:
 
         prompt_bs_bucket_cfg = read_bucket_settings('prompt', 'bs', min=1, step=1, max=max_num_prefill_seqs)
         prompt_query_bucket_cfg = read_bucket_settings('prompt',
-                                                       'seq',
+                                                       'query',
                                                        min=block_size,
                                                        step=block_size,
                                                        max=max_num_batched_tokens)
@@ -91,16 +91,31 @@ def read_bucket_settings(phase: str, dim: str, **defaults):
     """Read bucketing configuration from env variables.
 
     phase is either 'prompt' or 'decode'
-    dim is either 'bs', 'seq' or 'block'
+    dim is either 'bs', 'query' or 'block'
     param is either 'min', 'step' or 'max'
     example env variable: VLLM_DECODE_BS_BUCKET_STEP=128
     """
     params = ['min', 'step', 'max']
     env_vars = [f'VLLM_{phase}_{dim}_BUCKET_{p}'.upper() for p in params]
     default_values = [defaults[p] for p in params]
-    values = [int(os.environ.get(e, d)) for e, d in zip(env_vars, default_values)]
-    for e, v, d in zip(env_vars, values, default_values):
-        logger().info(f'{e}={v} (default:{d})')
+    values = []
+
+    for p, e, d in zip(params, env_vars, default_values):
+        val = os.environ.get(e)
+
+        if val is None and dim == 'query':
+            # Check if fallback 'seq' flag is set
+            fallback_env = f'VLLM_{phase}_SEQ_BUCKET_{p}'.upper()
+            fallback_val = os.environ.get(fallback_env)
+
+            if fallback_val is not None:
+                val = fallback_val
+                logger().warning(f"{e} not set, using {fallback_env} value ({fallback_val}) instead. "
+                                 "This fallback behavior is deprecated and will be removed in v0.12.0.")
+        resolved_val = int(val) if val is not None else d
+        logger().info(f'{e}={resolved_val} (default:{d})')
+        values.append(resolved_val)
+
     return values
 
 
@@ -123,6 +138,8 @@ def warmup_range(config: Tuple[int, int, int]):
                           "batch size. If you want to skip warmup, "
                           "set VLLM_SKIP_WARMUP=true")
     if add_zero_bucket:
+        if bmin == 0 and bmax == 0:
+            return [0]
         bmin = bstep
     base = itertools.repeat(2)
     ramp_up_acc = itertools.accumulate(base, func=operator.mul, initial=bmin)

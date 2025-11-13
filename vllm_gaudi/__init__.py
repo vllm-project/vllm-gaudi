@@ -20,3 +20,9 @@ def register_ops():
     import vllm_gaudi.ops.hpu_gptq  # noqa: F401
     import vllm_gaudi.ops.hpu_awq  # noqa: F401
     import vllm_gaudi.ops.hpu_multihead_attn  # noqa: F401
+
+
+def register_models():
+    import vllm_gaudi.models.utils  # noqa: F401
+    from .models import register_model
+    register_model()

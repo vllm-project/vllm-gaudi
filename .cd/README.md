@@ -27,7 +27,7 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
 
 ### 0. Clone the Repository
 
-Before proceeding with any of the steps below, make sure to clone the vLLM fork repository and navigate to the `.cd` directory. This ensures you have all necessary files and scripts for running the server or benchmarks.
+Before proceeding with any of the steps below, make sure to clone the vLLM plugin repository and navigate to the `.cd` directory. This ensures you have all necessary files and scripts for running the server or benchmarks.
 
 ```bash
 git clone https://github.com/vllm-project/vllm-gaudi.git
@@ -129,7 +129,7 @@ cd vllm-gaudi/.cd/
    MAX_MODEL_LEN=2048 \
    INPUT_TOK=128 \
    OUTPUT_TOK=128 \
-   CON_REQ=16 \
+   CONCURRENT_REQ=16 \
    NUM_PROMPTS=64 \
    docker compose --profile benchmark up
    ```
@@ -149,9 +149,9 @@ cd vllm-gaudi/.cd/
 
    ```bash
    HF_TOKEN=<your huggingface token> \
-   VLLM_SERVER_CONFIG_FILE=server_configurations/server_text.yaml \
+   VLLM_SERVER_CONFIG_FILE=server/server_scenarios_text.yaml \
    VLLM_SERVER_CONFIG_NAME=llama31_8b_instruct \
-   VLLM_BENCHMARK_CONFIG_FILE=benchmark_configurations/benchmark_text.yaml \
+   VLLM_BENCHMARK_CONFIG_FILE=benchmark/benchmark_scenarios_text.yaml \
    VLLM_BENCHMARK_CONFIG_NAME=llama31_8b_instruct \
    docker compose --profile benchmark up
    ```
@@ -159,7 +159,41 @@ cd vllm-gaudi/.cd/
    > [!NOTE]
    > When using configuration files, you do not need to set the `MODEL` environment variable, as the model name is specified within the configuration file. However, you must still provide your `HF_TOKEN`.
 
-### 7. Running the Server Directly with Docker
+### 7.  Advance Options with pinning CPU cores for memory access coherence
+
+   To improve memory access cohererence and release CPUs to other CPU only workloads like a vLLM serving with Llama3 8B,  
+   pin the CPU cores based on different CPU NUMA nodes by using an auto-generate docker-compose.override.yml file.  
+   Validated Xeon Processors as for now: Intel Xeon 6960P, and Intel Xeon PLATINUM 8568Y+.  
+  
+   Couple python libraries are needed for the python scripts, so install the required packages using following commnad.  
+
+   ```bash
+   pip install -r vllm-gaudi/.cd/server/cpu_binding/requirements_cpu_binding.txt
+   ```
+
+   Run below command to do CPU cores pinning via auto-generated docker-compose.override.yml file.
+
+   ```bash
+   export MODEL="Qwen/Qwen2.5-14B-Instruct"
+   export HF_TOKEN="<your huggingface token>"
+   export DOCKER_IMAGE="<docker image url>"
+   python3 server/cpu_binding/generate_cpu_binding_from_csv.py --settings server/cpu_binding/cpu_binding_gnr.csv --output ./docker-compose.override.yml
+   docker compose --profile benchmark up
+   ```
+
+   To also pin idle CPUs to another service like vllm-cpu-service, please give the service name to update
+   docker-compose.override.yml in order to bind another service to idle cpus.
+   Here is an exmaple to bind idle cpu for vllm-cpu-service service while docker-compose.vllm-cpu-service.yml defines cpu service.
+
+   ```bash
+   export MODEL="Qwen/Qwen2.5-14B-Instruct"
+   export HF_TOKEN="<your huggingface token>"
+   export DOCKER_IMAGE="<docker image url>"
+   python3 server/cpu_binding/generate_cpu_binding_from_csv.py --settings server/cpu_binding/cpu_binding_gnr.csv --output ./docker-compose.override.yml --cpuservice vllm-cpu-service
+   docker compose --profile benchmark -f docker-compose.yml -f docker-compose.vllm-cpu-service.yml -f docker-compose.override.yml up
+   ```
+
+### 8. Running the Server Directly with Docker
 
    For full control, you can run the server using the `docker run` command. This approach allows you to specify any native Docker parameters as needed.
 
