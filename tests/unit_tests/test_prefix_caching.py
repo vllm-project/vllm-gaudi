@@ -91,8 +91,6 @@ def test_prefix_cache_hits(model_runner, prompt1, prompt2, num_common_prefix, ex
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
-        grammar_bitmask=None,
     )
     model_runner._update_states(sched_out1)
     cached_state = model_runner.requests[req_id1]
@@ -114,8 +112,6 @@ def test_prefix_cache_hits(model_runner, prompt1, prompt2, num_common_prefix, ex
         num_common_prefix_blocks=num_common_prefix,
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
-        grammar_bitmask=None,
     )
     model_runner._update_states(sched_out2)
     cached_state = model_runner.requests[req_id2]
@@ -145,8 +141,6 @@ def test_prefix_cache_reset(model_runner, prompt, cache_first, cache_second, dis
         num_common_prefix_blocks=cache_first,
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
-        grammar_bitmask=None,
     )
     model_runner._update_states(sched_out1)
     cached_state1 = model_runner.requests[req_id]
@@ -168,8 +162,6 @@ def test_prefix_cache_reset(model_runner, prompt, cache_first, cache_second, dis
         num_common_prefix_blocks=cache_second,
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
-        grammar_bitmask=None,
     )
     model_runner._update_states(sched_out2)
     cached_state2 = model_runner.requests[req_id]
