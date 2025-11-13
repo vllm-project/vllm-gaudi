@@ -100,9 +100,6 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         # disable DeepGemm support.
         self.allow_deep_gemm = False
 
-        self.topk_indices_dtype = None
-        self.fused_experts = None
-
     def create_weights(self, *args, **kwargs) -> None:
         if hpu_ops.is_hpu_gaudi2:
             kwargs['weight_loader'] = hpu_ops.gaudi_weight_wrapper(kwargs.get('weight_loader'))

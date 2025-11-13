@@ -29,7 +29,7 @@ def retain_envs(var_name):
 
 
 class HpuPlatform(Platform):
-    _enum = PlatformEnum.OOT if envs.VLLM_USE_V1 else PlatformEnum.HPU
+    _enum = PlatformEnum.OOT
     device_name: str = "hpu"
     device_type: str = "hpu"
     dispatch_key: str = "HPU"
@@ -44,17 +44,25 @@ class HpuPlatform(Platform):
                              kv_cache_dtype: Optional[str], block_size: int, use_v1: bool, use_mla: bool,
                              has_sink: bool, use_sparse: bool) -> str:
         assert use_v1, 'Only V1 is supported!'
+        from vllm.attention.backends.registry import (register_backend, AttentionBackendEnum)
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on HPU.")
         if use_mla:
+            register_backend(AttentionBackendEnum.CUSTOM,
+                             "vllm_gaudi.attention.backends.hpu_attn.HPUMLAAttentionBackend")
             logger.info("Using HPUAttentionMLA backend.")
             return ("vllm_gaudi.attention.backends.hpu_attn."
                     "HPUMLAAttentionBackend")
         elif get_config().unified_attn:
+            register_backend(
+                AttentionBackendEnum.CUSTOM,
+                "vllm_gaudi.attention.backends.vllm_gaudi.attention.backends.hpu_attn.HPUUnifiedAttentionBackend")
             logger.info("Using UnifiedAttention backend.")
             return ("vllm_gaudi.attention.backends."
                     "hpu_attn.HPUUnifiedAttentionBackend")
         else:
+            register_backend(AttentionBackendEnum.CUSTOM,
+                             "vllm_gaudi.v1.attention.backends.hpu_attn.HPUAttentionBackendV1")
             logger.info("Using HPUAttentionV1 backend.")
             return ("vllm_gaudi.v1.attention.backends."
                     "hpu_attn.HPUAttentionBackendV1")
@@ -79,12 +87,8 @@ class HpuPlatform(Platform):
         parallel_config = vllm_config.parallel_config
 
         if parallel_config.worker_cls == "auto":
-            if envs.VLLM_USE_V1:
-                parallel_config.worker_cls = \
+            parallel_config.worker_cls = \
                     "vllm_gaudi.v1.worker.hpu_worker.HPUWorker"
-            else:
-                parallel_config.worker_cls = \
-                    "vllm.worker.hpu_worker.HPUWorker"
 
         # NOTE(kzawora): default block size for Gaudi should be 128
         # smaller sizes still work, but very inefficiently
@@ -111,23 +115,22 @@ class HpuPlatform(Platform):
                            "Using bfloat16 instead.", vllm_config.model_config.dtype)
             vllm_config.model_config.dtype = torch.bfloat16
 
-        if envs.VLLM_USE_V1:
-            from vllm.config import CompilationMode, CUDAGraphMode
-            compilation_config = vllm_config.compilation_config
-            # Activate custom ops for v1.
-            compilation_config.custom_ops = ["all"]
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            compilation_config.cudagraph_capture_sizes = []
+        from vllm.config import CompilationMode, CUDAGraphMode
+        compilation_config = vllm_config.compilation_config
+        # Activate custom ops for v1.
+        compilation_config.custom_ops = ["all"]
+        compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        compilation_config.cudagraph_capture_sizes = []
 
-            if compilation_config.mode != CompilationMode.NONE:
-                logger.info("[HPU] Forcing CompilationMode.NONE "
-                            "compilation mode")
-                compilation_config.mode = CompilationMode.NONE
+        if compilation_config.mode != CompilationMode.NONE:
+            logger.info("[HPU] Forcing CompilationMode.NONE "
+                        "compilation mode")
+            compilation_config.mode = CompilationMode.NONE
 
-            print(f"========={compilation_config.custom_ops=}===========")
+        print(f"========={compilation_config.custom_ops=}===========")
 
         # Disable multi-stream for shared experts as no Stream on CPU
-        os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "0"
+        os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
     @classmethod
     def is_pin_memory_available(cls):

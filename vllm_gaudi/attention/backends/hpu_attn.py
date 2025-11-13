@@ -24,6 +24,8 @@ from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention, HPUPaged
 from vllm_gaudi.extension.logger import logger as init_logger
 from vllm_gaudi.extension.unified import (unified_attn, HPUUnifiedAttentionMetadata)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.attention.backends.registry import (register_backend, AttentionBackendEnum)
+from vllm._aiter_ops import rocm_aiter_ops
 
 logger = init_logger()
 
@@ -71,11 +73,12 @@ class HPUAttentionBackend(AttentionBackend):
         HPUPagedAttention.copy_blocks(kv_caches, src_to_dsts)
 
 
+@register_backend(AttentionBackendEnum.CUSTOM, "HPU_MLA")
 class HPUMLAAttentionBackend(HPUAttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "HPU_MLA"
+        return "CUSTOM"
 
     @staticmethod
     def get_impl_cls() -> type["AttentionImpl"]:
@@ -95,11 +98,12 @@ class HPUMLAAttentionBackend(HPUAttentionBackend):
         return (num_blocks * block_size, head_size)
 
 
+@register_backend(AttentionBackendEnum.CUSTOM, "HPU_UA")
 class HPUUnifiedAttentionBackend(HPUAttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "HPU_UA"
+        return "CUSTOM"
 
     @staticmethod
     def get_impl_cls() -> type["AttentionImpl"]:
@@ -206,6 +210,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         self.prefill_impl = get_config().prompt_attn_impl
         assert self.prefill_impl != 'fsdpa_impl' or alibi_slopes is None, \
             'Prefill with FusedSDPA not supported with alibi slopes!'
+        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):

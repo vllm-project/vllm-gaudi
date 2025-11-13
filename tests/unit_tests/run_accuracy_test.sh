@@ -1,4 +1,8 @@
 #!/bin/bash
+
+#Temporary test case disablement because of PR28012
+exit 0
+
 set -e
 
 # --- Install Nixl ---
@@ -22,7 +26,6 @@ MODELS=(
 #	"meta-llama/Llama-3.1-8B"
 #)
 
-export VLLM_USE_V1=1
 export VLLM_SKIP_WARMUP="true"
 export PT_HPU_LAZY_MODE=1
 

@@ -16,7 +16,6 @@ MODELS=(
 
 CMD="hl-prof-config --use-template profile_api --hw-trace off"
 eval "$CMD &" 
-export VLLM_USE_V1=1
 export VLLM_SKIP_WARMUP=True
 export PT_HPU_LAZY_MODE=1
 export HABANA_PROFILE=1 

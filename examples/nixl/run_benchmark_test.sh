@@ -13,7 +13,6 @@ set -xe
 MODELS=(
     "/root/software/data/pytorch/huggingface/hub/models--meta-llama--Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659/"
 )
-export VLLM_USE_V1=1
 #export VLLM_SKIP_WARMUP=True
 export PT_HPU_LAZY_MODE=1
 export VLLM_EXPONENTIAL_BUCKETING=False
