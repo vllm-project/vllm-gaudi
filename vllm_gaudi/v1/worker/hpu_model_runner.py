@@ -3761,7 +3761,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         idx = 0
         num_candidates = len(buckets)
         captured_all = True
-        developer_settings = get_config().VLLM_ENABLE_EXPERIMENTAL_FLAGS
+        developer_settings = get_config().VLLM_DEVELOPER_MODE
         phase = 'Prompt' if is_prompt else 'Decode'
         desc = f'{phase} warmup processing: '
         with tqdm(total=num_candidates, desc=desc, unit="item") as pbar:
@@ -3800,7 +3800,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
     def warmup_unified_graphs(self, buckets, kv_cache):
         idx = 0
         num_candidates = len(buckets)
-        developer_settings = get_config().VLLM_ENABLE_EXPERIMENTAL_FLAGS
+        developer_settings = get_config().VLLM_DEVELOPER_MODE
         with tqdm(total=num_candidates, desc="Unified Attention warmup", unit="item") as pbar:
             for idx, (query, shared_ctx, unique_ctx, is_causal) in enumerate(reversed(buckets)):
                 unified_cfg = (query, shared_ctx, unique_ctx, is_causal)
