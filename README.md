@@ -15,7 +15,8 @@ vLLM Hardware Plugin for Intel® Gaudi®
 ---
 *Latest News* 🔥
 
-- [2025/06] We introduced an early developer preview of the vLLM Hardware Plugin for Intel® Gaudi®, which is not yet intended for general use. For a more stable experience, consider using the [HabanaAI/vllm-fork](https://github.com/HabanaAI/vllm-fork) or the in-tree Intel® Gaudi® implementation available in [vllm-project/vllm](https://github.com/vllm-project/vllm).
+- [2025/11] The v1.23.0 release introduces the production-ready version of the vLLM Hardware Plugin for Intel® Gaudi®. The plugin is an alternative to the [vLLM fork](https://github.com/HabanaAI/vllm-fork), which reaches end of life with this release and will be deprecated in v1.24.0, remaining functional only for legacy use cases. We strongly encourage all fork users to begin planning their migration to the plugin. For more information about this release, see the [Release Notes](docs/release_notes.md).
+- [2025/06] We introduced an early developer preview of the vLLM Hardware Plugin for Intel® Gaudi®, which is not yet intended for general use.
 
 ---
 
