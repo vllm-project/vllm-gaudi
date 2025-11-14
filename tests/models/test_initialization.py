@@ -53,11 +53,6 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
 
         return hf_config
 
-    # Avoid calling model.forward()
-    def _initialize_kv_caches_v0(self) -> None:
-        self.cache_config.num_gpu_blocks = 0
-        self.cache_config.num_cpu_blocks = 0
-
     def _initialize_kv_caches_v1(self, vllm_config):
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
         scheduler_kv_cache_config = get_kv_cache_configs(

@@ -8,6 +8,7 @@ import math
 import os
 import sys
 import time
+from tqdm import tqdm
 from dataclasses import dataclass, field, fields
 from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast)
 
@@ -104,7 +105,12 @@ logger = init_logger()
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
 hpu_buffer: list[list[torch.Tensor]] = []
-HPU_TORCH_DTYPE_TO_STR_DTYPE = {torch.bfloat16: "bfloat16", torch.float8_e4m3fn: "fp8_e4m3"}
+HPU_TORCH_DTYPE_TO_STR_DTYPE = {
+    torch.float32: "float32",
+    torch.bfloat16: "bfloat16",
+    torch.float16: "float16",
+    torch.float8_e4m3fn: "fp8_e4m3"
+}
 
 
 class BucketingFailedException(Exception):
@@ -579,13 +585,13 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
                 self._reset_rotary_cos_sin()
         return hidden_states
 
-    def get_input_embeddings(self, input_ids, multimodal_embeddings=None, is_multimodal=False):
-        return self.model.get_input_embeddings(input_ids=input_ids,
-                                               multimodal_embeddings=multimodal_embeddings,
-                                               is_multimodal=is_multimodal)
+    def embed_input_ids(self, input_ids, multimodal_embeddings=None, is_multimodal=False):
+        return self.model.embed_input_ids(input_ids=input_ids,
+                                          multimodal_embeddings=multimodal_embeddings,
+                                          is_multimodal=is_multimodal)
 
-    def get_multimodal_embeddings(self, **batched_mm_inputs):
-        return self.model.get_multimodal_embeddings(**batched_mm_inputs)
+    def embed_multimodal(self, **batched_mm_inputs):
+        return self.model.embed_multimodal(**batched_mm_inputs)
 
     def compute_logits(self, *args, **kwargs):
         return self.model.compute_logits(*args, **kwargs)
@@ -1332,7 +1338,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # 2. A list or tuple (length: num_items) of tensors, each of shape
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
-            curr_group_outputs = self.model.get_multimodal_embeddings(**mm_kwargs_group)
+            curr_group_outputs = self.model.embed_multimodal(**mm_kwargs_group)
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -3067,7 +3073,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa E501
                     # This may require moving multimodal input preps into _prepare_inputs,        # noqa E501
                     # to avoid padding issues.
-                    inputs_embeds = self.model.get_input_embeddings(
+                    inputs_embeds = self.model.embed_input_ids(
                         token_ids,
                         multimodal_embeddings=mm_embeds,
                         is_multimodal=is_mm_embed,
@@ -3610,7 +3616,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                    f"query_len:{second_dim} "
                    f"num_blocks:{third_dim} "
                    f"free_mem:{free_mem}")
-        logger.info(msg)
+        tqdm.write(msg)
 
     def log_warmup_multimodal(self, phase, i, max_i, batch_size, seq_len, img_args):
         free_mem = format_bytes(HabanaMemoryProfiler.current_free_device_memory())
@@ -3760,45 +3766,57 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         idx = 0
         num_candidates = len(buckets)
         captured_all = True
-        for idx, (batch_size, seq_len, num_blocks) in enumerate(reversed(buckets)):
-            if seq_len > self.max_num_tokens:
-                continue
-            # Graph memory usage is proportional to seq dimension in a batch
-            phase = f"Graph/{'prompt' if is_prompt else 'decode'}"
-            if is_prompt:
-                batch_seq = batch_size * seq_len * num_blocks if num_blocks else batch_size * seq_len
-            else:
-                batch_seq = batch_size
-
-            graphed_bucket = (batch_size, seq_len, num_blocks, is_prompt)
-            if graphed_bucket in self.graphed_buckets:
-                continue
-            self.graphed_buckets.add(graphed_bucket)
-            self.log_warmup(phase, idx, num_candidates, batch_size, seq_len, num_blocks)
-            prompt_cfg, decode_cfg = None, None
-            with HabanaMemoryProfiler() as mem_prof:
+        developer_settings = get_config().VLLM_DEVELOPER_MODE
+        phase = 'Prompt' if is_prompt else 'Decode'
+        desc = f'{phase} warmup processing: '
+        with tqdm(total=num_candidates, desc=desc, unit="item") as pbar:
+            for idx, (batch_size, seq_len, num_blocks) in enumerate(reversed(buckets)):
+                if seq_len > self.max_num_tokens:
+                    continue
+                # Graph memory usage is proportional to seq dimension in a batch
                 if is_prompt:
-                    prompt_cfg = (batch_size, seq_len, num_blocks)
+                    batch_seq = batch_size * seq_len * num_blocks if num_blocks else batch_size * seq_len
                 else:
-                    decode_cfg = (batch_size, 1, num_blocks)
-                self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
-            # TODO(kzawora): align_workers
-            used_mem = mem_prof.consumed_device_memory
-            total_mem += used_mem
-            total_batch_seq += batch_seq
+                    batch_seq = batch_size
+
+                graphed_bucket = (batch_size, seq_len, num_blocks, is_prompt)
+                if graphed_bucket in self.graphed_buckets:
+                    continue
+                self.graphed_buckets.add(graphed_bucket)
+                if developer_settings:
+                    self.log_warmup(phase, idx, num_candidates, batch_size, seq_len, num_blocks)
+                prompt_cfg, decode_cfg = None, None
+                with HabanaMemoryProfiler() as mem_prof:
+                    if is_prompt:
+                        prompt_cfg = (batch_size, seq_len, num_blocks)
+                    else:
+                        decode_cfg = (batch_size, 1, num_blocks)
+                    self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
+                # TODO(kzawora): align_workers
+                used_mem = mem_prof.consumed_device_memory
+                total_mem += used_mem
+                total_batch_seq += batch_seq
+
+                pbar.set_postfix_str(f"{idx}/{num_candidates}")
+                pbar.update(1)
 
         return total_mem, total_batch_seq, captured_all
 
     def warmup_unified_graphs(self, buckets, kv_cache):
         idx = 0
         num_candidates = len(buckets)
-        for idx, (query, shared_ctx, unique_ctx, is_causal) in enumerate(reversed(buckets)):
-            unified_cfg = (query, shared_ctx, unique_ctx, is_causal)
-            if unified_cfg in self.graphed_buckets:
-                continue
-            self.graphed_buckets.add(unified_cfg)
-            self.log_warmup("Unified CFG", idx, num_candidates, query, shared_ctx, unique_ctx, is_causal)
-            self._prepare_dummy_unified_scenario(unified_cfg)
+        developer_settings = get_config().VLLM_DEVELOPER_MODE
+        with tqdm(total=num_candidates, desc="Unified Attention warmup", unit="item") as pbar:
+            for idx, (query, shared_ctx, unique_ctx, is_causal) in enumerate(reversed(buckets)):
+                unified_cfg = (query, shared_ctx, unique_ctx, is_causal)
+                if unified_cfg in self.graphed_buckets:
+                    continue
+                self.graphed_buckets.add(unified_cfg)
+                if developer_settings:
+                    self.log_warmup("Unified CFG", idx, num_candidates, query, shared_ctx, unique_ctx, is_causal)
+                self._prepare_dummy_unified_scenario(unified_cfg)
+                pbar.set_postfix_str(f"{idx}/{num_candidates}")
+                pbar.update(1)
 
     def _add_dummy_request(self,
                            requests,
@@ -4155,7 +4173,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 #htorch.core.mark_step()
                 # Run multimodal encoder.
                 dummy_encoder_outputs = \
-                     self.model.get_multimodal_embeddings(
+                     self.model.embed_multimodal(
                      **batched_dummy_mm_inputs)
                 #htorch.core.mark_step()
 
