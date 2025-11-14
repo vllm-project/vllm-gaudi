@@ -190,7 +190,7 @@ class DynamicPlaceholderMempool:
 
     def __getitem__(self, key):
         """Get a view of the cached placeholder reshaped to the requested shape"""
-        shape, pad_value, dtype = key
+        shape, _, dtype = key
         n_elts = int(np.prod(shape))
         newkey = self._normalize_key(key)
 
@@ -216,7 +216,6 @@ class DynamicPlaceholderMempool:
 
     def __setitem__(self, key, value: Union[np.ndarray, torch.Tensor]):
         """Store or upgrade the placeholder for this (pad_value, dtype) pair"""
-        shape, pad_value, dtype = key
         newkey = self._normalize_key(key)
 
         # Flatten based on type
