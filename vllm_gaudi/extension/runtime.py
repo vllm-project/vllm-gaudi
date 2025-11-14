@@ -63,10 +63,11 @@ def finalize_config():
 
     user_flags = filter_defined(detected, USER_FLAGS)
     experimental_flags = filter_defined(detected, EXPERIMENTAL_FLAGS)
+    experimental_flags = {k: v for k, v in user_flags.items() if k not in user_flags}
     environment_values = filter_defined(detected, ENVIRONMENT_VALUES)
     feature_values = filter_defined(detected, FEATURE_VALUES)
 
-    if len(experimental_flags) > 0 and not detected.VLLM_ENABLE_EXPERIMENTAL_FLAGS:
+    if len(experimental_flags) > 0 and not detected.VLLM_DEVELOPER_MODE:
         asterisks = 48 * '*'
         header = f"{asterisks} Warning! {asterisks}"
         footer = '*' * len(header)
@@ -74,7 +75,7 @@ def finalize_config():
         logger().warning(
             f"Following environment variables are considered experimental: {', '.join(experimental_flags)}")
         logger().warning(
-            "From v0.12.0 release using those flags without VLLM_ENABLE_EXPERIMENTAL_FLAGS will trigger a fatal error.")
+            "From v0.12.0 release using those flags without VLLM_DEVELOPER_MODE will trigger a fatal error.")
         logger().warning(footer)
 
     dump('Environment', environment_values)
