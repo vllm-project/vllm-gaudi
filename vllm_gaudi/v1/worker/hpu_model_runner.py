@@ -3014,12 +3014,19 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         image_index_tensor = None
         if self.is_mm_optimized and len(prefill_data.token_ids):
-            #logger.info(f"SHIV DEBUG MULTIMODAL {self.image_token_id=}, {prefill_data.token_ids=}")
-            is_image_flatten = (
-                prefill_data.token_ids[0].squeeze().flatten() == self.image_token_id)
-            #logger.info(f"SHIV DEBUG MULTIMODAL {is_image_flatten=} ")
-            is_image_flatten = is_image_flatten.flatten()
-            image_index_tensor = is_image_flatten.nonzero().squeeze(-1)
+            
+            logger.info(f"SHIV DEBUG MULTIMODAL {len(prefill_data.token_ids)=}")
+            if len(prefill_data.token_ids)>1:
+                for el in prefill_data.token_ids:
+                    logger.info(f"SHIV DEBUG MULTIMODAL PREFILL >>>>>> {el.shape=}")
+            image_index_tensors = []
+            for idx, prefill_data_slice in enumerate(prefill_data.token_ids):
+                is_image_flatten = (
+                    prefill_data_slice.squeeze().flatten() == self.image_token_id)
+                #logger.info(f"SHIV DEBUG MULTIMODAL {is_image_flatten=} ")
+                is_image_flatten = is_image_flatten.flatten()
+                image_index_tensor = is_image_flatten.nonzero().squeeze(-1)
+                image_index_tensors.append(image_index_tensor)
             #logger.info(f"SHIV DEBUG MULTIMODAL {self.image_token_id=}, {image_index_tensor.shape=}")
 
         num_pad_prefill_batch_across_dp = \
@@ -3068,6 +3075,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 inputs_embeds = None
                 model_mm_kwargs = None
                 stat1 = gc_metric.stats()[0][1]
+                logger.info(f"SHIV DEBUG check loop {idx=}")
                 logger.info(f"SHIV DEBUG >>>>>>>>>>>>> start of prefill {stat1=}") 
                 if self.supports_mm_inputs:
                     # Run the multimodal encoder if any.
@@ -3091,8 +3099,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     #logger.info(f"SHIV DEBUG devices === {token_ids.device=} {is_mm_embed.device=}")
 
                     model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
-                    if image_index_tensor is not None:
-                        model_mm_kwargs['image_index'] = image_index_tensor
+                    if image_index_tensors[idx] is not None:
+                        model_mm_kwargs['image_index'] = image_index_tensors[idx]
                     model_mm_kwargs = MultiModalKwargs.as_kwargs(
                         model_mm_kwargs,
                         device=self.device,
