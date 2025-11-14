@@ -17,7 +17,6 @@ def test_plugin(
 ):
     # V1 shuts down rather than raising an error here.
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "0")
         m.setenv("VLLM_PLUGINS", "")
 
         match = "Cannot find model module"
