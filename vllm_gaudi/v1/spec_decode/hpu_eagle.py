@@ -49,8 +49,8 @@ class HpuEagleProposer(EagleProposer):
         sampled_token_ids: list[list[int]],
     ):
         # if there is no spec decode tokens consider num_draft_tokens all 0
-        num_draft_tokens = ([0] * len(sampled_token_ids) if spec_decode_metadata is None
-                            else spec_decode_metadata.num_draft_tokens)
+        num_draft_tokens = ([0] * len(sampled_token_ids)
+                            if spec_decode_metadata is None else spec_decode_metadata.num_draft_tokens)
         max_num_draft_tokens = max(num_draft_tokens)
 
         num_picked_token_indices = []
