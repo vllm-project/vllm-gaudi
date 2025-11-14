@@ -26,8 +26,8 @@ class Matmul(torch.nn.Module):
     def __init__(self):
         super(Matmul, self).__init__()
 
-    def forward(self, x, y):
-        return torch.matmul(x, y)
+    def forward(self, x, y, *args, **kwargs):
+        return torch.matmul(x, y, *args, **kwargs)
 
 
 class Softmax(torch.nn.Module):
@@ -42,17 +42,17 @@ class Softmax(torch.nn.Module):
 class VLLMKVCache(torch.nn.Module):
 
     def __init__(self):
-        super(VLLMKVCache, self).__init__()
+        super().__init__()
         self.use_contiguous_pa = get_config().use_contiguous_pa
 
-    def forward(self, input, cache, slot_mapping):
+    def forward(self, input, cache, slot_mapping, scales=None):
         # In cross-attention kv cache forward inputs are None in decode
         # We don't want to store them in the cache in such case
         if input is not None:
             cache.index_copy_(0, slot_mapping, input)
         return cache
 
-    def fetch_from_cache(self, cache, blocks):
+    def fetch_from_cache(self, cache, blocks, scales=None):
         if self.use_contiguous_pa:
             return cache[:blocks.size(0)]
         else:
@@ -62,7 +62,7 @@ class VLLMKVCache(torch.nn.Module):
 class VLLMFP8KVCache(VLLMKVCache):
 
     def __init__(self, input_scale=1.0):
-        super(VLLMKVCache, self).__init__()
+        super().__init__()
         self.use_contiguous_pa = get_config().use_contiguous_pa
         self.input_scale = input_scale
         self.output_scale = 1.0 / self.input_scale
