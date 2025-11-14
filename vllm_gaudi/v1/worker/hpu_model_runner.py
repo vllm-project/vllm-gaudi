@@ -580,13 +580,13 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
                 self._reset_rotary_cos_sin()
         return hidden_states
 
-    def get_input_embeddings(self, input_ids, multimodal_embeddings=None, is_multimodal=False):
-        return self.model.get_input_embeddings(input_ids=input_ids,
-                                               multimodal_embeddings=multimodal_embeddings,
-                                               is_multimodal=is_multimodal)
+    def embed_input_ids(self, input_ids, multimodal_embeddings=None, is_multimodal=False):
+        return self.model.embed_input_ids(input_ids=input_ids,
+                                          multimodal_embeddings=multimodal_embeddings,
+                                          is_multimodal=is_multimodal)
 
-    def get_multimodal_embeddings(self, **batched_mm_inputs):
-        return self.model.get_multimodal_embeddings(**batched_mm_inputs)
+    def embed_multimodal(self, **batched_mm_inputs):
+        return self.model.embed_multimodal(**batched_mm_inputs)
 
     def compute_logits(self, *args, **kwargs):
         return self.model.compute_logits(*args, **kwargs)
@@ -1333,7 +1333,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # 2. A list or tuple (length: num_items) of tensors, each of shape
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
-            curr_group_outputs = self.model.get_multimodal_embeddings(**mm_kwargs_group)
+            curr_group_outputs = self.model.embed_multimodal(**mm_kwargs_group)
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -3068,7 +3068,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa E501
                     # This may require moving multimodal input preps into _prepare_inputs,        # noqa E501
                     # to avoid padding issues.
-                    inputs_embeds = self.model.get_input_embeddings(
+                    inputs_embeds = self.model.embed_input_ids(
                         token_ids,
                         multimodal_embeddings=mm_embeds,
                         is_multimodal=is_mm_embed,
@@ -4168,7 +4168,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 #htorch.core.mark_step()
                 # Run multimodal encoder.
                 dummy_encoder_outputs = \
-                     self.model.get_multimodal_embeddings(
+                     self.model.embed_multimodal(
                      **batched_dummy_mm_inputs)
                 #htorch.core.mark_step()
 
