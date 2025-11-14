@@ -9,6 +9,7 @@ from vllm_gaudi.extension.logger import logger as init_logger
 from vllm_gaudi.extension.runtime import get_config
 
 logger = init_logger()
+import collections
 
 
 @dataclass
@@ -34,16 +35,19 @@ def to_hpu(data: Optional[Union[torch.Tensor, list]], dtype: Optional[torch.dtyp
 
 def mask_to_bias(mask: np.ndarray, dtype: np.dtype, bias_placeholder: np.ndarray = None) -> np.ndarray:
     """Convert attn mask to attn bias"""
-    placeholder_too_small = mask.shape[0] > bias_placeholder.shape[0] or mask.shape[1] > bias_placeholder.shape[1]
-    if placeholder_too_small:
-        msg = (f"Provided bias_placeholder is too small for the required mask shape {mask.shape}. "
-               f"Expected at least {mask.shape[0]}x{mask.shape[1]}, but got "
-               f"{bias_placeholder.shape[0]}x{bias_placeholder.shape[1]}. "
-               f"This usually happens when size of shared context is greater than the entire KV cache. "
-               f"Please consider tuning VLLM_UNIFIED_ATTENTION_SHARED_CACHE_RATIO environment variable. "
-               f"Falling back to dynamic allocation. ")
-        logger.warning(msg)
-    if bias_placeholder is not None and not placeholder_too_small:
+    can_use_placeholder = bias_placeholder is not None
+    if can_use_placeholder:
+        placeholder_too_small = mask.shape[0] > bias_placeholder.shape[0] or mask.shape[1] > bias_placeholder.shape[1]
+        if placeholder_too_small:
+            msg = (f"Provided bias_placeholder is too small for the required mask shape {mask.shape}. "
+                   f"Expected at least {mask.shape[0]}x{mask.shape[1]}, but got "
+                   f"{bias_placeholder.shape[0]}x{bias_placeholder.shape[1]}. "
+                   f"This usually happens when size of shared context is greater than the entire KV cache. "
+                   f"Please consider tuning VLLM_UNIFIED_ATTENTION_SHARED_CACHE_RATIO environment variable. "
+                   f"Falling back to dynamic allocation. ")
+            logger.warning(msg)
+        can_use_placeholder &= not placeholder_too_small
+    if can_use_placeholder:
         # IMPORTANT: Make a copy to avoid data leakage between batches
         bias = bias_placeholder[:mask.shape[0], :mask.shape[1]].copy()
         assert bias.shape == mask.shape
@@ -150,19 +154,45 @@ class Context:
         return self.index_select(shared_idx), self.index_select(unique_idx)
 
 
-def hpu_tensor(tensor: np.ndarray | None, shape: tuple, pad_value: Union[int, float],
-               dtype: torch.dtype) -> torch.Tensor:
-    """ Pad if necessary and move tensor to HPU"""
-    if tensor is None:
-        return None
-    assert len(tensor.shape) == len(shape)
-    orig_shape = tensor.shape
-    padding = [(0, target - cur) for cur, target in zip(tensor.shape, shape)]
-    assert all(p[1] >= 0 for p in padding)
-    if sum(p[1] for p in padding) > 0:
-        tensor = np.pad(tensor, padding, mode='constant', constant_values=pad_value)
-    # Convert numpy array to torch tensor and move to HPU
-    return to_hpu(torch.from_numpy(tensor).to(dtype))
+class PlaceholderLRUCache:
+
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.cache = collections.OrderedDict()
+        self._cache_size = 0
+
+    @property
+    def cache_size(self):
+        return self._cache_size
+
+    def _cache_evict_last(self):
+        _, value = self.cache.popitem(last=False)
+        self._cache_size -= value.nbytes
+
+    def _cache_pop(self, key):
+        value = self.cache.pop(key)
+        self._cache_size -= value.nbytes
+        return value
+
+    def _cache_set(self, key, value):
+        self.cache[key] = value
+        self._cache_size += value.nbytes
+
+    def __getitem__(self, key):
+        value = self._cache_pop(key)
+        self._cache_set(key, value)
+        return value
+
+    def __setitem__(self, key, value: Union[np.ndarray, torch.Tensor]):
+        try:
+            self._cache_pop(key)
+        except KeyError:
+            while self.cache_size >= self.capacity:
+                self._cache_evict_last()
+        self._cache_set(key, value)
+
+    def __contains__(self, key):
+        return key in self.cache
 
 
 class UnifiedBatchPersistentContext:
@@ -181,11 +211,22 @@ class UnifiedBatchPersistentContext:
             np_dtype = np.float32
         self.profiler = profiler
         # Intermediate numpy arrays for computation - these ARE reused across batches
-        self.shared_bias = np.full((max_num_batched_tokens, max_shared_blocks, block_size), -math.inf, dtype=np_dtype)
-
-        # NOTE(kzawora): shared block bias is a weird entity - it maps block usage to each individual token in the context -
-        # so the upper bound should be max_shared_blocks*block_size (max_num_shared_tokens) by block_size
-        self.shared_block_bias = np.full((max_shared_blocks * block_size, block_size), -math.inf, dtype=np_dtype)
+        estimated_shared_bias_mem = (max_num_batched_tokens * max_shared_blocks * block_size *
+                                     np.dtype(np_dtype).itemsize) + (max_shared_blocks * block_size * block_size *
+                                                                     np.dtype(np_dtype).itemsize)
+        # NOTE(kzawora): 64GiB is an arbitrary threshold to avoid OOMs when allocating large shared bias buffers
+        shared_bias_mem_threshold = 64 * 2**30
+        self.use_persistent_shared_biases = estimated_shared_bias_mem <= shared_bias_mem_threshold
+        if self.use_persistent_shared_biases:
+            self.shared_bias = np.full((max_num_batched_tokens, max_shared_blocks, block_size),
+                                       -math.inf,
+                                       dtype=np_dtype)
+            # NOTE(kzawora): shared block bias is a weird entity - it maps block usage to each individual token in the context -
+            # so the upper bound should be max_shared_blocks*block_size (max_num_shared_tokens) by block_size
+            self.shared_block_bias = np.full((max_shared_blocks * block_size, block_size), -math.inf, dtype=np_dtype)
+        else:
+            self.shared_bias = None
+            self.shared_block_bias = None
 
         self.unique_bias = np.full((max_unique_blocks, block_size), -math.inf, dtype=np_dtype)
         self.unique_block_bias = np.full((max_unique_blocks, block_size), -math.inf, dtype=np_dtype)
@@ -212,6 +253,75 @@ class UnifiedBatchPersistentContext:
                                                            backend='hpu_backend',
                                                            fullgraph=True,
                                                            dynamic=False)
+        self.hpu_tensor_online_padding = True
+        # NOTE(kzawora): Cache for numpy placeholders to avoid reallocation
+        placeholder_lru_cache_capacity = 4 * 2**30  # Use 4GiB of host memoryfor placeholder cache
+        self.np_placeholder_cache = PlaceholderLRUCache(capacity=placeholder_lru_cache_capacity)
+        self.torch_placeholder_cache = PlaceholderLRUCache(capacity=placeholder_lru_cache_capacity)
+
+    def hpu_tensor(self, tensor: np.ndarray | None, shape: tuple, pad_value: Union[int, float],
+                   dtype: torch.dtype) -> torch.Tensor:
+        with self.profiler.record_event('internal', 'hpu_tensor'):
+            return self.__hpu_tensor_internal(tensor, shape, pad_value, dtype)
+
+    def get_placeholders(self, shape: tuple, pad_value: Union[int, float], dtype: np.dtype,
+                         torch_dtype: torch.dtype) -> np.ndarray:
+        """ Get or create a cached placeholder tensor """
+        key = (shape, pad_value, dtype)
+        torch_key = (shape, pad_value, torch_dtype)
+        try:
+            # Use __getitem__ to both retrieve and update LRU order
+            np_placeholder = self.np_placeholder_cache[key]
+            torch_placeholder = self.torch_placeholder_cache[torch_key]
+        except KeyError:
+            np_placeholder = np.full(shape, pad_value, dtype=dtype)
+            self.np_placeholder_cache[key] = np_placeholder
+            torch_placeholder = torch.full(shape, pad_value, dtype=torch_dtype, device='hpu')
+            self.torch_placeholder_cache[torch_key] = torch_placeholder
+        return np_placeholder.copy(), torch_placeholder.detach().clone()
+
+    def __hpu_tensor_internal(self, tensor: np.ndarray | None, shape: tuple, pad_value: Union[int, float],
+                              dtype: torch.dtype) -> torch.Tensor:
+        """ Pad if necessary and move tensor to HPU"""
+        if tensor is None:
+            return None
+        assert len(tensor.shape) == len(shape)
+        orig_shape = tensor.shape
+        if self.hpu_tensor_online_padding:
+            with self.profiler.record_event('internal', 'online_padding'):
+                padding = [(0, target - cur) for cur, target in zip(tensor.shape, shape)]
+                assert all(p[1] >= 0 for p in padding)
+                if sum(p[1] for p in padding) > 0:
+                    tensor = np.pad(tensor, padding, mode='constant', constant_values=pad_value)
+            # Convert numpy array to torch tensor and move to HPU
+            with self.profiler.record_event('internal', 'to_torch'):
+                torch_cpu_tensor = torch.from_numpy(tensor).to(dtype)
+            with self.profiler.record_event('internal', 'to_hpu'):
+                out = to_hpu(torch_cpu_tensor)
+            return out
+        else:
+            with self.profiler.record_event('internal', 'placeholder_padding'):
+                # Use placeholder-based padding
+                placeholder_dtype = dtype if dtype != torch.bfloat16 else torch.float32
+                np_placeholder, torch_placeholder = self.get_placeholders(shape, pad_value, tensor.dtype, dtype)
+                if len(shape) == 4:
+                    np_placeholder[:tensor.shape[0], :tensor.shape[1], :tensor.shape[2], :tensor.shape[3]] = tensor
+                elif len(shape) == 3:
+                    np_placeholder[:tensor.shape[0], :tensor.shape[1], :tensor.shape[2]] = tensor
+                elif len(shape) == 2:
+                    np_placeholder[:tensor.shape[0], :tensor.shape[1]] = tensor
+                else:
+                    np_placeholder[:tensor.shape[0]] = tensor
+                tensor = np_placeholder
+
+            # Convert numpy array to torch tensor and move to HPU
+            with self.profiler.record_event('internal', 'to_torch'):
+                # NOTE(kzawora): stock float32 -> bfloat conversion is SLOOOOOOW on CPU
+                # So in case of bfloats, we copy to float32 placeholder on HPU and then convert there
+                torch_cpu_tensor = torch.from_numpy(tensor)  #.to(dtype)
+            with self.profiler.record_event('internal', 'to_hpu'):
+                out = torch_placeholder.copy_(torch_cpu_tensor, non_blocking=True)  #.to(dtype, non_blocking=True)
+            return out
 
 
 class HPUBiasGenerator(torch.nn.Module):
@@ -323,6 +433,7 @@ def create_unified_batch(req_ids: list[str],
     unique_block_mapping = None
     unique_bias = None
     do_shared = False
+    do_unique = True
 
     if contains_prompts and not hpu_bias_acceleration:
         with persistent_ctx.profiler.record_event('internal', 'causal_cpu_prep'):
@@ -349,13 +460,18 @@ def create_unified_batch(req_ids: list[str],
                         shared_block_bias = generate_bias(shared_block_usage, block_size, np_dtype,
                                                           persistent_ctx.block_len_range,
                                                           persistent_ctx.shared_block_bias)
-
-                        shared_bias = persistent_ctx.shared_bias[:query_len, :shared_blocks.shape[0], :block_size]
+                        if persistent_ctx.use_persistent_shared_biases:
+                            shared_bias = persistent_ctx.shared_bias[:query_len, :shared_blocks.shape[0], :block_size]
+                        else:
+                            shared_bias = np.full((query_len, shared_blocks.shape[0], block_size),
+                                                  -math.inf,
+                                                  dtype=np_dtype)
                         shared_bias.fill(-math.inf)
                         shared_bias[shared_token_idx, shared_block_idx] = shared_block_bias
 
         if unique_ctx:
             with persistent_ctx.profiler.record_event('internal', 'unique_cpu_prep'):
+                do_unique = True
                 unique_blocks = int(unique_ctx.block_ids.max()) + 1
                 unique_bias = persistent_ctx.unique_bias[:unique_blocks, :block_size]
                 unique_bias.fill(-math.inf)
@@ -384,16 +500,19 @@ def create_unified_batch(req_ids: list[str],
     with persistent_ctx.profiler.record_event('internal', 'attn_metadata_prep'):
         attn_metadata = HPUUnifiedAttentionMetadata(
             block_size=block_size,
-            slot_mapping=hpu_tensor(token_slots, (target_qlen, ), -1, slot_mapping_dtype),
-            causal_bias=hpu_tensor(causal_bias,
-                                   (target_qlen, target_qlen), -math.inf, dtype) if causal_bias is not None else None,
+            slot_mapping=persistent_ctx.hpu_tensor(token_slots, (target_qlen, ), -1, slot_mapping_dtype),
+            causal_bias=persistent_ctx.hpu_tensor(causal_bias,
+                                                  (target_qlen,
+                                                   target_qlen), -math.inf, dtype) if causal_bias is not None else None,
             causal_width=default_causal_width,
-            shared_blocks=hpu_tensor(shared_blocks, (target_shared_blocks, ), -1, slot_mapping_dtype),
-            shared_bias=hpu_tensor(shared_bias, (target_qlen, target_shared_blocks,
-                                                 block_size), -math.inf, dtype) if shared_bias is not None else None,
+            shared_blocks=persistent_ctx.hpu_tensor(shared_blocks, (target_shared_blocks, ), -1, slot_mapping_dtype),
+            shared_bias=persistent_ctx.hpu_tensor(shared_bias,
+                                                  (target_qlen, target_shared_blocks,
+                                                   block_size), -math.inf, dtype) if shared_bias is not None else None,
             unique_blocks=target_unique_blocks,
-            unique_block_mapping=hpu_tensor(unique_block_mapping, (target_unique_blocks, ), -1, slot_mapping_dtype),
-            unique_bias=hpu_tensor(unique_bias, (target_unique_blocks, block_size), -math.inf, dtype),
+            unique_block_mapping=persistent_ctx.hpu_tensor(unique_block_mapping, (target_unique_blocks, ), -1,
+                                                           slot_mapping_dtype),
+            unique_bias=persistent_ctx.hpu_tensor(unique_bias, (target_unique_blocks, block_size), -math.inf, dtype),
             fmin=to_hpu(fmin),
             feps=to_hpu(feps),
         )
@@ -401,12 +520,13 @@ def create_unified_batch(req_ids: list[str],
     if hpu_bias_acceleration:
         if contains_prompts:
             with persistent_ctx.profiler.record_event('internal', 'causal_hpu_prep'):
-                # NOTE(kzawora): all tensors are pre-padded and work on [target_qlen, ] shapes, and the generated mask is [target_qlen, target_qlen] tensor
+                # NOTE(kzawora): all tensors are pre-padded and work on [target_qlen, ] shapes, and the genewrated mask is [target_qlen, target_qlen] tensor
                 padding_mask = np.full((target_qlen, ), True, dtype=bool)
                 padding_mask[:token_groups.shape[0]].fill(False)
-                hpu_padding_mask = hpu_tensor(padding_mask, (target_qlen, ), True, torch.bool)
-                hpu_token_groups = hpu_tensor(token_groups, (target_qlen, ), -1, slot_mapping_dtype)
-                hpu_token_positions = hpu_tensor(token_positions, (target_qlen, ), -1, slot_mapping_dtype)
+                hpu_padding_mask = persistent_ctx.hpu_tensor(padding_mask, (target_qlen, ), True, torch.bool)
+                hpu_token_groups = persistent_ctx.hpu_tensor(token_groups, (target_qlen, ), -1, slot_mapping_dtype)
+                hpu_token_positions = persistent_ctx.hpu_tensor(token_positions, (target_qlen, ), -1,
+                                                                slot_mapping_dtype)
                 attn_metadata.causal_bias = persistent_ctx.causal_bias_generator(hpu_token_groups, hpu_token_positions,
                                                                                  hpu_padding_mask, dtype)
         if do_shared:
@@ -420,25 +540,33 @@ def create_unified_batch(req_ids: list[str],
 
             actual_num_shared_tokens = shared_block_usage.shape[0]
             padded_num_shared_tokens = target_shared_blocks * block_size
-            acceptable_padding = 0.5 * padded_num_shared_tokens
-            is_acceptable = (padded_num_shared_tokens - actual_num_shared_tokens) <= acceptable_padding
+            # NOTE(kzawora): Initially we checked for padding ratio as well, but ultimately I've found no cases in
+            # which generating mask on padded_num_shared_tokens was slower than CPU + copying to HPU
             # in case we have too many or too little shared tokens, we fall back to cpu generation
-            if padded_num_shared_tokens < actual_num_shared_tokens or not is_acceptable:
+            if padded_num_shared_tokens < actual_num_shared_tokens:
                 with persistent_ctx.profiler.record_event('internal', 'shared_bias_cpu_fallback'):
                     shared_block_bias = generate_bias(shared_block_usage, block_size, np_dtype,
                                                       persistent_ctx.block_len_range, persistent_ctx.shared_block_bias)
-                    shared_bias = persistent_ctx.shared_bias[:query_len, :shared_blocks.shape[0], :block_size]
+                    if persistent_ctx.use_persistent_shared_biases:
+                        shared_bias = persistent_ctx.shared_bias[:query_len, :shared_blocks.shape[0], :block_size]
+                    else:
+                        shared_bias = np.full((query_len, shared_blocks.shape[0], block_size),
+                                              -math.inf,
+                                              dtype=np_dtype)
                     shared_bias.fill(-math.inf)
                     shared_bias[shared_token_idx, shared_block_idx] = shared_block_bias
-                    attn_metadata.shared_bias = hpu_tensor(shared_bias, (target_qlen, target_shared_blocks, block_size),
-                                                           -math.inf, dtype)
+                    attn_metadata.shared_bias = persistent_ctx.hpu_tensor(
+                        shared_bias, (target_qlen, target_shared_blocks, block_size), -math.inf, dtype)
             else:
                 with persistent_ctx.profiler.record_event('internal', 'shared_bias_hpu_prep'):
                     # do HPU-accelerated shared mask generation
                     shared_tokens_shape = (padded_num_shared_tokens, )
-                    hpu_shared_block_usage = hpu_tensor(shared_block_usage, shared_tokens_shape, -1, slot_mapping_dtype)
-                    hpu_shared_token_idx = hpu_tensor(shared_token_idx, shared_tokens_shape, -1, slot_mapping_dtype)
-                    hpu_shared_block_idx = hpu_tensor(shared_block_idx, shared_tokens_shape, -1, slot_mapping_dtype)
+                    hpu_shared_block_usage = persistent_ctx.hpu_tensor(shared_block_usage, shared_tokens_shape, -1,
+                                                                       slot_mapping_dtype)
+                    hpu_shared_token_idx = persistent_ctx.hpu_tensor(shared_token_idx, shared_tokens_shape, -1,
+                                                                     slot_mapping_dtype)
+                    hpu_shared_block_idx = persistent_ctx.hpu_tensor(shared_block_idx, shared_tokens_shape, -1,
+                                                                     slot_mapping_dtype)
                     hpu_shared_bias = persistent_ctx.shared_bias_generator(hpu_shared_block_usage, hpu_shared_token_idx,
                                                                            hpu_shared_block_idx, block_size, dtype,
                                                                            target_qlen, target_shared_blocks)
@@ -448,10 +576,10 @@ def create_unified_batch(req_ids: list[str],
     with persistent_ctx.profiler.record_event('internal', 'unified_batch_prep'):
         unified_batch = UnifiedBatch(
             req_ids_cpu=req_ids,
-            token_ids=hpu_tensor(token_ids, (target_qlen, ), -1, token_ids_dtype),
-            token_positions=hpu_tensor(token_positions, (target_qlen, ), -1, token_positions_dtype),
+            token_ids=persistent_ctx.hpu_tensor(token_ids, (target_qlen, ), -1, token_ids_dtype),
+            token_positions=persistent_ctx.hpu_tensor(token_positions, (target_qlen, ), -1, token_positions_dtype),
             new_token_positions_cpu=torch.from_numpy(new_token_positions).to(token_positions_dtype),
-            logits_indices=hpu_tensor(logits_indices, (target_logits, ), -1, logits_indices_dtype),
+            logits_indices=persistent_ctx.hpu_tensor(logits_indices, (target_logits, ), -1, logits_indices_dtype),
             logits_groups_cpu=torch.from_numpy(logits_groups).to(logits_indices_dtype),
             attn_metadata=attn_metadata)
     return unified_batch
