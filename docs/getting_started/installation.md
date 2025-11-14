@@ -112,7 +112,7 @@ To achieve the best performance on HPU, please follow the methods outlined in th
           --name=ubuntu.pytorch.vllm.nixl.latest \
           --network=host \
           -e HABANA_VISIBLE_DEVICES=all \
-          ubuntu.pytorch.vllm.nixl.latest  /bin/bash
+          ubuntu.pytorch.vllm.nixl.latest /bin/bash
   
 3. Install vLLM Hardware Plugin for Intel® Gaudi® and NIXL using sources. Get the last verified vLLM commit. While vLLM Hardware Plugin for Intel® Gaudi® follows the latest vLLM commits, upstream API updates may introduce compatibility issues. The saved commit has been thoroughly validated.
   
