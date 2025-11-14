@@ -142,10 +142,18 @@ def partial_attn_causal(query: torch.tensor, key: torch.tensor, value: torch.ten
         b = bias[q_min:q_max, 0:q_max]
 
         s_attn = torch.matmul(q, k.transpose(-1, -2)) + b.unsqueeze(0).unsqueeze(0)
-        s_max = torch.maximum(s_attn.amax(-1), fmin)
-        s_attn = torch.exp(s_attn - s_max.unsqueeze(-1))
-        s_sum = torch.sum(s_attn, -1)
-        s_attn = torch.matmul(s_attn, v)
+        retained_shape = s_attn.shape[:-1]
+        inputM_hpu = torch.ones(retained_shape, dtype=s_attn.dtype, device="hpu") * torch.inf * -1
+        inputL_hpu = torch.zeros(retained_shape, dtype=s_attn.dtype, device="hpu")
+        # + b.unsqueeze(0).unsqueeze(0)
+        # s_max = torch.maximum(s_attn.amax(-1), fmin)
+        # s_attn = torch.exp(s_attn - s_max.unsqueeze(-1))
+        # s_sum = torch.sum(s_attn, -1)
+        # s_attn = torch.matmul(s_attn, v)
+
+        s_attn, s_max, s_sum, _exp_max_fixup_hpu = torch.ops.hpu.softmax_fa2(s_attn,
+                                                                             inputM=inputM_hpu,
+                                                                             inputL=inputL_hpu)
         attn_slices.append(s_attn)
         max_slices.append(s_max)
         sum_slices.append(s_sum)
@@ -167,12 +175,18 @@ def partial_attn_shared(query: torch.tensor, blocks: torch.tensor, bias: Optiona
     key, value = cache_utils.fetch_shared(blocks)
     bias = bias.flatten(-2, -1).unsqueeze(0)
 
-    attn = torch.matmul(query, key.transpose(-1, -2))
-    attn = attn.flatten(0, 1)
-    attn = attn + bias
-    local_max = torch.maximum(attn.amax(-1), fmin)
-    attn = torch.exp(attn - local_max.unsqueeze(-1))
-    local_sum = attn.sum(-1)
+    attn = torch.matmul(query, key.transpose(-1, -2)) + bias.unsqueeze(0)
+    retained_shape = attn.shape[:-1]
+    inputM_hpu = torch.ones(retained_shape, dtype=attn.dtype, device="hpu") * torch.inf * -1
+    inputL_hpu = torch.zeros(retained_shape, dtype=attn.dtype, device="hpu")
+    # attn = attn.flatten(0, 1)
+    # attn = attn + bias
+    # local_max = torch.maximum(attn.amax(-1), fmin)
+    # attn = torch.exp(attn - local_max.unsqueeze(-1))
+    # local_sum = attn.sum(-1)
+    attn, local_max, local_sum, _exp_max_fixup_hpu = torch.ops.hpu.softmax_fa2(attn,
+                                                                               inputM=inputM_hpu,
+                                                                               inputL=inputL_hpu)
     attn = torch.matmul(attn.unflatten(0, (kv_heads, -1)), value).flatten(0, 1)
     return attn.transpose(0, 1), local_max.transpose(0, 1), local_sum.transpose(0, 1)
 
