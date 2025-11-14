@@ -12,7 +12,7 @@ from vllm_gaudi.extension.validation import for_all, choice
 
 def get_user_flags():
     flags = [
-        Env('VLLM_ENABLE_EXPERIMENTAL_FLAGS', boolean),
+        Env('VLLM_DEVELOPER_MODE', boolean),
         Env('VLLM_EXPONENTIAL_BUCKETING', boolean),
         Env('VLLM_PROMPT_BS_BUCKET_MIN', int),
         Env('VLLM_PROMPT_BS_BUCKET_STEP', int),
