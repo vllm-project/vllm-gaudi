@@ -205,7 +205,6 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
         htcore.mark_step()
         if position_bias is not None:
             position_bias = position_bias.float()
-
     if position_bias is not None:
         if attn.dtype != position_bias.dtype:
             attn = attn.to(dtype=position_bias.dtype)
