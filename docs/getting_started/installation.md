@@ -80,13 +80,13 @@ There are two ways to install vLLM Hardware Plugin for Intel® Gaudi® from sour
         cd vllm
         git checkout $VLLM_COMMIT_HASH
         pip install -r <(sed '/^torch/d' requirements/build.txt)
-        VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
+        VLLM_TARGET_DEVICE=empty pip install --no-build-isolation .
         cd ..
   
 5. Install vLLM Hardware Plugin for Intel® Gaudi® from source.
   
         cd vllm-gaudi
-        pip install -e .
+        pip install .
         cd ..
   
 To achieve the best performance on HPU, please follow the methods outlined in the
@@ -103,43 +103,39 @@ To achieve the best performance on HPU, please follow the methods outlined in th
   
     For more information about verification, see [System Verification and Final Tests](https://docs.habana.ai/en/latest/Installation_Guide/System_Verification_and_Final_Tests.html).
 
-2. Install NIXL.
+2. Install vLLM Hardware Plugin for Intel® Gaudi® and NIXL using a Docker file.
   
-        cd vllm-gaudi
-        python install_nixl.py
-        cd ..
-  
-3. Install vLLM Hardware Plugin for Intel® Gaudi® and NIXL using a Docker file.
-  
+        git clone https://github.com/vllm-project/vllm-gaudi
         docker build -t ubuntu.pytorch.vllm.nixl.latest \
-          -f .cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest github.com/vllm-project/vllm-gaudi
+          -f .cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest vllm-gaudi
         docker run -it --rm --runtime=habana \
           --name=ubuntu.pytorch.vllm.nixl.latest \
           --network=host \
           -e HABANA_VISIBLE_DEVICES=all \
-          vllm-gaudi-for-llmd /bin/bash
+          ubuntu.pytorch.vllm.nixl.latest  /bin/bash
   
-4. Get the last verified vLLM commit. While vLLM Hardware Plugin for Intel® Gaudi® follows the latest vLLM commits, upstream API updates may introduce compatibility issues. The saved commit has been thoroughly validated.
+3. Install vLLM Hardware Plugin for Intel® Gaudi® and NIXL using sources. Get the last verified vLLM commit. While vLLM Hardware Plugin for Intel® Gaudi® follows the latest vLLM commits, upstream API updates may introduce compatibility issues. The saved commit has been thoroughly validated.
   
         git clone https://github.com/vllm-project/vllm-gaudi
         cd vllm-gaudi
         export VLLM_COMMIT_HASH=$(git show "origin/vllm/last-good-commit-for-vllm-gaudi:VLLM_STABLE_COMMIT" 2>/dev/null)
   
-5. Build vLLM from source for empty platform, reusing existing torch installation.
+4. Build vLLM from source for empty platform, reusing existing torch installation.
 
+        cd ..
         git clone https://github.com/vllm-project/vllm
         cd vllm
         git checkout $VLLM_COMMIT_HASH
         pip install -r <(sed '/^torch/d' requirements/build.txt)
-        VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
+        VLLM_TARGET_DEVICE=empty pip install --no-build-isolation .
         cd ..
 
-6. Install vLLM Hardware Plugin for Intel® Gaudi® from source.
+5. Install vLLM Hardware Plugin for Intel® Gaudi® from source.
 
         cd vllm-gaudi
-        pip install -e .
+        pip install .
   
-7. Build NIXL.
+6. Build NIXL.
   
         python install_nixl.py
   
