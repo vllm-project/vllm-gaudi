@@ -93,7 +93,7 @@ The list of the supported features is available in the [Supported Features](../f
 
 - Tensor parallel inference
 
-- FP8 models and KV Cache quantization and calibration with Intel® Neural Compressor (INC). See [FP8 Calibration and Inference with vLLM](../features/quantization/inc.md) for more details.
+- FP8 models and KV Cache quantization and calibration with Intel® Neural Compressor (INC). For more details, see the [Intel® Neural Compressor](../configuration/quantization/inc.md) quantization and inference guide.
 
 ## Performance Tuning
 

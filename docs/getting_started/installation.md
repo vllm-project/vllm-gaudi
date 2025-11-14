@@ -36,7 +36,7 @@ Use the following commands to set up the container with the latest Intel® Gaudi
 !!! tip
     If you are facing the following error: `docker: Error response from daemon: Unknown runtime specified habana.`, refer to the "Install Optional Packages" section
     of [Install Driver and Software](https://docs.habana.ai/en/latest/Installation_Guide/Driver_Installation.html#install-driver-and-software) and "Configure Container
-    Runtime" section of [Docker Installation](https://docs.habana.ai/en/latest/Installation_Guide/Installation_Methods/Docker_Installation.html#configure-container-runtime).
+    Runtime" section of [Docker Installation](https://docs.habana.ai/en/latest/Installation_Guide/Additional_Installation/Docker_Installation.html#configure-container-runtime).
     Make sure you have ``habanalabs-container-runtime`` package installed and that ``habana`` container runtime is registered.
 
 To achieve the best performance on HPU, please follow the methods outlined in the
