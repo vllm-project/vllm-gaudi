@@ -725,9 +725,14 @@ def rewrite_kv_based_on_transfer_layout_hetero(self, metadata: NixlConnectorMeta
             ]), device=self.kv_buffer_device, dtype=torch.int64)
         for k, v in self.device_kv_caches.values():
             _, n_kv_heads, head_dim = self.block_shape
-            k[slot_indices] = k[slot_indices].reshape(-1, self.block_size//self.block_factor, n_kv_heads, head_dim).permute(0, 2, 1, 3).contiguous().view(-1, n_kv_heads, head_dim)
-            # Same for v  
-            v[slot_indices] = v[slot_indices].reshape(-1, self.block_size//self.block_factor, n_kv_heads, head_dim).permute(0, 2, 1, 3).contiguous().view(-1, n_kv_heads, head_dim)
+            k_blocks = k.index_select(0, slot_indices)
+            k_reshaped = k_blocks.reshape(-1, self.block_size//self.block_factor, n_kv_heads, head_dim).permute(0, 2, 1, 3).contiguous().view(-1, n_kv_heads, head_dim)
+            k.index_copy_(0, slot_indices, k_reshaped)
+
+            v_blocks = v.index_select(0, slot_indices)
+            v_reshaped = v_blocks.reshape(-1, self.block_size//self.block_factor, n_kv_heads, head_dim).permute(0, 2, 1, 3).contiguous().view(-1, n_kv_heads, head_dim)
+            v.index_copy_(0, slot_indices, v_reshaped)
+        
     if len(metadata.reqs_to_save) > 0:
         torch.hpu.synchronize()
     logger.debug('buke time consumes in rewrite:', time.perf_counter()-s)
