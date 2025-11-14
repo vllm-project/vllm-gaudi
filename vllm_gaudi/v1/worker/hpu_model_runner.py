@@ -492,7 +492,7 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
             mask = torch.where(same_chunk, mask, torch.tensor(0.0, dtype=dtype, device=device))
             attn_bias = torch.log(mask)
 
-        attn_metadata = prefill_metadata._replace(chunked_attn_bias=attn_bias)
+        attn_metadata = custom_tuple_replace(prefill_metadata, "TrimmedAttentionMetadata", chunked_attn_bias=attn_bias)
         return attn_metadata
 
     def _set_block_mapping(self, metadata, batch_size, device, dtype, is_window_block=False, update_for_chunked_attention=False):
