@@ -24,7 +24,7 @@ This document summarizes the features currently supported by the vLLM Hardware P
 | AutoGPTQ quantization | Supports inference with models quantized using the AutoGPTQ library. | [Library](https://github.com/AutoGPTQ/AutoGPTQ) |
 | LoRA/MultiLoRA support    | Supports LoRA and MultiLoRA on compatible models.     | [vLLM supported models](https://docs.vllm.ai/en/latest/models/supported_models.html), [Example](https://docs.vllm.ai/en/stable/examples/offline_inference/multilora_inference.html)   |
 | Fully async model executor     | Allows the model runner to run asynchronously with async scheduling, overlapping CPU operations , including `prepare_inputs`, and the model forward pass. It does not support speculative decoding, PP, or guided decoding. Expected speedup is 5-10% over the current async scheduling.   | [Feature description](https://github.com/vllm-project/vllm/pull/23569)   |
-| Automatic prefix caching   | Improves prefills efficiency. This feature is enabled by default.  | [Documentation](https://docs.vllm.ai/en/latest/features/automatic_prefix_caching/)  |
+| Automatic Prefix Caching (APC)  | Improves prefills efficiency. This feature is enabled by default.  | [Documentation](https://docs.vllm.ai/en/latest/features/automatic_prefix_caching/)  |
 | Speculative decoding (functional release)     | Supports experimental speculative decoding, which improves inter-token latency in some scenarios. The feature is configurable via the standard `--speculative_model` and `--num_speculative_tokens` parameters. It is not fully supported with the `torch.compile` execution mode.   | [Documentation](https://docs.vllm.ai/en/stable/features/spec_decode.html), [Example](https://docs.vllm.ai/en/stable/examples/offline_inference/spec_decode.html)  |
 | Multiprocessing backend   | The default distributed runtime in vLLM.   | [Documentation](https://docs.vllm.ai/en/v0.10.0/serving/distributed_serving.html)  |
 | Multimodal   | Supports inference for multi-modal models. It is not fully supported with the `t.compile` execution mode. |  [Documentation](https://docs.vllm.ai/en/latest/features/multimodal_inputs.html) |
@@ -46,5 +46,5 @@ Future plugin releases are planned to provide support for the following vLLM fea
 
 | **Feature**   | **Description**   | **Reasoning**  |
 |---    |---    |---    |
-| Multi-step scheduling      | Multi-step scheduling support for host overhead reduction.    | Replaced by async-scheduling, configurable via the `--async_scheduling` parameter.    |
-| Delayed Sampling     | Support for delayed sampling scheduling for asynchronous execution.    | Replaced by ascyn-scheduling, configurable via the `--async_scheduling` parameter.   |
+| Multi-step scheduling      | Multi-step scheduling support for host overhead reduction.    | Replaced by async scheduling, configurable via the `--async_scheduling` parameter.    |
+| Delayed Sampling     | Support for delayed sampling scheduling for asynchronous execution.    | Replaced by async scheduling, configurable via the `--async_scheduling` parameter.   |
