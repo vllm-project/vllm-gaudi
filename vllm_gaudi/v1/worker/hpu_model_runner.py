@@ -459,26 +459,25 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         if self.prefill_use_fusedsdpa and attn_metadata.block_list is not None:
 
             context_lens_t = prefill_metadata.context_lens_tensor
-
-            block_list = attn_metadata.block_list
+            block_list = prefill_metadata.block_list
             max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
             max_context_len = max_context_len * self.block_size
-
-            num_total_toks = torch.ceil(context_lens_t + seq_len)
-            which_chunk = torch.ceil(num_total_toks / chunk_size) - 1
-
-            invalid_lens_t = context_lens_t + torch.arange(seq_len, device=device) - (num_total_toks - which_chunk * chunk_size) - 1
-
+            query_positions = torch.arange(seq_len, device=device)
+            total_token_positions = context_lens_t.unsqueeze(-1) + query_positions.unsqueeze(0)
+            which_chunk = (total_token_positions // chunk_size)
+            chunk_start_positions = which_chunk * chunk_size
+            invalid_lens_t = chunk_start_positions - 1
+            
             past_indices = torch.arange(max_context_len, device=device)
-            past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
-                         (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+            past_mask = ((past_indices.unsqueeze(0).unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
+                         (past_indices.unsqueeze(0).unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(-1))).unsqueeze(1)
 
             causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=shift)
-            mask = torch.zeros_like(causal_mask, dtype=torch.bool)
-            for start in range(0, seq_len, chunk_size):
-                end = min(start + chunk_size, seq_len)
-                mask[start:end, start:end] = causal_mask[start:end, start:end]
-            causal_mask = mask.view(batch_size, 1, seq_len, seq_len)
+            query_chunk_ids = which_chunk[0]
+            same_chunk_mask = query_chunk_ids.unsqueeze(0) == query_chunk_ids.unsqueeze(1)
+            
+            causal_mask = causal_mask & same_chunk_mask
+            causal_mask = causal_mask.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, seq_len, seq_len)
 
             mask = torch.concat((past_mask, causal_mask), dim=-1)
             attn_bias = torch.where(mask, torch.tensor(0.0, dtype=dtype, device=device),
