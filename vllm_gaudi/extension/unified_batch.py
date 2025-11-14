@@ -154,12 +154,14 @@ class Context:
         return self.index_select(shared_idx), self.index_select(unique_idx)
 
 
-class PlaceholderLRUCache:
+class DynamicPlaceholderMempool:
 
-    def __init__(self, capacity):
+    def __init__(self, capacity, device='cpu'):
         self.capacity = capacity
-        self.cache = collections.OrderedDict()
+        self.device = device  # 'cpu' for numpy, 'hpu' for torch
+        self.cache = collections.OrderedDict()  # Maps (pad_value, dtype_name) -> array/tensor
         self._cache_size = 0
+        self.is_torch_cache = (device == 'hpu')
 
     @property
     def cache_size(self):
@@ -167,32 +169,99 @@ class PlaceholderLRUCache:
 
     def _cache_evict_last(self):
         _, value = self.cache.popitem(last=False)
-        self._cache_size -= value.nbytes
+        self._cache_size -= self._get_nbytes(value)
 
-    def _cache_pop(self, key):
-        value = self.cache.pop(key)
-        self._cache_size -= value.nbytes
-        return value
+    def _get_nbytes(self, value):
+        """Get size in bytes for numpy array or torch tensor"""
+        if isinstance(value, torch.Tensor):
+            return value.element_size() * value.numel()
+        else:
+            return value.nbytes
 
-    def _cache_set(self, key, value):
-        self.cache[key] = value
-        self._cache_size += value.nbytes
+    def _normalize_key(self, key):
+        """Convert (shape, pad_value, dtype) to (pad_value, dtype_name)"""
+        shape, pad_value, dtype = key
+        # Handle both np.dtype and torch.dtype
+        if hasattr(dtype, 'name'):
+            dtype_name = dtype.name
+        else:
+            dtype_name = str(dtype)
+        return (pad_value, dtype_name)
 
     def __getitem__(self, key):
-        value = self._cache_pop(key)
-        self._cache_set(key, value)
-        return value
+        """Get a view of the cached placeholder reshaped to the requested shape"""
+        shape, pad_value, dtype = key
+        n_elts = int(np.prod(shape))
+        newkey = self._normalize_key(key)
+
+        # Get value and move to end (most recently used)
+        value = self.cache[newkey]
+        self.cache.move_to_end(newkey)
+
+        # Verify we have enough space
+        if isinstance(value, torch.Tensor):
+            item_size = value.element_size()
+            current_bytes = value.element_size() * value.numel()
+        else:
+            item_size = np.dtype(dtype).itemsize
+            current_bytes = value.nbytes
+
+        needed_bytes = n_elts * item_size
+        if current_bytes < needed_bytes:
+            raise KeyError(f"Cached placeholder for {newkey} is too small. "
+                           f"Needed {needed_bytes} bytes, but got {current_bytes} bytes.")
+
+        # Return a reshaped view (no copy)
+        return value[:n_elts].reshape(shape)
 
     def __setitem__(self, key, value: Union[np.ndarray, torch.Tensor]):
-        try:
-            self._cache_pop(key)
-        except KeyError:
-            while self.cache_size >= self.capacity:
+        """Store or upgrade the placeholder for this (pad_value, dtype) pair"""
+        shape, pad_value, dtype = key
+        newkey = self._normalize_key(key)
+
+        # Flatten based on type
+        if isinstance(value, torch.Tensor):
+            flat_value = value.flatten()
+        else:
+            flat_value = value.flatten()
+
+        current_value = self.cache.get(newkey, None)
+        flat_value_bytes = self._get_nbytes(flat_value)
+        current_value_bytes = self._get_nbytes(current_value) if current_value is not None else 0
+
+        # Only update if we don't have a placeholder OR the new one is bigger
+        if current_value is None:
+            # New entry - evict if needed
+            while self.cache_size + flat_value_bytes > self.capacity:
+                if len(self.cache) == 0:
+                    break  # Can't evict anymore
                 self._cache_evict_last()
-        self._cache_set(key, value)
+
+            self.cache[newkey] = flat_value
+            self._cache_size += flat_value_bytes
+
+        elif flat_value_bytes > current_value_bytes:
+            # Upgrade to bigger placeholder
+            size_diff = flat_value_bytes - current_value_bytes
+
+            # Evict if needed to make room for the size increase
+            while self.cache_size + size_diff > self.capacity:
+                if len(self.cache) <= 1:  # Don't evict the one we're updating
+                    break
+                self._cache_evict_last()
+
+            # Move to end and update
+            self.cache.pop(newkey)
+            self.cache[newkey] = flat_value
+            self._cache_size += size_diff
+        else:
+            # Same size or smaller - just update LRU order
+            self.cache.move_to_end(newkey)
 
     def __contains__(self, key):
-        return key in self.cache
+        """Check if we have a placeholder for this (pad_value, dtype) pair"""
+        newkey = self._normalize_key(key)
+        return newkey in self.cache
 
 
 class UnifiedBatchPersistentContext:
@@ -253,32 +322,49 @@ class UnifiedBatchPersistentContext:
                                                            backend='hpu_backend',
                                                            fullgraph=True,
                                                            dynamic=False)
-        self.hpu_tensor_online_padding = True
-        # NOTE(kzawora): Cache for numpy placeholders to avoid reallocation
-        placeholder_lru_cache_capacity = 4 * 2**30  # Use 4GiB of host memoryfor placeholder cache
-        self.np_placeholder_cache = PlaceholderLRUCache(capacity=placeholder_lru_cache_capacity)
-        self.torch_placeholder_cache = PlaceholderLRUCache(capacity=placeholder_lru_cache_capacity)
+        self.hpu_tensor_online_padding = False
+        if not self.hpu_tensor_online_padding:
+            # NOTE(kzawora): Dynamic mempool caches - store largest placeholders needed for each (pad_value, dtype)
+            placeholder_lru_cache_capacity = 4 * 2**30  # Use 4GiB of host memory for CPU placeholder cache
+            self.np_placeholder_cache = DynamicPlaceholderMempool(capacity=placeholder_lru_cache_capacity, device='cpu')
+
+        # NOTE(kzawora): HPU tensor mempool - it is functional, but currently seems to degrade performance, so it is disabled by default
+        self.use_hpu_tensor_mempool = False
+        if self.use_hpu_tensor_mempool:
+            hpu_placeholder_lru_cache_capacity = 4 * 2**30  # Use 4GiB of HPU memory for HPU placeholder cache
+            self.torch_placeholder_cache = DynamicPlaceholderMempool(capacity=hpu_placeholder_lru_cache_capacity,
+                                                                     device='hpu')
 
     def hpu_tensor(self, tensor: np.ndarray | None, shape: tuple, pad_value: Union[int, float],
                    dtype: torch.dtype) -> torch.Tensor:
-        with self.profiler.record_event('internal', 'hpu_tensor'):
+        with self.profiler.record_event('internal', f'hpu_tensor_{shape}_{dtype}'):
             return self.__hpu_tensor_internal(tensor, shape, pad_value, dtype)
 
-    def get_placeholders(self, shape: tuple, pad_value: Union[int, float], dtype: np.dtype,
-                         torch_dtype: torch.dtype) -> np.ndarray:
-        """ Get or create a cached placeholder tensor """
+    def get_np_placeholder(self, shape: tuple, pad_value: Union[int, float], dtype: np.dtype) -> np.ndarray:
+        """ Get or create cached numpy placeholder - returns COPY to avoid batch contamination """
         key = (shape, pad_value, dtype)
-        torch_key = (shape, pad_value, torch_dtype)
         try:
-            # Use __getitem__ to both retrieve and update LRU order
-            np_placeholder = self.np_placeholder_cache[key]
-            torch_placeholder = self.torch_placeholder_cache[torch_key]
+            placeholder = self.np_placeholder_cache[key]
+            with self.profiler.record_event('internal', 'copy_placeholder'):
+                out = placeholder.copy()
+            return out
         except KeyError:
-            np_placeholder = np.full(shape, pad_value, dtype=dtype)
-            self.np_placeholder_cache[key] = np_placeholder
-            torch_placeholder = torch.full(shape, pad_value, dtype=torch_dtype, device='hpu')
-            self.torch_placeholder_cache[torch_key] = torch_placeholder
-        return np_placeholder.copy(), torch_placeholder.detach().clone()
+            with self.profiler.record_event('internal', 'create_new_placeholder'):
+                placeholder = np.full(shape, pad_value, dtype=dtype)
+                self.np_placeholder_cache[key] = placeholder
+                return placeholder.copy()
+
+    def get_torch_placeholder(self, shape: tuple, pad_value: Union[int, float], dtype: torch.dtype) -> torch.Tensor:
+        """ Get or create cached torch placeholder - returns REFERENCE (will be overwritten by caller) """
+        key = (shape, pad_value, dtype)
+        try:
+            # No clone needed - caller will overwrite the contents anyway
+            placeholder = self.torch_placeholder_cache[key]
+            return placeholder
+        except KeyError:
+            placeholder = torch.full(shape, pad_value, dtype=dtype, device='hpu')
+            self.torch_placeholder_cache[key] = placeholder
+            return placeholder
 
     def __hpu_tensor_internal(self, tensor: np.ndarray | None, shape: tuple, pad_value: Union[int, float],
                               dtype: torch.dtype) -> torch.Tensor:
@@ -300,28 +386,49 @@ class UnifiedBatchPersistentContext:
                 out = to_hpu(torch_cpu_tensor)
             return out
         else:
-            with self.profiler.record_event('internal', 'placeholder_padding'):
-                # Use placeholder-based padding
-                placeholder_dtype = dtype if dtype != torch.bfloat16 else torch.float32
-                np_placeholder, torch_placeholder = self.get_placeholders(shape, pad_value, tensor.dtype, dtype)
-                if len(shape) == 4:
-                    np_placeholder[:tensor.shape[0], :tensor.shape[1], :tensor.shape[2], :tensor.shape[3]] = tensor
-                elif len(shape) == 3:
-                    np_placeholder[:tensor.shape[0], :tensor.shape[1], :tensor.shape[2]] = tensor
-                elif len(shape) == 2:
-                    np_placeholder[:tensor.shape[0], :tensor.shape[1]] = tensor
-                else:
-                    np_placeholder[:tensor.shape[0]] = tensor
-                tensor = np_placeholder
+            # Fast path: if no padding needed, skip placeholder logic entirely
+            needs_padding = tensor.shape != shape
 
-            # Convert numpy array to torch tensor and move to HPU
-            with self.profiler.record_event('internal', 'to_torch'):
-                # NOTE(kzawora): stock float32 -> bfloat conversion is SLOOOOOOW on CPU
-                # So in case of bfloats, we copy to float32 placeholder on HPU and then convert there
-                torch_cpu_tensor = torch.from_numpy(tensor)  #.to(dtype)
-            with self.profiler.record_event('internal', 'to_hpu'):
-                out = torch_placeholder.copy_(torch_cpu_tensor, non_blocking=True)  #.to(dtype, non_blocking=True)
-            return out
+            if not needs_padding:
+                with self.profiler.record_event('internal', 'to_torch_cpu_nopad'):
+                    torch_cpu_tensor = torch.from_numpy(tensor)
+            else:
+                with self.profiler.record_event('internal', 'get_placeholder'):
+                    # Use placeholder-based padding
+                    np_placeholder = self.get_np_placeholder(shape, pad_value, tensor.dtype)
+                with self.profiler.record_event('internal', 'fill_placeholder'):
+                    if len(shape) == 4:
+                        np_placeholder[:tensor.shape[0], :tensor.shape[1], :tensor.shape[2], :tensor.shape[3]] = tensor
+                    elif len(shape) == 3:
+                        np_placeholder[:tensor.shape[0], :tensor.shape[1], :tensor.shape[2]] = tensor
+                    elif len(shape) == 2:
+                        np_placeholder[:tensor.shape[0], :tensor.shape[1]] = tensor
+                    else:
+                        np_placeholder[:tensor.shape[0]] = tensor
+                with self.profiler.record_event('internal', 'to_torch_cpu'):
+                    torch_cpu_tensor = torch.from_numpy(np_placeholder)
+
+            # Check if we need dtype conversion
+            src_dtype = torch_cpu_tensor.dtype
+            needs_conversion = (src_dtype != dtype)
+            if not self.use_hpu_tensor_mempool:
+                with self.profiler.record_event('internal', 'to_hpu_no_mempool'):
+                    torch_hpu_tensor = torch_cpu_tensor.to(device='hpu', non_blocking=True)
+                    if needs_conversion:
+                        with self.profiler.record_event('internal', 'dtype_conversion'):
+                            return torch_hpu_tensor.to(dtype, non_blocking=True)
+                    return torch_hpu_tensor
+
+            if needs_conversion:
+                # Dtype conversion needed - can't reuse placeholder, allocate new
+                with self.profiler.record_event('internal', 'to_hpu_with_conversion'):
+                    return torch_cpu_tensor.to(device='hpu', dtype=dtype, non_blocking=True)
+            else:
+                # Same dtype - can reuse cached placeholder
+                with self.profiler.record_event('internal', 'to_hpu_cached'):
+                    torch_placeholder = self.get_torch_placeholder(shape, pad_value, dtype)
+                    torch_placeholder.copy_(torch_cpu_tensor, non_blocking=True)
+                    return torch_placeholder
 
 
 class HPUBiasGenerator(torch.nn.Module):
