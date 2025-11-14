@@ -37,7 +37,7 @@ For the [DeepSeek-R1](https://huggingface.co/collections/deepseek-ai/deepseek-r1
 Refer the following chapters to follow the calibration procedure for your setup:
 
 - [Simple calibration for a single Intel® Gaudi® node](calibration_one_node.md)
-- [Calibration for multiple Intel® Gaudi® nodes](calibration_multi_node)
+- [Calibration for multiple Intel® Gaudi® nodes](calibration_multi_node.md)
 
 ## Troubleshooting
 

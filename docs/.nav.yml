@@ -20,7 +20,6 @@ nav:
       - configuration/quantization/inc.md
       - configuration/quantization/auto_awq.md
       - configuration/quantization/gptqmodel.md
-    - configuration/optimization.md
     - configuration/pipeline_parallelism.md
   - Features:
     - features/supported_features.md
