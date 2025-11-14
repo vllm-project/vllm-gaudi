@@ -46,8 +46,8 @@ If you encounter out-of-memory errors while using the plugin, consider the follo
 
 ## OOM errors occur during inference
 
-Factors such as available GPU memory, model size, and input sequence length may prevent the standard inference command from running successfully for your model, potentially resulting in out-of-memory (OOM) errors. To address these errors, consider the following recommendations:
+Factors such as available HPU memory, model size, and input sequence length may prevent the standard inference command from running successfully for your model, potentially resulting in out-of-memory (OOM) errors. To address these errors, consider the following recommendations:
 
 - Increase `gpu_memory_utilization`: To address memory limitations, vLLM pre-allocates HPU cache using the percentage of memory defined by `gpu_memory_utilization`. Increasing this value allocates more space for the KV cache.
 - Decrease `max_num_seqs` or `max_num_batched_tokens`: It may reduce the number of concurrent requests in a batch, leading to lower KV cache usage.
-- Increase `tensor_parallel_size`: This method distributes the model weights across GPUs, increasing the memory available for the KV cache on each GPU.
+- Increase `tensor_parallel_size`: This method distributes the model weights across HPUs, increasing the memory available for the KV cache on each HPU.
