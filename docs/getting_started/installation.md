@@ -80,13 +80,13 @@ There are two ways to install vLLM Hardware Plugin for Intel® Gaudi® from sour
         cd vllm
         git checkout $VLLM_COMMIT_HASH
         pip install -r <(sed '/^torch/d' requirements/build.txt)
-        VLLM_TARGET_DEVICE=empty pip install --no-build-isolation .
+        VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
         cd ..
   
 5. Install vLLM Hardware Plugin for Intel® Gaudi® from source.
   
         cd vllm-gaudi
-        pip install .
+        pip install -e .
         cd ..
   
 To achieve the best performance on HPU, please follow the methods outlined in the
@@ -127,13 +127,13 @@ To achieve the best performance on HPU, please follow the methods outlined in th
         cd vllm
         git checkout $VLLM_COMMIT_HASH
         pip install -r <(sed '/^torch/d' requirements/build.txt)
-        VLLM_TARGET_DEVICE=empty pip install --no-build-isolation .
+        VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
         cd ..
 
 5. Install vLLM Hardware Plugin for Intel® Gaudi® from source.
 
         cd vllm-gaudi
-        pip install .
+        pip install -e .
   
 6. Build NIXL.
   
