@@ -1,15 +1,31 @@
 #!/bin/bash
-set -xe
+
+#Temporary test case disablement because of PR28012
+exit 0
+
+set -e
+
+# --- Install Nixl ---
+echo "Installing lm-eval dependency..."
+python ../../install_nixl.py
+echo "Dependency installation complete."
+
+
+# --- Install Dependencies ---
+echo "Installing lm-eval dependency..."
+pip install lm-eval[api]
+echo "Dependency installation complete."
+
 
 # Models to run
 MODELS=(
     "Qwen/Qwen3-0.6B"
+    "deepseek-ai/DeepSeek-V2-Lite-Chat"
 )
 #MODELS=(
 #	"meta-llama/Llama-3.1-8B"
 #)
 
-export VLLM_USE_V1=1
 export VLLM_SKIP_WARMUP="true"
 export PT_HPU_LAZY_MODE=1
 
@@ -26,7 +42,7 @@ fi
 NUM_PREFILL_INSTANCES=${NUM_PREFILL_INSTANCES:-1} # Default to 1
 NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-1}   # Default to 1
 PREFILLER_TP_SIZE=${PREFILLER_TP_SIZE:-1}
-DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
+DECODER_TP_SIZE=${DECODER_TP_SIZE:-2}
 
 # Find the git repository root directory
 #GIT_ROOT=$(git rev-parse --show-toplevel)

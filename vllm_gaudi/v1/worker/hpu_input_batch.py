@@ -12,7 +12,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.utils import swap_dict_values
+from vllm.utils.collection_utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -69,6 +69,7 @@ class InputBatch:
         pin_memory: bool,
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
+        kernel_block_sizes: list[int],
         logitsprocs: Optional[LogitsProcessors] = None,
         is_spec_decode: bool = False,
     ):
@@ -114,6 +115,7 @@ class InputBatch:
             pin_memory=pin_memory,
             device=device,
             block_sizes=block_sizes,
+            kernel_block_sizes=kernel_block_sizes,
         )
 
         # Sampling-related.
@@ -254,6 +256,15 @@ class InputBatch:
         start_idx = num_prompt_tokens
         end_idx = start_idx + len(request.output_token_ids)
         self.token_ids_cpu[req_index, start_idx:end_idx] = request.output_token_ids
+        #NOTE(kzawora): In non-preemption scenario,
+        # self.input_batch.num_prompt_tokens[batch_idx] == self.input_batch.num_tokens[batch_idx].
+        # In preemption scenario, we want num_prompt_tokens to also include the tokens emitted before preemption,
+        # as that is used as basis for recomputing prefill.
+        # This also assumes that preemption is complete and reduces num_computed_tokens to 0 and preempted sequences
+        # don't retain any originally used cache blocks.
+        if request.num_computed_tokens == 0:
+            self.num_prompt_tokens[req_index] = num_prompt_tokens + len(request.output_token_ids)
+
         # Number of token ids in token_ids_cpu.
         # NOTE(woosuk): This may include spec decode tokens.
         self.num_tokens[req_index] = request.num_tokens
