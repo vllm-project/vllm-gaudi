@@ -12,8 +12,8 @@ from vllm.platforms import Platform, PlatformEnum
 from vllm_gaudi.extension.runtime import get_config
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import _Backend
     from vllm.config import ModelConfig, VllmConfig
+    from vllm.attention.backends.registry import AttentionBackendEnum
 else:
     ModelConfig = None
     VllmConfig = None
@@ -40,29 +40,29 @@ class HpuPlatform(Platform):
     additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: "_Backend", head_size: int, dtype: torch.dtype,
-                             kv_cache_dtype: Optional[str], block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink: bool, use_sparse: bool) -> str:
-        assert use_v1, 'Only V1 is supported!'
-        from vllm.attention.backends.registry import (register_backend, AttentionBackendEnum)
+    def get_attn_backend_cls(
+        cls,
+        selected_backend: "AttentionBackendEnum",
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: Optional[str],
+        block_size: int,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        attn_type: str | None = None,
+    ) -> str:
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on HPU.")
         if use_mla:
-            register_backend(AttentionBackendEnum.CUSTOM,
-                             "vllm_gaudi.attention.backends.hpu_attn.HPUMLAAttentionBackend")
             logger.info("Using HPUAttentionMLA backend.")
             return ("vllm_gaudi.attention.backends.hpu_attn."
                     "HPUMLAAttentionBackend")
         elif get_config().unified_attn:
-            register_backend(
-                AttentionBackendEnum.CUSTOM,
-                "vllm_gaudi.attention.backends.vllm_gaudi.attention.backends.hpu_attn.HPUUnifiedAttentionBackend")
             logger.info("Using UnifiedAttention backend.")
             return ("vllm_gaudi.attention.backends."
                     "hpu_attn.HPUUnifiedAttentionBackend")
         else:
-            register_backend(AttentionBackendEnum.CUSTOM,
-                             "vllm_gaudi.v1.attention.backends.hpu_attn.HPUAttentionBackendV1")
             logger.info("Using HPUAttentionV1 backend.")
             return ("vllm_gaudi.v1.attention.backends."
                     "hpu_attn.HPUAttentionBackendV1")
