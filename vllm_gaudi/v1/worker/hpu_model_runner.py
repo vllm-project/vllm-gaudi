@@ -4362,13 +4362,16 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
                 "for more details.")
-            self.input_batch = InputBatch(max_num_reqs=self.scheduler_config.max_num_seqs,
-                                          max_model_len=self.max_model_len,
-                                          max_num_batched_tokens=self.max_num_tokens,
-                                          device=self.device,
-                                          pin_memory=self.pin_memory,
-                                          vocab_size=self.model_config.get_vocab_size(),
-                                          block_sizes=block_sizes)
+            self.input_batch = InputBatch(
+                max_num_reqs=self.scheduler_config.max_num_seqs,
+                max_model_len=self.max_model_len,
+                max_num_batched_tokens=self.max_num_tokens,
+                device=self.device,
+                pin_memory=self.pin_memory,
+                vocab_size=self.model_config.get_vocab_size(),
+                block_sizes=block_sizes,
+                kernel_block_sizes=block_sizes,
+            )
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """

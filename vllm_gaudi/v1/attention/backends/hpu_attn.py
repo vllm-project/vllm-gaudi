@@ -111,10 +111,8 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    block_size=block_size,
                    query_start_loc=query_start_loc)
 
-class HPUMetadataBuilder(AttentionMetadataBuilder[HPUAttentionMetadata]):
 
-    def build(self):
-        passclass HPUMetadataBuilder(AttentionMetadataBuilder[HPUAttentionMetadata]):
+class HPUMetadataBuilder(AttentionMetadataBuilder[HPUAttentionMetadata]):
 
     def build(self):
         pass
