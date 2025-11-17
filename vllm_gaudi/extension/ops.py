@@ -209,7 +209,7 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
             position_bias = position_bias.float()
     else:
         attn = matmul_qk_op(query, key)
-    
+
     if position_bias is not None:
         if attn.dtype != position_bias.dtype:
             attn = attn.to(dtype=position_bias.dtype)
