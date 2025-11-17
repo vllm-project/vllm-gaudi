@@ -4342,8 +4342,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 self.get_model().vision_bucket_manager = HPUVisionBucketManager(self.model_config.model)
                 msg = (f"Multimodal bucket : {self.get_model().vision_bucket_manager.multimodal_buckets}")
                 logger.info(msg)
-
-            max_bucket = max(self.bucketing_manager.decode_buckets[-1][0], self.bucketing_manager.prompt_buckets[-1][0])
+            if self.is_pooling_model:
+                max_bucket = self.bucketing_manager.prompt_buckets[-1][0]
+            else:
+                max_bucket = max(self.bucketing_manager.decode_buckets[-1][0],
+                                 self.bucketing_manager.prompt_buckets[-1][0])
             if max_bucket > self.input_batch.max_num_reqs:
                 input_batch_bkp = self.input_batch
                 self.input_batch = InputBatch(
@@ -4429,7 +4432,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         mem_post_decode, decode_batch_seq, decode_captured_all = \
                           self.warmup_graphs(
                               self.bucketing_manager.decode_buckets, False, kv_caches)
-                         self.log_graph_warmup_summary(self.bucketing_manager.decode_buckets, False, mem_post_decode)
+                        self.log_graph_warmup_summary(self.bucketing_manager.decode_buckets, False, mem_post_decode)
 
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
