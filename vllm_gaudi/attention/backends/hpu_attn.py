@@ -24,6 +24,8 @@ from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention, HPUPaged
 from vllm_gaudi.extension.logger import logger as init_logger
 from vllm_gaudi.extension.unified import (unified_attn, HPUUnifiedAttentionMetadata)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.attention.backends.registry import (register_backend, AttentionBackendEnum)
+from vllm._aiter_ops import rocm_aiter_ops
 
 logger = init_logger()
 
@@ -71,11 +73,12 @@ class HPUAttentionBackend(AttentionBackend):
         HPUPagedAttention.copy_blocks(kv_caches, src_to_dsts)
 
 
+@register_backend(AttentionBackendEnum.CUSTOM, "HPU_MLA")
 class HPUMLAAttentionBackend(HPUAttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "HPU_MLA"
+        return "CUSTOM"
 
     @staticmethod
     def get_impl_cls() -> type["AttentionImpl"]:
@@ -95,11 +98,12 @@ class HPUMLAAttentionBackend(HPUAttentionBackend):
         return (num_blocks * block_size, head_size)
 
 
+@register_backend(AttentionBackendEnum.CUSTOM, "HPU_UA")
 class HPUUnifiedAttentionBackend(HPUAttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "HPU_UA"
+        return "CUSTOM"
 
     @staticmethod
     def get_impl_cls() -> type["AttentionImpl"]:
@@ -206,6 +210,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         self.prefill_impl = get_config().prompt_attn_impl
         assert self.prefill_impl != 'fsdpa_impl' or alibi_slopes is None, \
             'Prefill with FusedSDPA not supported with alibi slopes!'
+        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
@@ -318,7 +323,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
             fsdpa_op=self.fused_scaled_dot_product_attention.apply \
             if self.fused_scaled_dot_product_attention is not None else None)
         # remove padding
-        output = output.view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]
+        output = output.view(batch_size, -1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]
 
         return output.reshape(-1, self.num_heads * v.shape[-1])
 
@@ -570,9 +575,13 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
 
             common_args = self.common_attention_args(block_list, key_cache, value_cache, attn_metadata.block_size)
 
-            if self.sliding_window and hasattr(attn_metadata,
-                                               'window_attn_bias') and attn_metadata.window_attn_bias is not None:
-                attn_bias = attn_metadata.window_attn_bias
+            if self.sliding_window:
+                if hasattr(attn_metadata, 'window_attn_bias') and attn_metadata.window_attn_bias is not None:
+                    attn_bias = attn_metadata.window_attn_bias
+                else:
+                    attn_bias = None
+                    window_size = (self.sliding_window, 0)
+                    common_args['window_size'] = window_size
 
             out = ops.prompt_attention(impl=self.prefill_impl,
                                        query=query.view(query_shape),
@@ -802,7 +811,7 @@ def _make_decode_alibi_bias(
     return per_head_bias
 
 
-class HPUUnifiedAttentionImpl(AttentionImpl):
+class HPUUnifiedAttentionImpl(AttentionImpl, torch.nn.Module):
 
     def __init__(
         self,
@@ -832,7 +841,6 @@ class HPUUnifiedAttentionImpl(AttentionImpl):
             'non-GQA attention': num_kv_heads is None,
             'Encoder attn': attn_type != AttentionType.DECODER,
             'fp32 softmax': get_config().fp32_softmax,
-            'fp8': kv_cache_dtype == 'fp8_inc',
         }
         for feature, check in unsupported_features.items():
             if check:
@@ -841,7 +849,7 @@ class HPUUnifiedAttentionImpl(AttentionImpl):
         if use_irope:
             logger.warning_once("Using irope in HPU is not supported yet, it will fall back "
                                 "to global attention for long context.")
-
+        self.enable_fp8_attn = kv_cache_dtype == 'fp8_inc' and os.environ.get('QUANT_CONFIG', None) is None
         self.kv_cache_dtype = kv_cache_dtype
         self.num_heads = num_heads
         self.head_size = head_size
@@ -849,8 +857,10 @@ class HPUUnifiedAttentionImpl(AttentionImpl):
         self.num_kv_heads = num_kv_heads
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-        self.k_cache = VLLMKVCache()
-        self.v_cache = VLLMKVCache()
+        self.k_cache = VLLMKVCache() if not self.enable_fp8_attn \
+            else VLLMFP8KVCache()
+        self.v_cache = VLLMKVCache() if not self.enable_fp8_attn \
+            else VLLMFP8KVCache()
 
     def forward(
         self,

@@ -58,6 +58,18 @@ class HPUBucketingManager():
         self.fallback_seq_base_step = 32
         self.fallback_blocks_base_step = 32
 
+        self.use_sliding_window = get_config().PT_HPU_SDPA_QKV_SLICE_MODE_FWD
+        if self.use_sliding_window:
+            self.slice_size = get_config().PT_HPU_SDPA_BC_FACTOR if \
+                get_config().PT_HPU_SDPA_BC_FACTOR is not None else 1024
+            self.slice_thld = get_config().VLLM_FUSEDSDPA_SLIDE_THLD if \
+                get_config().VLLM_FUSEDSDPA_SLIDE_THLD is not None else 8192
+
+            msg = (
+                f"use_sliding_window {self.use_sliding_window}, slice_size {self.slice_size}, threshold {self.slice_thld}"
+            )
+            logger().info(msg)
+
     ### GENERATE BUCKETS FUNCTIONS ###
 
     def read_from_file(self, is_prompt):
@@ -136,6 +148,13 @@ class HPUBucketingManager():
                                                    self.max_num_batched_tokens, self.block_size, self.num_hpu_blocks,
                                                    buckets_from_file)
             self.log_generate_info(True)
+            if self.use_sliding_window:
+                self.prompt_buckets = [
+                    t for t in self.prompt_buckets
+                    if t[2] != 0 or (t[2] == 0 and (t[1] < self.slice_thld or
+                                                    (t[1] >= self.slice_thld and t[1] % self.slice_size == 0)))
+                ]
+                self.log_generate_info(True)
         else:
             logger().info("Bucketing is off - skipping prompt buckets generation")
             self.prompt_buckets = []
@@ -189,7 +208,11 @@ class HPUBucketingManager():
     def generate_fallback_bucket(self, batch_size, seq_len, ctx):
         assert self.max_num_batched_tokens is not None
         new_batch_size = calc_fallback_value(batch_size, self.fallback_bs_base_step)
-        new_seq_len = min(calc_fallback_value(seq_len, self.fallback_seq_base_step), self.max_num_batched_tokens)
+        if self.use_sliding_window and seq_len >= self.slice_thld:
+            new_seq_len = math.ceil(seq_len / self.slice_size) * self.slice_size
+        else:
+            new_seq_len = min(calc_fallback_value(seq_len, self.fallback_seq_base_step), self.max_num_batched_tokens)
+
         if self.num_hpu_blocks is None:
             new_ctx = 0
         else:
@@ -306,13 +329,11 @@ def generate_buckets(bs_range,
                 "-> bs, query, ctx: ", bs, query, ctx))
         return smaller_than_limit
 
-    # decode
-    def block_not_greater_than_max_model_len(bs, query, ctx):
-        smaller_than_limit = ctx <= bs * math.ceil(max_model_len / block_size)
-        if not smaller_than_limit:
-            omitted_buckets.add(
-                ("condition: ctx <= bs * math.ceil(max_model_len / block_size)", "-> bs, query, ctx: ", bs, query, ctx))
-        return smaller_than_limit
+    def no_corrections(bs, query, ctx):
+        return (bs, query, ctx)
+
+    def correct_for_max_model_len(bs, query, ctx):
+        return (bs, query, min(ctx, bs * math.ceil(max_model_len / block_size)))
 
     def batch_size_smaller_than_blocks(bs, query, ctx):
         if not bs <= ctx:
@@ -328,7 +349,7 @@ def generate_buckets(bs_range,
         "decode": {
             # depends only on contiguous PA
             True: [],
-            False: [block_not_greater_than_max_model_len, batch_size_smaller_than_blocks],
+            False: [batch_size_smaller_than_blocks],
         }
     }
 
@@ -338,15 +359,22 @@ def generate_buckets(bs_range,
             return filters_map[phase][use_merged_prefill]
         return filters_map[phase][use_contiguous_pa]
 
+    def get_corrector(is_prompt, use_contiguous_pa):
+        if is_prompt or use_contiguous_pa:
+            return no_corrections
+        else:
+            return correct_for_max_model_len
+
     buckets = set()
     buckets_2d = set()
     omitted_buckets = set()
     filters = get_filters(is_prompt, use_merged_prefill, use_contiguous_pa)
+    corrector = get_corrector(is_prompt, use_contiguous_pa)
 
     if file_buckets:
         for bs, query, blocks in file_buckets:
             if all(bucket_filter(bs, query, blocks) for bucket_filter in filters):
-                buckets.add((bs, query, blocks))
+                buckets.add(corrector(bs, query, blocks))
     else:
         for bs_idx, bs in enumerate(bs_range):
             for ctx_idx, ctx in enumerate(ctx_range):
@@ -357,7 +385,7 @@ def generate_buckets(bs_range,
         for bs, ctx in buckets_2d:
             for query in query_range:
                 if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
-                    buckets.add((bs, query, ctx))
+                    buckets.add(corrector(bs, query, ctx))
     if not buckets:
         phase = 'prompt' if is_prompt else 'decode'
         for bucket in omitted_buckets:
