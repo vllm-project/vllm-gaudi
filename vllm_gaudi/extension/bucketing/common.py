@@ -54,12 +54,29 @@ class HPUBucketingManager():
         self.num_hpu_blocks = None
         self.max_model_len = max_model_len
         self.initialized = True
-
         self.fallback_bs_base_step = 2
         self.fallback_seq_base_step = 32
         self.fallback_blocks_base_step = 32
 
+        self.use_sliding_window = get_config().PT_HPU_SDPA_QKV_SLICE_MODE_FWD
+        if self.use_sliding_window:
+            self.slice_size = get_config().PT_HPU_SDPA_BC_FACTOR if \
+                get_config().PT_HPU_SDPA_BC_FACTOR is not None else 1024
+            self.slice_thld = get_config().VLLM_FUSEDSDPA_SLIDE_THLD if \
+                get_config().VLLM_FUSEDSDPA_SLIDE_THLD is not None else 8192
+
+            msg = (
+                f"use_sliding_window {self.use_sliding_window}, slice_size {self.slice_size}, threshold {self.slice_thld}"
+            )
+            logger().info(msg)
+
     ### GENERATE BUCKETS FUNCTIONS ###
+
+    def read_from_file(self, is_prompt):
+        file_name = get_config().VLLM_BUCKETING_FROM_FILE
+        from vllm_gaudi.extension.bucketing.file_strategy import (FileBucketingStrategy)
+        strategy = FileBucketingStrategy()
+        return strategy.get_buckets(file_name, is_prompt)
 
     def get_bucketing_strategy(self):
         strategy = None
@@ -78,6 +95,8 @@ class HPUBucketingManager():
 
     def generate_unified_buckets(self):
         if self.initialized:
+            if get_config().VLLM_BUCKETING_FROM_FILE:
+                assert "Unified attention doesn't support bucketing from file"
             from vllm_gaudi.extension.bucketing.unified import (UnifiedBucketingStrategy)
             strategy = UnifiedBucketingStrategy()
 
@@ -105,21 +124,37 @@ class HPUBucketingManager():
 
     def generate_prompt_buckets(self):
         if self.initialized:
-            strategy = self.get_bucketing_strategy()
+            buckets_from_file = None
+            bs_range = []
+            query_range = []
+            ctx_range = []
+            if get_config().VLLM_BUCKETING_FROM_FILE:
+                buckets_from_file = self.read_from_file(is_prompt=True)
+            else:
+                strategy = self.get_bucketing_strategy()
 
-            bs_cfg, query_cfg, ctx_cfg = strategy.get_prompt_cfgs(max_num_prefill_seqs=self.max_num_prefill_seqs,
-                                                                  block_size=self.block_size,
-                                                                  max_num_batched_tokens=self.max_num_batched_tokens,
-                                                                  max_model_len=self.max_model_len)
+                bs_cfg, query_cfg, ctx_cfg = strategy.get_prompt_cfgs(
+                    max_num_prefill_seqs=self.max_num_prefill_seqs,
+                    block_size=self.block_size,
+                    max_num_batched_tokens=self.max_num_batched_tokens,
+                    max_model_len=self.max_model_len)
 
-            bs_range = strategy.get_range(bs_cfg)
-            query_range = strategy.get_range(query_cfg)
-            ctx_range = strategy.get_range(ctx_cfg)
+                bs_range = strategy.get_range(bs_cfg)
+                query_range = strategy.get_range(query_cfg)
+                ctx_range = strategy.get_range(ctx_cfg)
 
             self.prompt_buckets = generate_buckets(bs_range, query_range, ctx_range, True, self.max_model_len,
                                                    self.max_num_seqs, self.max_num_prefill_seqs,
-                                                   self.max_num_batched_tokens, self.block_size, self.num_hpu_blocks)
+                                                   self.max_num_batched_tokens, self.block_size, self.num_hpu_blocks,
+                                                   buckets_from_file)
             self.log_generate_info(True)
+            if self.use_sliding_window:
+                self.prompt_buckets = [
+                    t for t in self.prompt_buckets
+                    if t[2] != 0 or (t[2] == 0 and (t[1] < self.slice_thld or
+                                                    (t[1] >= self.slice_thld and t[1] % self.slice_size == 0)))
+                ]
+                self.log_generate_info(True)
         else:
             logger().info("Bucketing is off - skipping prompt buckets generation")
             self.prompt_buckets = []
@@ -127,24 +162,33 @@ class HPUBucketingManager():
 
     def generate_decode_buckets(self):
         if self.initialized:
-            strategy = self.get_bucketing_strategy()
+            buckets_from_file = None
+            bs_range = []
+            query_range = []
+            ctx_range = []
+            if get_config().VLLM_BUCKETING_FROM_FILE:
+                buckets_from_file = self.read_from_file(is_prompt=False)
+            else:
+                strategy = self.get_bucketing_strategy()
 
-            bs_cfg, query_cfg, ctx_cfg = strategy.get_decode_cfgs(max_num_seqs=self.max_num_seqs,
-                                                                  block_size=self.block_size,
-                                                                  max_num_batched_tokens=self.max_num_batched_tokens,
-                                                                  max_model_len=self.max_model_len,
-                                                                  max_blocks=self.num_hpu_blocks)
+                bs_cfg, query_cfg, ctx_cfg = strategy.get_decode_cfgs(
+                    max_num_seqs=self.max_num_seqs,
+                    block_size=self.block_size,
+                    max_num_batched_tokens=self.max_num_batched_tokens,
+                    max_model_len=self.max_model_len,
+                    max_blocks=self.num_hpu_blocks)
 
-            bs_range = strategy.get_range(bs_cfg)
-            query_range = strategy.get_range(query_cfg)
-            ctx_range = strategy.get_range(ctx_cfg)
+                bs_range = strategy.get_range(bs_cfg)
+                query_range = strategy.get_range(query_cfg)
+                ctx_range = strategy.get_range(ctx_cfg)
 
-            if get_config().use_contiguous_pa and ctx_range[-1] < self.num_hpu_blocks:
-                ctx_range.append(self.num_hpu_blocks)
+                if get_config().use_contiguous_pa and ctx_range[-1] < self.num_hpu_blocks:
+                    ctx_range.append(self.num_hpu_blocks)
 
             self.decode_buckets = generate_buckets(bs_range, query_range, ctx_range, False, self.max_model_len,
                                                    self.max_num_seqs, self.max_num_prefill_seqs,
-                                                   self.max_num_batched_tokens, self.block_size, self.num_hpu_blocks)
+                                                   self.max_num_batched_tokens, self.block_size, self.num_hpu_blocks,
+                                                   buckets_from_file)
             self.log_generate_info(False)
         else:
             logger().info("Bucketing is off - skipping decode buckets generation")
@@ -164,7 +208,11 @@ class HPUBucketingManager():
     def generate_fallback_bucket(self, batch_size, seq_len, ctx):
         assert self.max_num_batched_tokens is not None
         new_batch_size = calc_fallback_value(batch_size, self.fallback_bs_base_step)
-        new_seq_len = min(calc_fallback_value(seq_len, self.fallback_seq_base_step), self.max_num_batched_tokens)
+        if self.use_sliding_window and seq_len >= self.slice_thld:
+            new_seq_len = math.ceil(seq_len / self.slice_size) * self.slice_size
+        else:
+            new_seq_len = min(calc_fallback_value(seq_len, self.fallback_seq_base_step), self.max_num_batched_tokens)
+
         if self.num_hpu_blocks is None:
             new_ctx = 0
         else:
@@ -225,12 +273,21 @@ def get_bucketing_manager():
     return instance
 
 
-def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len, max_num_seqs, max_num_prefill_seqs,
-                     max_num_batched_tokens, block_size, max_blocks):
+def generate_buckets(bs_range,
+                     query_range,
+                     ctx_range,
+                     is_prompt,
+                     max_model_len,
+                     max_num_seqs,
+                     max_num_prefill_seqs,
+                     max_num_batched_tokens,
+                     block_size,
+                     max_blocks,
+                     file_buckets=None):
     use_merged_prefill = get_config().merged_prefill
     use_contiguous_pa = get_config().use_contiguous_pa
 
-    def expand_to_neighbor_buckets(bs_idx, bs_range, query_idx, query_range, max_num_batched_tokens):
+    def expand_to_neighbor_buckets(bs_idx, bs_range, ctx_idx, ctx_range, max_num_batched_tokens):
         '''
         Expand 2d bucket (bs, query) to include:
         - itself
@@ -241,41 +298,58 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
         values that are in and out of budget:
         bs < edge_case_bs < next bs and query < edge_case_query < next query
         '''
-        candidates = [(bs_idx, query_idx), (bs_idx + 1, query_idx), (bs_idx, query_idx + 1),
-                      (bs_idx + 1, query_idx + 1)]
-        valid = bs_range[bs_idx] * query_range[query_idx] <= max_num_batched_tokens
-        if not valid:
-            return {}
+
+        candidates = [(bs_idx, ctx_idx), (bs_idx + 1, ctx_idx), (bs_idx, ctx_idx + 1), (bs_idx + 1, ctx_idx + 1)]
         valid_candidates = [(b_idx, q_idx) for b_idx, q_idx in candidates
-                            if b_idx < len(bs_range) and q_idx < len(query_range)]
-        return {(bs_range[b_idx], query_range[q_idx]) for b_idx, q_idx in valid_candidates}
+                            if b_idx < len(bs_range) and q_idx < len(ctx_range)]
+        return {(bs_range[b_idx], ctx_range[q_idx]) for b_idx, q_idx in valid_candidates}
 
     # filter rules for buckets
     # prompt
     def not_over_max_model_len(bs, query, ctx):
-        return query + ctx * block_size <= max_model_len
+        smaller_than_limit = (query + ctx * block_size) <= max_model_len
+        if not smaller_than_limit:
+            omitted_buckets.add(
+                ("condition: (query + ctx * block_size) <= max_model_len", "-> bs, query, ctx: ", bs, query, ctx))
+        return smaller_than_limit
+
+    def not_over_max_num_batched_tokens(bs, query, ctx):
+        smaller_than_limit = bs * query <= max_num_batched_tokens
+        if not smaller_than_limit:
+            omitted_buckets.add(
+                ("condition: bs * query <= max_num_batched_tokens", "-> bs, query, ctx: ", bs, query, ctx))
+        return smaller_than_limit
 
     def ctx_not_over_max_ctx_for_merged_prefill(bs, query, ctx):
-        return ctx <= max_num_prefill_seqs * math.ceil(
+        smaller_than_limit = ctx <= max_num_prefill_seqs * math.ceil(
             (max_model_len - math.floor(query / max_num_prefill_seqs)) // block_size)
+        if not smaller_than_limit:
+            omitted_buckets.add((
+                "ctx <= max_num_prefill_seqs * math.ceil((max_model_len - math.floor(query / max_num_prefill_seqs)) // block_size)",
+                "-> bs, query, ctx: ", bs, query, ctx))
+        return smaller_than_limit
 
-    # decode
-    def block_not_greater_than_max_model_len(bs, query, ctx):
-        return ctx <= bs * math.ceil(max_model_len / block_size)
+    def no_corrections(bs, query, ctx):
+        return (bs, query, ctx)
+
+    def correct_for_max_model_len(bs, query, ctx):
+        return (bs, query, min(ctx, bs * math.ceil(max_model_len / block_size)))
 
     def batch_size_smaller_than_blocks(bs, query, ctx):
+        if not bs <= ctx:
+            omitted_buckets.add(("condition: bs <= ctx, ", "-> bs, query, ctx: ", bs, query, ctx))
         return bs <= ctx
 
     filters_map = {
         "prompt": {
             # depends only on merged_prefill
             True: [ctx_not_over_max_ctx_for_merged_prefill],
-            False: [not_over_max_model_len],
+            False: [not_over_max_model_len, not_over_max_num_batched_tokens],
         },
         "decode": {
             # depends only on contiguous PA
             True: [],
-            False: [block_not_greater_than_max_model_len, batch_size_smaller_than_blocks],
+            False: [batch_size_smaller_than_blocks],
         }
     }
 
@@ -283,22 +357,44 @@ def generate_buckets(bs_range, query_range, ctx_range, is_prompt, max_model_len,
         phase = "prompt" if is_prompt else "decode"
         if is_prompt:
             return filters_map[phase][use_merged_prefill]
+        return filters_map[phase][use_contiguous_pa]
+
+    def get_corrector(is_prompt, use_contiguous_pa):
+        if is_prompt or use_contiguous_pa:
+            return no_corrections
         else:
-            return filters_map[phase][use_contiguous_pa]
-        return []
+            return correct_for_max_model_len
 
     buckets = set()
     buckets_2d = set()
+    omitted_buckets = set()
     filters = get_filters(is_prompt, use_merged_prefill, use_contiguous_pa)
-    for bs_idx, bs in enumerate(bs_range):
-        for query_idx, query in enumerate(query_range):
-            buckets_2d.update(
-                expand_to_neighbor_buckets(bs_idx, bs_range, query_idx, query_range, max_num_batched_tokens))
+    corrector = get_corrector(is_prompt, use_contiguous_pa)
 
-    for bs, query in buckets_2d:
-        for ctx in ctx_range:
-            if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
-                buckets.add((bs, query, ctx))
+    if file_buckets:
+        for bs, query, blocks in file_buckets:
+            if all(bucket_filter(bs, query, blocks) for bucket_filter in filters):
+                buckets.add(corrector(bs, query, blocks))
+    else:
+        for bs_idx, bs in enumerate(bs_range):
+            for ctx_idx, ctx in enumerate(ctx_range):
+                local_buckets = expand_to_neighbor_buckets(bs_idx, bs_range, ctx_idx, ctx_range,
+                                                           max_num_batched_tokens) if not is_prompt else {(bs, ctx)}
+                buckets_2d.update(local_buckets)
+
+        for bs, ctx in buckets_2d:
+            for query in query_range:
+                if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
+                    buckets.add(corrector(bs, query, ctx))
+    if not buckets:
+        phase = 'prompt' if is_prompt else 'decode'
+        for bucket in omitted_buckets:
+            logger().error(bucket)
+        raise RuntimeError(
+            "Generated 0 " + phase +
+            " buckets. Please use default exponential bucketing, VLLM_EXPONENTIAL_BUCKETING=true or generate linear warmup flags according to README"
+        )
+
     return sorted(buckets)
 
 
@@ -312,12 +408,12 @@ def generate_unified_buckets(query_range, shared_ctx_range, unique_ctx_range, bs
             max_bs = min(bs, query)
             if math.ceil(shared_ctx * block_size // max_bs) <= max_model_len:
                 buckets.add((query, shared_ctx, unique_ctx, causal))
-        elif (query <= bs):
+        elif query <= bs:
             # non causal query = current bs
             if shared_ctx > 0 or unique_ctx > 0:
-                if shared_ctx == 0 or (query > 1 and \
-                    math.ceil(shared_ctx * block_size // (query // 2)) <= max_model_len):
-                    buckets.add((query, shared_ctx, unique_ctx, causal))
+                if shared_ctx == 0 or (math.ceil(shared_ctx * block_size // (query // 2)) <= max_model_len):
+                    if shared_ctx > 0 or query <= unique_ctx:
+                        buckets.add((query, shared_ctx, unique_ctx, causal))
 
     return sorted(buckets)
 

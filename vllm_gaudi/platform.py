@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 import habana_frameworks.torch as htorch
 
 from vllm import envs
 
-from vllm.platforms import Platform, PlatformEnum, _Backend
+from vllm.platforms import Platform, PlatformEnum
 from vllm_gaudi.extension.runtime import get_config
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
+    from vllm.attention.backends.registry import AttentionBackendEnum
 else:
     ModelConfig = None
     VllmConfig = None
@@ -28,7 +29,7 @@ def retain_envs(var_name):
 
 
 class HpuPlatform(Platform):
-    _enum = PlatformEnum.OOT if envs.VLLM_USE_V1 else PlatformEnum.HPU
+    _enum = PlatformEnum.OOT
     device_name: str = "hpu"
     device_type: str = "hpu"
     dispatch_key: str = "HPU"
@@ -39,10 +40,20 @@ class HpuPlatform(Platform):
     additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int, dtype: torch.dtype,
-                             kv_cache_dtype: Optional[str], block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink: bool) -> str:
-        assert use_v1, 'Only V1 is supported!'
+    def get_attn_backend_cls(
+        cls,
+        selected_backend: "AttentionBackendEnum",
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: Optional[str],
+        block_size: int,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        attn_type: str | None = None,
+    ) -> str:
+        if use_sparse:
+            raise NotImplementedError("Sparse Attention is not supported on HPU.")
         if use_mla:
             logger.info("Using HPUAttentionMLA backend.")
             return ("vllm_gaudi.attention.backends.hpu_attn."
@@ -76,12 +87,8 @@ class HpuPlatform(Platform):
         parallel_config = vllm_config.parallel_config
 
         if parallel_config.worker_cls == "auto":
-            if envs.VLLM_USE_V1:
-                parallel_config.worker_cls = \
+            parallel_config.worker_cls = \
                     "vllm_gaudi.v1.worker.hpu_worker.HPUWorker"
-            else:
-                parallel_config.worker_cls = \
-                    "vllm.worker.hpu_worker.HPUWorker"
 
         # NOTE(kzawora): default block size for Gaudi should be 128
         # smaller sizes still work, but very inefficiently
@@ -108,20 +115,22 @@ class HpuPlatform(Platform):
                            "Using bfloat16 instead.", vllm_config.model_config.dtype)
             vllm_config.model_config.dtype = torch.bfloat16
 
-        if envs.VLLM_USE_V1:
-            from vllm.config import CompilationLevel, CUDAGraphMode
-            compilation_config = vllm_config.compilation_config
-            # Activate custom ops for v1.
-            compilation_config.custom_ops = ["all"]
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            compilation_config.cudagraph_capture_sizes = []
+        from vllm.config import CompilationMode, CUDAGraphMode
+        compilation_config = vllm_config.compilation_config
+        # Activate custom ops for v1.
+        compilation_config.custom_ops = ["all"]
+        compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        compilation_config.cudagraph_capture_sizes = []
 
-            if compilation_config.level != CompilationLevel.NO_COMPILATION:
-                logger.info("[HPU] Forcing CompilationLevel.NO_COMPILATION "
-                            "compilation level")
-                compilation_config.level = CompilationLevel.NO_COMPILATION
+        if compilation_config.mode != CompilationMode.NONE:
+            logger.info("[HPU] Forcing CompilationMode.NONE "
+                        "compilation mode")
+            compilation_config.mode = CompilationMode.NONE
 
-            print(f"========={compilation_config.custom_ops=}===========")
+        print(f"========={compilation_config.custom_ops=}===========")
+
+        # Disable multi-stream for shared experts as no Stream on CPU
+        os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
     @classmethod
     def is_pin_memory_available(cls):
@@ -170,6 +179,13 @@ class HpuPlatform(Platform):
             # requires enabling lazy collectives
             # see https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html  # noqa: E501
             os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
+        else:
+            # If not set by user then for torch compile enable Runtime scale patching by default
+            if os.environ.get('RUNTIME_SCALE_PATCHING') is None:
+                os.environ['RUNTIME_SCALE_PATCHING'] = '1'
+            #This allows for utilization of Parallel Compilation feature
+            if os.environ.get('FUSER_ENABLE_MULTI_THREADED_INVOCATIONS') is None:
+                os.environ['FUSER_ENABLE_MULTI_THREADED_INVOCATIONS'] = '1'
 
     @classmethod
     def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str, model_config: ModelConfig) -> bool:
@@ -195,6 +211,43 @@ class HpuPlatform(Platform):
             return out
 
         return _synced_weight_loader
+
+    @classmethod
+    def insert_blocks_to_device(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: Union[tuple[torch.Tensor], torch.Tensor],
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from src_cache to dst_cache on HPU."""
+        if isinstance(dst_cache, tuple):
+            _src_cache = src_cache[:, src_block_indices]
+            if _src_cache.shape[2:] != dst_cache.shape[2:]:  # type: ignore[attr-defined]
+                _src_cache = _src_cache.permute(0, 1, 3, 2, 4)
+            for i in range(len(dst_cache)):
+                dst_cache[i].index_copy_(0, dst_block_indices, _src_cache[i].to(dst_cache[i].device))
+        else:
+            dst_cache.index_copy_(0, dst_block_indices, src_cache[src_block_indices].to(dst_cache.device))
+        torch.hpu.synchronize()
+
+    @classmethod
+    def swap_out_blocks_to_host(
+        cls,
+        src_cache: Union[tuple[torch.Tensor], torch.Tensor],
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from HPU to host (CPU)."""
+        if isinstance(src_cache, tuple):
+            _src_cache = torch.stack([c[src_block_indices] for c in src_cache], dim=0)
+            # permute back to original shape
+            if _src_cache.shape[2:] != dst_cache.shape[2:]:  # type: ignore[attr-defined]
+                _src_cache = _src_cache.permute(0, 1, 3, 2, 4)
+            dst_cache[:, dst_block_indices] = _src_cache.cpu()
+        else:
+            dst_cache[dst_block_indices] = src_cache[src_block_indices].cpu()
 
     @classmethod
     def patch_for_pt27(cls) -> None:

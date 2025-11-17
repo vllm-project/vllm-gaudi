@@ -1,0 +1,11 @@
+model_card:
+  model_name: "/mnt/weka/llm/DeepSeek-V2-Lite-Chat"
+  tasks: gsm8k
+  num_fewshot: 5
+  limit: 1000
+  trust_remote_code: True
+  inc: true # use INC for calibration
+
+metrics:
+  name: exact_match,strict-match
+  value: 0.66

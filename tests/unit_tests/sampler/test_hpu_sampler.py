@@ -16,7 +16,7 @@ from vllm.v1.sample.sampler import Sampler
 from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
-from vllm.utils import is_pin_memory_available
+from vllm.utils.platform_utils import is_pin_memory_available
 
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
 
@@ -88,6 +88,7 @@ def _prepare_metadata(batch_size: int,
         pin_memory=is_pin_memory_available(),
         vocab_size=1024,
         block_sizes=[1],
+        kernel_block_sizes=[1],
     )
     if is_seeded_random:
         generator = torch.Generator(device=DEVICE)
