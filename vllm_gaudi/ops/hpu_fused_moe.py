@@ -126,7 +126,6 @@ def patched_fused_moe_forward(
             reduce_output(self, shared_output)[..., :og_hidden_states],
             reduce_output(self, fused_output)[..., :og_hidden_states],
         else:
-            print("iboiko0101")
             shared_output, fused_output = torch.ops.vllm.moe_forward_shared(hidden_states, router_logits,
                                                                             self.layer_name)
         return (shared_output[..., :og_hidden_states], fused_output[..., :og_hidden_states])
