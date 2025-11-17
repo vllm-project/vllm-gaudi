@@ -142,7 +142,6 @@ def flat_pa_mla(query, key_cache, value_cache, block_list, block_mapping, block_
     else:
         key = key.transpose(2, 3)
 
-    attn = matmul_qk_op(query, key)
     #NOTE(adobrzyn): Remove if after (GAUDISW-243850)
     if get_config().use_output_tensor_in_matmulqk:
         attn = None
@@ -150,8 +149,11 @@ def flat_pa_mla(query, key_cache, value_cache, block_list, block_mapping, block_
             attn = torch.empty(matmul_shape(query, key), dtype=torch.float32, device=query.device)
         attn = matmul_qk_op(query, key, out=attn)
     elif get_config().fp32_softmax:
+        attn = matmul_qk_op(query, key)
         attn = attn.float()
         htcore.mark_step()
+    else:
+        attn = matmul_qk_op(query, key)
 
     attn = pipelined_pa(attn,
                         value,
@@ -191,7 +193,6 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
             block_bias = block_bias.unsqueeze(2)
     key = key.transpose(-2, -1)
 
-    attn = matmul_qk_op(query, key)
     #NOTE(adobrzyn): Remove if after (GAUDISW-243850)
     if get_config().use_output_tensor_in_matmulqk:
         attn = None
@@ -201,10 +202,14 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
                 position_bias = position_bias.float()
         attn = matmul_qk_op(query, key, out=attn)
     elif get_config().fp32_softmax:
+        attn = matmul_qk_op(query, key)
         attn = attn.float()
         htcore.mark_step()
         if position_bias is not None:
             position_bias = position_bias.float()
+    else:
+        attn = matmul_qk_op(query, key)
+    
     if position_bias is not None:
         if attn.dtype != position_bias.dtype:
             attn = attn.to(dtype=position_bias.dtype)
