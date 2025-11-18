@@ -26,8 +26,8 @@ class Matmul(torch.nn.Module):
     def __init__(self):
         super(Matmul, self).__init__()
 
-    def forward(self, x, y):
-        return torch.matmul(x, y)
+    def forward(self, x, y, **kwargs):
+        return torch.matmul(x, y, **kwargs)
 
 
 class Softmax(torch.nn.Module):
