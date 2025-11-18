@@ -22,6 +22,7 @@ from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 
 # LMCache-related environment variables
+os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
 # The port to start LMCache server
 port = 8100
 # LMCache is set to use 256 tokens per chunk

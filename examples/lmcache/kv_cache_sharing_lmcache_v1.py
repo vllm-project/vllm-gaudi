@@ -23,6 +23,7 @@ from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 
 # LMCache-related environment variables
+os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
 # LMCache is set to use 256 tokens per chunk
 os.environ["LMCACHE_CHUNK_SIZE"] = "256"
 # Disable local CPU backend in LMCache
@@ -35,8 +36,8 @@ os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "5.0"
 # `naive` indicates using raw bytes of the tensor without any compression
 os.environ["LMCACHE_REMOTE_SERDE"] = "naive"
 # GAUDI-NIC
-
-MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
+MODEL = "meta-llama/Llama-3.2-1B-Instruct"
+#MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
 # prompts = [
 #    "Hello, how are you?" * 1000,
 # ]
@@ -47,7 +48,7 @@ prompts = [
 
 def run_store(store_done, prompts, tp_size):
     # We use GPU 0 for KV cache store process.
-    os.environ["RANK"] = "0"
+    #os.environ["RANK"] = "0"
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
 
     ktc = KVTransferConfig(
@@ -77,8 +78,8 @@ def run_store(store_done, prompts, tp_size):
 
 def run_retrieve(store_done, prompts, tp_size, timeout=1):
     # We use GPU 1 for KV cache retrieve process.
-    decoder_rank = "1"
-    os.environ["RANK"] = decoder_rank
+    #decoder_rank = "1"
+    #os.environ["RANK"] = decoder_rank
 
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=20)
     ktc = KVTransferConfig(

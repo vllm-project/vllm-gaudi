@@ -28,7 +28,9 @@ if [[ $1 == "prefiller" ]]; then
         RANK=0 \
         DECODER_RANK=1 \
         vllm serve $MODEL \
+	--max-num-batched-tokens 8192 \
         --port 1100 \
+        --gpu_memory_utilization 0.80 \
         --disable-log-requests \
         --enforce-eager \
         --kv-transfer-config \
@@ -47,6 +49,7 @@ elif [[ $1 == "decoder" ]]; then
         RANK=1 \
         DECODER_RANK=1 \
         vllm serve $MODEL \
+	--max-num-batched-tokens 8192 \
         --port 1200 \
         --gpu_memory_utilization 0.80 \
         --disable-log-requests \

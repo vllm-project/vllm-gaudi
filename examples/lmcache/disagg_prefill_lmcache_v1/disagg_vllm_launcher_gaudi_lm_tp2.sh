@@ -20,13 +20,14 @@ if [[ $1 == "prefiller" ]]; then
     # Prefiller listens on port 8100
     prefill_config_file=$SCRIPT_DIR/configs/lmcache-config-lm.yaml
 
-    UCX_TLS=tcp \
+    #UCX_TLS=tcp \
     LMCACHE_CONFIG_FILE=$prefill_config_file \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
         LMCACHE_REMOTE_SERDE=naive \
         LMCACHE_CHUNK_SIZE=256 \
         vllm serve $MODEL \
+	--max_num_batched_tokens 8192 \
         --port 1100 \
         --gpu_memory_utilization 0.8 \
         --disable-log-requests \
@@ -39,13 +40,14 @@ elif [[ $1 == "decoder" ]]; then
     # Decoder listens on port 8200
     decode_config_file=$SCRIPT_DIR/configs/lmcache-config-lm.yaml
 
-    UCX_TLS=tcp \
+    #UCX_TLS=tcp \
     LMCACHE_CONFIG_FILE=$decode_config_file \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
         LMCACHE_REMOTE_SERDE=naive \
         LMCACHE_CHUNK_SIZE=256 \
         vllm serve $MODEL \
+	--max_num_batched_tokens 8192 \
         --port 1200 \
         --gpu_memory_utilization 0.8 \
         --disable-log-requests \

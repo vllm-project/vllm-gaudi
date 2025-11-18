@@ -2440,6 +2440,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                kv_caches,
                                lora_logits_mask,
                                lora_mask,
+                               scheduler_output,
                                warmup_mode=False,
                                inputs_embeds=None,
                                model_mm_kwargs=None):
@@ -2470,6 +2471,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         else:
             model_event_name = 'model_executable'
         with self.profiler.record_event('internal', model_event_name):
+            with set_forward_context(attn_metadata, self.vllm_config):
+                self.maybe_setup_kv_connector(scheduler_output)
             hidden_states = self.model.forward(input_ids=token_ids,
                                                positions=position_ids,
                                                attn_metadata=trimmed_attn_metadata,
@@ -3031,9 +3034,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         #if not has_kv_transfer_group():
         #    assert not (num_prefills > 0 and num_decodes > 0)
         # skip kv_connector if dummy run
-        if not warmup_mode:
-            with set_forward_context(None, self.vllm_config):
-                self.maybe_setup_kv_connector(scheduler_output)
         finished_sending, finished_recving = set(), set()
 
         # NOTE(Chendi): used by spec decode draft model, since we are doing
@@ -3118,7 +3118,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         lora_mask,
                         inputs_embeds=inputs_embeds,
                         model_mm_kwargs=model_mm_kwargs,
-                        warmup_mode=warmup_mode,)
+                        warmup_mode=warmup_mode,
+                        scheduler_output=scheduler_output)
                 htorch.core.mark_step()
                 non_flattened_hidden_states_prefills.append(non_flattened_hidden_states)
                 if self.use_aux_hidden_state_outputs:
@@ -3152,12 +3153,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                              is_prompt=True)
                     self.profiler.record_counter(self.event_start, counters)
 
-            if not warmup_mode and \
-                (isinstance(scheduler_output.kv_connector_metadata, NixlConnectorMetadata) or \
-                isinstance(scheduler_output.kv_connector_metadata, LMCacheConnectorMetadata)):
-                logger.info(f"libin debug maybe_wait_for_kv_save")
-                self.maybe_wait_for_kv_save()
-
             if self.is_driver_worker and self.profiler.enabled:
                 self.profiler_counter_helper.reset_prompt_seq_stats()
 
@@ -3174,7 +3169,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     self.kv_caches,
                     None,
                     None,
-                    warmup_mode=warmup_mode)
+                    warmup_mode=warmup_mode,
+                    scheduler_output=scheduler_output)
                 htorch.core.mark_step()
 
         ######################### DECODES #########################
@@ -3196,7 +3192,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 self.kv_caches,
                 lora_logits_mask,
                 lora_mask,
-                warmup_mode=warmup_mode)
+                warmup_mode=warmup_mode,
+                scheduler_output=scheduler_output)
             htorch.core.mark_step()
 
             if structured_output:
@@ -3261,7 +3258,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                        self.kv_caches,
                                                                        None,
                                                                        None,
-                                                                       warmup_mode=warmup_mode)
+                                                                       warmup_mode=warmup_mode,
+                                                                       scheduler_output=scheduler_output)
             htorch.core.mark_step()
 
         if structured_output:
@@ -3397,6 +3395,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         logprobs = None
 
         if not warmup_mode:
+            self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = self.get_finished_kv_transfers(scheduler_output)
 
         if self.use_async_scheduling:
