@@ -186,6 +186,7 @@ def partial_attn_shared(query: torch.tensor, blocks: torch.tensor, bias: Optiona
     attn = attn.flatten(0, 1)
     attn = attn + bias
     local_max = torch.maximum(attn.amax(-1), fmin)
+    attn = torch.exp(attn - local_max.unsqueeze(-1))
     # TODO: add downcasting attn to original dtype
     local_sum = attn.sum(-1)
     attn = torch.matmul(attn.unflatten(0, (kv_heads, -1)), value).flatten(0, 1)
