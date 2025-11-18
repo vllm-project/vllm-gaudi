@@ -2906,19 +2906,20 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 }
             else:
                 sampled_token_ids_cpu = sampler_output.sampled_token_ids.cpu()
+
                 sampled_token_ids_np = sampled_token_ids_cpu.numpy()
                 for req_id, tokens_array in zip(selected_req_ids, sampled_token_ids_np):
                     idx = self.input_batch.req_id_to_index[req_id]
                     sampled_token_ids[idx] = tokens_array
 
-                    #TODO: add support for multi-token output
-                    assert sampled_token_ids_cpu.size(1) == 1, 'Currently only single token output is supported!'
-                    sampled_token_ids_cpu = sampled_token_ids_cpu.flatten()
-                    htorch.core.mark_step()
+                #TODO: add support for multi-token output
+                assert sampled_token_ids_cpu.size(1) == 1, 'Currently only single token output is supported!'
+                sampled_token_ids_cpu = sampled_token_ids_cpu.flatten()
+                htorch.core.mark_step()
 
-                    sampled_token_ids_cpu = sampled_token_ids_cpu.index_select(0, batch.logits_groups_cpu)
-                    self.input_batch.token_ids_cpu_tensor.index_put_(
-                        (batch.logits_groups_cpu, batch.new_token_positions_cpu), sampled_token_ids_cpu)
+                sampled_token_ids_cpu = sampled_token_ids_cpu.index_select(0, batch.logits_groups_cpu)
+                self.input_batch.token_ids_cpu_tensor.index_put_(
+                    (batch.logits_groups_cpu, batch.new_token_positions_cpu), sampled_token_ids_cpu)
 
             ######### UPDATE REQUEST STATE WITH GENERATED TOKENS #########
             num_reqs = len(selected_req_ids)
