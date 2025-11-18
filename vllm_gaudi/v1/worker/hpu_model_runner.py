@@ -559,7 +559,7 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
                                                                        self.sliding_window, device, dtype)
             if model_has_chunked_attention:
                 attn_metadata = self._set_attn_bias_for_chunked_attention(
-                    attn_metadata, batch_size, seq_len, self.model.config.text_config.attention_chunk_size, device, 
+                    attn_metadata, batch_size, seq_len, self.model.config.text_config.attention_chunk_size, device,
                     dtype)
         else:
             attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype)
@@ -1442,15 +1442,15 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.input_batch.req_type[req_id] == "decode")
 
     def maybe_set_chunked_attention_layers(self, model):
-        if hasattr(model.config, 'text_config'):
-            if hasattr(model.config.text_config, 'attention_chunk_size'):
+        if hasattr(model.config, 'text_config'):  # noqa: SIM102
+            if hasattr(model.config.text_config, 'attention_chunk_size'):  # noqa: SIM102
                 if model.config.text_config.attention_chunk_size > 0:
                     self.model_has_chunked_attention = True
                     try:
                         for layer in model.language_model.model.layers:
                             if "ChunkedLocalAttention" in layer.self_attn.attn.get_attn_backend().__name__:
                                 layer.self_attn.attn.impl.is_chunked_attention = True
-                    except:
+                    except Exception:
                         pass
 
     def _get_prompts_and_decodes(
@@ -2075,13 +2075,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 self.get_habana_paged_attn_buffers(
                     window_block_tables, slot_mapping.tolist(),
                     padded_batch_size * num_tokens)
- 
+
         if self.model_has_chunked_attention:
             chunk_size = (self.model.model.config.text_config.attention_chunk_size // self.block_size)
             seq_lens_block = [len(block_table) for block_table in block_tables_list]
             num_seq_chunks = [math.ceil(sl / chunk_size) - 1 for sl in seq_lens_block]
             block_tables_chunk = [
-                block_table[num_seq_chunks[i]*chunk_size:] for i, block_table in enumerate(block_tables_list)
+                block_table[num_seq_chunks[i] * chunk_size:] for i, block_table in enumerate(block_tables_list)
             ]
             chunked_block_list, chunked_block_groups, chunked_block_usage = \
                 self.get_habana_paged_attn_buffers(
