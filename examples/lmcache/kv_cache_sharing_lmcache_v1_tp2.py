@@ -21,6 +21,11 @@ from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 
+os.environ["PYTHONHASHSEED"] = "0"
+os.environ["PT_HPU_GPU_MIGRATION"] = "1"
+os.environ["VLLM_USE_V1"] = "1"
+os.environ["VLLM_SKIP_WARMUP"] = "True"
+os.environ["PT_HPU_ENABLE_LAZY_COLLECTIVES"] = "True"
 # LMCache-related environment variables
 os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
 # The port to start LMCache server

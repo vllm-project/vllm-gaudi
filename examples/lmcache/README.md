@@ -22,7 +22,7 @@ Run
 to get into `disagg_prefill_lmcache_v1` folder, and then run
 
 ```bash
-PYTHONHASHSEED=0 PT_HPU_GPU_MIGRATION=1 VLLM_USE_V1=1 VLLM_SKIP_WARMUP=True PT_HPU_ENABLE_LAZY_COLLECTIVES=true bash disagg_example.sh
+bash disagg_example_gaudi_lm.sh
 ```
 
 to run disaggregated prefill and benchmark the performance.
@@ -31,7 +31,7 @@ lmserver is default and it's configurable as well as tensor_parallel_size and mo
 
 For tp>1
 ```bash
-PYTHONHASHSEED=0 PT_HPU_GPU_MIGRATION=1 VLLM_USE_V1=1 VLLM_SKIP_WARMUP=True PT_HPU_ENABLE_LAZY_COLLECTIVES=true bash disagg_example_gaudi_lm_tp2.sh
+bash disagg_example_gaudi_lm_tp2.sh
 ```
 
 ### Components
@@ -57,7 +57,7 @@ The `kv_cache_sharing_lmcache_v1.py` example demonstrates how to share KV caches
 ### Usage
 
 ```bash
-PYTHONHASHSEED=0 PT_HPU_GPU_MIGRATION=1 VLLM_USE_V1=1 VLLM_SKIP_WARMUP=True PT_HPU_ENABLE_LAZY_COLLECTIVES=true python kv_cache_sharing_lmcache_v1.py
+python kv_cache_sharing_lmcache_v1.py
 ```
 
 lmserver is default and it's configurable as well as tensor_parallel_size.
@@ -65,5 +65,5 @@ lmserver is default and it's configurable as well as tensor_parallel_size.
 For tp > 1
 
 ```bash
-PYTHONHASHSEED=0 PT_HPU_GPU_MIGRATION=1 VLLM_USE_V1=1 VLLM_SKIP_WARMUP=True PT_HPU_ENABLE_LAZY_COLLECTIVES=true python kv_cache_sharing_lmcache_v1_tp2.py
+python kv_cache_sharing_lmcache_v1_tp2.py
 ```

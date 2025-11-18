@@ -123,9 +123,9 @@ main() {
     echo "All servers are up. Starting benchmark..."
 
     # begin benchmark
-    cd ../../../benchmarks/
+    cd ../../..//benchmarks/
     MODEL="meta-llama/Llama-3.1-8B-Instruct"
-    python benchmark_serving.py --port 1000 --seed $(date +%s) \
+    vllm bench serve --port 1000 --seed $(date +%s) \
         --model $MODEL \
         --dataset-name random --random-input-len 8000 --random-output-len 200 \
         --num-prompts 100 --burstiness 100 --request-rate 3.6 | tee benchmark.log

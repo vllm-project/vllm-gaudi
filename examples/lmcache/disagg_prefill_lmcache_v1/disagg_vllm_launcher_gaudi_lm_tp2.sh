@@ -20,7 +20,13 @@ if [[ $1 == "prefiller" ]]; then
     # Prefiller listens on port 8100
     prefill_config_file=$SCRIPT_DIR/configs/lmcache-config-lm.yaml
 
-    #UCX_TLS=tcp \
+    VLLM_ENGINE_ITERATION_TIMEOUT_S=6600 \
+    VLLM_RPC_TIMEOUT=20000000 \
+    PYTHONHASHSEED=0 \
+    PT_HPU_GPU_MIGRATION=1 \
+    VLLM_USE_V1=1 \
+    VLLM_SKIP_WARMUP=true \
+    PT_HPU_ENABLE_LAZY_COLLECTIVES=true \
     LMCACHE_CONFIG_FILE=$prefill_config_file \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
@@ -40,7 +46,13 @@ elif [[ $1 == "decoder" ]]; then
     # Decoder listens on port 8200
     decode_config_file=$SCRIPT_DIR/configs/lmcache-config-lm.yaml
 
-    #UCX_TLS=tcp \
+    VLLM_ENGINE_ITERATION_TIMEOUT_S=6600 \
+    VLLM_RPC_TIMEOUT=20000000 \
+    PYTHONHASHSEED=0 \
+    PT_HPU_GPU_MIGRATION=1 \
+    VLLM_USE_V1=1 \
+    VLLM_SKIP_WARMUP=true \
+    PT_HPU_ENABLE_LAZY_COLLECTIVES=true \
     LMCACHE_CONFIG_FILE=$decode_config_file \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
