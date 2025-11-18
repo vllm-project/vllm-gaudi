@@ -2900,7 +2900,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         warmup_mode: bool = False,
     ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput]:
         if self.unified_attn:
-            return self.unified_execute_model(scheduler_output, warmup_mode)
+            return self.unified_execute_model(scheduler_output, warmup_mode=warmup_mode)
+
         # NOTE(kzawora): Since scheduler doesn't differentiate between prefills
         # and decodes, we must handle mixed batches. In _update_states we make
         # sure that first self.input_batch.num_decodes requests are decodes,
