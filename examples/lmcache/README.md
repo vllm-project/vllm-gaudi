@@ -30,6 +30,7 @@ to run disaggregated prefill and benchmark the performance.
 lmserver is default and it's configurable as well as tensor_parallel_size and model name.
 
 For tp>1
+
 ```bash
 bash disagg_example_gaudi_lm_tp2.sh
 ```

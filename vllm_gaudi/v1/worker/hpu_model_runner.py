@@ -88,9 +88,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnectorMetadata
 from vllm.v1.core.sched.output import GrammarOutput
 
-from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
-
-
 if TYPE_CHECKING:
     import xgrammar as xgr
     import xgrammar.kernels.apply_token_bitmask_inplace_torch_compile as xgr_torch_compile  # noqa: E501
@@ -2862,7 +2859,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     kv_caches=self.kv_caches,
                     lora_logits_mask=None,
                     lora_mask=None,
-                    warmup_mode=warmup_mode)
+                    warmup_mode=warmup_mode,
+                    scheduler_output=scheduler_output)
         selected_req_ids = [batch.req_ids_cpu[idx] for idx in batch.logits_groups_cpu.tolist()]
         htorch.core.mark_step()
         with self.profiler.record_event('internal', 'unified_sampler'):

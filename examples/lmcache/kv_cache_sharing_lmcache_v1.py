@@ -42,7 +42,7 @@ os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "5.0"
 os.environ["LMCACHE_REMOTE_SERDE"] = "naive"
 # GAUDI-NIC
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
-#MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
+# MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
 # prompts = [
 #    "Hello, how are you?" * 1000,
 # ]
@@ -53,12 +53,10 @@ prompts = [
 
 def run_store(store_done, prompts, tp_size):
     # We use GPU 0 for KV cache store process.
-    #os.environ["RANK"] = "0"
+    # os.environ["RANK"] = "0"
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
 
-    ktc = KVTransferConfig(
-        kv_connector="LMCacheConnectorV1", kv_role="kv_producer"
-    )
+    ktc = KVTransferConfig(kv_connector="LMCacheConnectorV1", kv_role="kv_producer")
     # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
     # memory. Reduce the value if your GPU has less memory.
     llm = LLM(
@@ -83,13 +81,11 @@ def run_store(store_done, prompts, tp_size):
 
 def run_retrieve(store_done, prompts, tp_size, timeout=1):
     # We use GPU 1 for KV cache retrieve process.
-    #decoder_rank = "1"
-    #os.environ["RANK"] = decoder_rank
+    # decoder_rank = "1"
+    # os.environ["RANK"] = decoder_rank
 
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=20)
-    ktc = KVTransferConfig(
-        kv_connector="LMCacheConnectorV1", kv_role="kv_consumer"
-    )
+    ktc = KVTransferConfig(kv_connector="LMCacheConnectorV1", kv_role="kv_consumer")
     # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
     # of memory. Reduce the value if your GPU has less memory.
     llm = LLM(
@@ -116,17 +112,13 @@ def run_retrieve(store_done, prompts, tp_size, timeout=1):
 
 def run_lmcache_server(port):
     os.environ["LMCACHE_REMOTE_URL"] = f"lm://localhost:{port}"
-    server_proc = subprocess.Popen(
-        ["python", "-m", "lmcache.v1.server", "localhost", str(port)]
-    )
+    server_proc = subprocess.Popen(["python", "-m", "lmcache.v1.server", "localhost", str(port)])
     return server_proc
 
 
 def run_redis_server(port):
     os.environ["LMCACHE_REMOTE_URL"] = f"redis://localhost:{port}"
-    redis_server_path = (
-        "/usr/bin/redis-server"  # Update this to the correct path
-    )
+    redis_server_path = "/usr/bin/redis-server"  # Update this to the correct path
 
     try:
         # Start the Redis server
@@ -152,12 +144,8 @@ def main():
     print(args)
 
     store_done = Event()
-    store_process = Process(
-        target=run_store, args=(store_done, prompts, args.tp_size)
-    )
-    retrieve_process = Process(
-        target=run_retrieve, args=(store_done, prompts, args.tp_size)
-    )
+    store_process = Process(target=run_store, args=(store_done, prompts, args.tp_size))
+    retrieve_process = Process(target=run_retrieve, args=(store_done, prompts, args.tp_size))
     if args.remote_server == "lm":
         remote_server_process = run_lmcache_server(args.lm_port)
     elif args.remote_server == "redis":
@@ -190,15 +178,9 @@ def parse_args():
         default="lm",
         help="remote lmcache server type. 'lm' or 'redis'",
     )
-    parser.add_argument(
-        "--lm_port", type=int, default=8100, help="lm server port"
-    )
-    parser.add_argument(
-        "--redis_port", type=int, default=6379, help="redis server port"
-    )
-    parser.add_argument(
-        "--tp_size", type=int, default=1, help="tensor parallel size"
-    )
+    parser.add_argument("--lm_port", type=int, default=8100, help="lm server port")
+    parser.add_argument("--redis_port", type=int, default=6379, help="redis server port")
+    parser.add_argument("--tp_size", type=int, default=1, help="tensor parallel size")
 
     return parser.parse_args()
 
