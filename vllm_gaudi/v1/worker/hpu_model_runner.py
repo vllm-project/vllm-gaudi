@@ -8,6 +8,7 @@ import math
 import os
 import sys
 import time
+from tqdm import tqdm
 from dataclasses import dataclass, field, fields
 from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast)
 
@@ -108,7 +109,12 @@ logger = init_logger()
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
 hpu_buffer: list[list[torch.Tensor]] = []
-HPU_TORCH_DTYPE_TO_STR_DTYPE = {torch.bfloat16: "bfloat16", torch.float8_e4m3fn: "fp8_e4m3"}
+HPU_TORCH_DTYPE_TO_STR_DTYPE = {
+    torch.float32: "float32",
+    torch.bfloat16: "bfloat16",
+    torch.float16: "float16",
+    torch.float8_e4m3fn: "fp8_e4m3"
+}
 
 
 class BucketingFailedException(Exception):
@@ -148,11 +154,12 @@ class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
         # Release the device tensor once the copy has completed
         self._async_copy_ready_event.synchronize()
 
-        valid_sampled_token_ids = self._sampled_token_ids_cpu.tolist()
+        sampled_token_ids_np = self._sampled_token_ids_cpu.numpy()
+        valid_sampled_token_ids = [sampled_token_ids_np[i] for i in range(len(sampled_token_ids_np))]
         del self._sampled_token_ids
         for i in self._invalid_req_indices:
             if i < len(valid_sampled_token_ids):
-                valid_sampled_token_ids[i].clear()
+                valid_sampled_token_ids[i] = np.array([], dtype=np.int32)
 
         output = self._model_runner_output
         output.sampled_token_ids[:len(valid_sampled_token_ids)] = valid_sampled_token_ids
@@ -2864,9 +2871,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         with self.profiler.record_event('internal', 'unified_postprocess'):
             sampled_token_ids_cpu = sampler_output.sampled_token_ids.cpu()
-            sampled_token_ids: list[list[int]] = [[] for _ in batch.req_ids_cpu]
-            for req_id, tokens in zip(selected_req_ids, sampled_token_ids_cpu.tolist()):
-                sampled_token_ids[self.input_batch.req_id_to_index[req_id]].extend(tokens)
+
+            sampled_token_ids_np = sampled_token_ids_cpu.numpy()
+            sampled_token_ids: list[np.ndarray] = [np.array([], dtype=np.int32) for _ in batch.req_ids_cpu]
+            for req_id, tokens_array in zip(selected_req_ids, sampled_token_ids_np):
+                idx = self.input_batch.req_id_to_index[req_id]
+                sampled_token_ids[idx] = tokens_array
 
             #TODO: add support for multi-token output
             assert sampled_token_ids_cpu.size(1) == 1, 'Currently only single token output is supported!'
@@ -2887,7 +2897,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 num_tokens = len(token_ids)
                 self.input_batch.token_ids_cpu[i, seq_len:seq_len + num_tokens] = token_ids
                 self.input_batch.num_tokens[i] += len(token_ids)
-                req_state.output_token_ids.extend(token_ids)
+                req_state.output_token_ids.extend(token_ids.tolist())
 
         model_runner_output = ModelRunnerOutput(
             req_ids=batch.req_ids_cpu,
@@ -3293,7 +3303,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.input_batch.req_id_to_index.copy()
 
         max_req_index = max(self.input_batch.req_id_to_index.values())
-        postprocessed_sampled_token_ids: list[list[int]] = [[] for _ in range(max_req_index + 1)]
+        postprocessed_sampled_token_ids: list[np.ndarray] = [
+            np.array([], dtype=np.int32) for _ in range(max_req_index + 1)
+        ]
         if self.use_async_scheduling:
             self.input_batch.prev_sampled_token_ids = sampled_token_ids.flatten()
             # self.input_batch.prev_sampled_token_ids_invalid_indices
@@ -3317,9 +3329,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 else:
                     decode_sampled_token_ids = [tensor.cpu()[:num_decodes] for tensor in decode_sampled_token_ids]
                 if decode_sampled_token_ids + prefill_sampled_token_ids:
-                    sampled_token_ids_list = torch.cat(decode_sampled_token_ids + prefill_sampled_token_ids).tolist()
+                    sampled_token_ids_tensor = torch.cat(decode_sampled_token_ids + prefill_sampled_token_ids)
+                    sampled_token_ids_np = sampled_token_ids_tensor.cpu().numpy().flatten()
                 else:
-                    sampled_token_ids_list = []
+                    sampled_token_ids_np = np.array([], dtype=np.int32)
                 sampled_token_requests = \
                     decode_sampled_requests + prefill_sampled_requests
                 max_req_index = max(self.input_batch.req_id_to_index.values())
@@ -3329,9 +3342,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 for i, req_id in enumerate(sampled_token_requests):
                     num_tokens = spec_decode_num_tokens[
                         i] if spec_decode_num_tokens is not None and i < num_decodes else 1
-                    postprocessed_sampled_token_ids[
-                        self.input_batch.req_id_to_index[req_id]] += sampled_token_ids_list[start_idx:start_idx +
-                                                                                            num_tokens]
+                    req_idx = self.input_batch.req_id_to_index[req_id]
+                    postprocessed_sampled_token_ids[req_idx] = np.array(sampled_token_ids_np[start_idx:start_idx +
+                                                                                             num_tokens],
+                                                                        dtype=np.int32)
                     start_idx += num_tokens
 
         ################## RETURN ##################
@@ -3354,7 +3368,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # the sampled tokens back, because there's no direct communication
         # between the first-stage worker and the last-stage worker.
         for req_idx, sampled_ids in enumerate(postprocessed_sampled_token_ids[:num_reqs]):
-            if not sampled_ids:
+            if sampled_ids is None:
                 continue
 
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
@@ -3620,7 +3634,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                    f"query_len:{second_dim} "
                    f"num_blocks:{third_dim} "
                    f"free_mem:{free_mem}")
-        logger.info(msg)
+        tqdm.write(msg)
 
     def log_warmup_multimodal(self, phase, i, max_i, batch_size, seq_len, img_args):
         free_mem = format_bytes(HabanaMemoryProfiler.current_free_device_memory())
@@ -3770,45 +3784,57 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         idx = 0
         num_candidates = len(buckets)
         captured_all = True
-        for idx, (batch_size, seq_len, num_blocks) in enumerate(reversed(buckets)):
-            if seq_len > self.max_num_tokens:
-                continue
-            # Graph memory usage is proportional to seq dimension in a batch
-            phase = f"Graph/{'prompt' if is_prompt else 'decode'}"
-            if is_prompt:
-                batch_seq = batch_size * seq_len * num_blocks if num_blocks else batch_size * seq_len
-            else:
-                batch_seq = batch_size
-
-            graphed_bucket = (batch_size, seq_len, num_blocks, is_prompt)
-            if graphed_bucket in self.graphed_buckets:
-                continue
-            self.graphed_buckets.add(graphed_bucket)
-            self.log_warmup(phase, idx, num_candidates, batch_size, seq_len, num_blocks)
-            prompt_cfg, decode_cfg = None, None
-            with HabanaMemoryProfiler() as mem_prof:
+        developer_settings = get_config().VLLM_DEVELOPER_MODE
+        phase = 'Prompt' if is_prompt else 'Decode'
+        desc = f'{phase} warmup processing: '
+        with tqdm(total=num_candidates, desc=desc, unit="item") as pbar:
+            for idx, (batch_size, seq_len, num_blocks) in enumerate(reversed(buckets)):
+                if seq_len > self.max_num_tokens:
+                    continue
+                # Graph memory usage is proportional to seq dimension in a batch
                 if is_prompt:
-                    prompt_cfg = (batch_size, seq_len, num_blocks)
+                    batch_seq = batch_size * seq_len * num_blocks if num_blocks else batch_size * seq_len
                 else:
-                    decode_cfg = (batch_size, 1, num_blocks)
-                self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
-            # TODO(kzawora): align_workers
-            used_mem = mem_prof.consumed_device_memory
-            total_mem += used_mem
-            total_batch_seq += batch_seq
+                    batch_seq = batch_size
+
+                graphed_bucket = (batch_size, seq_len, num_blocks, is_prompt)
+                if graphed_bucket in self.graphed_buckets:
+                    continue
+                self.graphed_buckets.add(graphed_bucket)
+                if developer_settings:
+                    self.log_warmup(phase, idx, num_candidates, batch_size, seq_len, num_blocks)
+                prompt_cfg, decode_cfg = None, None
+                with HabanaMemoryProfiler() as mem_prof:
+                    if is_prompt:
+                        prompt_cfg = (batch_size, seq_len, num_blocks)
+                    else:
+                        decode_cfg = (batch_size, 1, num_blocks)
+                    self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
+                # TODO(kzawora): align_workers
+                used_mem = mem_prof.consumed_device_memory
+                total_mem += used_mem
+                total_batch_seq += batch_seq
+
+                pbar.set_postfix_str(f"{idx}/{num_candidates}")
+                pbar.update(1)
 
         return total_mem, total_batch_seq, captured_all
 
     def warmup_unified_graphs(self, buckets, kv_cache):
         idx = 0
         num_candidates = len(buckets)
-        for idx, (query, shared_ctx, unique_ctx, is_causal) in enumerate(reversed(buckets)):
-            unified_cfg = (query, shared_ctx, unique_ctx, is_causal)
-            if unified_cfg in self.graphed_buckets:
-                continue
-            self.graphed_buckets.add(unified_cfg)
-            self.log_warmup("Unified CFG", idx, num_candidates, query, shared_ctx, unique_ctx, is_causal)
-            self._prepare_dummy_unified_scenario(unified_cfg)
+        developer_settings = get_config().VLLM_DEVELOPER_MODE
+        with tqdm(total=num_candidates, desc="Unified Attention warmup", unit="item") as pbar:
+            for idx, (query, shared_ctx, unique_ctx, is_causal) in enumerate(reversed(buckets)):
+                unified_cfg = (query, shared_ctx, unique_ctx, is_causal)
+                if unified_cfg in self.graphed_buckets:
+                    continue
+                self.graphed_buckets.add(unified_cfg)
+                if developer_settings:
+                    self.log_warmup("Unified CFG", idx, num_candidates, query, shared_ctx, unique_ctx, is_causal)
+                self._prepare_dummy_unified_scenario(unified_cfg)
+                pbar.set_postfix_str(f"{idx}/{num_candidates}")
+                pbar.update(1)
 
     def _add_dummy_request(self,
                            requests,
