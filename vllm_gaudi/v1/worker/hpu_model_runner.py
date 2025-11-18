@@ -714,7 +714,7 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
         'chunked_block_list',
         'chunked_block_usage',
         'chunked_block_groups'
-    ])
+    ])  # yapf: disable
     return attention_metadata
 
 
