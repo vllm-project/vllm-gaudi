@@ -68,14 +68,20 @@ class Fp8LinearMethod(OrigFp8LinearMethod):
                 force_channel_fp8=envs.VLLM_HPU_FORCE_CHANNEL_FP8,
             )
 
+        # View input as 2D matrix for fp8 methods
+        input_2d = x.view(-1, x.shape[-1])
+        output_shape = [*x.shape[:-1], layer.weight.shape[1]]
+
         weight_scale = layer.weight_scale.transpose(0, 1) if layer.weight_scale.dim() > 1 else layer.weight_scale
         input_scale = getattr(layer, 'input_scale', None)
-        return hpu_ops.apply_fp8_linear_hpu(input=x,
+        output = hpu_ops.apply_fp8_linear_hpu(input=input_2d,
                                             weight=layer.weight,
                                             weight_scale=weight_scale,
                                             input_scale=input_scale,
                                             bias=bias,
                                             trans_B=False)
+        output = torch.narrow(output, 0, 0, input_2d.shape[0]).view(*output_shape)
+        return output
 
     def dequant_fp8_weight(self, layer) -> torch.Tensor:
         if hasattr(layer, "updated_fp8_weight") and layer.updated_fp8_weight:
