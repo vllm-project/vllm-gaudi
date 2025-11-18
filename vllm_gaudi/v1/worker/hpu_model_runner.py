@@ -2893,7 +2893,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.input_batch.req_id_to_index.copy()
 
         with self.profiler.record_event('internal', 'unified_postprocess'):
-            sampled_token_ids: list[list[int]] = [[] for _ in batch.req_ids_cpu]
+            sampled_token_ids: list[np.ndarray] = [np.array([], dtype=np.int32) for _ in batch.req_ids_cpu]
             if self.use_async_scheduling:
                 sampled_token_ids_hpu = sampler_output.sampled_token_ids.view(-1, 1)
                 self.input_batch.prev_sampled_token_ids = sampled_token_ids_hpu.flatten()
@@ -2906,9 +2906,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 }
             else:
                 sampled_token_ids_cpu = sampler_output.sampled_token_ids.cpu()
-
                 sampled_token_ids_np = sampled_token_ids_cpu.numpy()
-                sampled_token_ids: list[np.ndarray] = [np.array([], dtype=np.int32) for _ in batch.req_ids_cpu]
                 for req_id, tokens_array in zip(selected_req_ids, sampled_token_ids_np):
                     idx = self.input_batch.req_id_to_index[req_id]
                     sampled_token_ids[idx] = tokens_array
