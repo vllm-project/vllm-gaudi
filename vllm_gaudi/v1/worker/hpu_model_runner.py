@@ -693,7 +693,7 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
     # input_hash(torch.tensor(123)) == input_hash(torch.tensor(321))
     # input_hash(123) != input_hash(321)
     # input_hash("abc") != input_hash("cba")
-    attention_metadata = subtuple(metadata, 'TrimmedAttentionMetadata', [  # noqa
+    attention_metadata = subtuple(metadata, 'TrimmedAttentionMetadata', [
         'attn_bias',
         'seq_lens_tensor',
         'context_lens_tensor',
