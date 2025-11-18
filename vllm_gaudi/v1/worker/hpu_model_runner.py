@@ -467,15 +467,16 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
             which_chunk = (total_token_positions // chunk_size)
             chunk_start_positions = which_chunk * chunk_size
             invalid_lens_t = chunk_start_positions - 1
-            
+
             past_indices = torch.arange(max_context_len, device=device)
-            past_mask = ((past_indices.unsqueeze(0).unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
-                         (past_indices.unsqueeze(0).unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(-1))).unsqueeze(1)
+            past_mask = (
+                (past_indices.unsqueeze(0).unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
+                (past_indices.unsqueeze(0).unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(-1))).unsqueeze(1)
 
             causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=shift)
             query_chunk_ids = which_chunk[0]
             same_chunk_mask = query_chunk_ids.unsqueeze(0) == query_chunk_ids.unsqueeze(1)
-            
+
             causal_mask = causal_mask & same_chunk_mask
             causal_mask = causal_mask.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, seq_len, seq_len)
 
@@ -495,7 +496,13 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         attn_metadata = custom_tuple_replace(prefill_metadata, "TrimmedAttentionMetadata", chunked_attn_bias=attn_bias)
         return attn_metadata
 
-    def _set_block_mapping(self, metadata, batch_size, device, dtype, is_window_block=False, update_for_chunked_attention=False):
+    def _set_block_mapping(self,
+                           metadata,
+                           batch_size,
+                           device,
+                           dtype,
+                           is_window_block=False,
+                           update_for_chunked_attention=False):
         if is_window_block:
             block_usage = metadata.window_block_usage
             block_groups = metadata.window_block_groups
@@ -551,14 +558,17 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
                 attn_metadata = self._set_attn_bias_for_sliding_window(attn_metadata, batch_size, seq_len,
                                                                        self.sliding_window, device, dtype)
             if model_has_chunked_attention:
-                attn_metadata = self._set_attn_bias_for_chunked_attention(attn_metadata, batch_size, seq_len,
-                                                                         self.model.config.text_config.attention_chunk_size,
-                                                                         device, dtype)
+                attn_metadata = self._set_attn_bias_for_chunked_attention(
+                    attn_metadata, batch_size, seq_len, self.model.config.text_config.attention_chunk_size, device, 
+                    dtype)
         else:
             attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype)
             if model_has_chunked_attention:
-                attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype,
-                                                       update_for_chunked_attention=True)
+                attn_metadata = self._set_block_mapping(attn_metadata,
+                                                        batch_size,
+                                                        device,
+                                                        dtype,
+                                                        update_for_chunked_attention=True)
             if self.interleaved_sliding_window:
                 attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype, True)
         return attn_metadata
@@ -683,7 +693,7 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
     # input_hash(torch.tensor(123)) == input_hash(torch.tensor(321))
     # input_hash(123) != input_hash(321)
     # input_hash("abc") != input_hash("cba")
-    attention_metadata = subtuple(metadata, 'TrimmedAttentionMetadata', [
+    attention_metadata = subtuple(metadata, 'TrimmedAttentionMetadata', [  # noqa
         'attn_bias',
         'seq_lens_tensor',
         'context_lens_tensor',
@@ -2070,7 +2080,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             chunk_size = (self.model.model.config.text_config.attention_chunk_size // self.block_size)
             seq_lens_block = [len(block_table) for block_table in block_tables_list]
             num_seq_chunks = [math.ceil(sl / chunk_size) - 1 for sl in seq_lens_block]
-            block_tables_chunk = [block_table[num_seq_chunks[i]*chunk_size:] for i, block_table in enumerate(block_tables_list)]
+            block_tables_chunk = [
+                block_table[num_seq_chunks[i]*chunk_size:] for i, block_table in enumerate(block_tables_list)
+            ]
             chunked_block_list, chunked_block_groups, chunked_block_usage = \
                 self.get_habana_paged_attn_buffers(
                     block_tables_chunk, slot_mapping.tolist(),
@@ -2092,7 +2104,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         chunked_block_usage_device = async_h2d_copy(chunked_block_usage,
                                                     device=self.device) if self.model_has_chunked_attention else None
         chunked_block_groups_device = async_h2d_copy(chunked_block_groups,
-                                                    device=self.device) if self.model_has_chunked_attention else None
+                                                     device=self.device) if self.model_has_chunked_attention else None
 
         token_ids_device = async_h2d_copy(token_ids, device=self.device)
         if self.use_async_scheduling:
