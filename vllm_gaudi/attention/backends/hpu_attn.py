@@ -142,6 +142,12 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     window_block_groups: Optional[torch.Tensor] = None
     window_block_usage: Optional[torch.Tensor] = None
     window_attn_bias: Optional[torch.Tensor] = None
+    chunked_slot_mapping: Optional[torch.Tensor] = None
+    chunked_attn_bias: Optional[torch.Tensor] = None
+    chunked_block_mapping: Optional[torch.Tensor] = None
+    chunked_block_list: Optional[torch.Tensor] = None
+    chunked_block_groups: Optional[torch.Tensor] = None
+    chunked_block_usage: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -459,6 +465,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                       "is not implemented for "
                                       "HPUAttentionImpl")
 
+        self.is_chunked_attention = False
+
     def _maybe_init_alibi_biases(
         self,
         max_seq_len,
@@ -575,6 +583,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
 
             common_args = self.common_attention_args(block_list, key_cache, value_cache, attn_metadata.block_size)
 
+<<<<<<< HEAD
             if self.sliding_window:
                 if hasattr(attn_metadata, 'window_attn_bias') and attn_metadata.window_attn_bias is not None:
                     attn_bias = attn_metadata.window_attn_bias
@@ -582,6 +591,14 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                     attn_bias = None
                     window_size = (self.sliding_window, 0)
                     common_args['window_size'] = window_size
+=======
+            if self.sliding_window and hasattr(attn_metadata,
+                                               'window_attn_bias') and attn_metadata.window_attn_bias is not None:
+                attn_bias = attn_metadata.window_attn_bias
+            if self.is_chunked_attention and \
+                hasattr(attn_metadata, 'chunked_attn_bias') and attn_metadata.chunked_attn_bias is not None:
+                attn_bias = attn_metadata.chunked_attn_bias
+>>>>>>> 6e1be4e (Add support for chunked attention (#560))
 
             out = ops.prompt_attention(impl=self.prefill_impl,
                                        query=query.view(query_shape),
@@ -602,6 +619,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 block_groups = attn_metadata.window_block_groups
                 block_mapping = attn_metadata.window_block_mapping
                 attn_bias = attn_metadata.window_attn_bias
+            elif self.is_chunked_attention and \
+                attn_metadata.chunked_block_list is not None:
+                block_list = attn_metadata.chunked_block_list
+                block_groups = attn_metadata.chunked_block_groups
+                block_mapping = attn_metadata.chunked_block_mapping
+                attn_bias = attn_metadata.chunked_attn_bias
             else:
                 block_list = attn_metadata.block_list
                 block_groups = attn_metadata.block_groups
