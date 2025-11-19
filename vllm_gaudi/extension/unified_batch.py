@@ -33,6 +33,10 @@ def to_hpu(data: Optional[Union[torch.Tensor, list]], dtype: Optional[torch.dtyp
 
 def mask_to_bias(mask: np.ndarray, dtype: np.dtype, bias_placeholder: np.ndarray = None) -> np.ndarray:
     """Convert attn mask to attn bias"""
+    if not bias_placeholder:
+        bias = np.zeros_like(mask, dtype=dtype)
+        bias[mask] = -math.inf
+        return bias
     placeholder_too_small = mask.shape[0] > bias_placeholder.shape[0] or mask.shape[1] > bias_placeholder.shape[1]
     if placeholder_too_small:
         msg = (f"Provided bias_placeholder is too small for the required mask shape {mask.shape}. "
@@ -42,7 +46,7 @@ def mask_to_bias(mask: np.ndarray, dtype: np.dtype, bias_placeholder: np.ndarray
                f"Please consider tuning VLLM_UNIFIED_ATTENTION_SHARED_CACHE_RATIO environment variable. "
                f"Falling back to dynamic allocation. ")
         logger.warning(msg)
-    if bias_placeholder is not None and not placeholder_too_small:
+    if not placeholder_too_small:
         # IMPORTANT: Make a copy to avoid data leakage between batches
         bias = bias_placeholder[:mask.shape[0], :mask.shape[1]].copy()
         assert bias.shape == mask.shape
