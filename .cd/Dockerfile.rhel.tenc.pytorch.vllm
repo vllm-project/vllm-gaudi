@@ -29,7 +29,7 @@ RUN if echo "$BASE_NAME" | grep -qi "tencentos"; then \
   yum install -y gettext jq git --allowerasing --exclude=openmpi --exclude=opensm-libs && \
   ln -sf /usr/bin/python3 /usr/bin/python ; \
 else \
-  yum update -y -nobest && \
+  yum update -y --nobest && \
   yum install -y gettext jq git --allowerasing && \
   ln -sf /usr/bin/python3 /usr/bin/python ; \
 fi
