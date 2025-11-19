@@ -41,7 +41,3 @@ if __name__ == "__main__":
         distributed_executor_backend=args.distributed_executor_backend,
         enable_expert_parallel=args.expert_parallel,
     )
-
-    # Skip shutdown when VLLM_USE_V1 is set to "1"
-    if not os.environ.get("VLLM_USE_V1") or os.environ.get("VLLM_USE_V1") != "1":
-        llm.llm_engine.model_executor.shutdown()

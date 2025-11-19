@@ -4,13 +4,14 @@
 # This source code is licensed under the Apache 2.0 license found in the
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
-from typing import Callable, Optional, Tuple, List
+from typing import Callable, Optional, Tuple, List, Union
 import habana_frameworks.torch as htorch
 import torch
 import torch.nn.functional as F
 import math
 import habana_frameworks.torch.core as htcore
 from vllm_gaudi.extension.runtime import get_config
+
 import habana_frameworks.torch.utils.experimental as htexp
 import types
 
@@ -50,6 +51,14 @@ def batch2block(tensor, block_mapping, matmul_op=torch.matmul):
 
 def block2batch(tensor, block_mapping, matmul_op=torch.matmul):
     return b2b_impl(tensor, block_mapping.t(), matmul_op)
+
+
+def matmul_shape(lhs, rhs):
+    lhs_shape = list(lhs.shape)
+    rhs_shape = list(rhs.shape)
+    common_shape = [max(left, right) for left, right in zip(lhs_shape[:-2], rhs_shape[:-2])]
+    result = common_shape + [lhs_shape[-2]] + [rhs_shape[-1]]
+    return result
 
 
 def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, batch_size, matmul_av_op, batch2block_matmul_op,
@@ -133,10 +142,18 @@ def flat_pa_mla(query, key_cache, value_cache, block_list, block_mapping, block_
     else:
         key = key.transpose(2, 3)
 
-    attn = matmul_qk_op(query, key)
-    if get_config().fp32_softmax:
+    #NOTE(adobrzyn): Remove if after (GAUDISW-243850)
+    if get_config().use_output_tensor_in_matmulqk:
+        attn = None
+        if get_config().fp32_softmax:
+            attn = torch.empty(matmul_shape(query, key), dtype=torch.float32, device=query.device)
+        attn = matmul_qk_op(query, key, out=attn)
+    elif get_config().fp32_softmax:
+        attn = matmul_qk_op(query, key)
         attn = attn.float()
         htcore.mark_step()
+    else:
+        attn = matmul_qk_op(query, key)
 
     attn = pipelined_pa(attn,
                         value,
@@ -176,12 +193,23 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
             block_bias = block_bias.unsqueeze(2)
     key = key.transpose(-2, -1)
 
-    attn = matmul_qk_op(query, key)
-    if get_config().fp32_softmax:
+    #NOTE(adobrzyn): Remove if after (GAUDISW-243850)
+    if get_config().use_output_tensor_in_matmulqk:
+        attn = None
+        if get_config().fp32_softmax:
+            attn = torch.empty(matmul_shape(query, key), dtype=torch.float32, device=query.device)
+            if position_bias is not None:
+                position_bias = position_bias.float()
+        attn = matmul_qk_op(query, key, out=attn)
+    elif get_config().fp32_softmax:
+        attn = matmul_qk_op(query, key)
         attn = attn.float()
         htcore.mark_step()
         if position_bias is not None:
             position_bias = position_bias.float()
+    else:
+        attn = matmul_qk_op(query, key)
+
     if position_bias is not None:
         if attn.dtype != position_bias.dtype:
             attn = attn.to(dtype=position_bias.dtype)
@@ -302,10 +330,12 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
                             is_causal: bool,
                             attn_bias: Optional[torch.Tensor] = None,
                             valid_seq_lengths: Optional[torch.Tensor] = None,
+                            window_size: Optional[int] = None,
                             **ignored_args) -> torch.Tensor:
     query = query.transpose(1, 2)
     key = key.transpose(1, 2)
     value = value.transpose(1, 2)
+    padding_side = 'right'
     if get_config().fp32_softmax:
         softmax_mode = 'fp32'
     else:
@@ -317,8 +347,14 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
         # TODO: causal + attn_bias is not yet supported
         is_causal = False
         valid_seq_lengths = None
-    attn_weights = fsdpa_op(query, key, value, attn_bias, 0.0, is_causal, scale, softmax_mode, recompute_mode,
-                            valid_seq_lengths, 'right')
+
+    args = [
+        query, key, value, attn_bias, 0.0, is_causal, scale, softmax_mode, recompute_mode, valid_seq_lengths,
+        padding_side
+    ]
+    args += [window_size] if window_size else []
+    attn_weights = fsdpa_op(*args)
+
     attn_weights = attn_weights.transpose(1, 2)
     return attn_weights
 
@@ -1042,16 +1078,70 @@ def scaled_fp8_quant(
     if scale is None:
         raise "dynamic scaled_fp8_quant not implemented for HPU"
         # TODO: calculate scale to match gaudi2 240 range instead of 448
-        if use_per_token_if_dynamic:
-            scale = torch.empty((input.numel() // input.shape[-1], 1), device=input.device, dtype=torch.float32)
-            torch.ops._C.dynamic_per_token_scaled_fp8_quant(output, input, scale, scale_ub)
-        else:
-            scale = torch.zeros(1, device=input.device, dtype=torch.float32)
-            torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
         output = torch.ops.hpu.cast_to_fp8_v2(input, 1 / scale, False, False, dtype=torch.float8_e4m3fn)[0]
 
     return output, scale
+
+
+def per_tensor_dequantize(tensor: torch.Tensor, inv_scale: Union[float, torch.Tensor]) -> torch.Tensor:
+    device = tensor.device
+    dtype = torch.bfloat16
+    if is_hpu_gaudi2:
+        # dequant on cpu to avoid nan on gaudi2
+        tensor = tensor.to('cpu')
+
+    fake_qweight = tensor.to(dtype).to(device)
+    dq_weight = fake_qweight * inv_scale
+    return dq_weight
+
+
+def requantize_with_max_scale(weight: torch.Tensor, weight_scale: torch.Tensor,
+                              logical_widths: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
+    # Max scale to be used for requanitzation.
+    max_w_scale = weight_scale.max()
+    # QKV / MLP is fused in the on disk checkpoint if any of the
+    # weight scales are still set to the default since we initialize
+    # N weight scales for N shards but we only load 1 weight scale
+    # from disk in this case. Skip requantization in this case (since)
+    # we already are quantized with the single scale.
+    # * Sample Model: nm-testing/Phi-3-mini-128k-instruct-FP8
+    unfused_module_in_checkpoint = (weight_scale[-1] > torch.finfo(torch.float8_e4m3fn).min)
+
+    # If unfused checkpoint, need requanize with the single scale.
+    if unfused_module_in_checkpoint:
+        start = 0
+        for idx, logical_width in enumerate(logical_widths):
+            # Skip any component with zero width.
+            if logical_width == 0:
+                continue
+            end = start + logical_width
+            weight_dq = per_tensor_dequantize(weight[start:end, :], weight_scale[idx])
+            weight[start:end, :], _ = scaled_fp8_quant(weight_dq, max_w_scale)
+            start = end
+
+    return max_w_scale, weight
+
+
+def process_fp8_weight_tensor_strategy(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    logical_widths: list[int],
+    input_scale: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Process weights for tensor-wise quantization strategy."""
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        _maybe_pad_fp8_weight, )
+
+    # Requantize with max scale
+    weight_scale, weight = requantize_with_max_scale(
+        weight=weight,
+        weight_scale=weight_scale,
+        logical_widths=logical_widths,
+    )
+
+    weight = _maybe_pad_fp8_weight(weight)
+    return weight, weight_scale, input_scale
 
 
 class MoeWNA16Matmul(torch.nn.Module):

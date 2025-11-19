@@ -5,7 +5,7 @@ import gc
 import os
 import queue
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.distributed
@@ -18,14 +18,19 @@ from vllm_gaudi.extension.runtime import get_config
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized, init_distributed_environment)
-from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
+from vllm.distributed.kv_transfer import (
+    ensure_kv_transfer_initialized,
+    get_kv_transfer_group,
+    has_kv_transfer_group,
+)
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor import set_random_seed
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec)
 from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerOutput)
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.utils import is_fake_hpu
-from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, bool_helper
+from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_gaudi.extension.logger import logger as init_logger
@@ -33,7 +38,7 @@ from vllm_gaudi.extension.logger import logger as init_logger
 logger = init_logger()
 
 if TYPE_CHECKING:
-    from vllm.v1.core.scheduler import SchedulerOutput
+    from vllm.v1.core.scheduler import GrammarOutput, SchedulerOutput
 
 
 def setup_step_profiler(steps):
@@ -79,11 +84,10 @@ class HPUWorker(WorkerBase):
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
-            from vllm.utils import init_cached_hf_modules
+            from vllm.utils.import_utils import init_cached_hf_modules
             init_cached_hf_modules()
 
-        self.gc_track_recompiles = bool("PT_HPU_METRICS_GC_DETAILS" in os.environ
-                                        and bool_helper(os.getenv("PT_HPU_METRICS_GC_DETAILS")))
+        self.gc_track_recompiles = get_config().track_graph_compilation and not get_config().high_level_profiler_enabled
         self.step = 0
         self.profile_steps = get_config().VLLM_PROFILE_STEPS
         self.step_profiler = setup_step_profiler(self.profile_steps)
@@ -251,11 +255,14 @@ class HPUWorker(WorkerBase):
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
+    def sample_tokens(self, grammar_output: "GrammarOutput|None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        return self.model_runner.sample_tokens(grammar_output)
+
     @torch.inference_mode()
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput]:
+    ) -> ModelRunnerOutput | None:
         if self.step_debug:
             self.step_debug(f'step={self.step}')
         if self.step_profiler and self.step == self.profile_steps[0]:
@@ -293,6 +300,21 @@ class HPUWorker(WorkerBase):
 
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1)
+
+    def get_kv_connector_handshake_metadata(self) -> dict | None:
+        """Get KV connector metadata from this worker if available."""
+
+        if not has_kv_transfer_group():
+            return None
+
+        connector = get_kv_transfer_group()
+        # Return None for connectors that don't need to exchange handshake
+        # metadata across workers.
+        if (metadata := connector.get_handshake_metadata()) is None:
+            return None
+
+        tp_rank = get_tp_group().rank_in_group
+        return {tp_rank: metadata}
 
 
 def init_worker_distributed_environment(

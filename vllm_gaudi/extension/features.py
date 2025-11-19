@@ -12,32 +12,38 @@ from vllm_gaudi.extension.validation import for_all, choice
 
 def get_user_flags():
     flags = [
-        Env('VLLM_USE_V1', boolean),
-        Env('VLLM_ENABLE_EXPERIMENTAL_FLAGS', boolean),
+        Env('VLLM_DEVELOPER_MODE', boolean),
         Env('VLLM_EXPONENTIAL_BUCKETING', boolean),
         Env('VLLM_PROMPT_BS_BUCKET_MIN', int),
         Env('VLLM_PROMPT_BS_BUCKET_STEP', int),
         Env('VLLM_PROMPT_BS_BUCKET_MAX', int),
-        Env('VLLM_PROMPT_BS_BUCKET_LIMIT', int),
+        Env('VLLM_PROMPT_QUERY_BUCKET_MIN', int),
+        Env('VLLM_PROMPT_QUERY_BUCKET_STEP', int),
+        Env('VLLM_PROMPT_QUERY_BUCKET_MAX', int),
         Env('VLLM_PROMPT_SEQ_BUCKET_MIN', int),
         Env('VLLM_PROMPT_SEQ_BUCKET_STEP', int),
         Env('VLLM_PROMPT_SEQ_BUCKET_MAX', int),
-        Env('VLLM_PROMPT_SEQ_BUCKET_LIMIT', int),
         Env('VLLM_PROMPT_CTX_BUCKET_MIN', int),
         Env('VLLM_PROMPT_CTX_BUCKET_STEP', int),
         Env('VLLM_PROMPT_CTX_BUCKET_MAX', int),
         Env('VLLM_DECODE_BS_BUCKET_MIN', int),
         Env('VLLM_DECODE_BS_BUCKET_STEP', int),
         Env('VLLM_DECODE_BS_BUCKET_MAX', int),
-        Env('VLLM_DECODE_BS_BUCKET_LIMIT', int),
         Env('VLLM_DECODE_BLOCK_BUCKET_MIN', int),
         Env('VLLM_DECODE_BLOCK_BUCKET_STEP', int),
         Env('VLLM_DECODE_BLOCK_BUCKET_MAX', int),
         Env('VLLM_DECODE_BLOCK_BUCKET_LIMIT', int),
+        Env('VLLM_BUCKETING_FROM_FILE', str),
 
         # Non-vllm flags that are also important to print
         Env('EXPERIMENTAL_WEIGHT_SHARING', str),
         Env('PT_HPU_WEIGHT_SHARING', str),
+        Env('RUNTIME_SCALE_PATCHING', str),
+
+        # Sliding window flags
+        Env('PT_HPU_SDPA_QKV_SLICE_MODE_FWD', boolean),
+        Env('PT_HPU_SDPA_BC_FACTOR', int),
+        Env('VLLM_FUSEDSDPA_SLIDE_THLD', int),
     ]
     return to_dict(flags)
 
@@ -75,7 +81,6 @@ def get_features():
         Value('use_contiguous_pa',
               Any(Disabled('prefix_caching'), Enabled('unified_attn')),
               env_var='VLLM_CONTIGUOUS_PA'),
-        Value('use_delayed_sampling', Engine('v0'), env_var='VLLM_DELAYED_SAMPLING'),
         Value('use_bucketing', True, env_var='VLLM_ENABLE_BUCKETING'),
         Value('exponential_bucketing', True),
         Value('linear_bucketing', True),
@@ -87,5 +92,12 @@ def get_features():
         Value('unified_attn', False),
         Value('scale_adjustment', True, env_var='VLLM_SCALE_ADJUSTMENT', env_var_type=boolean),
         Value('flatten_input', Any(ModelType('qwen3_moe'), ModelType('granitemoe'), ModelType('glm4_moe'))),
+        Value('unified_attn_shared_cache_ratio',
+              1.,
+              env_var='VLLM_UNIFIED_ATTENTION_SHARED_CACHE_RATIO',
+              env_var_type=float),
+        Value('high_level_profiler_enabled', False, env_var='VLLM_PROFILER_ENABLED', env_var_type=boolean),
+        Value('track_graph_compilation', False, env_var='PT_HPU_METRICS_GC_DETAILS', env_var_type=boolean),
+        Value('use_output_tensor_in_matmulqk', VersionRange(">=1.24.0.171"), env_var_type=boolean)
     ]
     return split_values_and_flags(features)

@@ -120,9 +120,27 @@ jobs:
             echo "branch_name=pre_${{ github.event.inputs.branch_name }}" >> "$GITHUB_OUTPUT"
           fi
 
-  setup_and_build:
-    runs-on: hourly-ci
+  # --- NEW JOB ---
+  # This job runs after prep, picks one 'hourly-ci' runner,
+  # and outputs its name so all other test jobs can target it.
+  discover_runner:
+    name: "Discover Self-Hosted Runner"
     needs: [prepare-release-branch]
+    runs-on: hourly-ci
+    outputs:
+      runner_name: ${{ steps.get_name.outputs.name }}
+    steps:
+      - name: Get runner name
+        id: get_name
+        run: |
+          echo "This workflow will run on: ${{ runner.name }}"
+          echo "name=${{ runner.name }}" >> "$GITHUB_OUTPUT"
+
+  setup_and_build:
+    # --- UPDATED: Add discover_runner dependency ---
+    needs: [prepare-release-branch, discover_runner]
+    # --- UPDATED: Run on the specific node ---
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: "Checkout the release branch"
         uses: actions/checkout@v4
@@ -168,8 +186,10 @@ jobs:
           echo "Docker image built successfully."
 
   run_unit_tests:
-    needs: [prepare-release-branch, setup_and_build]
-    runs-on: hourly-ci
+    # --- UPDATED: Add discover_runner dependency ---
+    needs: [prepare-release-branch, setup_and_build, discover_runner]
+    # --- UPDATED: Run on the specific node ---
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Run pytest in tests/unit_tests
         run: |
@@ -191,8 +211,10 @@ jobs:
           echo "Test script exited with code: $EXITCODE"
 
   discover_tests:
-    runs-on: hourly-ci
-    needs: [prepare-release-branch]
+    # --- UPDATED: Add discover_runner dependency ---
+    needs: [prepare-release-branch, discover_runner]
+    # --- UPDATED: Run on the specific node ---
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
@@ -204,9 +226,9 @@ jobs:
         id: set-matrix
         run: |
           TEST_FUNCTIONS=$( grep '^run_' ./tests/full_tests/ci_gsm8k_tests.sh | \
-              awk '{print $1}' | \
-              sed 's/()//' | \
-              jq -R . | jq -s -c . )
+                      awk '{print $1}' | \
+                      sed 's/()//' | \
+                      jq -R . | jq -s -c . )
 
           echo "Discovered test matrix: $TEST_FUNCTIONS"
           if [ "$TEST_FUNCTIONS" = "[]" ]; then
@@ -216,8 +238,10 @@ jobs:
           echo "matrix=$TEST_FUNCTIONS" >> "$GITHUB_OUTPUT"
 
   e2e:
-    needs: [prepare-release-branch, setup_and_build, discover_tests]
-    runs-on: hourly-ci
+    # --- UPDATED: Add discover_runner dependency ---
+    needs: [prepare-release-branch, setup_and_build, discover_tests, discover_runner]
+    # --- UPDATED: Run on the specific node ---
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     strategy:
       fail-fast: false
       matrix:
@@ -245,8 +269,10 @@ jobs:
           echo "Test script exited with code: $EXITCODE"
 
   run_data_parallel_test:
-    needs: [prepare-release-branch, setup_and_build]
-    runs-on: hourly-ci
+    # --- UPDATED: Add discover_runner dependency ---
+    needs: [prepare-release-branch, setup_and_build, discover_runner]
+    # --- UPDATED: Run on the specific node ---
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Run Data Parallel test
         run: |
@@ -261,7 +287,6 @@ jobs:
             -e HF_HOME=/workspace/hf_cache \
             -e VLLM_SKIP_WARMUP=true \
             -e PT_HPU_LAZY_MODE=1 \
-            -e VLLM_USE_V1=1 \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-${{ needs.prepare-release-branch.outputs.tag_name }} \
@@ -271,8 +296,10 @@ jobs:
           echo "Test script exited with code: $EXITCODE"
 
   run_pd_disaggregate_test:
-    needs: [prepare-release-branch, setup_and_build]
-    runs-on: hourly-ci
+    # --- UPDATED: Add discover_runner dependency ---
+    needs: [prepare-release-branch, setup_and_build, discover_runner]
+    # --- UPDATED: Run on the specific node ---
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Run PD disaggregate test
         run: |
@@ -287,7 +314,7 @@ jobs:
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
-            -v /mnt/wheels_cache:/workspace/wheels_cache \
+            -v /mnt/wheels_cache:/tmp/wheels_cache \
             hpu-plugin-v1-${{ needs.prepare-release-branch.outputs.tag_name }} \
             /bin/bash -c "
               pip install lm-eval[api] &&
@@ -298,8 +325,10 @@ jobs:
           echo "Test script exited with code: $EXITCODE"
 
   run_hpu_perf_tests:
-    needs: [prepare-release-branch, setup_and_build]
-    runs-on: hourly-ci
+    # --- UPDATED: Add discover_runner dependency ---
+    needs: [prepare-release-branch, setup_and_build, discover_runner]
+    # --- UPDATED: Run on the specific node ---
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Run Sharegpt performance tests with warmup
         run: |
@@ -324,6 +353,8 @@ jobs:
   summarize_and_notify:
     name: "Summarize Test Results and Notify"
     runs-on: ubuntu-latest
+    # --- This job runs on ubuntu-latest, so no runner change is needed ---
+    # It will correctly wait for all the test jobs to finish
     if: needs.prepare-release-branch.result == 'success'
     needs:
       - prepare-release-branch

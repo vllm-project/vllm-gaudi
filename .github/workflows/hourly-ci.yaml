@@ -13,13 +13,29 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  # JOB 1: Sets up the environment and builds the Docker image needed for all tests.
+  # JOB 1: (NEW) Discovers an available runner and locks it for all subsequent jobs.
+  discover_runner:
+    runs-on: hourly-ci # Picks any available runner from the 'hourly-ci' pool
+    outputs:
+      runner_name: ${{ steps.get_name.outputs.name }}
+    steps:
+      - name: Get runner name
+        id: get_name
+        # This command gets the unique name of the runner (e.g., "my-runner-123")
+        # and saves it as an output variable
+        run: |
+          echo "This workflow will run on: ${{ runner.name }}"
+          echo "name=${{ runner.name }}" >> "$GITHUB_OUTPUT"
+
+  # JOB 2: (UPDATED) Sets up the environment and builds the Docker image.
   setup_and_build:
     if: |
       github.event_name == 'workflow_dispatch' ||
       github.ref == 'refs/heads/main'
-    runs-on: hourly-ci
-    needs: discover_tests
+    # <-- UPDATED: Now needs 'discover_tests' AND 'discover_runner'
+    needs: [discover_tests, discover_runner]
+    # <-- UPDATED: Runs on the specific runner from the discover_runner job
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     permissions:
       contents: read # Required to checkout code and read history
     outputs:
@@ -103,9 +119,12 @@ jobs:
           EOF
           echo "Docker image built successfully."
 
+  # JOB 3: (UPDATED)
   run_unit_tests:
-    needs: setup_and_build
-    runs-on: hourly-ci
+    # <-- UPDATED: Now needs 'setup_and_build' AND 'discover_runner'
+    needs: [setup_and_build, discover_runner]
+    # <-- UPDATED: Runs on the specific runner
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Run pytest in tests/unit_tests
         run: |
@@ -126,8 +145,12 @@ jobs:
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
 
+  # JOB 4: (UPDATED)
   discover_tests:
-    runs-on: hourly-ci
+    # <-- UPDATED: Now needs 'discover_runner'
+    needs: discover_runner
+    # <-- UPDATED: Runs on the specific runner
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
@@ -140,9 +163,9 @@ jobs:
           # naming convention, excluding the main 'run_all_tests' function itself.
           # The final list is formatted into a JSON array required for the matrix strategy.
           TEST_FUNCTIONS=$( grep '^run_' ./tests/full_tests/ci_gsm8k_tests.sh | \
-                   awk '{print $1}' | \
-                   sed 's/()//' | \
-                   jq -R . | jq -s -c . )
+                      awk '{print $1}' | \
+                      sed 's/()//' | \
+                      jq -R . | jq -s -c . )
 
           echo "Discovered test matrix: $TEST_FUNCTIONS"
           # Fail the job if no tests were found.
@@ -152,9 +175,12 @@ jobs:
           fi
           echo "matrix=$TEST_FUNCTIONS" >> "$GITHUB_OUTPUT"
 
+  # JOB 5: (UPDATED)
   e2e:
-    needs: [setup_and_build, discover_tests]
-    runs-on: hourly-ci
+    # <-- UPDATED: Now needs 'setup_and_build', 'discover_tests', AND 'discover_runner'
+    needs: [setup_and_build, discover_tests, discover_runner]
+    # <-- UPDATED: Runs on the specific runner
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     strategy:
       fail-fast: false
       matrix:
@@ -183,9 +209,12 @@ jobs:
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
 
+  # JOB 6: (UPDATED)
   run_data_parallel_test:
-    needs: setup_and_build
-    runs-on: hourly-ci
+    # <-- UPDATED: Now needs 'setup_and_build' AND 'discover_runner'
+    needs: [setup_and_build, discover_runner]
+    # <-- UPDATED: Runs on the specific runner
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Run Data Parallel test
         run: |
@@ -200,7 +229,6 @@ jobs:
             -e HF_HOME=/workspace/hf_cache \
             -e VLLM_SKIP_WARMUP=true \
             -e PT_HPU_LAZY_MODE=1 \
-            -e VLLM_USE_V1=1 \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-hourly-ci \
@@ -209,9 +237,12 @@ jobs:
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
 
+  # JOB 7: (UPDATED)
   run_pd_disaggregate_test:
-    needs: setup_and_build
-    runs-on: hourly-ci
+    # <-- UPDATED: Now needs 'setup_and_build' AND 'discover_runner'
+    needs: [setup_and_build, discover_runner]
+    # <-- UPDATED: Runs on the specific runner
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Run PD disaggregate test
         run: |
@@ -226,7 +257,7 @@ jobs:
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
-            -v /mnt/wheels_cache:/workspace/wheels_cache \
+            -v /mnt/wheels_cache:/tmp/wheels_cache \
             hpu-plugin-v1-test-env-hourly-ci \
             /bin/bash -c "
               pip install lm-eval[api] &&
@@ -236,9 +267,12 @@ jobs:
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
   
+  # JOB 8: (UPDATED)
   store_last_stable_vllm_commit:
-    needs: [setup_and_build, run_unit_tests, e2e, run_data_parallel_test, run_pd_disaggregate_test]
-    runs-on: hourly-ci
+    # <-- UPDATED: Now needs all test jobs AND 'discover_runner'
+    needs: [setup_and_build, run_unit_tests, e2e, run_data_parallel_test, run_pd_disaggregate_test, discover_runner]
+    # <-- UPDATED: Runs on the specific runner
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     permissions:
       contents: write # Permission is required to push a commit
     steps:

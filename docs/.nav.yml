@@ -1,37 +1,45 @@
 nav:
-  - Home: 
-    - vLLM x Intel Gaudi: README.md
-    - Getting Started:
-      - getting_started/quickstart.md
-      - getting_started/installation.md
-    - Quick Links:
-      - User Guide: user_guide/README.md
-      - Developer Guide: dev_guide/README.md
-      - API Reference: api/README.md
-  - User Guide:
-    - Summary: user_guide/README.md
-    - user_guide/v1_guide.md
-    - General:
-      - user_guide/*
-    - Configuration:
-      - Summary: configuration/README.md
-      - configuration/*
-    - Models:
-      - models/validated_models.md
-    - Features:
-      - features/supported_features.md
-      - features/compatibility_matrix.md
-      - features/*
-      - features/quantization
-  - Developer Guide:
-    - Summary: dev_guide/README.md
-    - General:
-      - glob: dev_guide/*
-        flatten_single_child_sections: true
-    - Design Documents:
-      - design/*
+  - Getting Started:
+    - README.md
+    - Quick Start: 
+      - getting_started/quickstart/quickstart.md
+      - getting_started/quickstart/quickstart_configuration.md
+      - getting_started/quickstart/quickstart_inference.md
+    - getting_started/installation.md
+    - release_notes.md
+    - getting_started/compatibility_matrix.md
+    - getting_started/validated_models.md
+  - Configuration Guides:
+    - configuration/env_vars.md
+    - configuration/long_context.md
+    - Calibration: 
+      - configuration/calibration/calibration.md
+      - configuration/calibration/calibration_one_node.md
+      - configuration/calibration/calibration_multi_node.md
+    - Quantization and Inference: 
+      - configuration/quantization/quantization.md
+      - configuration/quantization/inc.md
+      - configuration/quantization/auto_awq.md
+      - configuration/quantization/gptqmodel.md
+    - configuration/pipeline_parallelism.md
+  - Features:
+    - features/supported_features.md
+    - features/*
+    - features/quantization
+  - Developer Guides:
+    - dev_guide/plugin_system.md
+    - dev_guide/ci-failures.md
+    - Profiling:
+      - dev_guide/profiling/profiling.md
+      - dev_guide/profiling/e2e-profiling.md
+      - dev_guide/profiling/high-level-profiling.md
+      - dev_guide/profiling/pytorch-profiling-async.md
+      - dev_guide/profiling/pytorch-profiling-script.md
+      - dev_guide/profiling/profiling-prompt-decode.md
   - API Reference:
     - Summary: api/README.md
     - Contents:
       - glob: api/vllm_gaudi/*
         preserve_directory_names: true
+  - general/troubleshooting.md
+  - general/faq.md

@@ -3,8 +3,8 @@
 
 # Parameterize base image components for RHEL 9.4/9.6 and TencentOS 3.1
 ARG DOCKER_URL=vault.habana.ai/gaudi-docker
-ARG VERSION=1.21.2
-ARG BASE_NAME=rhel9.2
+ARG VERSION=1.21.5
+ARG BASE_NAME=rhel9.4
 ARG PT_VERSION=2.6.0
 ARG REVISION=latest
 ARG REPO_TYPE=habanalabs
@@ -12,7 +12,7 @@ ARG TORCH_TYPE_SUFFIX
 
 FROM ${DOCKER_URL}/${VERSION}/${BASE_NAME}/${REPO_TYPE}/pytorch-${TORCH_TYPE_SUFFIX}installer-${PT_VERSION}:${REVISION}
 
-# Parameterize commit/branch for vllm-fork checkout
+# Parameterize commit/branch for vllm-plugin checkout
 ARG VLLM_GAUDI_COMMIT=main
 # leave empty to use last-good-commit-for-vllm-gaudi
 ARG VLLM_PROJECT_COMMIT=
@@ -26,11 +26,11 @@ ENV OMPI_MCA_btl_vader_single_copy_mechanism=none
 RUN if echo "$BASE_NAME" | grep -qi "tencentos"; then \
   yum remove -y mpitests_openmpi perftest openmpi opensm-libs || true && \
   yum update -y --exclude=openmpi --exclude=opensm-libs && \
-  yum install -y gettext jq python3-pip git --allowerasing --exclude=openmpi --exclude=opensm-libs && \
+  yum install -y gettext jq git --allowerasing --exclude=openmpi --exclude=opensm-libs && \
   ln -sf /usr/bin/python3 /usr/bin/python ; \
 else \
-  yum update -y && \
-  yum install -y gettext jq python3-pip git --allowerasing && \
+  yum update -y --nobest && \
+  yum install -y gettext jq git --allowerasing && \
   ln -sf /usr/bin/python3 /usr/bin/python ; \
 fi
 
@@ -61,7 +61,7 @@ RUN \
     git fetch upstream --tags || true && \
     git checkout ${VLLM_PROJECT_COMMIT} && \
     # Install vllm-project/vllm
-    bash -c "pip install -r <(sed '/^[torch]/d' requirements/build.txt)" && \
+    pip install -r <(sed '/^torch/d' requirements/build.txt) && \
     VLLM_TARGET_DEVICE=empty pip install --no-build-isolation . && \
     # Install vllm-gaudi plugin
     cd $VLLM_PATH2 && \
@@ -69,7 +69,7 @@ RUN \
     VLLM_TARGET_DEVICE=hpu pip install -v . --no-build-isolation
 # --- END: COMBINED RUN COMMAND ---
 
-# to be enabled later PWolsza
+# to be verified later PWolsza
 # RUN pip3 install -v -e $VLLM_PATH/tests/vllm_test_utils
 
 # Install additional Python packages

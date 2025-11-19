@@ -1,11 +1,11 @@
-site_name: vLLM x Intel Gaudi
+site_name: vLLM Hardware Plugin for Intel® Gaudi®
 exclude_docs: |
   *.inc.md
   *.template.md
 theme:
   name: material
-  logo: assets/logos/gaudi-icon.png
-  favicon: assets/logos/gaudi-icon.png
+  logo: assets/logos/gaudi-logo.png
+  favicon: assets/logos/gaudi-logo-favicon.png
   palette:
     # Palette toggle for automatic mode
     - media: "(prefers-color-scheme)"
@@ -30,10 +30,8 @@ theme:
     - content.code.copy
     - content.tabs.link
     - navigation.tracking
-    - navigation.tabs
     - navigation.sections
     - navigation.prune
-    - navigation.top
     - search.highlight
     - search.share
     - toc.follow
@@ -110,9 +108,15 @@ markdown_extensions:
   # For math rendering
   - mdx_math:
       enable_dollar_delimiter: true
+  # For checkbox feature
+  - pymdownx.tasklist:
+      custom_checkbox: true
 
+extra_css:
+  - styles/custom.css
 extra_javascript:
   - https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS_HTML
+  - styles/custom.js
 
 # Makes the url format end in .html rather than act as a dir
 # So index.md generates as index.html and is available under URL /index.html
