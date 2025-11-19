@@ -154,7 +154,7 @@ jobs:
             --build-arg VLLM_COMMIT_ARG=${{ needs.prepare-release-branch.outputs.commit_id }} \
             -t hpu-plugin-v1-${{ needs.prepare-release-branch.outputs.tag_name }} \
             -f - . <<EOF
-          FROM vault.habana.ai/gaudi-docker/1.22.0/ubuntu24.04/habanalabs/pytorch-installer-2.7.1:latest
+          FROM vault.habana.ai/gaudi-docker/1.23.0/ubuntu24.04/habanalabs/pytorch-installer-2.9.0:latest
 
           COPY ./ /workspace/vllm-gaudi
           WORKDIR /workspace
