@@ -42,7 +42,7 @@ def initialize_host_xfer_buffer(self, kv_caches: dict[str, torch.Tensor]) -> Non
     NOT directly supported by NIXL (e.g., tpu)
     
     NOTE(Chendi): override to support HPU heterogeneousTP size.
-    We intended to prepare host_buffer with HND layout as stride layout
+    We intend to prepare host_buffer with HND layout as stride layout
     However, we want to keep shape as NHD
     """
     xfer_buffers: dict[str, torch.Tensor] = {}
