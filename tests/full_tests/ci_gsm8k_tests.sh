@@ -196,9 +196,8 @@ run_gsm8k_deepseek_test() {
 # GSM8K on QWEN3-30B-A3B
 run_gsm8k_qwen3_30b_test() {
     echo "➡️ Testing GSM8K on QWEN3-30B-A3B..."
-    #VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 TP_SIZE=2 \
-    #pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/Qwen3-30B-A3B.yaml"
-    # Temporary commented due to bug
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 TP_SIZE=2 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/Qwen3-30B-A3B.yaml"
     echo "✅ Test with QWEN3-30B-A3B passed."
 }
 
