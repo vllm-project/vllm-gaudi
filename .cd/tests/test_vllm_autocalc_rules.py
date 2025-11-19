@@ -87,31 +87,45 @@ def test_calc_EST_HPU_BLOCKS():
     assert rules.calc_EST_HPU_BLOCKS(ctx) == expected
 
 
-def test_calc_DECODE_BS_RAMP_GRAPHS():
-    ctx = {'VLLM_DECODE_BS_BUCKET_STEP': 16, 'VLLM_DECODE_BS_BUCKET_MIN': 2, 'VLLM_EXPONENTIAL_BUCKETING': False}
-    expected = 1 + int(math.log(16 / 2, 2))
+@pytest.mark.parametrize("exp", [True, False])
+def test_calc_DECODE_BS_RAMP_GRAPHS(exp):
+    ctx = {
+        'VLLM_DECODE_BS_BUCKET_STEP': 16,
+        'VLLM_DECODE_BS_BUCKET_MIN': 2,
+        'EST_MAX_NUM_SEQS': 16,
+        'VLLM_EXPONENTIAL_BUCKETING': exp
+    }
+    expected = 1 + math.ceil(math.log(16, 2)) if exp else 1 + int(math.log(16 / 2, 2))
     assert rules.calc_DECODE_BS_RAMP_GRAPHS(ctx) == expected
 
 
-def test_calc_DECODE_BS_STEP_GRAPHS():
-    ctx = {'EST_MAX_NUM_SEQS': 64, 'VLLM_DECODE_BS_BUCKET_STEP': 8, 'VLLM_EXPONENTIAL_BUCKETING': False}
-    expected = max(0, int(1 + (64 - 8) / 8))
+@pytest.mark.parametrize("exp", [True, False])
+def test_calc_DECODE_BS_STEP_GRAPHS(exp):
+    ctx = {'EST_MAX_NUM_SEQS': 64, 'VLLM_DECODE_BS_BUCKET_STEP': 8, 'VLLM_EXPONENTIAL_BUCKETING': exp}
+    expected = 0 if exp else max(0, int(1 + (64 - 8) / 8))
     assert rules.calc_DECODE_BS_STEP_GRAPHS(ctx) == expected
 
 
-def test_calc_DECODE_BLOCK_RAMP_GRAPHS():
-    ctx = {'VLLM_DECODE_BLOCK_BUCKET_STEP': 16, 'VLLM_DECODE_BLOCK_BUCKET_MIN': 2, 'VLLM_EXPONENTIAL_BUCKETING': False}
-    expected = 1 + int(math.log(16 / 2, 2))
+@pytest.mark.parametrize("exp", [True, False])
+def test_calc_DECODE_BLOCK_RAMP_GRAPHS(exp):
+    ctx = {
+        'VLLM_DECODE_BLOCK_BUCKET_STEP': 16,
+        'VLLM_DECODE_BLOCK_BUCKET_MIN': 2,
+        'EST_HPU_BLOCKS': 64,
+        'VLLM_EXPONENTIAL_BUCKETING': exp
+    }
+    expected = 1 + math.ceil(math.log(64, 2)) if exp else 1 + int(math.log(16 / 2, 2))
     assert rules.calc_DECODE_BLOCK_RAMP_GRAPHS(ctx) == expected
 
 
-def test_calc_DECODE_BLOCK_STEP_GRAPHS():
-    ctx = {'EST_HPU_BLOCKS': 64, 'VLLM_DECODE_BLOCK_BUCKET_STEP': 8, 'VLLM_EXPONENTIAL_BUCKETING': False}
-    expected = max(0, int(1 + (64 - 8) / 8))
+@pytest.mark.parametrize("exp", [True, False])
+def test_calc_DECODE_BLOCK_STEP_GRAPHS(exp):
+    ctx = {'EST_HPU_BLOCKS': 64, 'VLLM_DECODE_BLOCK_BUCKET_STEP': 8, 'VLLM_EXPONENTIAL_BUCKETING': exp}
+    expected = 0 if exp else max(0, int(1 + (64 - 8) / 8))
     assert rules.calc_DECODE_BLOCK_STEP_GRAPHS(ctx) == expected
 
 
-@pytest.mark.parametrize("cpa", ["true", "false"])
+@pytest.mark.parametrize("cpa", [True, False])
 def test_calc_NUM_DECODE_GRAPHS(cpa):
     ctx = {
         'DECODE_BS_RAMP_GRAPHS': 2,
@@ -124,54 +138,64 @@ def test_calc_NUM_DECODE_GRAPHS(cpa):
     assert rules.calc_NUM_DECODE_GRAPHS(ctx) == expected
 
 
-def test_calc_PROMPT_BS_RAMP_GRAPHS():
+@pytest.mark.parametrize("exp", [True, False])
+def test_calc_PROMPT_BS_RAMP_GRAPHS(exp):
     ctx = {
         'VLLM_PROMPT_BS_BUCKET_MAX': 16,
         'VLLM_PROMPT_BS_BUCKET_STEP': 8,
         'VLLM_PROMPT_BS_BUCKET_MIN': 2,
-        'VLLM_EXPONENTIAL_BUCKETING': False
+        'VLLM_EXPONENTIAL_BUCKETING': exp
     }
-    expected = 1 + int(math.log(min(16, 8) / 2, 2))
+    expected = 1 + math.ceil(math.log(16, 2)) if exp else 1 + int(math.log(min(16, 8) / 2, 2))
     assert rules.calc_PROMPT_BS_RAMP_GRAPHS(ctx) == expected
 
 
-def test_calc_PROMPT_BS_STEP_GRAPHS():
-    ctx = {'VLLM_PROMPT_BS_BUCKET_MAX': 32, 'VLLM_PROMPT_BS_BUCKET_STEP': 8, 'VLLM_EXPONENTIAL_BUCKETING': False}
-    expected = max(0, int(1 + (32 - 8) / 8))
+@pytest.mark.parametrize("exp", [True, False])
+def test_calc_PROMPT_BS_STEP_GRAPHS(exp):
+    ctx = {'VLLM_PROMPT_BS_BUCKET_MAX': 32, 'VLLM_PROMPT_BS_BUCKET_STEP': 8, 'VLLM_EXPONENTIAL_BUCKETING': exp}
+    expected = 0 if exp else max(0, int(1 + (32 - 8) / 8))
     assert rules.calc_PROMPT_BS_STEP_GRAPHS(ctx) == expected
 
 
-def test_calc_PROMPT_SEQ_RAMP_GRAPHS():
-    ctx = {'VLLM_PROMPT_SEQ_BUCKET_STEP': 16, 'VLLM_PROMPT_SEQ_BUCKET_MIN': 2, 'VLLM_EXPONENTIAL_BUCKETING': False}
-    expected = 1 + int(math.log(16 / 2, 2))
+@pytest.mark.parametrize("exp", [True, False])
+def test_calc_PROMPT_SEQ_RAMP_GRAPHS(exp):
+    ctx = {
+        'VLLM_PROMPT_SEQ_BUCKET_STEP': 16,
+        'VLLM_PROMPT_SEQ_BUCKET_MIN': 2,
+        'MAX_NUM_BATCHED_TOKENS': 32,
+        'VLLM_EXPONENTIAL_BUCKETING': exp
+    }
+    expected = 1 + math.ceil(math.log(32, 2)) if exp else 1 + int(math.log(16 / 2, 2))
     assert rules.calc_PROMPT_SEQ_RAMP_GRAPHS(ctx) == expected
 
 
-def test_calc_PROMPT_SEQ_STEP_GRAPHS():
+@pytest.mark.parametrize("exp", [True, False])
+def test_calc_PROMPT_SEQ_STEP_GRAPHS(exp):
     ctx = {
         'MAX_NUM_BATCHED_TOKENS': 32,
         'MAX_MODEL_LEN': 64,
         'VLLM_PROMPT_SEQ_BUCKET_STEP': 8,
-        'VLLM_EXPONENTIAL_BUCKETING': False
+        'VLLM_EXPONENTIAL_BUCKETING': exp
     }
-    expected = int(1 + (32 - 8) / 8)
+    expected = 0 if exp else int(1 + (32 - 8) / 8)
     assert rules.calc_PROMPT_SEQ_STEP_GRAPHS(ctx) == expected
 
 
-def test_calc_EST_NUM_PROMPT_GRAPHS():
+@pytest.mark.parametrize("exp", [True, False])
+def test_calc_EST_NUM_PROMPT_GRAPHS(exp):
     ctx = {
         'PROMPT_BS_RAMP_GRAPHS': 1,
         'PROMPT_BS_STEP_GRAPHS': 0,
-        'PROMPT_SEQ_RAMP_GRAPHS': 4,
-        'PROMPT_SEQ_STEP_GRAPHS': 5,
+        'PROMPT_SEQ_RAMP_GRAPHS': 4 if not exp else 12,
+        'PROMPT_SEQ_STEP_GRAPHS': 5 if not exp else 0,
         'MAX_NUM_BATCHED_TOKENS': 2048,
         'MAX_MODEL_LEN': 4352,
         'VLLM_PROMPT_SEQ_BUCKET_MIN': 128,
         'VLLM_PROMPT_CTX_BUCKET_STEP': 1,
         'BLOCK_SIZE': 128,
-        'VLLM_EXPONENTIAL_BUCKETING': False
+        'VLLM_EXPONENTIAL_BUCKETING': exp
     }
-    expected = ((1 + 0) * (4 + 5)) * (33 + 18) / 2
+    expected = ((1 + 0) * (12 + 0)) * (6 + 5) / 2 if exp else ((1 + 0) * (4 + 5)) * (33 + 18) / 2
     assert rules.calc_EST_NUM_PROMPT_GRAPHS(ctx) == expected
 
 
