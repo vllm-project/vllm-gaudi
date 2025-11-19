@@ -88,25 +88,25 @@ def test_calc_EST_HPU_BLOCKS():
 
 
 def test_calc_DECODE_BS_RAMP_GRAPHS():
-    ctx = {'VLLM_DECODE_BS_BUCKET_STEP': 16, 'VLLM_DECODE_BS_BUCKET_MIN': 2}
+    ctx = {'VLLM_DECODE_BS_BUCKET_STEP': 16, 'VLLM_DECODE_BS_BUCKET_MIN': 2, 'VLLM_EXPONENTIAL_BUCKETING': False}
     expected = 1 + int(math.log(16 / 2, 2))
     assert rules.calc_DECODE_BS_RAMP_GRAPHS(ctx) == expected
 
 
 def test_calc_DECODE_BS_STEP_GRAPHS():
-    ctx = {'EST_MAX_NUM_SEQS': 64, 'VLLM_DECODE_BS_BUCKET_STEP': 8}
+    ctx = {'EST_MAX_NUM_SEQS': 64, 'VLLM_DECODE_BS_BUCKET_STEP': 8, 'VLLM_EXPONENTIAL_BUCKETING': False}
     expected = max(0, int(1 + (64 - 8) / 8))
     assert rules.calc_DECODE_BS_STEP_GRAPHS(ctx) == expected
 
 
 def test_calc_DECODE_BLOCK_RAMP_GRAPHS():
-    ctx = {'VLLM_DECODE_BLOCK_BUCKET_STEP': 16, 'VLLM_DECODE_BLOCK_BUCKET_MIN': 2}
+    ctx = {'VLLM_DECODE_BLOCK_BUCKET_STEP': 16, 'VLLM_DECODE_BLOCK_BUCKET_MIN': 2, 'VLLM_EXPONENTIAL_BUCKETING': False}
     expected = 1 + int(math.log(16 / 2, 2))
     assert rules.calc_DECODE_BLOCK_RAMP_GRAPHS(ctx) == expected
 
 
 def test_calc_DECODE_BLOCK_STEP_GRAPHS():
-    ctx = {'EST_HPU_BLOCKS': 64, 'VLLM_DECODE_BLOCK_BUCKET_STEP': 8}
+    ctx = {'EST_HPU_BLOCKS': 64, 'VLLM_DECODE_BLOCK_BUCKET_STEP': 8, 'VLLM_EXPONENTIAL_BUCKETING': False}
     expected = max(0, int(1 + (64 - 8) / 8))
     assert rules.calc_DECODE_BLOCK_STEP_GRAPHS(ctx) == expected
 
@@ -125,25 +125,35 @@ def test_calc_NUM_DECODE_GRAPHS(cpa):
 
 
 def test_calc_PROMPT_BS_RAMP_GRAPHS():
-    ctx = {'MAX_NUM_PREFILL_SEQS': 16, 'VLLM_PROMPT_BS_BUCKET_STEP': 8, 'VLLM_PROMPT_BS_BUCKET_MIN': 2}
+    ctx = {
+        'VLLM_PROMPT_BS_BUCKET_MAX': 16,
+        'VLLM_PROMPT_BS_BUCKET_STEP': 8,
+        'VLLM_PROMPT_BS_BUCKET_MIN': 2,
+        'VLLM_EXPONENTIAL_BUCKETING': False
+    }
     expected = 1 + int(math.log(min(16, 8) / 2, 2))
     assert rules.calc_PROMPT_BS_RAMP_GRAPHS(ctx) == expected
 
 
 def test_calc_PROMPT_BS_STEP_GRAPHS():
-    ctx = {'MAX_NUM_PREFILL_SEQS': 32, 'VLLM_PROMPT_BS_BUCKET_STEP': 8}
+    ctx = {'VLLM_PROMPT_BS_BUCKET_MAX': 32, 'VLLM_PROMPT_BS_BUCKET_STEP': 8, 'VLLM_EXPONENTIAL_BUCKETING': False}
     expected = max(0, int(1 + (32 - 8) / 8))
     assert rules.calc_PROMPT_BS_STEP_GRAPHS(ctx) == expected
 
 
 def test_calc_PROMPT_SEQ_RAMP_GRAPHS():
-    ctx = {'VLLM_PROMPT_SEQ_BUCKET_STEP': 16, 'VLLM_PROMPT_SEQ_BUCKET_MIN': 2}
+    ctx = {'VLLM_PROMPT_SEQ_BUCKET_STEP': 16, 'VLLM_PROMPT_SEQ_BUCKET_MIN': 2, 'VLLM_EXPONENTIAL_BUCKETING': False}
     expected = 1 + int(math.log(16 / 2, 2))
     assert rules.calc_PROMPT_SEQ_RAMP_GRAPHS(ctx) == expected
 
 
 def test_calc_PROMPT_SEQ_STEP_GRAPHS():
-    ctx = {'MAX_NUM_BATCHED_TOKENS': 32, 'MAX_MODEL_LEN': 64, 'VLLM_PROMPT_SEQ_BUCKET_STEP': 8}
+    ctx = {
+        'MAX_NUM_BATCHED_TOKENS': 32,
+        'MAX_MODEL_LEN': 64,
+        'VLLM_PROMPT_SEQ_BUCKET_STEP': 8,
+        'VLLM_EXPONENTIAL_BUCKETING': False
+    }
     expected = int(1 + (32 - 8) / 8)
     assert rules.calc_PROMPT_SEQ_STEP_GRAPHS(ctx) == expected
 
@@ -157,14 +167,16 @@ def test_calc_EST_NUM_PROMPT_GRAPHS():
         'MAX_NUM_BATCHED_TOKENS': 2048,
         'MAX_MODEL_LEN': 4352,
         'VLLM_PROMPT_SEQ_BUCKET_MIN': 128,
+        'VLLM_PROMPT_CTX_BUCKET_STEP': 1,
         'BLOCK_SIZE': 128,
+        'VLLM_EXPONENTIAL_BUCKETING': False
     }
     expected = ((1 + 0) * (4 + 5)) * (33 + 18) / 2
     assert rules.calc_EST_NUM_PROMPT_GRAPHS(ctx) == expected
 
 
 def test_calc_EST_GRAPH_PROMPT_RATIO():
-    ctx = {'EST_NUM_PROMPT_GRAPHS': 10, 'NUM_DECODE_GRAPHS': 30}
+    ctx = {'EST_NUM_PROMPT_GRAPHS': 10, 'NUM_DECODE_GRAPHS': 30, 'APPROX_MEM_PER_GRAPH_MB': 10}
     expected = math.ceil(10 / (10 + 30) * 100) / 100
     assert rules.calc_EST_GRAPH_PROMPT_RATIO(ctx) == expected
 
