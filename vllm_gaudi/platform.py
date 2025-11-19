@@ -122,6 +122,10 @@ class HpuPlatform(Platform):
         compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         compilation_config.cudagraph_capture_sizes = []
 
+        if get_config().VLLM_CONTIGUOUS_PA and not get_config().unified_attn:
+            logger.warning("Using Contiguous PA, disabling prefix caching")
+            vllm_config.cache_config.enable_prefix_caching = False
+
         if compilation_config.mode != CompilationMode.NONE:
             logger.info("[HPU] Forcing CompilationMode.NONE "
                         "compilation mode")
