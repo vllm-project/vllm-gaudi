@@ -4,8 +4,8 @@ exclude_docs: |
   *.template.md
 theme:
   name: material
-  logo: assets/logos/gaudi-icon.png
-  favicon: assets/logos/gaudi-icon.png
+  logo: assets/logos/gaudi-logo.png
+  favicon: assets/logos/gaudi-logo-favicon.png
   palette:
     # Palette toggle for automatic mode
     - media: "(prefers-color-scheme)"
