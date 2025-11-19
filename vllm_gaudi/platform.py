@@ -111,6 +111,10 @@ class HpuPlatform(Platform):
                            "Using bfloat16 instead.", vllm_config.model_config.dtype)
             vllm_config.model_config.dtype = torch.bfloat16
 
+        if get_config().VLLM_CONTIGUOUS_PA and not get_config().unified_attn:
+            logger.warning("Using Contiguous PA, disabling prefix caching")
+            vllm_config.cache_config.enable_prefix_caching = False
+
         if envs.VLLM_USE_V1:
             from vllm.config import CompilationLevel, CUDAGraphMode
             compilation_config = vllm_config.compilation_config
