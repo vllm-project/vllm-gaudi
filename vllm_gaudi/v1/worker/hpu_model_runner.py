@@ -67,7 +67,7 @@ from vllm.model_executor.models.interfaces import (SupportsMultiModal, supports_
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.transformers_utils.config import is_interleaved
-from vllm.v1.worker.utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
+from vllm.v1.worker.utils import (sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -82,6 +82,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm_gaudi.extension.ops import LoraMask as LoraMask
+from vllm_gaudi.models.utils import gather_mm_placeholders
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 
@@ -97,7 +98,7 @@ else:
                                    "xgrammar.kernels.apply_token_bitmask_inplace_torch_compile")
 
 from vllm_gaudi.extension.logger import logger as init_logger
-
+from habana_frameworks.torch.hpu import metric_global as metric_global
 logger = init_logger()
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
@@ -1400,11 +1401,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         is_mm_embed[:total_num_scheduled_tokens] = False
 
         req_start_idx = 0
+
+        gc_metric = metric_global("graph_compilation")
         for req_id in req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             req_state = self.requests[req_id]
             num_computed_tokens = \
                 req_state.num_computed_tokens + shift_computed_tokens
+
             for mm_feature in req_state.mm_features:
                 pos_info = mm_feature.mm_position
                 start_pos = pos_info.offset
@@ -1421,34 +1425,76 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     # The encoder output is already processed and stored
                     # in the decoder's KV cache.
                     continue
+ 
+                # Calculate the overlapping range
+                overlap_start = max(num_computed_tokens, start_pos)
+                overlap_end = min(num_computed_tokens + num_scheduled_tokens, start_pos + num_encoder_tokens)
 
-                start_idx = max(num_computed_tokens - start_pos, 0)
-                end_idx = min(num_computed_tokens - start_pos + num_scheduled_tokens, num_encoder_tokens)
-                assert start_idx < end_idx
+                # Convert to indices relative to the encoder output
+                encoder_start = overlap_start - start_pos
+                encoder_end = overlap_end - start_pos
+
+                # Calculate actual slice length
+                actual_slice_length = encoder_end - encoder_start
+
+                assert encoder_start < encoder_end
+
                 mm_hash = mm_feature.identifier
                 encoder_output = self.encoder_cache.get(mm_hash, None)
                 assert encoder_output is not None,\
                       f"Encoder cache miss for {mm_hash}."
                 encoder_output = self.encoder_cache[mm_hash]
+ 
+                # Get the actual slice and pad to fixed size
+                actual_slice = encoder_output[encoder_start:encoder_end]
+                max_slice_size = encoder_output.shape[0]
 
-                if (is_embed := pos_info.is_embed) is not None:
-                    is_embed = is_embed[start_idx:end_idx]
+                # Pad encoder slice to fixed size
+                if actual_slice_length < max_slice_size:
+                    pad_size = max_slice_size - actual_slice_length
+                    padding_shape = (pad_size,) + actual_slice.shape[1:]
+                    padding = torch.zeros(padding_shape, dtype=actual_slice.dtype, device=actual_slice.device)
+                    padded_encoder_slice = torch.cat([actual_slice, padding], dim=0)
+                else:
+                    padded_encoder_slice = actual_slice
 
-                mm_embeds_item = gather_mm_placeholders(
-                    encoder_output[start_idx:end_idx],
+                # Handle is_embed with same padding
+                is_embed = None
+                if (pos_is_embed := pos_info.is_embed) is not None:
+                    actual_is_embed = pos_is_embed[encoder_start:encoder_end]
+                    if actual_slice_length < max_slice_size:
+                        pad_size = max_slice_size - actual_slice_length
+                        padding_is_embed = torch.zeros(pad_size, dtype=actual_is_embed.dtype, device=actual_is_embed.device)
+                        is_embed = torch.cat([actual_is_embed, padding_is_embed], dim=0)
+                    else:
+                        is_embed = actual_is_embed
+
+                stat1 = gc_metric.stats()[0][1]
+                # Call gather_mm_placeholders with fixed-size padded tensors
+                padded_mm_embeds_item, actual_embed_count = gather_mm_placeholders(
+                    padded_encoder_slice,
                     is_embed=is_embed,
+                    max_output_size=max_slice_size,
                 )
-                req_start_pos = req_start_idx + start_pos - num_computed_tokens
-                is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
-                    = True
+                stat2 = gc_metric.stats()[0][1]
+                logger.info(f"SHIV DEBUG >>>>>>>>>>>>>  after gather mm placeholders {stat2-stat1}")
+
+                # Trim the result to the actual number of embeddings (not slice length)
+                mm_embeds_item = padded_mm_embeds_item[:actual_embed_count]
+
+                # Calculate position in the request's token sequence
+                req_start_pos = req_start_idx + overlap_start - num_computed_tokens
+                req_end_pos = req_start_idx + overlap_end - num_computed_tokens
+                is_mm_embed[req_start_pos:req_end_pos] = True
 
                 # Only whole mm items are processed
                 mm_embeds.append(mm_embeds_item)
             req_start_idx += num_scheduled_tokens
 
         is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
-
+ 
         return mm_embeds, is_mm_embed
+
 
     def get_model(self) -> torch.nn.Module:
         if isinstance(self.model, HpuModelAdapter):
@@ -3063,7 +3109,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             structured_output = True
         if self.use_async_scheduling:
             invalid_req_indices = []
-        from habana_frameworks.torch.hpu import metric_global as metric_global
         gc_metric = metric_global("graph_compilation")
 
         ######################### PREFILLS #########################

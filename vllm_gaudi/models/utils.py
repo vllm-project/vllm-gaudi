@@ -61,6 +61,7 @@ def merge_multimodal_embeddings_static(
 ) -> torch.Tensor:
     if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
         return inputs_embeds
+    print("SHIV DEBUG INSIDE MERGE STATIC")
     flattened = _flatten_embeddings(multimodal_embeddings)
 
     inputs_embeds_s = inputs_embeds.shape
@@ -69,5 +70,65 @@ def merge_multimodal_embeddings_static(
     inputs_embeds = inputs_embeds.index_copy_(0, is_multimodal_index,
                                               flattened).view(inputs_embeds_s)
     return inputs_embeds
+
+def scatter_mm_placeholders_static(
+    embeds: torch.Tensor,
+    is_embed: torch.Tensor | None,
+) -> torch.Tensor:
+    """
+    Scatter the multimodal embeddings into a contiguous tensor that represents
+    the placeholder tokens.
+
+    [`vllm.multimodal.processing.PromptUpdateDetails.is_embed`][].
+
+    Args:
+        embeds: The multimodal embeddings.
+            Shape: `(num_embeds, embed_dim)`
+        is_embed: A boolean mask indicating which positions in the placeholder
+            tokens need to be filled with multimodal embeddings.
+            Shape: `(num_placeholders, num_embeds)`
+    """
+    if is_embed is None:
+        return embeds
+
+    print(f"SHIV DEBUG INSIDE SCATTER")
+    placeholders = embeds.new_full(
+        (is_embed.shape[0], embeds.shape[-1]),
+        fill_value=torch.nan,
+    )
+    placeholders[is_embed] = embeds
+    return placeholders
+
+def gather_mm_placeholders(
+    placeholders: torch.Tensor,
+    is_embed: torch.Tensor | None,
+    max_output_size: int = None,
+) -> tuple[torch.Tensor, int]:
+    """
+    Reconstructs the embeddings from the placeholder tokens.
+    Returns (gathered_tensor, actual_count) where actual_count is the number of valid embeddings.
+    """
+    if is_embed is None:
+        return placeholders, placeholders.shape[0]
+
+    max_size = max_output_size or placeholders.shape[0]
+
+    # Get true indices and pad to fixed size
+    true_indices = torch.nonzero(is_embed, as_tuple=False).squeeze(-1)
+    num_true = len(true_indices)
+
+    # Create fixed-size index tensor
+    if num_true < max_size:
+        # Pad with zeros (will select first element repeatedly)
+        padded_indices = torch.zeros(max_size, dtype=torch.long, device=placeholders.device)
+        padded_indices[:num_true] = true_indices
+    else:
+        padded_indices = true_indices[:max_size]
+
+    # Gather with fixed-size indices
+    gathered = torch.index_select(placeholders, dim=0, index=padded_indices)
+
+    return gathered, num_true
+
 
 utils._merge_multimodal_embeddings = _merge_multimodal_embeddings
