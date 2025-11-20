@@ -196,9 +196,8 @@ run_gsm8k_deepseek_test() {
 # GSM8K on QWEN3-30B-A3B
 run_gsm8k_qwen3_30b_test() {
     echo "➡️ Testing GSM8K on QWEN3-30B-A3B..."
-    #VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 TP_SIZE=2 \
-    #pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/Qwen3-30B-A3B.yaml"
-    # Temporary commented due to bug
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 TP_SIZE=2 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/Qwen3-30B-A3B.yaml"
     echo "✅ Test with QWEN3-30B-A3B passed."
 }
 
@@ -216,6 +215,13 @@ run_spec_decode_ngram_test() {
     #VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --assert_acc_rate 0.25 --osl 1024
     # Test case is skipped because of PR27922
     echo "✅ Test with spec decode with ngram passed."
+}
+
+# Spec decode with eagle3
+run_spec_decode_eagle3_test() {
+    echo "➡️ Testing Spec-decode with eagle3..."
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_acc_rate 0.70 --osl 2048
+    echo "✅ Test with spec decode with eagle3 passed."
 }
 
 # NOTE(Chendi): Failed due upstream, expect fix by SW-241408
@@ -259,6 +265,7 @@ launch_all_tests() {
     run_gsm8k_qwen3_30b_test
     run_qwen2_5_vl_test
     run_spec_decode_ngram_test
+    run_spec_decode_eagle3_test
     #run_embedding_model_test
     echo "🎉 All test suites passed successfully!"
 }

@@ -82,6 +82,13 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         ).view(*input_shape)
 
 
+def reduce_output(self, states: torch.Tensor) -> torch.Tensor:
+    if (not self.is_sequence_parallel and not self.use_dp_chunking and self.reduce_results
+            and (self.tp_size > 1 or self.ep_size > 1)):
+        states = self.maybe_all_reduce_tensor_model_parallel(states)
+    return states
+
+
 def patched_fused_moe_forward(
     self,
     hidden_states: torch.Tensor,
@@ -101,12 +108,23 @@ def patched_fused_moe_forward(
         if use_direct_implementation:
             fused_output = self.forward_impl(hidden_states, router_logits)
             assert not isinstance(fused_output, tuple)
+
+            if self.zero_expert_num is not None and self.zero_expert_num > 0:
+                assert isinstance(fused_output, tuple)
+                fused_output, zero_expert_result = fused_output
+                return (reduce_output(self, fused_output) + zero_expert_result)[..., :og_hidden_states]
+            else:
+                return reduce_output(self, fused_output)[..., :og_hidden_states]
+
         else:
             fused_output = torch.ops.vllm.moe_forward(hidden_states, router_logits, self.layer_name)
+
         return fused_output[..., :og_hidden_states]
     else:
         if use_direct_implementation:
             shared_output, fused_output = self.forward_impl(hidden_states, router_logits)
+            reduce_output(self, shared_output)[..., :og_hidden_states],
+            reduce_output(self, fused_output)[..., :og_hidden_states],
         else:
             shared_output, fused_output = torch.ops.vllm.moe_forward_shared(hidden_states, router_logits,
                                                                             self.layer_name)
