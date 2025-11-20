@@ -16,7 +16,7 @@ Before you start:
 
 To perform calibration, follow these steps in a [Gaudi Pytorch container](https://docs.habana.ai/en/latest/Installation_Guide/Additional_Installation/Docker_Installation.html#use-intel-gaudi-containers).
 
-1. Build and install the latest version of vLLM Hardware Plugin for Intel® Gaudi® by following the [Installation](../getting_started/installation.md) procedure.
+1. Build and install the latest version of vLLM Hardware Plugin for Intel® Gaudi® by following the [Installation](../../getting_started/installation.md) procedure.
 
 2. Create workspace directory on NFS, clone the calibration scripts repository, and create an empty `quant_config_buffer.json` file in the calibration directory.
 

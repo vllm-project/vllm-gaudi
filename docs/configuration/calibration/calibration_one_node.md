@@ -8,7 +8,7 @@ Before you start, familiarize with [notes and recommendations](calibration.md#no
 
 ## Calibration procedure
 
-1. Build and install the latest version of vLLM Hardware Plugin for Intel® Gaudi® by following the [Installation](../getting_started/installation.md) procedure.
+1. Build and install the latest version of vLLM Hardware Plugin for Intel® Gaudi® by following the [Installation](../../getting_started/installation.md) procedure.
 
 2. In the plugin project directory, navigate to the `calibration` subdirectory and install the required dependencies.
 
