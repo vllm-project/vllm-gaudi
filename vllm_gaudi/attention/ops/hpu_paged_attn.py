@@ -52,6 +52,17 @@ class HPUPagedAttention:
     def get_supported_head_sizes() -> list[int]:
         return list(range(1, 257))
 
+    @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        """CPU attention supports decoder and encoder-only attention."""
+        from vllm.attention import AttentionType
+
+        return attn_type in (
+            AttentionType.DECODER,
+            AttentionType.ENCODER,
+            AttentionType.ENCODER_ONLY,
+        )
+
     @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,

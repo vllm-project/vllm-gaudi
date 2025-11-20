@@ -12,8 +12,8 @@ from vllm.platforms import Platform, PlatformEnum
 from vllm_gaudi.extension.runtime import get_config
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import _Backend
     from vllm.config import ModelConfig, VllmConfig
+    from vllm.attention.backends.registry import AttentionBackendEnum
 else:
     ModelConfig = None
     VllmConfig = None
@@ -29,7 +29,7 @@ def retain_envs(var_name):
 
 
 class HpuPlatform(Platform):
-    _enum = PlatformEnum.OOT if envs.VLLM_USE_V1 else PlatformEnum.HPU
+    _enum = PlatformEnum.OOT
     device_name: str = "hpu"
     device_type: str = "hpu"
     dispatch_key: str = "HPU"
@@ -40,10 +40,18 @@ class HpuPlatform(Platform):
     additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: "_Backend", head_size: int, dtype: torch.dtype,
-                             kv_cache_dtype: Optional[str], block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink: bool, use_sparse: bool) -> str:
-        assert use_v1, 'Only V1 is supported!'
+    def get_attn_backend_cls(
+        cls,
+        selected_backend: "AttentionBackendEnum",
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: Optional[str],
+        block_size: int,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        attn_type: str | None = None,
+    ) -> str:
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on HPU.")
         if use_mla:
@@ -79,12 +87,8 @@ class HpuPlatform(Platform):
         parallel_config = vllm_config.parallel_config
 
         if parallel_config.worker_cls == "auto":
-            if envs.VLLM_USE_V1:
-                parallel_config.worker_cls = \
+            parallel_config.worker_cls = \
                     "vllm_gaudi.v1.worker.hpu_worker.HPUWorker"
-            else:
-                parallel_config.worker_cls = \
-                    "vllm.worker.hpu_worker.HPUWorker"
 
         # NOTE(kzawora): default block size for Gaudi should be 128
         # smaller sizes still work, but very inefficiently
@@ -111,23 +115,26 @@ class HpuPlatform(Platform):
                            "Using bfloat16 instead.", vllm_config.model_config.dtype)
             vllm_config.model_config.dtype = torch.bfloat16
 
-        if envs.VLLM_USE_V1:
-            from vllm.config import CompilationMode, CUDAGraphMode
-            compilation_config = vllm_config.compilation_config
-            # Activate custom ops for v1.
-            compilation_config.custom_ops = ["all"]
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            compilation_config.cudagraph_capture_sizes = []
+        from vllm.config import CompilationMode, CUDAGraphMode
+        compilation_config = vllm_config.compilation_config
+        # Activate custom ops for v1.
+        compilation_config.custom_ops = ["all"]
+        compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        compilation_config.cudagraph_capture_sizes = []
 
-            if compilation_config.mode != CompilationMode.NONE:
-                logger.info("[HPU] Forcing CompilationMode.NONE "
-                            "compilation mode")
-                compilation_config.mode = CompilationMode.NONE
+        if get_config().VLLM_CONTIGUOUS_PA and not get_config().unified_attn:
+            logger.warning("Using Contiguous PA, disabling prefix caching")
+            vllm_config.cache_config.enable_prefix_caching = False
 
-            print(f"========={compilation_config.custom_ops=}===========")
+        if compilation_config.mode != CompilationMode.NONE:
+            logger.info("[HPU] Forcing CompilationMode.NONE "
+                        "compilation mode")
+            compilation_config.mode = CompilationMode.NONE
+
+        print(f"========={compilation_config.custom_ops=}===========")
 
         # Disable multi-stream for shared experts as no Stream on CPU
-        os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "0"
+        os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
     @classmethod
     def is_pin_memory_available(cls):
@@ -220,8 +227,6 @@ class HpuPlatform(Platform):
         """Copy blocks from src_cache to dst_cache on HPU."""
         if isinstance(dst_cache, tuple):
             _src_cache = src_cache[:, src_block_indices]
-            if _src_cache.shape[2:] != dst_cache.shape[2:]:  # type: ignore[attr-defined]
-                _src_cache = _src_cache.permute(0, 1, 3, 2, 4)
             for i in range(len(dst_cache)):
                 dst_cache[i].index_copy_(0, dst_block_indices, _src_cache[i].to(dst_cache[i].device))
         else:
@@ -239,9 +244,6 @@ class HpuPlatform(Platform):
         """Copy blocks from HPU to host (CPU)."""
         if isinstance(src_cache, tuple):
             _src_cache = torch.stack([c[src_block_indices] for c in src_cache], dim=0)
-            # permute back to original shape
-            if _src_cache.shape[2:] != dst_cache.shape[2:]:  # type: ignore[attr-defined]
-                _src_cache = _src_cache.permute(0, 1, 3, 2, 4)
             dst_cache[:, dst_block_indices] = _src_cache.cpu()
         else:
             dst_cache[dst_block_indices] = src_cache[src_block_indices].cpu()
