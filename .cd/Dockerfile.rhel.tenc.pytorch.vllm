@@ -21,7 +21,7 @@ ENV BASE_NAME=${BASE_NAME}
 
 ENV OMPI_MCA_btl_vader_single_copy_mechanism=none
 
-# Install required packages for RHEL 9.x and TencentOS 3.1
+# Install required packages for RHEL 9.x and TencentOS 3.1 
 RUN if echo "$BASE_NAME" | grep -qi "tencentos"; then \
   yum remove -y mpitests_openmpi perftest openmpi opensm-libs || true && \
   yum update -y --exclude=openmpi --exclude=opensm-libs && \
