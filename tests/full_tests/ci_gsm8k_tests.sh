@@ -232,6 +232,18 @@ run_embedding_model_test() {
     echo "✅ Embedding-model-support for v1 successful."
 }
 
+# pd_disaggregate_nixl_libfabric
+run_pd_disaggregate_nixl_libfabric_test() {
+    echo "➡️ Testing PD disaggregate through NIXL libfabric."
+    git clone https://github.com/intel-staging/nixl.git -b v0.6.0_OFI
+    cp -r nixl /tmp/nixl_source
+    cd nixl; WHEELS_CACHE_HOME=/workspace/hf_cache/wheels_cache_ofi python install_nixl.py; cd ..
+    rm -rf nixl
+    cd ${VLLM_GAUDI_PREFIX}/tests/unit_tests; DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=OFI bash run_accuracy_test.sh
+    echo "✅ PD disaggregate through NIXL libfabric."
+}
+
+
 
 # --- Script Entry Point ---
 
