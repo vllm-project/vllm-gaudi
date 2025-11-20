@@ -35,7 +35,7 @@ Set the preferred variable when running the vLLM server using Docker Compose, as
 ```bash
 MODEL="Qwen/Qwen2.5-14B-Instruct" \
 HF_TOKEN="<your huggingface token>" \
-DOCKER_IMAGE="vault.habana.ai/gaudi-docker/|Version|/ubuntu24.04/habanalabs/vllm-installer-|PT_VERSION|:latest" \
+DOCKER_IMAGE="vault.habana.ai/gaudi-docker/|Version|/ubuntu24.04/habanalabs/vllm-installer-{{ PT_VERSION }}:latest" \
 TENSOR_PARALLEL_SIZE=1 \
 MAX_MODEL_LEN=2048 \
 docker compose up
@@ -59,7 +59,7 @@ Set the preferred variable when running the vLLM server using Docker Compose, as
 ```bash
 MODEL="Qwen/Qwen2.5-14B-Instruct" \
 HF_TOKEN="<your huggingface token>" \
-DOCKER_IMAGE="vault.habana.ai/gaudi-docker/|Version|/ubuntu24.04/habanalabs/vllm-installer-|PT_VERSION|:latest" \
+DOCKER_IMAGE="vault.habana.ai/gaudi-docker/|Version|/ubuntu24.04/habanalabs/vllm-installer-{{ PT_VERSION }}:latest" \
 INPUT_TOK=128 \
 OUTPUT_TOK=128 \
 CON_REQ=16 \
@@ -76,7 +76,7 @@ This configuration allows you to launch the vLLM server and benchmark together. 
 ```bash
 MODEL="Qwen/Qwen2.5-14B-Instruct" \
 HF_TOKEN="<your huggingface token>" \
-DOCKER_IMAGE="vault.habana.ai/gaudi-docker/|Version|/ubuntu24.04/habanalabs/vllm-installer-|PT_VERSION|:latest" \
+DOCKER_IMAGE="vault.habana.ai/gaudi-docker/|Version|/ubuntu24.04/habanalabs/vllm-installer-{{ PT_VERSION }}:latest" \
 TENSOR_PARALLEL_SIZE=1 \
 MAX_MODEL_LEN=2048 \
 INPUT_TOK=128 \

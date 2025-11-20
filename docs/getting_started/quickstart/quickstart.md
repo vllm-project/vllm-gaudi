@@ -81,7 +81,7 @@ Follow these steps to run the vLLM server or launch benchmarks on Gaudi using Do
     ```bash
     MODEL="Qwen/Qwen2.5-14B-Instruct" \
     HF_TOKEN="<your huggingface token>" \
-    DOCKER_IMAGE="vault.habana.ai/gaudi-docker/|Version|/ubuntu24.04/habanalabs/vllm-installer-|PT_VERSION|:latest"
+    DOCKER_IMAGE="vault.habana.ai/gaudi-docker/|Version|/ubuntu24.04/habanalabs/vllm-installer-{{ PT_VERSION }}:latest"
     ```
 
 5. Run the vLLM server using Docker Compose.
