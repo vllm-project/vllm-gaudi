@@ -4575,6 +4575,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
             draft_token_ids = None
             if decode_data is not None:
+                if decode_data.spec_decode_metadata is None:
+                    # No sequence scheduled any spec decode tokens
+                    # This happens at the end of decoding so no need more draft tokens
+                    return None
                 assert decode_data.spec_decode_metadata is not None
                 assert decode_data.position_ids is not None
                 num_draft_tokens = \
