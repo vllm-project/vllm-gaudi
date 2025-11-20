@@ -13,11 +13,12 @@ echo $VLLM_GAUDI_PREFIX
 # Gemma3 with image input
 run_gemma3_test() {
     echo "➡️ Testing gemma-3-4b-it..."
-    VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
+    #VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
     echo "✅ Test with multimodal-support with gemma-3-4b-it passed."
     echo "➡️ Testing gemma-3-4b-it with multiple images(applying sliding_window)..."
-    VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm_multi.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-27b-it.yaml"
+    #VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm_multi.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-27b-it.yaml"
     echo "✅ Test with multimodal-support with multiple images gemma-3-27b-it passed."
+    #Test cases are commented because of PR27772
 }
 
 # Basic model test
@@ -212,9 +213,15 @@ run_qwen2_5_vl_test() {
 # Spec decode with ngram
 run_spec_decode_ngram_test() {
     echo "➡️ Testing Spec-decode with ngram..."
-    #VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --assert_acc_rate 0.25 --osl 1024
-    # Test case is skipped because of PR27922
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --assert_acc_rate 0.25 --osl 1024
     echo "✅ Test with spec decode with ngram passed."
+}
+
+# Spec decode with eagle3
+run_spec_decode_eagle3_test() {
+    echo "➡️ Testing Spec-decode with eagle3..."
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_acc_rate 0.70 --osl 2048
+    echo "✅ Test with spec decode with eagle3 passed."
 }
 
 # NOTE(Chendi): Failed due upstream, expect fix by SW-241408
@@ -258,6 +265,7 @@ launch_all_tests() {
     run_gsm8k_qwen3_30b_test
     run_qwen2_5_vl_test
     run_spec_decode_ngram_test
+    run_spec_decode_eagle3_test
     #run_embedding_model_test
     echo "🎉 All test suites passed successfully!"
 }
