@@ -98,6 +98,7 @@ def get_features():
               env_var_type=float),
         Value('high_level_profiler_enabled', False, env_var='VLLM_PROFILER_ENABLED', env_var_type=boolean),
         Value('track_graph_compilation', False, env_var='PT_HPU_METRICS_GC_DETAILS', env_var_type=boolean),
-        Value('use_output_tensor_in_matmulqk', VersionRange(">=1.24.0.171"), env_var_type=boolean)
+        Value('use_output_tensor_in_matmulqk', VersionRange(">=1.24.0.171"), env_var_type=boolean),
+        Value('per_token_kv_scaling_support', VersionRange(">=1.24.0.350"), env_var_type=boolean)
     ]
     return split_values_and_flags(features)
