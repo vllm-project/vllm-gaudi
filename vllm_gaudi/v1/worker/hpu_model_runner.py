@@ -1174,6 +1174,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
             resumed_from_preemption = req_id in getattr(req_data, "resumed_req_ids", set())
+            num_output_tokens = req_data.num_output_tokens[i]
             req_state.num_computed_tokens = num_computed_tokens
 
             if not is_last_rank:
@@ -1207,6 +1208,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 # The request is not in the persistent batch.
                 # The request was either preempted and resumed later, or was not
                 # scheduled in the previous step and needs to be added again.
+
+                if self.use_async_scheduling and num_output_tokens > 0:
+                    # We must recover the output token ids for resumed requests in the
+                    # async scheduling case, so that correct input_ids are obtained.
+                    resumed_token_ids = req_data.all_token_ids[req_id]
+                    req_state.output_token_ids = resumed_token_ids[-num_output_tokens:]
+
                 req_ids_to_add.append(req_id)
                 continue
 
@@ -4604,49 +4612,57 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
             draft_token_ids = None
             if decode_data is not None:
-                assert decode_data.spec_decode_metadata is not None
-                assert decode_data.position_ids is not None
-                num_draft_tokens = \
-                    decode_data.spec_decode_metadata.num_draft_tokens
-                max_num_draft_tokens = max(num_draft_tokens)
-                common_attn_metadata = decode_data.attn_metadata
-
-                num_picked_token_indices = []
-                last_token_indices = []
-                starting_index = 0
-                num_rejected_tokens = [
-                    n + 1 - len(sampled_token_ids[i]) if n > 0 else 0 for i, n in enumerate(num_draft_tokens)
-                ]
-                for i, n in enumerate(num_draft_tokens):
-                    r = num_rejected_tokens[i]
-                    step = max_num_draft_tokens + 1
-                    for j in range(step):
-                        if j == n - r:
-                            last_token_indices.append(starting_index + j)
-                        if j < n + 1 - r:
-                            num_picked_token_indices.append(starting_index + j)
-                        else:
-                            num_picked_token_indices.append(-1)
-                    starting_index += step
-                hidden_states_indices = torch.tensor(num_picked_token_indices, device=self.device)
-                last_token_indices = torch.tensor(last_token_indices, device=self.device)
-
-                target_token_ids = decode_sampled_token_ids_tensor.reshape(-1, 1)[hidden_states_indices]
-                target_positions = decode_data.position_ids[hidden_states_indices]
-
-                if self.use_aux_hidden_state_outputs and \
-                    aux_hidden_states is not None:
-                    target_hidden_states = torch.cat([h[hidden_states_indices] for h in aux_hidden_states], dim=-1)
+                if decode_data.spec_decode_metadata is None:
+                    # No sequence scheduled any spec decode tokens
+                    # This happens at the end of decoding so no need more draft tokens
+                    # Return dummy draft tokens (as there may be prefill sequences in the same request)
+                    draft_token_ids = torch.zeros(len(sampled_token_ids),
+                                                  self.speculative_config.num_speculative_tokens,
+                                                  dtype=torch.int64,
+                                                  device=self.device)
                 else:
-                    target_hidden_states = hidden_states[hidden_states_indices]
+                    assert decode_data.position_ids is not None
+                    num_draft_tokens = \
+                        decode_data.spec_decode_metadata.num_draft_tokens
+                    max_num_draft_tokens = max(num_draft_tokens)
+                    common_attn_metadata = decode_data.attn_metadata
 
-                if target_hidden_states.dim() == 2:
-                    target_hidden_states = target_hidden_states.unsqueeze(1)
-                draft_token_ids, hidden_states = execute_drafter_model(target_token_ids, target_positions,
-                                                                       target_hidden_states, last_token_indices,
-                                                                       common_attn_metadata)
+                    num_picked_token_indices = []
+                    last_token_indices = []
+                    starting_index = 0
+                    num_rejected_tokens = [
+                        n + 1 - len(sampled_token_ids[i]) if n > 0 else 0 for i, n in enumerate(num_draft_tokens)
+                    ]
+                    for i, n in enumerate(num_draft_tokens):
+                        r = num_rejected_tokens[i]
+                        step = max_num_draft_tokens + 1
+                        for j in range(step):
+                            if j == n - r:
+                                last_token_indices.append(starting_index + j)
+                            if j < n + 1 - r:
+                                num_picked_token_indices.append(starting_index + j)
+                            else:
+                                num_picked_token_indices.append(-1)
+                        starting_index += step
+                    hidden_states_indices = torch.tensor(num_picked_token_indices, device=self.device)
+                    last_token_indices = torch.tensor(last_token_indices, device=self.device)
 
-                draft_token_ids = draft_token_ids[:num_decodes]
+                    target_token_ids = decode_sampled_token_ids_tensor.reshape(-1, 1)[hidden_states_indices]
+                    target_positions = decode_data.position_ids[hidden_states_indices]
+
+                    if self.use_aux_hidden_state_outputs and \
+                        aux_hidden_states is not None:
+                        target_hidden_states = torch.cat([h[hidden_states_indices] for h in aux_hidden_states], dim=-1)
+                    else:
+                        target_hidden_states = hidden_states[hidden_states_indices]
+
+                    if target_hidden_states.dim() == 2:
+                        target_hidden_states = target_hidden_states.unsqueeze(1)
+                    draft_token_ids, hidden_states = execute_drafter_model(target_token_ids, target_positions,
+                                                                           target_hidden_states, last_token_indices,
+                                                                           common_attn_metadata)
+
+                    draft_token_ids = draft_token_ids[:num_decodes]
             # handle prefill
             if prefill_data is not None:
                 # Currently, prefill is done one by one
