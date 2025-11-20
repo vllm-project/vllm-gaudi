@@ -4555,7 +4555,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
             draft_token_ids = None
             if decode_data is not None:
-                draft_token_ids, hidden_states = self.propose_eagle_decode(
+                draft_token_ids = self.propose_eagle_decode(
                     sampled_token_ids,
                     decode_sampled_token_ids_tensor,
                     hidden_states,
@@ -4567,12 +4567,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if prefill_data is not None:
                 # Currently, prefill is done one by one
                 draft_token_ids_prefill = []
-                hidden_states_prefill = []
 
                 for idx, (req_id, prompt_len, token_ids, position_ids, attn_metadata, logits_indices,
                           logits_requests) in enumerate(zip(*shallow_tuple(prefill_data))):
-                    _draft_token_ids, _hidden_states = \
-                        self.propose_eagle_prefill(
+                    _draft_token_ids = self.propose_eagle_prefill(
                             prefill_sampled_token_ids_tensor,
                             hidden_states_prefills,
                             aux_hidden_states_prefills,
@@ -4583,14 +4581,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                             logits_indices,
                         )
                     draft_token_ids_prefill.append(_draft_token_ids)
-                    hidden_states_prefill.append(_hidden_states)
 
                 if draft_token_ids is None:
                     draft_token_ids = torch.cat(draft_token_ids_prefill, dim=0)
-                    hidden_states = torch.cat(hidden_states_prefill, dim=0)
                 else:
                     draft_token_ids = torch.cat([draft_token_ids] + draft_token_ids_prefill, dim=0)
-                    hidden_states = torch.cat([hidden_states] + hidden_states_prefill, dim=0)
 
             # Early exit if there is only one draft token to be generated.
             # [batch_size, 1]
@@ -4634,11 +4629,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         if target_hidden_states.dim() == 2:
             target_hidden_states = target_hidden_states.unsqueeze(1)
-        draft_token_ids, hidden_states = self.drafter.propose(target_token_ids, target_positions, target_hidden_states,
-                                                              last_token_indices, common_attn_metadata)
+        draft_token_ids = self.drafter.propose(target_token_ids, target_positions, target_hidden_states,
+                                               last_token_indices, common_attn_metadata)
 
         draft_token_ids = draft_token_ids[:num_decodes]
-        return draft_token_ids, hidden_states
+        return draft_token_ids
 
     def propose_eagle_prefill(
         self,
@@ -4667,9 +4662,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         target_token_ids = target_token_ids.unsqueeze(0)
         if target_hidden_states.dim() == 2:
             target_hidden_states = target_hidden_states.unsqueeze(0)
-        _draft_token_ids, _hidden_states = self.drafter.propose(target_token_ids, position_ids, target_hidden_states,
-                                                                logits_indices, attn_metadata)
-        return _draft_token_ids, _hidden_states
+        _draft_token_ids = self.drafter.propose(target_token_ids, position_ids, target_hidden_states, logits_indices,
+                                                attn_metadata)
+        return _draft_token_ids
 
     def propose_ngram_draft_token_ids(
         self,

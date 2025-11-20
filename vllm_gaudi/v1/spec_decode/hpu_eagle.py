@@ -40,7 +40,7 @@ class HpuEagleProposer(EagleProposer):
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
         draft_token_ids = logits.argmax(dim=-1)
-        return draft_token_ids, hidden_states
+        return draft_token_ids
 
     def prepare_inputs(
         self,
