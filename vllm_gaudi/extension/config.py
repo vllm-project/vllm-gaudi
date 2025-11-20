@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
 
+from importlib.metadata import version as get_version
+from packaging import version
 from packaging.version import Version
 from packaging.specifiers import SpecifierSet
 from typing import Optional, Callable, TypeAlias, Any, TypeVar
@@ -119,6 +121,13 @@ def VersionRange(*specifiers_str: str) -> ValueFn:
     """Return True if any of the version specifiers matches current build"""
     specifiers = [SpecifierSet(s) for s in specifiers_str]
     return lambda cfg: any(Version(cfg.build) in s for s in specifiers)
+
+
+def MinPackageVersion(package_name: str, min_version: str) -> ValueFn:
+    def check(_cfg: Config):
+        installed_version = get_version(package_name)
+        return version.parse(installed_version) >= version.parse(min_version)
+    return check
 
 
 def boolean(x: str) -> bool:
