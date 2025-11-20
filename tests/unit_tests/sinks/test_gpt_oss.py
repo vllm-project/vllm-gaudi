@@ -72,7 +72,7 @@ def test_gpt_oss_1x():
     os.environ['PT_HPU_SDPA_BR_FACTOR'] = '64'
     os.environ['PT_HPU_SDPA_BC_FACTOR'] = '64'
     os.environ['PT_HPU_SDPA_QKV_SLICE_MODE_FWD'] = '1'
-    os.environ['VLLM_FUSEDSDPA_SLIDE_THLD'] = '128'
+    os.environ['VLLM_FUSEDSDPA_SLIDE_THLD'] = '0'
     _test_gpt_oss()
     os.environ['PT_HPU_ENABLE_FUSED_SDPA_SINK'] = '0'
     os.environ['PT_HPU_QKV_SLICE_SEQ_LEN_THLD'] = '1024'
