@@ -4571,15 +4571,15 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 for idx, (req_id, prompt_len, token_ids, position_ids, attn_metadata, logits_indices,
                           logits_requests) in enumerate(zip(*shallow_tuple(prefill_data))):
                     _draft_token_ids = self.propose_eagle_prefill(
-                            prefill_sampled_token_ids_tensor,
-                            hidden_states_prefills,
-                            aux_hidden_states_prefills,
-                            idx,
-                            token_ids,
-                            position_ids,
-                            attn_metadata,
-                            logits_indices,
-                        )
+                        prefill_sampled_token_ids_tensor,
+                        hidden_states_prefills,
+                        aux_hidden_states_prefills,
+                        idx,
+                        token_ids,
+                        position_ids,
+                        attn_metadata,
+                        logits_indices,
+                    )
                     draft_token_ids_prefill.append(_draft_token_ids)
 
                 if draft_token_ids is None:
@@ -4608,8 +4608,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # No sequence scheduled any spec decode tokens
             # This happens at the end of decoding so no need more draft tokens
             # Return dummy draft tokens (as there may be prefill sequences in the same request)
-            return torch.zeros(len(sampled_token_ids), self.speculative_config.num_speculative_tokens,
-                               dtype=torch.int64, device=self.device)
+            return torch.zeros(len(sampled_token_ids),
+                               self.speculative_config.num_speculative_tokens,
+                               dtype=torch.int64,
+                               device=self.device)
 
         assert decode_data.position_ids is not None
         common_attn_metadata = decode_data.attn_metadata
