@@ -69,6 +69,8 @@ def rejection_sample_pytorch(
 
     mismatches = ~matches
     any_mismatch = mismatches.any(dim=1)
+    # For sequence that the num draft tokens is 0, always consider all match
+    any_mismatch[num_draft_tokens_per_seq == 0] = False
     first_mismatch_idx = torch.argmax(mismatches.int(), dim=1)
 
     # 4. Determine the number of accepted tokens for each sequence
