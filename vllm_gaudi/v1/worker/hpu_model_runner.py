@@ -818,16 +818,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # NOTE(Chendi): Speculative decoding is only enabled for the last rank
         # in the pipeline parallel group.
         if self.speculative_config:
-            if self.speculative_config.num_speculative_tokens > 1:
-                raise NotImplementedError("Speculative decoding with num_speculative_tokens > 1 is "
-                                          "not supported on HPU.")
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
-                if self.speculative_config.num_speculative_tokens > 1:
-                    logger.warning("EagleProposer only supports num_speculative_tokens=1. "
-                                   "Overriding the config.")
-                    self.speculative_config.num_speculative_tokens = 1
                 self.drafter = HpuEagleProposer(self.vllm_config, self.device, self)  # type: ignore
                 if self.speculative_config.method == "eagle3":
                     self.use_aux_hidden_state_outputs = True
@@ -4807,6 +4800,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                device=self.device)
 
         assert decode_data.position_ids is not None
+        block_table_cpu_tensor = self.input_batch.block_table[0].get_cpu_tensor()
         common_attn_metadata = decode_data.attn_metadata
         common_attn_metadata, hidden_states_indices, last_token_indices = \
             self.drafter.prepare_inputs(common_attn_metadata,
@@ -4825,7 +4819,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if target_hidden_states.dim() == 2:
             target_hidden_states = target_hidden_states.unsqueeze(1)
         draft_token_ids = self.drafter.propose(target_token_ids, target_positions, target_hidden_states,
-                                               last_token_indices, common_attn_metadata)
+                                               last_token_indices, common_attn_metadata, block_table_cpu_tensor, self)
 
         draft_token_ids = draft_token_ids[:num_decodes]
         return draft_token_ids
@@ -4841,6 +4835,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         attn_metadata,
         logits_indices,
     ):
+        block_table_cpu_tensor = self.input_batch.block_table[0].get_cpu_tensor()
         hidden_states = hidden_states_prefills[idx]
         if self.use_aux_hidden_state_outputs:
             aux_hidden_states = aux_hidden_states_prefills[idx]
@@ -4858,7 +4853,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if target_hidden_states.dim() == 2:
             target_hidden_states = target_hidden_states.unsqueeze(0)
         _draft_token_ids = self.drafter.propose(target_token_ids, position_ids, target_hidden_states, logits_indices,
-                                                attn_metadata)
+                                                attn_metadata, block_table_cpu_tensor, self)
         return _draft_token_ids
 
     def propose_ngram_draft_token_ids(
