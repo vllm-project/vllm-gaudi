@@ -27,3 +27,15 @@ Vllm calculates maximum available concurrency for current environment based on k
 ```
 
 So for this specific scenario correct value for --max_concurrency is 10
+
+### 3. Async scheduler causes error after preemption:
+
+```
+(EngineCore_DP0 pid=19906)     assert request.num_output_placeholders >= 0
+```
+
+#### Solution:
+0.11.0 version is missing crucial fixes from upstream. To avoid it try:
+- lowering max conccurency
+- decresing `max-num-seqs`
+- disabling async scheduler
