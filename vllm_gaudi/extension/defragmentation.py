@@ -196,8 +196,7 @@ class OnlineDefragmenter:
                     break
 
         if not free_tail:
-            if self.debug:
-                self.debug("No free blocks in tail, skipping defragmentation")
+            # No free blocks in tail, skipping defragmentation
             return
 
         # 2. Victims (highest physical IDs)
@@ -209,8 +208,7 @@ class OnlineDefragmenter:
                     break
 
         if len(victims) == 0:
-            if self.debug:
-                self.debug("No victims to swap, skipping defragmentation")
+            # No victims to swap, skipping defragmentation
             return
 
         # 3. Sort
@@ -246,5 +244,5 @@ class OnlineDefragmenter:
             new_max = max(self.used_blocks.keys())
             frag_ratio = new_max / num_used if num_used > 0 else 0
             self.debug(
-                f'defrag {max_phys}→{new_max}, used={num_used}, free={len(free_tail)}, copied={len(to_swap)}/{pad}, frag_ratio={frag_ratio:.2f}'
+                f'defrag {max_phys}->{new_max}, used={num_used}, free={len(free_tail)}, copied={len(to_swap)}/{pad}, frag_ratio={frag_ratio:.2f}'
             )
