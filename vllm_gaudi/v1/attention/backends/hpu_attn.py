@@ -10,6 +10,7 @@ from typing import Optional
 import torch
 
 from vllm.attention.backends.abstract import AttentionMetadata, AttentionImpl
+from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm_gaudi.attention.backends.hpu_attn import (HPUAttentionBackend, HPUAttentionImpl, HPUAttentionMetadata)
 from vllm_gaudi.extension.logger import logger as init_logger
 from vllm.attention.backends.registry import (register_backend, AttentionBackendEnum)
@@ -31,6 +32,10 @@ class HPUAttentionBackendV1(HPUAttentionBackend):
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
         return HPUAttentionMetadataV1
+
+    @staticmethod
+    def get_builder_cls() -> type["HPUMetadataBuilder"]:
+        return HPUMetadataBuilder
 
 
 @dataclass
@@ -88,6 +93,7 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                              window_block_usage,
                              window_block_groups,
                              query_start_loc=None):
+
         return cls(is_prompt=False,
                    block_mapping=None,
                    alibi_blocks=None,
@@ -104,3 +110,9 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    slot_mapping=slot_mapping,
                    block_size=block_size,
                    query_start_loc=query_start_loc)
+
+
+class HPUMetadataBuilder(AttentionMetadataBuilder[HPUAttentionMetadata]):
+
+    def build(self):
+        pass

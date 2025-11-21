@@ -648,7 +648,7 @@ class InputBatch:
         pooling_params = self.get_pooling_params()
 
         return PoolingMetadata(
-            prompt_lens=torch.from_numpy(self.num_prompt_tokens[:self.num_reqs]).to(self.device),
+            prompt_lens=torch.from_numpy(self.num_prompt_tokens[:self.num_reqs]),
             prompt_token_ids=self.sampling_metadata.prompt_token_ids,
             pooling_params=pooling_params,
         )
