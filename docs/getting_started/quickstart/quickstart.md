@@ -4,8 +4,8 @@ title: Basic Quick Start Guide
 
 # Basic Quick Start Guide
 
-The 1.22 release of vLLM Hardware Plugin for Intel® Gaudi® introduces ready-to-run container
-images that package vLLM together with the Intel® Gaudi® software. This release
+vLLM Hardware Plugin for Intel® Gaudi® offers ready-to-run container
+images that package vLLM together with the Intel® Gaudi® software. This
 enables a fast and simple launch of vLLM Hardware Plugin for Intel® Gaudi® using prebuilt Docker
 images and Docker Compose, with support for custom runtime parameters and
 benchmarking.
