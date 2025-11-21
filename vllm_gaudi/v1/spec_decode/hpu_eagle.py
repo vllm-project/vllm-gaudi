@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import itertools
 
 import torch
 from vllm_gaudi.utils import async_h2d_copy
@@ -21,6 +22,7 @@ class HpuEagleProposer(EagleProposer):
         # [batch_size]
         last_token_indices,
         common_attn_metadata,
+        # [num_seq, total_blocks]
         block_table_cpu_tensor,
         model_runner,
     ):
@@ -87,8 +89,8 @@ class HpuEagleProposer(EagleProposer):
             clamped_positions = torch.where(exceeds_max_model_len, 0, positions)
 
             # Prepare the attn metadata
-            attn_metadata = self.prepare_attn_metadata(
-                block_table_cpu_tensor, positions, clamped_positions, model_runner)
+            attn_metadata = self.prepare_attn_metadata(block_table_cpu_tensor, positions, clamped_positions,
+                                                       model_runner)
 
             # [batch_size, 1]
             input_ids = input_ids.view(-1, 1)
@@ -160,7 +162,7 @@ class HpuEagleProposer(EagleProposer):
 
     def prepare_attn_metadata(
             self,
-            # [batch_size, total_blocks]
+            # [num_seq, total_blocks]
             block_table_cpu_tensor,
             # [batch_size]
             positions,
@@ -172,29 +174,39 @@ class HpuEagleProposer(EagleProposer):
         positions = positions.cpu()
         clamped_positions = clamped_positions.cpu()
 
+        # Note: block_table_cpu_tensor doesn't include the padding
+        # which might smaller than the (padded) batch_size
+        num_seq = block_table_cpu_tensor.shape[0]
+
         # Prepare block tables list
+        # block_tables_list is a nested list of shape [num_seq, num_blocks]
         # num_blocks should include the slots needed for the current token
         # positions are the context lengths, and we need +1 for num_blocks
-        num_blocks = torch.ceil((positions + 1) / self.block_size).int().tolist()
-        # block_tables_list is a nested list of shape [batch_size, num_blocks]
+        num_blocks = torch.ceil((positions + 1) / self.block_size).int()
+        num_blocks = num_blocks[:num_seq].tolist()
         block_tables_list = []
         for i, n in enumerate(num_blocks):
             seq_block_table = block_table_cpu_tensor[i, :n].tolist()
             assert len(seq_block_table) == n
             block_tables_list.append(seq_block_table)
         # Needs to be resolved by defragmenter
-        block_tables_list = model_runner.defragmenter.resolve_all(
-            block_tables_list)
+        block_tables_list = model_runner.defragmenter.resolve_all(block_tables_list)
 
         # Compute slot mapping in [batch_size, 1] shape
         clamped_positions = clamped_positions.view(-1, 1)
         block_numbers = clamped_positions // self.block_size
+
+        # Limit with num_seq because block_table_cpu_tensor is in the shape [num_seq, x]
+        block_numbers = block_numbers[:num_seq]
+        block_ids = torch.ones((batch_size, 1), dtype=torch.int32) * model_runner._PAD_BLOCK_ID
+        block_ids[:num_seq] = block_table_cpu_tensor.gather(dim=1, index=block_numbers)
         # Needs to be resolved by defragmenter
-        block_numbers.apply_(model_runner.defragmenter.resolve)
-        block_ids = block_table_cpu_tensor.gather(
-            dim=1, index=block_numbers
-        )
+        block_ids.apply_(model_runner.defragmenter.resolve)
+
+        # Calculate the slot mapping and fill with padding
         slot_mapping = block_ids * self.block_size + clamped_positions % self.block_size
+        dummy_slots = itertools.cycle(range(model_runner._PAD_SLOT_ID, model_runner._PAD_SLOT_ID + self.block_size))
+        slot_mapping[num_seq:].apply_(lambda _, ds=dummy_slots: next(ds))
 
         block_list, block_groups, block_usage = \
             model_runner.get_habana_paged_attn_buffers(
@@ -205,10 +217,8 @@ class HpuEagleProposer(EagleProposer):
 
         block_list_device = async_h2d_copy(block_list, device=self.device)
         block_usage_device = async_h2d_copy(block_usage, device=self.device)
-        block_groups_device = async_h2d_copy(block_groups,
-                                             device=self.device)
-        slot_mapping_device = async_h2d_copy(slot_mapping,
-                                             device=self.device)
+        block_groups_device = async_h2d_copy(block_groups, device=self.device)
+        slot_mapping_device = async_h2d_copy(slot_mapping, device=self.device)
 
         common_attn_metadata = HPUAttentionMetadataV1.make_decode_metadata(
             block_list=block_list_device,

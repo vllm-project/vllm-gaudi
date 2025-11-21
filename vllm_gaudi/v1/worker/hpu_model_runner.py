@@ -4753,6 +4753,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if prefill_data is not None:
                 # Currently, prefill is done one by one
                 draft_token_ids_prefill = []
+                prefill_batch_start_idx = num_decodes
 
                 for idx, (req_id, prompt_len, token_ids, position_ids, attn_metadata, logits_indices,
                           logits_requests) in enumerate(zip(*shallow_tuple(prefill_data))):
@@ -4765,8 +4766,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         position_ids,
                         attn_metadata,
                         logits_indices,
+                        prefill_batch_start_idx,
                     )
                     draft_token_ids_prefill.append(_draft_token_ids)
+                    prefill_batch_start_idx += len(req_id)
 
                 if draft_token_ids is None:
                     draft_token_ids = torch.cat(draft_token_ids_prefill, dim=0)
@@ -4794,13 +4797,20 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # No sequence scheduled any spec decode tokens
             # This happens at the end of decoding so no need more draft tokens
             # Return dummy draft tokens (as there may be prefill sequences in the same request)
-            return torch.zeros(len(sampled_token_ids),
+            return torch.zeros(num_decodes,
                                self.speculative_config.num_speculative_tokens,
                                dtype=torch.int64,
                                device=self.device)
 
         assert decode_data.position_ids is not None
+
+        # The input batch block table include both decodes and prefills
+        # Decodes are the first num_decodes requests.
+        # Prefill are the next num_reqs - num_decodes requests.
+        # Note: sampled_token_ids includes both decode and prefill sampled tokens
         block_table_cpu_tensor = self.input_batch.block_table[0].get_cpu_tensor()
+        decode_block_table = block_table_cpu_tensor[:num_decodes]
+
         common_attn_metadata = decode_data.attn_metadata
         common_attn_metadata, hidden_states_indices, last_token_indices = \
             self.drafter.prepare_inputs(common_attn_metadata,
@@ -4819,7 +4829,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if target_hidden_states.dim() == 2:
             target_hidden_states = target_hidden_states.unsqueeze(1)
         draft_token_ids = self.drafter.propose(target_token_ids, target_positions, target_hidden_states,
-                                               last_token_indices, common_attn_metadata, block_table_cpu_tensor, self)
+                                               last_token_indices, common_attn_metadata, decode_block_table, self)
 
         draft_token_ids = draft_token_ids[:num_decodes]
         return draft_token_ids
@@ -4834,8 +4844,16 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         position_ids,
         attn_metadata,
         logits_indices,
+        # The sequence start index of this prefill batch
+        batch_start_idx,
     ):
+        # The input batch block table include both decodes and prefills
+        # Decodes are the first num_decodes requests.
+        # Prefill are the next num_reqs - num_decodes requests and divide into batches
         block_table_cpu_tensor = self.input_batch.block_table[0].get_cpu_tensor()
+        batch_size = logits_indices.shape[0]
+        prefill_batch_block_table = block_table_cpu_tensor[batch_start_idx:batch_start_idx+batch_size]
+
         hidden_states = hidden_states_prefills[idx]
         if self.use_aux_hidden_state_outputs:
             aux_hidden_states = aux_hidden_states_prefills[idx]
@@ -4853,7 +4871,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if target_hidden_states.dim() == 2:
             target_hidden_states = target_hidden_states.unsqueeze(0)
         _draft_token_ids = self.drafter.propose(target_token_ids, position_ids, target_hidden_states, logits_indices,
-                                                attn_metadata, block_table_cpu_tensor, self)
+                                                attn_metadata, prefill_batch_block_table, self)
         return _draft_token_ids
 
     def propose_ngram_draft_token_ids(
