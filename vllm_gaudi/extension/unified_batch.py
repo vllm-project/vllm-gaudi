@@ -3,6 +3,7 @@ import numpy as np
 import habana_frameworks.torch as htorch
 from dataclasses import dataclass
 from vllm_gaudi.extension.unified import HPUUnifiedAttentionMetadata
+from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 import math
 from typing import Optional, Callable, Union
 from vllm_gaudi.extension.logger import logger as init_logger
@@ -20,6 +21,7 @@ class UnifiedBatch:
     logits_groups_cpu: torch.Tensor
     attn_metadata: HPUUnifiedAttentionMetadata
     invalid_req_indices: list[int]
+    spec_decode_metadata: Optional[SpecDecodeMetadata] = None
 
 
 def to_hpu(data: Optional[Union[torch.Tensor, list]], dtype: Optional[torch.dtype] = None) -> torch.Tensor:
@@ -244,6 +246,7 @@ def create_unified_batch(req_ids: list[str],
     is_prompt = total_tokens <= num_prompt_tokens
     cached_tokens = num_computed_tokens + np.where(is_prompt, 0, num_scheduled_tokens)
     contains_prompts = bool(np.any(is_prompt))
+    print(f"{num_scheduled_tokens=}, {num_computed_tokens=}, {num_prompt_tokens=} {is_prompt=} {cached_tokens=}")
     num_output_tokens = total_tokens - num_prompt_tokens + 1
     num_output_tokens = np.clip(num_output_tokens, np.zeros_like(num_scheduled_tokens), num_scheduled_tokens)
     group_starts = np.cumsum(num_scheduled_tokens) - num_scheduled_tokens
@@ -342,6 +345,8 @@ def create_unified_batch(req_ids: list[str],
             # Depends on 1 decode token/batch
             invalid_req_indices.append(len(req_ids) - 1)
 
+    # # call prepare_spec_decode_inputs to get the logits indices and
+    # logits_indices, spec_decode_metadata = self._prepare_spec_decode_inputs(scheduler_output, logits_indices, token_ids_device, num_tokens)
     # Convert numpy arrays to HPU tensors with proper dtypes
     return UnifiedBatch(
         req_ids_cpu=req_ids,
