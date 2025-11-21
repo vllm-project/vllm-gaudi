@@ -213,14 +213,15 @@ class OnlineDefragmenter:
                 self.debug("No victims to swap, skipping defragmentation")
             return
 
-        # 3. Sort victims by logical ID (ascending)
-        victims.sort(key=self._get_logical_id)
+        # 3. Sort
+        victims.sort(reverse=True)  # largest physical IDs first
+        free_tail.sort()  # smallest holes first
 
         # 4. Build swap list
         to_swap = []
         for v, f in zip(victims, free_tail):
             if f > v:
-                break
+                continue
             to_swap.append((v, f))
 
         if len(to_swap) < self.min_swaps:
