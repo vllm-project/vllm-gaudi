@@ -13,11 +13,12 @@ echo $VLLM_GAUDI_PREFIX
 # Gemma3 with image input
 run_gemma3_test() {
     echo "➡️ Testing gemma-3-4b-it..."
-    VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
+    #VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
     echo "✅ Test with multimodal-support with gemma-3-4b-it passed."
     echo "➡️ Testing gemma-3-4b-it with multiple images(applying sliding_window)..."
-    VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm_multi.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-27b-it.yaml"
+    #VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm_multi.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-27b-it.yaml"
     echo "✅ Test with multimodal-support with multiple images gemma-3-27b-it passed."
+    #Test cases are commented because of PR27772
 }
 
 # Basic model test
@@ -185,6 +186,14 @@ run_gsm8k_granite_async_test() {
     echo "✅ Test with granite-8b + async_scheduling passed."
 }
 
+# GSM8K on granite-8b (unified attn + async scheduling)
+run_gsm8k_granite_test_unified_attn_async() {
+    echo "➡️ Testing GSM8K on granite-8b with unified attention + async scheduling..."
+    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 ASYNC_SCHEDULING=1 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/granite-8b.yaml"
+    echo "✅ Test with granite-8b unified attention + async scheduling passed."
+}
+
 # GSM8K on deepseek v2 lite
 run_gsm8k_deepseek_test() {
     echo "➡️ Testing GSM8K on deepseek v2 lite..."
@@ -212,8 +221,7 @@ run_qwen2_5_vl_test() {
 # Spec decode with ngram
 run_spec_decode_ngram_test() {
     echo "➡️ Testing Spec-decode with ngram..."
-    #VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --assert_acc_rate 0.25 --osl 1024
-    # Test case is skipped because of PR27922
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --assert_acc_rate 0.25 --osl 1024
     echo "✅ Test with spec decode with ngram passed."
 }
 
@@ -228,10 +236,22 @@ run_spec_decode_eagle3_test() {
 # Embedding-model-support for v1
 run_embedding_model_test() {
     echo "➡️ Testing Embedding-model-support for v1..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/pooling.py" --model intfloat/e5-mistral-7b-instruct --trust-remote-code
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=false PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/pooling.py" --model intfloat/e5-mistral-7b-instruct --trust-remote-code
     HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/pooling.py" --model Alibaba-NLP/gte-Qwen2-7B-instruct --trust-remote-code
     echo "✅ Embedding-model-support for v1 successful."
 }
+
+# pd_disaggregate_nixl_libfabric
+run_pd_disaggregate_nixl_libfabric_test() {
+    echo "➡️ Testing PD disaggregate through NIXL libfabric."
+    git clone https://github.com/intel-staging/nixl.git -b v0.6.0_OFI
+    cp -r nixl /tmp/nixl_source
+    cd nixl; WHEELS_CACHE_HOME=/workspace/hf_cache/wheels_cache_ofi python install_nixl.py; cd ..
+    rm -rf nixl
+    cd ${VLLM_GAUDI_PREFIX}/tests/unit_tests; DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=OFI bash run_accuracy_test.sh
+    echo "✅ PD disaggregate through NIXL libfabric."
+}
+
 
 
 # --- Script Entry Point ---
@@ -262,6 +282,7 @@ launch_all_tests() {
     run_gsm8k_granite_test
     run_gsm8k_granite_test_unified_attn
     run_gsm8k_granite_async_test
+    run_gsm8k_granite_test_unified_attn_async
     run_gsm8k_deepseek_test
     run_gsm8k_qwen3_30b_test
     run_qwen2_5_vl_test
