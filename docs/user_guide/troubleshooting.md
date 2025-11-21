@@ -36,6 +36,6 @@ So for this specific scenario correct value for --max_concurrency is 10
 
 #### Solution:
 0.11.0 version is missing crucial fixes from upstream. To avoid it try:
-- lowering max conccurency
+- lowering max concurrency
 - decresing `max-num-seqs`
 - disabling async scheduler
