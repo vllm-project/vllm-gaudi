@@ -199,6 +199,7 @@ jobs:
 
           echo "Running HPU plugin test: ${{ matrix.test_function }}"
           docker run --rm --runtime=habana --name=$CONTAINER_NAME --network=host \
+            --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
@@ -225,6 +226,7 @@ jobs:
 
           echo "Running HPU plugin v1 dp tests"
           docker run --rm --runtime=habana --name=hpu-plugin-v1-test-dp-tests-hourly-ci --network=host \
+            --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e VLLM_SKIP_WARMUP=true \
@@ -253,6 +255,7 @@ jobs:
 
           echo "Running HPU plugin v1 nixl pd tests"
           docker run --rm --runtime=habana --name=hpu-plugin-v1-test-pd-tests-hourly-ci --network=host \
+            --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
