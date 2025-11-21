@@ -61,7 +61,7 @@ class OnlineDefragmenter:
 
     def __init__(self):
         config = get_config()
-        self.threshold = with_default(config.VLLM_DEFRAG_THRESHOLD, 32)
+        self.frag_limit = with_default(config.VLLM_DEFRAG_RATIO_LIMIT, 1.5)
         self.to_swap_pad_thresholds = [8, 16, 32, 64, 128, 256, 512]
         self.used_blocks = {}
         self.req_blocks = {}
@@ -180,7 +180,9 @@ class OnlineDefragmenter:
         # 0. stats
         num_used = len(self.used_blocks)
         max_phys = max(self.used_blocks.keys())
-        if max_phys - self.threshold <= num_used:
+        # Ratio-based fragmentation check
+        frag_ratio = max_phys / num_used if num_used > 0 else 0.0
+        if frag_ratio <= self.frag_limit:
             return
 
         # 1. Free blocks in the tail

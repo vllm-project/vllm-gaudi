@@ -54,7 +54,7 @@ def get_experimental_flags():
         Env('VLLM_PROFILE_PROMPT', str),
         Env('VLLM_PROFILE_DECODE', str),
         Env('VLLM_PROFILE_STEPS', list_of(int)),
-        Env('VLLM_DEFRAG_THRESHOLD', int),
+        Env('VLLM_DEFRAG_RATIO_LIMIT', float),
         Env('VLLM_DEFRAG_WITH_GRAPHS', boolean),
         Env('VLLM_DEBUG', list_of(str), check=for_all(choice('steps', 'defrag', 'fwd'))),
     ]
