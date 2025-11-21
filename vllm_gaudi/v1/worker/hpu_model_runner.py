@@ -2101,12 +2101,15 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         block_usage_device = async_h2d_copy(block_usage, device=self.device)
         block_groups_device = async_h2d_copy(block_groups, device=self.device)
         slot_mapping_device = async_h2d_copy(slot_mapping, device=self.device)
-        window_block_list_device = async_h2d_copy(window_block_list,
-                                                  device=self.device) if self.interleaved_sliding_window and self.sliding_window is not None else None
-        window_block_usage_device = async_h2d_copy(window_block_usage,
-                                                   device=self.device) if self.interleaved_sliding_window and self.sliding_window is not None else None
-        window_block_groups_device = async_h2d_copy(window_block_groups,
-                                                    device=self.device) if self.interleaved_sliding_window and self.sliding_window is not None else None
+        window_block_list_device = async_h2d_copy(
+            window_block_list,
+            device=self.device) if self.interleaved_sliding_window and self.sliding_window is not None else None
+        window_block_usage_device = async_h2d_copy(
+            window_block_usage,
+            device=self.device) if self.interleaved_sliding_window and self.sliding_window is not None else None
+        window_block_groups_device = async_h2d_copy(
+            window_block_groups,
+            device=self.device) if self.interleaved_sliding_window and self.sliding_window is not None else None
 
         token_ids_device = async_h2d_copy(token_ids, device=self.device)
         # when DP also enabled, some DP ranks will exeucte dummy run with empty
