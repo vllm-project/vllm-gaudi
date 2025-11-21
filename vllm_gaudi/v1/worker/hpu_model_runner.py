@@ -2891,9 +2891,26 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     warmup_mode=warmup_mode)
         selected_req_ids = [batch.req_ids_cpu[idx] for idx in batch.logits_groups_cpu.tolist()]
         htorch.core.mark_step()
+        ##### Sampling Start #####
+        spec_decode_metadata = batch.spec_decode_metadata
+        if spec_decode_metadata is not None:
+            logits_device = logits_device[spec_decode_metadata.bonus_logits_indices]
         with self.profiler.record_event('internal', 'unified_sampler'):
             sampling_metadata = self._prepare_sampling(batch_changed, selected_req_ids, pad_to=logits_device.shape[0])
             sampler_output = self.sampler(logits=logits_device, sampling_metadata=sampling_metadata)
+        if spec_decode_metadata is not None:
+            # Handling spec decode sampling.
+            sampler_output = self.rejection_sampler(
+                spec_decode_metadata,
+                None,  # draft_probs
+                logits_device,
+                sampling_metadata,
+            )
+            sampler_output.sampled_token_ids = \
+                self.rejection_sampler.parse_output(
+                    sampler_output.sampled_token_ids,
+                    self.input_batch.vocab_size,
+            )
 
         # Copy some objects so they don't get modified after returning.
         # This is important when using async scheduling.
@@ -2938,6 +2955,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 self.input_batch.token_ids_cpu[i, seq_len:seq_len + num_tokens] = token_ids
                 self.input_batch.num_tokens[i] += len(token_ids)
                 req_state.output_token_ids.extend(token_ids)
+
+        ################## Spec Decode ##################
+        # Now, we will call drafter to propose draft token ids
+        if self.speculative_config:
+            self._draft_token_ids = self.propose_draft_token_ids(scheduler_output, sampled_token_ids, sampling_metadata,
+                                                                 non_flattened_hidden_states, hidden_states,
+                                                                 aux_hidden_states)
+        ################## Spec Decode end ##################
 
         if self.use_async_scheduling:
             model_runner_output = ModelRunnerOutput(
@@ -3447,9 +3472,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # Now, we will call drafter to propose draft token ids
         if self.speculative_config:
             self._draft_token_ids = self.propose_draft_token_ids(
-                scheduler_output, postprocessed_sampled_token_ids, prefill_sampled_token_ids_device,
-                decode_sampled_token_ids_device, sampling_metadata, non_flattened_hidden_states, sample_hidden_states,
-                aux_hidden_states, non_flattened_hidden_states_prefills, sample_hidden_states_prefills,
+                scheduler_output, postprocessed_sampled_token_ids, sampling_metadata, non_flattened_hidden_states,
+                sample_hidden_states, aux_hidden_states, prefill_sampled_token_ids_device,
+                decode_sampled_token_ids_device, non_flattened_hidden_states_prefills, sample_hidden_states_prefills,
                 aux_hidden_states_prefills, num_decodes, prefill_data if num_prefills > 0 else None,
                 decode_data if num_decodes > 0 else None)
         ################## Spec Decode end ##################
@@ -4727,16 +4752,16 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         sampled_token_ids: list[list[int]],
-        prefill_sampled_token_ids_tensor: torch.Tensor,
-        decode_sampled_token_ids_tensor: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         hidden_states: torch.Tensor,
         sample_hidden_states: torch.Tensor,
         aux_hidden_states: Optional[torch.Tensor],
-        hidden_states_prefills: list[torch.Tensor],
-        sample_hidden_states_prefills: list[torch.Tensor],
-        aux_hidden_states_prefills: list[Optional[torch.Tensor]],
-        num_decodes: int,
+        prefill_sampled_token_ids_tensor: Optional[torch.Tensor] = None,
+        decode_sampled_token_ids_tensor: Optional[torch.Tensor] = None,
+        hidden_states_prefills: Optional[list[torch.Tensor]] = None,
+        sample_hidden_states_prefills: Optional[list[torch.Tensor]] = None,
+        aux_hidden_states_prefills: Optional[list[Optional[torch.Tensor]]] = None,
+        num_decodes: Optional[int] = None,
         prefill_data: Optional[PrefillInputData] = None,
         decode_data: Optional[DecodeInputData] = None,
     ) -> Union[list[list[int]], torch.Tensor]:
