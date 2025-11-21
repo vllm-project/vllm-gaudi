@@ -21,15 +21,15 @@ ENV BASE_NAME=${BASE_NAME}
 
 ENV OMPI_MCA_btl_vader_single_copy_mechanism=none
 
-# Install required packages for RHEL 9.x and TencentOS 3.1
+# Install required packages for RHEL 9.x and TencentOS 3.1 
 RUN if echo "$BASE_NAME" | grep -qi "tencentos"; then \
   yum remove -y mpitests_openmpi perftest openmpi opensm-libs || true && \
   yum update -y --exclude=openmpi --exclude=opensm-libs && \
-  yum install -y gettext jq python3-pip git --allowerasing --exclude=openmpi --exclude=opensm-libs && \
+  yum install -y gettext jq git --allowerasing --exclude=openmpi --exclude=opensm-libs && \
   ln -sf /usr/bin/python3 /usr/bin/python ; \
 else \
-  yum update -y && \
-  yum install -y gettext jq python3-pip git --allowerasing && \
+  yum update -y --nobest && \
+  yum install -y gettext jq git --allowerasing && \
   ln -sf /usr/bin/python3 /usr/bin/python ; \
 fi
 
