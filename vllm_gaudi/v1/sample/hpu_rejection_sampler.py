@@ -13,6 +13,8 @@ def rejection_sample_pytorch(
     padded_draft_token_ids: torch.Tensor,
     padded_target_token_ids: torch.Tensor,
     bonus_token_ids: torch.Tensor,
+    # [batch_size]
+    num_draft_tokens: list[int],
     cu_num_draft_tokens: torch.Tensor,
 ) -> torch.Tensor:
     """
@@ -49,7 +51,9 @@ def rejection_sample_pytorch(
     bonus_token_ids = bonus_token_ids.cpu().to(torch.int32)
     cu_num_draft_tokens = cu_num_draft_tokens.cpu()
     # 1. Get tensor dimensions and device for calculations
-    num_seqs, max_draft_tokens = padded_draft_token_ids.shape
+    num_seqs = len(num_draft_tokens)
+    padded_draft_token_ids = padded_draft_token_ids.view(num_seqs, -1)
+    max_draft_tokens = padded_draft_token_ids.shape[-1]
     padded_target_token_ids = padded_target_token_ids.view(num_seqs, -1)
     bonus_token_ids = bonus_token_ids.view(num_seqs, -1)
     device = padded_draft_token_ids.device
@@ -137,7 +141,8 @@ def rejection_sample(
     # Rejection sampling for greedy sampling requests.
 
     target_argmax = target_probs.argmax(dim=-1)
-    output_token_ids = rejection_sample_pytorch(draft_token_ids, target_argmax, bonus_token_ids, cu_num_draft_tokens)
+    output_token_ids = rejection_sample_pytorch(draft_token_ids, target_argmax, bonus_token_ids, num_draft_tokens,
+                                                cu_num_draft_tokens)
     return output_token_ids
 
 
