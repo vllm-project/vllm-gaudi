@@ -124,9 +124,11 @@ def VersionRange(*specifiers_str: str) -> ValueFn:
 
 
 def MinPackageVersion(package_name: str, min_version: str) -> ValueFn:
+
     def check(_cfg: Config):
         installed_version = get_version(package_name)
         return version.parse(installed_version) >= version.parse(min_version)
+
     return check
 
 
