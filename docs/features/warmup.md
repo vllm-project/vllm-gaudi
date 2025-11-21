@@ -162,6 +162,7 @@ You can disable either the warm-up step itself or the entire defragmentation fea
 Related environment variables:
 
 - `VLLM_DEFRAG_RATIO_LIMIT`: Ratio threshold for triggering KV-cache defragmentation. Computed as (max physical block ID / number of used blocks). Higher values reduce compaction frequency; lower values make it more aggressive. Default: 1.5.
+- `VLLM_DEFRAG_MIN_SWAPS`: Minimum number of swaps required to trigger defragmentation. Default: 4.
 - `VLLM_DEFRAG_WITH_GRAPHS`: Determines whether swap paths are compiled or graphed. By default, this follows `bridge_mode == eager`.
 - `VLLM_DEBUG=defrag`: Enables verbose defragmentation debug logging.
 - `VLLM_SKIP_WARMUP`: Disables all warm-up stages including defragmentation.

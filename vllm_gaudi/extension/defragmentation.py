@@ -62,6 +62,7 @@ class OnlineDefragmenter:
     def __init__(self):
         config = get_config()
         self.frag_limit = with_default(config.VLLM_DEFRAG_RATIO_LIMIT, 1.5)
+        self.min_swaps = with_default(config.VLLM_DEFRAG_MIN_SWAPS, 4)
         self.to_swap_pad_thresholds = [8, 16, 32, 64, 128, 256, 512]
         self.used_blocks = {}
         self.req_blocks = {}
@@ -222,9 +223,7 @@ class OnlineDefragmenter:
                 break
             to_swap.append((v, f))
 
-        if len(to_swap) < 4:  # Minimum swap threshold
-            if self.debug and to_swap:
-                self.debug(f"Too few swaps ({len(to_swap)}), skipping defragmentation")
+        if len(to_swap) < self.min_swaps:
             return
 
         # 5. Update meta-data
