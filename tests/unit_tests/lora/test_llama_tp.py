@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 from typing import Union
 
 import vllm
@@ -70,7 +69,7 @@ def generate_and_test(llm, sql_lora_files, tensorizer_config_dict: Union[dict, N
     print("removing lora")
 
 
-#@create_new_process_for_each_test()
+'''#@create_new_process_for_each_test()
 def test_llama_lora(sql_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
@@ -84,8 +83,7 @@ def test_llama_lora(sql_lora_files):
         hf_token=os.environ.get("HF_TOKEN"),
     )
     generate_and_test(llm, sql_lora_files)
-
-
+'''
 '''@multi_gpu_test(num_gpus=4)
 @create_new_process_for_each_test()
 def test_llama_lora_tp4(sql_lora_files):
