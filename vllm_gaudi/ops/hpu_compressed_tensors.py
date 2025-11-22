@@ -115,6 +115,7 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         if layer.scheme.is_static_input_scheme:
             # required by torch.compile to be torch.nn.Parameter, only per-tensor supported
+            # see the scheme definitions: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_w8a8_fp8.py
             layer.input_scale = torch.nn.Parameter(layer.input_scale.max(), requires_grad=False)
 
     def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int, output_partition_sizes: list[int],
@@ -196,20 +197,14 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
         self.weight_quant = self.quant_config.target_scheme_map["Linear"].get("weights")
         self.input_quant = self.quant_config.target_scheme_map["Linear"].get("input_activations")
 
-        per_tensor = (
-            self.weight_quant.strategy == QuantizationStrategy.TENSOR
-            and self.input_quant.strategy == QuantizationStrategy.TENSOR
-        )
-        per_channel_token = (
-            self.weight_quant.strategy == QuantizationStrategy.CHANNEL
-            and self.input_quant.strategy == QuantizationStrategy.TOKEN
-        )
+        per_tensor = (self.weight_quant.strategy == QuantizationStrategy.TENSOR
+                      and self.input_quant.strategy == QuantizationStrategy.TENSOR)
+        per_channel_token = (self.weight_quant.strategy == QuantizationStrategy.CHANNEL
+                             and self.input_quant.strategy == QuantizationStrategy.TOKEN)
 
         # extend format
-        per_channel_tensor = (
-            self.weight_quant.strategy == QuantizationStrategy.CHANNEL
-            and self.input_quant.strategy == QuantizationStrategy.TENSOR
-        )
+        per_channel_tensor = (self.weight_quant.strategy == QuantizationStrategy.CHANNEL
+                              and self.input_quant.strategy == QuantizationStrategy.TENSOR)
 
         if not (per_tensor or per_channel_token or per_channel_tensor):
             assert self.weight_quant.strategy == QuantizationStrategy.BLOCK
@@ -221,18 +216,13 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
 
         self.static_input_scales = not self.input_quant.dynamic
         if self.static_input_scales and per_channel_token:
-            raise ValueError(
-                "For FP8 Fused MoE layer, we require either per tensor or "
-                "channelwise, dynamic per token quantization."
-            )
+            raise ValueError("For FP8 Fused MoE layer, we require either per tensor or "
+                             "channelwise, dynamic per token quantization.")
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
-        self.use_marlin = (
-            not current_platform.has_device_capability(89)
-            or envs.VLLM_TEST_FORCE_FP8_MARLIN
-            and not self.block_quant
-        )
+        self.use_marlin = (not current_platform.has_device_capability(89)
+                           or envs.VLLM_TEST_FORCE_FP8_MARLIN and not self.block_quant)
 
         self.disable_expert_map = False
 
