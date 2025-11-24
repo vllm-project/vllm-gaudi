@@ -152,12 +152,11 @@ class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
         # Release the device tensor once the copy has completed
         self._async_copy_ready_event.synchronize()
 
-        sampled_token_ids_np = self._sampled_token_ids_cpu.numpy()
-        valid_sampled_token_ids = [sampled_token_ids_np[i] for i in range(len(sampled_token_ids_np))]
+        valid_sampled_token_ids = self._sampled_token_ids_cpu.tolist()
         del self._sampled_token_ids
         for i in self._invalid_req_indices:
             if i < len(valid_sampled_token_ids):
-                valid_sampled_token_ids[i] = np.array([], dtype=np.int32)
+                valid_sampled_token_ids[i].clear()
 
         output = self._model_runner_output
         output.sampled_token_ids[:len(valid_sampled_token_ids)] = valid_sampled_token_ids
@@ -2903,7 +2902,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.input_batch.req_id_to_index.copy()
 
         with self.profiler.record_event('internal', 'unified_postprocess'):
-            sampled_token_ids: list[np.ndarray] = [np.array([], dtype=np.int32) for _ in batch.req_ids_cpu]
+            sampled_token_ids: list[list[int]] = [[] for _ in batch.req_ids_cpu]
             if self.use_async_scheduling:
                 sampled_token_ids_hpu = sampler_output.sampled_token_ids.view(-1, 1)
                 self.input_batch.prev_sampled_token_ids = sampled_token_ids_hpu.flatten()
@@ -2916,11 +2915,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 }
             else:
                 sampled_token_ids_cpu = sampler_output.sampled_token_ids.cpu()
-
-                sampled_token_ids_np = sampled_token_ids_cpu.numpy()
-                for req_id, tokens_array in zip(selected_req_ids, sampled_token_ids_np):
-                    idx = self.input_batch.req_id_to_index[req_id]
-                    sampled_token_ids[idx] = tokens_array
+                for req_id, tokens in zip(selected_req_ids, sampled_token_ids_cpu.tolist()):
+                    sampled_token_ids[self.input_batch.req_id_to_index[req_id]].extend(tokens)
 
                 #TODO: add support for multi-token output
                 assert sampled_token_ids_cpu.size(1) == 1, 'Currently only single token output is supported!'
@@ -2941,7 +2937,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 num_tokens = len(token_ids)
                 self.input_batch.token_ids_cpu[i, seq_len:seq_len + num_tokens] = token_ids
                 self.input_batch.num_tokens[i] += len(token_ids)
-                req_state.output_token_ids.extend(token_ids.tolist())
+                req_state.output_token_ids.extend(token_ids)
 
         if self.use_async_scheduling:
             model_runner_output = ModelRunnerOutput(
@@ -3366,9 +3362,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.input_batch.req_id_to_index.copy()
 
         max_req_index = max(self.input_batch.req_id_to_index.values())
-        postprocessed_sampled_token_ids: list[np.ndarray] = [
-            np.array([], dtype=np.int32) for _ in range(max_req_index + 1)
-        ]
+        postprocessed_sampled_token_ids: list[list[int]] = [[] for _ in range(max_req_index + 1)]
         if self.use_async_scheduling:
             self.input_batch.prev_sampled_token_ids = sampled_token_ids.flatten()
             # self.input_batch.prev_sampled_token_ids_invalid_indices
@@ -3392,10 +3386,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 else:
                     decode_sampled_token_ids = [tensor.cpu()[:num_decodes] for tensor in decode_sampled_token_ids]
                 if decode_sampled_token_ids + prefill_sampled_token_ids:
-                    sampled_token_ids_tensor = torch.cat(decode_sampled_token_ids + prefill_sampled_token_ids)
-                    sampled_token_ids_np = sampled_token_ids_tensor.cpu().numpy().flatten()
+                    sampled_token_ids_list = torch.cat(decode_sampled_token_ids + prefill_sampled_token_ids).tolist()
                 else:
-                    sampled_token_ids_np = np.array([], dtype=np.int32)
+                    sampled_token_ids_list = []
                 sampled_token_requests = \
                     decode_sampled_requests + prefill_sampled_requests
                 max_req_index = max(self.input_batch.req_id_to_index.values())
@@ -3405,10 +3398,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 for i, req_id in enumerate(sampled_token_requests):
                     num_tokens = spec_decode_num_tokens[
                         i] if spec_decode_num_tokens is not None and i < num_decodes else 1
-                    req_idx = self.input_batch.req_id_to_index[req_id]
-                    postprocessed_sampled_token_ids[req_idx] = np.array(sampled_token_ids_np[start_idx:start_idx +
-                                                                                             num_tokens],
-                                                                        dtype=np.int32)
+                    postprocessed_sampled_token_ids[
+                        self.input_batch.req_id_to_index[req_id]] += sampled_token_ids_list[start_idx:start_idx +
+                                                                                            num_tokens]
                     start_idx += num_tokens
 
         ################## RETURN ##################
@@ -3431,7 +3423,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # the sampled tokens back, because there's no direct communication
         # between the first-stage worker and the last-stage worker.
         for req_idx, sampled_ids in enumerate(postprocessed_sampled_token_ids[:num_reqs]):
-            if sampled_ids is None:
+            if not sampled_ids:
                 continue
 
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
