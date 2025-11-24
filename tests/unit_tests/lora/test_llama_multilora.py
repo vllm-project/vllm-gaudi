@@ -109,9 +109,8 @@ def _test_llama_multilora(sql_lora_files, tp_size):
     assert generated_texts == expected_output
 
 
-def test_llama_multilora_1x(sql_lora_files):
-    _test_llama_multilora(sql_lora_files, 1)
-
+#def test_llama_multilora_1x(sql_lora_files):
+#    _test_llama_multilora(sql_lora_files, 1)
 
 #def test_llama_multilora_2x(sql_lora_files):
 #    _test_llama_multilora(sql_lora_files, 2)

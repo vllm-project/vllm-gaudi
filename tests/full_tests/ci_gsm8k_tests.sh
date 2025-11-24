@@ -186,6 +186,14 @@ run_gsm8k_granite_async_test() {
     echo "✅ Test with granite-8b + async_scheduling passed."
 }
 
+# GSM8K on granite-8b (unified attn + async scheduling)
+run_gsm8k_granite_test_unified_attn_async() {
+    echo "➡️ Testing GSM8K on granite-8b with unified attention + async scheduling..."
+    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 ASYNC_SCHEDULING=1 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/granite-8b.yaml"
+    echo "✅ Test with granite-8b unified attention + async scheduling passed."
+}
+
 # GSM8K on deepseek v2 lite
 run_gsm8k_deepseek_test() {
     echo "➡️ Testing GSM8K on deepseek v2 lite..."
@@ -228,9 +236,21 @@ run_spec_decode_eagle3_test() {
 # Embedding-model-support for v1
 run_embedding_model_test() {
     echo "➡️ Testing Embedding-model-support for v1..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/pooling.py" --model intfloat/e5-mistral-7b-instruct --trust-remote-code
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=false PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/pooling.py" --model intfloat/e5-mistral-7b-instruct --trust-remote-code
     echo "✅ Embedding-model-support for v1 successful."
 }
+
+# pd_disaggregate_nixl_libfabric
+run_pd_disaggregate_nixl_libfabric_test() {
+    echo "➡️ Testing PD disaggregate through NIXL libfabric."
+    git clone https://github.com/intel-staging/nixl.git -b v0.6.0_OFI
+    cp -r nixl /tmp/nixl_source
+    cd nixl; WHEELS_CACHE_HOME=/workspace/hf_cache/wheels_cache_ofi python install_nixl.py; cd ..
+    rm -rf nixl
+    cd ${VLLM_GAUDI_PREFIX}/tests/unit_tests; DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=OFI bash run_accuracy_test.sh
+    echo "✅ PD disaggregate through NIXL libfabric."
+}
+
 
 
 # --- Script Entry Point ---
@@ -261,6 +281,7 @@ launch_all_tests() {
     run_gsm8k_granite_test
     run_gsm8k_granite_test_unified_attn
     run_gsm8k_granite_async_test
+    run_gsm8k_granite_test_unified_attn_async
     run_gsm8k_deepseek_test
     run_gsm8k_qwen3_30b_test
     run_qwen2_5_vl_test
