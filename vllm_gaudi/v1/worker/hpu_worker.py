@@ -13,6 +13,7 @@ import torch.nn as nn
 import habana_frameworks.torch as htorch
 from vllm.tasks import SupportedTask
 from vllm_gaudi.extension.debug import init_debug_logger
+from vllm_gaudi.extension.defragmentation import OnlineDefragmenter
 from vllm_gaudi.extension.profiler import (HabanaMemoryProfiler, format_bytes, setup_profiler)
 from vllm_gaudi.extension.runtime import get_config
 
@@ -349,11 +350,13 @@ class HPUWorker(WorkerBase):
 
         # Handle KV cache - discard it
         if self.kv_cache_sleeping:
-            logger.warning("KV cache has already been discarded by calling sleep method and it has not been reinitialized by calling wake up method yet, skipping discarding it again")
+            logger.warning("KV cache has already been discarded by calling sleep method and it has not been "
+                           "reinitialized by calling wake up method yet, skipping discarding it again")
         elif self.kv_cache_config is None:
             logger.warning("KV cache has not been initialized yet, skipping discarding it")
         else:
             with HabanaMemoryProfiler() as m:
+                self.model_runner.defragmenter.cache_utils.kv_caches = None
                 self.model_runner.kv_caches = []
 
                 forward_context = self.vllm_config.compilation_config.static_forward_context
@@ -403,11 +406,14 @@ class HPUWorker(WorkerBase):
             else:
                 with HabanaMemoryProfiler() as m:
                     self.model_runner.initialize_kv_cache(self.kv_cache_config)
+                    self.model_runner.defragmenter = OnlineDefragmenter()
+                    self.model_runner.defragmenter.initialize(self.model_runner.kv_caches, self.model_runner.block_size)
                     gc.collect()
                     torch.hpu.synchronize()
                 msg = f"Waking up KV cache, reinitializing it took {m.get_summary_string()}"
                 logger.info(msg)
                 self.kv_cache_sleeping = False
+
 
 def init_worker_distributed_environment(
     vllm_config: VllmConfig,
