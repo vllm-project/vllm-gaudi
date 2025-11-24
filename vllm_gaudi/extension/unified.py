@@ -102,9 +102,9 @@ def optional(op):
     return opt_impl
 
 
-def get_vecsize_packsize(dtype: torch.dtype) -> tuple[int, float]:
+def get_vecsize_packsize(dtype: torch.dtype) -> tuple[int, int]:
     """Get vecsize and packsize for given dtype"""
-    pack_size = 8.0
+    pack_size = 8
     if hpu_ops.is_hpu_gaudi3:
         return 128 if dtype == torch.bfloat16 else 64, pack_size
     return 1, pack_size
@@ -114,8 +114,8 @@ def create_softmax_fa2_input_tensors(attn: torch.tensor, fmin: torch.tensor) -> 
     """Create dummy input tensors for the softmax_fa2 operation."""
     vec_size, pack_size = get_vecsize_packsize(attn.dtype)
     retained_shape = list(attn.shape[:-1])
-    retained_shape[-1] = math.ceil(float(retained_shape[-1]) / pack_size) * vec_size
-    inputM_hpu = torch.ones(retained_shape, dtype=attn.dtype, device="hpu") * fmin
+    retained_shape[-1] = math.ceil(retained_shape[-1] / pack_size) * vec_size
+    inputM_hpu = torch.full(retained_shape, fmin, dtype=attn.dtype, device='hpu')
     inputL_hpu = torch.zeros(retained_shape, dtype=attn.dtype, device="hpu")
     return inputM_hpu, inputL_hpu
 
@@ -127,7 +127,7 @@ def convert_cl_aligned_tensor(input_hpu, reference_size) -> torch.tensor:
     input_hpu_shape[-1] = -1
     input_hpu_shape.append(vec_size)
     input_hpu = input_hpu.reshape(input_hpu_shape)
-    input_hpu = input_hpu[..., :int(pack_size)]
+    input_hpu = input_hpu[..., :pack_size]
     input_hpu = torch.flatten(input_hpu, start_dim=-2, end_dim=-1)
     input_hpu = input_hpu[..., :reference_size[-1]]
     return input_hpu
@@ -174,12 +174,17 @@ def partial_attn_causal(query: torch.tensor, key: torch.tensor, value: torch.ten
         b = bias[q_min:q_max, 0:q_max]
 
         s_attn = torch.matmul(q, k.transpose(-1, -2)) + b.unsqueeze(0).unsqueeze(0)
-        inputM_hpu, inputL_hpu = create_softmax_fa2_input_tensors(s_attn, fmin)
-        s_attn, s_max, s_sum, _exp_max_fixup_hpu = torch.ops.hpu.softmax_fa2(s_attn,
-                                                                             inputM=inputM_hpu,
-                                                                             inputL=inputL_hpu)
-        s_max = convert_cl_aligned_tensor(s_max, list(s_attn.shape[:-1]))
-        s_sum = convert_cl_aligned_tensor(s_sum, list(s_attn.shape[:-1]))
+        if get_config().unified_attn_softmax_fa2_for_shared_causal:
+            inputM_hpu, inputL_hpu = create_softmax_fa2_input_tensors(s_attn, fmin)
+            s_attn, s_max, s_sum, _exp_max_fixup_hpu = torch.ops.hpu.softmax_fa2(s_attn,
+                                                                                 inputM=inputM_hpu,
+                                                                                 inputL=inputL_hpu)
+            s_max = convert_cl_aligned_tensor(s_max, list(s_attn.shape[:-1]))
+            s_sum = convert_cl_aligned_tensor(s_sum, list(s_attn.shape[:-1]))
+        else:
+            s_max = torch.maximum(s_attn.amax(-1), fmin)
+            s_attn = torch.exp(s_attn - s_max.unsqueeze(-1))
+            s_sum = torch.sum(s_attn, -1)
         s_attn = torch.matmul(s_attn, v)
         attn_slices.append(s_attn)
         max_slices.append(s_max)
@@ -205,13 +210,17 @@ def partial_attn_shared(query: torch.tensor, blocks: torch.tensor, bias: Optiona
     attn = torch.matmul(query, key.transpose(-1, -2))
     attn = attn.flatten(0, 1)
     attn = attn + bias
-    inputM_hpu, inputL_hpu = create_softmax_fa2_input_tensors(attn, fmin)
-    attn, local_max, local_sum, _exp_max_fixup_hpu = torch.ops.hpu.softmax_fa2(attn,
-                                                                               inputM=inputM_hpu,
-                                                                               inputL=inputL_hpu)
-    if hpu_ops.is_hpu_gaudi3:
+    if get_config().unified_attn_softmax_fa2_for_shared_causal:
+        inputM_hpu, inputL_hpu = create_softmax_fa2_input_tensors(attn, fmin)
+        attn, local_max, local_sum, _exp_max_fixup_hpu = torch.ops.hpu.softmax_fa2(attn,
+                                                                                   inputM=inputM_hpu,
+                                                                                   inputL=inputL_hpu)
         local_max = convert_cl_aligned_tensor(local_max, list(attn.shape[:-1]))
         local_sum = convert_cl_aligned_tensor(local_sum, list(attn.shape[:-1]))
+    else:
+        local_max = torch.maximum(attn.amax(-1), fmin)
+        attn = torch.exp(attn - local_max.unsqueeze(-1))
+        local_sum = attn.sum(-1)
     attn = torch.matmul(attn.unflatten(0, (kv_heads, -1)), value).flatten(0, 1)
     return attn.transpose(0, 1), local_max.transpose(0, 1), local_sum.transpose(0, 1)
 
