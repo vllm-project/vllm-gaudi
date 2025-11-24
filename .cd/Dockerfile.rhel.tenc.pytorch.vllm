@@ -12,7 +12,7 @@ ARG TORCH_TYPE_SUFFIX
 
 FROM ${DOCKER_URL}/${VERSION}/${BASE_NAME}/${REPO_TYPE}/pytorch-${TORCH_TYPE_SUFFIX}installer-${PT_VERSION}:${REVISION}
 
-# Parameterize commit/branch for vllm-fork checkout
+# Parameterize commit/branch for vllm-plugin checkout
 ARG VLLM_GAUDI_COMMIT=main
 # leave empty to use last-good-commit-for-vllm-gaudi
 ARG VLLM_PROJECT_COMMIT=
@@ -26,11 +26,11 @@ ENV OMPI_MCA_btl_vader_single_copy_mechanism=none
 RUN if echo "$BASE_NAME" | grep -qi "tencentos"; then \
   yum remove -y mpitests_openmpi perftest openmpi opensm-libs || true && \
   yum update -y --exclude=openmpi --exclude=opensm-libs && \
-  yum install -y gettext jq python3-pip git --allowerasing --exclude=openmpi --exclude=opensm-libs && \
+  yum install -y gettext jq git --allowerasing --exclude=openmpi --exclude=opensm-libs && \
   ln -sf /usr/bin/python3 /usr/bin/python ; \
 else \
-  yum update -y && \
-  yum install -y gettext jq python3-pip git --allowerasing && \
+  yum update -y --nobest && \
+  yum install -y gettext jq git --allowerasing && \
   ln -sf /usr/bin/python3 /usr/bin/python ; \
 fi
 

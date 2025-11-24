@@ -14,7 +14,8 @@ from vllm_gaudi.extension.runtime import get_config, clear_config
 
 @pytest.fixture(autouse=True)
 def default_config():
-    get_config(prefix_caching=True)
+    clear_config()
+    get_config()
     yield
     clear_config()
 
