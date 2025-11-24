@@ -12,6 +12,7 @@ from vllm_gaudi.utils import HPUCompileConfig
 from vllm.forward_context import override_forward_context
 from safetensors import safe_open
 
+
 def test_compressed_tensors_linear_method_w8a8fp8_static_per_tensor(dist_init):
     """weight per-tensor, activation per-tensor
     """
@@ -62,14 +63,14 @@ def test_compressed_tensors_linear_method_w8a8fp8_static_per_tensor(dist_init):
     # Weight and weight_scale_inv were extracted from first o_proj layer of Intel/Qwen3-0.6B-FP8-Test-Only
     # which is RowParallelLinear
     # (with adjusted shapes, to make tensors smaller)
-    with safe_open(get_data_path("data/compressed_tensors/linear_w8a8fp8_static_per_tensor.safetensors"), framework="pt",
+    with safe_open(get_data_path("data/compressed_tensors/linear_w8a8fp8_static_per_tensor.safetensors"),
+                   framework="pt",
                    device="hpu") as f:
         oot_op.weight.copy_(f.get_tensor("weight"))
         oot_op.weight_scale.copy_(f.get_tensor("weight_scale"))
         oot_op.input_scale.copy_(f.get_tensor("input_scale"))
 
     oot_op.quant_method.process_weights_after_loading(oot_op)
-
     """
     if not htorch.utils.internal.is_lazy():
         compile_config = HPUCompileConfig()
@@ -79,7 +80,8 @@ def test_compressed_tensors_linear_method_w8a8fp8_static_per_tensor(dist_init):
     # Input and expected output
     # Output tensor holds data that was returned by cuda impl of CompressedTensorsLinearMethod for given input
     # (CompressedTensorsLinearMethod was triggered offline with the same input as below to get the ref_output)
-    with safe_open(get_data_path("data/compressed_tensors/linear_w8a8fp8_static_per_tensor.safetensors"), framework="pt",
+    with safe_open(get_data_path("data/compressed_tensors/linear_w8a8fp8_static_per_tensor.safetensors"),
+                   framework="pt",
                    device="hpu") as f:
         input = f.get_tensor("input")
         ref_output = f.get_tensor("ref_output")
@@ -89,6 +91,7 @@ def test_compressed_tensors_linear_method_w8a8fp8_static_per_tensor(dist_init):
 
     # Check correctness
     torch.testing.assert_close(ref_output, out, atol=1e-3, rtol=1e-3)
+
 
 def test_compressed_tensors_linear_method_w8a8fp8_static_per_channel(dist_init):
     """weight per-channel, activation per-tensor
@@ -140,14 +143,14 @@ def test_compressed_tensors_linear_method_w8a8fp8_static_per_channel(dist_init):
     # Weight and weight_scale_inv were extracted from first o_proj layer of Intel/Qwen3-0.6B-FP8-Static-Test-Only
     # which is RowParallelLinear
     # (with adjusted shapes, to make tensors smaller)
-    with safe_open(get_data_path("data/compressed_tensors/linear_w8a8fp8_static_per_channel.safetensors"), framework="pt",
+    with safe_open(get_data_path("data/compressed_tensors/linear_w8a8fp8_static_per_channel.safetensors"),
+                   framework="pt",
                    device="hpu") as f:
         oot_op.weight.copy_(f.get_tensor("weight"))
         oot_op.weight_scale.copy_(f.get_tensor("weight_scale"))
         oot_op.input_scale.copy_(f.get_tensor("input_scale"))
 
     oot_op.quant_method.process_weights_after_loading(oot_op)
-
     """
     if not htorch.utils.internal.is_lazy():
         compile_config = HPUCompileConfig()
@@ -157,7 +160,8 @@ def test_compressed_tensors_linear_method_w8a8fp8_static_per_channel(dist_init):
     # Input and expected output
     # Output tensor holds data that was returned by cuda impl of CompressedTensorsLinearMethod for given input
     # (CompressedTensorsLinearMethod was triggered offline with the same input as below to get the ref_output)
-    with safe_open(get_data_path("data/compressed_tensors/linear_w8a8fp8_static_per_channel.safetensors"), framework="pt",
+    with safe_open(get_data_path("data/compressed_tensors/linear_w8a8fp8_static_per_channel.safetensors"),
+                   framework="pt",
                    device="hpu") as f:
         input = f.get_tensor("input")
         ref_output = f.get_tensor("ref_output")
@@ -167,6 +171,7 @@ def test_compressed_tensors_linear_method_w8a8fp8_static_per_channel(dist_init):
 
     # Check correctness
     torch.testing.assert_close(ref_output, out, atol=1e-3, rtol=1e-3)
+
 
 def test_compressed_tensors_linear_method_w8a8fp8(dist_init):
     config = {
