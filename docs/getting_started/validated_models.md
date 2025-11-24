@@ -36,7 +36,6 @@ Validation of the following configurations is currently in progress:
 
 | Model   | Tensor parallelism [x HPU]   | Datatype    | Validated AI accelerator    |
 |:---    |:---:    |:---:    |:---:  |
-
 | [meta-llama/Meta-Llama-3-70B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-70B-Instruct)     | 8    | BF16    |Gaudi 2, Gaudi 3|
 | [meta-llama/Meta-Llama-3.1-70B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B-Instruct)     | 2, 4, 8    | BF16, FP8   |Gaudi 2, Gaudi 3|
 | [meta-llama/Meta-Llama-3.1-405B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-405B-Instruct)     | 8    | BF16, FP8    |Gaudi 3|
