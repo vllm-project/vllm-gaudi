@@ -33,6 +33,7 @@ qwen25_14b_instruct:
 
 qwen25_32b_instruct:
   MODEL: Qwen/Qwen2.5-32B-Instruct
+  CONCURRENT_REQ: 8
 
 qwen25_72b_instruct:
   MODEL: Qwen/Qwen2.5-72B-Instruct
