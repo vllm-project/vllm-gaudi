@@ -32,7 +32,7 @@ nav:
     - features/supported_features.md
     - features/bucketing_mechanism.md
     - features/floating_point_8.md
-    - features/inified_attn.md
+    - features/unified_attn.md
   - Developer Guides:
     - dev_guide/plugin_system.md
     - dev_guide/ci-failures.md

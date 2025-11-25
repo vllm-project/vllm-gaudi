@@ -159,7 +159,7 @@ The Xeon processors currently validated for this setup are: Intel Xeon 6960P and
     docker compose --profile benchmark up
     ```
 
-3. Specify the service name in `docker-compose.override.yml` to bind idle CPUs to another service, such as `vllm-cpu-service`, as in te following example:
+3. Specify the service name in `docker-compose.override.yml` to bind idle CPUs to another service, such as `vllm-cpu-service`, as in the following example:
 
     ```bash
     export MODEL="Qwen/Qwen2.5-14B-Instruct"
