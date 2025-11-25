@@ -76,6 +76,11 @@ class HpuEagleProposer(EagleProposer):
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
 
+        # Positions used by prepare_attn_metadata needs to be cpu because
+        # compile only mode for warmup will not do any real computations
+        target_positions_cpu = target_positions.cpu()
+        positions_cpu = target_positions_cpu[last_token_indices.cpu()]
+
         # Decode 1 token each time
         for token_index in range(self.num_speculative_tokens - 1):
             # Update the inputs.
@@ -89,8 +94,8 @@ class HpuEagleProposer(EagleProposer):
             clamped_positions = torch.where(exceeds_max_model_len, 0, positions)
 
             # Prepare the attn metadata
-            attn_metadata = self.prepare_attn_metadata(block_table_cpu_tensor, positions, clamped_positions,
-                                                       model_runner)
+            positions_cpu += 1
+            attn_metadata = self.prepare_attn_metadata(block_table_cpu_tensor, positions_cpu, model_runner)
 
             # [batch_size, 1]
             input_ids = input_ids.view(-1, 1)
@@ -164,15 +169,13 @@ class HpuEagleProposer(EagleProposer):
             self,
             # [num_seq, total_blocks]
             block_table_cpu_tensor,
-            # [batch_size]
+            # CPU tensor: [batch_size]
             positions,
-            # [batch_size]
-            clamped_positions,
             model_runner):
         # Prepare attn metadata on CPU. (Improve for pure HPU based attn metadata preparation)
         batch_size = positions.shape[0]
-        positions = positions.cpu()
-        clamped_positions = clamped_positions.cpu()
+        exceeds_max_model_len = positions >= self.max_model_len
+        clamped_positions = torch.where(exceeds_max_model_len, 0, positions)
 
         # Note: block_table_cpu_tensor doesn't include the padding
         # which might smaller than the (padded) batch_size
@@ -197,7 +200,7 @@ class HpuEagleProposer(EagleProposer):
         block_numbers = clamped_positions // self.block_size
 
         # Limit with num_seq because block_table_cpu_tensor is in the shape [num_seq, x]
-        block_numbers = block_numbers[:num_seq]
+        block_numbers = block_numbers.to(torch.int64)[:num_seq]
         block_ids = torch.ones((batch_size, 1), dtype=torch.int32) * model_runner._PAD_BLOCK_ID
         block_ids[:num_seq] = block_table_cpu_tensor.gather(dim=1, index=block_numbers)
         # Needs to be resolved by defragmenter
@@ -207,6 +210,8 @@ class HpuEagleProposer(EagleProposer):
         slot_mapping = block_ids * self.block_size + clamped_positions % self.block_size
         dummy_slots = itertools.cycle(range(model_runner._PAD_SLOT_ID, model_runner._PAD_SLOT_ID + self.block_size))
         slot_mapping[num_seq:].apply_(lambda _, ds=dummy_slots: next(ds))
+        # Slot mapping needs to be int64 (long) type
+        slot_mapping = slot_mapping.to(torch.int64)
 
         block_list, block_groups, block_usage = \
             model_runner.get_habana_paged_attn_buffers(
