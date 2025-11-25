@@ -4852,7 +4852,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # Prefill are the next num_reqs - num_decodes requests and divide into batches
         block_table_cpu_tensor = self.input_batch.block_table[0].get_cpu_tensor()
         batch_size = logits_indices.shape[0]
-        prefill_batch_block_table = block_table_cpu_tensor[batch_start_idx:batch_start_idx+batch_size]
+        prefill_batch_block_table = block_table_cpu_tensor[batch_start_idx:batch_start_idx + batch_size]
 
         hidden_states = hidden_states_prefills[idx]
         if self.use_aux_hidden_state_outputs:
