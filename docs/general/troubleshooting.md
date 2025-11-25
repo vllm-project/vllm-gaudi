@@ -34,20 +34,14 @@ vLLM calculates the maximum available concurrency for current environment based 
 
 In this example, the correct `max_concurrency` value in this specific scenario is `10`.
 
-## Out-of-memory errors occur when using the plugin
-
-If you encounter out-of-memory errors while using the plugin, consider the following solutions and recommendations:
-
-- Increase `--gpu-memory-utilization` to a higher value than the default `0.9`. This addresses insufficient available memory per card.
-
-- Increase `--tensor-parallel-size` to a higher value than the default `1`. This approach shards model weights across the devices and may help in loading a model, which is too big for a single card, across multiple cards.
-
-- Disable HPU Graphs completely by switching to any other execution mode to maximize KV cache space allocation.
-
-## OOM errors occur during inference
+## Out-of-memory errors occur during inference
 
 Factors such as available HPU memory, model size, and input sequence length may prevent the standard inference command from running successfully for your model, potentially resulting in out-of-memory (OOM) errors. To address these errors, consider the following recommendations:
 
-- Increase `gpu_memory_utilization`: To address memory limitations, vLLM pre-allocates HPU cache using the percentage of memory defined by `gpu_memory_utilization`. Increasing this value allocates more space for the KV cache.
+- Increase `gpu_memory_utilization` to a higher value than the default `0.9`. To address memory limitations, vLLM pre-allocates HPU cache using the percentage of memory defined by `gpu_memory_utilization`. Increasing this value allocates more space for the KV cache.
+
+- Increase `tensor_parallel_size` to a higher value than the default `1`. This method distributes the model weights across HPUs, increasing the memory available for the KV cache on each HPU.
+
 - Decrease `max_num_seqs` or `max_num_batched_tokens`: It may reduce the number of concurrent requests in a batch, leading to lower KV cache usage.
-- Increase `tensor_parallel_size`: This method distributes the model weights across HPUs, increasing the memory available for the KV cache on each HPU.
+
+- Disable HPU Graphs completely by switching to any other execution mode to maximize KV cache space allocation.

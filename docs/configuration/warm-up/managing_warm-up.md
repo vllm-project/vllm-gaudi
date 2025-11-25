@@ -64,7 +64,7 @@ This results in the following:
 
 #### Docker
 
-No changes are required in the Dockerfile as recipe cache is specific to the model and use case. Use the ``-e`` flag to set the environment variable:
+No changes are required in the Dockerfile as recipe cache is specific to the model and use case. Use the `-e` flag to set the environment variable:
 
 ```
 -e PT_HPU_RECIPE_CACHE_CONFIG='/tmp/llama3_8b_recipe_cache/',True,8192
@@ -72,10 +72,7 @@ No changes are required in the Dockerfile as recipe cache is specific to the mod
 
 ## Bucket Management
 
-vLLM warm-up time is determined by the number of HPU graphs that must be compiled to support dynamic shapes, which in turn are influenced by the `batch_size` and `sequence_length`. The following parameters define the upper limits for graph compilation. Setting them according to `max_model_len` ensures that additional graphs are not compiled at runtime.
-
-- Sequence length max (`VLLM_PROMPT_SEQ_BUCKET_MAX`): `max_model_len`
-- Block size max (`VLLM_DECODE_BLOCK_BUCKET_MAX`): `max(128, (max_num_seqs*2048)/block_size)`
+vLLM warm-up time is determined by the number of HPU graphs that must be compiled to support dynamic shapes. These shapes are influenced by the `batch_size`, `query_length`, and `num_context_blocks`. Setting them according to `max_num_batched_tokens` ensures that additional graphs are not compiled at runtime.
 
 ## Exponential Bucketing
 
