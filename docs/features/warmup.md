@@ -157,7 +157,7 @@ The potential consequences of omitting warm-up include:
 - Compilation latency can manifest as a sudden tail-latency spike for a user request.
 - Multiple first-seen swap sizes across different processes may each trigger separate compilations.
 
-You can disable either the warm-up step itself or the entire defragmentation feature. To skip all warm-up phases, including the defragmenter, set `VLLM_SKIP_WARMUP=true`. Alternatively, running without unified attention effectively disables the defragmenter, since it is tied to unified attention; in this case, the warm-up becomes a no-op. Note that there is no separate environment flag in this version to force-enable or disable defragmentation independently of unified attention. Additionally, if supported by your execution mode, you can avoid graph compilation for defragmenter swaps by setting `VLLM_DEFRAG_WITH_GRAPHS=false`. This causes swaps to fall back to regular execution, while the warm-up still exercises them without triggering graph capture.
+You can disable either the warm-up step itself or the entire defragmentation feature. To skip all warm-up phases, including the defragmenter, set `VLLM_SKIP_WARMUP=true`. <!-- Alternatively, running without unified attention effectively disables the defragmenter, since it is tied to unified attention; in this case, the warm-up becomes a no-op. Note that there is no separate environment flag in this version to force-enable or disable defragmentation independently of unified attention.  -->Additionally, if supported by your execution mode, you can avoid graph compilation for defragmenter swaps by setting `VLLM_DEFRAG_WITH_GRAPHS=false`. This causes swaps to fall back to regular execution, while the warm-up still exercises them without triggering graph capture.
 
 Related environment variables:
 
@@ -167,13 +167,13 @@ Related environment variables:
 - `VLLM_SKIP_WARMUP`: Disables all warm-up stages including defragmentation.
 
 !!! note
-    Disabling the defragmenter warm-up does not turn off defragmentation itself, unless unified attention or the feature is entirely disabled. It simply skips ahead-of-time graph preparation, which may shift the compilation cost to the first live fragmentation event.
+    Disabling the defragmenter warm-up does not turn off defragmentation itself.<!--, unless unified attention or the feature is entirely disabled.--> It simply skips ahead-of-time graph preparation, which may shift the compilation cost to the first live fragmentation event.
 
 ### Defragmenter Warm-Up Process
 
 During the main warm-up (`warmup_model`), the system calls the internal `warmup_defragmenter` method after initializing the KV caches and defragmenter. The process is defined by following warm-up steps:
 
-1. Confirming that the defragmenter warm-up feature is enabled, as it only runs when unified attention is enabled, and that the `cache_utils` swap utilities are ready.
+1. Confirming that the defragmenter warm-up feature is enabled and that the `cache_utils` swap utilities are ready.
 2. Establishing the list of padding thresholds: `[8, 16, 32, 64, 128, 256, 512]`.
 3. Choosing a minimal valid swap pair `[(1, 0)]` with two distinct block IDs. Only two real blocks are required. Internally, each swap call is padded up to the current threshold length so that a compiled graph for that exact padded size is produced.
 4. Iterating through each threshold and invoking a swap. This captures or compiles, depending on the execution mode, the swap graph for that padded size.
