@@ -4,13 +4,14 @@
 import os
 from vllm import LLM, EngineArgs
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm_gaudi.extension.profiler import HabanaMemoryProfiler
 
 
 def create_parser():
     parser = FlexibleArgumentParser()
     # Add engine args
     EngineArgs.add_cli_args(parser)
-    parser.set_defaults(model="Qwen/Qwen3-8B", enforce_eager=False)
+    parser.set_defaults(model="meta-llama/Llama-3.2-1B-Instruct", enforce_eager=False)
     return parser
 
 
@@ -21,6 +22,13 @@ def print_outputs(outputs):
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
         print("-" * 50)
+
+
+def assert_model_device(model_runner, targert_device):
+    if model_runner:
+        params_devices = list(set([p.device for p in model_runner.model.parameters()]))
+        assert len(params_devices) == 1
+        assert params_devices[0].type == targert_device
 
 
 def main(args):
@@ -37,17 +45,25 @@ def main(args):
         "The future of AI is",
     ]
 
+    multiproc = os.getenv("VLLM_ENABLE_V1_MULTIPROCESSING")
+    model_runner = None
+    if multiproc == "0":
+        model_runner = llm.llm_engine.model_executor.driver_worker.worker.model_runner
+
     outputs = llm.generate(prompts)
     print_outputs(outputs)
 
     for i in range(3):
-        assert llm.llm_engine.is_sleeping() == False
-        llm.sleep()
-        assert llm.llm_engine.is_sleeping() == True
-        llm.wake_up(["weights"])
-        assert llm.llm_engine.is_sleeping() == True
-        llm.wake_up(["kv_cache"])
-        assert llm.llm_engine.is_sleeping() == False
+        with HabanaMemoryProfiler() as m:
+            llm.sleep()
+        assert m.consumed_device_memory < -60 * 1024 * 1024 * 1024  # check if more than 60GB was freed
+        assert_model_device(model_runner, "cpu")
+
+        with HabanaMemoryProfiler() as m:
+            llm.wake_up(["weights", "kv_cache"])
+        assert m.consumed_device_memory > 60 * 1024 * 1024 * 1024  # check if more than 60GB was allocated
+        assert_model_device(model_runner, "hpu")
+
         outputs = llm.generate(prompts)
         print_outputs(outputs)
 

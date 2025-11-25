@@ -49,6 +49,16 @@ if [ $? -ne 0 ]; then
 fi
 echo "Test with structured outputs passed"
 
+# sleep mode
+echo "Testing basic model with sleep mode / wake up functionality"
+echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 VLLM_ENABLE_V1_MULTIPROCESSING=0 python -u vllm-gaudi/tests/full_tests/sleep_mode.py --model facebook/opt-125m
+HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 VLLM_ENABLE_V1_MULTIPROCESSING=0 python -u vllm-gaudi/tests/full_tests/sleep_mode.py --model facebook/opt-125m
+if [ $? -ne 0 ]; then
+    echo "Error: Test failed for sleep mode" >&2
+    exit -1
+fi
+echo "Test with sleep mode passed"
+
 # DP2
 # echo "Testing data parallel size 2 with vllm-hpu plugin v1"
 # echo HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u vllm-gaudi/examples/data_parallel.py --dp-size 2 --tp-size 2
