@@ -13,7 +13,7 @@ logging.basicConfig(
 )
 
 os.environ["VLLM_SKIP_WARMUP"] = "true"
-os.environ["VLLM_CONTIGUOUS_PA"] = "false"
+#os.environ["VLLM_CONTIGUOUS_PA"] = "false"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 

@@ -3,6 +3,7 @@ import numpy as np
 import habana_frameworks.torch as htorch
 from dataclasses import dataclass
 from vllm_gaudi.extension.unified import HPUUnifiedAttentionMetadata
+from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 import math
 from typing import Optional, Callable, Union
 from vllm_gaudi.extension.logger import logger as init_logger
@@ -20,6 +21,7 @@ class UnifiedBatch:
     logits_groups_cpu: torch.Tensor
     attn_metadata: HPUUnifiedAttentionMetadata
     invalid_req_indices: list[int]
+    spec_decode_metadata: Optional[SpecDecodeMetadata] = None
 
 
 def to_hpu(data: Optional[Union[torch.Tensor, list]], dtype: Optional[torch.dtype] = None) -> torch.Tensor:
@@ -201,19 +203,24 @@ class UnifiedBatchPersistentContext:
         self.causal_bias = np.full((max_num_batched_tokens, max_num_batched_tokens), -math.inf, dtype=np_dtype)
 
 
-def create_unified_batch(req_ids: list[str],
-                         all_token_ids: torch.Tensor,
-                         num_computed_tokens: torch.Tensor,
-                         num_scheduled_tokens: torch.Tensor,
-                         num_prompt_tokens: torch.Tensor,
-                         block_table: torch.Tensor,
-                         block_size: int,
-                         dtype: torch.dtype,
-                         persistent_ctx: UnifiedBatchPersistentContext,
-                         bucketing_fn: Callable[[bool, int, int, int, int], tuple[int, int, int, int]],
-                         get_dp_padding_fn: Callable[[int], int],
-                         input_ids_hpu: Optional[torch.Tensor] = None,
-                         num_decodes: int = 0) -> UnifiedBatch:
+def create_unified_batch(
+    req_ids: list[str],
+    all_token_ids: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    num_scheduled_tokens: torch.Tensor,
+    num_prompt_tokens: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    dtype: torch.dtype,
+    persistent_ctx: UnifiedBatchPersistentContext,
+    bucketing_fn: Callable[[bool, int, int, int, int], tuple[int, int, int, int]],
+    get_dp_padding_fn: Callable[[int], int],
+    input_ids_hpu: Optional[torch.Tensor] = None,
+    num_decodes: int = 0,
+    scheduled_spec_decode_tokens: Optional[dict[int, int]] = None,
+    prepare_spec_decode_inputs_fn: Optional[Callable[[dict[int, int], np.ndarray, torch.Tensor, int],
+                                                     tuple[np.ndarray, SpecDecodeMetadata]]] = None,
+) -> UnifiedBatch:
     """ Calculate all necessary tensors needed for batch scheduling """
     # Track original dtypes before converting to numpy
     token_ids_dtype = all_token_ids.dtype
@@ -223,9 +230,18 @@ def create_unified_batch(req_ids: list[str],
     # Convert to numpy
     all_token_ids = all_token_ids.numpy()
     num_computed_tokens = num_computed_tokens.numpy()
-    num_scheduled_tokens = num_scheduled_tokens.numpy()
     num_prompt_tokens = num_prompt_tokens.numpy()
     block_table = block_table.numpy()
+    num_scheduled_tokens = num_scheduled_tokens.tolist()
+    # NOTE(Chendi): In spec decode case, we will return -1 as dummy draft token
+    # while we need to exclude them when counting num_scheduled_tokens
+    for idx, req_id in enumerate(req_ids):
+        spec_tokens = scheduled_spec_decode_tokens.get(req_id, None)
+        if spec_tokens is None:
+            continue
+        num_spec_tokens = len([i for i in spec_tokens if i != -1])
+        num_scheduled_tokens[idx] = num_spec_tokens + 1
+    num_scheduled_tokens = np.asarray(num_scheduled_tokens, dtype=np.int32)
 
     # Convert torch dtype to numpy dtype for internal operations
     if hasattr(dtype, 'numpy_dtype'):
@@ -246,6 +262,7 @@ def create_unified_batch(req_ids: list[str],
     contains_prompts = bool(np.any(is_prompt))
     num_output_tokens = total_tokens - num_prompt_tokens + 1
     num_output_tokens = np.clip(num_output_tokens, np.zeros_like(num_scheduled_tokens), num_scheduled_tokens)
+    num_tokens = max(num_output_tokens)
     group_starts = np.cumsum(num_scheduled_tokens) - num_scheduled_tokens
 
     token_groups, token_offsets = indices_and_offsets(num_scheduled_tokens)
@@ -258,7 +275,10 @@ def create_unified_batch(req_ids: list[str],
     logits_groups, logits_offsets = indices_and_offsets(num_output_tokens)
     start_logits_indices = np.cumsum(num_scheduled_tokens, dtype=num_scheduled_tokens.dtype) - num_output_tokens
     logits_indices = logits_offsets + start_logits_indices[logits_groups]
-    new_token_positions = total_tokens[logits_groups]
+    # NOTE(Chendi): for spec decode, scheduled tokens is more than 1.
+    # So we can't simply use total, we need to offset
+    negative_logits_offsets = num_output_tokens[logits_groups] - logits_offsets - 1
+    new_token_positions = total_tokens[logits_groups] - negative_logits_offsets
 
     def first_dim(t: Optional[np.ndarray]) -> int:
         """ Takes first dim size or 0 if tensor is None"""
@@ -342,7 +362,14 @@ def create_unified_batch(req_ids: list[str],
             # Depends on 1 decode token/batch
             invalid_req_indices.append(len(req_ids) - 1)
 
-    # Convert numpy arrays to HPU tensors with proper dtypes
+    # call prepare_spec_decode_inputs to prepare spec decode inputs
+    _, spec_decode_metadata = prepare_spec_decode_inputs_fn(
+        all_token_ids.shape[0],
+        scheduled_spec_decode_tokens,
+        logits_indices_device,
+        token_ids_device,
+        num_tokens,
+    )
     return UnifiedBatch(
         req_ids_cpu=req_ids,
         token_ids=token_ids_device,
@@ -364,4 +391,5 @@ def create_unified_batch(req_ids: list[str],
             feps=to_hpu(feps),
         ),
         invalid_req_indices=invalid_req_indices,
+        spec_decode_metadata=spec_decode_metadata,
     )
