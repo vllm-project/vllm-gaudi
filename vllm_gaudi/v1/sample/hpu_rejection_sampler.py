@@ -26,8 +26,8 @@ def rejection_sample_pytorch(
     tokens per sequence.
 
     The current HPU implementation of spec decode will flatten the num_draft_tokens
-    to 1. And so the batch size in the padded_draft_token_ids will be
-    the real batch size * padded_draft_token_ids.
+    to 1. And so the shape size of padded_draft_token_ids will be
+    the [real batch size * num_draft_tokens, 1].
 
     Args:
         padded_draft_token_ids (torch.Tensor): A 2D tensor of draft tokens.
