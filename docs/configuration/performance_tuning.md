@@ -2,12 +2,6 @@
 
 Understanding how configuration settings affect system behavior is essential for effective performance management. This document explains how you can tune and optimize performance.
 
-## Warm-Up
-
-During the development phase, when evaluating a model for inference on vLLM, you may skip the warm-up phase of the server using the `VLLM_SKIP_WARMUP=true` environment variable. This helps to achieve faster testing turnaround times. However, disabling warm-up is acceptable only for development purposes, we strongly recommend keeping it enabled in production environments. Keep warm-up enabled during deployment with optimal number of [buckets](../../features/bucketing_mechanism.md).
-
-Warm-up time depends on many factors, such as input and output sequence length, batch size, number of buckets, and data type. It can even take a couple of hours, depending on the configuration. For more information, see the [Warm-up](../../features/warmup.md) document.
-
 ## Memory Allocation
 
 HPU graphs and the KV cache share the same usable memory pool, determined by `gpu_memory_utilization`. Memory allocation between the two must be balanced to prevent performance degradation. You can find memory consumption information for your model in the logs. They provide device memory usage during model weight loading, profiling runs (using dummy data and without the KV cache), and the final usable memory available before the warm-up phase begins. You can use this information to determine an appropriate bucketing scheme for warm-ups. The following example shows the initial part of the generated server log for the [Meta-Llama-3.1-8B](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B) model:
@@ -35,8 +29,6 @@ INFO 09-24 17:32:13 habana_executor.py:91] init_cache_engine took 64.26 GiB of d
 
 After analyzing these logs, you should have a good understanding of how much free device memory remains for overhead calculations and how much more could still be used by increasing `gpu_memory_utilization`. You can balance the memory allocation for warm-up bucketing, HPU graphs, and the KV cache to suit your workload requirements.
 
-The `VLLM_GRAPH_PROMPT_RATIO` environment variable controls the ratio of usable graph memory between prefill and decode graphs. Assigning more memory to a stage usually results in faster execution for that stage.
-
 ## Bucketing Mechanism
 
 The [bucketing mechanism](../../features/bucketing_mechanism.md) can help optimize performance across different workloads. The vLLM server is pre-configured for heavy decoding scenarios with high request concurrency, using the default maximum batch size strategy (`VLLM_GRAPH_DECODE_STRATEGY`). During low-load periods, this configuration may not be ideal and can be adjusted for smaller batch sizes. For example, modifying bucket ranges via `VLLM_DECODE_BS_BUCKET_{param}` can improve efficiency. For a list of environment variables controlling bucketing behavior, see the [Environment Variables](../env_variables.md) document.
@@ -45,3 +37,9 @@ The [bucketing mechanism](../../features/bucketing_mechanism.md) can help optimi
 
 Using the Floating Point 8-bit (FP8) data type for large language models reduces memory bandwidth requirements by half compared to BF16. In addition, the FP8 computation is twice as fast as BF16, enabling performance gains even for compute-bound workloads, such as offline inference with large batch sizes.
 For more information, see the [Floating Point 8-bit](../../features/floating_point_8.md) document.
+
+## Warm-Up
+
+During the development phase, when evaluating a model for inference on vLLM, you may skip the warm-up phase of the server using the `VLLM_SKIP_WARMUP=true` environment variable. This helps to achieve faster testing turnaround times. However, disabling warm-up is acceptable only for development purposes, we strongly recommend keeping it enabled in production environments. Keep warm-up enabled during deployment with optimal number of [buckets](../../features/bucketing_mechanism.md).
+
+Warm-up time depends on many factors, such as input and output sequence length, batch size, number of buckets, and data type. It can even take a couple of hours, depending on the configuration. For more information, see the [Warm-up](../../features/warmup.md) document.
