@@ -30,7 +30,7 @@ model_text:
 model_vision:
   MODELS:
     - Qwen/Qwen2.5-VL-7B-Instruct
-  DATASET: lmarena-ai/vision-arena-bench-v0.1
+  DATASET: lmarena-ai/VisionArena-Chat
   DATASET_NAME: hf
   BACKEND: openai-chat
   ENDPOINT: /v1/chat/completions
