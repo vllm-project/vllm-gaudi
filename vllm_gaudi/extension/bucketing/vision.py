@@ -14,6 +14,11 @@ MULTIMODAL_CONFIG = {
     'ovis2.5': {
         'is_batch_based': False,
         'buckets': [784, 1600, 3136, 4096, 6400, 7744, 9216, 12544]
+    },
+
+    'qwen2_5_vl': {
+        'is_batch_based': False,
+        'buckets': [1600, 3136, 4096, 6400, 7744, 9216, 12544]
     }
 }
 
@@ -48,7 +53,7 @@ class HPUVisionBucketManager:
                 return config
 
         # Default config
-        logger.info("MultiModal bucket config file for {model_name} not found.")
+        logger.info(f"MultiModal bucket config file for {model_name} not found.")
         return {'is_batch_based': True, 'buckets': [1, 2, 4, 8]}
 
     def _process_buckets(self, buckets):
