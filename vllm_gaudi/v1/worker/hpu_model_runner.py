@@ -4718,7 +4718,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 max_num_shared_blocks = math.ceil(num_blocks * get_config().unified_attn_shared_cache_ratio)
                 self.unified_attn_persistent_ctx = UnifiedBatchPersistentContext(self.max_num_batched_tokens,
                                                                                  max_num_shared_blocks, num_blocks,
-                                                                                 self.block_size, dtype)
+                                                                                 self.block_size, dtype, self.profiler)
             logger.info("Allocating unified persistent batch took %.4f GB of host memory",
                         m.consumed_host_memory / float(2**30))
 
