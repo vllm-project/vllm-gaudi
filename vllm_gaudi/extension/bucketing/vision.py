@@ -15,7 +15,6 @@ MULTIMODAL_CONFIG = {
         'is_batch_based': False,
         'buckets': [784, 1600, 3136, 4096, 6400, 7744, 9216, 12544]
     },
-
     'qwen2_5_vl': {
         'is_batch_based': False,
         'buckets': [1600, 3136, 4096, 6400, 7744, 9216, 12544]

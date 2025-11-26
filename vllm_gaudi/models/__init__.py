@@ -9,7 +9,5 @@ def register_model():
         "vllm_gaudi.models.gemma3_mm:HpuGemma3ForConditionalGeneration")
 
     from vllm_gaudi.models.qwen2_5_vl import HpuQwen2_5_VLForConditionalGeneration  # noqa: F401
-    ModelRegistry.register_model(
-        "Qwen2_5_VLForConditionalGeneration",
-        "vllm_gaudi.models.qwen2_5_vl:HpuQwen2_5_VLForConditionalGeneration"
-    )
+    ModelRegistry.register_model("Qwen2_5_VLForConditionalGeneration",
+                                 "vllm_gaudi.models.qwen2_5_vl:HpuQwen2_5_VLForConditionalGeneration")
