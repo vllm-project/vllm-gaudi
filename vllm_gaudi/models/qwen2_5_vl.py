@@ -79,7 +79,7 @@ class AttentionLongSequence:
             if i % 75 == 0:
                 htcore.mark_step()
         return attn_output
-    
+
 def create_block_diagonal_attention_mask_outerprod(indices):
     maxsize = indices[-1]
     range_to_max_for_each_img = torch.arange(
@@ -157,8 +157,6 @@ class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
             cu_seqlens: torch.Tensor,
             rotary_pos_emb_cos: torch.Tensor,
             rotary_pos_emb_sin: torch.Tensor,
-            max_seqlen: torch.Tensor = None,  # Only used for Flash Attention
-            seqlens: torch.Tensor = None,  # Only used for xFormers
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -286,22 +284,22 @@ class HPUQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
             attn_backend_override=attn_backend_override,
         )
 
-    def forward_v1(
+    def forward(
             self,
             x: torch.Tensor,
             cu_seqlens: torch.Tensor,
-            rotary_pos_emb: torch.Tensor,
+            rotary_pos_emb_cos: torch.Tensor,
+            rotary_pos_emb_sin: torch.Tensor,
             max_seqlen: Optional[int] = None,  # Only used for Flash Attention
             seqlens: Optional[list[int]] = None,  # Only used for xFormers
     ) -> torch.Tensor:
         x = x + self.attn(self.norm1(x),
                           cu_seqlens=cu_seqlens,
-                          rotary_pos_emb=rotary_pos_emb,
-                          max_seqlen=max_seqlen,
-                          seqlens=seqlens)
+                          rotary_pos_emb_cos=rotary_pos_emb_cos,
+                          rotary_pos_emb_sin=rotary_pos_emb_sin)
 
         x = x + self.mlp(self.norm2(x))
-        return x        
+        return x
 
 class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
     """
@@ -432,8 +430,7 @@ class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
 
             cu_seqlens_tmp = seqlens.cumsum(
                 0) * self.spatial_merge_unit + cu_window_seqlens[-1]
-            
-            # TODO (attafosu): Can we append 'cu_seqlens_tmp' here, and concat later? # noqa
+
             cu_window_seqlens.extend(cu_seqlens_tmp.tolist())
             window_index.append(index_new + window_index_id)
             window_index_id += (grid_t * llm_grid_h * llm_grid_w).item()
@@ -504,8 +501,6 @@ class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
                                 in self.fullatt_block_indexes else None,
                                 rotary_pos_emb_cos=rotary_pos_emb_cos,
                                 rotary_pos_emb_sin=rotary_pos_emb_sin,
-                                max_seqlen=None, # Only used for Flash Attention
-                                seqlens=None, # Only used for xFormers
                                 )
         return hidden_states
 
