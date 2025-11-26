@@ -2941,9 +2941,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             input_ids_hpu = self.input_ids_hpu
 
         batch = create_unified_batch(self.input_batch.req_ids, all_token_ids, num_computed_tokens, num_scheduled_tokens,
-                                    num_prompt_tokens, block_table, self.block_size, self.dtype,
-                                    self.unified_attn_persistent_ctx, self.unified_bucketing_fn, self.get_dp_padding,
-                                    input_ids_hpu, num_decodes)
+                                     num_prompt_tokens, block_table, self.block_size, self.dtype,
+                                     self.unified_attn_persistent_ctx, self.unified_bucketing_fn, self.get_dp_padding,
+                                     input_ids_hpu, num_decodes)
         if self.uses_mrope:
             batch.token_positions = self.get_unified_mrope_position_ids(
                 self.input_batch.req_ids,
@@ -2954,6 +2954,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 padding_gen=-1,
             )
         return batch
+
     @torch.inference_mode()
     def unified_execute_model(self,
                               scheduler_output: "SchedulerOutput",
@@ -2963,9 +2964,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         with self.profiler.record_event('internal', 'prepare_unified_batch'):
             batch = self.prepare_unified_batch(scheduler_output)
         htorch.core.mark_step()
-        
+
         # Prepare multimodal inputs if any
-        htorch.core.mark_step()
         inputs_embeds, model_mm_kwargs = self._get_model_mm_inputs(
             batch.token_ids.unsqueeze(
                 0  # A little unorthodox at dim0 (instead of dim1 w.r.t unified_attn) but doesn't work otherwise. # noqa E501
@@ -2975,7 +2975,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.input_batch.req_ids,
         )
         htorch.core.mark_step()
-        
+
         if self.is_driver_worker:
             unified_attn_cfg = self._get_unified_config(batch.attn_metadata, batch.logits_indices)
             (phase, qlen, num_shared_blocks, num_unique_blocks, num_logits) = unified_attn_cfg
