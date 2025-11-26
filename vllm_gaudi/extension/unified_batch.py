@@ -688,7 +688,7 @@ def create_unified_batch(req_ids: list[str],
     # Async scheduling.
     invalid_req_indices = []
     if input_ids_hpu is not None:
-        # When decodes are not the first ones in the batch, need to copy them to the correct positions
+        # When decodes are not first in the batch, need to copy them to the correct positions
         if decode_index is not None:
             token_ids_device[decode_index] = input_ids_hpu[decode_index]
         else:

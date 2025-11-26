@@ -2389,7 +2389,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         )
         return decode_input_data, None
 
-    def _prepare_input_ids(self, scheduler_output: "SchedulerOutput", return_index=False) -> Optional[torch.Tensor]:
+    def _prepare_input_ids(self,
+                           scheduler_output: "SchedulerOutput",
+                           return_index: bool = False) -> Optional[torch.Tensor]:
         """Prepare the input IDs for the current batch.
         
         Carefully handles the `prev_sampled_token_ids` which can be cached
