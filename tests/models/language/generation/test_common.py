@@ -29,6 +29,7 @@ def launch_lm_eval(eval_config):
         'max_model_len': 4096,
         'max_num_seqs': max_num_seqs,
         'trust_remote_code': trust_remote_code,
+        'batch_size': 'auto',
         'enable_expert_parallel': eval_config.get('enable_expert_parallel', False),
         'chat_template_args': eval_config.get('chat_template_args', {}),
         'seed': eval_config.get('seed', 42),
