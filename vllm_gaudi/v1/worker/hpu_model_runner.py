@@ -4951,7 +4951,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         decode_sampled_token_ids_tensor: Optional[torch.Tensor] = None,
         hidden_states_prefills: Optional[list[torch.Tensor]] = None,
         sample_hidden_states_prefills: Optional[list[torch.Tensor]] = None,
-        aux_hidden_states_prefills: Optional[list[Optional[torch.Tensor]]] = None,
+        aux_hidden_states_prefills: Optional[list[torch.Tensor]] = None,
         num_decodes: Optional[int] = None,
         prefill_data: Optional[PrefillInputData] = None,
         decode_data: Optional[DecodeInputData] = None,
@@ -4964,6 +4964,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
             draft_token_ids = None
             if decode_data is not None:
+                assert num_decodes is not None
                 draft_token_ids = self.propose_eagle_decode(
                     sampled_token_ids,
                     decode_sampled_token_ids_tensor,
@@ -4977,6 +4978,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 # Currently, prefill is done one by one
                 draft_token_ids_prefill = []
                 prefill_batch_start_idx = num_decodes
+                assert prefill_sampled_token_ids_tensor is not None
+                assert hidden_states_prefills is not None
+                assert prefill_batch_start_idx is not None
 
                 for idx, (req_id, prompt_len, token_ids, position_ids, attn_metadata, logits_indices,
                           logits_requests) in enumerate(zip(*shallow_tuple(prefill_data))):
@@ -5061,7 +5065,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self,
         prefill_sampled_token_ids_tensor: torch.Tensor,
         hidden_states_prefills: list[torch.Tensor],
-        aux_hidden_states_prefills: list[Optional[torch.Tensor]],
+        aux_hidden_states_prefills: Optional[list[torch.Tensor]],
         idx,
         token_ids,
         position_ids,
@@ -5079,6 +5083,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         hidden_states = hidden_states_prefills[idx]
         if self.use_aux_hidden_state_outputs:
+            assert aux_hidden_states_prefills is not None
             aux_hidden_states = aux_hidden_states_prefills[idx]
             target_hidden_states = torch.cat(aux_hidden_states, dim=-1)
         else:
