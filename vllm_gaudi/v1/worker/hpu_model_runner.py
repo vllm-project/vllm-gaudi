@@ -1681,8 +1681,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
     # modified from: vllm/v1/worker/gpu_model_runner.py:_calc_mrope_positions
     def get_unified_mrope_position_ids(self, req_ids: list[str], num_computed_tokens: torch.tensor,
-                                       num_scheduled_tokens: torch.tensor, num_prompt_tokens: torch.tensor,
-                                       target_len: int, padding_gen: int) -> torch.Tensor:
+                                       num_scheduled_tokens: torch.tensor, target_len: int,
+                                       padding_gen: int) -> torch.Tensor:
         out_shape = (3, target_len)
         mrope_position_tensor = torch.full(out_shape, padding_gen, dtype=torch.int32, device='cpu')
         mrope_pos_ptr = 0
@@ -2949,7 +2949,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 self.input_batch.req_ids,
                 num_computed_tokens,
                 num_scheduled_tokens,
-                num_prompt_tokens,
                 target_len=batch.token_ids.size(0),
                 padding_gen=-1,
             )
@@ -2968,7 +2967,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # Prepare multimodal inputs if any
         inputs_embeds, model_mm_kwargs = self._get_model_mm_inputs(
             batch.token_ids.unsqueeze(
-                0  # A little unorthodox at dim0 (instead of dim1 w.r.t unified_attn) but doesn't work otherwise. # noqa E501
+                0  # NOTE(attafosu): We unsqueeze at dim0 here to ensure the input tokens shape matches the expected batch-first format required by "model.embed_input_ids()" call in _get_model_mm_inputs and downstream model components. # noqa E501
             ),
             batch.token_ids.shape[0],
             scheduler_output,
