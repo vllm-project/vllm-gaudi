@@ -162,6 +162,15 @@ run_compressed_w4a16_moe_gidx_test() {
     echo "✅ Test with compressed w4a16 MoE with g_idx passed."
 }
 
+# Llama-3.3-70B-Instruct-FP8-dynamic + INC dynamic quant
+run_llama3_70b_inc_dynamic_quant_test() {
+    echo "➡️ Testing Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode ..."
+    QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_maxabs_dynamic_quant.json" \
+    HABANA_VISIBLE_DEVICES=all RUNTIME_SCALE_PATCHING=0 VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 \
+    python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic --max-model-len 2048
+    echo "✅ Test with Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode passed."
+}
+
 # GSM8K on granite-8b
 run_gsm8k_granite_test() {
     echo "➡️ Testing GSM8K on granite-8b..."
@@ -307,6 +316,7 @@ launch_all_tests() {
     run_spec_decode_ngram_test
     run_spec_decode_eagle3_test
     run_spec_decode_eagle3_num_spec_2_test
+    run_llama3_70b_inc_dynamic_quant_test
     #run_embedding_model_test
     echo "🎉 All test suites passed successfully!"
 }
