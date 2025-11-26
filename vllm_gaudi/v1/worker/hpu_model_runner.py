@@ -4648,9 +4648,36 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
-        if len(kv_cache_config.kv_cache_groups) > 1:
-            raise NotImplementedError("Hybrid models with more than one KV cache type are not "
-                                      "supported yet.")
+        # if len(kv_cache_config.kv_cache_groups) > 1:
+        block_sizes = [
+            kv_cache_group.kv_cache_spec.block_size
+            for kv_cache_group in kv_cache_config.kv_cache_groups
+        ]
+        if block_sizes != [self.cache_config.block_size]:
+            assert self.cache_config.cpu_offload_gb == 0, (
+                "Cannot re-initialize the input batch when CPU weight "
+                "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
+                "for more details.")
+            self.input_batch = InputBatch(
+                max_num_reqs=self.max_num_reqs,
+                max_model_len=max(self.max_model_len, self.max_encoder_len),
+                max_num_batched_tokens=self.max_num_tokens,
+                device=self.device,
+                pin_memory=self.pin_memory,
+                vocab_size=self.model_config.get_vocab_size(),
+                block_sizes=block_sizes,
+                is_spec_decode=bool(self.vllm_config.speculative_config),
+                logitsprocs=self.input_batch.logitsprocs,
+                is_pooling_model=self.is_pooling_model,
+                num_speculative_tokens=(
+                    self.vllm_config.speculative_config.num_speculative_tokens
+                    if self.vllm_config.speculative_config else 0),
+            )
+
+        #
+        # TODO:
+        # create attention groups
+        
 
         # build a map from layer_name -> KVCacheTensor
         tensor_map: dict[str, KVCacheTensor] = {}
@@ -4692,6 +4719,29 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         value_cache = None
                     for layer_name in kv_cache_tensor.shared_by:
                         kv_caches[layer_name] = (key_cache, value_cache)
+                elif isinstance(kv_cache_spec, MambaSpec):
+                    raw_tensor = kv_cache_raw_tensors[layer_name]
+                    state_tensors = []
+                    storage_offset_bytes = 0
+                    for (shape, dtype) in zip(kv_cache_spec.shapes,
+                                              kv_cache_spec.dtypes):
+                        dtype_size = get_dtype_size(dtype)
+                        num_element_per_page = (
+                            kv_cache_spec.page_size_bytes // dtype_size)
+                        target_shape = (num_blocks, *shape)
+                        stride = torch.empty(target_shape).stride()
+                        target_stride = (num_element_per_page, *stride[1:])
+                        assert storage_offset_bytes % dtype_size == 0
+                        tensor = torch.as_strided(
+                            raw_tensor.view(dtype),
+                            size=target_shape,
+                            stride=target_stride,
+                            storage_offset=storage_offset_bytes // dtype_size,
+                        )
+                        state_tensors.append(tensor)
+                        storage_offset_bytes += stride[0] * dtype_size
+
+                    kv_caches[layer_name] = state_tensors
                 else:
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.
