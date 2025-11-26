@@ -535,7 +535,6 @@ def create_unified_batch(
         num_output_tokens = total_tokens - num_prompt_tokens + 1
         num_output_tokens = np.clip(num_output_tokens, np.zeros_like(num_scheduled_tokens), num_scheduled_tokens)
         group_starts = np.cumsum(num_scheduled_tokens) - num_scheduled_tokens
-        num_tokens = max(num_output_tokens)
 
         token_groups, token_offsets = indices_and_offsets(num_scheduled_tokens)
         token_positions = token_offsets + num_computed_tokens[token_groups]
@@ -725,14 +724,15 @@ def create_unified_batch(
             invalid_req_indices.append(len(req_ids) - 1)
 
     # call prepare_spec_decode_inputs to prepare spec decode inputs
-    with persistent_ctx.profiler.record_event('internal', 'spec_decode_metadata_prep'):
-        _, spec_decode_metadata = prepare_spec_decode_inputs_fn(
-            all_token_ids.shape[0],
-            scheduled_spec_decode_tokens,
-            logits_indices_device,
-            token_ids_device,
-            num_tokens,
-        )
+    if max(num_output_tokens) > 1:
+        with persistent_ctx.profiler.record_event('internal', 'spec_decode_metadata_prep'):
+            _, spec_decode_metadata = prepare_spec_decode_inputs_fn(all_token_ids.shape[0],
+                                                                    scheduled_spec_decode_tokens,
+                                                                    logits_indices_device,
+                                                                    token_ids_device,
+                                                                    max_num_sampled_tokens=max(num_output_tokens))
+    else:
+        spec_decode_metadata = None
     # Convert numpy arrays to HPU tensors with proper dtypes
     with persistent_ctx.profiler.record_event('internal', 'unified_batch_prep'):
         unified_batch = UnifiedBatch(

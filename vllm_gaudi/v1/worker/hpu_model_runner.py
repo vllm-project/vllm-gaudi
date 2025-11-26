@@ -2351,72 +2351,78 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
     def _prepare_spec_decode_inputs_for_ua(self, batch_size, scheduled_spec_decode_tokens, logits_indices,
                                            token_ids_device, max_num_sampled_tokens):
-        use_spec_decode = max_num_sampled_tokens > 1
-        if not use_spec_decode:
-            spec_decode_metadata = None
-            logger.debug("no draft tokens detected")
-        else:
-            logger.debug("scheduled_spec_decode_tokens=", scheduled_spec_decode_tokens)
-            # Get the number of draft tokens for each request.
-            # Iterate over the dictionary rather than all requests since not all
-            # requests have draft tokens.
-            num_draft_tokens = np.zeros(batch_size, dtype=np.int32)
-            for req_id, draft_token_ids_in_req in (scheduled_spec_decode_tokens.items()):
-                req_idx = self.input_batch.req_id_to_index[req_id]
-                num_tokens = len([i for i in draft_token_ids_in_req if i != -1])
-                num_draft_tokens[req_idx] = num_tokens
+        logger.debug("scheduled_spec_decode_tokens=", scheduled_spec_decode_tokens)
+        # Get the number of draft tokens for each request.
+        # Iterate over the dictionary rather than all requests since not all
+        # requests have draft tokens.
+        num_draft_tokens = np.zeros(batch_size, dtype=np.int32)
+        for req_id, draft_token_ids_in_req in (scheduled_spec_decode_tokens.items()):
+            req_idx = self.input_batch.req_id_to_index[req_id]
+            num_tokens = len([i for i in draft_token_ids_in_req if i != -1])
+            num_draft_tokens[req_idx] = num_tokens
 
-            num_sampled_tokens = num_draft_tokens + 1
+        num_sampled_tokens = num_draft_tokens + 1
 
-            cu_num_sampled_tokens, arange = self._get_cumsum_and_arange(num_sampled_tokens, cumsum_dtype=np.int32)
+        cu_num_sampled_tokens, arange = self._get_cumsum_and_arange(num_sampled_tokens, cumsum_dtype=np.int32)
 
-            logits_indices = []
-            bonus_logits_indices = []
-            target_logits_indices = []
-            accumulate_index = 0
-            for _, n_tokens in enumerate(num_sampled_tokens):
-                for i in range(n_tokens - 1):
-                    logits_indices.append(accumulate_index + i)
-                    target_logits_indices.append(accumulate_index + i)
-                    accumulate_index += 1
-                bonus_logits_indices.append(accumulate_index)
-                logits_indices.append(accumulate_index)
+        # NOTE(Chendi): For unified attention, we made several design changes
+        # Since HPU graph shape does not depend on [batch_size, num_tokens],
+        # we will skip spec decode if previous fwd generate none draft tokens
+        # we will save tokens by not padding to max_num_sampled_tokens
+        # Example:
+        # scheduled_spec_decode_tokens={'0': [-1], '1': [-1], '2': [17689], '3': [-1]}
+        # token_ids = [[tok_0], [tok_1], [tok_2, draft_tok], [tok_4]]
+        # draft_token_indices = [0, 0, 3, 0] => pos of token_ids for compare to target model output
+        # target_token_indices = [-1, -1, 2, -1] => -1 is place holder, only verify pos==2 of target model output
+        # bonus_token_indices = [0, 1, 3, 4] => new generated token from target model
+
+        logits_indices = []
+        bonus_logits_indices = []
+        target_logits_indices = []
+        accumulate_index = 0
+        for _, n_tokens in enumerate(num_sampled_tokens):
+            for i in range(n_tokens - 1):
+                logits_indices.append(accumulate_index + i)
+                target_logits_indices.append(accumulate_index + i)
                 accumulate_index += 1
-                if n_tokens < max_num_sampled_tokens:
-                    logits_indices.extend([-1] * (max_num_sampled_tokens - n_tokens))
-                    target_logits_indices.extend([-1] * (max_num_sampled_tokens - n_tokens))
-            logits_indices = np.array(logits_indices, dtype=np.int32)
-            bonus_logits_indices = np.array(bonus_logits_indices, dtype=np.int32)
-            target_logits_indices = np.array(target_logits_indices, dtype=np.int32)
+            bonus_logits_indices.append(accumulate_index)
+            logits_indices.append(accumulate_index)
+            accumulate_index += 1
+            if n_tokens < max_num_sampled_tokens:
+                logits_indices.extend([-1] * (max_num_sampled_tokens - n_tokens))
+                target_logits_indices.extend([-1] * (max_num_sampled_tokens - n_tokens))
+        logits_indices = np.array(logits_indices, dtype=np.int32)
+        bonus_logits_indices = np.array(bonus_logits_indices, dtype=np.int32)
+        target_logits_indices = np.array(target_logits_indices, dtype=np.int32)
 
-            cu_num_draft_tokens, arange = self._get_cumsum_and_arange(num_draft_tokens, cumsum_dtype=np.int32)
+        cu_num_draft_tokens, arange = self._get_cumsum_and_arange(num_draft_tokens, cumsum_dtype=np.int32)
 
-            # TODO: Optimize the CPU -> GPU copy.
-            cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).to(self.device, non_blocking=True)
-            cu_num_sampled_tokens = torch.from_numpy(cu_num_sampled_tokens).to(self.device, non_blocking=True)
+        # TODO: Optimize the CPU -> GPU copy.
+        cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).to(self.device, non_blocking=True)
+        cu_num_sampled_tokens = torch.from_numpy(cu_num_sampled_tokens).to(self.device, non_blocking=True)
 
-            ##################################################
-            logits_indices = torch.from_numpy(logits_indices)
-            target_logits_indices_device = \
-                torch.from_numpy(target_logits_indices).to(
-                self.device, non_blocking=True)
-            bonus_logits_indices_device = \
-                torch.from_numpy(bonus_logits_indices).to(
-                self.device, non_blocking=True)
-            draft_logits_indices_device = target_logits_indices_device + 1
-            draft_token_ids = token_ids_device[draft_logits_indices_device]
+        ##################################################
+        logits_indices = torch.from_numpy(logits_indices)
+        target_logits_indices_device = \
+            torch.from_numpy(target_logits_indices).to(
+            self.device, non_blocking=True)
+        bonus_logits_indices_device = \
+            torch.from_numpy(bonus_logits_indices).to(
+            self.device, non_blocking=True)
+        draft_logits_indices_device = target_logits_indices_device + 1
+        draft_token_ids = token_ids_device[draft_logits_indices_device]
 
-            if draft_token_ids.dim() == 1:
-                draft_token_ids = draft_token_ids.view(batch_size, -1)
-            spec_decode_metadata = SpecDecodeMetadata(
-                draft_token_ids=draft_token_ids,
-                num_draft_tokens=num_draft_tokens.tolist(),
-                cu_num_draft_tokens=cu_num_draft_tokens,
-                cu_num_sampled_tokens=cu_num_sampled_tokens,
-                target_logits_indices=target_logits_indices_device,
-                bonus_logits_indices=bonus_logits_indices_device,
-                logits_indices=logits_indices,
-            )
+        if draft_token_ids.dim() == 1:
+            draft_token_ids = draft_token_ids.view(batch_size, -1)
+        spec_decode_metadata = SpecDecodeMetadata(
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=num_draft_tokens.tolist(),
+            cu_num_draft_tokens=cu_num_draft_tokens,
+            cu_num_sampled_tokens=cu_num_sampled_tokens,
+            target_logits_indices=target_logits_indices_device,
+            bonus_logits_indices=bonus_logits_indices_device,
+            logits_indices=logits_indices,
+        )
         return logits_indices, spec_decode_metadata
 
     def _prepare_unified_decode_inputs(self, num_decodes, num_scheduled_tokens, warmup_mode=False):
