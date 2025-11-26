@@ -1461,7 +1461,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # This may require moving multimodal input preps into _prepare_inputs,        # noqa
             # to avoid padding issues.
             htorch.core.mark_step()
-            inputs_embeds = self.model.get_input_embeddings(
+            inputs_embeds = self.model.embed_input_ids(
                 token_ids,
                 multimodal_embeddings=mm_embeds,
                 is_multimodal=is_mm_embed,
