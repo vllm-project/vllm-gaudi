@@ -36,7 +36,7 @@ def convert_files(input_path, output_path):
                         # "scale_inv" in deepseek-r1 is actually "scale"
                         tensor = tensor.float() * 2
                     else:
-                        raise NotImplementedError(f"Cannot covert {k}")
+                        raise NotImplementedError(f"Cannot convert {k}")
                 else:
                     print(f"skip {k}.")
                 tensors[k] = tensor
