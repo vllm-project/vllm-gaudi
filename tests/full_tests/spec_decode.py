@@ -243,6 +243,7 @@ def test_mtp_model(is_enable, args, prompts, sampling_params, task_key, result_q
                 enable_expert_parallel=True,
                 speculative_config={
                     "num_speculative_tokens": args.num_spec_tokens,
+                    "method": "mtp",
                 },
                 disable_log_stats=False,
                 trust_remote_code=True,
@@ -330,7 +331,7 @@ if __name__ == "__main__":
             task_queue['baseline_eaglemtp'] = {
                 'proc':
                 multiprocessing.Process(target=test_eaglemtp_model,
-                                        args=(False, args, prompts, sampling_params, 'baseline_mtp', result_queue))
+                                        args=(False, args, prompts, sampling_params, 'baseline_eaglemtp', result_queue))
             }
         task_queue['spec_eaglemtp'] = {
             'proc':
