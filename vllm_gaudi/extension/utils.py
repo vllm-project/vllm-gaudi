@@ -47,9 +47,11 @@ def get_kv_fetch_extra_args(**kwargs):
 
 class VLLMKVCache(torch.nn.Module):
 
-    def __init__(self):
+    def __init__(self, is_v_cache: bool = False):
         super().__init__()
         self.use_contiguous_pa = get_config().use_contiguous_pa
+        # is_v_cache is used in INC FP8 dynamic quantization to identify V cache
+        self.is_v_cache = is_v_cache
 
     def forward(self, input, cache, slot_mapping, *args, **kwargs):
         # In cross-attention kv cache forward inputs are None in decode

@@ -417,7 +417,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             else FP8Matmul()
         self.k_cache = VLLMKVCache() if not self.enable_fp8_attn \
             else VLLMFP8KVCache()
-        self.v_cache = VLLMKVCache() if not self.enable_fp8_attn \
+        self.v_cache = VLLMKVCache(is_v_cache=True) if not self.enable_fp8_attn \
             else VLLMFP8KVCache()
         HPUFusedSDPA = kernels.fsdpa()
         self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
