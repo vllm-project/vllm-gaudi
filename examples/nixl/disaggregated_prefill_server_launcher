@@ -1,0 +1,557 @@
+#!/bin/bash
+
+BASH_DIR=$(dirname "${BASH_SOURCE[0]}")
+
+# Help function
+show_help() {
+    cat << EOF
+Usage: $0 [OPTIONS]
+
+Launch disaggregated vLLM servers for prefill or decode operations.
+
+OPTIONS:
+    -h, --help                      Show this help message
+    -m, --model MODEL               Model to serve (default: ibm-research/PowerMoE-3b)
+    -r, --role ROLE                 Server role: prefill or decode (default: prefill)
+    -n, --num-instances NUM         Number of local instances (default: 1)
+    -t, --tp-size SIZE              Tensor parallel size (default: 1)
+    -d, --dp-size SIZE              Data parallel size (default: 1)
+    --base-port PORT                Base port for servers (default: 8300)
+    --base-channel-port PORT        Base channel port (default: 4300)
+    --node-size SIZE                Total number of nodes for this role's DP group (default: 1)
+    --node-rank RANK                Data parallel node rank within this role's group (default: 0)
+    --node-ip IP                    IP address of this node (default: localhost)
+    --dp-master-ip IP               Data parallel master IP (default: localhost)
+    --dp-master-port PORT           Data parallel master port (default: 6300)
+    --nixl-buffer-device DEVICE     Buffer device: cpu or hpu (default: cpu)
+    --nixl-backend BACKEND          NIXL backend: UCX or other (default: UCX)
+    --ucx-tls TLS                   UCX transport layer (default: rc,ud,ib)
+    --max-model-len LENGTH          Maximum model length (default: 8192)
+    --max-num-batched-tokens TOKENS Maximum number of batched tokens (default: 8192)
+    --max-num-seqs SEQS             Maximum number of sequences (default: 256)
+    --max-cudagraph-capture-size SIZE Maximum CUDA graph capture size (default: 4096)
+    --gpu-memory-utilization RATIO  GPU memory utilization ratio (default: 0.75)
+    --enforce-eager                 Enable eager execution mode
+    --debug                         Enable debug mode with reduced model layers
+    --apc                           Enable vLLM prefix cache
+    --profile                       Enable profiling (HABANA_PROFILE and VLLM_PROFILER_ENABLED)
+    --recipe-cache                  Enable HPU recipe cache
+    --async                         Enable async scheduling for decode role (adds --async-scheduling)
+    --warmup                        Enable vLLM warmup (do not skip warmup)
+    --no-ep                         Disable expert parallelism
+    --inc CONFIG_FILE               Path to quantization config JSON file for INC quantization
+    --log-dir DIR                   Directory to save server logs (default: current directory)
+                                    Logs will be saved in DIR/xpyd_logs/YYYYMMDD_HHMMSS/
+
+EXAMPLES:
+    # Launch prefill server with default settings
+    $0
+
+    # Launch decode server with 2 instances
+    $0 --role decode --num-instances 2
+
+    # Launch prefill server with custom model and tensor parallelism
+    $0 --model meta-llama/Llama-2-7b-hf --tp-size 4
+
+    # Launch on specific node in multi-node setup
+    $0 --node-rank 1 --node-ip 192.168.1.100 --dp-master-ip 192.168.1.50
+
+    # Launch with vLLM prefix cache enabled
+    $0 --apc
+
+    # Launch with profiling enabled
+    $0 --profile
+
+    # Launch decode server with async scheduling enabled
+    $0 --role decode --async
+
+    # Launch with warmup enabled
+    $0 --warmup
+
+    # Launch with custom log directory
+    $0 --log-dir /tmp/vllm-logs
+    # (Logs will be saved in /tmp/vllm-logs/xpyd_logs/YYYYMMDD_HHMMSS/)
+
+EOF
+}
+
+# Default values
+MODEL="ibm-research/PowerMoE-3b"
+SERVER_ROLE="prefill"
+NUM_LOCAL_INSTANCES=1
+BASE_PORT=8300
+BASE_CHANNEL_PORT=4300
+NODE_SIZE=1
+NODE_RANK=0
+NODE_IP="localhost"
+TP_SIZE=1
+DP_SIZE=1
+DP_MASTER_IP="localhost"
+DP_MASTER_PORT=6300
+NIXL_BUFFER_DEVICE="cpu"
+VLLM_NIXL_BACKEND="UCX"
+UCX_TLS="rc,ud,ib"
+MAX_MODEL_LEN=8192
+MAX_NUM_BATCHED_TOKENS=8192
+MAX_NUM_SEQS=256
+MAX_CUDAGRAPH_CAPTURE_SIZE=4096
+GPU_MEMORY_UTILIZATION=0.75
+ENFORCE_EAGER=false
+DEBUG=false
+APC=false
+PROFILE=false
+RECIPE_CACHE=false
+ASYNC=false
+WARMUP=false
+ENABLE_EXPERT_PARALLEL=true
+INC_CONFIG=""
+LOG_DIR="."
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        -m|--model)
+            MODEL="$2"
+            shift 2
+            ;;
+        -r|--role)
+            SERVER_ROLE="$2"
+            shift 2
+            ;;
+        -n|--num-instances)
+            NUM_LOCAL_INSTANCES="$2"
+            shift 2
+            ;;
+        -t|--tp-size)
+            TP_SIZE="$2"
+            shift 2
+            ;;
+        -d|--dp-size)
+            DP_SIZE="$2"
+            shift 2
+            ;;
+        --base-port)
+            BASE_PORT="$2"
+            shift 2
+            ;;
+        --base-channel-port)
+            BASE_CHANNEL_PORT="$2"
+            shift 2
+            ;;
+        --node-size)
+            NODE_SIZE="$2"
+            shift 2
+            ;;
+        --node-rank)
+            NODE_RANK="$2"
+            shift 2
+            ;;
+        --node-ip)
+            NODE_IP="$2"
+            shift 2
+            ;;
+        --dp-master-ip)
+            DP_MASTER_IP="$2"
+            shift 2
+            ;;
+        --dp-master-port)
+            DP_MASTER_PORT="$2"
+            shift 2
+            ;;
+        --nixl-buffer-device)
+            NIXL_BUFFER_DEVICE="$2"
+            shift 2
+            ;;
+        --nixl-backend)
+            VLLM_NIXL_BACKEND="$2"
+            shift 2
+            ;;
+        --ucx-tls)
+            UCX_TLS="$2"
+            shift 2
+            ;;
+        --max-model-len)
+            MAX_MODEL_LEN="$2"
+            shift 2
+            ;;
+        --max-num-batched-tokens)
+            MAX_NUM_BATCHED_TOKENS="$2"
+            shift 2
+            ;;
+        --max-num-seqs)
+            MAX_NUM_SEQS="$2"
+            shift 2
+            ;;
+        --max-cudagraph-capture-size)
+            MAX_CUDAGRAPH_CAPTURE_SIZE="$2"
+            shift 2
+            ;;
+        --gpu-memory-utilization)
+            GPU_MEMORY_UTILIZATION="$2"
+            shift 2
+            ;;
+        --enforce-eager)
+            ENFORCE_EAGER=true
+            shift
+            ;;
+        --debug)
+            DEBUG=true
+            shift
+            ;;
+        --apc)
+            APC=true
+            shift
+            ;;
+        --profile)
+            PROFILE=true
+            shift
+            ;;
+        --recipe-cache)
+            RECIPE_CACHE=true
+            shift
+            ;;
+        --async)
+            ASYNC=true
+            shift
+            ;;
+        --warmup)
+            WARMUP=true
+            shift
+            ;;
+        --no-ep)
+            ENABLE_EXPERT_PARALLEL=false
+            shift
+            ;;
+        --inc)
+            INC_CONFIG="$2"
+            shift 2
+            ;;
+        --log-dir)
+            LOG_DIR="$2"
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1"
+            show_help
+            exit 1
+            ;;
+    esac
+done
+
+# Environment variables
+export no_proxy=localhost,${no_proxy}
+export VLLM_USE_V1=1
+if [ "$WARMUP" = false ]; then
+  export VLLM_SKIP_WARMUP=True
+fi
+export PT_HPU_LAZY_MODE=1
+export PT_HPU_ENABLE_LAZY_COLLECTIVES=1
+
+# Set flags based on --apc option
+PREFIX_CACHE=()
+if [ "$APC" = false ]; then
+  # APC will be disabled
+  PREFIX_CACHE+=(--no-enable-prefix-caching)
+fi
+
+# Set profiling flags based on --profile option
+if [ "$PROFILE" = true ]; then
+  export HABANA_PROFILE=1
+  export VLLM_PROFILER_ENABLED=1
+  echo "Profiling enabled: HABANA_PROFILE=1, VLLM_PROFILER_ENABLED=1"
+fi
+
+# Set recipe cache based on --recipe-cache option
+if [ "$RECIPE_CACHE" = true ]; then
+  export PT_HPU_RECIPE_CACHE_CONFIG="/workspace/pd_${SERVER_ROLE}_${NODE_RANK}_cache,false,131072"
+  echo "Recipe cache enabled: PT_HPU_RECIPE_CACHE_CONFIG=${PT_HPU_RECIPE_CACHE_CONFIG}"
+fi
+
+# Set quantization config based on --inc option
+if [ -n "$INC_CONFIG" ]; then
+  export QUANT_CONFIG="$INC_CONFIG"
+  echo "INC quantization enabled: QUANT_CONFIG=${QUANT_CONFIG}"
+  export VLLM_REQUANT_FP8_INC=1
+  export VLLM_ENABLE_RUNTIME_DEQUANT=1
+  export VLLM_MOE_N_SLICE=1
+  export VLLM_HPU_MARK_SCALES_AS_CONST=false
+  export RUNTIME_SCALE_PATCHING=1
+fi
+
+export VLLM_SCALE_ADJUSTMENT=0
+
+# Validate SERVER_ROLE
+if [[ "$SERVER_ROLE" != "prefill" && "$SERVER_ROLE" != "decode" ]]; then
+  echo "Error: SERVER_ROLE ($SERVER_ROLE) must be either 'prefill' or 'decode'"
+  exit 1
+fi
+
+# Create log directory if it doesn't exist
+RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+LOG_DIR_FULL="${LOG_DIR}/xpyd_logs/${RUN_TIMESTAMP}"
+if [ ! -d "$LOG_DIR_FULL" ]; then
+  echo "Creating log directory: $LOG_DIR_FULL"
+  mkdir -p "$LOG_DIR_FULL"
+  if [ $? -ne 0 ]; then
+    echo "Error: Failed to create log directory: $LOG_DIR_FULL"
+    exit 1
+  fi
+fi
+
+# NIXL Config
+export VLLM_NIXL_SIDE_CHANNEL_HOST=${NODE_IP}
+if [ "$NIXL_BUFFER_DEVICE" == "cpu" ]; then
+  export VLLM_NIXL_DEVICE_TO_DEVICE=false
+else
+  export VLLM_NIXL_DEVICE_TO_DEVICE=true
+  # Add gaudi_gdr to UCX_TLS if not already present
+  if [[ "$UCX_TLS" != *"gaudi_gdr"* ]]; then
+    UCX_TLS="${UCX_TLS},gaudi_gdr"
+  fi
+  export UCX_MEMTYPE_CACHE=0
+fi
+
+# Bucket settings
+block_size=128
+input_min=128
+input_max=$MAX_MODEL_LEN
+output_max=$MAX_MODEL_LEN
+prompt_bs_step=2
+prompt_bs_min=1
+prompt_bs_max=$(( $MAX_NUM_BATCHED_TOKENS / $input_min ))
+prompt_bs_max=$(( $prompt_bs_max > $MAX_NUM_SEQS ? $MAX_NUM_SEQS : $prompt_bs_max ))
+# Hardcoded to 8 here for avoiding extra prompt bucket on decode nodes
+prompt_bs_max=$(( $prompt_bs_max > 8 ? 8 : $prompt_bs_max ))
+prompt_bs_max=$(( ($prompt_bs_max + $prompt_bs_step - 1) / $prompt_bs_step * $prompt_bs_step ))
+prompt_seq_step=128
+prompt_seq_min=$(( ($input_min + $prompt_seq_step -1) / $prompt_seq_step * $prompt_seq_step ))
+prompt_seq_max=$(( (($input_max + $prompt_seq_step -1) / $prompt_seq_step) * $prompt_seq_step ))
+prompt_ctx_max=$(( ($MAX_MODEL_LEN - $block_size) / $block_size ))
+decode_bs_step=$(( ($MAX_NUM_SEQS + 15) / 16 ))
+decode_bs_min=1
+decode_bs_max=$(( ($MAX_NUM_SEQS + $decode_bs_step -1) / $decode_bs_step * $decode_bs_step ))
+decode_block_step=$decode_bs_max
+decode_block_min=$(( ($input_min + $block_size - 1) / $block_size ))
+decode_block_min=$(( ($decode_block_min + $decode_block_step) / $decode_block_step * $decode_block_step ))
+decode_block_max=$(( (($input_max + $output_max + $block_size -1) / $block_size + 1) * $decode_bs_max))
+# Set role-specific configurations
+if [ "$SERVER_ROLE" == "prefill" ]; then
+  KV_ROLE="kv_producer"
+  export VLLM_SUPPORT_MOE_CHUNK="false"
+  # Bucket settings
+  export VLLM_EXPONENTIAL_BUCKETING=false
+  export VLLM_PROMPT_BS_BUCKET_MIN=$prompt_bs_min
+  export VLLM_PROMPT_BS_BUCKET_STEP=$prompt_bs_step
+  export VLLM_PROMPT_BS_BUCKET_MAX=$prompt_bs_max
+  export VLLM_PROMPT_QUERY_BUCKET_MIN=$prompt_seq_min
+  export VLLM_PROMPT_QUERY_BUCKET_STEP=$prompt_seq_step
+  export VLLM_PROMPT_QUERY_BUCKET_MAX=$prompt_seq_max
+  export VLLM_DECODE_BS_BUCKET_MIN=1
+  export VLLM_DECODE_BS_BUCKET_STEP=1
+  export VLLM_DECODE_BS_BUCKET_MAX=1
+  export VLLM_DECODE_BLOCK_BUCKET_MIN=2
+  export VLLM_DECODE_BLOCK_BUCKET_STEP=1
+  export VLLM_DECODE_BLOCK_BUCKET_MAX=2
+  if [ "$APC" = false ]; then
+    export VLLM_PROMPT_CTX_BUCKET_MAX=0
+  fi
+else
+  KV_ROLE="kv_consumer"
+  BASE_PORT=$((BASE_PORT+1000))
+  BASE_CHANNEL_PORT=$((BASE_CHANNEL_PORT+1000))
+  DP_MASTER_PORT=$((DP_MASTER_PORT+1000))
+  # MoE settings
+  export VLLM_MOE_CHUNK="64, 128"
+  export VLLM_MOE_TOKEN_BOUNDARY="2048, 4096"
+  export VLLM_EXPONENTIAL_BUCKETING=true
+  # Bucket settings
+  export VLLM_PROMPT_QUERY_BUCKET_MIN=1
+  export VLLM_PROMPT_QUERY_BUCKET_STEP=1
+  export VLLM_PROMPT_QUERY_BUCKET_MAX=1
+fi
+
+# Check if DP_SIZE is 1 or equal to NUM_LOCAL_INSTANCES
+if (( DP_SIZE != 1 && DP_SIZE != NUM_LOCAL_INSTANCES * NODE_SIZE )); then
+  echo "Error: DP_SIZE ($DP_SIZE) must be 1 or equal to NUM_LOCAL_INSTANCES ($NUM_LOCAL_INSTANCES) * NODE_SIZE ($NODE_SIZE)"
+  exit 1
+fi
+
+# Waits for vLLM to start.
+wait_for_server() {
+  local port=$1
+  timeout 1200 bash -c "
+    until env http_proxy=\"\" https_proxy=\"\" HTTP_PROXY=\"\" HTTPS_PROXY=\"\" \
+          curl -s ${NODE_IP}:${port}/v1/completions > /dev/null; do
+      sleep 1
+    done" && return 0 || return 1
+}
+
+# Function to run tests for a specific model
+launch_vllm_server() {
+  local model_name=$1
+  echo "Launching $SERVER_ROLE server with model: $model_name"
+
+  # Arrays to store all hosts and ports
+  HOSTS=()
+  PORTS=()
+
+  # Start instances
+  for i in $(seq 0 $((NUM_LOCAL_INSTANCES-1))); do
+    # Calculate port number (base port + instance number)
+    PORT=$((BASE_PORT+8*NODE_RANK+i))
+    # Calculate side channel port. Avoid clash with with TP workers. 
+    SIDE_CHANNEL_PORT=$((BASE_CHANNEL_PORT+8*NODE_RANK+i))
+
+    echo "Starting local instance $i on node $NODE_RANK, port $PORT"
+
+    DP_ARGS=()
+    if [ "$DP_SIZE" -gt 1 ]; then
+      DP_ARGS+=(--data-parallel-size $DP_SIZE)
+      DP_ARGS+=(--data-parallel-rank $((NUM_LOCAL_INSTANCES*NODE_RANK+i)))
+      DP_ARGS+=(--data-parallel-addr $DP_MASTER_IP)
+      DP_ARGS+=(--data-parallel-rpc-port $DP_MASTER_PORT)
+    fi
+
+    # Build debug args if enabled
+    DEBUG_ARGS=()
+    if [ "$DEBUG" = true ]; then
+      export VLLM_LOGGING_LEVEL=DEBUG
+      export VLLM_DEBUG=fwd
+      # DEBUG_ARGS+=(--hf-overrides \'{\"num_hidden_layers\": 6}\')
+    fi
+
+    # Build eager execution args if enabled
+    EAGER_ARGS=()
+    if [ "$ENFORCE_EAGER" = true ]; then
+      EAGER_ARGS+=(--enforce-eager)
+    fi
+
+    # Build async scheduling args if enabled (decode role only)
+    ASYNC_ARGS=()
+    if [ "$ASYNC" = true ] && [ "$SERVER_ROLE" == "decode" ]; then
+      ASYNC_ARGS+=(--async-scheduling)
+    fi
+
+    # Build expert parallel args if enabled
+    EXPERT_PARALLEL_ARGS=()
+    if [ "$ENABLE_EXPERT_PARALLEL" = true ]; then
+      EXPERT_PARALLEL_ARGS+=(--enable-expert-parallel)
+    fi
+
+    # Build INC quantization args if enabled
+    INC_ARGS=()
+    if [ -n "$INC_CONFIG" ]; then
+      INC_ARGS+=(--kv_cache_dtype "fp8_inc")
+    fi
+
+    # Build the command with or without model-specific args
+    BASE_CMD="UCX_TLS=${UCX_TLS} VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT"
+    
+    # Add profiling directory if profiling is enabled
+    if [ "$PROFILE" = true ]; then
+      PROFILE_DIR="${LOG_DIR_FULL}/profile_outputs_${SERVER_ROLE}_node_${NODE_RANK}_rank_${i}/"
+      BASE_CMD="${BASE_CMD} VLLM_TORCH_PROFILER_DIR=${PROFILE_DIR}"
+      echo "Profile output directory for instance $i: $PROFILE_DIR"
+    fi
+    
+    BASE_CMD="${BASE_CMD} vllm serve $model_name \
+    --port $PORT \
+    --long_prefill_token_threshold 8192 \
+    --max_num_batched_tokens $MAX_NUM_BATCHED_TOKENS \
+    --max-model-len $MAX_MODEL_LEN \
+    --max-num-seqs $MAX_NUM_SEQS \
+    --max-cudagraph-capture-size $MAX_CUDAGRAPH_CAPTURE_SIZE \
+    --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+    --disable-log-requests \
+    --trust-remote-code \
+    --tensor-parallel-size $TP_SIZE \
+    ${PREFIX_CACHE[@]} \
+    ${DP_ARGS[@]} \
+    ${DEBUG_ARGS[@]} \
+    ${EAGER_ARGS[@]} \
+    ${ASYNC_ARGS[@]} \
+    ${EXPERT_PARALLEL_ARGS[@]} \
+    ${INC_ARGS[@]} \
+    --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"${KV_ROLE}\",\"kv_buffer_device\":\"${NIXL_BUFFER_DEVICE}\", \"kv_connector_extra_config\":{\"backends\":[\"${VLLM_NIXL_BACKEND}\"]}}'"
+
+    FULL_CMD="$BASE_CMD"
+    echo $FULL_CMD
+
+    LOG_FILE="${LOG_DIR_FULL}/vllm_server_${SERVER_ROLE}_node_${NODE_RANK}_rank_${i}.log"
+    echo "Logging to: $LOG_FILE"
+    eval "$FULL_CMD &> \"$LOG_FILE\" &"
+
+    # Store host and port for proxy configuration
+    HOSTS+=($NODE_IP)
+    PORTS+=($PORT)
+  done
+
+  # Wait for all instances to start (in parallel)
+  echo "Waiting for all $SERVER_ROLE instances to start..."
+  wait_pids=()
+  for PORT in "${PORTS[@]}"; do
+    echo "Checking $SERVER_ROLE instance on port $PORT..."
+    wait_for_server $PORT &
+    wait_pids+=($!)
+  done
+  
+  # Wait for all background processes to complete
+  for pid in "${wait_pids[@]}"; do
+    wait $pid
+    if [ $? -ne 0 ]; then
+      echo "Error: Failed to start server on one of the ports"
+      exit 1
+    fi
+  done
+
+  # Print all launched servers
+  echo "=============================================="
+  echo "All $SERVER_ROLE servers launched successfully"
+  echo "Run ID: $RUN_TIMESTAMP"
+  echo "Log directory: $LOG_DIR_FULL"
+  echo "=============================================="
+  for i in "${!HOSTS[@]}"; do
+    echo "Server $((i+1)): ${HOSTS[$i]}:${PORTS[$i]}"
+  done
+  echo "=============================================="
+  
+  # Show profiling control commands if profiling is enabled
+  if [ "$PROFILE" = true ]; then
+    echo ""
+    echo "Profiling Control Commands:"
+    echo "=============================================="
+    
+    # Build the port list from actual PORTS array
+    if [ ${#PORTS[@]} -gt 1 ]; then
+      # Multiple ports - create comma-separated list
+      port_list=""
+      for i in "${!PORTS[@]}"; do
+        if [ $i -eq 0 ]; then
+          port_list="${PORTS[$i]}"
+        else
+          port_list="${port_list},${PORTS[$i]}"
+        fi
+      done
+      echo "Start profiling for all instances:"
+      echo "  vllm_start_profile ${NODE_IP}:${port_list}"
+      echo ""
+      echo "Stop profiling for all instances:"
+      echo "  vllm_stop_profile ${NODE_IP}:${port_list}"
+    else
+      # Single port
+      echo "Start profiling:"
+      echo "  vllm_start_profile ${NODE_IP}:${PORTS[0]}"
+      echo ""
+      echo "Stop profiling:"
+      echo "  vllm_stop_profile ${NODE_IP}:${PORTS[0]}"
+    fi
+    echo "=============================================="
+  fi
+}
+
+launch_vllm_server "$MODEL"
+
