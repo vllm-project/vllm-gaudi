@@ -146,6 +146,10 @@ class HpuPlatform(Platform):
         return "vllm_gaudi.lora.punica_wrapper.punica_hpu.PunicaWrapperHPU"
 
     @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        return True
+
+    @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "vllm_gaudi.distributed.device_communicators.hpu_communicator.HpuCommunicator"  # noqa
 
