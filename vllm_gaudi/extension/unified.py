@@ -174,7 +174,8 @@ def partial_attn_causal(query: torch.tensor, key: torch.tensor, value: torch.ten
         b = bias[q_min:q_max, 0:q_max]
 
         s_attn = torch.matmul(q, k.transpose(-1, -2)) + b.unsqueeze(0).unsqueeze(0)
-        if get_config().unified_attn_softmax_fa2_for_shared_causal:
+        # TODO: remove dtype check once full support is added for fp8 in unified attention
+        if get_config().unified_attn_softmax_fa2 and s_attn.dtype == torch.bfloat16:
             inputM_hpu, inputL_hpu = create_softmax_fa2_input_tensors(s_attn, fmin)
             s_attn, s_max, s_sum, _exp_max_fixup_hpu = torch.ops.hpu.softmax_fa2(s_attn,
                                                                                  inputM=inputM_hpu,
@@ -210,7 +211,8 @@ def partial_attn_shared(query: torch.tensor, blocks: torch.tensor, bias: Optiona
     attn = torch.matmul(query, key.transpose(-1, -2))
     attn = attn.flatten(0, 1)
     attn = attn + bias
-    if get_config().unified_attn_softmax_fa2_for_shared_causal:
+    # TODO: remove dtype check once full support is added for fp8 in unified attention
+    if get_config().unified_attn_softmax_fa2 and attn.dtype == torch.bfloat16:
         inputM_hpu, inputL_hpu = create_softmax_fa2_input_tensors(attn, fmin)
         attn, local_max, local_sum, _exp_max_fixup_hpu = torch.ops.hpu.softmax_fa2(attn,
                                                                                    inputM=inputM_hpu,
