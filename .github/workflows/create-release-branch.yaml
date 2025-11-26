@@ -258,6 +258,7 @@ jobs:
 
           echo "Running HPU plugin test: ${{ matrix.test_function }}"
           docker run --rm --runtime=habana --name=$CONTAINER_NAME --network=host \
+            --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
@@ -283,11 +284,11 @@ jobs:
 
           echo "Running HPU plugin v1 dp tests"
           docker run --rm --runtime=habana --name=hpu-plugin-v1-test-dp-tests-hourly-ci --network=host \
+            --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e VLLM_SKIP_WARMUP=true \
             -e PT_HPU_LAZY_MODE=1 \
-            -e VLLM_USE_V1=1 \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-${{ needs.prepare-release-branch.outputs.tag_name }} \
@@ -311,11 +312,12 @@ jobs:
 
           echo "Running HPU plugin v1 nixl pd tests"
           docker run --rm --runtime=habana --name=hpu-plugin-v1-test-pd-tests-hourly-ci --network=host \
+            --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
-            -v /mnt/wheels_cache:/workspace/wheels_cache \
+            -v /mnt/wheels_cache:/tmp/wheels_cache \
             hpu-plugin-v1-${{ needs.prepare-release-branch.outputs.tag_name }} \
             /bin/bash -c "
               pip install lm-eval[api] &&
@@ -341,6 +343,7 @@ jobs:
 
           echo "Running HPU plugin v1 perf tests"
           docker run --rm --runtime=habana --name=$CONTAINER_NAME --network=host \
+            --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -e HF_HOME=/workspace/hf_cache \

@@ -217,11 +217,6 @@ if $SKIP_STEP_1; then
     EXTRA_FLAGS_STEP_2+="--dataset ${DATASET_PATH_OR_NAME} "
 fi
 
-if [[ -z "$VLLM_USE_V1" || $VLLM_USE_V1 != "1" ]]; then
-    EXTRA_FLAGS_STEP_2+="--max-num-prefill-seqs 1 "
-    EXTRA_FLAGS_STEP_4+="--max-num-prefill-seqs 1 "
-fi
-
 if $MULTI_NODE_SETUP; then
     cat $FP8_DIR/$MODEL_NAME/maxabs_measure_$DEVICE_TYPE.json > $QUANT_CONFIG
     sleep 2

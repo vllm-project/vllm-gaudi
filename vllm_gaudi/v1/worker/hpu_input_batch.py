@@ -256,6 +256,15 @@ class InputBatch:
         start_idx = num_prompt_tokens
         end_idx = start_idx + len(request.output_token_ids)
         self.token_ids_cpu[req_index, start_idx:end_idx] = request.output_token_ids
+        #NOTE(kzawora): In non-preemption scenario,
+        # self.input_batch.num_prompt_tokens[batch_idx] == self.input_batch.num_tokens[batch_idx].
+        # In preemption scenario, we want num_prompt_tokens to also include the tokens emitted before preemption,
+        # as that is used as basis for recomputing prefill.
+        # This also assumes that preemption is complete and reduces num_computed_tokens to 0 and preempted sequences
+        # don't retain any originally used cache blocks.
+        if request.num_computed_tokens == 0:
+            self.num_prompt_tokens[req_index] = num_prompt_tokens + len(request.output_token_ids)
+
         # Number of token ids in token_ids_cpu.
         # NOTE(woosuk): This may include spec decode tokens.
         self.num_tokens[req_index] = request.num_tokens
@@ -631,15 +640,12 @@ class InputBatch:
             logitsprocs=self.logitsprocs,
         )
 
-    @property
-    def pooling_metadata(self) -> PoolingMetadata:
-        if len(self.pooling_params) == 0:
-            pooling_params = []
-        else:
-            # Note, for now this assumes that all request in the batch
-            # are either sampling or pooling requests
-            assert len(self.req_ids) == len(self.pooling_params)
-            pooling_params = [self.pooling_params[req_id] for req_id in self.req_ids]
+    def get_pooling_params(self) -> list[PoolingParams]:
+        assert len(self.req_ids) == len(self.pooling_params)
+        return [self.pooling_params[req_id] for req_id in self.req_ids]
+
+    def get_pooling_metadata(self) -> PoolingMetadata:
+        pooling_params = self.get_pooling_params()
 
         return PoolingMetadata(
             prompt_lens=torch.from_numpy(self.num_prompt_tokens[:self.num_reqs]).to(self.device),

@@ -375,11 +375,12 @@ jobs:
 
           echo "Running HPU plugin v1 nixl pd tests"
           docker run --rm --runtime=habana --name=hpu-plugin-v1-test-pd-tests-${{ github.event.pull_request.head.sha }} --network=host \
+            --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
-            -v /mnt/wheels_cache:/workspace/wheels_cache \
+            -v /mnt/wheels_cache:/tmp/wheels_cache \
             hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
             /bin/bash -c "
                 pip install lm-eval[api] &&
@@ -404,6 +405,7 @@ jobs:
 
           echo "Running HPU plugin v1 perf tests"
           docker run --rm --runtime=habana --name=hpu-plugin-v1-test-perf-tests-${{ github.event.pull_request.head.sha }} --network=host \
+            --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -e HF_HOME=/workspace/hf_cache \
@@ -428,11 +430,11 @@ jobs:
 
           echo "Running HPU plugin v1 dp tests"
           docker run --rm --runtime=habana --name=hpu-plugin-v1-test-dp-tests-${{ github.event.pull_request.head.sha }} --network=host \
+            --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e VLLM_SKIP_WARMUP=true \
             -e PT_HPU_LAZY_MODE=1 \
-            -e VLLM_USE_V1=1 \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
@@ -463,6 +465,7 @@ jobs:
 
           echo "Running HPU plugin test: ${{ matrix.test_function }}"
           docker run --rm --runtime=habana --name=$CONTAINER_NAME --network=host \
+            --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
