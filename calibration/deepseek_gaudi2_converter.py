@@ -51,11 +51,13 @@ if __name__ == "__main__":
         "-i",
         "--input_path",
         help="Path to the official model weights.",
+        required=True,
     )
     parser.add_argument(
         "-o",
         "--output_path",
         help="Path to the output directory.",
+        required=True,
     )
     args = parser.parse_args()
     input_path = args.input_path
