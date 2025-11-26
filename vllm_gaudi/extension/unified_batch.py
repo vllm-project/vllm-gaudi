@@ -21,6 +21,7 @@ class UnifiedBatch:
     logits_indices: torch.Tensor
     logits_groups_cpu: torch.Tensor
     attn_metadata: HPUUnifiedAttentionMetadata
+    invalid_req_indices: list[int]
 
 
 def to_hpu(data: Optional[Union[torch.Tensor, list]], dtype: Optional[torch.dtype] = None) -> torch.Tensor:
@@ -479,6 +480,8 @@ def create_unified_batch(req_ids: list[str],
                          persistent_ctx: UnifiedBatchPersistentContext,
                          bucketing_fn: Callable[[bool, int, int, int, int], tuple[int, int, int, int]],
                          get_dp_padding_fn: Callable[[int], int],
+                         input_ids_hpu: Optional[torch.Tensor] = None,
+                         num_decodes: int = 0,
                          hpu_bias_acceleration: bool = True) -> UnifiedBatch:
     """ Calculate all necessary tensors needed for batch scheduling """
     # Track original dtypes before converting to numpy
@@ -678,6 +681,28 @@ def create_unified_batch(req_ids: list[str],
                                                                            target_qlen, target_shared_blocks)
                     attn_metadata.shared_bias = hpu_shared_bias
 
+    token_ids_device = persistent_ctx.hpu_tensor(token_ids, (target_qlen, ), -1, token_ids_dtype)
+    logits_indices_device = persistent_ctx.hpu_tensor(logits_indices, (target_logits, ), -1, logits_indices_dtype)
+
+    # Async scheduling.
+    invalid_req_indices = []
+    if input_ids_hpu is not None:
+        token_ids_device[:num_decodes] = input_ids_hpu[:num_decodes]
+        # NOTE(tianmu-li): Align behavior of incomplete prompt with gpu_model_runner
+        # If logits_indices is smaller than req_id, the last request is a chunked prompt request that
+        # hasn't finished in this step. We add the last token position to logits_indices to ensure
+        # the last token of the chunk is sampled. This sampled token will be discarded later
+        if len(req_ids) - logits_indices.shape[0] == 1:
+            # Use query_len - 1 to fill the missing logits_indices
+            logits_indices_append = torch.full((1, ),
+                                               query_len - 1,
+                                               dtype=logits_indices_dtype,
+                                               device=logits_indices_device.device)
+            logits_indices_device = torch.cat([logits_indices_device, logits_indices_append])
+            # Discard partial prefill logit for async scheduling
+            # Depends on 1 decode token/batch
+            invalid_req_indices.append(len(req_ids) - 1)
+
     # Convert numpy arrays to HPU tensors with proper dtypes
     with persistent_ctx.profiler.record_event('internal', 'unified_batch_prep'):
         unified_batch = UnifiedBatch(
@@ -687,5 +712,6 @@ def create_unified_batch(req_ids: list[str],
             new_token_positions_cpu=torch.from_numpy(new_token_positions).to(token_positions_dtype),
             logits_indices=persistent_ctx.hpu_tensor(logits_indices, (target_logits, ), -1, logits_indices_dtype),
             logits_groups_cpu=torch.from_numpy(logits_groups).to(logits_indices_dtype),
-            attn_metadata=attn_metadata)
+            attn_metadata=attn_metadata,
+            invalid_req_indices=invalid_req_indices)
     return unified_batch
