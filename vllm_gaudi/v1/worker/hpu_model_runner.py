@@ -8,9 +8,14 @@ import math
 import os
 import sys
 import time
+from contextlib import suppress
 from tqdm import tqdm
 from dataclasses import dataclass, field, fields
 from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast)
+if os.getenv("QUANT_CONFIG", None) is not None:
+    from neural_compressor.torch.quantization import finalize_calibration
+else:
+    finalize_calibration = None
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -114,6 +119,8 @@ HPU_TORCH_DTYPE_TO_STR_DTYPE = {
     torch.float8_e4m3fn: "fp8_e4m3"
 }
 
+shutdown_inc_called = False
+
 
 class BucketingFailedException(Exception):
     pass
@@ -152,12 +159,11 @@ class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
         # Release the device tensor once the copy has completed
         self._async_copy_ready_event.synchronize()
 
-        sampled_token_ids_np = self._sampled_token_ids_cpu.numpy()
-        valid_sampled_token_ids = [sampled_token_ids_np[i] for i in range(len(sampled_token_ids_np))]
+        valid_sampled_token_ids = self._sampled_token_ids_cpu.tolist()
         del self._sampled_token_ids
         for i in self._invalid_req_indices:
             if i < len(valid_sampled_token_ids):
-                valid_sampled_token_ids[i] = np.array([], dtype=np.int32)
+                valid_sampled_token_ids[i].clear()
 
         output = self._model_runner_output
         output.sampled_token_ids[:len(valid_sampled_token_ids)] = valid_sampled_token_ids
@@ -819,16 +825,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # NOTE(Chendi): Speculative decoding is only enabled for the last rank
         # in the pipeline parallel group.
         if self.speculative_config:
-            if self.speculative_config.num_speculative_tokens > 1:
-                raise NotImplementedError("Speculative decoding with num_speculative_tokens > 1 is "
-                                          "not supported on HPU.")
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
-                if self.speculative_config.num_speculative_tokens > 1:
-                    logger.warning("EagleProposer only supports num_speculative_tokens=1. "
-                                   "Overriding the config.")
-                    self.speculative_config.num_speculative_tokens = 1
                 self.drafter = HpuEagleProposer(self.vllm_config, self.device, self)  # type: ignore
                 if self.speculative_config.method == "eagle3":
                     self.use_aux_hidden_state_outputs = True
@@ -2903,7 +2902,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.input_batch.req_id_to_index.copy()
 
         with self.profiler.record_event('internal', 'unified_postprocess'):
-            sampled_token_ids: list[np.ndarray] = [np.array([], dtype=np.int32) for _ in batch.req_ids_cpu]
+            sampled_token_ids: list[list[int]] = [[] for _ in batch.req_ids_cpu]
             if self.use_async_scheduling:
                 sampled_token_ids_hpu = sampler_output.sampled_token_ids.view(-1, 1)
                 self.input_batch.prev_sampled_token_ids = sampled_token_ids_hpu.flatten()
@@ -2916,11 +2915,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 }
             else:
                 sampled_token_ids_cpu = sampler_output.sampled_token_ids.cpu()
-
-                sampled_token_ids_np = sampled_token_ids_cpu.numpy()
-                for req_id, tokens_array in zip(selected_req_ids, sampled_token_ids_np):
-                    idx = self.input_batch.req_id_to_index[req_id]
-                    sampled_token_ids[idx] = tokens_array
+                for req_id, tokens in zip(selected_req_ids, sampled_token_ids_cpu.tolist()):
+                    sampled_token_ids[self.input_batch.req_id_to_index[req_id]].extend(tokens)
 
                 #TODO: add support for multi-token output
                 assert sampled_token_ids_cpu.size(1) == 1, 'Currently only single token output is supported!'
@@ -2941,7 +2937,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 num_tokens = len(token_ids)
                 self.input_batch.token_ids_cpu[i, seq_len:seq_len + num_tokens] = token_ids
                 self.input_batch.num_tokens[i] += len(token_ids)
-                req_state.output_token_ids.extend(token_ids.tolist())
+                req_state.output_token_ids.extend(token_ids)
 
         if self.use_async_scheduling:
             model_runner_output = ModelRunnerOutput(
@@ -3366,9 +3362,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.input_batch.req_id_to_index.copy()
 
         max_req_index = max(self.input_batch.req_id_to_index.values())
-        postprocessed_sampled_token_ids: list[np.ndarray] = [
-            np.array([], dtype=np.int32) for _ in range(max_req_index + 1)
-        ]
+        postprocessed_sampled_token_ids: list[list[int]] = [[] for _ in range(max_req_index + 1)]
         if self.use_async_scheduling:
             self.input_batch.prev_sampled_token_ids = sampled_token_ids.flatten()
             # self.input_batch.prev_sampled_token_ids_invalid_indices
@@ -3392,10 +3386,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 else:
                     decode_sampled_token_ids = [tensor.cpu()[:num_decodes] for tensor in decode_sampled_token_ids]
                 if decode_sampled_token_ids + prefill_sampled_token_ids:
-                    sampled_token_ids_tensor = torch.cat(decode_sampled_token_ids + prefill_sampled_token_ids)
-                    sampled_token_ids_np = sampled_token_ids_tensor.cpu().numpy().flatten()
+                    sampled_token_ids_list = torch.cat(decode_sampled_token_ids + prefill_sampled_token_ids).tolist()
                 else:
-                    sampled_token_ids_np = np.array([], dtype=np.int32)
+                    sampled_token_ids_list = []
                 sampled_token_requests = \
                     decode_sampled_requests + prefill_sampled_requests
                 max_req_index = max(self.input_batch.req_id_to_index.values())
@@ -3405,10 +3398,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 for i, req_id in enumerate(sampled_token_requests):
                     num_tokens = spec_decode_num_tokens[
                         i] if spec_decode_num_tokens is not None and i < num_decodes else 1
-                    req_idx = self.input_batch.req_id_to_index[req_id]
-                    postprocessed_sampled_token_ids[req_idx] = np.array(sampled_token_ids_np[start_idx:start_idx +
-                                                                                             num_tokens],
-                                                                        dtype=np.int32)
+                    postprocessed_sampled_token_ids[
+                        self.input_batch.req_id_to_index[req_id]] += sampled_token_ids_list[start_idx:start_idx +
+                                                                                            num_tokens]
                     start_idx += num_tokens
 
         ################## RETURN ##################
@@ -3431,7 +3423,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # the sampled tokens back, because there's no direct communication
         # between the first-stage worker and the last-stage worker.
         for req_idx, sampled_ids in enumerate(postprocessed_sampled_token_ids[:num_reqs]):
-            if sampled_ids is None:
+            if not sampled_ids:
                 continue
 
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
@@ -4525,13 +4517,18 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.defragmenter = OnlineDefragmenter()
         self.defragmenter.initialize(self.kv_caches, self.block_size)
 
-    def shutdown_inc(self):
-        can_finalize_inc = self._is_quant_with_inc() and \
-            (self.model.model is not None) and \
-            self.inc_initialized_successfully and \
-            not self._is_inc_finalized
+    def shutdown_inc(self, suppress=suppress, finalize_calibration=finalize_calibration):
+        global shutdown_inc_called
+        if shutdown_inc_called:
+            return
+        shutdown_inc_called = True
+        can_finalize_inc = False
+        with suppress(AttributeError):
+            can_finalize_inc = self._is_quant_with_inc() and \
+                (self.model.model is not None) and \
+                self.inc_initialized_successfully and \
+                not self._is_inc_finalized
         if can_finalize_inc:
-            from neural_compressor.torch.quantization import (finalize_calibration)
             finalize_calibration(self.model.model)
             self._is_inc_finalized = True
 
@@ -4768,6 +4765,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if prefill_data is not None:
                 # Currently, prefill is done one by one
                 draft_token_ids_prefill = []
+                prefill_batch_start_idx = num_decodes
 
                 for idx, (req_id, prompt_len, token_ids, position_ids, attn_metadata, logits_indices,
                           logits_requests) in enumerate(zip(*shallow_tuple(prefill_data))):
@@ -4780,8 +4778,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         position_ids,
                         attn_metadata,
                         logits_indices,
+                        prefill_batch_start_idx,
                     )
                     draft_token_ids_prefill.append(_draft_token_ids)
+                    prefill_batch_start_idx += len(req_id)
 
                 if draft_token_ids is None:
                     draft_token_ids = torch.cat(draft_token_ids_prefill, dim=0)
@@ -4809,12 +4809,20 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # No sequence scheduled any spec decode tokens
             # This happens at the end of decoding so no need more draft tokens
             # Return dummy draft tokens (as there may be prefill sequences in the same request)
-            return torch.zeros(len(sampled_token_ids),
+            return torch.zeros(num_decodes,
                                self.speculative_config.num_speculative_tokens,
                                dtype=torch.int64,
                                device=self.device)
 
         assert decode_data.position_ids is not None
+
+        # The input batch block table include both decodes and prefills
+        # Decodes are the first num_decodes requests.
+        # Prefill are the next num_reqs - num_decodes requests.
+        # Note: sampled_token_ids includes both decode and prefill sampled tokens
+        block_table_cpu_tensor = self.input_batch.block_table[0].get_cpu_tensor()
+        decode_block_table = block_table_cpu_tensor[:num_decodes]
+
         common_attn_metadata = decode_data.attn_metadata
         common_attn_metadata, hidden_states_indices, last_token_indices = \
             self.drafter.prepare_inputs(common_attn_metadata,
@@ -4833,7 +4841,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if target_hidden_states.dim() == 2:
             target_hidden_states = target_hidden_states.unsqueeze(1)
         draft_token_ids = self.drafter.propose(target_token_ids, target_positions, target_hidden_states,
-                                               last_token_indices, common_attn_metadata)
+                                               last_token_indices, common_attn_metadata, decode_block_table, self)
 
         draft_token_ids = draft_token_ids[:num_decodes]
         return draft_token_ids
@@ -4848,7 +4856,16 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         position_ids,
         attn_metadata,
         logits_indices,
+        # The sequence start index of this prefill batch
+        batch_start_idx,
     ):
+        # The input batch block table include both decodes and prefills
+        # Decodes are the first num_decodes requests.
+        # Prefill are the next num_reqs - num_decodes requests and divide into batches
+        block_table_cpu_tensor = self.input_batch.block_table[0].get_cpu_tensor()
+        batch_size = logits_indices.shape[0]
+        prefill_batch_block_table = block_table_cpu_tensor[batch_start_idx:batch_start_idx + batch_size]
+
         hidden_states = hidden_states_prefills[idx]
         if self.use_aux_hidden_state_outputs:
             aux_hidden_states = aux_hidden_states_prefills[idx]
@@ -4866,7 +4883,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if target_hidden_states.dim() == 2:
             target_hidden_states = target_hidden_states.unsqueeze(0)
         _draft_token_ids = self.drafter.propose(target_token_ids, position_ids, target_hidden_states, logits_indices,
-                                                attn_metadata)
+                                                attn_metadata, prefill_batch_block_table, self)
         return _draft_token_ids
 
     def propose_ngram_draft_token_ids(
