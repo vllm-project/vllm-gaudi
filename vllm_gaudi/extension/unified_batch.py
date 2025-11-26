@@ -331,7 +331,7 @@ def create_unified_batch(req_ids: list[str],
         # If logits_indices is smaller than req_id, the last request is a chunked prompt request that
         # hasn't finished in this step. We add the last token position to logits_indices to ensure
         # the last token of the chunk is sampled. This sampled token will be discarded later
-        if logits_indices.shape[0] < len(req_ids):
+        if len(req_ids) - logits_indices.shape[0] == 1:
             # Use query_len - 1 to fill the missing logits_indices
             logits_indices_append = torch.full((1, ),
                                                query_len - 1,
