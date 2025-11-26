@@ -7,7 +7,6 @@ import vllm
 import vllm.config
 from vllm.lora.request import LoRARequest
 
-#from ..utils import VLLM_PATH, create_new_process_for_each_test, multi_gpu_test
 
 PROMPT_TEMPLATE = """<|eot_id|><|start_header_id|>user<|end_header_id|>
 I want you to act as a SQL terminal in front of an example database, you need only to return the sql command to me.Below is an instruction that describes a task, Write a response that appropriately completes the request.
@@ -95,8 +94,6 @@ def generate_and_test(llm, llama32_lora_files, tensorizer_config_dict: dict | No
     print("removing lora")
 
 
-#@create_new_process_for_each_test()
-#@pytest.mark.parametrize("cudagraph_specialize_lora", [True, False])
 def test_llama_lora(llama32_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
@@ -107,108 +104,5 @@ def test_llama_lora(llama32_lora_files):
         max_loras=4,
         dtype='bfloat16',
         hf_token=os.environ.get("HF_TOKEN"),
-        #compilation_config=vllm.config.CompilationConfig(
-        #    cudagraph_specialize_lora=cudagraph_specialize_lora,
-        #),
     )
     generate_and_test(llm, llama32_lora_files)
-
-
-'''@multi_gpu_test(num_gpus=4)
-def test_llama_lora_tp4(llama32_lora_files):
-    llm = vllm.LLM(
-        MODEL_PATH,
-        enable_lora=True,
-        max_num_seqs=7,
-        max_model_len=1024,
-        max_loras=4,
-        tensor_parallel_size=4,
-    )
-    generate_and_test(llm, llama32_lora_files)
-
-
-@multi_gpu_test(num_gpus=4)
-def test_llama_lora_tp4_fully_sharded_loras(llama32_lora_files):
-    llm = vllm.LLM(
-        MODEL_PATH,
-        enable_lora=True,
-        max_num_seqs=8,
-        max_loras=4,
-        max_model_len=1024,
-        tensor_parallel_size=4,
-        fully_sharded_loras=True,
-    )
-    generate_and_test(llm, llama32_lora_files)
-
-
-@multi_gpu_test(num_gpus=2)
-def test_tp2_serialize_and_deserialize_lora(
-    tmp_path,
-    llama32_lora_files,
-):
-    # Run the tensorizing of the LoRA adapter and the model in a subprocess
-    # to guarantee cleanup
-
-    tp_size = 2
-    model_name = "model-rank-%03d.tensors"
-
-    model_ref = MODEL_PATH
-    lora_path = llama32_lora_files
-    suffix = "test"
-    try:
-        result = subprocess.run(
-            [
-                sys.executable,
-                f"{VLLM_PATH}/examples/others/tensorize_vllm_model.py",
-                "--model",
-                MODEL_PATH,
-                "--lora-path",
-                lora_path,
-                "--tensor-parallel-size",
-                str(tp_size),
-                "serialize",
-                "--serialized-directory",
-                str(tmp_path),
-                "--suffix",
-                suffix,
-                "--serialization-kwargs",
-                '{"limit_cpu_concurrency": 4}',
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as e:
-        print("Tensorizing failed.")
-        print("STDOUT:\n", e.stdout)
-        print("STDERR:\n", e.stderr)
-        raise
-
-    print("STDOUT:\n", result.stdout)
-
-    model_uri = tmp_path / "vllm" / model_ref / suffix / model_name
-    tensorizer_config = TensorizerConfig(tensorizer_uri=str(model_uri))
-
-    loaded_llm = LLM(
-        model=model_ref,
-        load_format="tensorizer",
-        enable_lora=True,
-        enforce_eager=True,
-        model_loader_extra_config=tensorizer_config,
-        max_num_seqs=7,
-        max_model_len=1024,
-        tensor_parallel_size=2,
-        max_loras=2,
-    )
-
-    tc_as_dict = tensorizer_config.to_serializable()
-
-    print("lora adapter created")
-    print("lora 1")
-    assert (
-        do_sample(
-            loaded_llm, llama32_lora_files, tensorizer_config_dict=tc_as_dict, lora_id=1
-        )
-        == EXPECTED_LORA_OUTPUT
-    )
-'''
