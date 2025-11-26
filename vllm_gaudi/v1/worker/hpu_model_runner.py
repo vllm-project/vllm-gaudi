@@ -2993,6 +2993,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     kv_caches=self.kv_caches,
                     lora_logits_mask=None,
                     lora_mask=None,
+                    inputs_embeds=inputs_embeds,
+                    model_mm_kwargs=model_mm_kwargs,
                     warmup_mode=warmup_mode)
         selected_req_ids = [batch.req_ids_cpu[idx] for idx in batch.logits_groups_cpu.tolist()]
         htorch.core.mark_step()
