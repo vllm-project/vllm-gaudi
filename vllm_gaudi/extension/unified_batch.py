@@ -707,10 +707,10 @@ def create_unified_batch(req_ids: list[str],
     with persistent_ctx.profiler.record_event('internal', 'unified_batch_prep'):
         unified_batch = UnifiedBatch(
             req_ids_cpu=req_ids,
-            token_ids=persistent_ctx.hpu_tensor(token_ids, (target_qlen, ), -1, token_ids_dtype),
+            token_ids=token_ids_device,
             token_positions=persistent_ctx.hpu_tensor(token_positions, (target_qlen, ), -1, token_positions_dtype),
             new_token_positions_cpu=torch.from_numpy(new_token_positions).to(token_positions_dtype),
-            logits_indices=persistent_ctx.hpu_tensor(logits_indices, (target_logits, ), -1, logits_indices_dtype),
+            logits_indices=logits_indices_device,
             logits_groups_cpu=torch.from_numpy(logits_groups).to(logits_indices_dtype),
             attn_metadata=attn_metadata,
             invalid_req_indices=invalid_req_indices)
