@@ -4641,6 +4641,111 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
         return
 
+    def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
+        """
+        Initialize the attention backends and attention metadata builders.
+        """
+        assert len(self.attn_groups) == 0, "Attention backends are already initialized"
+
+        class AttentionGroupKey(NamedTuple):
+            attn_backend: type[AttentionBackend]
+            kv_cache_spec: KVCacheSpec
+
+        def get_attn_backends_for_group(
+            kv_cache_group_spec: KVCacheGroupSpec,
+        ) -> tuple[dict[AttentionGroupKey, list[str]], set[type[AttentionBackend]]]:
+            layer_type = cast(type[Any], AttentionLayerBase)
+            layers = get_layers_from_vllm_config(
+                self.vllm_config, layer_type, kv_cache_group_spec.layer_names
+            )
+            attn_backends = {}
+            attn_backend_layers = defaultdict(list)
+            # Dedupe based on full class name; this is a bit safer than
+            # using the class itself as the key because when we create dynamic
+            # attention backend subclasses (e.g. ChunkedLocalAttention) unless
+            # they are cached correctly, there will be different objects per
+            # layer.
+            for layer_name in kv_cache_group_spec.layer_names:
+                attn_backend = layers[layer_name].get_attn_backend()
+
+                if layer_name in self.kv_sharing_fast_prefill_eligible_layers:
+                    attn_backend = create_fast_prefill_custom_backend(
+                        "FastPrefill",
+                        attn_backend,  # type: ignore[arg-type]
+                    )
+
+                full_cls_name = attn_backend.full_cls_name()
+                layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+                if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
+                    layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                key = (full_cls_name, layer_kv_cache_spec)
+                attn_backends[key] = AttentionGroupKey(
+                    attn_backend, layer_kv_cache_spec
+                )
+                attn_backend_layers[key].append(layer_name)
+            return (
+                {attn_backends[k]: v for k, v in attn_backend_layers.items()},
+                set(group_key.attn_backend for group_key in attn_backends.values()),
+            )
+
+        def create_attn_groups(
+            attn_backends_map: dict[AttentionGroupKey, list[str]],
+            kv_cache_group_id: int,
+        ) -> list[AttentionGroup]:
+            attn_groups: list[AttentionGroup] = []
+            for (attn_backend, kv_cache_spec), layer_names in attn_backends_map.items():
+                attn_group = AttentionGroup(
+                    attn_backend,
+                    layer_names,
+                    kv_cache_spec,
+                    kv_cache_group_id,
+                )
+
+                attn_groups.append(attn_group)
+            return attn_groups
+
+        attention_backend_maps = []
+        attention_backend_list = []
+        for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+            attn_backends = get_attn_backends_for_group(kv_cache_group_spec)
+            attention_backend_maps.append(attn_backends[0])
+            attention_backend_list.append(attn_backends[1])
+
+        # Resolve cudagraph_mode before actually initialize metadata_builders
+        self._check_and_update_cudagraph_mode(
+            attention_backend_list, kv_cache_config.kv_cache_groups
+        )
+
+        for i, attn_backend_map in enumerate(attention_backend_maps):
+            self.attn_groups.append(create_attn_groups(attn_backend_map, i))
+
+    def _update_hybrid_attention_mamba_layout(
+        self, kv_caches: dict[str, torch.Tensor]
+    ) -> None:
+        """
+        Update the layout of attention layers from (2, num_blocks, ...) to
+        (num_blocks, 2, ...).
+
+        Args:
+            kv_caches: The KV cache buffer of each layer.
+        """
+
+        for group in self._kv_cache_spec_attn_group_iterator():
+            kv_cache_spec = group.kv_cache_spec
+            for layer_name in group.layer_names:
+                kv_cache = kv_caches[layer_name]
+                if isinstance(kv_cache_spec, AttentionSpec) and kv_cache.shape[0] == 2:
+                    assert kv_cache.shape[1] != 2, (
+                        "Fail to determine whether the layout is "
+                        "(2, num_blocks, ...) or (num_blocks, 2, ...) for "
+                        f"a tensor of shape {kv_cache.shape}"
+                    )
+                    hidden_size = kv_cache.shape[2:].numel()
+                    kv_cache.as_strided_(
+                        size=kv_cache.shape,
+                        stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
+                    )
+                    
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -4674,10 +4779,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     if self.vllm_config.speculative_config else 0),
             )
 
-        #
-        # TODO:
-        # create attention groups
-        
+        self.initialize_attn_backend(kv_cache_config)
+      
 
         # build a map from layer_name -> KVCacheTensor
         tensor_map: dict[str, KVCacheTensor] = {}
@@ -4691,6 +4794,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             assert len(kv_cache_tensor.shared_by) == 1
             kv_cache_sizes[kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
 
+        has_mamba = False
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
@@ -4720,6 +4824,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     for layer_name in kv_cache_tensor.shared_by:
                         kv_caches[layer_name] = (key_cache, value_cache)
                 elif isinstance(kv_cache_spec, MambaSpec):
+                    has_mamba = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     state_tensors = []
                     storage_offset_bytes = 0
@@ -4771,6 +4876,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                                  self.block_size, dtype, self.profiler)
             logger.info("Allocating unified persistent batch took %.4f GB of host memory",
                         m.consumed_host_memory / float(2**30))
+
+        if has_mamba:
+            self._update_hybrid_attention_mamba_layout(kv_caches)
 
         htorch.hpu.synchronize()
 
