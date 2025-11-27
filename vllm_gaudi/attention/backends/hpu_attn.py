@@ -352,6 +352,13 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         result = self._v_up_proj(output)
         return result
 
+    # NOTE(Xinyu): Make the loaded weight contiguous to avoid the transpose
+    # during each graph execution
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        super().process_weights_after_loading(act_dtype)
+        self.W_UV: torch.Tensor = self.W_UV.contiguous()
+        self.W_UK_T: torch.Tensor = self.W_UK_T.contiguous()
+
     # NOTE(Chendi): PR25184 using output buffer as default, which can't be used in HPU Graph,
     # so we override and always return a new tensor
     def _v_up_proj(self, x):
