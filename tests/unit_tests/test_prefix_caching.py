@@ -5,7 +5,7 @@ import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
 
 from vllm.sampling_params import SamplingParams
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.platforms import current_platform
 from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData, CachedRequestData
 from vllm.config import (VllmConfig, ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig)
