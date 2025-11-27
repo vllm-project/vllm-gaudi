@@ -363,7 +363,7 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         self.is_mm_optimized = is_mm_optimized(self.model)
         self.sliding_window = vllm_config.model_config.get_sliding_window()
         self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
-        if self.interleaved_sliding_window:
+        if self.interleaved_sliding_window and self.sliding_window is not None:
             self.use_window_sdpa = os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
             self.slice_size = int(os.getenv("PT_HPU_SDPA_BC_FACTOR", "1024"))
             self.slice_thld = int(os.environ.get('VLLM_FUSEDSDPA_SLIDE_THLD', '8192'))
@@ -543,12 +543,12 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
     def _update_metadata(self, attn_metadata, batch_size, seq_len, device, dtype):
         if attn_metadata.is_prompt:
             attn_metadata = self._set_attn_bias(attn_metadata, batch_size, seq_len, device, dtype)
-            if self.interleaved_sliding_window:
+            if self.interleaved_sliding_window and self.sliding_window is not None:
                 attn_metadata = self._set_attn_bias_for_sliding_window(attn_metadata, batch_size, seq_len,
                                                                        self.sliding_window, device, dtype)
         else:
             attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype)
-            if self.interleaved_sliding_window:
+            if self.interleaved_sliding_window and self.sliding_window is not None:
                 attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype, True)
         return attn_metadata
 
@@ -2170,7 +2170,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 padded_batch_size * num_tokens
             )
 
-        if self.interleaved_sliding_window and self.sliding_window > 0:
+        if self.interleaved_sliding_window and self.sliding_window is not None and self.sliding_window > 0:
             sliding_block_size = (self.sliding_window // self.block_size)
             window_block_tables = [block_table[-sliding_block_size:] for block_table in block_tables_list]
             window_block_list, window_block_groups, window_block_usage = \
@@ -2183,12 +2183,15 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         block_usage_device = async_h2d_copy(block_usage, device=self.device)
         block_groups_device = async_h2d_copy(block_groups, device=self.device)
         slot_mapping_device = async_h2d_copy(slot_mapping, device=self.device)
-        window_block_list_device = async_h2d_copy(window_block_list,
-                                                  device=self.device) if self.interleaved_sliding_window else None
-        window_block_usage_device = async_h2d_copy(window_block_usage,
-                                                   device=self.device) if self.interleaved_sliding_window else None
-        window_block_groups_device = async_h2d_copy(window_block_groups,
-                                                    device=self.device) if self.interleaved_sliding_window else None
+        window_block_list_device = async_h2d_copy(
+            window_block_list,
+            device=self.device) if self.interleaved_sliding_window and self.sliding_window is not None else None
+        window_block_usage_device = async_h2d_copy(
+            window_block_usage,
+            device=self.device) if self.interleaved_sliding_window and self.sliding_window is not None else None
+        window_block_groups_device = async_h2d_copy(
+            window_block_groups,
+            device=self.device) if self.interleaved_sliding_window and self.sliding_window is not None else None
 
         token_ids_device = async_h2d_copy(token_ids, device=self.device)
         # when DP also enabled, some DP ranks will exeucte dummy run with empty
@@ -4715,7 +4718,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 max_num_shared_blocks = math.ceil(num_blocks * get_config().unified_attn_shared_cache_ratio)
                 self.unified_attn_persistent_ctx = UnifiedBatchPersistentContext(self.max_num_batched_tokens,
                                                                                  max_num_shared_blocks, num_blocks,
-                                                                                 self.block_size, dtype)
+                                                                                 self.block_size, dtype, self.profiler)
             logger.info("Allocating unified persistent batch took %.4f GB of host memory",
                         m.consumed_host_memory / float(2**30))
 
