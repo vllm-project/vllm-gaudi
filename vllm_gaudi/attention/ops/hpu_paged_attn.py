@@ -9,6 +9,7 @@ from typing import Optional
 
 import torch
 from vllm_gaudi.extension import cache_ops, ops
+from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
@@ -25,7 +26,7 @@ class HPUPagedAttentionMetadata:
 
 
 @dataclass
-class HPUPagedAttentionMetadataBuilder:
+class HPUPagedAttentionMetadataBuilder(AttentionMetadataBuilder):
 
     def __init__(self, input_builder: "HPUPageAttentionInputBuilderBase") -> None:
         """Create the builder, remember some configuration and parameters."""
