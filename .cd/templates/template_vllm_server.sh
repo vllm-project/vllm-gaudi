@@ -15,7 +15,7 @@ vllm serve $MODEL \
         --block-size $BLOCK_SIZE \
         --dtype $DTYPE \
         --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
-        --download_dir $HF_HOME \
+        --download_dir $MODEL \
         --max-model-len $MAX_MODEL_LEN \
         --gpu-memory-utilization $GPU_MEM_UTILIZATION \
         --max-num-seqs $MAX_NUM_SEQS \

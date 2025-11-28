@@ -3,7 +3,7 @@ deepSeek-R1-Distill-Llama-70B:
   TENSOR_PARALLEL_SIZE: 4
 
 llama31_8b_instruct:
-  MODEL: meta-llama/Llama-3.1-8B-Instruct
+  MODEL: Llama-3.1-8B-Instruct
   TENSOR_PARALLEL_SIZE: 1
 
 llama31_70b_instruct:
