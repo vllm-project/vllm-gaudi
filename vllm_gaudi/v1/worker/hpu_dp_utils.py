@@ -22,7 +22,7 @@ class HPUDPMetadata:
         dp_size = vllm_config.parallel_config.data_parallel_size
         tp_size = vllm_config.parallel_config.tensor_parallel_size
 
-        if num_tokens % tp_size != 0:
+        if vllm_config.parallel_config.use_sequence_parallel_moe and (num_tokens % tp_size != 0):
             # make sure num_tokens is enough to be divided by tp_size for
             # sequence parallel MOE
             num_tokens = (num_tokens // tp_size + 1) * tp_size
