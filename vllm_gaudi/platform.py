@@ -83,6 +83,12 @@ class HpuPlatform(Platform):
         return cls.device_name
 
     @classmethod
+    def get_device_total_memory(cls, device_id: int = 0) -> int:
+        """Get the total memory of a device in bytes."""
+        total_hpu_memory = torch.hpu.mem_get_info()[1]
+        return total_hpu_memory
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
 
