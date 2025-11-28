@@ -2349,6 +2349,82 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             )
         return logits_indices, spec_decode_metadata
 
+    def _prepare_spec_decode_inputs_for_ua(self, batch_size, scheduled_spec_decode_tokens, logits_indices,
+                                           token_ids_device, max_num_sampled_tokens):
+        logger.debug("scheduled_spec_decode_tokens=", scheduled_spec_decode_tokens)
+        # Get the number of draft tokens for each request.
+        # Iterate over the dictionary rather than all requests since not all
+        # requests have draft tokens.
+        num_draft_tokens = np.zeros(batch_size, dtype=np.int32)
+        for req_id, draft_token_ids_in_req in (scheduled_spec_decode_tokens.items()):
+            req_idx = self.input_batch.req_id_to_index[req_id]
+            num_tokens = len([i for i in draft_token_ids_in_req if i != -1])
+            num_draft_tokens[req_idx] = num_tokens
+
+        num_sampled_tokens = num_draft_tokens + 1
+
+        cu_num_sampled_tokens, arange = self._get_cumsum_and_arange(num_sampled_tokens, cumsum_dtype=np.int32)
+
+        # NOTE(Chendi): For unified attention, we made several design changes
+        # Since HPU graph shape does not depend on [batch_size, num_tokens],
+        # we will skip spec decode if previous fwd generate none draft tokens
+        # we will save tokens by not padding to max_num_sampled_tokens
+        # Example:
+        # scheduled_spec_decode_tokens={'0': [-1], '1': [-1], '2': [17689], '3': [-1]}
+        # token_ids = [[tok_0], [tok_1], [tok_2, draft_tok], [tok_4]]
+        # draft_token_indices = [0, 0, 3, 0] => pos of token_ids for compare to target model output
+        # target_token_indices = [-1, -1, 2, -1] => -1 is place holder, only verify pos==2 of target model output
+        # bonus_token_indices = [0, 1, 3, 4] => new generated token from target model
+
+        logits_indices = []
+        bonus_logits_indices = []
+        target_logits_indices = []
+        accumulate_index = 0
+        for _, n_tokens in enumerate(num_sampled_tokens):
+            for i in range(n_tokens - 1):
+                logits_indices.append(accumulate_index + i)
+                target_logits_indices.append(accumulate_index + i)
+                accumulate_index += 1
+            bonus_logits_indices.append(accumulate_index)
+            logits_indices.append(accumulate_index)
+            accumulate_index += 1
+            if n_tokens < max_num_sampled_tokens:
+                logits_indices.extend([-1] * (max_num_sampled_tokens - n_tokens))
+                target_logits_indices.extend([-1] * (max_num_sampled_tokens - n_tokens))
+        logits_indices = np.array(logits_indices, dtype=np.int32)
+        bonus_logits_indices = np.array(bonus_logits_indices, dtype=np.int32)
+        target_logits_indices = np.array(target_logits_indices, dtype=np.int32)
+
+        cu_num_draft_tokens, arange = self._get_cumsum_and_arange(num_draft_tokens, cumsum_dtype=np.int32)
+
+        # TODO: Optimize the CPU -> GPU copy.
+        cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).to(self.device, non_blocking=True)
+        cu_num_sampled_tokens = torch.from_numpy(cu_num_sampled_tokens).to(self.device, non_blocking=True)
+
+        ##################################################
+        logits_indices = torch.from_numpy(logits_indices)
+        target_logits_indices_device = \
+            torch.from_numpy(target_logits_indices).to(
+            self.device, non_blocking=True)
+        bonus_logits_indices_device = \
+            torch.from_numpy(bonus_logits_indices).to(
+            self.device, non_blocking=True)
+        draft_logits_indices_device = target_logits_indices_device + 1
+        draft_token_ids = token_ids_device[draft_logits_indices_device]
+
+        if draft_token_ids.dim() == 1:
+            draft_token_ids = draft_token_ids.view(batch_size, -1)
+        spec_decode_metadata = SpecDecodeMetadata(
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=num_draft_tokens.tolist(),
+            cu_num_draft_tokens=cu_num_draft_tokens,
+            cu_num_sampled_tokens=cu_num_sampled_tokens,
+            target_logits_indices=target_logits_indices_device,
+            bonus_logits_indices=bonus_logits_indices_device,
+            logits_indices=logits_indices,
+        )
+        return logits_indices, spec_decode_metadata
+
     def _prepare_unified_decode_inputs(self, num_decodes, num_scheduled_tokens, warmup_mode=False):
 
         if num_decodes == 0:
@@ -2943,10 +3019,21 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self._prepare_input_ids(scheduler_output)
             input_ids_hpu = self.input_ids_hpu
 
-        batch = create_unified_batch(self.input_batch.req_ids, all_token_ids, num_computed_tokens, num_scheduled_tokens,
-                                     num_prompt_tokens, block_table, self.block_size, self.dtype,
-                                     self.unified_attn_persistent_ctx, self.unified_bucketing_fn, self.get_dp_padding,
-                                     input_ids_hpu, num_decodes)
+        batch = create_unified_batch(self.input_batch.req_ids,
+                                     all_token_ids,
+                                     num_computed_tokens,
+                                     num_scheduled_tokens,
+                                     num_prompt_tokens,
+                                     block_table,
+                                     self.block_size,
+                                     self.dtype,
+                                     self.unified_attn_persistent_ctx,
+                                     self.unified_bucketing_fn,
+                                     self.get_dp_padding,
+                                     input_ids_hpu,
+                                     num_decodes,
+                                     scheduled_spec_decode_tokens=scheduler_output.scheduled_spec_decode_tokens,
+                                     prepare_spec_decode_inputs_fn=self._prepare_spec_decode_inputs_for_ua)
         if self.uses_mrope:
             batch.token_positions = self.get_unified_mrope_position_ids(
                 self.input_batch.req_ids,
@@ -3000,9 +3087,25 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     warmup_mode=warmup_mode)
         selected_req_ids = [batch.req_ids_cpu[idx] for idx in batch.logits_groups_cpu.tolist()]
         htorch.core.mark_step()
+        ##### Sampling Start #####
+        spec_decode_metadata = batch.spec_decode_metadata
         with self.profiler.record_event('internal', 'unified_sampler'):
             sampling_metadata = self._prepare_sampling(batch_changed, selected_req_ids, pad_to=logits_device.shape[0])
-            sampler_output = self.sampler(logits=logits_device, sampling_metadata=sampling_metadata)
+            if spec_decode_metadata is None:
+                sampler_output = self.sampler(logits=logits_device, sampling_metadata=sampling_metadata)
+            else:
+                # Handling spec decode sampling.
+                sampler_output = self.rejection_sampler(
+                    spec_decode_metadata,
+                    None,  # draft_probs
+                    logits_device,
+                    sampling_metadata,
+                )
+                sampled_token_ids_parsed = \
+                    self.rejection_sampler.parse_output(
+                        sampler_output.sampled_token_ids,
+                        self.input_batch.vocab_size,
+                )
 
         # Copy some objects so they don't get modified after returning.
         # This is important when using async scheduling.
@@ -3024,29 +3127,48 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 }
             else:
                 sampled_token_ids_cpu = sampler_output.sampled_token_ids.cpu()
-                for req_id, tokens in zip(selected_req_ids, sampled_token_ids_cpu.tolist()):
-                    sampled_token_ids[self.input_batch.req_id_to_index[req_id]].extend(tokens)
 
-                #TODO: add support for multi-token output
-                assert sampled_token_ids_cpu.size(1) == 1, 'Currently only single token output is supported!'
-                sampled_token_ids_cpu = sampled_token_ids_cpu.flatten()
-                htorch.core.mark_step()
-
-                sampled_token_ids_cpu = sampled_token_ids_cpu.index_select(0, batch.logits_groups_cpu)
-                self.input_batch.token_ids_cpu_tensor.index_put_(
-                    (batch.logits_groups_cpu, batch.new_token_positions_cpu), sampled_token_ids_cpu)
+                if spec_decode_metadata is None:
+                    for req_id, tokens in zip(selected_req_ids, sampled_token_ids_cpu.tolist()):
+                        sampled_token_ids[self.input_batch.req_id_to_index[req_id]].extend(tokens)
+                    #TODO: add support for multi-token output
+                    assert sampled_token_ids_cpu.size(1) == 1, 'Currently only single token output is supported!'
+                    sampled_token_ids_cpu = sampled_token_ids_cpu.flatten()
+                    htorch.core.mark_step()
+                    sampled_token_ids_cpu = sampled_token_ids_cpu.index_select(0, batch.logits_groups_cpu)
+                    self.input_batch.token_ids_cpu_tensor.index_put_(
+                        (batch.logits_groups_cpu, batch.new_token_positions_cpu), sampled_token_ids_cpu)
+                else:
+                    sampled_token_ids = sampled_token_ids_parsed
+                    logger.debug("Speculative decode generated tokens:", sampled_token_ids)
 
             ######### UPDATE REQUEST STATE WITH GENERATED TOKENS #########
             num_reqs = len(selected_req_ids)
             for req_id in self.input_batch.req_ids[:num_reqs]:
                 req_state = self.requests[req_id]
                 i = self.input_batch.req_id_to_index[req_id]
-                seq_len = (req_state.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id])
                 token_ids = sampled_token_ids[i]
                 num_tokens = len(token_ids)
+                spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
+                num_spec_tokens = len(spec_token_ids)
+                if num_spec_tokens > 0:
+                    seq_len = (req_state.num_computed_tokens + 1)
+                else:
+                    seq_len = (req_state.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id])
+                end_idx = seq_len + num_tokens
                 self.input_batch.token_ids_cpu[i, seq_len:seq_len + num_tokens] = token_ids
+                self.input_batch.num_tokens_no_spec[i] = end_idx
+                self.input_batch.num_tokens[i] = end_idx
                 self.input_batch.num_tokens[i] += len(token_ids)
                 req_state.output_token_ids.extend(token_ids)
+
+        ################## Spec Decode ##################
+        # Now, we will call drafter to propose draft token ids
+        if self.speculative_config:
+            self._draft_token_ids = self.propose_draft_token_ids(scheduler_output, sampled_token_ids, sampling_metadata,
+                                                                 non_flattened_hidden_states, hidden_states,
+                                                                 aux_hidden_states)
+        ################## Spec Decode end ##################
 
         if self.use_async_scheduling:
             model_runner_output = ModelRunnerOutput(
@@ -3536,9 +3658,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # Now, we will call drafter to propose draft token ids
         if self.speculative_config:
             self._draft_token_ids = self.propose_draft_token_ids(
-                scheduler_output, postprocessed_sampled_token_ids, prefill_sampled_token_ids_device,
-                decode_sampled_token_ids_device, sampling_metadata, non_flattened_hidden_states, sample_hidden_states,
-                aux_hidden_states, non_flattened_hidden_states_prefills, sample_hidden_states_prefills,
+                scheduler_output, postprocessed_sampled_token_ids, sampling_metadata, non_flattened_hidden_states,
+                sample_hidden_states, aux_hidden_states, prefill_sampled_token_ids_device,
+                decode_sampled_token_ids_device, non_flattened_hidden_states_prefills, sample_hidden_states_prefills,
                 aux_hidden_states_prefills, num_decodes, prefill_data if num_prefills > 0 else None,
                 decode_data if num_decodes > 0 else None)
         ################## Spec Decode end ##################
@@ -4827,16 +4949,16 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         sampled_token_ids: list[list[int]],
-        prefill_sampled_token_ids_tensor: torch.Tensor,
-        decode_sampled_token_ids_tensor: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         hidden_states: torch.Tensor,
         sample_hidden_states: torch.Tensor,
         aux_hidden_states: Optional[torch.Tensor],
-        hidden_states_prefills: list[torch.Tensor],
-        sample_hidden_states_prefills: list[torch.Tensor],
-        aux_hidden_states_prefills: list[Optional[torch.Tensor]],
-        num_decodes: int,
+        prefill_sampled_token_ids_tensor: Optional[torch.Tensor] = None,
+        decode_sampled_token_ids_tensor: Optional[torch.Tensor] = None,
+        hidden_states_prefills: Optional[list[torch.Tensor]] = None,
+        sample_hidden_states_prefills: Optional[list[torch.Tensor]] = None,
+        aux_hidden_states_prefills: Optional[list[torch.Tensor]] = None,
+        num_decodes: Optional[int] = None,
         prefill_data: Optional[PrefillInputData] = None,
         decode_data: Optional[DecodeInputData] = None,
     ) -> Union[list[list[int]], torch.Tensor]:
@@ -4848,6 +4970,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
             draft_token_ids = None
             if decode_data is not None:
+                assert num_decodes is not None
                 draft_token_ids = self.propose_eagle_decode(
                     sampled_token_ids,
                     decode_sampled_token_ids_tensor,
@@ -4861,6 +4984,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 # Currently, prefill is done one by one
                 draft_token_ids_prefill = []
                 prefill_batch_start_idx = num_decodes
+                assert prefill_sampled_token_ids_tensor is not None
+                assert hidden_states_prefills is not None
+                assert prefill_batch_start_idx is not None
 
                 for idx, (req_id, prompt_len, token_ids, position_ids, attn_metadata, logits_indices,
                           logits_requests) in enumerate(zip(*shallow_tuple(prefill_data))):
@@ -4945,7 +5071,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self,
         prefill_sampled_token_ids_tensor: torch.Tensor,
         hidden_states_prefills: list[torch.Tensor],
-        aux_hidden_states_prefills: list[Optional[torch.Tensor]],
+        aux_hidden_states_prefills: Optional[list[torch.Tensor]],
         idx,
         token_ids,
         position_ids,
@@ -4963,6 +5089,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         hidden_states = hidden_states_prefills[idx]
         if self.use_aux_hidden_state_outputs:
+            assert aux_hidden_states_prefills is not None
             aux_hidden_states = aux_hidden_states_prefills[idx]
             target_hidden_states = torch.cat(aux_hidden_states, dim=-1)
         else:
