@@ -95,7 +95,7 @@ These parameters can be configured separately by the user for the prompt and dec
     => buckets = ramp_up + stable => (128, 256, 384, 512)
     ```
 
-### Unified Strategy
+<!-- ### Unified Strategy
 
 The unified strategy is dedicated to Unified Attention. Its buckets are determined by the following non-configurable parameters:
 
@@ -104,7 +104,7 @@ The unified strategy is dedicated to Unified Attention. Its buckets are determin
 - `unique num blocks`: The context length measured in blocks. It includes only blocks that are not shared between block tables and are used by one token.
 - `is causal`: Indicates whether there is at least one prompt in the batch. Possible values are 0 or 1.
 
-Unified bucketing prepares buckets for both prompt and decode as one, known as `unified cfg`.
+Unified bucketing prepares buckets for both prompt and decode as one, known as `unified cfg`. -->
 
 #### Alpha Version
 
@@ -161,5 +161,5 @@ You can mix these three approaches in a single file, for example `([64, 128, 256
 
 Each bucket or a configuration has to be provided in a separate line. You can find a sample bucketing in [bucketing_file.txt](https://github.com/vllm-project/vllm-gaudi/blob/main/vllm_gaudi/extension/bucketing/bucketing_file.txt).
 
-!!! note
-    Currently, bucketing from a file is not supported for unified attention.
+<!-- !!! note
+    Currently, bucketing from a file is not supported for unified attention. -->
