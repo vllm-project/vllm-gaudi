@@ -11,21 +11,18 @@ from typing import Optional
 class HPUVocabParallelEmbeddingWithLoRA(VocabParallelEmbeddingWithLoRA):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        added_tokens_mask = torch.where(x > self.base_layer.org_vocab_size - 1, 1, 0)
-
         # NB: Don't use torch.narrow here. torch.narrow triggers some
         # Dynamic Shape specialization in torch.compile
         # flatten to get num_tokens since HPU uses 2d input layout
         # reshape indices_1, indices_0 to match shape of input
         num_tokens = x.view(-1).shape[0]
         indices_1 = self.punica_wrapper._embeddings_indices[1][:num_tokens].view_as(x)
-        indices_0 = self.punica_wrapper._embeddings_indices[0][:num_tokens].view_as(x)
 
         full_lora_a_embeddings = F.embedding(
             x + indices_1,
             self.lora_a_stacked_2d,
         )
-        full_output = self.base_layer.forward(x + (indices_0 * added_tokens_mask))
+        full_output = self.base_layer.forward(x)
 
         full_output_org = full_output
         if full_output.ndim == 3:
@@ -84,30 +81,6 @@ class HPULogitsProcessorWithLoRA(LogitsProcessorWithLoRA):
             # indices:  [0, 1, 2, 3, 4, 5,  6,  7]
             # token_id: [0, 1, 2, 3, 4, 5, -1, -1]
             logits = logits[:, self.sharded_to_full_mapping_gpu]
-
-        lora_logits = torch.empty(
-            self.embeddings_tensors.shape[0] + 1,
-            self.embeddings_tensors.shape[1],
-            hidden_states.shape[0],
-            dtype=self.embeddings_tensors.dtype,
-            device=self.embeddings_tensors.device,
-        )
-        torch.matmul(self.embeddings_tensors, hidden_states.T, out=lora_logits[:-1])
-
-        neg_inf, pos_inf = current_platform.get_infinity_values(lora_logits.dtype)
-
-        lora_logits[-1] = neg_inf
-        lora_logits = lora_logits.mT
-        indices_padded = self.punica_wrapper.sampler_indices_padded
-
-        indices_padded = indices_padded[:logits.size(0)]
-
-        lora_logits = (lora_logits.reshape(
-            lora_logits.shape[0] * lora_logits.shape[1],
-            lora_logits.shape[2],
-        ).index_select(0, indices_padded).nan_to_num_(nan=neg_inf, posinf=pos_inf, neginf=neg_inf))
-
-        logits[:, self.base_layer.org_vocab_size:self.base_layer.org_vocab_size + lora_logits.shape[1]] = lora_logits
 
         lora_output: Optional[torch.Tensor] = self.punica_wrapper.add_lora_logits(logits, hidden_states,
                                                                                   self.lora_a_stacked,
