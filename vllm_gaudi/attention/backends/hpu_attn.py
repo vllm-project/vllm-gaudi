@@ -840,7 +840,6 @@ class HPUUnifiedAttentionImpl(AttentionImpl, torch.nn.Module):
             'Sliding window': sliding_window is not None,
             'non-GQA attention': num_kv_heads is None,
             'Encoder attn': attn_type != AttentionType.DECODER,
-            'fp32 softmax': get_config().fp32_softmax,
         }
         for feature, check in unsupported_features.items():
             if check:
