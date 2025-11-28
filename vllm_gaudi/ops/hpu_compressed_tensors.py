@@ -196,6 +196,7 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
         layer.moe_op = VllmMixtureOfExpertsOpFP8PerChannel(
+            layer.global_num_experts,
             num_experts,
             experts_min,
             experts_max,
