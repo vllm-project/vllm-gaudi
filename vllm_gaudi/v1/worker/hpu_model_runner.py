@@ -4482,6 +4482,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         if self.unified_attn:
             self.bucketing_manager.generate_unified_buckets()
+            if self.supports_mm_inputs:
+                # Delayed multimodal buckets during warmup until model is loaded.
+                from vllm_gaudi.extension.bucketing.vision import HPUVisionBucketManager
+                self.get_model().vision_bucket_manager = HPUVisionBucketManager(get_config().model_type)
+                msg = (f"Multimodal bucket : {self.get_model().vision_bucket_manager.multimodal_buckets}")
+                logger.info(msg)
         else:
             self.bucketing_manager.generate_prompt_buckets()
             if not self.is_pooling_model:
@@ -4490,7 +4496,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if self.supports_mm_inputs:
                 # Delayed multimodal buckets during warmup until model is loaded.
                 from vllm_gaudi.extension.bucketing.vision import HPUVisionBucketManager
-                self.get_model().vision_bucket_manager = HPUVisionBucketManager(self.model_config.model)
+                self.get_model().vision_bucket_manager = HPUVisionBucketManager(get_config().model_type)
                 msg = (f"Multimodal bucket : {self.get_model().vision_bucket_manager.multimodal_buckets}")
                 logger.info(msg)
             if self.is_pooling_model:
@@ -4718,7 +4724,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 max_num_shared_blocks = math.ceil(num_blocks * get_config().unified_attn_shared_cache_ratio)
                 self.unified_attn_persistent_ctx = UnifiedBatchPersistentContext(self.max_num_batched_tokens,
                                                                                  max_num_shared_blocks, num_blocks,
-                                                                                 self.block_size, dtype)
+                                                                                 self.block_size, dtype, self.profiler)
             logger.info("Allocating unified persistent batch took %.4f GB of host memory",
                         m.consumed_host_memory / float(2**30))
 
