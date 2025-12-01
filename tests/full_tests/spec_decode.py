@@ -32,23 +32,24 @@ def time_generation(llm: LLM,
     # objects that contain the prompt, generated text, and other information.
     # Warmup first
     accuracy_check = prompts is None
+    ret = [""]
     if accuracy_check:
         task = "gsm8k"
         RTOL = 0.03
         FILTER = "exact_match,strict-match"
         accuracy = accuracy or 0.3
         start = time.time()
-        results = lm_eval.simple_evaluate(model=llm, tasks=[task], limit=limit, batch_size=16)
+        results = lm_eval.simple_evaluate(model=llm, tasks=[task], limit=limit)
         end = time.time()
         latency = end - start
         try:
             measured_value = results["results"][task][FILTER]
         except KeyError as e:
             raise KeyError(f"Available metrics: {results['results']}") from e
-        if accuracy > (measured_value + RTOL):
-            raise AssertionError(f"Expected: {accuracy} |  Measured: {measured_value}")
         ret = [f"Task: {task} | Metric: {FILTER} | Expected: {accuracy} | Measured: {measured_value}"]
         metrics = llm.model.llm_engine.get_metrics()
+        if accuracy > (measured_value + RTOL):
+            raise AssertionError(f"Expected: {accuracy} |  Measured: {measured_value}")
     else:
         logging.info("Warming up the model...")
         for _ in range(num_warmups):
@@ -118,17 +119,17 @@ def create_error_result(e: Exception) -> dict:
 
 def test_ngram(is_enable, args, prompts, sampling_params, task_key, result_queue):
     VLLM_CLS = LLM if prompts is not None else VLLM
+    kwargs = {"model":"Qwen/Qwen3-4B",} if prompts is not None \
+        else {"pretrained":"Qwen/Qwen3-4B","batch_size":16}
     try:
         if not is_enable:
             llm = VLLM_CLS(
-                model="Qwen/Qwen3-4B",
-                pretrained="Qwen/Qwen3-4B",
+                **kwargs,
                 disable_log_stats=False,
             )
         else:
             llm = VLLM_CLS(
-                model="Qwen/Qwen3-4B",
-                pretrained="Qwen/Qwen3-4B",
+                **kwargs,
                 speculative_config={
                     "method": "ngram",
                     "prompt_lookup_max": 3,
@@ -153,16 +154,19 @@ def test_ngram(is_enable, args, prompts, sampling_params, task_key, result_queue
 
 
 def test_eagle_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
+    VLLM_CLS = LLM if prompts is not None else VLLM
+    kwargs = {"model":"meta-llama/Meta-Llama-3-8B-Instruct"} if prompts is not None \
+        else {"pretrained":"meta-llama/Meta-Llama-3-8B-Instruct","batch_size":16}
     try:
         if not is_enable:
-            llm = LLM(
-                model="meta-llama/Meta-Llama-3-8B-Instruct",
+            llm = VLLM_CLS(
+                **kwargs,
                 disable_log_stats=False,
                 enforce_eager=args.enforce_eager,
             )
         else:
-            llm = LLM(
-                model="meta-llama/Meta-Llama-3-8B-Instruct",
+            llm = VLLM_CLS(
+                **kwargs,
                 speculative_config={
                     "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
                     "num_speculative_tokens": args.num_spec_tokens,
@@ -186,16 +190,19 @@ def test_eagle_model(is_enable, args, prompts, sampling_params, task_key, result
 
 
 def test_eagle3_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
+    VLLM_CLS = LLM if prompts is not None else VLLM
+    kwargs = {"model":"meta-llama/Meta-Llama-3-8B-Instruct",} if prompts is not None \
+        else {"pretrained":"meta-llama/Meta-Llama-3-8B-Instruct","batch_size":16}
     try:
         if not is_enable:
-            llm = LLM(
-                model="meta-llama/Meta-Llama-3-8B-Instruct",
+            llm = VLLM_CLS(
+                **kwargs,
                 disable_log_stats=False,
                 enforce_eager=args.enforce_eager,
             )
         else:
-            llm = LLM(
-                model="meta-llama/Meta-Llama-3-8B-Instruct",
+            llm = VLLM_CLS(
+                **kwargs,
                 speculative_config={
                     "model": "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
                     "num_speculative_tokens": args.num_spec_tokens,
@@ -220,16 +227,19 @@ def test_eagle3_model(is_enable, args, prompts, sampling_params, task_key, resul
 
 
 def test_medusa_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
+    VLLM_CLS = LLM if prompts is not None else VLLM
+    kwargs = {"model":"JackFram/llama-68m",} if prompts is not None \
+        else {"pretrained":"JackFram/llama-68m",}
     try:
         if not is_enable:
-            llm = LLM(
-                model="JackFram/llama-68m",
+            llm = VLLM_CLS(
+                **kwargs,
                 disable_log_stats=False,
                 enforce_eager=args.enforce_eager,
             )
         else:
-            llm = LLM(
-                model="JackFram/llama-68m",
+            llm = VLLM_CLS(
+                **kwargs,
                 speculative_config={
                     "model": "abhigoyal/vllm-medusa-llama-68m-random",
                     "num_speculative_tokens": args.num_spec_tokens,
@@ -253,15 +263,18 @@ def test_medusa_model(is_enable, args, prompts, sampling_params, task_key, resul
 
 
 def test_eaglemtp_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
+    VLLM_CLS = LLM if prompts is not None else VLLM
+    kwargs = {"model":"eagle618/deepseek-v3-random",} if prompts is not None \
+        else {"pretrained":"eagle618/deepseek-v3-random",}
     try:
         if not is_enable:
-            llm = LLM(
-                model="eagle618/deepseek-v3-random",
+            llm = VLLM_CLS(
+                **kwargs,
                 disable_log_stats=False,
             )
         else:
-            llm = LLM(
-                model="eagle618/deepseek-v3-random",
+            llm = VLLM_CLS(
+                **kwargs,
                 speculative_config={
                     "model": "eagle618/eagle-deepseek-v3-random",
                     "num_speculative_tokens": args.num_spec_tokens,
@@ -284,18 +297,21 @@ def test_eaglemtp_model(is_enable, args, prompts, sampling_params, task_key, res
 
 
 def test_mtp_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
+    VLLM_CLS = LLM if prompts is not None else VLLM
+    kwargs = {"model":"/mnt/weka/data/pytorch/DeepSeek-R1",} if prompts is not None \
+        else {"pretrained":"/mnt/weka/data/pytorch/DeepSeek-R1",}
     try:
         if not is_enable:
-            llm = LLM(
-                model="/mnt/weka/data/pytorch/DeepSeek-R1",
+            llm = VLLM_CLS(
+                **kwargs,
                 tensor_parallel_size=8,
                 enable_expert_parallel=True,
                 disable_log_stats=False,
                 trust_remote_code=True,
             )
         else:
-            llm = LLM(
-                model="/mnt/weka/data/pytorch/DeepSeek-R1",
+            llm = VLLM_CLS(
+                **kwargs,
                 tensor_parallel_size=8,
                 enable_expert_parallel=True,
                 speculative_config={
