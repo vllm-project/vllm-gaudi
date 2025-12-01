@@ -13,7 +13,8 @@ services:
     env_file:
       - ./server/server_user.env
     volumes:
-      - ${LOCAL_PATH:-/tmp/hf_cache}:/mnt/hf_cache
+      ## - /mnt/hf_cache:/mnt/hf_cache
+      - /mnt/weka:/mnt/hf_cache
     ports:
       - "8000:8000"
     cap_add:
