@@ -45,7 +45,8 @@ class HpuEagleProposer(EagleProposer):
             attn_metadata=common_attn_metadata,
         )
 
-        if self.method in ("deepseek_mtp", "ernie_mtp"):
+        # All MTP related method names are now unified to "mtp"
+        if self.method == "mtp":
             last_hidden_states = ret_hidden_states
             hidden_states = last_hidden_states
         else:
@@ -63,7 +64,7 @@ class HpuEagleProposer(EagleProposer):
         target_positions = target_positions.view(-1)
         # [batch_size]
         positions = target_positions[last_token_indices]
-        if self.method in ("deepseek_mtp", "ernie_mtp", "longcat_flash_mtp"):
+        if self.method == "mtp":
             hidden_states = target_hidden_states.view(-1, target_hidden_states.shape[-1])
         else:
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
