@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARG DOCKER_URL=vault.habana.ai/gaudi-docker
-ARG VERSION=1.22.0
+ARG VERSION=1.22.2
 ARG BASE_NAME=ubuntu24.04
 ARG PT_VERSION=2.7.1
 ARG REVISION=latest
