@@ -47,14 +47,14 @@ def time_generation(llm: LLM,
             raise KeyError(f"Available metrics: {results['results']}") from e
         if accuracy > (measured_value + RTOL):
             raise AssertionError(f"Expected: {accuracy} |  Measured: {measured_value}")
-        ret = f"Task: {task} | Metric: {FILTER} | Expected: {accuracy} | Measured: {measured_value}"
+        ret = [f"Task: {task} | Metric: {FILTER} | Expected: {accuracy} | Measured: {measured_value}"]
         metrics = llm.model.llm_engine.get_metrics()
     else:
         logging.info("Warming up the model...")
         for _ in range(num_warmups):
             llm.generate(prompts, sampling_params)
         logging.info("Starting generation...")
-        ret: list[str] = []
+        ret = []
         if do_profile:
             llm.start_profile()
         start = time.time()
@@ -362,6 +362,7 @@ if __name__ == "__main__":
         os.environ["VLLM_TORCH_PROFILER_DIR"] = "./vllm_profile_spec_decode"
 
     sampling_params = SamplingParams(temperature=0, max_tokens=args.osl, ignore_eos=True)
+    prompts: Optional[list[str]] = None
     if not args.accuracy_rate:
         # Sample prompts.
         prompts = [
@@ -378,9 +379,6 @@ if __name__ == "__main__":
             prompts = prompts[:args.batch_size]
         else:
             prompts = prompts * (args.batch_size // len(prompts)) + prompts[:args.batch_size % len(prompts)]
-
-    else:
-        prompts = None
 
     task_queue: dict[str, dict] = {}
     result_queue: multiprocessing.Queue = multiprocessing.Queue()
@@ -486,7 +484,7 @@ if __name__ == "__main__":
                     print(f"Prompt: {prompt}")
                     print(f"Generated text: {text}'...'")
             else:
-                print(f"accuracy check: {proc['result']['ret_spec']}")
+                print(f"accuracy check: {proc['result']['ret_spec'][0]}")
             print("=========================================")
             if proc['proc'].is_alive():
                 proc['proc'].terminate()
