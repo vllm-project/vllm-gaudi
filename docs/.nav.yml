@@ -24,8 +24,9 @@ nav:
     - configuration/pipeline_parallelism.md
   - Features:
     - features/supported_features.md
-    - features/*
-    - features/quantization
+    - features/bucketing_mechanism.md
+    - features/floating_point_8.md
+    - features/warmup.md
   - Developer Guides:
     - dev_guide/plugin_system.md
     - dev_guide/ci-failures.md
