@@ -3,14 +3,13 @@ import habana_frameworks.torch as htorch
 import torch
 from compressed_tensors import CompressionFormat
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, FusedMoEConfig)
 from compressed_tensors.quantization import (QuantizationStrategy)
 
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (convert_to_channelwise, all_close_1d)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import convert_to_channelwise
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter, ModelWeightParameter, PerTensorScaleParameter,
                                            BasevLLMParameter, GroupQuantScaleParameter, PackedColumnParameter,
                                            PackedvLLMParameter, RowvLLMParameter)
@@ -24,13 +23,12 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
     WNA16_SUPPORTED_TYPES_MAP)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (find_matched_target)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
-    CompressedTensorsW8A8Fp8MoEMethod, CompressedTensorsWNA16MarlinMoEMethod, CompressedTensorsMoEMethod)
+    CompressedTensorsW8A8Fp8MoEMethod, CompressedTensorsWNA16MarlinMoEMethod)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision import (MPLinearKernel, MPLinearLayerConfig)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (pack_quantized_values_into_int32,
                                                                        unpack_quantized_values_into_int32)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (marlin_repeat_scales_on_all_ranks)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
 import vllm_gaudi.extension.ops as hpu_ops
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel, VllmMixtureOfExpertsOpWNA16)
 
