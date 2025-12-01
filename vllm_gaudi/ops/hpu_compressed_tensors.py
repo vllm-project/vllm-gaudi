@@ -181,51 +181,8 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
     """MoE method without quantization."""
 
-    def __init__(
-        self,
-        quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
-        moe: FusedMoEConfig,
-    ):
-        """
-        Copied from CompressedTensorsW8A8Fp8MoEMethod.__int__: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe.py#L537
-        The only differences are:
-            - remove some useless code.
-            - extend per-channel weight and per-tensor activation format
-        """
-        CompressedTensorsMoEMethod.__init__(self, moe)
-        self.quant_config = quant_config
-        self.weight_quant = self.quant_config.target_scheme_map["Linear"].get("weights")
-        self.input_quant = self.quant_config.target_scheme_map["Linear"].get("input_activations")
-
-        per_tensor = (self.weight_quant.strategy == QuantizationStrategy.TENSOR
-                      and self.input_quant.strategy == QuantizationStrategy.TENSOR)
-        per_channel_token = (self.weight_quant.strategy == QuantizationStrategy.CHANNEL
-                             and self.input_quant.strategy == QuantizationStrategy.TOKEN)
-
-        # extend format
-        per_channel_tensor = (self.weight_quant.strategy == QuantizationStrategy.CHANNEL
-                              and self.input_quant.strategy == QuantizationStrategy.TENSOR)
-
-        if not (per_tensor or per_channel_token or per_channel_tensor):
-            assert self.weight_quant.strategy == QuantizationStrategy.BLOCK
-            self.weight_block_size = self.weight_quant.block_structure
-            assert self.weight_quant.dynamic is not None
-        else:
-            self.weight_block_size = None
-        self.block_quant = self.weight_block_size is not None
-
-        self.static_input_scales = not self.input_quant.dynamic
-        if self.static_input_scales and per_channel_token:
-            raise ValueError("For FP8 Fused MoE layer, we require either per tensor or "
-                             "channelwise, dynamic per token quantization.")
-
-        # For GPUs that lack FP8 hardware support, we can leverage the Marlin
-        # kernel for fast weight-only FP8 quantization
-        self.use_marlin = (not current_platform.has_device_capability(89)
-                           or envs.VLLM_TEST_FORCE_FP8_MARLIN and not self.block_quant)
-
-        self.disable_expert_map = False
-
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         torch.hpu.synchronize()
 
     def create_weights(self, *args, **kwargs) -> None:
@@ -246,37 +203,6 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
             experts_min,
             experts_max,
         )
-
-        if self.static_input_scales:
-            assert self.input_quant.strategy == QuantizationStrategy.TENSOR
-            if (layer.w13_input_scale is None or layer.w2_input_scale is None):
-                raise ValueError("QuantConfig has static quantization, but found "
-                                 "activation scales are None.")
-
-            if (not all_close_1d(layer.w13_input_scale)):
-                logger.warning_once("Found input_scales that are not equal for "
-                                    "fp8 MoE layer. Using the maximum across experts "
-                                    "for each layer.")
-            layer.w13_input_scale = torch.nn.Parameter(layer.w13_input_scale.max(), requires_grad=False)
-
-        if self.weight_quant.strategy == QuantizationStrategy.TENSOR:
-            assert layer.w13_weight_scale is not None
-            # convert per-channel
-            w13_s0 = layer.w13_weight_scale[:, :1]
-            w13_s1 = layer.w13_weight_scale[:, 1:]
-            w13_s0_exp = torch.repeat_interleave(w13_s0, repeats=layer.intermediate_size_per_partition, dim=1)
-            w13_s1_exp = torch.repeat_interleave(w13_s1, repeats=layer.intermediate_size_per_partition, dim=1)
-            w13_weight_scale_channel = torch.cat([w13_s0_exp, w13_s1_exp],
-                                                 dim=1).unsqueeze(-1).to(device=layer.w13_weight_scale.device,
-                                                                         dtype=torch.float32)
-            layer.w13_weight_scale = torch.nn.Parameter(w13_weight_scale_channel, requires_grad=False)
-
-            w2_weight_scale_channel = torch.empty((layer.local_num_experts, layer.hidden_size, 1),
-                                                  dtype=torch.float32,
-                                                  device=layer.w2_weight_scale.device)
-
-            w2_weight_scale_channel[:, :, 0] = layer.w2_weight_scale.reshape(-1, 1)
-            layer.w2_weight_scale = torch.nn.Parameter(w2_weight_scale_channel, requires_grad=False)
 
         layer = hpu_ops.fp8_channel_moe_prepare_weights(layer)
         return
