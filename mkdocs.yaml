@@ -51,6 +51,7 @@ plugins:
   - search
   - autorefs
   - awesome-nav
+  - macros
   # For API reference generation
   - api-autonav:
       modules: ["vllm_gaudi"]
