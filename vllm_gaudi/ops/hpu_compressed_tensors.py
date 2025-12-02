@@ -89,7 +89,7 @@ class HPUCompressedTensorsLinearMethod(OrigCompressedTensorsLinearMethod):
         return hpu_scheme
 
 
-@CustomOp.register_oot(name='CompressedTensorsW8A16Fp8')
+@CustomOp.register_oot(name='CompressedTensorsW8A8Fp8')
 class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
     def __init__(self, strategy: str, is_static_input_scheme: bool):
@@ -111,10 +111,12 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         # Weights must be transposed for marlin
         layer.weight = torch.nn.Parameter(layer.weight.t(), requires_grad=False)
 
-        if layer.scheme.is_static_input_scheme:
+        # see the reference: https://github.com/vllm-project/vllm/blob/v0.11.2/vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_w8a8_fp8.py#L169-L173
+        if layer.scheme.is_static_input_scheme and hasattr(layer, "input_scale"):
             # required by torch.compile to be torch.nn.Parameter, only per-tensor supported
-            # see the scheme definitions: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_w8a8_fp8.py
             layer.input_scale = torch.nn.Parameter(layer.input_scale.max(), requires_grad=False)
+        else:
+            layer.input_scale = None
 
     def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int, output_partition_sizes: list[int],
                        input_size: int, output_size: int, params_dtype: torch.dtype, **extra_weight_attrs):
