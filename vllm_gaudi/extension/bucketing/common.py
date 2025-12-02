@@ -49,7 +49,12 @@ class HPUBucketingManager():
             cls._instance = super(HPUBucketingManager, cls).__new__(cls)
         return cls._instance
 
-    def initialize(self, max_num_seqs, max_num_prefill_seqs, block_size, max_num_batched_tokens, max_model_len,
+    def initialize(self,
+                   max_num_seqs,
+                   max_num_prefill_seqs,
+                   block_size,
+                   max_num_batched_tokens,
+                   max_model_len,
                    num_speculative_tokens=0):
         self.max_num_seqs = max_num_seqs
         self.max_num_prefill_seqs = max_num_prefill_seqs

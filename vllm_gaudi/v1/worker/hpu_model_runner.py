@@ -2036,7 +2036,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         num_tokens_per_req = num_scheduled_tokens[:num_decodes]
         num_tokens = max(num_tokens_per_req)
         # Spec decode to use seed buckets to get padded batch size
-        seek_buckets = True if num_tokens > 1 else False
+        seek_buckets = bool(num_tokens > 1)
 
         # PAD FOR STATIC SHAPES.
         padded_batch_size: int
