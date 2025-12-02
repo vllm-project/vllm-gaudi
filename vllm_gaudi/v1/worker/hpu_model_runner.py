@@ -33,7 +33,6 @@ from vllm_gaudi.extension.runtime import finalize_config, get_config
 from vllm_gaudi.extension.unified_batch import create_unified_batch
 from vllm_gaudi.extension.utils import align_and_pad, pad_list, with_default
 from vllm_gaudi.extension.debug import init_debug_logger
-from vllm_gaudi.v1.spec_decode.hpu_eagle import HpuEagleProposer
 from vllm_gaudi.v1.worker.hpu_dp_utils import set_hpu_dp_metadata
 
 from vllm.attention.backends.abstract import AttentionType
@@ -105,6 +104,7 @@ else:
     xgr_torch_compile = LazyLoader("xgr_torch_compile", globals(),
                                    "xgrammar.kernels.apply_token_bitmask_inplace_torch_compile")
 
+from vllm_gaudi.extension.unified_batch import UnifiedBatch
 from vllm_gaudi.extension.logger import logger as init_logger
 
 logger = init_logger()
@@ -819,6 +819,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.inc_initialized_successfully = False
         self._is_inc_finalized = False
 
+        self.unified_attn = get_config().unified_attn
+
         # mm_hash -> encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
         # Set up speculative decoding.
@@ -828,6 +830,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
+                if self.unified_attn:
+                    from vllm_gaudi.v1.spec_decode.hpu_eagle_unified import HpuEagleProposer
+                else:
+                    from vllm_gaudi.v1.spec_decode.hpu_eagle import HpuEagleProposer
                 self.drafter = HpuEagleProposer(self.vllm_config, self.device, self)  # type: ignore
                 if self.speculative_config.method == "eagle3":
                     self.use_aux_hidden_state_outputs = True
@@ -871,7 +877,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         assert not (self.use_async_scheduling and (self.speculative_config is not None)), \
             "Speculative decoding is not supported with async scheduling."
         self.mem_margin = None
-        self.unified_attn = get_config().unified_attn
         self.use_merged_prefill = get_config().merged_prefill
 
         self.use_hpu_graph = not self.model_config.enforce_eager
@@ -3020,21 +3025,24 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self._prepare_input_ids(scheduler_output)
             input_ids_hpu = self.input_ids_hpu
 
-        batch = create_unified_batch(self.input_batch.req_ids,
-                                     all_token_ids,
-                                     num_computed_tokens,
-                                     num_scheduled_tokens,
-                                     num_prompt_tokens,
-                                     block_table,
-                                     self.block_size,
-                                     self.dtype,
-                                     self.unified_attn_persistent_ctx,
-                                     self.unified_bucketing_fn,
-                                     self.get_dp_padding,
-                                     input_ids_hpu,
-                                     num_decodes,
-                                     scheduled_spec_decode_tokens=scheduler_output.scheduled_spec_decode_tokens,
-                                     prepare_spec_decode_inputs_fn=self._prepare_spec_decode_inputs_for_ua)
+        batch = create_unified_batch(
+            self.input_batch.req_ids,
+            all_token_ids,
+            num_computed_tokens,
+            num_scheduled_tokens,
+            num_prompt_tokens,
+            block_table,
+            self.block_size,
+            self.dtype,
+            self.unified_attn_persistent_ctx,
+            self.unified_bucketing_fn,
+            self.get_dp_padding,
+            input_ids_hpu,
+            num_decodes,
+            scheduled_spec_decode_tokens=scheduler_output.scheduled_spec_decode_tokens,
+            prepare_spec_decode_inputs_fn=self._prepare_spec_decode_inputs_for_ua,
+            get_cumsum_and_arange=self._get_cumsum_and_arange,
+        )
         if self.uses_mrope:
             batch.token_positions = self.get_unified_mrope_position_ids(
                 self.input_batch.req_ids,
@@ -3107,6 +3115,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         sampler_output.sampled_token_ids,
                         self.input_batch.vocab_size,
                 )
+                if isinstance(sampled_token_ids_parsed, tuple):
+                    sampled_token_ids_parsed = sampled_token_ids_parsed[0]
 
         # Copy some objects so they don't get modified after returning.
         # This is important when using async scheduling.
@@ -3166,9 +3176,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         ################## Spec Decode ##################
         # Now, we will call drafter to propose draft token ids
         if self.speculative_config:
-            self._draft_token_ids = self.propose_draft_token_ids(scheduler_output, sampled_token_ids, sampling_metadata,
-                                                                 non_flattened_hidden_states, hidden_states,
-                                                                 aux_hidden_states)
+            self._draft_token_ids = self.propose_draft_token_ids(scheduler_output,
+                                                                 sampled_token_ids,
+                                                                 sampling_metadata,
+                                                                 non_flattened_hidden_states,
+                                                                 hidden_states,
+                                                                 aux_hidden_states,
+                                                                 unified_data=batch)
         ################## Spec Decode end ##################
 
         if self.use_async_scheduling:
@@ -3667,7 +3681,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 sample_hidden_states, aux_hidden_states, prefill_sampled_token_ids_device,
                 decode_sampled_token_ids_device, non_flattened_hidden_states_prefills, sample_hidden_states_prefills,
                 aux_hidden_states_prefills, num_decodes, prefill_data if num_prefills > 0 else None,
-                decode_data if num_decodes > 0 else None)
+                decode_data if num_decodes > 0 else None, None)
         ################## Spec Decode end ##################
 
         # Create output.
@@ -4965,6 +4979,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         num_decodes: Optional[int] = None,
         prefill_data: Optional[PrefillInputData] = None,
         decode_data: Optional[DecodeInputData] = None,
+        unified_data: Optional[UnifiedBatch] = None,
     ) -> Union[list[list[int]], torch.Tensor]:
         if self.speculative_config.method == "ngram":
             assert isinstance(self.drafter, NgramProposer)
@@ -4973,6 +4988,22 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             assert isinstance(self.drafter, EagleProposer)
 
             draft_token_ids = None
+            if decode_data is None and prefill_data is None:
+                # we will do unified attention for draft model
+                assert unified_data is not None
+                draft_token_ids = self.propose_eagle_unified(
+                    scheduler_output,
+                    sampled_token_ids,
+                    sampling_metadata,
+                    hidden_states,
+                    sample_hidden_states,
+                    aux_hidden_states,
+                    unified_data,
+                )
+                if self.speculative_config.num_speculative_tokens == 1:
+                    return draft_token_ids.view(-1, 1)  # type: ignore
+                return draft_token_ids
+
             if decode_data is not None:
                 assert num_decodes is not None
                 draft_token_ids = self.propose_eagle_decode(
@@ -5021,6 +5052,66 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if self.speculative_config.num_speculative_tokens == 1:
                 return draft_token_ids.view(-1, 1)  # type: ignore
 
+        return draft_token_ids
+
+    def propose_eagle_unified(
+        self,
+        scheduler_output: "SchedulerOutput",
+        sampled_token_ids: list[list[int]],
+        sampling_metadata: SamplingMetadata,
+        hidden_states: torch.Tensor,
+        sample_hidden_states: torch.Tensor,
+        aux_hidden_states: Optional[torch.Tensor],
+        unified_data: UnifiedBatch,
+    ):
+        spec_decode_metadata = unified_data.spec_decode_metadata
+        next_token_ids = self.drafter.prepare_next_token_ids_cpu(
+            sampled_token_ids,
+            self.requests,
+            self.input_batch,
+            scheduler_output.num_scheduled_tokens,
+        )
+        common_attn_metadata = unified_data.attn_metadata
+        if spec_decode_metadata is None:
+            # when no draft token scheduled, we don't need to remove rejected tokens
+            target_token_ids = unified_data.token_ids
+            target_positions = unified_data.token_positions
+            last_token_indices = (unified_data.query_start_loc_cpu[1:] - 1).to(self.device)
+            if self.use_aux_hidden_state_outputs:
+                assert aux_hidden_states is not None
+                target_hidden_states = torch.cat([h for h in aux_hidden_states], dim=-1)
+            else:
+                target_hidden_states = hidden_states
+        else:
+            # when draft token scheduled, we need to only select last valid token for each sequence
+            # as input to drafter
+            token_indices, last_token_indices = \
+            self.drafter.prepare_inputs(sampled_token_ids, unified_data,)
+            # FIXME(Chendi): if we use token_indices, we can feed less tokens to drafter,
+            # However, we will need to update attn_metadata to put some shareable attn tokens to
+            # unique buckets to make that happen.
+            # Now I am using easier way which is to use target model attn_metadata and use
+            # last_token_indices to pick correct token for sampling
+            #target_token_ids = unified_data.token_ids[token_indices]
+            #target_positions = unified_data.token_positions[token_indices]
+            target_token_ids = unified_data.token_ids
+            target_positions = unified_data.token_positions
+            if self.use_aux_hidden_state_outputs:
+                assert aux_hidden_states is not None
+                #target_hidden_states = torch.cat([h[token_indices] for h in aux_hidden_states], dim=-1)
+                target_hidden_states = torch.cat([h for h in aux_hidden_states], dim=-1)
+            else:
+                #target_hidden_states = hidden_states[token_indices]
+                target_hidden_states = hidden_states
+        draft_token_ids = self.drafter.propose(
+            target_token_ids=target_token_ids,
+            target_positions=target_positions,
+            target_hidden_states=target_hidden_states,
+            next_token_ids=next_token_ids,
+            last_token_indices=last_token_indices,
+            sampling_metadata=sampling_metadata,
+            common_attn_metadata=common_attn_metadata,
+        )
         return draft_token_ids
 
     def propose_eagle_decode(

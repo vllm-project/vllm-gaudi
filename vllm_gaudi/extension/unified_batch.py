@@ -24,6 +24,8 @@ class UnifiedBatch:
     attn_metadata: HPUUnifiedAttentionMetadata
     invalid_req_indices: list[int]
     spec_decode_metadata: Optional[SpecDecodeMetadata] = None
+    query_start_loc_cpu: torch.Tensor = None
+    seq_lens_cpu: torch.Tensor = None
 
 
 def to_hpu(data: Optional[Union[torch.Tensor, list]], dtype: Optional[torch.dtype] = None) -> torch.Tensor:
@@ -489,6 +491,7 @@ def create_unified_batch(
     scheduled_spec_decode_tokens: Optional[dict[int, int]] = None,
     prepare_spec_decode_inputs_fn: Optional[Callable[[dict[int, int], np.ndarray, torch.Tensor, int],
                                                      tuple[np.ndarray, SpecDecodeMetadata]]] = None,
+    get_cumsum_and_arange: Optional[Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]]] = None,
 ) -> UnifiedBatch:
     """ Calculate all necessary tensors needed for batch scheduling """
     # Track original dtypes before converting to numpy
@@ -550,6 +553,14 @@ def create_unified_batch(
         # So we can't simply use total, we need to offset
         negative_logits_offsets = num_output_tokens[logits_groups] - logits_offsets - 1
         new_token_positions = total_tokens[logits_groups] - negative_logits_offsets
+
+        # Used by spec decode draft model
+        num_reqs = len(req_ids)
+        cu_num_tokens, _ = get_cumsum_and_arange(num_scheduled_tokens)
+        query_start_loc_cpu = torch.zeros((num_reqs + 1, ), dtype=torch.int32)
+        query_start_loc_np = query_start_loc_cpu.numpy()
+        query_start_loc_np[0] = 0
+        query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
 
     def first_dim(t: Optional[np.ndarray]) -> int:
         """ Takes first dim size or 0 if tensor is None"""
@@ -745,5 +756,7 @@ def create_unified_batch(
             attn_metadata=attn_metadata,
             invalid_req_indices=invalid_req_indices,
             spec_decode_metadata=spec_decode_metadata,
+            query_start_loc_cpu=query_start_loc_cpu,
+            seq_lens_cpu=torch.from_numpy(total_tokens),
         )
     return unified_batch
