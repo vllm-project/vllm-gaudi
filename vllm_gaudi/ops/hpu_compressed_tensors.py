@@ -440,6 +440,7 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         self,
         quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
         moe: FusedMoEConfig,
+        layer_name: str | None = None,
     ):
         super().__init__(quant_config, moe)
 
@@ -449,6 +450,7 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
             raise ValueError("For Fused MoE layers, only ", f"{CompressionFormat.pack_quantized.value} ",
                              "is supported for the following bits: ", f"{HPU_WNA16_SUPPORTED_BITS}")
         self.quant_type = WNA16_SUPPORTED_TYPES_MAP[self.num_bits]
+        self.layer_name = layer_name
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int, params_dtype: torch.dtype, **extra_weight_attrs):
