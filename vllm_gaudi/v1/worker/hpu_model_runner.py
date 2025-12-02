@@ -3385,6 +3385,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                 sampled_token_ids,
                                 self.input_batch.vocab_size,
                         )
+                        if isinstance(decode_sampled_token_ids, tuple):
+                            decode_sampled_token_ids, _ = decode_sampled_token_ids
                         # Trim output in case of dummy padding
                         decode_sampled_token_ids = decode_sampled_token_ids[:num_decodes]
                         # convert decode_sampled_token_ids as list of tensor
