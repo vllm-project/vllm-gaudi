@@ -3,7 +3,7 @@
 
 # Parameterize base image components
 ARG DOCKER_URL=vault.habana.ai/gaudi-docker
-ARG VERSION=1.22.0
+ARG VERSION=1.22.2
 ARG BASE_NAME=ubuntu22.04
 ARG PT_VERSION=2.7.1
 ARG REVISION=latest
@@ -24,6 +24,7 @@ WORKDIR /root
 
 ENV VLLM_PATH=/workspace/vllm-project
 ENV VLLM_PATH2=/workspace/vllm-gaudi
+ENV HABANA_VISIBLE_DEVICES=all
 
 RUN echo "dash dash/sh boolean false" | debconf-set-selections && \
     DEBIAN_FRONTEND=noninteractive dpkg-reconfigure dash
