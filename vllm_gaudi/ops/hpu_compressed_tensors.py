@@ -88,6 +88,13 @@ class HPUCompressedTensorsLinearMethod(OrigCompressedTensorsLinearMethod):
             raise ValueError(f"{scheme_classname} compressed format is not supported on HPU")
         return hpu_scheme
 
+    def dequant_fp8_weight(self, layer: torch.nn.Module) -> torch.Tensor:
+        if layer.scheme.strategy == QuantizationStrategy.CHANNEL:  # weights were quantized per-channel
+            dequant_weight = layer.weight.to(layer.weight_scale.dtype) * layer.weight_scale.squeeze()
+            return dequant_weight.to(torch.bfloat16).t()
+        else:
+            raise NotImplementedError("Implemented per-channel dequantization only")
+
 
 @CustomOp.register_oot(name='CompressedTensorsW8A16Fp8')
 class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
@@ -114,6 +121,10 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         if layer.scheme.is_static_input_scheme:
             # required by torch.compile to be torch.nn.Parameter
             layer.input_scale = torch.nn.Parameter(layer.input_scale.data, requires_grad=False)
+
+        # postprocess weights for perchannel strategy
+        if layer.scheme.strategy == QuantizationStrategy.CHANNEL:
+            hpu_ops.fp8_perchannel_linear_postprocess_weights(layer)
 
     def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int, output_partition_sizes: list[int],
                        input_size: int, output_size: int, params_dtype: torch.dtype, **extra_weight_attrs):
