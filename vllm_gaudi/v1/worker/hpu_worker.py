@@ -327,10 +327,11 @@ class HPUWorker(WorkerBase):
         """Put the worker into sleep mode to reduce memory usage. Unlike GPU workers that use custom
         memory allocators, HPU workers use a simpler approach of moving model to CPU and clearing KV cache.
         Args:
-            level (int): Sleep level (kept for interface compatibility, performs only level 1 operations)
+            level (int): Sleep level (kept for interface compatibility, always performs level 1 operations)
         """
 
-        assert level == 1, f"Currently, HPU supports only sleep mode level 1 (and not: level {level})"
+        if level == 2:
+            logger.warning("Currently, HPU does not support level 2 sleep mode. Performing level 1 operations")
         assert not htorch.utils.internal.is_lazy(
         ) or self.model_config.enforce_eager, "Sleep mode is supported only for torch.compile mode"
 
