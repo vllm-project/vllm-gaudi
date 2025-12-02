@@ -891,11 +891,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                else self.max_prefill_batch_size
         if self.enable_bucketing:
             logger.info("Bucketing is ON.")
+            num_speculative_tokens = self.speculative_config.num_speculative_tokens if self.speculative_config else 0
             self.bucketing_manager.initialize(max_num_seqs=self.max_num_seqs,
                                               max_num_prefill_seqs=max_num_prefill_seqs,
                                               block_size=self.block_size,
                                               max_num_batched_tokens=self.max_num_batched_tokens,
-                                              max_model_len=self.max_model_len)
+                                              max_model_len=self.max_model_len,
+                                              num_speculative_tokens=num_speculative_tokens)
             self.graphed_buckets: set[Any] = set()
             self.graphed_multimodal_buckets: set[Any] = set()
         else:
@@ -2031,15 +2033,18 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # but also kvs for the current token
         num_blocks = np.ceil((context_lens + 1) / self.block_size).astype(np.int32).tolist()
 
+        num_tokens_per_req = num_scheduled_tokens[:num_decodes]
+        num_tokens = max(num_tokens_per_req)
+        # Spec decode to use seed buckets to get padded batch size
+        seek_buckets = True if num_tokens > 1 else False
+
         # PAD FOR STATIC SHAPES.
         padded_batch_size: int
-        padded_batch_size = self.bucketing_manager.find_decode_bucket(num_decodes, sum(num_blocks))[0]
+        padded_batch_size = self.bucketing_manager.find_decode_bucket(num_decodes, sum(num_blocks), seek_buckets)[0]
 
         # dp aware padding
         padded_batch_size += self.get_dp_padding(padded_batch_size)
 
-        num_tokens_per_req = num_scheduled_tokens[:num_decodes]
-        num_tokens = max(num_tokens_per_req)
         total_num_scheduled_tokens = sum(num_tokens_per_req)
         num_tokens_per_req = num_tokens_per_req + [0] * (padded_batch_size - num_decodes)
 
