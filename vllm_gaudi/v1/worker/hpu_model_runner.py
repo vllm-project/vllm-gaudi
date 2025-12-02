@@ -1016,7 +1016,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             vllm_config,
             device,
             model.embedding_modules,
-            model.embedding_padding_modules,
         )
         return self.lora_manager.create_lora_manager(model)
 
@@ -2300,6 +2299,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_draft_tokens = np.zeros(logits_indices.numel(), dtype=np.int32)
             for req_id, draft_token_ids_in_req in (scheduler_output.scheduled_spec_decode_tokens.items()):
                 req_idx = self.input_batch.req_id_to_index[req_id]
+                if req_idx >= logits_indices.numel():
+                    continue
                 num_draft_tokens[req_idx] = len(draft_token_ids_in_req)
 
             num_sampled_tokens = num_draft_tokens + 1
@@ -3383,6 +3384,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                 sampled_token_ids,
                                 self.input_batch.vocab_size,
                         )
+                        if isinstance(decode_sampled_token_ids, tuple):
+                            decode_sampled_token_ids, _ = decode_sampled_token_ids
+                        # Trim output in case of dummy padding
+                        decode_sampled_token_ids = decode_sampled_token_ids[:num_decodes]
                         # convert decode_sampled_token_ids as list of tensor
                         spec_decode_num_tokens = [len(v) for v in decode_sampled_token_ids]
                         decode_sampled_token_ids = [
@@ -3643,7 +3648,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         ########### Spec Decode model ############
         if hasattr(self, "drafter"):
             with HabanaMemoryProfiler() as m:  # noqa: SIM117
-                logger.info("Loading drafter model %s...", self.vllm_config.speculative_config.draft_model_config)
+                #logger.info("Loading drafter model %s...", self.vllm_config.speculative_config.draft_model_config)
                 self.drafter.load_model(self.model.model)
                 if self.use_aux_hidden_state_outputs:
                     if supports_eagle3(self.model.model):
@@ -4863,6 +4868,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
                 for idx, (req_id, prompt_len, token_ids, position_ids, attn_metadata, logits_indices,
                           logits_requests) in enumerate(zip(*shallow_tuple(prefill_data))):
+                    if idx >= len(prefill_sampled_token_ids_tensor):
+                        continue
                     _draft_token_ids = self.propose_eagle_prefill(
                         prefill_sampled_token_ids_tensor,
                         hidden_states_prefills,
