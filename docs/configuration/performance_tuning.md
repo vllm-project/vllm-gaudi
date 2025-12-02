@@ -16,7 +16,7 @@ INFO 09-24 17:31:40 habana_executor.py:85] # HPU blocks: 4107, # CPU blocks: 256
 INFO 09-24 17:31:41 habana_worker.py:208] Initializing cache engine took 64.17 GiB of device memory (79.57 GiB/94.62 GiB used) and 1.015 GiB of host memory (9.329 GiB/108.2 GiB used)
 ```
 
-You can control the ratio between HPU graphs and KV cache using the `VLLM_GRAPH_RESERVED_MEM` environment variable. Increasing the KV cache size enables larger batch processing, improving overall throughput. Enabling [HPU graphs](../warm-up/warm-up.md#hpu-graph-capture) helps reduce host [overhead](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html#reducing-host-overhead-with-hpu-graphs) and can lower latency.
+You can control the ratio between HPU graphs and KV cache using the `VLLM_GRAPH_RESERVED_MEM` environment variable. Increasing the KV cache size enables larger batch processing, improving overall throughput. Enabling [HPU graphs](warm-up/warm-up.md#hpu-graph-capture) helps reduce host [overhead](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html#reducing-host-overhead-with-hpu-graphs) and can lower latency.
 
 The following example shows the warm-up phase logs:
 
@@ -31,15 +31,15 @@ After analyzing these logs, you should have a good understanding of how much fre
 
 ## Bucketing Mechanism
 
-The [bucketing mechanism](../../features/bucketing_mechanism.md) can help optimize performance across different workloads. The vLLM server is pre-configured for heavy decoding scenarios with high request concurrency, using the default maximum batch size strategy (`VLLM_GRAPH_DECODE_STRATEGY`). During low-load periods, this configuration may not be ideal and can be adjusted for smaller batch sizes. For example, modifying bucket ranges via `VLLM_DECODE_BS_BUCKET_{param}` can improve efficiency. For a list of environment variables controlling bucketing behavior, see the [Environment Variables](../env_variables.md) document.
+The [bucketing mechanism](../features/bucketing_mechanism.md) can help optimize performance across different workloads. The vLLM server is pre-configured for heavy decoding scenarios with high request concurrency, using the default maximum batch size strategy (`VLLM_GRAPH_DECODE_STRATEGY`). During low-load periods, this configuration may not be ideal and can be adjusted for smaller batch sizes. For example, modifying bucket ranges via `VLLM_DECODE_BS_BUCKET_{param}` can improve efficiency. For a list of environment variables controlling bucketing behavior, see the [Environment Variables](env_variables.md) document.
 
 ## Floating Point 8-bit
 
 Using the Floating Point 8-bit (FP8) data type for large language models reduces memory bandwidth requirements by half compared to BF16. In addition, the FP8 computation is twice as fast as BF16, enabling performance gains even for compute-bound workloads, such as offline inference with large batch sizes.
-For more information, see the [Floating Point 8-bit](../../features/floating_point_8.md) document.
+For more information, see the [Floating Point 8-bit](../features/floating_point_8.md) document.
 
 ## Warm-Up
 
-During the development phase, when evaluating a model for inference on vLLM, you may skip the warm-up phase of the server using the `VLLM_SKIP_WARMUP=true` environment variable. This helps to achieve faster testing turnaround times. However, disabling warm-up is acceptable only for development purposes, we strongly recommend keeping it enabled in production environments. Keep warm-up enabled during deployment with optimal number of [buckets](../../features/bucketing_mechanism.md).
+During the development phase, when evaluating a model for inference on vLLM, you may skip the warm-up phase of the server using the `VLLM_SKIP_WARMUP=true` environment variable. This helps to achieve faster testing turnaround times. However, disabling warm-up is acceptable only for development purposes, we strongly recommend keeping it enabled in production environments. Keep warm-up enabled during deployment with optimal number of [buckets](../features/bucketing_mechanism.md).
 
-Warm-up time depends on many factors, such as input and output sequence length, batch size, number of buckets, and data type. It can even take a couple of hours, depending on the configuration. For more information, see the [Warm-up](../../features/warmup.md) document.
+Warm-up time depends on many factors, such as input and output sequence length, batch size, number of buckets, and data type. It can even take a couple of hours, depending on the configuration. For more information, see the [Warm-up](../features/warmup.md) document.
