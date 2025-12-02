@@ -147,6 +147,9 @@ class HPUWorker(WorkerBase):
         self.model_runner = HPUModelRunner(vllm_config=self.vllm_config, is_driver_worker=self.is_driver_worker)
         self.init_profiler()
 
+    def shutdown(self):
+        getattr(self.model_runner, 'shutdown_inc', lambda: None)()
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 
