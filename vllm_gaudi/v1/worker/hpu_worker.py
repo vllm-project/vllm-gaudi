@@ -327,7 +327,7 @@ class HPUWorker(WorkerBase):
         """Put the worker into sleep mode to reduce memory usage. Unlike GPU workers that use custom
         memory allocators, HPU workers use a simpler approach of moving model to CPU and clearing KV cache.
         Args:
-            level (int): Sleep level (kept for interface compatibility, always performs level 1 operations)
+            level (int): Sleep level (kept for interface compatibility, performs only level 1 operations)
         """
 
         assert level == 1, f"Currently, HPU supports only sleep mode level 1 (and not: level {level})"
@@ -358,11 +358,9 @@ class HPUWorker(WorkerBase):
             with HabanaMemoryProfiler() as m:
                 self.model_runner.defragmenter.cache_utils.kv_caches = None
                 self.model_runner.kv_caches = []
-
                 forward_context = self.vllm_config.compilation_config.static_forward_context
                 for layer_name in forward_context:
                     forward_context[layer_name].kv_cache = None
-
                 gc.collect()
                 torch.hpu.synchronize()
             msg = f"Discarding KV cache for sleep mode took {m.get_summary_string()}"
