@@ -109,7 +109,6 @@ class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
         prefix: str = "",
         use_data_parallel: bool = False,
         attn_backend: AttentionBackendEnum = AttentionBackendEnum.TORCH_SDPA,
-        use_upstream_fa: bool = False,
         attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__(
@@ -120,7 +119,6 @@ class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
             prefix=prefix,
             use_data_parallel=use_data_parallel,
             attn_backend=attn_backend,
-            use_upstream_fa=use_upstream_fa,
             attn_backend_override=attn_backend_override,
         )
 
@@ -223,7 +221,6 @@ class HPUQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
         prefix: str = "",
         use_data_parallel: bool = False,
         attn_backend: AttentionBackendEnum = AttentionBackendEnum.TORCH_SDPA,
-        use_upstream_fa: bool = False,
         attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__(
@@ -236,7 +233,6 @@ class HPUQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
             prefix=prefix,
             use_data_parallel=use_data_parallel,
             attn_backend=attn_backend,
-            use_upstream_fa=use_upstream_fa,
             attn_backend_override=attn_backend_override,
         )
         self.attn = HPUQwen2_5_VisionAttention(
@@ -247,7 +243,6 @@ class HPUQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
             prefix=maybe_prefix(prefix, "attn."),
             use_data_parallel=use_data_parallel,
             attn_backend=attn_backend,
-            use_upstream_fa=use_upstream_fa,
             attn_backend_override=attn_backend_override,
         )
 
@@ -301,7 +296,6 @@ class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
         )
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
-        use_upstream_fa = False
         depth = vision_config.depth
         from vllm.compilation.backends import set_model_tag
 
@@ -317,7 +311,6 @@ class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
                     prefix=f"{prefix}.blocks.{layer_idx}",
                     use_data_parallel=use_data_parallel,
                     attn_backend=self.attn_backend,
-                    use_upstream_fa=use_upstream_fa,
                     attn_backend_override=attn_backend_override,
                 ) for layer_idx in range(depth)
             ])
