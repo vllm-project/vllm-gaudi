@@ -1,13 +1,12 @@
 from typing import Callable, Optional, Union
 import habana_frameworks.torch as htorch
 import torch
-from compressed_tensors import CompressionFormat
 
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, FusedMoEConfig)
-from compressed_tensors.quantization import (QuantizationStrategy)
+from compressed_tensors.quantization import (QuantizationArgs, QuantizationStrategy)
 
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import convert_to_channelwise
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter, ModelWeightParameter, PerTensorScaleParameter,
@@ -452,17 +451,16 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
 
     def __init__(
         self,
-        quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs | None,
         moe: FusedMoEConfig,
         layer_name: str | None = None,
     ):
-        super().__init__(quant_config, moe)
+        super().__init__(weight_quant, input_quant, moe)
 
-        HPU_WNA16_SUPPORTED_BITS = [4]
-        if not (self.quant_config.quant_format == CompressionFormat.pack_quantized.value
-                and self.num_bits in HPU_WNA16_SUPPORTED_BITS):
-            raise ValueError("For Fused MoE layers, only ", f"{CompressionFormat.pack_quantized.value} ",
-                             "is supported for the following bits: ", f"{HPU_WNA16_SUPPORTED_BITS}")
+        self.weight_quant = weight_quant
+        self.input_quant = input_quant
+        assert weight_quant.symmetric, ("Only symmetric quantization is supported for MoE")
         self.quant_type = WNA16_SUPPORTED_TYPES_MAP[self.num_bits]
         self.layer_name = layer_name
 
