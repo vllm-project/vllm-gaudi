@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import habana_frameworks.torch as htorch
 from dataclasses import dataclass
-from vllm_gaudi.extension.unified import HPUUnifiedAttentionMetadata, get_vecsize_packsize
+from vllm_gaudi.extension.unified import HPUUnifiedAttentionMetadata, get_vecsize_packsize, get_last_dim_size
 import math
 from typing import Optional, Callable, Union
 from vllm_gaudi.extension.logger import logger as init_logger
@@ -106,10 +106,7 @@ def generate_bias(block_usages: np.ndarray, block_size: int, dtype: np.dtype, bl
 
 def prepare_unified_attn_softmax_inputs(attn_metadata: dict, cfg: tuple, num_kv_heads: int,
                                         num_query_heads: int) -> dict:
-
-    def get_last_dim_size(last_dim, vec_size, pack_size):
-        return math.ceil(last_dim / pack_size) * vec_size
-
+    """ Pre-allocate necessary HPU tensors for unified attention's causal and shared softmax_fa2 computation """
     vec_size, pack_size = get_vecsize_packsize(attn_metadata.fmin.dtype)
     shapes_to_create = []
     query_len = cfg[1]

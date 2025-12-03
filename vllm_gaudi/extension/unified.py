@@ -102,6 +102,10 @@ def optional(op):
     return opt_impl
 
 
+def get_last_dim_size(last_dim, vec_size, pack_size):
+    return math.ceil(last_dim / pack_size) * vec_size
+
+
 def get_vecsize_packsize(dtype: torch.dtype) -> tuple[int, int]:
     """Get vecsize and packsize for given dtype"""
     pack_size = 8
@@ -118,7 +122,7 @@ def create_softmax_fa2_input_tensors(
     # The filling is done on each call to avoid potential stale data issues.
     vec_size, pack_size = get_vecsize_packsize(attn.dtype)
     retained_shape = list(attn.shape[:-1])
-    retained_shape[-1] = math.ceil(retained_shape[-1] / pack_size) * vec_size
+    retained_shape[-1] = get_last_dim_size(retained_shape[-1], vec_size, pack_size)
     t_retained_shape = tuple(retained_shape)
 
     if t_retained_shape not in inputM_hpu_tensors:
