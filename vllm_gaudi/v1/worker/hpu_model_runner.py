@@ -2393,7 +2393,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         )
         return decode_input_data, None
 
-    def _prepare_input_ids(self, scheduler_output: "SchedulerOutput") -> None:
+    def _prepare_input_ids(self,
+                           scheduler_output: "SchedulerOutput",
+                           return_index: bool = False) -> Optional[torch.Tensor]:
         """Prepare the input IDs for the current batch.
         
         Carefully handles the `prev_sampled_token_ids` which can be cached
@@ -2401,7 +2403,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         GPU need to be copied into the corresponding slots into input_ids."""
 
         if self.input_batch.prev_sampled_token_ids is None:
-            return
+            return None
 
         # Compute cu_num_tokens from scheduler_output
         req_ids = self.input_batch.req_ids
@@ -2436,7 +2438,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if num_commmon_tokens == 0:
             # No requests in common with the previous iteration
             # So input_ids_cpu will have all the input ids.
-            return
+            return None
 
         prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
 
@@ -2445,8 +2447,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # and no reordering happened.
             # The indices are both the same permutation of 0..N-1
             self.input_ids_hpu[:len(flattened_indices)].copy_(prev_sampled_token_ids[:len(flattened_indices)])
-            return
-
+            return None
         # Upload the index tensors asynchronously
         # so the scatter can be non-blocking
         input_ids_index_tensor = torch.tensor(flattened_indices, dtype=torch.int64).to(self.device, non_blocking=True)
@@ -2457,6 +2458,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.input_ids_hpu.scatter_(dim=0,
                                     index=input_ids_index_tensor,
                                     src=prev_sampled_token_ids[prev_common_req_indices_tensor])
+
+        # When batch is reordered, we need to return the input_ids_index_tensor instead of rely on
+        # num_decodes to get the correct input ids to update
+        if return_index:
+            return input_ids_index_tensor
+        return None
 
     def _prepare_inputs(
         self,
@@ -2932,15 +2939,16 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             block_table.apply_(self.defragmenter.resolve)
         input_ids_hpu = None
         num_decodes = 0
+        decode_index = None
         if self.use_async_scheduling:
             num_decodes = self._get_num_decodes()
-            self._prepare_input_ids(scheduler_output)
+            decode_index = self._prepare_input_ids(scheduler_output, return_index=True)
             input_ids_hpu = self.input_ids_hpu
 
         batch = create_unified_batch(self.input_batch.req_ids, all_token_ids, num_computed_tokens, num_scheduled_tokens,
                                      num_prompt_tokens, block_table, self.block_size, self.dtype,
                                      self.unified_attn_persistent_ctx, self.unified_bucketing_fn, self.get_dp_padding,
-                                     input_ids_hpu, num_decodes)
+                                     input_ids_hpu, num_decodes, decode_index)
         if self.uses_mrope:
             batch.token_positions = self.get_unified_mrope_position_ids(
                 self.input_batch.req_ids,
@@ -2952,17 +2960,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         return batch
 
     @torch.inference_mode()
-    def unified_execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
-        warmup_mode: bool = False,
-    ) -> ModelRunnerOutput:
-        self.run_defragmenter(scheduler_output, warmup_mode)
-        batch_changed = self._update_states(scheduler_output)
-        if not scheduler_output.total_num_scheduled_tokens:
-            # Return empty ModelRunnerOuptut if there's no work to do.
-            return EMPTY_MODEL_RUNNER_OUTPUT
-        htorch.core.mark_step()
+    def unified_execute_model(self,
+                              scheduler_output: "SchedulerOutput",
+                              grammar_output: "GrammarOutput" = None,
+                              warmup_mode: bool = False) -> ModelRunnerOutput:
+
+        batch_changed = self.batch_changed
         with self.profiler.record_event('internal', 'prepare_unified_batch'):
             batch = self.prepare_unified_batch(scheduler_output)
         htorch.core.mark_step()
