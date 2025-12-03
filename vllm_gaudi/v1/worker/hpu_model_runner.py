@@ -4603,8 +4603,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     v_cache_shape = None if self.model_config.use_mla \
                         else kv_cache_shape
                     dtype = kv_cache_spec.dtype
-                    if dtype == torch.float8_e4m3fn and os.environ.get('QUANT_CONFIG', None) is not None \
-                        and not self.model_config.use_mla:
+                    if dtype == torch.float8_e4m3fn and os.environ.get('QUANT_CONFIG', None) is not None and \
+                        os.environ.get('VLLM_DYNAMIC_KV_QUANT', None) is not None and not self.model_config.use_mla:
                         create_dynamic_scales = True
                     else:
                         create_dynamic_scales = False
