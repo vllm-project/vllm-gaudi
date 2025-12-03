@@ -5,10 +5,11 @@ from compressed_tensors import CompressionFormat
 
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, FusedMoEConfig)
 from compressed_tensors.quantization import (QuantizationStrategy)
 
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (convert_to_channelwise)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import convert_to_channelwise
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter, ModelWeightParameter, PerTensorScaleParameter,
                                            BasevLLMParameter, GroupQuantScaleParameter, PackedColumnParameter,
                                            PackedvLLMParameter, RowvLLMParameter)
@@ -28,7 +29,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (pack_quan
                                                                        unpack_quantized_values_into_int32)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (marlin_repeat_scales_on_all_ranks)
 from vllm.model_executor.utils import set_weight_attrs
-
 import vllm_gaudi.extension.ops as hpu_ops
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel, VllmMixtureOfExpertsOpWNA16)
 
@@ -96,7 +96,7 @@ class HPUCompressedTensorsLinearMethod(OrigCompressedTensorsLinearMethod):
             raise NotImplementedError("Implemented per-channel dequantization only")
 
 
-@CustomOp.register_oot(name='CompressedTensorsW8A16Fp8')
+@CustomOp.register_oot(name='CompressedTensorsW8A8Fp8')
 class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
     def __init__(self, strategy: str, is_static_input_scheme: bool):
@@ -118,9 +118,12 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         # Weights must be transposed for marlin
         layer.weight = torch.nn.Parameter(layer.weight.t(), requires_grad=False)
 
-        if layer.scheme.is_static_input_scheme:
-            # required by torch.compile to be torch.nn.Parameter
-            layer.input_scale = torch.nn.Parameter(layer.input_scale.data, requires_grad=False)
+        # see the reference: https://github.com/vllm-project/vllm/blob/v0.11.2/vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_w8a8_fp8.py#L169-L173
+        if layer.scheme.is_static_input_scheme and hasattr(layer, "input_scale"):
+            # required by torch.compile to be torch.nn.Parameter, only per-tensor supported
+            layer.input_scale = torch.nn.Parameter(layer.input_scale.max(), requires_grad=False)
+        else:
+            layer.input_scale = None
 
         # postprocess weights for perchannel strategy
         if layer.scheme.strategy == QuantizationStrategy.CHANNEL:
@@ -691,3 +694,6 @@ compressed_tensors_moe.CompressedTensorsWNA16MoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod
 compressed_tensors_moe.CompressedTensorsWNA16MarlinMoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod # Override default WNA16 MoE method
+
+# support weight_loader_v2
+WEIGHT_LOADER_V2_SUPPORTED.append(HPUCompressedTensorsLinearMethod.__name__)
