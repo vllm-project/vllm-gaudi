@@ -101,6 +101,8 @@ def get_features():
         Value('use_output_tensor_in_matmulqk',
               All(VersionRange(">=1.24.0.171"), MinPackageVersion("neural_compressor_pt", "3.6")),
               env_var_type=boolean),
-        Value('per_token_kv_scaling_support', VersionRange(">=1.24.0.350"), env_var_type=boolean)
+        Value('per_token_kv_scaling_support',
+              All(VersionRange(">=1.24.0.350"), MinPackageVersion("neural_compressor_pt", "3.6")),
+              env_var_type=boolean)
     ]
     return split_values_and_flags(features)

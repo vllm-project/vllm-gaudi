@@ -53,14 +53,14 @@ class VLLMKVCache(torch.nn.Module):
         # is_v_cache is used in INC FP8 dynamic quantization to identify V cache
         self.is_v_cache = is_v_cache
 
-    def forward(self, input, cache, slot_mapping, *args, **kwargs):
+    def forward(self, input, cache, slot_mapping, scales=None, **kwargs):
         # In cross-attention kv cache forward inputs are None in decode
         # We don't want to store them in the cache in such case
         if input is not None:
             cache.index_copy_(0, slot_mapping, input)
         return cache
 
-    def fetch_from_cache(self, cache, blocks, **kwargs):
+    def fetch_from_cache(self, cache, blocks, scales=None, **kwargs):
         if self.use_contiguous_pa:
             return cache[:blocks.size(0)]
         else:
