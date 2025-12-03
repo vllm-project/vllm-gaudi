@@ -268,7 +268,7 @@ run_UA_spec_decode_ngram_test() {
 # Spec decode with eagle3 with UA
 run_UA_spec_decode_eagle3_test() {
     echo "➡️ Testing Spec-decode with eagle3..."
-    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.50 --osl 512
+    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.50 --osl 1024
     echo "✅ Test with spec decode with eagle3 passed."
 }
 
