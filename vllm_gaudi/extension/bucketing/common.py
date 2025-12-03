@@ -39,6 +39,9 @@ class HPUBucketingManager():
     prompt_buckets: List[Tuple[int, int, int]] = []
     decode_buckets: List[Tuple[int, int, int]] = []
     unified_buckets: List[Tuple[int, int, int]] = []
+    # Seed buckets are the buckets originally generated from bucketing configuration
+    # Spec decode may automatically add new buckets based on the seed buckets
+    seed_decode_buckets: List[Tuple[int, int, int]] = None
     initialized = False
 
     def __new__(cls, *args, **kwargs):
@@ -46,13 +49,20 @@ class HPUBucketingManager():
             cls._instance = super(HPUBucketingManager, cls).__new__(cls)
         return cls._instance
 
-    def initialize(self, max_num_seqs, max_num_prefill_seqs, block_size, max_num_batched_tokens, max_model_len):
+    def initialize(self,
+                   max_num_seqs,
+                   max_num_prefill_seqs,
+                   block_size,
+                   max_num_batched_tokens,
+                   max_model_len,
+                   num_speculative_tokens=0):
         self.max_num_seqs = max_num_seqs
         self.max_num_prefill_seqs = max_num_prefill_seqs
         self.block_size = block_size
         self.max_num_batched_tokens = max_num_batched_tokens
         self.num_hpu_blocks = None
         self.max_model_len = max_model_len
+        self.num_speculative_tokens = num_speculative_tokens
         self.initialized = True
         self.fallback_bs_base_step = 2
         self.fallback_seq_base_step = 32
@@ -189,6 +199,12 @@ class HPUBucketingManager():
                                                    self.max_num_seqs, self.max_num_prefill_seqs,
                                                    self.max_num_batched_tokens, self.block_size, self.num_hpu_blocks,
                                                    buckets_from_file)
+            if self.num_speculative_tokens:
+                # The existing buckets are used as seed decode buckets
+                self.seed_decode_buckets = self.decode_buckets
+                # More buckets are added automatically for spec decode
+                self.decode_buckets = self.generate_spec_decode_buckets(self.decode_buckets)
+
             self.log_generate_info(False)
         else:
             logger().info("Bucketing is off - skipping decode buckets generation")
@@ -232,8 +248,14 @@ class HPUBucketingManager():
             return found_bucket
         return (batch_size, seq_len, ctx)
 
-    def find_decode_bucket(self, batch_size, num_blocks):
+    def find_decode_bucket(self, batch_size, num_blocks, seed_buckets: bool = False):
         if self.initialized:
+            if seed_buckets and self.seed_decode_buckets is not None:
+                found_bucket = find_equal_or_closest_greater_config(self.seed_decode_buckets,
+                                                                    (batch_size, 1, num_blocks))
+                if found_bucket is not None:
+                    return found_bucket
+
             found_bucket = find_equal_or_closest_greater_config(self.decode_buckets, (batch_size, 1, num_blocks))
             if found_bucket is None:
                 new_bucket = self.generate_fallback_bucket(batch_size, 1, num_blocks)
@@ -259,6 +281,46 @@ class HPUBucketingManager():
     def get_max_prompt_shape(self):
         return max(b[1] for b in self.prompt_buckets) \
                if len(self.prompt_buckets) > 0 else self.max_model_len
+
+    def generate_spec_decode_buckets(self, seed_decode_buckets):
+        max_model_len = self.max_model_len
+        block_size = self.block_size
+
+        def no_corrections(bs, query, ctx):
+            return (bs, query, ctx)
+
+        def correct_for_max_model_len(bs, query, ctx):
+            return (bs, query, min(ctx, bs * math.ceil(max_model_len / block_size)))
+
+        def get_corrector(use_contiguous_pa):
+            if use_contiguous_pa:
+                return no_corrections
+            else:
+                return correct_for_max_model_len
+
+        use_contiguous_pa = get_config().use_contiguous_pa
+        corrector = get_corrector(use_contiguous_pa)
+
+        # If spec decode enabled, generate buckets for batch_size * (1 + num_speculative_tokens)
+        num_tokens = 1 + self.num_speculative_tokens
+        buckets = set()
+        for bucket in seed_decode_buckets:
+            buckets.add(bucket)
+            bs, query, ctx = bucket
+            spec_decode_bs = bs * num_tokens
+            if spec_decode_bs <= ctx:
+                # Add a bucket with (batch_size * num_tokens, query, ctx)
+                buckets.add(corrector(spec_decode_bs, query, ctx))
+            # Add a bucket with (batch_size * num_tokens, query, ctx * num_tokens)
+            buckets.add(corrector(spec_decode_bs, query, ctx * num_tokens))
+
+        # Log the new generated spec decode buckets
+        new_buckets = sorted(buckets - set(seed_decode_buckets))
+        msg = (f"Generated {len(new_buckets)} "
+               f"spec decode buckets [bs, query, num_blocks]: {list(new_buckets)}")
+        logger().info(msg)
+
+        return sorted(buckets)
 
     @classmethod
     def get_instance(cls):
