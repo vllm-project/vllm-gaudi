@@ -10,7 +10,7 @@ import torch
 import functools
 from dataclasses import dataclass
 import itertools
-from typing import Optional, Callable, TypeAlias, Union
+from typing import Dict, Optional, Callable, TypeAlias, Union
 from dataclasses import dataclass
 import habana_frameworks.torch as htorch
 
@@ -110,14 +110,26 @@ def get_vecsize_packsize(dtype: torch.dtype) -> tuple[int, int]:
     return 1, pack_size
 
 
-def create_softmax_fa2_input_tensors(attn: torch.tensor, fmin: torch.tensor) -> tuple[torch.tensor, torch.tensor]:
+def create_softmax_fa2_input_tensors(
+        attn: torch.tensor, fmin: torch.tensor, inputL_hpu_tensors: Dict[tuple, torch.Tensor],
+        inputM_hpu_tensors: Dict[tuple, torch.Tensor]) -> tuple[torch.tensor, torch.tensor]:
     """Create dummy input tensors for the softmax_fa2 operation."""
+    # Assumes input tensors are already allocated with correct shape.
+    # The filling is done on each call to avoid potential stale data issues.
     vec_size, pack_size = get_vecsize_packsize(attn.dtype)
     retained_shape = list(attn.shape[:-1])
     retained_shape[-1] = math.ceil(retained_shape[-1] / pack_size) * vec_size
-    inputM_hpu = torch.full(retained_shape, fmin, dtype=attn.dtype, device='hpu')
-    inputL_hpu = torch.zeros(retained_shape, dtype=attn.dtype, device="hpu")
-    return inputM_hpu, inputL_hpu
+    t_retained_shape = tuple(retained_shape)
+
+    if t_retained_shape not in inputM_hpu_tensors:
+        print("Allocating new input tensors for shape:", t_retained_shape, "for attn shape:", attn.shape)
+        return torch.full(retained_shape, fmin, dtype=attn.dtype, device='hpu'), torch.zeros(retained_shape,
+                                                                                             dtype=attn.dtype,
+                                                                                             device="hpu")
+    torch.hpu.synchronize()
+    inputL_hpu_tensors[t_retained_shape].zero_()
+    inputM_hpu_tensors[t_retained_shape].fill_(fmin)
+    return inputM_hpu_tensors[t_retained_shape], inputL_hpu_tensors[t_retained_shape]
 
 
 def convert_cl_aligned_tensor(input_hpu, reference_size) -> torch.tensor:
@@ -148,8 +160,10 @@ def merge(*attn_results: torch.tensor, feps: torch.tensor) -> torch.tensor:
     return attn
 
 
-def partial_attn_causal(query: torch.tensor, key: torch.tensor, value: torch.tensor, bias: Optional[torch.tensor],
-                        slice_size: int, fmin: torch.tensor) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
+def partial_attn_causal(
+        query: torch.tensor, key: torch.tensor, value: torch.tensor, bias: Optional[torch.tensor], slice_size: int,
+        fmin: torch.tensor, inputL_hpu_tensors: Dict[tuple, torch.Tensor],
+        inputM_hpu_tensors: Dict[tuple, torch.Tensor]) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
     """Partial attention where qkv are assumed to be causal between slices"""
     if bias is None:
         return (None, None, None)
@@ -176,7 +190,8 @@ def partial_attn_causal(query: torch.tensor, key: torch.tensor, value: torch.ten
         s_attn = torch.matmul(q, k.transpose(-1, -2)) + b.unsqueeze(0).unsqueeze(0)
         # TODO: remove dtype check once full support is added for fp8 in unified attention
         if get_config().unified_attn_softmax_fa2 and s_attn.dtype == torch.bfloat16:
-            inputM_hpu, inputL_hpu = create_softmax_fa2_input_tensors(s_attn, fmin)
+            inputM_hpu, inputL_hpu = create_softmax_fa2_input_tensors(s_attn, fmin, inputL_hpu_tensors,
+                                                                      inputM_hpu_tensors)
             s_attn, s_max, s_sum, _exp_max_fixup_hpu = torch.ops.hpu.softmax_fa2(s_attn,
                                                                                  inputM=inputM_hpu,
                                                                                  inputL=inputL_hpu)
@@ -199,6 +214,7 @@ def partial_attn_causal(query: torch.tensor, key: torch.tensor, value: torch.ten
 
 
 def partial_attn_shared(query: torch.tensor, blocks: torch.tensor, bias: Optional[torch.tensor], fmin: torch.tensor,
+                        inputL_hpu_tensors: Dict[tuple, torch.Tensor], inputM_hpu_tensors: Dict[tuple, torch.Tensor],
                         cache_utils: CacheUtils) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
     """Partial attention where all shared blocks are compared with whole query"""
     if bias is None:
@@ -213,7 +229,7 @@ def partial_attn_shared(query: torch.tensor, blocks: torch.tensor, bias: Optiona
     attn = attn + bias
     # TODO: remove dtype check once full support is added for fp8 in unified attention
     if get_config().unified_attn_softmax_fa2 and attn.dtype == torch.bfloat16:
-        inputM_hpu, inputL_hpu = create_softmax_fa2_input_tensors(attn, fmin)
+        inputM_hpu, inputL_hpu = create_softmax_fa2_input_tensors(attn, fmin, inputL_hpu_tensors, inputM_hpu_tensors)
         attn, local_max, local_sum, _exp_max_fixup_hpu = torch.ops.hpu.softmax_fa2(attn,
                                                                                    inputM=inputM_hpu,
                                                                                    inputL=inputL_hpu)
@@ -269,6 +285,8 @@ class HPUUnifiedAttentionMetadata:
     unique_bias: Optional[torch.tensor]
     fmin: torch.tensor
     feps: torch.tensor
+    inputL_hpu_tensors: Optional[Dict[tuple, torch.Tensor]]
+    inputM_hpu_tensors: Optional[Dict[tuple, torch.Tensor]]
 
     def seq_len(self):
         # TODO: This needs to be changed in case of mixed batches
@@ -302,11 +320,15 @@ def unified_attn(query: torch.tensor, key: torch.tensor, value: torch.tensor, ke
                                  value=value,
                                  bias=metadata.causal_bias,
                                  slice_size=metadata.causal_width,
-                                 fmin=metadata.fmin)
+                                 fmin=metadata.fmin,
+                                 inputL_hpu_tensors=metadata.inputL_hpu_tensors,
+                                 inputM_hpu_tensors=metadata.inputM_hpu_tensors)
     shared = partial_attn_shared(query=scaled_query,
                                  blocks=metadata.shared_blocks,
                                  bias=metadata.shared_bias,
                                  fmin=metadata.fmin,
+                                 inputL_hpu_tensors=metadata.inputL_hpu_tensors,
+                                 inputM_hpu_tensors=metadata.inputM_hpu_tensors,
                                  cache_utils=cache_utils)
     unique = partial_attn_unique(query=scaled_query,
                                  blocks=metadata.unique_blocks,
@@ -314,9 +336,7 @@ def unified_attn(query: torch.tensor, key: torch.tensor, value: torch.tensor, ke
                                  bias=metadata.unique_bias,
                                  fmin=metadata.fmin,
                                  cache_utils=cache_utils)
-
     attn = merge(causal, shared, unique, feps=metadata.feps)
-
     if attn is None:
         return query
     return attn

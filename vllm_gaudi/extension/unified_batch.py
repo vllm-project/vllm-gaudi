@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import habana_frameworks.torch as htorch
 from dataclasses import dataclass
-from vllm_gaudi.extension.unified import HPUUnifiedAttentionMetadata
+from vllm_gaudi.extension.unified import HPUUnifiedAttentionMetadata, get_vecsize_packsize
 import math
 from typing import Optional, Callable, Union
 from vllm_gaudi.extension.logger import logger as init_logger
@@ -102,6 +102,34 @@ def generate_bias(block_usages: np.ndarray, block_size: int, dtype: np.dtype, bl
     """ Generate block bias based on block_usage """
     block_mask = block_len_range[np.newaxis, :] > block_usages[:, np.newaxis]
     return mask_to_bias(block_mask, dtype=dtype, bias_placeholder=bias_placeholder)
+
+
+def prepare_unified_attn_softmax_inputs(attn_metadata: dict, cfg: tuple, num_kv_heads: int,
+                                        num_query_heads: int) -> dict:
+
+    def get_last_dim_size(last_dim, vec_size, pack_size):
+        return math.ceil(last_dim / pack_size) * vec_size
+
+    vec_size, pack_size = get_vecsize_packsize(attn_metadata.fmin.dtype)
+    shapes_to_create = []
+    query_len = cfg[1]
+    if attn_metadata.causal_bias is not None:
+        causal_sizes = [
+            attn_metadata.causal_width, causal_rest
+        ] if (causal_rest := query_len % attn_metadata.causal_width) and query_len > attn_metadata.causal_width else [
+            causal_rest
+        ] if causal_rest else [attn_metadata.causal_width]
+        shapes_to_create.extend([(num_kv_heads, num_query_heads // num_kv_heads,
+                                  get_last_dim_size(size, vec_size, pack_size)) for size in causal_sizes])
+
+    if attn_metadata.shared_bias is not None:
+        shapes_to_create.append((num_query_heads, get_last_dim_size(query_len, vec_size, pack_size)))
+
+    for shape in shapes_to_create:
+        if shape in attn_metadata.inputL_hpu_tensors:
+            continue
+        attn_metadata.inputL_hpu_tensors[shape] = torch.empty(shape, dtype=attn_metadata.fmin.dtype, device="hpu")
+        attn_metadata.inputM_hpu_tensors[shape] = torch.empty(shape, dtype=attn_metadata.fmin.dtype, device="hpu")
 
 
 @dataclass
@@ -622,8 +650,10 @@ def create_unified_batch(req_ids: list[str],
             unique_block_mapping=persistent_ctx.hpu_tensor(unique_block_mapping, (target_unique_blocks, ), -1,
                                                            slot_mapping_dtype),
             unique_bias=persistent_ctx.hpu_tensor(unique_bias, (target_unique_blocks, block_size), -math.inf, dtype),
-            fmin=to_hpu(fmin),
-            feps=to_hpu(feps),
+            fmin=to_hpu(fmin, dtype=dtype),
+            feps=to_hpu(feps, dtype=dtype),
+            inputL_hpu_tensors=dict(),
+            inputM_hpu_tensors=dict(),
         )
 
     if hpu_bias_acceleration:
