@@ -6,6 +6,7 @@ on:
     branches: 
       - main
       - releases/**
+      - pre-releases/**
 
   # Allow manual triggering for testing purposes
   workflow_dispatch: {}
