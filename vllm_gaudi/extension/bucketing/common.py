@@ -314,6 +314,12 @@ class HPUBucketingManager():
             # Add a bucket with (batch_size * num_tokens, query, ctx * num_tokens)
             buckets.add(corrector(spec_decode_bs, query, ctx * num_tokens))
 
+        # Log the new generated spec decode buckets
+        new_buckets = sorted(buckets - set(seed_decode_buckets))
+        msg = (f"Generated {len(new_buckets)} "
+               f"spec decode buckets [bs, query, num_blocks]: {list(new_buckets)}")
+        logger().info(msg)
+
         return sorted(buckets)
 
     @classmethod
