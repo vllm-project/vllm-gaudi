@@ -487,6 +487,7 @@ def create_unified_batch(
     get_dp_padding_fn: Callable[[int], int],
     input_ids_hpu: Optional[torch.Tensor] = None,
     num_decodes: int = 0,
+    decode_index: Optional[torch.Tensor] = None,
     hpu_bias_acceleration: bool = True,
     scheduled_spec_decode_tokens: Optional[dict[int, int]] = None,
     prepare_spec_decode_inputs_fn: Optional[Callable[[dict[int, int], np.ndarray, torch.Tensor, int],
@@ -718,7 +719,11 @@ def create_unified_batch(
     # Async scheduling.
     invalid_req_indices = []
     if input_ids_hpu is not None:
-        token_ids_device[:num_decodes] = input_ids_hpu[:num_decodes]
+        # When decodes are not first in the batch, need to copy them to the correct positions
+        if decode_index is not None:
+            token_ids_device[decode_index] = input_ids_hpu[decode_index]
+        else:
+            token_ids_device[:num_decodes] = input_ids_hpu[:num_decodes]
         # NOTE(tianmu-li): Align behavior of incomplete prompt with gpu_model_runner
         # If logits_indices is smaller than req_id, the last request is a chunked prompt request that
         # hasn't finished in this step. We add the last token position to logits_indices to ensure

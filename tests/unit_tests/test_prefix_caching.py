@@ -14,11 +14,6 @@ DEVICE = current_platform.device_type
 
 
 def get_vllm_config():
-    scheduler_config = SchedulerConfig(
-        max_num_seqs=10,
-        max_num_batched_tokens=512,
-        max_model_len=512,
-    )
     model_config = ModelConfig(
         model="facebook/opt-125m",
         task="generate",
@@ -27,6 +22,12 @@ def get_vllm_config():
         trust_remote_code=True,
         dtype="bfloat16",
         seed=42,
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=10,
+        max_num_batched_tokens=512,
+        max_model_len=512,
+        is_encoder_decoder=model_config.is_encoder_decoder,
     )
     cache_config = CacheConfig(
         block_size=128,

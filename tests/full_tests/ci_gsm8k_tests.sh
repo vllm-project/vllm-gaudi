@@ -13,12 +13,11 @@ echo $VLLM_GAUDI_PREFIX
 # Gemma3 with image input
 run_gemma3_test() {
     echo "➡️ Testing gemma-3-4b-it..."
-    #VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
+    VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
     echo "✅ Test with multimodal-support with gemma-3-4b-it passed."
     echo "➡️ Testing gemma-3-4b-it with multiple images(applying sliding_window)..."
-    #VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm_multi.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-27b-it.yaml"
+    VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm_multi.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-27b-it.yaml"
     echo "✅ Test with multimodal-support with multiple images gemma-3-27b-it passed."
-    #Test cases are commented because of PR27772
 }
 
 # Basic model test
@@ -160,6 +159,15 @@ run_compressed_w4a16_moe_gidx_test() {
     echo "➡️ Testing compressed w4a16 MoE with g_idx inference..."
     HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model nm-testing/test-w4a16-mixtral-actorder-group --dtype bfloat16
     echo "✅ Test with compressed w4a16 MoE with g_idx passed."
+}
+
+# Llama-3.3-70B-Instruct-FP8-dynamic + INC dynamic quant
+run_llama3_70b_inc_dynamic_quant_test() {
+    echo "➡️ Testing Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode ..."
+    QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_maxabs_dynamic_quant.json" \
+    HABANA_VISIBLE_DEVICES=all RUNTIME_SCALE_PATCHING=0 VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 \
+    python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic --max-model-len 2048
+    echo "✅ Test with Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode passed."
 }
 
 # GSM8K on granite-8b
@@ -321,6 +329,7 @@ launch_all_tests() {
     run_spec_decode_ngram_test
     run_spec_decode_eagle3_test
     run_spec_decode_eagle3_num_spec_2_test
+    run_llama3_70b_inc_dynamic_quant_test
     #run_embedding_model_test
     echo "🎉 All test suites passed successfully!"
 }
