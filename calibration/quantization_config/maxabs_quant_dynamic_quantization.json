@@ -4,5 +4,18 @@
     "scale_format": "CONST",
     "scale_method": "act_maxabs_pcs_pow2_weight_maxabs_pts_pow2_hw",
     "dynamic_quantization": true,
+    "blocklist": {
+        "types": [
+            "Matmul",
+            "KVCache",
+            "VLLMKVCache"
+        ],
+        "names": [
+            "matmul_qk",
+            "matmul_av",
+            "k_cache",
+            "v_cache"
+        ]
+    },
     "dump_stats_path": ""
 }
