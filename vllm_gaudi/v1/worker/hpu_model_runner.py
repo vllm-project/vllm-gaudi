@@ -1502,44 +1502,40 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         inputs_embeds = None
         model_mm_kwargs = None
 
-       if self.supports_mm_inputs:
-           # Run the multimodal encoder if any.
-           with self.profiler.record_event('internal', 'prepare_input_encoders'):
-               self._execute_mm_encoder(scheduler_output, req_id)
-           stat2 = gc_metric.stats()[0][1]
-           logger.info(f"SHIV DEBUG >>>>>>>>>>>>> {stat2=} b4 gather embedding {stat2-stat1}") 
-           htorch.core.mark_step()
-
-           mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output,
-                                                               req_id,
-                                                               total_num_scheduled_tokens=token_ids.shape[-1])
-           htorch.core.mark_step()
-           stat3 = gc_metric.stats()[0][1]
-           logger.info(f"SHIV DEBUG >>>>>>>>>>>>> {stat3=} after gather embedding {stat3-stat2}") 
-
-           # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa E501
-           # This may require moving multimodal input preps into _prepare_inputs,        # noqa E501
-           # to avoid padding issues.
-
-           model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
-           if image_index_tensors[idx] is not None:
-               model_mm_kwargs['image_index'] = image_index_tensors[idx]
-           model_mm_kwargs = MultiModalKwargs.as_kwargs(
-               model_mm_kwargs,
-               device=self.device,
-           )
-           #logger.info(f"SHIV DEBUG {type(self.model)=}, {dir(self.model)=}") 
-           if 'image_index' in model_mm_kwargs:
-               inputs_embeds = self.model.embed_input_ids_hpu(
-                   token_ids, model_mm_kwargs['image_index'], mm_embeds)
-               model_mm_kwargs.pop("image_index", None)
-           else: 
-               inputs_embeds = self.model.embed_input_ids(
-                   token_ids,
-                   multimodal_embeddings=mm_embeds,
-                   is_multimodal=is_mm_embed,
-               )
-
+        if self.supports_mm_inputs:
+            # Run the multimodal encoder if any.
+            with self.profiler.record_event('internal', 'prepare_input_encoders'):
+                self._execute_mm_encoder(scheduler_output, req_ids)
+            htorch.core.mark_step()
+ 
+            mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output,
+                                                                req_ids,
+                                                                total_num_scheduled_tokens=token_ids)
+            htorch.core.mark_step()
+ 
+            # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa E501
+            # This may require moving multimodal input preps into _prepare_inputs,        # noqa E501
+            # to avoid padding issues.
+ 
+            model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
+            if image_index_tensors[idx] is not None:
+                model_mm_kwargs['image_index'] = image_index_tensors[idx]
+            model_mm_kwargs = MultiModalKwargs.as_kwargs(
+                model_mm_kwargs,
+                device=self.device,
+            )
+            #logger.info(f"SHIV DEBUG {type(self.model)=}, {dir(self.model)=}") 
+            if 'image_index' in model_mm_kwargs:
+                inputs_embeds = self.model.embed_input_ids_hpu(
+                    token_ids, model_mm_kwargs['image_index'], mm_embeds)
+                model_mm_kwargs.pop("image_index", None)
+            else: 
+                inputs_embeds = self.model.embed_input_ids(
+                    token_ids,
+                    multimodal_embeddings=mm_embeds,
+                    is_multimodal=is_mm_embed,
+                )
+ 
         return inputs_embeds, model_mm_kwargs
 
     def get_model(self) -> torch.nn.Module:
@@ -3336,6 +3332,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                       logits_requests) in enumerate(zip(*shallow_tuple(prefill_data))):
 
                 # Prepare multimodal inputs if any
+                stat3 = gc_metric.stats()[0][1]
                 inputs_embeds, model_mm_kwargs = self._get_model_mm_inputs(
                     token_ids,
                     token_ids.shape[-1],
@@ -3343,8 +3340,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     req_id,
                 )
 
-                    stat4 = gc_metric.stats()[0][1]
-                    logger.info(f"SHIV DEBUG >>>>>>>>>>>>> {stat4=} after input embedding {stat4-stat3}") 
+                stat4 = gc_metric.stats()[0][1]
+                logger.info(f"SHIV DEBUG >>>>>>>>>>>>> {stat4=} after input embedding {stat4-stat3}") 
                 lora_mask, lora_logits_mask = self._configure_lora(token_ids, self.requests, req_id, True)
 
                 self.event_start = self.profiler.get_timestamp_us()
