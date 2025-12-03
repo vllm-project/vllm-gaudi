@@ -6,8 +6,7 @@ from mkdocs.structure.files import Files
 from mkdocs.structure.pages import Page
 
 
-def on_page_markdown(markdown: str, *, page: Page, config: MkDocsConfig,
-                     files: Files):
+def on_page_markdown(markdown: str, *, page: Page, config: MkDocsConfig, files: Files):
     gh_icon = ":octicons-mark-github-16:"
     gh_url = "https://github.com"
     repo_url = f"{gh_url}/vllm-project/vllm"

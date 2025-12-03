@@ -1,0 +1,11 @@
+model_name: "google/gemma-3-4b-it"
+test_config:                                # List of test configurations. - modality is test for <modality>
+  - modality: image                         # modality (currently supports image and video)
+    extra_engine_args:                      # Optional extra arguments for the engine
+      mm_processor_kwargs:
+          min_pixels: 802816                # 896x896
+          max_pixels: 1003520
+          fps: 1
+    input_data_config:                      # Configuration for the input data
+      num_prompts: 4                        # Number of samples to run
+      media_source: default                 # Source of the data to load

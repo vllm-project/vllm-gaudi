@@ -5,20 +5,18 @@
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
 
-
 from vllm_gaudi.extension.environment import get_environment
 from vllm_gaudi.extension.features import get_features, get_user_flags, get_experimental_flags
 from vllm_gaudi.extension.config import Config
 from vllm_gaudi.extension.logger import logger
-
 
 RUNTIME_CONFIG = None
 USER_FLAGS = None
 EXPERIMENTAL_FLAGS = None
 ENVIRONMENT_VALUES = None
 FEATURE_VALUES = None
-HIDDEN_PARAMS = ['exponential_bucketing', 'linear_bucketing', 
-                     'flex_impl', 'fsdpa_impl', 'naive_impl']
+HIDDEN_PARAMS = ['exponential_bucketing', 'linear_bucketing', 'flex_impl', 'fsdpa_impl', 'naive_impl']
+
 
 def filter_defined(config, keys):
     return {k: v for k, v in config.get_all(keys).items() if v is not None}
@@ -65,16 +63,19 @@ def finalize_config():
 
     user_flags = filter_defined(detected, USER_FLAGS)
     experimental_flags = filter_defined(detected, EXPERIMENTAL_FLAGS)
+    experimental_flags = {k: v for k, v in user_flags.items() if k not in user_flags}
     environment_values = filter_defined(detected, ENVIRONMENT_VALUES)
     feature_values = filter_defined(detected, FEATURE_VALUES)
 
-    if len(experimental_flags) > 0 and not detected.VLLM_ENABLE_EXPERIMENTAL_FLAGS:
+    if len(experimental_flags) > 0 and not detected.VLLM_DEVELOPER_MODE:
         asterisks = 48 * '*'
         header = f"{asterisks} Warning! {asterisks}"
         footer = '*' * len(header)
         logger().warning(header)
-        logger().warning(f"Following environment variables are considered experimental: {', '.join(experimental_flags)}")
-        logger().warning("In future releases using those flags without VLLM_ENABLE_EXPERIMENTAL_FLAGS will trigger a fatal error.")
+        logger().warning(
+            f"Following environment variables are considered experimental: {', '.join(experimental_flags)}")
+        logger().warning(
+            "From v0.12.0 release using those flags without VLLM_DEVELOPER_MODE will trigger a fatal error.")
         logger().warning(footer)
 
     dump('Environment', environment_values)

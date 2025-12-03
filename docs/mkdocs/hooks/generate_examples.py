@@ -82,8 +82,7 @@ class Example:
         Raises:
             IndexError: If no Markdown files are found in the directory.
         """ # noqa: E501
-        return self.path if self.path.is_file() else list(
-            self.path.glob("*.md")).pop()
+        return self.path if self.path.is_file() else list(self.path.glob("*.md")).pop()
 
     def determine_other_files(self) -> list[Path]:
         """

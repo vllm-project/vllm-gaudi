@@ -1,8 +1,7 @@
-from vllm.distributed import (cleanup_dist_env_and_memory,
-                              init_distributed_environment,
-                              initialize_model_parallel)
+from vllm.distributed import (cleanup_dist_env_and_memory, init_distributed_environment, initialize_model_parallel)
 import pytest
 import tempfile
+from huggingface_hub import snapshot_download
 
 
 @pytest.fixture
@@ -18,3 +17,8 @@ def dist_init():
     initialize_model_parallel(1, 1)
     yield
     cleanup_dist_env_and_memory()
+
+
+@pytest.fixture(scope="session")
+def llama32_lora_files():
+    return snapshot_download(repo_id="jeeejeee/llama32-3b-text2sql-spider")

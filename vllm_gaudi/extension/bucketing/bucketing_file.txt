@@ -1,0 +1,24 @@
+# This is a sample bucketing file
+
+# Add buckets as follows:
+# Prompt: (batch_size, query_len, context)
+# Decode: (batch_size, 1, context)
+
+# You can also use lists to end up with Cartesian product like so:
+# (1, [256, 512], [0, 4, 8])
+# In this case you will end up with 6 buckets
+# You can also use python's range to create similar lists
+# range(min, max, step)
+# Examples are shown below
+
+# Not supported for unified attention buckets
+# use '#' to comment out lines
+
+
+# Buckets:
+(1, 2048, 0)
+(1, [256, 512], [0, 4, 8])
+
+(64, 1, 1024)
+(32, 1, 512)
+(1, 1, range(256, 512, 32))

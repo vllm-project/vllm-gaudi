@@ -1,0 +1,53 @@
+name: "Update Stable vLLM Commit"
+
+on:
+  # This enables manual triggering of the workflow from the GitHub Actions UI
+  workflow_dispatch:
+    inputs:
+      commit_id:
+        description: "The vLLM commit hash to set as the new stable commit"
+        required: true
+        type: string
+
+# This permission is required for the action to push changes to the repository
+permissions:
+  contents: write
+
+jobs:
+  update-commit-file:
+    name: "Update and Push Stable Commit"
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Check out the specific branch we need to modify
+      - name: "Checkout the target branch"
+        uses: actions/checkout@v4
+        with:
+          ref: "vllm/last-good-commit-for-vllm-gaudi"
+          # Fetch full history to ensure we can push changes
+          fetch-depth: 0
+
+      # Step 2: Configure Git user for the commit
+      - name: "Configure Git"
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # Step 3: Update the file with the user-provided commit ID
+      - name: "Update VLLM_STABLE_COMMIT file"
+        run: |
+          echo "Updating file with new commit ID: ${{ github.event.inputs.commit_id }}"
+          echo "${{ github.event.inputs.commit_id }}" > VLLM_STABLE_COMMIT
+
+      # Step 4: Commit and push the changes if the file has been modified
+      - name: "Commit and push changes"
+        run: |
+          # Check if there are any changes to commit
+          if [[ -z $(git status --porcelain) ]]; then
+            echo "No changes to commit. The file already contains the correct commit ID."
+          else
+            git add VLLM_STABLE_COMMIT
+            git commit -m "CI: Update stable commit to ${{ github.event.inputs.commit_id }}"
+            git push
+            echo "Successfully pushed the updated commit ID."
+          fi
