@@ -93,6 +93,8 @@ class HpuPlatform(Platform):
         # default_max_num_batched_tokens, in order to avoid the
         # error in hpu_perf_test, while also preventing a
         # NotImplementedError in test_defaults_with_usage_context.
+        logger.warning("This is a workaround! Please check the NOTE "
+                       "in the get_device_total_memory definition.")
 
         total_hpu_memory = 0
 
