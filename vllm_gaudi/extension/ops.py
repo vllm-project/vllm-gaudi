@@ -767,6 +767,14 @@ def synced_weight_loader(weight_loader):
     return wrapper
 
 
+def fp8_perchannel_linear_postprocess_weights(layer):
+    # For INC path, we attach the dequant func to the layer
+    inc_config = os.getenv("QUANT_CONFIG", None)
+    if inc_config:
+        layer.get_dequant_weights_func = types.MethodType(get_dequant_weights_func, layer)
+    return layer
+
+
 def fp8_block_linear_postprocess_weights(layer, force_channel_fp8=False):
     weight, orig_M, orig_N = pad_block_fp8_weight_naive(layer.weight.data, layer.weight_scale_inv.data,
                                                         layer.quant_config.weight_block_size)
