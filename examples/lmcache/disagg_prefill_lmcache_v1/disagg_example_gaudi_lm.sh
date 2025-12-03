@@ -123,7 +123,6 @@ main() {
     echo "All servers are up. Starting benchmark..."
 
     # begin benchmark
-    cd ../../..//benchmarks/
     MODEL="meta-llama/Llama-3.1-8B-Instruct"
     vllm bench serve --port 1000 --seed $(date +%s) \
         --model $MODEL \
