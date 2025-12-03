@@ -595,7 +595,7 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
                                           is_multimodal=is_multimodal)
 
     def embed_input_ids_hpu(self, input_ids, image_index_tensor, multimodal_embeddings=None):
-        return self.model.get_input_embeddings_hpu(input_ids=input_ids,
+        return self.model.embed_input_ids_hpu(input_ids=input_ids,
                                                multimodal_embeddings=multimodal_embeddings,
                                                image_index_tensor=image_index_tensor)
     
@@ -3149,7 +3149,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 inputs_embeds = None
                 model_mm_kwargs = None
                 stat1 = gc_metric.stats()[0][1]
-                logger.info(f"SHIV DEBUG check loop {idx=}")
+                logger.info(f"SHIV DEBUG check loop {idx=} {req_id=} {prompt_len=} {attn_metadata=}")
                 logger.info(f"SHIV DEBUG >>>>>>>>>>>>> start of prefill {stat1=}") 
                 if self.supports_mm_inputs:
                     # Run the multimodal encoder if any.
