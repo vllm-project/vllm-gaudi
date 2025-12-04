@@ -891,11 +891,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                else self.max_prefill_batch_size
         if self.enable_bucketing:
             logger.info("Bucketing is ON.")
+            num_speculative_tokens = self.speculative_config.num_speculative_tokens if self.speculative_config else 0
             self.bucketing_manager.initialize(max_num_seqs=self.max_num_seqs,
                                               max_num_prefill_seqs=max_num_prefill_seqs,
                                               block_size=self.block_size,
                                               max_num_batched_tokens=self.max_num_batched_tokens,
-                                              max_model_len=self.max_model_len)
+                                              max_model_len=self.max_model_len,
+                                              num_speculative_tokens=num_speculative_tokens)
             self.graphed_buckets: set[Any] = set()
             self.graphed_multimodal_buckets: set[Any] = set()
         else:
@@ -2031,15 +2033,18 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # but also kvs for the current token
         num_blocks = np.ceil((context_lens + 1) / self.block_size).astype(np.int32).tolist()
 
+        num_tokens_per_req = num_scheduled_tokens[:num_decodes]
+        num_tokens = max(num_tokens_per_req)
+        # Spec decode to use seed buckets to get padded batch size
+        seek_buckets = bool(num_tokens > 1)
+
         # PAD FOR STATIC SHAPES.
         padded_batch_size: int
-        padded_batch_size = self.bucketing_manager.find_decode_bucket(num_decodes, sum(num_blocks))[0]
+        padded_batch_size = self.bucketing_manager.find_decode_bucket(num_decodes, sum(num_blocks), seek_buckets)[0]
 
         # dp aware padding
         padded_batch_size += self.get_dp_padding(padded_batch_size)
 
-        num_tokens_per_req = num_scheduled_tokens[:num_decodes]
-        num_tokens = max(num_tokens_per_req)
         total_num_scheduled_tokens = sum(num_tokens_per_req)
         num_tokens_per_req = num_tokens_per_req + [0] * (padded_batch_size - num_decodes)
 
@@ -3513,7 +3518,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         for req_id in self.input_batch.req_ids[:num_reqs]:
             req_state = self.requests[req_id]
             i = self.input_batch.req_id_to_index[req_id]
-            seq_len = (req_state.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id])
+            # Cannot use num_computed_tokens + num_scheduled_tokens here
+            # as it may include rejected spec decode tokens
+            seq_len = self.input_batch.num_tokens_no_spec[i]
             token_ids = postprocessed_sampled_token_ids[i]
             num_tokens = len(token_ids)
             self.input_batch.token_ids_cpu[i, seq_len:seq_len + num_tokens] = token_ids
@@ -4098,7 +4105,16 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                            scheduled_tokens,
                            is_prompt,
                            block_id=0):
-        num_blocks = round_up(total_tokens, self.block_size) // self.block_size
+        # Spec decode: blocks should include look ahead tokens (eagle)
+        total_tokens_for_blocks = total_tokens
+        if self.speculative_config and self.speculative_config.use_eagle():
+            # Consider the block space for draft tokens to propose
+            total_tokens_for_blocks += self.speculative_config.num_speculative_tokens
+            # Check the limit of the max model length
+            if total_tokens_for_blocks > self.max_model_len:
+                total_tokens_for_blocks = self.max_model_len
+
+        num_blocks = round_up(total_tokens_for_blocks, self.block_size) // self.block_size
         prompt_token_ids = list(range(total_tokens))
 
         req_id = f'{len(requests)}'
@@ -4177,14 +4193,20 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         requests.append(req)
         scheduled_tokens[req_id] = num_scheduled_tokens
 
-    @staticmethod
-    def _generate_seq_lengths(num_samples, num_blocks, block_size):
+    def _generate_seq_lengths(self, num_samples, num_blocks, block_size):
         assert num_samples <= num_blocks
         blocks = [num_blocks // num_samples] * num_samples
         missing_blocks = num_blocks - sum(blocks)
         for i in range(missing_blocks):
             blocks[i] += 1
-        seq_lengths = [b * block_size - 1 for b in blocks]
+
+        # Leave space for the output token and draft tokens to propose
+        num_lookahead_tokens = 1
+        if self.speculative_config and self.speculative_config.use_eagle():
+            # Consider the token space for draft tokens to propose
+            # The draft tokens for eagle consumes block table space
+            num_lookahead_tokens += self.speculative_config.num_speculative_tokens
+        seq_lengths = [b * block_size - num_lookahead_tokens for b in blocks]
         return seq_lengths
 
     def distribute_sum_evenly(self, total_sum, max_length):
@@ -4324,6 +4346,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                      prompt_num_blocks)
             for _ in range(prompt_bs):
                 for tokens, context_len in zip(prompt_total_tokens, prompt_num_context_blocks):
+                    if self.speculative_config and self.speculative_config.use_eagle():
+                        # Leave the block space for draft tokens to propose
+                        # The draft tokens for eagle consumes block table space
+                        num_speculative_tokens = self.speculative_config.num_speculative_tokens
+                        tokens -= num_speculative_tokens
+                        prompt_query_len -= num_speculative_tokens
                     self._add_dummy_request(requests,
                                             scheduled_tokens,
                                             num_computed_tokens=(context_len * self.block_size),
