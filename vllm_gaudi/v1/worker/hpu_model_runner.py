@@ -64,7 +64,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCach
 from vllm.v1.worker.kv_connector_model_runner_mixin import (KVConnectorModelRunnerMixin)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors, DraftTokenIds, ModelRunnerOutput,
                              AsyncModelRunnerOutput, KVConnectorOutput)
-from vllm.v1.pool.metadata import PoolingMetadata
+from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm.v1.utils import CpuGpuBuffer
@@ -773,6 +773,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if prompt_profile_cfg:
                 self.scheduler_config.max_num_batched_tokens = prompt_profile_cfg[0] * prompt_profile_cfg[1]
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
+        self.max_num_reqs = self.scheduler_config.max_num_seqs
         # Cached outputs.
         ## universal buffer for input_ids and positions ##
         ## necessary being used by spec decode by following GPU impl ##
@@ -786,6 +787,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                          device="cpu",
                                          pin_memory=self.pin_memory)
         self.positions_np = self.positions_cpu.numpy()
+        self.seq_lens = torch.zeros(self.max_num_reqs, dtype=torch.int32, device="cpu", pin_memory=self.pin_memory)
         ###############################################################
 
         # Model-related.
@@ -2928,9 +2930,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         "Either all or none of the requests in" \
         " a batch must be pooling request"
         hidden_states = hidden_states[:num_scheduled_tokens]
+        seq_lens_cpu = self.seq_lens.cpu[:self.input_batch.num_reqs]
 
         pooling_metadata = self.input_batch.get_pooling_metadata()
-        pooling_metadata.build_pooling_cursor(num_scheduled_tokens_np.tolist(), device=hidden_states.device)
+        pooling_metadata.build_pooling_cursor(num_scheduled_tokens_np.tolist(),
+                                              seq_lens_cpu,
+                                              device=hidden_states.device)
 
         num_reqs = self.input_batch.num_reqs
 
@@ -2939,7 +2944,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             torch.tensor(self.input_batch.num_computed_tokens_cpu[:num_reqs], dtype=torch.int32, device=self.device))
         raw_pooler_output = self.model.pooler(hidden_states=hidden_states, pooling_metadata=pooling_metadata)
         raw_pooler_output = json_map_leaves(
-            lambda x: x.to("cpu", non_blocking=True),
+            lambda x: x.to("cpu", non_blocking=True) if x is not None else x,
             raw_pooler_output,
         )
 
@@ -4018,12 +4023,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
             pooling_params_list = [dummy_pooling_param] * bs
 
-            pooling_metadata = PoolingMetadata(
-                prompt_lens=prompt_lens_cpu,
-                prompt_token_ids=prompt_token_ids,
-                pooling_params=pooling_params_list,
-            )
-            pooling_metadata.build_pooling_cursor(num_scheduled_tokens_list, device=hidden_states.device)
+            pooling_metadata = PoolingMetadata(prompt_lens=prompt_lens_cpu,
+                                               prompt_token_ids=prompt_token_ids,
+                                               pooling_params=pooling_params_list,
+                                               pooling_states=[PoolingStates() for i in range(bs)])
+            pooling_metadata.build_pooling_cursor(num_scheduled_tokens_list,
+                                                  seq_lens_cpu=prompt_lens_cpu,
+                                                  device=hidden_states.device)
 
             try:
                 _pooler_output = model.pooler(hidden_states=hidden_states, pooling_metadata=pooling_metadata)
