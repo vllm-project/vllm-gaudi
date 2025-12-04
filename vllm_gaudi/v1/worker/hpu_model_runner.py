@@ -30,7 +30,7 @@ from vllm_gaudi.extension.defragmentation import OnlineDefragmenter
 from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler, HabanaMemoryProfiler, HabanaProfilerCounterHelper,
                                            format_bytes, setup_profiler)
 from vllm_gaudi.extension.runtime import finalize_config, get_config
-from vllm_gaudi.extension.unified_batch import create_unified_batch
+from vllm_gaudi.extension.unified_batch import create_unified_batch, prepare_unified_attn_softmax_inputs
 from vllm_gaudi.extension.utils import align_and_pad, pad_list, with_default
 from vllm_gaudi.extension.debug import init_debug_logger
 from vllm_gaudi.v1.spec_decode.hpu_eagle import HpuEagleProposer
@@ -2555,6 +2555,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         cfg = self._get_unified_config(attn_metadata, logits_indices)
         if self.debug_fwd:
             self.debug_fwd(cfg)
+        if get_config().unified_attn_softmax_fa2 and ('c' in cfg[0] or 's' in cfg[0]):
+            prepare_unified_attn_softmax_inputs(attn_metadata, cfg, self.num_kv_heads, self.num_query_heads)
         seen = cfg in self.seen_configs
         self.seen_configs.add(cfg)
         if not seen and not warmup_mode:
