@@ -5,7 +5,7 @@ import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
 
 from vllm.sampling_params import SamplingParams
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.platforms import current_platform
 from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData, CachedRequestData
 from vllm.config import (VllmConfig, ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig)
@@ -14,11 +14,6 @@ DEVICE = current_platform.device_type
 
 
 def get_vllm_config():
-    scheduler_config = SchedulerConfig(
-        max_num_seqs=10,
-        max_num_batched_tokens=512,
-        max_model_len=512,
-    )
     model_config = ModelConfig(
         model="facebook/opt-125m",
         task="generate",
@@ -27,6 +22,12 @@ def get_vllm_config():
         trust_remote_code=True,
         dtype="bfloat16",
         seed=42,
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=10,
+        max_num_batched_tokens=512,
+        max_model_len=512,
+        is_encoder_decoder=model_config.is_encoder_decoder,
     )
     cache_config = CacheConfig(
         block_size=128,
@@ -91,8 +92,6 @@ def test_prefix_cache_hits(model_runner, prompt1, prompt2, num_common_prefix, ex
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
-        grammar_bitmask=None,
     )
     model_runner._update_states(sched_out1)
     cached_state = model_runner.requests[req_id1]
@@ -114,8 +113,6 @@ def test_prefix_cache_hits(model_runner, prompt1, prompt2, num_common_prefix, ex
         num_common_prefix_blocks=num_common_prefix,
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
-        grammar_bitmask=None,
     )
     model_runner._update_states(sched_out2)
     cached_state = model_runner.requests[req_id2]
@@ -145,8 +142,6 @@ def test_prefix_cache_reset(model_runner, prompt, cache_first, cache_second, dis
         num_common_prefix_blocks=cache_first,
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
-        grammar_bitmask=None,
     )
     model_runner._update_states(sched_out1)
     cached_state1 = model_runner.requests[req_id]
@@ -168,8 +163,6 @@ def test_prefix_cache_reset(model_runner, prompt, cache_first, cache_second, dis
         num_common_prefix_blocks=cache_second,
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
-        grammar_bitmask=None,
     )
     model_runner._update_states(sched_out2)
     cached_state2 = model_runner.requests[req_id]

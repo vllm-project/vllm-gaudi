@@ -2,7 +2,7 @@ from typing import Callable, Optional
 
 import torch
 from vllm_gaudi import envs
-from vllm.model_executor.custom_op import CustomOp
+from torch.nn.parameter import Parameter
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
 from vllm.model_executor.layers.quantization import fp8
@@ -24,6 +24,35 @@ class Fp8LinearMethod(OrigFp8LinearMethod):
         if self.block_quant:
             layer = hpu_ops.fp8_block_linear_postprocess_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
             return
+        # If checkpoint not serialized fp8, quantize the weights.
+        elif not self.quant_config.is_checkpoint_fp8_serialized:
+            qweight, weight_scale = hpu_ops.scaled_fp8_quant(layer.weight, scale=None)
+            weight = qweight.t()
+
+        # If checkpoint is fp8 per-tensor, handle that there are N scales for N
+        # shards in a fused module
+        else:
+            weight = layer.weight
+            weight_scale = layer.weight_scale
+
+            # If using w8a8, torch._scaled_mm needs per tensor, so
+            # requantize the logical shards as a single weight.
+
+            weight, weight_scale, input_scale = hpu_ops.process_fp8_weight_tensor_strategy(
+                weight,
+                weight_scale,
+                layer.logical_widths,
+                getattr(layer, "input_scale", None),
+            )
+            if self.act_q_static:
+                assert input_scale is not None
+                input_scale = input_scale.max()
+            weight = weight.t()
+
+        # Update layer with new values.
+        layer.weight = Parameter(weight.data, requires_grad=False)
+        layer.weight_scale = Parameter(weight_scale.data, requires_grad=False)
+        layer.input_scale = (Parameter(input_scale, requires_grad=False) if input_scale is not None else None)
 
     def apply(self, layer: torch.nn.Module, x: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         if self.block_quant:
@@ -36,7 +65,8 @@ class Fp8LinearMethod(OrigFp8LinearMethod):
                 do_unpad=True,
                 force_channel_fp8=envs.VLLM_HPU_FORCE_CHANNEL_FP8,
             )
-        weight_scale = layer.weight_scale.transpose(0, 1)
+
+        weight_scale = layer.weight_scale.transpose(0, 1) if layer.weight_scale.dim() > 1 else layer.weight_scale
         input_scale = getattr(layer, 'input_scale', None)
         return hpu_ops.apply_fp8_linear_hpu(input=x,
                                             weight=layer.weight,
@@ -59,7 +89,6 @@ class Fp8LinearMethod(OrigFp8LinearMethod):
         return dequant_weight
 
 
-@CustomOp.register_oot(name='Fp8MoEMethod')
 class HPUFp8MoEMethod(Fp8MoEMethod):
 
     def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
@@ -70,9 +99,6 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
 
         # disable DeepGemm support.
         self.allow_deep_gemm = False
-
-        self.topk_indices_dtype = None
-        self.fused_experts = None
 
     def create_weights(self, *args, **kwargs) -> None:
         if hpu_ops.is_hpu_gaudi2:
@@ -104,7 +130,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         top_k: int,
@@ -124,17 +150,8 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if use_grouped_topk or custom_routing_function is not None:
-            topk_weights, topk_ids, zero_expert_result = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias)
+            topk_weights, topk_ids, zero_expert_result = layer.select_experts(hidden_states=x,
+                                                                              router_logits=router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)

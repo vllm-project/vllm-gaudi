@@ -1,14 +1,14 @@
 from typing import Callable, Optional, Union
 import habana_frameworks.torch as htorch
 import torch
-from compressed_tensors import CompressionFormat
 
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, FusedMoEConfig)
-from compressed_tensors.quantization import (QuantizationStrategy)
+from compressed_tensors.quantization import (QuantizationArgs, QuantizationStrategy)
 
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (convert_to_channelwise)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import convert_to_channelwise
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter, ModelWeightParameter, PerTensorScaleParameter,
                                            BasevLLMParameter, GroupQuantScaleParameter, PackedColumnParameter,
                                            PackedvLLMParameter, RowvLLMParameter)
@@ -28,7 +28,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (pack_quan
                                                                        unpack_quantized_values_into_int32)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (marlin_repeat_scales_on_all_ranks)
 from vllm.model_executor.utils import set_weight_attrs
-
 import vllm_gaudi.extension.ops as hpu_ops
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel, VllmMixtureOfExpertsOpWNA16)
 
@@ -88,8 +87,15 @@ class HPUCompressedTensorsLinearMethod(OrigCompressedTensorsLinearMethod):
             raise ValueError(f"{scheme_classname} compressed format is not supported on HPU")
         return hpu_scheme
 
+    def dequant_fp8_weight(self, layer: torch.nn.Module) -> torch.Tensor:
+        if layer.scheme.strategy == QuantizationStrategy.CHANNEL:  # weights were quantized per-channel
+            dequant_weight = layer.weight.to(layer.weight_scale.dtype) * layer.weight_scale.squeeze()
+            return dequant_weight.to(torch.bfloat16).t()
+        else:
+            raise NotImplementedError("Implemented per-channel dequantization only")
 
-@CustomOp.register_oot(name='CompressedTensorsW8A16Fp8')
+
+@CustomOp.register_oot(name='CompressedTensorsW8A8Fp8')
 class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
     def __init__(self, strategy: str, is_static_input_scheme: bool):
@@ -111,9 +117,16 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         # Weights must be transposed for marlin
         layer.weight = torch.nn.Parameter(layer.weight.t(), requires_grad=False)
 
-        if layer.scheme.is_static_input_scheme:
-            # required by torch.compile to be torch.nn.Parameter
-            layer.input_scale = torch.nn.Parameter(layer.input_scale.data, requires_grad=False)
+        # see the reference: https://github.com/vllm-project/vllm/blob/v0.11.2/vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_w8a8_fp8.py#L169-L173
+        if layer.scheme.is_static_input_scheme and hasattr(layer, "input_scale"):
+            # required by torch.compile to be torch.nn.Parameter, only per-tensor supported
+            layer.input_scale = torch.nn.Parameter(layer.input_scale.max(), requires_grad=False)
+        else:
+            layer.input_scale = None
+
+        # postprocess weights for perchannel strategy
+        if layer.scheme.strategy == QuantizationStrategy.CHANNEL:
+            hpu_ops.fp8_perchannel_linear_postprocess_weights(layer)
 
     def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int, output_partition_sizes: list[int],
                        input_size: int, output_size: int, params_dtype: torch.dtype, **extra_weight_attrs):
@@ -206,7 +219,7 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         top_k: int,
@@ -226,17 +239,8 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if use_grouped_topk or custom_routing_function is not None:
-            topk_weights, topk_ids, zero_expert_result = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias)
+            topk_weights, topk_ids, zero_expert_result = layer.select_experts(hidden_states=x,
+                                                                              router_logits=router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
@@ -447,17 +451,18 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
 
     def __init__(
         self,
-        quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs | None,
         moe: FusedMoEConfig,
+        layer_name: str | None = None,
     ):
-        super().__init__(quant_config, moe)
+        super().__init__(weight_quant, input_quant, moe)
 
-        HPU_WNA16_SUPPORTED_BITS = [4]
-        if not (self.quant_config.quant_format == CompressionFormat.pack_quantized.value
-                and self.num_bits in HPU_WNA16_SUPPORTED_BITS):
-            raise ValueError("For Fused MoE layers, only ", f"{CompressionFormat.pack_quantized.value} ",
-                             "is supported for the following bits: ", f"{HPU_WNA16_SUPPORTED_BITS}")
+        self.weight_quant = weight_quant
+        self.input_quant = input_quant
+        assert weight_quant.symmetric, ("Only symmetric quantization is supported for MoE")
         self.quant_type = WNA16_SUPPORTED_TYPES_MAP[self.num_bits]
+        self.layer_name = layer_name
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int, params_dtype: torch.dtype, **extra_weight_attrs):
@@ -633,7 +638,7 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         top_k: int,
@@ -654,29 +659,13 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        assert self.fused_experts is None
-
-        if enable_eplb:
-            raise NotImplementedError("EPLB not supported for "
-                                      "`CompressedTensorsWNA16MoEMethod` yet.")
 
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
 
         if use_grouped_topk or custom_routing_function is not None:
-            topk_weights, topk_ids, zero_expert_result = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                routed_scaling_factor=routed_scaling_factor,
-                e_score_correction_bias=e_score_correction_bias,
-                indices_type=self.topk_indices_dtype)
+            topk_weights, topk_ids, zero_expert_result = layer.select_experts(hidden_states=x,
+                                                                              router_logits=router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
@@ -703,3 +692,6 @@ compressed_tensors_moe.CompressedTensorsWNA16MoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod
 compressed_tensors_moe.CompressedTensorsWNA16MarlinMoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod # Override default WNA16 MoE method
+
+# support weight_loader_v2
+WEIGHT_LOADER_V2_SUPPORTED.append(HPUCompressedTensorsLinearMethod.__name__)
