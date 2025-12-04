@@ -895,12 +895,23 @@ class MoeFP8Matmul(torch.nn.Module):
         self.block_size = block_size
 
     def get_dequant_weight(self):
-        return dequant_block_fp8_weight_naive(
-            self.weight,
-            self.scale_inv_fp8,
-            block_size=self.block_size,
-            dtype=self.high_precision,
-        )
+        weight_shape = self.weight.shape
+        scale_shape = self.scale_inv_fp8.shape
+
+        if weight_shape[0] / scale_shape[0] == self.block_size[0] and \
+           weight_shape[1] / scale_shape[1] == self.block_size[1]:   # block-wise
+            return dequant_block_fp8_weight_naive(
+                self.weight,
+                self.scale_inv_fp8,
+                block_size=self.block_size,
+                dtype=self.high_precision,
+            )
+        elif weight_shape[0] == scale_shape[0] or weight_shape[1] == scale_shape[1]:  # channel-wise
+            scale_dtype = self.scale_inv_fp8.dtype
+            return (self.weight.to(scale_dtype) * self.scale_inv_fp8).to(self.high_precision)
+        else:
+            raise NotImplementedError(
+                "Dequantize weights for strategy other than block-wise and channel-wise not implemented")
 
     def forward(self, state, expert_id, w):
         raise NotImplementedError()
