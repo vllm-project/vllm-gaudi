@@ -87,9 +87,9 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                              window_block_list,
                              window_block_usage,
                              window_block_groups,
-                             chunked_block_list,
-                             chunked_block_usage,
-                             chunked_block_groups,
+                             chunked_block_list=None,
+                             chunked_block_usage=None,
+                             chunked_block_groups=None,
                              query_start_loc=None):
         return cls(is_prompt=False,
                    block_mapping=None,
