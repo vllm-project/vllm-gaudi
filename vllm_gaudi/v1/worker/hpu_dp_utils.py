@@ -1,4 +1,5 @@
 import torch
+import os
 from contextlib import contextmanager
 from vllm.config import VllmConfig
 from dataclasses import dataclass
@@ -33,9 +34,12 @@ class HPUDPMetadata:
         num_experts_per_tok = getattr(vllm_config.model_config.hf_text_config, "num_experts_per_tok", 0)
         assert num_experts_per_tok > 0, ("No expert found in the model config. Please check the model config.")
 
+        quant_config = os.getenv("QUANT_CONFIG", None) is not None
+        is_quant_with_inc = vllm_config.model_config.quantization == "inc" or quant_config
+        hidden_states_dtype = (torch.float8_e4m3fn if is_quant_with_inc else dtype)
         hidden_states_across_dp = torch.empty(
             (num_tokens_across_dp, hidden_size),
-            dtype=dtype,
+            dtype=hidden_states_dtype,
             device=device,
         )
         topk_ids_across_dp = torch.empty(
@@ -115,3 +119,8 @@ def dispatch_tensor(input, output: torch.Tensor | None = None, is_sequence_paral
         output, input, group=get_ep_group().device_group if is_sequence_parallel else get_dp_group().device_group)
 
     return output
+
+
+def dispatch_hidden_states(input, is_sequence_parallel):
+    hidden_states_across_dp = get_hpu_dp_metadata().hidden_states_across_dp
+    return dispatch_tensor(input, hidden_states_across_dp, is_sequence_parallel)
