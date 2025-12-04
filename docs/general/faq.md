@@ -10,7 +10,7 @@ title: Frequently Asked Questions
 - Ubuntu 22.04 LTS OS.
 - Python 3.10.
 - Intel Gaudi 2 or Intel Gaudi 3 AI accelerator.
-- Intel Gaudi software version 1.22.2 and above.
+- Intel Gaudi software version 1.23.0 and above.
 
 ### What is the vLLM plugin and where can I find its GitHub repository?
 
