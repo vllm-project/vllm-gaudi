@@ -10,6 +10,7 @@ from vllm.model_executor.layers.quantization.fp8 import (Fp8LinearMethod as Orig
                                                          Fp8Config)
 import vllm_gaudi.extension.ops as hpu_ops
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel, VllmMixtureOfExpertsOpFP8)
+from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_tensor, get_hpu_dp_metadata
 
 
 class Fp8LinearMethod(OrigFp8LinearMethod):
@@ -158,6 +159,20 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
             topk_weights, topk_ids = torch.topk(topk_weights, top_k, dim=-1)
             topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
             topk_weights = topk_weights.to(x.dtype)
+
+        topk_ids = topk_ids.to(torch.int64)
+        topk_weights = topk_weights.to(x.dtype)
+
+        if layer.dp_size > 1:
+            hidden_states_across_dp = get_hpu_dp_metadata().hidden_states_across_dp
+            x = dispatch_tensor(x, hidden_states_across_dp, layer.is_sequence_parallel)
+
+            topk_ids_across_dp = get_hpu_dp_metadata().topk_ids_across_dp
+            topk_ids = dispatch_tensor(topk_ids, topk_ids_across_dp, layer.is_sequence_parallel)
+
+            topk_weights_across_dp = get_hpu_dp_metadata().topk_weights_across_dp
+            topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, layer.is_sequence_parallel)
+
         topk_ids = topk_ids.view(*x.shape[:-1], -1)
         topk_weights = topk_weights.view(*x.shape[:-1], -1)
         if not layer.use_grouped_topk:
@@ -171,7 +186,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
             permuted_weights=True,
             activation=activation,
         )
-        return output.view(*input_shape)
+        return output.view(*(x.size(0), *input_shape[1:]))
 
 
 fp8.Fp8LinearMethod = Fp8LinearMethod
