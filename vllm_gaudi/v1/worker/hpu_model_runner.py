@@ -2550,7 +2550,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         cfg = self._get_unified_config(attn_metadata, logits_indices)
         if self.debug_fwd:
             self.debug_fwd(cfg)
-        if 'c' in cfg[0] or 's' in cfg[0]:
+        if get_config().unified_attn_softmax_fa2 and ('c' in cfg[0] or 's' in cfg[0]):
             prepare_unified_attn_softmax_inputs(attn_metadata, cfg, self.num_kv_heads, self.num_query_heads)
         seen = cfg in self.seen_configs
         self.seen_configs.add(cfg)

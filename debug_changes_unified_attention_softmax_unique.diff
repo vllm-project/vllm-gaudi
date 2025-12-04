@@ -1,0 +1,512 @@
+diff --git a/vllm_gaudi/extension/unified.py b/vllm_gaudi/extension/unified.py
+index 340c7f5..253be3f 100644
+--- a/vllm_gaudi/extension/unified.py
++++ b/vllm_gaudi/extension/unified.py
+@@ -15,7 +15,11 @@ from dataclasses import dataclass
+ import habana_frameworks.torch as htorch
+ 
+ from vllm_gaudi.extension.runtime import get_config
++import numpy as np
++import habana_frameworks.torch.core as htcore
+ 
++def batch2block(tensor, block_mapping):
++    return torch.matmul(block_mapping, tensor.flatten(1, -1)).unflatten(-1, tensor.shape[1:])
+ 
+ def block2batch(tensor, block_mapping):
+     """Convert from block to batch on dim=0"""
+@@ -101,18 +105,45 @@ def optional(op):
+     return opt_impl
+ 
+ 
+-def merge(*attn_results: torch.tensor, feps: torch.tensor) -> torch.tensor:
++def check_tensor_for_nan(name, tensor: torch.Tensor) -> bool:
++    nan_mask = torch.isnan(tensor)
++    has_nan = nan_mask.any().item()
++    if has_nan:
++        nan_count = nan_mask.sum().item()
++        print(f"    ✗ {name} {nan_count} NaN value(s) detected")
++    else:
++        print(f"    ✓ {name} no NaNs")
++    return has_nan
++
++
++def merge(*attn_results: torch.tensor, has_nans, unique_nans, feps: torch.tensor) -> torch.tensor:
+     """Merge partial attention values into final attn score"""
+-    all_attn, all_max, all_sum = zip(*attn_results)
++    if not has_nans:
++        all_attn, all_max, all_sum = zip(*attn_results)
++    else:
++        all_attn, all_max, all_sum = zip(attn_results[0], attn_results[1], unique_nans)
+     global_max = functools.reduce(optional(torch.maximum), all_max)
++    if has_nans:
++        check_tensor_for_nan("global_max", global_max)
+     calc_adjustment = optional(lambda x: torch.exp((x - global_max)))
+     adjust = optional(lambda x, a: x * a)
+     all_adj = [calc_adjustment(x) for x in all_max]
+     global_sum = functools.reduce(optional(torch.add), [adjust(s, a) for s, a in zip(all_sum, all_adj)])
++    if has_nans:
++        check_tensor_for_nan("global_sum", global_sum)
+     global_sum = torch.maximum(global_sum, feps)
++    if has_nans:
++        print("After max with feps:")
++        check_tensor_for_nan("global_sum", global_sum)
+     rescale = optional(lambda x, adj: x * (adj / global_sum).unsqueeze(-1))
++    if has_nans:
++        print("After max with feps:")
++        check_tensor_for_nan("global_sum", global_sum)
+     attn = [rescale(attn, adj) for attn, adj in zip(all_attn, all_adj)]
+     attn = functools.reduce(optional(torch.add), attn)
++    if has_nans:
++        check_tensor_for_nan("final_attn", attn)
++        raise RuntimeError("AAAAA")
+     return attn
+ 
+ 
+@@ -177,7 +208,7 @@ def partial_attn_shared(query: torch.tensor, blocks: torch.tensor, bias: Optiona
+     return attn.transpose(0, 1), local_max.transpose(0, 1), local_sum.transpose(0, 1)
+ 
+ 
+-def partial_attn_unique(query: torch.tensor, blocks: torch.tensor, block_mapping: torch.tensor,
++def partial_attn_unique_old(query: torch.tensor, blocks: torch.tensor, block_mapping: torch.tensor,
+                         bias: Optional[torch.tensor], fmin: torch.tensor,
+                         cache_utils: CacheUtils) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
+     """Partial attention where all blocks are used by max one query"""
+@@ -186,6 +217,41 @@ def partial_attn_unique(query: torch.tensor, blocks: torch.tensor, block_mapping
+     batch_size = query.size(0)
+     kv_heads = cache_utils.kv_heads
+ 
++    # print("Block mapping: ", block_mapping.cpu())
++
++    query = query.index_select(0, block_mapping).unflatten(1, (kv_heads, -1)).unsqueeze(-2)
++    key, value = cache_utils.fetch_unique(blocks)
++    block_mapping_2d = torch.nn.functional.one_hot(block_mapping, num_classes=batch_size).to(query.dtype)
++
++    attn = torch.matmul(query, key.transpose(-1, -2))
++    attn = attn + bias.unsqueeze(1).unsqueeze(1).unsqueeze(1)
++    block_max = torch.maximum(attn.amax(-1), fmin)
++    attn = torch.exp(attn - block_max.unsqueeze(-1))
++    block_sum = attn.sum(-1)
++    attn = torch.matmul(attn, value)
++    
++    # print(f"OLD block_max range: [{block_max.min().item()}, {block_max.max().item()}]")
++
++    group_max = reduce_max(block_max, batch_size, block_mapping)
++    block_adjustment = torch.exp(block_max - group_max.index_select(0, block_mapping))
++    block_sum = block_sum * block_adjustment
++    group_sum = block2batch(block_sum, block_mapping_2d)
++
++    attn = attn * block_adjustment.unsqueeze(-1)
++    attn = block2batch(attn, block_mapping_2d)
++
++    return (attn.flatten(1, 3), group_max.flatten(1, 3), group_sum.flatten(1, 3))
++
++
++def partial_attn_unique(query: torch.tensor, blocks: torch.tensor, block_mapping: torch.tensor,
++                        bias: Optional[torch.tensor], fmin: torch.tensor,
++                        cache_utils: CacheUtils) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
++    """Partial attention where all blocks are used by max one query"""
++    if bias is None:
++        return (None, None, None)
++
++    batch_size = query.size(0)
++    kv_heads = cache_utils.kv_heads
+     query = query.index_select(0, block_mapping).unflatten(1, (kv_heads, -1)).unsqueeze(-2)
+     head_dim = query.size(2)
+     key, value = cache_utils.fetch_unique(blocks)
+@@ -193,8 +259,70 @@ def partial_attn_unique(query: torch.tensor, blocks: torch.tensor, block_mapping
+ 
+     attn = torch.matmul(query, key.transpose(-1, -2))
+     block_bias = bias.unsqueeze(1).unsqueeze(1).unsqueeze(1)
++    # if any([torch.isnan(t.cpu()).sum().item() > 0 for t in block_bias]):
++    #     print("NaNs detected in unique NEW attention ATTTTTTTN block_bias!")
++    #     # print("Saved scaled_query", scaled_query[0].cpu())
++    # else:
++    #     print("No NaNs in unique NEW attention ATTTTTTTN block_bias.")
++
++    # dump_dir = "/software/users/ksmusz/tickets/SW-241081/tensors/good_shapes_bad_values_llama31_13_inputs_to_block_softmax_results_old"
++    # import time
++    # timestamp = int(time.time() * 1000000)  # microseconds for uniqueness
++    
++    # # Dump input tensors
++    # def save_tensor(name, tensor, prefix=timestamp):
++    #     if tensor is None:
++    #         with open(f"{dump_dir}/{prefix}_{name}_None.txt", 'w') as f:
++    #             f.write("None")
++    #         return
++        
++    #     cpu_tensor = tensor.cpu() if torch.is_tensor(tensor) else tensor
++        
++    #     # Save shape and dtype info
++    #     with open(f"{dump_dir}/{prefix}_{name}_info.txt", 'w') as f:
++    #         if torch.is_tensor(cpu_tensor):
++    #             f.write(f"Shape: {cpu_tensor.shape}\n")
++    #             f.write(f"Dtype: {cpu_tensor.dtype}\n")
++    #             f.write(f"Device: {tensor.device}\n")
++    #         else:
++    #             f.write(f"Type: {type(cpu_tensor)}\n")
++    #             f.write(f"Value: {cpu_tensor}\n")
++        
++    #     # Save tensor data
++    #     if torch.is_tensor(cpu_tensor):
++    #         torch.save(cpu_tensor, f"{dump_dir}/{prefix}_{name}.pt")
++    #     else:
++    #         # For non-tensor values (like int)
++    #         with open(f"{dump_dir}/{prefix}_{name}_value.txt", 'w') as f:
++    #             f.write(str(cpu_tensor))
++    
++    # Save all inputs
++    # save_tensor("attn", attn)
++    # save_tensor("block_bias", block_bias)
++    # save_tensor("block_mapping", block_mapping)
++    
++    # print(f"[DUMP] Saved input tensors to {dump_dir} with prefix {timestamp}")
++
+     attn, block_max, block_sum = torch.ops.hpu.block_softmax(attn, block_bias, block_mapping, fp8_exp=False)
+ 
++    # if any([torch.isnan(t.cpu()).sum().item() > 0 for t in attn]):
++    #     print("NaNs detected in unique NEW attention ATTTTTTTN output!")
++    #     # print("Saved scaled_query", scaled_query[0].cpu())
++    # else:
++    #     print("No NaNs in unique NEW attention ATTTTTTTN output.")
++
++    # if any([torch.isnan(t.cpu()).sum().item() > 0 for t in block_max]):
++    #     print("NaNs detected in unique NEW attention ATTTTTTTN block_max!")
++    #     # print("Saved scaled_query", scaled_query[0].cpu())
++    # else:
++    #     print("No NaNs in unique NEW attention ATTTTTTTN block_max.")
++
++    # if any([torch.isnan(t.cpu()).sum().item() > 0 for t in block_sum]):
++    #     print("NaNs detected in unique NEW attention ATTTTTTTN block_sum!")
++    #     # print("Saved scaled_query", scaled_query[0].cpu())
++    # else:
++    #     print("No NaNs in unique NEW attention ATTTTTTTN block_sum.")
++
+     attn = torch.matmul(attn, value)
+ 
+     # Reshape outputs
+@@ -203,12 +331,21 @@ def partial_attn_unique(query: torch.tensor, blocks: torch.tensor, block_mapping
+     block_sum = block_sum[:, :kv_heads * head_dim].view(-1, kv_heads, head_dim,
+                                                         1)  # [num_blocks, kv_heads, head_dim, 1]
+ 
++    block_max = torch.nan_to_num(block_max, nan=fmin)
++    block_sum = torch.nan_to_num(block_sum, nan=0)
++
++    check_tensor_for_nan("block_max after nan_to_num", block_max)
++    check_tensor_for_nan("block_sum after nan_to_num", block_sum)
++
+     group_max = reduce_max(block_max, batch_size, block_mapping)
+ 
+     block_adjustment = torch.exp(block_max - group_max.index_select(0, block_mapping))
+ 
+     block_sum = block_sum * block_adjustment
++    check_tensor_for_nan("block_sum adjustment", block_sum)
++    check_tensor_for_nan("block_mapping_2d", block_mapping_2d)
+     group_sum = block2batch(block_sum, block_mapping_2d)
++    check_tensor_for_nan("group_sum after block2batch", group_sum)
+ 
+     attn = attn * block_adjustment.unsqueeze(-1)
+     attn = block2batch(attn, block_mapping_2d)
+@@ -250,12 +387,128 @@ class HPUUnifiedAttentionMetadata:
+         return self.causal_bias is not None
+ 
+ 
++def compare_tensors(name, old, new, rtol=1e-5, atol=1e-8):
++    """Compare two tensors focusing on valid (non-zero, non-NaN, non-inf) values"""
++    if old is None and new is None:
++        print(f"✓ {name}: Both None")
++        return True
++    if old is None or new is None:
++        print(f"✗ {name}: One is None - old: {old is not None}, new: {new is not None}")
++        return False
++    
++    non_zero_valid_count = False
++    
++    # Move to CPU for comparison
++    old_cpu = old.cpu()
++    new_cpu = new.cpu()
++    
++    # Shape check
++    if old_cpu.shape != new_cpu.shape:
++        print(f"✗ {name}: Shape mismatch - old: {old_cpu.shape}, new: {new_cpu.shape}")
++        return False
++    
++    # Identify valid values (non-zero, non-NaN, non-inf) in each tensor
++    old_valid_mask = ~(torch.isnan(old_cpu) | torch.isinf(old_cpu) | (old_cpu == 0))
++    new_valid_mask = ~(torch.isnan(new_cpu) | torch.isinf(new_cpu) | (new_cpu == 0))
++    
++    old_valid_count = old_valid_mask.sum().item()
++    new_valid_count = new_valid_mask.sum().item()
++
++    if old_valid_count > 0 or new_valid_count > 0:
++        non_zero_valid_count = True
++
++    if name == "attn":
++        print(old_cpu[0,0,0])
++        print(new_cpu[0,0,0])
++    
++    print(f"{name}:")
++    print(f"  Shape: {old_cpu.shape}")
++    print(f"  Old valid values: {old_valid_count}/{old_cpu.numel()} ({100*old_valid_count/old_cpu.numel()}%)")
++    print(f"  New valid values: {new_valid_count}/{new_cpu.numel()} ({100*new_valid_count/new_cpu.numel()}%)")
++    
++    # Check if valid value positions match
++    positions_match = torch.equal(old_valid_mask, new_valid_mask)
++    if not positions_match:
++        only_in_old = (old_valid_mask & ~new_valid_mask).sum().item()
++        only_in_new = (new_valid_mask & ~old_valid_mask).sum().item()
++        print(f"  ✗ Valid value positions differ!")
++        print(f"    Valid only in old: {only_in_old}")
++        print(f"    Valid only in new: {only_in_new}")
++        
++        # Show sample positions that differ
++        diff_positions = old_valid_mask != new_valid_mask
++        common_positions = old_valid_mask & new_valid_mask
++        if diff_positions.any():
++            print("Different valid positions:")
++            indices = torch.where(diff_positions)
++            until = 3 if name != "block_adjustment" else 2000
++            for i in range(min(until, len(indices[0]))):
++                idx = tuple(ind[i].item() for ind in indices)
++                print(f"    [{idx}]: old={old_cpu[idx].item()} (valid={old_valid_mask[idx].item()}), "
++                      f"new={new_cpu[idx].item()} (valid={new_valid_mask[idx].item()})")
++        if common_positions.any():
++            print("Common valid positions:")
++            indices = torch.where(common_positions)
++            until = 3 if name != "block_adjustment" else 1000
++            for i in range(min(until, len(indices[0]))):
++                idx = tuple(ind[i].item() for ind in indices)
++                print(f"    [{idx}]: old={old_cpu[idx].item()} (valid={old_valid_mask[idx].item()}), "
++                      f"new={new_cpu[idx].item()} (valid={new_valid_mask[idx].item()})")
++        return False, non_zero_valid_count
++    
++    print(f"  ✓ Valid value positions match")
++    
++    # If no valid values, tensors are equivalent
++    if old_valid_count == 0:
++        print(f"  ✓ No valid values to compare (both tensors are all zeros/NaN/inf)")
++        return True, non_zero_valid_count
++    
++    # Compare values at valid positions
++    old_valid_values = old_cpu[old_valid_mask]
++    new_valid_values = new_cpu[new_valid_mask]
++    
++    are_close = torch.allclose(old_valid_values, new_valid_values, rtol=rtol, atol=atol)
++    
++    if are_close:
++        print(f"  ✓ All valid values match within tolerance (rtol={rtol}, atol={atol})")
++        return True, non_zero_valid_count
++    else:
++        diff = torch.abs(old_valid_values - new_valid_values)
++        max_diff = diff.max().item()
++        mean_diff = diff.mean().item()
++        rel_diff = (diff / (torch.abs(old_valid_values) + 1e-10)).max().item()
++        
++        print(f"  ✗ Valid values differ!")
++        print(f"    Max absolute diff: {max_diff:.6e}")
++        print(f"    Mean absolute diff: {mean_diff:.6e}")
++        print(f"    Max relative diff: {rel_diff:.6e}")
++        
++        # Show worst mismatches
++        diff_mask = diff > atol
++        if diff_mask.any():
++            num_diffs = diff_mask.sum().item()
++            print(f"    Differing values: {num_diffs}/{old_valid_count} ({100*num_diffs/old_valid_count}%)")
++            
++            # Find positions of worst differences
++            worst_indices = torch.argsort(diff, descending=True)[:5]
++            valid_positions = torch.where(old_valid_mask)
++            
++            for i in worst_indices:
++                if i >= len(valid_positions[0]):
++                    break
++                idx = tuple(pos[i].item() for pos in valid_positions)
++                print(f"    [{idx}]: old={old_cpu[idx].item()}, new={new_cpu[idx].item()}, diff={diff[i].item():.6e}")
++        
++        return False, non_zero_valid_count
++
++
+ def unified_attn(query: torch.tensor, key: torch.tensor, value: torch.tensor, key_cache: torch.tensor,
+                  value_cache: torch.tensor, scale: float, metadata: HPUUnifiedAttentionMetadata) -> torch.tensor:
+     """Main entry point for unified attention"""
+-
++    
+     scaled_query = query * scale
+     cache_utils = CacheUtils(key_cache, value_cache, metadata.block_size)
++    has_nans = False
+ 
+     causal = partial_attn_causal(query=scaled_query,
+                                  key=key,
+@@ -268,14 +521,159 @@ def unified_attn(query: torch.tensor, key: torch.tensor, value: torch.tensor, ke
+                                  bias=metadata.shared_bias,
+                                  fmin=metadata.fmin,
+                                  cache_utils=cache_utils)
++    # torch.hpu.synchronize()
++    unique_old = partial_attn_unique_old(query=scaled_query,
++                                    blocks=metadata.unique_blocks,
++                                    block_mapping=metadata.unique_block_mapping,
++                                    bias=metadata.unique_bias,
++                                    fmin=metadata.fmin,
++                                    cache_utils=cache_utils)
++    # torch.hpu.synchronize()
+     unique = partial_attn_unique(query=scaled_query,
+                                  blocks=metadata.unique_blocks,
+                                  block_mapping=metadata.unique_block_mapping,
+                                  bias=metadata.unique_bias,
+                                  fmin=metadata.fmin,
+                                  cache_utils=cache_utils)
++    # torch.hpu.synchronize()
++    if unique_old[0] is not None:
++        if any([torch.isnan(t.cpu()).sum().item() > 0 for t in unique_old]):
++            print("NaNs detected in unique OLD attention output!")
++            print("Saved scaled_query", scaled_query[0].cpu())
++        else:
++            print("No NaNs in unique OLD attention output.")
++
++    if unique[0] is not None:
++        for t, name in zip(unique, ["attn", "group_max", "group_sum"]):
++            if torch.isnan(t.cpu()).sum().item() > 0:
++                print(f"NaNs detected in unique NEW attention output: {name}!")
++                has_nans = True
++        else:
++            print("No NaNs in unique NEW attention output.")
++
++    
++    # if unique[0] is not None:
++    # #     # htcore.mark_step()
++    # #     # torch.hpu.synchronize()
++    # #     attn_match, non_zero_valid_count_attn = compare_tensors("attn", unique_old[0], unique[0])
++    # #     # htcore.mark_step()
++    # #     # torch.hpu.synchronize()
++    # #     max_match, non_zero_valid_count_max = compare_tensors("group_max", unique_old[1], unique[1])
++    # #     # htcore.mark_step()
++    # #     # torch.hpu.synchronize()
++    # #     sum_match, non_zero_valid_count_sum = compare_tensors("group_sum", unique_old[2], unique[2])
++
++    # #     all_match = attn_match and max_match and sum_match
++
++    #     dump_dir = "/software/users/ksmusz/tickets/SW-241081/tensors/good_shapes_bad_values_llama31_11_lazy_one_op_all_outputs"
++    #     import time
++    #     timestamp = int(time.time() * 1000000)  # microseconds for uniqueness
++        
++    #     # Dump input tensors
++    #     def save_tensor(name, tensor, prefix=timestamp):
++    #         if tensor is None:
++    #             with open(f"{dump_dir}/{prefix}_{name}_None.txt", 'w') as f:
++    #                 f.write("None")
++    #             return
++            
++    #         cpu_tensor = tensor.cpu() if torch.is_tensor(tensor) else tensor
++            
++    #         # Save shape and dtype info
++    #         with open(f"{dump_dir}/{prefix}_{name}_info.txt", 'w') as f:
++    #             if torch.is_tensor(cpu_tensor):
++    #                 f.write(f"Shape: {cpu_tensor.shape}\n")
++    #                 f.write(f"Dtype: {cpu_tensor.dtype}\n")
++    #                 f.write(f"Device: {tensor.device}\n")
++    #             else:
++    #                 f.write(f"Type: {type(cpu_tensor)}\n")
++    #                 f.write(f"Value: {cpu_tensor}\n")
++            
++    #         # Save tensor data
++    #         if torch.is_tensor(cpu_tensor):
++    #             torch.save(cpu_tensor, f"{dump_dir}/{prefix}_{name}.pt")
++    #         else:
++    #             # For non-tensor values (like int)
++    #             with open(f"{dump_dir}/{prefix}_{name}_value.txt", 'w') as f:
++    #                 f.write(str(cpu_tensor))
++        
++    #     # Save all inputs
++    #     save_tensor("query", scaled_query)
++    #     save_tensor("blocks", metadata.unique_blocks)
++    #     save_tensor("block_mapping", metadata.unique_block_mapping)
++    #     save_tensor("bias", metadata.unique_bias)
++    #     save_tensor("fmin", metadata.fmin)
++        
++    #     # Save cache_utils properties
++    #     save_tensor("key_cache", cache_utils.key_cache)
++    #     save_tensor("value_cache", cache_utils.value_cache)
++    #     with open(f"{dump_dir}/{timestamp}_cache_info.txt", 'w') as f:
++    #         f.write(f"block_size: {cache_utils.block_size}\n")
++    #         f.write(f"kv_heads: {cache_utils.kv_heads}\n")
++        
++    #     print(f"[DUMP] Saved input tensors to {dump_dir} with prefix {timestamp}")
++        
++        # print("="*60)
++        # if all_match:
++        #     print("✓ All outputs match!")
++        # else:
++        #     print("✗ Outputs differ!")
++            # htcore.mark_step()
++            # torch.hpu.synchronize()
++            # if non_zero_valid_count_attn or non_zero_valid_count_max or non_zero_valid_count_sum:
++            #     print("  (There were non-zero valid values to compare)")
++            #     dump_dir = "/software/users/ksmusz/tickets/SW-241081/tensors/good_shapes_bad_values_llama31_9_fuser_off"
++            #     import time
++            #     timestamp = int(time.time() * 1000000)  # microseconds for uniqueness
++                
++            #     # Dump input tensors
++            #     def save_tensor(name, tensor, prefix=timestamp):
++            #         if tensor is None:
++            #             with open(f"{dump_dir}/{prefix}_{name}_None.txt", 'w') as f:
++            #                 f.write("None")
++            #             return
++                    
++            #         cpu_tensor = tensor.cpu() if torch.is_tensor(tensor) else tensor
++                    
++            #         # Save shape and dtype info
++            #         with open(f"{dump_dir}/{prefix}_{name}_info.txt", 'w') as f:
++            #             if torch.is_tensor(cpu_tensor):
++            #                 f.write(f"Shape: {cpu_tensor.shape}\n")
++            #                 f.write(f"Dtype: {cpu_tensor.dtype}\n")
++            #                 f.write(f"Device: {tensor.device}\n")
++            #             else:
++            #                 f.write(f"Type: {type(cpu_tensor)}\n")
++            #                 f.write(f"Value: {cpu_tensor}\n")
++                    
++            #         # Save tensor data
++            #         if torch.is_tensor(cpu_tensor):
++            #             torch.save(tensor.cpu(), f"{dump_dir}/{prefix}_{name}.pt")
++            #         else:
++            #             # For non-tensor values (like int)
++            #             with open(f"{dump_dir}/{prefix}_{name}_value.txt", 'w') as f:
++            #                 f.write(str(cpu_tensor))
++                
++            #     # Save all inputs
++            #     save_tensor("query", scaled_query)
++            #     print("Saved scaled_query", scaled_query[0].cpu())
++            #     save_tensor("blocks", metadata.unique_blocks)
++            #     save_tensor("block_mapping", metadata.unique_block_mapping)
++            #     save_tensor("bias", metadata.unique_bias)
++            #     save_tensor("fmin", metadata.fmin)
++                
++            #     # Save cache_utils properties
++            #     save_tensor("key_cache", cache_utils.key_cache)
++            #     save_tensor("value_cache", cache_utils.value_cache)
++            #     with open(f"{dump_dir}/{timestamp}_cache_info.txt", 'w') as f:
++            #         f.write(f"block_size: {cache_utils.block_size}\n")
++            #         f.write(f"kv_heads: {cache_utils.kv_heads}\n")
++                
++            #     print(f"[DUMP] Saved input tensors to {dump_dir} with prefix {timestamp}")
++            # if non_zero_valid_count_attn or non_zero_valid_count_max or non_zero_valid_count_sum:
++            #     print("  (There were non-zero valid values to compare)")
++            #     raise RuntimeError("A")
++
++    attn = merge(causal, shared, unique_old, has_nans=has_nans, unique_nans=unique, feps=metadata.feps)
+ 
+-    attn = merge(causal, shared, unique, feps=metadata.feps)
+     if attn is None:
+         return query
+     return attn
+diff --git a/vllm_gaudi/v1/worker/hpu_model_runner.py b/vllm_gaudi/v1/worker/hpu_model_runner.py
+index 3764666..fcbbdd7 100644
+--- a/vllm_gaudi/v1/worker/hpu_model_runner.py
++++ b/vllm_gaudi/v1/worker/hpu_model_runner.py
+@@ -3571,7 +3571,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
+         return torch.compile(module, **self.compile_config.get_compile_args())
+ 
+     def _use_graphs(self):
+-        return not self.model_config.enforce_eager
++        return False
+ 
+     def _remove_duplicate_submodules(self):
+         model = self.get_model()
