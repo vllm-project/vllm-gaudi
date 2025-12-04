@@ -277,7 +277,12 @@ run_pd_disaggregate_nixl_libfabric_test() {
     echo "✅ PD disaggregate through NIXL libfabric."
 }
 
-
+# sleep mode
+run_sleep_mode_test() {
+    echo "Testing basic model with sleep mode / wake up functionality"
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 VLLM_ENABLE_V1_MULTIPROCESSING=0 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/sleep_mode.py" --model facebook/opt-125m
+    echo "✅ Test with sleep mode passed."
+}
 
 # --- Script Entry Point ---
 
@@ -316,6 +321,7 @@ launch_all_tests() {
     run_spec_decode_eagle3_test
     run_spec_decode_eagle3_num_spec_2_test
     run_llama3_70b_inc_dynamic_quant_test
+    run_sleep_mode_test
     #run_embedding_model_test
     echo "🎉 All test suites passed successfully!"
 }
