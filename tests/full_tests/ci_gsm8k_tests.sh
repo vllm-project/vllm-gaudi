@@ -268,7 +268,7 @@ run_embedding_model_test() {
 
 # pd_disaggregate_nixl_libfabric
 run_pd_disaggregate_nixl_libfabric_test() {
-    echo "[CI Test]: Initiate CI tests in libfabric branch"
+    echo "[CI Test]: Initiate CI tests in libfabric branch with v0.6.0_OFI branch"
     echo "➡️ Testing PD disaggregate through NIXL libfabric."
     git clone https://github.com/intel-staging/nixl.git -b v0.6.0_OFI
     cp -r nixl /tmp/nixl_source
