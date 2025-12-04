@@ -64,11 +64,14 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_weights = topk_weights.to(x.dtype)
         topk_ids = topk_ids.view(*x.shape[:-1], -1)
         topk_weights = topk_weights.view(*x.shape[:-1], -1)
+        if not layer.use_grouped_topk:
+            topk_ids = topk_ids.to(torch.int64)
+            topk_weights = topk_weights.to(x.dtype)
 
         return layer.moe_op(
             x,
-            topk_ids.to(torch.int64),
-            topk_weights.to(x.dtype),
+            topk_ids,
+            topk_weights,
             permuted_weights=True,
             activation=activation,
         ).view(*input_shape)
@@ -222,7 +225,7 @@ def patched_grouped_topk(
 
     if routed_scaling_factor != 1.0:
         topk_weights = topk_weights * routed_scaling_factor
-    return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
+    return topk_weights.to(hidden_states.dtype), topk_ids.to(torch.int64)
 
 
 # Apply patches
