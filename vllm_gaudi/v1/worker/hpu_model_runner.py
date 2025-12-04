@@ -1498,6 +1498,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         total_num_scheduled_tokens: Optional[int],
         scheduler_output: "SchedulerOutput",
         req_ids: list[str],
+        image_index_tensor: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor | None, dict[str, Any] | None]:
         inputs_embeds = None
         model_mm_kwargs = None
@@ -1510,7 +1511,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
  
             mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output,
                                                                 req_ids,
-                                                                total_num_scheduled_tokens=token_ids)
+                                                                total_num_scheduled_tokens=token_ids.shape[-1])
             htorch.core.mark_step()
  
             # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa E501
@@ -1518,8 +1519,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # to avoid padding issues.
  
             model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
-            if image_index_tensors[idx] is not None:
-                model_mm_kwargs['image_index'] = image_index_tensors[idx]
+            if image_index_tensor is not None:
+                model_mm_kwargs['image_index'] = image_index_tensor
             model_mm_kwargs = MultiModalKwargs.as_kwargs(
                 model_mm_kwargs,
                 device=self.device,
@@ -3273,13 +3274,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             dummy_prefill_input_data_batches_across_dp = prefill_input_data
 
         image_index_tensor = None
+        image_index_tensors = []
         if self.is_mm_optimized and len(prefill_data.token_ids):
             
             logger.info(f"SHIV DEBUG MULTIMODAL {len(prefill_data.token_ids)=}")
             if len(prefill_data.token_ids)>1:
                 for el in prefill_data.token_ids:
                     logger.info(f"SHIV DEBUG MULTIMODAL PREFILL >>>>>> {el.shape=}")
-            image_index_tensors = []
             for idx, prefill_data_slice in enumerate(prefill_data.token_ids):
                 is_image_flatten = (
                     prefill_data_slice.squeeze().flatten() == self.image_token_id)
@@ -3330,14 +3331,19 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             htorch.core.mark_step()
             for idx, (req_id, prompt_len, token_ids, position_ids, attn_metadata, logits_indices,
                       logits_requests) in enumerate(zip(*shallow_tuple(prefill_data))):
+                
+                logger.info(f"SHIV DEBUG >>>>>>>>>>>>> before input embedding {token_ids.shape=}") 
 
                 # Prepare multimodal inputs if any
                 stat3 = gc_metric.stats()[0][1]
+                mm_idx_tensor = image_index_tensors[idx] if len(image_index_tensors) else None 
+
                 inputs_embeds, model_mm_kwargs = self._get_model_mm_inputs(
                     token_ids,
                     token_ids.shape[-1],
                     scheduler_output,
                     req_id,
+                    image_index_tensors[idx]
                 )
 
                 stat4 = gc_metric.stats()[0][1]
