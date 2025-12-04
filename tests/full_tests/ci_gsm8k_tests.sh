@@ -268,12 +268,17 @@ run_embedding_model_test() {
 
 # pd_disaggregate_nixl_libfabric
 run_pd_disaggregate_nixl_libfabric_test() {
+    echo "[CI Test]: clone libfabric based NIXL along with PR3and run PD disaggregate test."
     echo "➡️ Testing PD disaggregate through NIXL libfabric."
-    git clone https://github.com/intel-staging/nixl.git -b v0.6.0_OFI
+    git clone https://github.com/intel-staging/nixl.git -b libfabric
+    cd nixl
+    git fetch origin pull/3/head:pr-3
+    git checkout pr-3
+    cd ..
     cp -r nixl /tmp/nixl_source
     cd nixl; WHEELS_CACHE_HOME=/workspace/hf_cache/wheels_cache_ofi python install_nixl.py; cd ..
     rm -rf nixl
-    cd ${VLLM_GAUDI_PREFIX}/tests/unit_tests; DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=OFI bash run_accuracy_test.sh
+    cd ${VLLM_GAUDI_PREFIX}/tests/unit_tests; DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=LIBFABRIC bash run_accuracy_test.sh
     echo "✅ PD disaggregate through NIXL libfabric."
 }
 
