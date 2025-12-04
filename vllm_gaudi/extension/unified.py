@@ -14,6 +14,7 @@ from typing import Optional, Callable, TypeAlias, Union
 from dataclasses import dataclass
 import habana_frameworks.torch as htorch
 
+from vllm_gaudi.extension.ops import matmul_shape
 from vllm_gaudi.extension.runtime import get_config
 
 
@@ -141,9 +142,17 @@ def partial_attn_causal(query: torch.tensor, key: torch.tensor, value: torch.ten
         v = value[:, :, 0:q_max, :]
         b = bias[q_min:q_max, 0:q_max]
 
-        s_attn = torch.matmul(q, k.transpose(-1, -2)) + b.unsqueeze(0).unsqueeze(0)
+        if get_config().use_output_tensor_in_matmulqk:
+            s_attn = None
+            if get_config().fp32_softmax:
+                s_attn = torch.empty(matmul_shape(q, k.transpose(-1, -2)), dtype=torch.float32, device=q.device)
+            s_attn = torch.matmul(q, k.transpose(-1, -2), out=s_attn)
+            s_attn = s_attn + b.unsqueeze(0).unsqueeze(0)
+        else:
+            s_attn = torch.matmul(q, k.transpose(-1, -2)) + b.unsqueeze(0).unsqueeze(0)
         s_max = torch.maximum(s_attn.amax(-1), fmin)
         s_attn = torch.exp(s_attn - s_max.unsqueeze(-1))
+        # TODO: add downcasting attn to original dtype
         s_sum = torch.sum(s_attn, -1)
         s_attn = torch.matmul(s_attn, v)
         attn_slices.append(s_attn)
@@ -167,11 +176,18 @@ def partial_attn_shared(query: torch.tensor, blocks: torch.tensor, bias: Optiona
     key, value = cache_utils.fetch_shared(blocks)
     bias = bias.flatten(-2, -1).unsqueeze(0)
 
-    attn = torch.matmul(query, key.transpose(-1, -2))
+    if get_config().use_output_tensor_in_matmulqk:
+        attn = None
+        if get_config().fp32_softmax:
+            attn = torch.empty(matmul_shape(query, key.transpose(-1, -2)), dtype=torch.float32, device=query.device)
+        attn = torch.matmul(query, key.transpose(-1, -2), out=attn)
+    else:
+        attn = torch.matmul(query, key.transpose(-1, -2))
     attn = attn.flatten(0, 1)
     attn = attn + bias
     local_max = torch.maximum(attn.amax(-1), fmin)
     attn = torch.exp(attn - local_max.unsqueeze(-1))
+    # TODO: add downcasting attn to original dtype
     local_sum = attn.sum(-1)
     attn = torch.matmul(attn.unflatten(0, (kv_heads, -1)), value).flatten(0, 1)
     return attn.transpose(0, 1), local_max.transpose(0, 1), local_sum.transpose(0, 1)
@@ -190,10 +206,17 @@ def partial_attn_unique(query: torch.tensor, blocks: torch.tensor, block_mapping
     key, value = cache_utils.fetch_unique(blocks)
     block_mapping_2d = torch.nn.functional.one_hot(block_mapping, num_classes=batch_size).to(query.dtype)
 
-    attn = torch.matmul(query, key.transpose(-1, -2))
+    if get_config().use_output_tensor_in_matmulqk:
+        attn = None
+        if get_config().fp32_softmax:
+            attn = torch.empty(matmul_shape(query, key.transpose(-1, -2)), dtype=torch.float32, device=query.device)
+        attn = torch.matmul(query, key.transpose(-1, -2), out=attn)
+    else:
+        attn = torch.matmul(query, key.transpose(-1, -2))
     attn = attn + bias.unsqueeze(1).unsqueeze(1).unsqueeze(1)
     block_max = torch.maximum(attn.amax(-1), fmin)
     attn = torch.exp(attn - block_max.unsqueeze(-1))
+    # TODO: add downcasting attn to original dtype
     block_sum = attn.sum(-1)
     attn = torch.matmul(attn, value)
 
