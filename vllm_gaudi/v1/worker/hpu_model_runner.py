@@ -4312,8 +4312,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             model = self.get_model()
             from vllm_gaudi.extension.bucketing.vision import HPUVisionBucketManager
             model.vision_bucket_manager = HPUVisionBucketManager(self.model_config.model)
-            logger_msg = "Multimodal bucket : " + str(model.vision_bucket_manager.multimodal_buckets)
-            logger.info(logger_msg)
+            logger.info("Multimodal bucket : %s", model.vision_bucket_manager.multimodal_buckets)
 
         # Run a simple profile scenario using the existing dummy run infrastructure
         prompt_cfg = (max_batch_size, self.max_model_len, 1)
