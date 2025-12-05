@@ -61,7 +61,6 @@ def merge_multimodal_embeddings_static(
 ) -> torch.Tensor:
     if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
         return inputs_embeds
-    print("SHIV DEBUG INSIDE MERGE STATIC")
     flattened = _flatten_embeddings(multimodal_embeddings)
 
     inputs_embeds_s = inputs_embeds.shape
@@ -91,7 +90,6 @@ def scatter_mm_placeholders_static(
     if is_embed is None:
         return embeds
 
-    print(f"SHIV DEBUG INSIDE SCATTER")
     placeholders = embeds.new_full(
         (is_embed.shape[0], embeds.shape[-1]),
         fill_value=torch.nan,

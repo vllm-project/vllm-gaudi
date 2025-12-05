@@ -57,10 +57,8 @@ class HpuGemma3ForConditionalGeneration(Gemma3ForConditionalGeneration):
         image_index_tensor: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
-        print("SHIV DEBUG inside get_input_embeddings_hpu")
         inputs_embeds = self.language_model.embed_input_ids(input_ids)
         if multimodal_embeddings is not None:
-            print("SHIV DEBUG multimodal inputs not none")
             inputs_embeds = merge_multimodal_embeddings_static(
                 image_index_tensor,
                 inputs_embeds,
