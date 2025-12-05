@@ -4290,6 +4290,34 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
     @torch.inference_mode()
     def profile_run(self) -> None:
+        # Skip profile run on decode instances
+        if self.vllm_config.kv_transfer_config is not None and\
+            self.vllm_config.kv_transfer_config.is_kv_consumer:
+            return
+
+        num_layers = self.model_config.get_num_layers(self.parallel_config)
+        kv_caches = [None] * num_layers
+        bind_kv_cache(
+            kv_caches,
+            self.vllm_config.compilation_config.static_forward_context,
+            [kv_caches] * self.parallel_config.pipeline_parallel_size)
+        max_batch_size = min(self.max_num_seqs,
+                             self.max_num_tokens // self.max_model_len)
+
+        if self.supports_mm_inputs:
+            # Using batch_size 1 for profiling multimodal models
+            max_batch_size = 1
+            model = self.get_model()
+            from vllm_gaudi.extension.bucketing.vision import HPUVisionBucketManager
+            model.vision_bucket_manager = HPUVisionBucketManager(self.model_config.model)
+            logger_msg = "Multimodal bucket : " + str(model.vision_bucket_manager.multimodal_buckets)
+            logger.info(logger_msg)
+
+        # Run a simple profile scenario using the existing dummy run infrastructure
+        prompt_cfg = (max_batch_size, self.max_model_len, 1)
+        decode_cfg = None
+        self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
+
         return
 
     def _dummy_run(self, max_num_batched_tokens: int) -> None:
