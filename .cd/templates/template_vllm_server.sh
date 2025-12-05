@@ -2,6 +2,10 @@
 
 #@VARS
 
+if [ "$VLLM_CONTIGUOUS_PA" == "True" ]; then # Checks if using contigous pa
+    EXTRA_ARGS+=" --no-enable-prefix-caching"
+fi
+
 if [ $ASYNC_SCHEDULING -gt 0 ]; then # Checks if using async scheduling
     EXTRA_ARGS+=" --async_scheduling"
 fi

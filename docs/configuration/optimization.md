@@ -1,3 +1,0 @@
-# Optimization and Tuning
-
-WIP

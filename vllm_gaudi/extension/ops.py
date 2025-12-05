@@ -16,6 +16,7 @@ import habana_frameworks.torch.utils.experimental as htexp
 import types
 
 is_hpu_gaudi2 = htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi2
+is_hpu_gaudi3 = htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi3
 
 FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
 if is_hpu_gaudi2:
@@ -765,6 +766,14 @@ def synced_weight_loader(weight_loader):
         torch.hpu.synchronize()
 
     return wrapper
+
+
+def fp8_perchannel_linear_postprocess_weights(layer):
+    # For INC path, we attach the dequant func to the layer
+    inc_config = os.getenv("QUANT_CONFIG", None)
+    if inc_config:
+        layer.get_dequant_weights_func = types.MethodType(get_dequant_weights_func, layer)
+    return layer
 
 
 def fp8_block_linear_postprocess_weights(layer, force_channel_fp8=False):

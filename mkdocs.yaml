@@ -51,6 +51,7 @@ plugins:
   - search
   - autorefs
   - awesome-nav
+  - macros
   # For API reference generation
   - api-autonav:
       modules: ["vllm_gaudi"]
@@ -122,3 +123,7 @@ extra_javascript:
 # So index.md generates as index.html and is available under URL /index.html
 # https://www.mkdocs.org/user-guide/configuration/#use_directory_urls
 use_directory_urls: false
+
+extra:
+  PT_VERSION: "2.7.1"
+  VERSION: "1.22.2"
