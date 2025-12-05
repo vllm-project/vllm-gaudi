@@ -2,6 +2,10 @@
 
 This document provides an overview of the features, changes, and fixes introduced in each release of the vLLM Hardware Plugin for Intel® Gaudi®.
 
+## 0.12.0
+
+This release upgraded the plugin to [vLLM 0.12.0](https://github.com/vllm-project/vllm/releases/tag/v0.12.0) and added support for [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
+
 ## 0.11.2
 
 This version is based on [vLLM 0.11.2](https://github.com/vllm-project/vllm/releases/tag/v0.11.2) and supports [Intel® Gaudi® v1.22.2](https://docs.habana.ai/en/v1.22.2/Release_Notes/GAUDI_Release_Notes.html).
