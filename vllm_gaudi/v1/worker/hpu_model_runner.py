@@ -107,7 +107,6 @@ else:
 
 from vllm_gaudi.extension.unified_batch import UnifiedBatch
 from vllm_gaudi.extension.logger import logger as init_logger
-from habana_frameworks.torch.hpu import metric_global as metric_global
 logger = init_logger()
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
@@ -1403,7 +1402,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         req_start_idx = 0
 
-        gc_metric = metric_global("graph_compilation")
         for req_id in req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             req_state = self.requests[req_id]
@@ -1470,14 +1468,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     else:
                         is_embed = actual_is_embed
 
-                stat1 = gc_metric.stats()[0][1]
                 # Call gather_mm_placeholders with fixed-size padded tensors
                 padded_mm_embeds_item, actual_embed_count = gather_mm_placeholders(
                     padded_encoder_slice,
                     is_embed=is_embed,
                     max_output_size=max_slice_size,
                 )
-                stat2 = gc_metric.stats()[0][1]
 
                 # Trim the result to the actual number of embeddings (not slice length)
                 mm_embeds_item = padded_mm_embeds_item[:actual_embed_count]
@@ -3459,7 +3455,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             structured_output = True
         if self.use_async_scheduling:
             invalid_req_indices = []
-        gc_metric = metric_global("graph_compilation")
 
         ######################### PREFILLS #########################
         if num_prefills > 0:
@@ -3469,7 +3464,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 
 
                 # Prepare multimodal inputs if any
-                stat3 = gc_metric.stats()[0][1]
                 mm_idx_tensor = image_index_tensors[idx] if len(image_index_tensors) else None 
 
                 inputs_embeds, model_mm_kwargs = self._get_model_mm_inputs(
@@ -3480,7 +3474,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     image_index_tensors[idx]
                 )
 
-                stat4 = gc_metric.stats()[0][1]
                 lora_mask, lora_logits_mask = self._configure_lora(token_ids, self.requests, req_id, True)
 
                 self.event_start = self.profiler.get_timestamp_us()
@@ -3517,7 +3510,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         model_mm_kwargs=model_mm_kwargs,
                         warmup_mode=warmup_mode,)
                 htorch.core.mark_step()
-                stat5 = gc_metric.stats()[0][1]
                 if self.use_aux_hidden_state_outputs:
                     aux_hidden_states_prefills.append(aux_hidden_states)
                 sample_hidden_states_prefills.append(sample_hidden_states)
