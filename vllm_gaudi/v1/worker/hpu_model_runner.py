@@ -47,7 +47,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs, MultiModalKwargsItem)
+from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem)
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
@@ -1474,10 +1474,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             )
 
             model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
-            model_mm_kwargs = MultiModalKwargs.as_kwargs(
-                model_mm_kwargs,
-                device=self.device,
-            )
 
         return inputs_embeds, model_mm_kwargs
 
