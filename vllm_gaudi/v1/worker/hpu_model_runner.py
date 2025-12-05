@@ -4319,7 +4319,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         decode_cfg = None
         self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
 
-        return
 
     def _dummy_run(self, max_num_batched_tokens: int) -> None:
         assert max_num_batched_tokens == 1
