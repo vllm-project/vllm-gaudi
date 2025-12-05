@@ -12,13 +12,14 @@ fi
 
 ## Executing command print
 
-printf "\nStarting vLLM server with the following command:\n"
+printf "\n---------------------Starting vLLM server with the command-------------------------"
 printf "\nvllm serve $MODEL --block-size $BLOCK_SIZE --dtype $DTYPE \
 --tensor-parallel-size $TENSOR_PARALLEL_SIZE --download_dir $HF_HOME \
 --max-model-len $MAX_MODEL_LEN --gpu-memory-utilization $GPU_MEM_UTILIZATION \
 --max-num-seqs $MAX_NUM_SEQS --generation-config vllm \
 --max_num_batched_tokens $MAX_NUM_BATCHED_TOKENS \
---disable-log-requests $EXTRA_ARGS \n\n"
+--disable-log-requests $EXTRA_ARGS"
+printf "\n-----------------------------------------------------------------------------------\n"
 
 ## Start server
 vllm serve $MODEL \
