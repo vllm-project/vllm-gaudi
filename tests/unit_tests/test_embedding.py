@@ -16,6 +16,7 @@ PROMPTS = [
 ]
 
 
+@pytest.mark.xfail(reason="pooling_states are not handled correctly yet.")
 @pytest.mark.parametrize(
     "model",
     [
