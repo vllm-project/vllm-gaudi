@@ -54,7 +54,7 @@ Follow these steps to run the vLLM server or launch benchmarks on Gaudi using Do
     | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
     | `MODEL`        | Preferred large language model. For a list of the available models, see the next table.                                                                                      |
     | `HF_TOKEN`     | Hugging Face token generated from <https://huggingface.co>.                                                                                                                  |
-    | `DOCKER_IMAGE` | Docker image name or URL for the vLLM Gaudi container. When using the Gaudi repository, make sure to select Docker images with the *vllm-installer* prefix in the file name. |
+    | `DOCKER_IMAGE` | Docker image name or URL for the vLLM Gaudi container. When using the Gaudi repository, make sure to select Docker images with the *vllm-plugin* prefix in the file name. |
 
     The following table lists the supported vLLM models:
 
