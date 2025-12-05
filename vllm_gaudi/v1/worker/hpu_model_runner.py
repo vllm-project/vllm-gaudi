@@ -4291,8 +4291,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
     @torch.inference_mode()
     def profile_run(self) -> None:
         # Skip profile run on decode instances
-        if self.vllm_config.kv_transfer_config is not None and\
-            self.vllm_config.kv_transfer_config.is_kv_consumer:
+        if (
+            self.vllm_config.kv_transfer_config is not None and
+            self.vllm_config.kv_transfer_config.is_kv_consumer
+        ):
             return
 
         num_layers = self.model_config.get_num_layers(self.parallel_config)
