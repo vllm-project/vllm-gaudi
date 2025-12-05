@@ -33,4 +33,4 @@ vllm serve $MODEL \
         --generation-config vllm \
         --max_num_batched_tokens $MAX_NUM_BATCHED_TOKENS \
         --disable-log-requests ${EXTRA_ARGS} \
-2>&1 | tee -a  logs/vllm_server.log
+2>&1 | stdbuf -o0 -e0 tr '\r' '\n' | tee -a  logs/vllm_server.log
