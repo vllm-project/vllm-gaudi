@@ -188,8 +188,10 @@ class HPUWorker(WorkerBase):
                 # it by reference, rather by specializing on the value ``None``.
                 hpu_k_cache = torch.tensor([], dtype=dtype, device='hpu')
                 hpu_v_cache = torch.tensor([], dtype=dtype, device='hpu')
+                hpu_k_scales = torch.tensor([], dtype=dtype, device='hpu')
+                hpu_v_scales = torch.tensor([], dtype=dtype, device='hpu')
 
-                kv_caches[layer_name] = (hpu_k_cache, hpu_v_cache)
+                kv_caches[layer_name] = (hpu_k_cache, hpu_v_cache, hpu_k_scales, hpu_v_scales)
 
                 single_kv_block_size_bytes += layer_spec.page_size_bytes
 
