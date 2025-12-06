@@ -12,6 +12,8 @@ def _embed_text_input_ids(
     is_multimodal: Tensor | None,
     handle_oov_mm_token: bool,
 ) -> Tensor:
+    if input_ids.ndim == 2 and input_ids.shape[0] == 1:
+        input_ids = input_ids.squeeze(0)
     if handle_oov_mm_token and is_multimodal is not None:
         is_text = ~is_multimodal
 
