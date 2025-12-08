@@ -1,0 +1,71 @@
+name: Update Review Dashboard
+
+on:
+  schedule:
+    - cron: '*/30 * * * *' # Runs every 30 minutes
+  workflow_dispatch: # Allows manual trigger
+
+permissions:
+  issues: write
+  pull-requests: read
+
+jobs:
+  update-dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate Dashboard Content
+        id: dashboard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          # 1. Fetch Data First (into a separate JSON file)
+          gh pr list --repo "$REPO" --limit 100 --state open \
+            --json number,title,author,assignees,url,createdAt,reviewDecision,statusCheckRollup,isDraft > pr_data.json
+
+          # 2. Generate the Body File
+          # We wrap everything in { ... } > body.md to write to the file only once
+          {
+            echo "# 🚦 Live Review Dashboard"
+            echo "_Last updated: $(date)_"
+            echo "_Note: Draft PRs are hidden._"
+            echo ""
+
+            # --- Unassigned Section ---
+            echo "### ⚠️ Unassigned PRs"
+            echo "| PR | Age | Status | Title | Author |"
+            echo "| :--- | :--- | :--- | :--- | :--- |"
+            
+            jq -r '.[] | select(.isDraft == false) | select(.assignees | length == 0) | 
+              "| <a href=\"\(.url)\">#\(.number)</a> | \((now - (.createdAt | fromdate)) / 86400 | floor) days | \(if .reviewDecision == "APPROVED" then "✅ Approved" elif .statusCheckRollup.state == "FAILURE" then "❌ CI Failed" elif .statusCheckRollup.state == "SUCCESS" then "💚 CI Passed" else "🟡 Pending" end) | \(.title) | @\(.author.login) |"' pr_data.json
+            
+            echo ""
+
+            # --- Assigned Section (Streaming Loop) ---
+            # We pipe into a loop to handle users one by one
+            jq -r '.[] | select(.isDraft == false) | .assignees[].login' pr_data.json | sort | uniq | while read -r USER; do
+              echo "### 👤 Assigned to: @$USER"
+              echo "| PR | Age | Status | Title | Author |"
+              echo "| :--- | :--- | :--- | :--- | :--- |"
+              
+              jq -r --arg USER "$USER" '.[] | select(.isDraft == false) | select(.assignees[].login == $USER) | 
+                "| <a href=\"\(.url)\">#\(.number)</a> | \((now - (.createdAt | fromdate)) / 86400 | floor) days | \(if .reviewDecision == "APPROVED" then "✅ Approved" elif .statusCheckRollup.state == "FAILURE" then "❌ CI Failed" elif .statusCheckRollup.state == "SUCCESS" then "💚 CI Passed" else "🟡 Pending" end) | \(.title) | @\(.author.login) |"' pr_data.json
+              
+              echo ""
+            done
+          } > body.md
+
+          # 3. Save to Env Variable
+          # FIXED: Grouped into one block to resolve SC2129
+          {
+            echo "BODY_CONTENT<<EOF"
+            cat body.md
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
+      - name: Update Issue Body
+        uses: peter-evans/create-or-update-issue@v4
+        with:
+          issue-number: 701   # <--- REPLACE WITH YOUR DASHBOARD ISSUE NUMBER
+          title: "🚦 Live Review Dashboard"
+          body: ${{ env.BODY_CONTENT }}
