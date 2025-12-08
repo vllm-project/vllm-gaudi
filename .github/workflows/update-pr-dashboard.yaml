@@ -24,8 +24,7 @@ jobs:
           NAME=${REPO#*/}
           
           # FETCH AND SAVE DATA
-          # We use "jq -s" to combine all pages into one array
-          # We use ".[0:100]" to strictly limit to the first 100 items without breaking JSON syntax
+          # shellcheck disable=SC2016
           gh api graphql --paginate \
             -F owner="$OWNER" -F name="$NAME" \
             -f query='
@@ -71,7 +70,7 @@ jobs:
             
             echo ""
 
-            # --- Assigned Section (THIS IS THE PART YOU WANTED) ---
+            # --- Assigned Section ---
             jq -r '.[] | select(.isDraft == false) | .assignees[].login' pr_data.json | sort | uniq | while read -r USER; do
               echo "### 👤 Assigned to: @$USER"
               echo "| PR | Age | Status | Title | Author |"
