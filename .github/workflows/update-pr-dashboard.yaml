@@ -2,8 +2,8 @@ name: Update Review Dashboard
 
 on:
   schedule:
-    - cron: '*/30 * * * *' # Runs every 30 minutes
-  workflow_dispatch: # Allows manual trigger
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
 
 permissions:
   issues: write
@@ -19,9 +19,40 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
-          # 1. Fetch Data First (into a separate JSON file)
-          gh pr list --repo "$REPO" --limit 100 --state open \
-            --json number,title,author,assignees,url,createdAt,reviewDecision,statusCheckRollup,isDraft > pr_data.json
+          # 1. Fetch Data using GraphQL + Pagination
+          OWNER=${REPO%/*}
+          NAME=${REPO#*/}
+          
+          # FETCH AND SAVE DATA
+          # We use "jq -s" to combine all pages into one array
+          # We use ".[0:100]" to strictly limit to the first 100 items without breaking JSON syntax
+          gh api graphql --paginate \
+            -F owner="$OWNER" -F name="$NAME" \
+            -f query='
+              query($owner: String!, $name: String!, $endCursor: String) {
+                repository(owner: $owner, name: $name) {
+                  pullRequests(first: 50, states: OPEN, after: $endCursor, orderBy: {field: CREATED_AT, direction: DESC}) {
+                    nodes {
+                      number
+                      title
+                      url
+                      createdAt
+                      reviewDecision
+                      isDraft
+                      author { login }
+                      assignees(first: 10) { nodes { login } }
+                      statusCheckRollup { state }
+                    }
+                    pageInfo {
+                      hasNextPage
+                      endCursor
+                    }
+                  }
+                }
+              }
+            ' \
+            --jq '.data.repository.pullRequests.nodes[] | {number, title, url, createdAt, reviewDecision, isDraft, author, statusCheckRollup, assignees: .assignees.nodes}' \
+            | jq -s '.[0:100]' > pr_data.json
 
           # 2. Generate the Body File
           {
@@ -35,44 +66,44 @@ jobs:
             echo "| PR | Age | Status | Title | Author |"
             echo "| :--- | :--- | :--- | :--- | :--- |"
             
-            # FIXED: Added safe navigation (?) and array fallback for statusCheckRollup
             jq -r '.[] | select(.isDraft == false) | select(.assignees | length == 0) | 
               "| <a href=\"\(.url)\">#\(.number)</a> | \((now - (.createdAt | fromdate)) / 86400 | floor) days | \(if .reviewDecision == "APPROVED" then "✅ Approved" elif (.statusCheckRollup.state? // .statusCheckRollup[0]?.state?) == "FAILURE" then "❌ CI Failed" elif (.statusCheckRollup.state? // .statusCheckRollup[0]?.state?) == "SUCCESS" then "💚 CI Passed" else "🟡 Pending" end) | \(.title) | @\(.author.login) |"' pr_data.json
             
             echo ""
 
-            # --- Assigned Section (Streaming Loop) ---
+            # --- Assigned Section (THIS IS THE PART YOU WANTED) ---
             jq -r '.[] | select(.isDraft == false) | .assignees[].login' pr_data.json | sort | uniq | while read -r USER; do
-              # FIXED: Added safe navigation (?) and array fallback for statusCheckRollup
+              echo "### 👤 Assigned to: @$USER"
+              echo "| PR | Age | Status | Title | Author |"
+              echo "| :--- | :--- | :--- | :--- | :--- |"
+              
               jq -r --arg USER "$USER" '.[] | select(.isDraft == false) | select(.assignees[].login == $USER) | 
                 "| <a href=\"\(.url)\">#\(.number)</a> | \((now - (.createdAt | fromdate)) / 86400 | floor) days | \(if .reviewDecision == "APPROVED" then "✅ Approved" elif (.statusCheckRollup.state? // .statusCheckRollup[0]?.state?) == "FAILURE" then "❌ CI Failed" elif (.statusCheckRollup.state? // .statusCheckRollup[0]?.state?) == "SUCCESS" then "💚 CI Passed" else "🟡 Pending" end) | \(.title) | @\(.author.login) |"' pr_data.json
               
               echo ""
             done
             
-            # --- CRITICAL: Add Hidden Marker ---
             echo ""
 
           } > body.md
 
-          # 3. Save to Env Variable
+          # 3. Save to Env
           {
             echo "BODY_CONTENT<<EOF"
             cat body.md
             echo "EOF"
           } >> "$GITHUB_ENV"
 
-      # Step 3: Find the previous comment (if it exists)
       - name: Find Previous Comment
         uses: peter-evans/find-comment@v3
         id: fc
         with:
-          issue-number: 701      # <--- TARGET ISSUE NUMBER
-          body-includes: # Step 4: Create new or Update existing comment
+          issue-number: 701
+          body-includes: 
       - name: Create or Update Comment
         uses: peter-evans/create-or-update-comment@v4
         with:
           comment-id: ${{ steps.fc.outputs.comment-id }}
-          issue-number: 701      # <--- TARGET ISSUE NUMBER
+          issue-number: 701
           body: ${{ env.BODY_CONTENT }}
           edit-mode: replace
