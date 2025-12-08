@@ -24,7 +24,6 @@ jobs:
             --json number,title,author,assignees,url,createdAt,reviewDecision,statusCheckRollup,isDraft > pr_data.json
 
           # 2. Generate the Body File
-          # We wrap everything in { ... } > body.md to write to the file only once
           {
             echo "# 🚦 Live Review Dashboard"
             echo "_Last updated: $(date)_"
@@ -42,7 +41,6 @@ jobs:
             echo ""
 
             # --- Assigned Section (Streaming Loop) ---
-            # We pipe into a loop to handle users one by one
             jq -r '.[] | select(.isDraft == false) | .assignees[].login' pr_data.json | sort | uniq | while read -r USER; do
               echo "### 👤 Assigned to: @$USER"
               echo "| PR | Age | Status | Title | Author |"
@@ -53,19 +51,31 @@ jobs:
               
               echo ""
             done
+            
+            # --- CRITICAL: Add Hidden Marker ---
+            # This is how the next step finds the comment to update
+            echo ""
+
           } > body.md
 
           # 3. Save to Env Variable
-          # FIXED: Grouped into one block to resolve SC2129
           {
             echo "BODY_CONTENT<<EOF"
             cat body.md
             echo "EOF"
           } >> "$GITHUB_ENV"
 
-      - name: Update Issue Body
-        uses: peter-evans/create-or-update-issue@v4
+      # Step 3: Find the previous comment (if it exists)
+      - name: Find Previous Comment
+        uses: peter-evans/find-comment@v3
+        id: fc
         with:
-          issue-number: 701   # <--- REPLACE WITH YOUR DASHBOARD ISSUE NUMBER
-          title: "🚦 Live Review Dashboard"
+          issue-number: 701      # <--- TARGET ISSUE NUMBER
+          body-includes: # Step 4: Create new or Update existing comment
+      - name: Create or Update Comment
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ steps.fc.outputs.comment-id }}
+          issue-number: 701      # <--- TARGET ISSUE NUMBER
           body: ${{ env.BODY_CONTENT }}
+          edit-mode: replace
