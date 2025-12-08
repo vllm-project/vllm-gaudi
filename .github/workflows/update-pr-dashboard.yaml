@@ -35,8 +35,9 @@ jobs:
             echo "| PR | Age | Status | Title | Author |"
             echo "| :--- | :--- | :--- | :--- | :--- |"
             
+            # FIXED: Added safe navigation (?) and array fallback for statusCheckRollup
             jq -r '.[] | select(.isDraft == false) | select(.assignees | length == 0) | 
-              "| <a href=\"\(.url)\">#\(.number)</a> | \((now - (.createdAt | fromdate)) / 86400 | floor) days | \(if .reviewDecision == "APPROVED" then "✅ Approved" elif .statusCheckRollup.state == "FAILURE" then "❌ CI Failed" elif .statusCheckRollup.state == "SUCCESS" then "💚 CI Passed" else "🟡 Pending" end) | \(.title) | @\(.author.login) |"' pr_data.json
+              "| <a href=\"\(.url)\">#\(.number)</a> | \((now - (.createdAt | fromdate)) / 86400 | floor) days | \(if .reviewDecision == "APPROVED" then "✅ Approved" elif (.statusCheckRollup.state? // .statusCheckRollup[0]?.state?) == "FAILURE" then "❌ CI Failed" elif (.statusCheckRollup.state? // .statusCheckRollup[0]?.state?) == "SUCCESS" then "💚 CI Passed" else "🟡 Pending" end) | \(.title) | @\(.author.login) |"' pr_data.json
             
             echo ""
 
@@ -46,14 +47,14 @@ jobs:
               echo "| PR | Age | Status | Title | Author |"
               echo "| :--- | :--- | :--- | :--- | :--- |"
               
+              # FIXED: Added safe navigation (?) and array fallback for statusCheckRollup
               jq -r --arg USER "$USER" '.[] | select(.isDraft == false) | select(.assignees[].login == $USER) | 
-                "| <a href=\"\(.url)\">#\(.number)</a> | \((now - (.createdAt | fromdate)) / 86400 | floor) days | \(if .reviewDecision == "APPROVED" then "✅ Approved" elif .statusCheckRollup.state == "FAILURE" then "❌ CI Failed" elif .statusCheckRollup.state == "SUCCESS" then "💚 CI Passed" else "🟡 Pending" end) | \(.title) | @\(.author.login) |"' pr_data.json
+                "| <a href=\"\(.url)\">#\(.number)</a> | \((now - (.createdAt | fromdate)) / 86400 | floor) days | \(if .reviewDecision == "APPROVED" then "✅ Approved" elif (.statusCheckRollup.state? // .statusCheckRollup[0]?.state?) == "FAILURE" then "❌ CI Failed" elif (.statusCheckRollup.state? // .statusCheckRollup[0]?.state?) == "SUCCESS" then "💚 CI Passed" else "🟡 Pending" end) | \(.title) | @\(.author.login) |"' pr_data.json
               
               echo ""
             done
             
             # --- CRITICAL: Add Hidden Marker ---
-            # This is how the next step finds the comment to update
             echo ""
 
           } > body.md
