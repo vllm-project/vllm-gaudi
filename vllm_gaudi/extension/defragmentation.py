@@ -23,7 +23,7 @@ class CacheSwapUtils(torch.nn.Module):
         super().__init__()
         self.block_size = block_size
         config = get_config()
-        self.apc = config.prefix_caching
+        self.enable_prefix_caching = config.prefix_caching
         self.kv_caches = tuple(kv_caches)
         self.block_slots = torch.arange(0, self.block_size, dtype=torch.long, device=kv_caches[0][0].device)
         self.is_mla = all([cache[1] is None for cache in self.kv_caches])
@@ -31,12 +31,12 @@ class CacheSwapUtils(torch.nn.Module):
     def forward(self, srcs: torch.tensor, dsts: torch.tensor, caches: list[torch.tensor]):
         """ Internal method wrapped in HPU/t.compile graphs"""
         htorch.core.mark_step()
-        srcs = ((srcs * self.block_size).unsqueeze(-1) + self.block_slots).flatten() # used
-        dsts = ((dsts * self.block_size).unsqueeze(-1) + self.block_slots).flatten() # free
+        srcs = ((srcs * self.block_size).unsqueeze(-1) + self.block_slots).flatten()  # used
+        dsts = ((dsts * self.block_size).unsqueeze(-1) + self.block_slots).flatten()  # free
         for cache in caches:
             prev_srcs = cache.index_select(0, srcs)
             # using apc we need to swap free blocks back as they can contain cached data
-            if self.apc:
+            if self.enable_prefix_caching:
                 prev_dsts = cache.index_select(0, dsts)
                 cache.index_copy_(0, srcs, prev_dsts)
                 prev_dsts = None
