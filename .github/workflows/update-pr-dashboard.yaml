@@ -19,70 +19,51 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
-          # 1. Initialize the Body File
-          echo "# 🚦 Live Review Dashboard" > body.md
-          echo "_Last updated: $(date)_" >> body.md
-          echo "_Note: Draft PRs are hidden._" >> body.md
-          echo "" >> body.md
-
-          # 2. Fetch ALL open PRs
-          # We fetch isDraft so we can filter it out in the next steps
+          # 1. Fetch Data First (into a separate JSON file)
           gh pr list --repo $REPO --limit 100 --state open \
             --json number,title,author,assignees,url,createdAt,reviewDecision,statusCheckRollup,isDraft > pr_data.json
 
-          # ----------------------------------------------
-          # 3. UNASSIGNED PRs TABLE
-          # ----------------------------------------------
-          echo "### ⚠️ Unassigned PRs" >> body.md
-          echo "| PR | Age | Status | Title | Author |" >> body.md
-          echo "| :--- | :--- | :--- | :--- | :--- |" >> body.md
-          
-          # JQ Filter: select(.isDraft == false) AND select(no assignees)
-          jq -r '.[] | select(.isDraft == false) | select(.assignees | length == 0) | 
-            "| <a href=\"\(.url)\">#\(.number)</a> | 
-            \((now - (.createdAt | fromdate)) / 86400 | floor) days | 
-            \(if .reviewDecision == "APPROVED" then "✅ Approved" 
-              elif .statusCheckRollup.state == "FAILURE" then "❌ CI Failed" 
-              elif .statusCheckRollup.state == "SUCCESS" then "💚 CI Passed" 
-              else "🟡 Pending" end) | 
-            \(.title) | @\(.author.login) |"' pr_data.json >> body.md
-          
-          echo "" >> body.md
-
-          # ----------------------------------------------
-          # 4. GROUPED BY ASSIGNEE
-          # ----------------------------------------------
-          
-          # Get unique assignees (excluding those who only have Draft PRs)
-          # We first filter out drafts, THEN grab the assignees
+          # 2. Prepare the Assignee List (needed for the loop later)
           ASSIGNEES=$(jq -r '.[] | select(.isDraft == false) | .assignees[].login' pr_data.json | sort | uniq)
 
-          for USER in $ASSIGNEES; do
-            echo "### 👤 Assigned to: @$USER" >> body.md
-            echo "| PR | Age | Status | Title | Author |" >> body.md
-            echo "| :--- | :--- | :--- | :--- | :--- |" >> body.md
-            
-            # JQ Filter: select(.isDraft == false) AND select(specific user)
-            jq -r --arg USER "$USER" '.[] | select(.isDraft == false) | select(.assignees[].login == $USER) | 
-              "| <a href=\"\(.url)\">#\(.number)</a> | 
-              \((now - (.createdAt | fromdate)) / 86400 | floor) days | 
-              \(if .reviewDecision == "APPROVED" then "✅ Approved" 
-                elif .statusCheckRollup.state == "FAILURE" then "❌ CI Failed" 
-                elif .statusCheckRollup.state == "SUCCESS" then "💚 CI Passed" 
-                else "🟡 Pending" end) | 
-              \(.title) | @\(.author.login) |"' pr_data.json >> body.md
-            
-            echo "" >> body.md
-          done
+          # 3. Generate the entire Body content in one go
+          {
+            echo "# 🚦 Live Review Dashboard"
+            echo "_Last updated: $(date)_"
+            echo "_Note: Draft PRs are hidden._"
+            echo ""
 
-          # 5. Save to Environment Variable
+            # --- Unassigned Section ---
+            echo "### ⚠️ Unassigned PRs"
+            echo "| PR | Age | Status | Title | Author |"
+            echo "| :--- | :--- | :--- | :--- | :--- |"
+            
+            jq -r '.[] | select(.isDraft == false) | select(.assignees | length == 0) | 
+              "| <a href=\"\(.url)\">#\(.number)</a> | \((now - (.createdAt | fromdate)) / 86400 | floor) days | \(if .reviewDecision == "APPROVED" then "✅ Approved" elif .statusCheckRollup.state == "FAILURE" then "❌ CI Failed" elif .statusCheckRollup.state == "SUCCESS" then "💚 CI Passed" else "🟡 Pending" end) | \(.title) | @\(.author.login) |"' pr_data.json
+            
+            echo ""
+
+            # --- Assigned Section (Loop) ---
+            for USER in $ASSIGNEES; do
+              echo "### 👤 Assigned to: @$USER"
+              echo "| PR | Age | Status | Title | Author |"
+              echo "| :--- | :--- | :--- | :--- | :--- |"
+              
+              jq -r --arg USER "$USER" '.[] | select(.isDraft == false) | select(.assignees[].login == $USER) | 
+                "| <a href=\"\(.url)\">#\(.number)</a> | \((now - (.createdAt | fromdate)) / 86400 | floor) days | \(if .reviewDecision == "APPROVED" then "✅ Approved" elif .statusCheckRollup.state == "FAILURE" then "❌ CI Failed" elif .statusCheckRollup.state == "SUCCESS" then "💚 CI Passed" else "🟡 Pending" end) | \(.title) | @\(.author.login) |"' pr_data.json
+              
+              echo ""
+            done
+          } > body.md
+
+          # 4. Save to Env Variable (for the next step)
           echo "BODY_CONTENT<<EOF" >> $GITHUB_ENV
           cat body.md >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
       - name: Update Issue Body
-        uses: peter-evans/create-or-update-comment@v3
+        uses: peter-evans/create-or-update-issue@v4
         with:
-          issue-number: 701  # <--- REPLACE WITH YOUR ISSUE NUMBER
+          issue-number: 701   # <--- REPLACE WITH YOUR DASHBOARD ISSUE NUMBER
+          title: "🚦 Live Review Dashboard"
           body: ${{ env.BODY_CONTENT }}
-          edit-mode: replace
