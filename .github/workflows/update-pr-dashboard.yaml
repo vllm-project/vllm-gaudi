@@ -1,0 +1,70 @@
+name: Update Review Dashboard
+
+on:
+  schedule:
+    # "*/30" means run every 30 minutes (at :00 and :30)
+    - cron: '*/30 * * * *'
+  workflow_dispatch: # This enables the "Run workflow" button
+
+permissions:
+  issues: write
+  pull-requests: read
+
+jobs:
+  update-dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate Dashboard Content
+        id: dashboard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Initialize the Body File
+          echo "# 🚦 Live Review Dashboard" > body.md
+          echo "_Auto-updated: $(date)_" >> body.md
+          echo "" >> body.md
+
+          # ----------------------------------------------
+          # 1. UNASSIGNED PRs
+          # ----------------------------------------------
+          echo "### ⚠️ Unassigned PRs" >> body.md
+          echo "| PR | Title | Author |" >> body.md
+          echo "| :--- | :--- | :--- |" >> body.md
+          
+          gh pr list --repo $REPO --limit 100 --state open --json number,title,author,assignees,url,isDraft \
+            --template '{{range .}}{{if not .assignees}}| <a href="{{.url}}">#{{.number}}</a> | {{.title}} | @{{.author.login}} |{{printf "\n"}}{{end}}{{end}}' >> body.md
+          
+          echo "" >> body.md
+
+          # ----------------------------------------------
+          # 2. ASSIGNED
+          # ----------------------------------------------
+          
+          # Fetch all PR data into a JSON file
+          gh pr list --repo $REPO --limit 100 --state open --json number,title,author,assignees,url,isDraft > pr_data.json
+          
+          # Get unique assignees
+          ASSIGNEES=$(jq -r '.[].assignees[].login' pr_data.json | sort | uniq)
+
+          for USER in $ASSIGNEES; do
+            echo "### 👤 Assigned to: @$USER" >> body.md
+            echo "| PR | Title | Author | Status |" >> body.md
+            echo "| :--- | :--- | :--- | :--- |" >> body.md
+            
+            # Filter JSON for this user
+            jq -r --arg USER "$USER" '.[] | select(.assignees[].login == $USER) | "| <a href=\"\(.url)\">#\(.number)</a> | \(.title) | @\(.author.login) | \(if .isDraft then "🚧 Draft" else "🟢 Open" end) |"' pr_data.json >> body.md
+            
+            echo "" >> body.md
+          done
+
+          echo "BODY_CONTENT<<EOF" >> $GITHUB_ENV
+          cat body.md >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Update Issue Body
+        uses: peter-evans/create-or-update-comment@v3
+        with:
+          issue-number: 15  # <--- REMEMBER TO CHANGE THIS TO YOUR ISSUE NUMBER
+          body: ${{ env.BODY_CONTENT }}
+          edit-mode: replace
