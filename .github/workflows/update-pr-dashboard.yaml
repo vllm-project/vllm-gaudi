@@ -20,13 +20,10 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           # 1. Fetch Data First (into a separate JSON file)
-          gh pr list --repo $REPO --limit 100 --state open \
+          gh pr list --repo "$REPO" --limit 100 --state open \
             --json number,title,author,assignees,url,createdAt,reviewDecision,statusCheckRollup,isDraft > pr_data.json
 
-          # 2. Prepare the Assignee List (needed for the loop later)
-          ASSIGNEES=$(jq -r '.[] | select(.isDraft == false) | .assignees[].login' pr_data.json | sort | uniq)
-
-          # 3. Generate the entire Body content in one go
+          # 2. Generate the entire Body content in one go
           {
             echo "# 🚦 Live Review Dashboard"
             echo "_Last updated: $(date)_"
@@ -43,8 +40,9 @@ jobs:
             
             echo ""
 
-            # --- Assigned Section (Loop) ---
-            for USER in $ASSIGNEES; do
+            # --- Assigned Section (Streaming Loop) ---
+            # We pipe the list directly into a while loop to avoid variable quoting issues
+            jq -r '.[] | select(.isDraft == false) | .assignees[].login' pr_data.json | sort | uniq | while read -r USER; do
               echo "### 👤 Assigned to: @$USER"
               echo "| PR | Age | Status | Title | Author |"
               echo "| :--- | :--- | :--- | :--- | :--- |"
@@ -56,10 +54,10 @@ jobs:
             done
           } > body.md
 
-          # 4. Save to Env Variable (for the next step)
-          echo "BODY_CONTENT<<EOF" >> $GITHUB_ENV
-          cat body.md >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
+          # 3. Save to Env Variable
+          echo "BODY_CONTENT<<EOF" >> "$GITHUB_ENV"
+          cat body.md >> "$GITHUB_ENV"
+          echo "EOF" >> "$GITHUB_ENV"
 
       - name: Update Issue Body
         uses: peter-evans/create-or-update-issue@v4
