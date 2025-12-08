@@ -9,12 +9,6 @@
             "Matmul",
             "KVCache",
             "VLLMKVCache"
-        ],
-        "names": [
-            "matmul_qk",
-            "matmul_av",
-            "k_cache",
-            "v_cache"
         ]
     },
     "dump_stats_path": ""
