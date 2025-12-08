@@ -18,7 +18,7 @@ Before you start, ensure that your environment meets the following requirements:
 
 - Python 3.10
 - Intel® Gaudi® 2 or 3 AI accelerator
-- Intel® Gaudi® software version 1.21.0 or later
+- Intel® Gaudi® software version {{ VERSION }} or later
 
 Additionally, ensure that the Gaudi execution environment is properly set up. If
 it is not, complete the setup by using the [Gaudi Installation
