@@ -83,6 +83,6 @@ jobs:
       - name: Update Issue Body
         uses: peter-evans/create-or-update-comment@v3
         with:
-          issue-number: 15  # <--- REPLACE WITH YOUR ISSUE NUMBER
+          issue-number: 701  # <--- REPLACE WITH YOUR ISSUE NUMBER
           body: ${{ env.BODY_CONTENT }}
           edit-mode: replace
