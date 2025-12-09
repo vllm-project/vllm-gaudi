@@ -1587,7 +1587,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
     def maybe_set_chunked_attention_layers(self, model):
         if hasattr(model.config, 'text_config'):  # noqa: SIM102
             if hasattr(model.config.text_config, 'attention_chunk_size'):  # noqa: SIM102
-                if model.config.text_config.attention_chunk_size > 0:
+                if model.config.text_config.attention_chunk_size:
                     self.model_has_chunked_attention = True
                     try:
                         for layer in model.language_model.model.layers:
