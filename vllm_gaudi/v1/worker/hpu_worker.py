@@ -329,13 +329,7 @@ def init_worker_distributed_environment(
 ) -> None:
     parallel_config = vllm_config.parallel_config
     """Initialize the distributed environment."""
-    init_distributed_environment(
-        world_size=parallel_config.world_size,
-        rank=rank,
-        local_rank=local_rank,
-        distributed_init_method=distributed_init_method,
-        backend='hccl',
-    )
+    init_distributed_environment(parallel_config.world_size, rank, distributed_init_method, local_rank, backend='hccl')
 
     dummy_tensor_hpu = torch.ones(1).to('hpu')
     torch.distributed.all_reduce(dummy_tensor_hpu)

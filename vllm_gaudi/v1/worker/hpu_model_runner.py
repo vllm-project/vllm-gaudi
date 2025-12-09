@@ -2598,8 +2598,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         else:
             model_event_name = 'model_executable'
         with self.profiler.record_event('internal', model_event_name):
-            with set_forward_context(attn_metadata, self.vllm_config):
-                self.maybe_setup_kv_connector(scheduler_output)
+            if not warmup_mode:
+                with set_forward_context(attn_metadata, self.vllm_config):
+                    self.maybe_setup_kv_connector(scheduler_output)
             hidden_states = self.model.forward(input_ids=token_ids,
                                                positions=position_ids,
                                                attn_metadata=trimmed_attn_metadata,
