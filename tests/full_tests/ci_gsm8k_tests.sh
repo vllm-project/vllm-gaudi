@@ -13,12 +13,11 @@ echo $VLLM_GAUDI_PREFIX
 # Gemma3 with image input
 run_gemma3_test() {
     echo "➡️ Testing gemma-3-4b-it..."
-    #VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
+    VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
     echo "✅ Test with multimodal-support with gemma-3-4b-it passed."
     echo "➡️ Testing gemma-3-4b-it with multiple images(applying sliding_window)..."
-    #VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm_multi.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-27b-it.yaml"
+    VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm_multi.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-27b-it.yaml"
     echo "✅ Test with multimodal-support with multiple images gemma-3-27b-it passed."
-    #Test cases are commented because of PR27772
 }
 
 # Basic model test
@@ -162,6 +161,15 @@ run_compressed_w4a16_moe_gidx_test() {
     echo "✅ Test with compressed w4a16 MoE with g_idx passed."
 }
 
+# Llama-3.3-70B-Instruct-FP8-dynamic + INC dynamic quant
+run_llama3_70b_inc_dynamic_quant_test() {
+    echo "➡️ Testing Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode ..."
+    QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_maxabs_dynamic_quant.json" \
+    HABANA_VISIBLE_DEVICES=all RUNTIME_SCALE_PATCHING=0 VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 \
+    python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic --max-model-len 2048
+    echo "✅ Test with Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode passed."
+}
+
 # GSM8K on granite-8b
 run_gsm8k_granite_test() {
     echo "➡️ Testing GSM8K on granite-8b..."
@@ -229,32 +237,48 @@ run_qwen2_5_vl_unified_attn_test() {
 # Spec decode with ngram
 run_spec_decode_ngram_test() {
     echo "➡️ Testing Spec-decode with ngram..."
-    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --assert_acc_rate 0.25 --osl 1024
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --assert_accept_rate 0.25 --osl 1024
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --accuracy_rate 0.75
     echo "✅ Test with spec decode with ngram passed."
 }
 
 # Spec decode with eagle3
 run_spec_decode_eagle3_test() {
     echo "➡️ Testing Spec-decode with eagle3..."
-    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_acc_rate 0.70 --osl 2048
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.70 --osl 2048
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --accuracy_rate 0.65
     echo "✅ Test with spec decode with eagle3 passed."
 }
 
 # Spec decode with eagle3 and num_speculative_tokens = 2
 run_spec_decode_eagle3_num_spec_2_test() {
     echo "➡️ Testing Spec-decode with eagle3 and num_speculative_tokens = 2..."
-    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_acc_rate 0.50 --osl 2048 --num_spec_tokens 2
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.59 --osl 2048 --num_spec_tokens 2
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --accuracy_rate 0.59 --num_spec_tokens 2
     echo "✅ Test with spec decode with eagle3 and num_speculative_tokens = 2 passed."
 }
 
-# NOTE(Chendi): Failed due upstream, expect fix by SW-241408
-# Embedding-model-support for v1
-run_embedding_model_test() {
-    echo "➡️ Testing Embedding-model-support for v1..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=false PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/pooling.py" --model intfloat/e5-mistral-7b-instruct --trust-remote-code
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/pooling.py" --model Alibaba-NLP/gte-Qwen2-7B-instruct --trust-remote-code
-    echo "✅ Embedding-model-support for v1 successful."
+# Spec decode with ngram with UA
+run_UA_spec_decode_ngram_test() {
+    echo "➡️ Testing Spec-decode with ngram..."
+    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --assert_accept_rate 0.25 --osl 512
+    echo "✅ Test with spec decode with ngram passed."
 }
+
+# Spec decode with eagle3 with UA
+run_UA_spec_decode_eagle3_test() {
+    echo "➡️ Testing Spec-decode with eagle3..."
+    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.50 --osl 1024
+    echo "✅ Test with spec decode with eagle3 passed."
+}
+
+# NOTE: Failed due upstream - pooling_states are not handled correctly yet.
+# Embedding-model-support for v1
+#run_embedding_model_test() {
+#    echo "➡️ Testing Embedding-model-support for v1..."
+#    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=false PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/pooling.py" --model intfloat/e5-mistral-7b-instruct --trust-remote-code
+#    echo "✅ Embedding-model-support for v1 successful."
+#}
 
 # pd_disaggregate_nixl_libfabric
 run_pd_disaggregate_nixl_libfabric_test() {
@@ -267,7 +291,12 @@ run_pd_disaggregate_nixl_libfabric_test() {
     echo "✅ PD disaggregate through NIXL libfabric."
 }
 
-
+# sleep mode
+run_sleep_mode_test() {
+    echo "Testing basic model with sleep mode / wake up functionality"
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 VLLM_ENABLE_V1_MULTIPROCESSING=0 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/sleep_mode.py" --model facebook/opt-125m
+    echo "✅ Test with sleep mode passed."
+}
 
 # --- Script Entry Point ---
 
@@ -305,6 +334,8 @@ launch_all_tests() {
     run_spec_decode_ngram_test
     run_spec_decode_eagle3_test
     run_spec_decode_eagle3_num_spec_2_test
+    run_llama3_70b_inc_dynamic_quant_test
+    run_sleep_mode_test
     #run_embedding_model_test
     echo "🎉 All test suites passed successfully!"
 }
@@ -339,5 +370,3 @@ else
   usage
   exit 1
 fi
-
-
