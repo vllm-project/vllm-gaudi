@@ -22,8 +22,7 @@ class CacheSwapUtils(torch.nn.Module):
     def __init__(self, kv_caches: tuple[tuple[torch.tensor, torch.tensor]], block_size: int):
         super().__init__()
         self.block_size = block_size
-        config = get_config()
-        self.enable_prefix_caching = config.prefix_caching
+        self.enable_prefix_caching = get_config().prefix_caching
         self.kv_caches = tuple(kv_caches)
         self.block_slots = torch.arange(0, self.block_size, dtype=torch.long, device=kv_caches[0][0].device)
         self.is_mla = all([cache[1] is None for cache in self.kv_caches])
