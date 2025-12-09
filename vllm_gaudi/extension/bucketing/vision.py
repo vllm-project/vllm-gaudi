@@ -18,21 +18,26 @@ MULTIMODAL_CONFIG = {
     'qwen2_5_vl': {
         'is_batch_based': False,
         'buckets': [1600, 3136, 4096, 6400, 7744, 9216, 12544]
+    },
+    'qwen3_vl': {
+        'is_batch_based': False,
+        #coverage for lmarena-ai/VisionArena-Chat
+        'buckets': [512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 131076]
     }
 }
-
 
 class HPUVisionBucketManager:
     '''
     This class is used to bucket image tokens
     '''
 
-    def __init__(self, model_name, is_batch_based=True):
+    def __init__(self, model_name, is_batch_based=None):
         config = self._get_multimodal_config(model_name)
 
         self.is_batch_based = is_batch_based if is_batch_based is not None else config['is_batch_based']
 
         envvar = os.environ.get('VLLM_MULTIMODAL_BUCKETS', "")
+
         if envvar == 'None':
             self.multimodal_buckets = None
         else:
@@ -110,9 +115,6 @@ class HPUVisionBucketManager:
         return best_pad_h, best_pad_w
 
     def pad_multimodal_data(self, pixel_values, image_grid_thw):
-
-        import pdb
-        pdb.set_trace()
         desired_number_of_pixels = self.get_multimodal_bucket(pixel_values.shape[0])
         padding_len = desired_number_of_pixels - pixel_values.shape[0]
         if padding_len <= 0:
