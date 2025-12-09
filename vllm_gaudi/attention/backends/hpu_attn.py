@@ -861,7 +861,15 @@ class HPUUnifiedAttentionImpl(AttentionImpl, torch.nn.Module):
             else VLLMFP8KVCache()
         self.v_cache = VLLMKVCache() if not self.enable_fp8_attn \
             else VLLMFP8KVCache()
-
+        self.matmul_qk = Matmul() if not self.enable_fp8_attn \
+            else FP8Matmul()
+        self.matmul_av = Matmul() if not self.enable_fp8_attn \
+            else FP8Matmul()
+        self.batch2block_matmul = Matmul() if not self.enable_fp8_attn \
+            else FP8Matmul()
+        self.block2batch_matmul = Matmul() if not self.enable_fp8_attn \
+            else FP8Matmul()
+        
     def forward(
         self,
         layer: AttentionLayer,
