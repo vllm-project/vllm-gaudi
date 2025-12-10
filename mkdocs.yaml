@@ -126,3 +126,4 @@ use_directory_urls: false
 
 extra:
   PT_VERSION: "2.7.1"
+  VERSION: "1.22.2"

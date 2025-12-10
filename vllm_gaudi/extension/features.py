@@ -6,7 +6,7 @@
 ###############################################################################
 
 from vllm_gaudi.extension.config import Not, Hardware, VersionRange, ModelType, Kernel, Any, All, Value, ValueFromList, Env, Enabled, Disabled, Engine, MinPackageVersion, boolean, to_dict, split_values_and_flags, list_of
-from vllm_gaudi.extension.kernels import fsdpa, block_softmax_adjustment
+from vllm_gaudi.extension.kernels import fsdpa, block_softmax_adjustment, softmax_fa2
 from vllm_gaudi.extension.validation import for_all, choice
 
 
@@ -91,6 +91,8 @@ def get_features():
         Value('dynamic_shapes_compilation', True, env_var='VLLM_T_COMPILE_DYNAMIC_SHAPES', env_var_type=boolean),
         Value('fullgraph_compilation', False, env_var='VLLM_T_COMPILE_FULLGRAPH', env_var_type=boolean),
         Value('unified_attn', False),
+        Value('unified_attn_softmax_fa2',
+              All(VersionRange(">=1.24.0.279"), Enabled('unified_attn'), Kernel(softmax_fa2), Hardware('gaudi3'))),
         Value('scale_adjustment', True, env_var='VLLM_SCALE_ADJUSTMENT', env_var_type=boolean),
         Value('flatten_input', Any(ModelType('qwen3_moe'), ModelType('granitemoe'), ModelType('glm4_moe'))),
         Value('unified_attn_shared_cache_ratio',
