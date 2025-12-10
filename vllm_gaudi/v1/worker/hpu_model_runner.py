@@ -94,7 +94,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.v1.core.sched.output import GrammarOutput
 from vllm.config.multimodal import ImageDummyOptions
 from vllm.multimodal.profiling import MultiModalProfiler
-from vllm.multimodal import MULTIMODAL_REGISTRY
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -4609,8 +4608,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         assert self.mm_budget is not None
         img_count = 1
         if self.get_model().vision_bucket_manager.is_batch_based:
-            # Create ImageDummyOptions for Gemma3  
-            image_options = ImageDummyOptions(  
+            # Create ImageDummyOptions for Gemma3
+            image_options = ImageDummyOptions(
                 width=896,  #pixels as in gemma3 config
                 height=896  #pixels as in gemma3 config
             )
@@ -4632,11 +4631,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             batch = img_count
         processor = self.mm_registry.create_processor(model_config=self.model_config, cache=self.mm_budget.cache)
         profiler: MultiModalProfiler = MultiModalProfiler(processor)
-        dummy_data = profiler.get_decoder_dummy_data(
-            seq_len=4096,
-            mm_counts={"image": img_count},
-            mm_options={"image": image_options}
-        )
+        dummy_data = profiler.get_decoder_dummy_data(seq_len=4096,
+                                                    mm_counts={"image": img_count},
+                                                    mm_options={"image": image_options})
         dummy_mm_data = dummy_data.multi_modal_data
 
         assert modality == 'image'
@@ -4663,7 +4660,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.mm_registry,
         ) if self.supports_mm_inputs else None
         aspect_ratios = [
-            (1, 1),   # 1:1 square
+            (1, 1),  # 1:1 square
             #(4, 3),   # 4:3 landscape
             #(3, 4),   # 3:4 portrait
             #(16, 9),  # 16:9 widescreen
@@ -4678,15 +4675,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 continue
             phase = f'Graph/Multimodal({modality})'
             num_candidates = len(buckets)
-            for idx, img_arg in enumerate(buckets):    
+            for idx, img_arg in enumerate(buckets):
                 for (ratio_w, ratio_h) in aspect_ratios:
                     # Create dummy batch of multimodal inputs.
-                    batched_dummy_mm_inputs = self._get_mm_dummy_batch(
-                        modality,
-                        img_arg,
-                        ratio_w,
-                        ratio_h
-                    )
+                    batched_dummy_mm_inputs = self._get_mm_dummy_batch(modality, img_arg, ratio_w, ratio_h)
                     #htorch.core.mark_step()
                     # Run multimodal encoder.
                     dummy_encoder_outputs = \
