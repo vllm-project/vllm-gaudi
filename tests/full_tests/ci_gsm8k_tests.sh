@@ -258,12 +258,25 @@ run_spec_decode_eagle3_num_spec_2_test() {
     echo "✅ Test with spec decode with eagle3 and num_speculative_tokens = 2 passed."
 }
 
-# NOTE(Chendi): Failed due upstream, expect fix by SW-241408
+# Spec decode with ngram with UA
+run_UA_spec_decode_ngram_test() {
+    echo "➡️ Testing Spec-decode with ngram..."
+    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --assert_accept_rate 0.25 --osl 512
+    echo "✅ Test with spec decode with ngram passed."
+}
+
+# Spec decode with eagle3 with UA
+run_UA_spec_decode_eagle3_test() {
+    echo "➡️ Testing Spec-decode with eagle3..."
+    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.50 --osl 1024
+    echo "✅ Test with spec decode with eagle3 passed."
+}
+
 # Embedding-model-support for v1
 run_embedding_model_test() {
-    echo "➡️ Testing Embedding-model-support for v1..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=false PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/pooling.py" --model intfloat/e5-mistral-7b-instruct --trust-remote-code
-    echo "✅ Embedding-model-support for v1 successful."
+   echo "➡️ Testing Embedding-model-support for v1..."
+   HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=false PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/pooling.py" --model intfloat/e5-mistral-7b-instruct --trust-remote-code
+   echo "✅ Embedding-model-support for v1 successful."
 }
 
 # pd_disaggregate_nixl_libfabric
@@ -356,5 +369,3 @@ else
   usage
   exit 1
 fi
-
-
