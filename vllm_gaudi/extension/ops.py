@@ -107,15 +107,15 @@ def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, batch_siz
 
 def flat_pa_mla(query, key_cache, value_cache, block_list, block_mapping, block_bias, block_groups, block_size, scale,
                 matmul_qk_op, matmul_av_op, batch2block_matmul_op, block2batch_matmul_op, keys_fetch_func,
-                values_fetch_func, kv_lora_rank):
+                values_fetch_func, kv_lora_rank, k_scale, v_scale):
     batch_size = query.size(0)
     q_heads = query.size(1)
     kv_heads = key_cache.size(1)
 
     query = batch2block(scale * query, block_mapping, batch2block_matmul_op).unsqueeze(-2)
-    key = keys_fetch_func(key_cache.unflatten(0, (-1, block_size)), block_list)
+    key = keys_fetch_func(key_cache.unflatten(0, (-1, block_size)), block_list, input_scale=k_scale)
     if value_cache is not None:
-        value = values_fetch_func(value_cache.unflatten(0, (-1, block_size)), block_list)
+        value = values_fetch_func(value_cache.unflatten(0, (-1, block_size)), block_list, input_scale=v_scale)
         key = torch.concat((value, key), dim=-1)
     elif kv_lora_rank is not None:
         value = key[..., :kv_lora_rank]
@@ -157,15 +157,16 @@ def flat_pa_mla(query, key_cache, value_cache, block_list, block_mapping, block_
 
 def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias, block_groups, block_size, scale,
             matmul_qk_op, position_bias, matmul_av_op, batch2block_matmul_op, block2batch_matmul_op, keys_fetch_func,
-            values_fetch_func, **ignored_args):
+            values_fetch_func, k_scale, v_scale, **ignored_args):
     batch_size, _, hidden_size = query.shape
     _, kv_heads, head_size = key_cache.shape
     q_heads = hidden_size // head_size
 
     query_shape = (-1, q_heads, 1, head_size)
     query = batch2block(scale * query, block_mapping, batch2block_matmul_op).view(query_shape)
-    key = keys_fetch_func(key_cache.unflatten(0, (-1, block_size)), block_list).transpose(1, 2)
-    value = values_fetch_func(value_cache.unflatten(0, (-1, block_size)), block_list).transpose(1, 2)
+    key = keys_fetch_func(key_cache.unflatten(0, (-1, block_size)), block_list, input_scale=k_scale).transpose(1, 2)
+    value = values_fetch_func(value_cache.unflatten(0, (-1, block_size)), block_list,
+                              input_scale=v_scale).transpose(1, 2)
     block_bias = block_bias.view(key.size(0), 1, 1, -1)
     if kv_heads != q_heads:
         query = query.unflatten(1, (kv_heads, -1))

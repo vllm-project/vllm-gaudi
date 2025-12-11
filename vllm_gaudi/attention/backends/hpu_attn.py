@@ -462,7 +462,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         if self.attn_type == AttentionType.ENCODER_DECODER:
             return self.forward_encoder_decoder(
                 query=query,
@@ -501,8 +500,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-            key_cache = self.k_cache(key, key_cache, slot_mapping)
-            value_cache = self.v_cache(value, value_cache, slot_mapping)
+            key_cache = self.k_cache(key, key_cache, slot_mapping, input_scale=layer._k_scale_float)
+            value_cache = self.v_cache(value, value_cache, slot_mapping, input_scale=layer._v_scale_float)
 
         if attn_metadata.is_prompt:
             # Prompt run.
@@ -548,8 +547,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                        attn_bias=attn_bias,
                                        position_bias=position_bias,
                                        valid_seq_lengths=attn_metadata.seq_lens_tensor,
-                                       **self.common_attention_args(block_list, key_cache, value_cache,
-                                                                    attn_metadata.block_size))
+                                       **self.common_attention_args(block_list,
+                                                                    key_cache,
+                                                                    value_cache,
+                                                                    attn_metadata.block_size,
+                                                                    k_scale=layer._k_scale_float,
+                                                                    v_scale=layer._v_scale_float))
 
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
@@ -584,12 +587,22 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                                       block_bias=attn_bias,
                                                       block_groups=block_groups,
                                                       position_bias=self.position_bias,
-                                                      **self.common_attention_args(block_list, key_cache, value_cache,
-                                                                                   attn_metadata.block_size))
+                                                      **self.common_attention_args(block_list,
+                                                                                   key_cache,
+                                                                                   value_cache,
+                                                                                   attn_metadata.block_size,
+                                                                                   k_scale=layer._k_scale_float,
+                                                                                   v_scale=layer._v_scale_float))
 
         return output.view(*output_shape)
 
-    def common_attention_args(self, block_list=None, key_cache=None, value_cache=None, block_size=None):
+    def common_attention_args(self,
+                              block_list=None,
+                              key_cache=None,
+                              value_cache=None,
+                              block_size=None,
+                              k_scale=1.0,
+                              v_scale=1.0):
         return {
             'scale': self.scale,
             'matmul_qk_op': self.matmul_qk,
@@ -604,6 +617,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             'key_cache': key_cache,
             'value_cache': value_cache,
             'block_size': block_size,
+            'k_scale': k_scale,
+            'v_scale': v_scale,
         }
 
     def forward_encoder_decoder(
@@ -654,8 +669,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-            key_cache = self.k_cache(key, key_cache, cross_slot_mapping)
-            value_cache = self.v_cache(value, value_cache, cross_slot_mapping)
+            key_cache = self.k_cache(key, key_cache, cross_slot_mapping, input_scale=k_scale)
+            value_cache = self.v_cache(value, value_cache, cross_slot_mapping, input_scale=v_scale)
 
         if attn_metadata.is_prompt:
             # Prompt run.
@@ -684,8 +699,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                                       block_bias=attn_bias,
                                                       block_groups=block_groups,
                                                       position_bias=None,
-                                                      **self.common_attention_args(block_list, key_cache, value_cache,
-                                                                                   attn_metadata.block_size))
+                                                      **self.common_attention_args(block_list,
+                                                                                   key_cache,
+                                                                                   value_cache,
+                                                                                   attn_metadata.block_size,
+                                                                                   k_scale=k_scale,
+                                                                                   v_scale=v_scale))
         # Reshape the output tensor.
         return output.view(batch_size, -1, hidden_size)
 
@@ -838,8 +857,8 @@ class HPUUnifiedAttentionImpl(AttentionImpl):
         query = query.unflatten(-1, (-1, self.head_size))
         key = key.unflatten(-1, (-1, self.head_size))
         value = value.unflatten(-1, (-1, self.head_size))
-        key_cache = self.k_cache(key, key_cache, attn_metadata.slot_mapping)
-        value_cache = self.v_cache(value, value_cache, attn_metadata.slot_mapping)
+        key_cache = self.k_cache(key, key_cache, attn_metadata.slot_mapping, input_scale=layer._k_scale_float)
+        value_cache = self.v_cache(value, value_cache, attn_metadata.slot_mapping, input_scale=layer._v_scale_float)
         output = unified_attn(
             query=query,
             key=key,

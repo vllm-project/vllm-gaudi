@@ -75,11 +75,11 @@ class Fp8LinearMethod(OrigFp8LinearMethod):
         weight_scale = layer.weight_scale.transpose(0, 1) if layer.weight_scale.dim() > 1 else layer.weight_scale
         input_scale = getattr(layer, 'input_scale', None)
         output = hpu_ops.apply_fp8_linear_hpu(input=input_2d,
-                                            weight=layer.weight,
-                                            weight_scale=weight_scale,
-                                            input_scale=input_scale,
-                                            bias=bias,
-                                            trans_B=False)
+                                              weight=layer.weight,
+                                              weight_scale=weight_scale,
+                                              input_scale=input_scale,
+                                              bias=bias,
+                                              trans_B=False)
         output = torch.narrow(output, 0, 0, input_2d.shape[0]).view(*output_shape)
         return output
 

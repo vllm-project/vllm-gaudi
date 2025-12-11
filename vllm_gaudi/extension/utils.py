@@ -45,48 +45,51 @@ class VLLMKVCache(torch.nn.Module):
         super(VLLMKVCache, self).__init__()
         self.use_contiguous_pa = get_config().use_contiguous_pa
 
-    def forward(self, input, cache, slot_mapping):
+    def forward(self, input, cache, slot_mapping, **kwargs):
         # In cross-attention kv cache forward inputs are None in decode
         # We don't want to store them in the cache in such case
         if input is not None:
             cache.index_copy_(0, slot_mapping, input)
         return cache
 
-    def fetch_from_cache(self, cache, blocks):
+    def fetch_from_cache(self, cache, blocks, **kwargs):
         if self.use_contiguous_pa:
             return cache[:blocks.size(0)]
         else:
             return cache.index_select(0, blocks)
 
-    def fetch_from_cache_prompt(self, cache, blocks):
+    def fetch_from_cache_prompt(self, cache, blocks, **kwargs):
         return cache.index_select(0, blocks)
+
 
 class VLLMFP8KVCache(VLLMKVCache):
 
-    def __init__(self, input_scale=1.0):
+    def __init__(self):
         super(VLLMKVCache, self).__init__()
         self.use_contiguous_pa = get_config().use_contiguous_pa
-        self.input_scale = input_scale
-        self.output_scale = 1.0 / self.input_scale
 
-    def quant_input(self, input):
-        return torch.ops.hpu.cast_to_fp8_v2(input, self.input_scale, False, False, torch.float8_e4m3fn)[0]
+    def quant_input(self, input, input_scale=1.0):
+        return torch.ops.hpu.cast_to_fp8_v2(input, input_scale, False, False, torch.float8_e4m3fn)[0]
 
-    def dequant_output(self, output):
-        return torch.ops.hpu.cast_from_fp8(output, self.output_scale, torch.bfloat16)
+    def dequant_output(self, output, input_scale=1.0):
+        output_scale = 1.0 / input_scale
+        return torch.ops.hpu.cast_from_fp8(output, output_scale, torch.bfloat16)
 
-    def forward(self, input, *args, **kwargs):
-        qinput = self.quant_input(input)
-        return super().forward(qinput, *args, **kwargs)
+    def forward(self, input, cache, slot_mapping, input_scale=1.0, **kwargs):
+        qinput = self.quant_input(input, input_scale)
+        return super().forward(qinput, cache, slot_mapping, input_scale=input_scale, **kwargs)
 
-    def fetch_from_cache(self, quant_cache, blocks, permutations=None):
+    def fetch_from_cache(self, quant_cache, blocks, input_scale=1.0, permutations=None):
         if permutations:
-            output_cache = super().fetch_from_cache(quant_cache, blocks, permutations)
+            output_cache = super().fetch_from_cache(quant_cache,
+                                                    blocks,
+                                                    input_scale=input_scale,
+                                                    permutations=permutations)
             for i in range(len(output_cache)):
-                output_cache[i] = self.dequant_output(output_cache[i])
+                output_cache[i] = self.dequant_output(output_cache[i], input_scale)
             return output_cache
-        output_cache = super().fetch_from_cache(quant_cache, blocks)
-        return self.dequant_output(output_cache)
+        output_cache = super().fetch_from_cache(quant_cache, blocks, input_scale=input_scale)
+        return self.dequant_output(output_cache, input_scale)
 
 
 class FP8Matmul(torch.nn.Module):
