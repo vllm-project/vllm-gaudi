@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Union
+from typing import Union
 
 import torch
 import vllm
@@ -40,7 +40,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     ):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
-        if layer.use_grouped_topk or layer.custom_routing_function is not None:
+        if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
             topk_weights, topk_ids, zero_expert_result = layer.select_experts(hidden_states=x,
                                                                               router_logits=router_logits)
         else:
