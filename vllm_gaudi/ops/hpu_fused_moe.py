@@ -1,9 +1,11 @@
+from functools import partial
 from typing import Callable, Optional, Union
 
 import torch
 import vllm
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, UnquantizedFusedMoEMethod)
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOp)
+from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
 
 
 @UnquantizedFusedMoEMethod.register_oot
@@ -21,10 +23,17 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         ep_shift = layer.ep_rank * num_experts
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
+
+        if layer.dp_size > 1:
+            dispatch_fn = partial(dispatch_hidden_states, is_sequence_parallel=layer.is_sequence_parallel)
+        else:
+            dispatch_fn = None
+
         layer.moe_op = VllmMixtureOfExpertsOp(
             num_experts,
             experts_min,
             experts_max,
+            dispatch_fn,
         )
 
         for expert_id in range(layer.local_num_experts):
@@ -61,16 +70,28 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_weights, topk_ids = torch.topk(topk_weights, top_k, dim=-1)
             topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
             topk_weights = topk_weights.to(x.dtype)
-        topk_ids = topk_ids.view(*x.shape[:-1], -1)
-        topk_weights = topk_weights.view(*x.shape[:-1], -1)
 
-        return layer.moe_op(
+        topk_ids = topk_ids.to(torch.int64)
+        topk_weights = topk_weights.to(x.dtype)
+
+        if layer.dp_size > 1:
+            topk_ids_across_dp = get_hpu_dp_metadata().topk_ids_across_dp
+            topk_ids = dispatch_tensor(topk_ids, topk_ids_across_dp, layer.is_sequence_parallel)
+
+            topk_weights_across_dp = get_hpu_dp_metadata().topk_weights_across_dp
+            topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, layer.is_sequence_parallel)
+
+        topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
+        topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
+
+        output = layer.moe_op(
             x,
-            topk_ids.to(torch.int64),
-            topk_weights.to(x.dtype),
+            topk_ids,
+            topk_weights,
             permuted_weights=True,
             activation=activation,
-        ).view(*input_shape)
+        )
+        return output.view(*(output.size(0), *input_shape[1:]))
 
 
 def reduce_output(self, states: torch.Tensor) -> torch.Tensor:

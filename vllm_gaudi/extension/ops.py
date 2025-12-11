@@ -483,7 +483,11 @@ class MoeMatmul(torch.nn.Module):
 
 class VllmMixtureOfExpertsOp(torch.nn.Module):
 
-    def __init__(self, num_total_experts, experts_min: int = 0, experts_max: int = 8):
+    def __init__(self,
+                 num_total_experts,
+                 experts_min: int = 0,
+                 experts_max: int = 8,
+                 dispatch_fn: Callable[[torch.Tensor], torch.Tensor] = None):
         super().__init__()
         self.w13_list = torch.nn.ModuleList([MoeMatmul() for _ in range(num_total_experts)])
         self.w2_list = torch.nn.ModuleList([MoeMatmul() for _ in range(num_total_experts)])
@@ -498,6 +502,12 @@ class VllmMixtureOfExpertsOp(torch.nn.Module):
         self.moe_n_slice = 1 if self.num_experts <= max_expert_per_slice \
                 else self.num_experts // max_expert_per_slice
         self.num_expert_per_group = self.num_experts // self.moe_n_slice
+
+        self.dispatch_func = dispatch_fn
+
+    def _get_dispatch_func(self):
+        fn = self.dispatch_func
+        return fn
 
     def forward(self, hidden_states, expert_routing_table, router_weights, permuted_weights=True, activation="silu"):
         # pre-processing for custom op inputs
@@ -934,7 +944,11 @@ class MoeFP8Matmul(torch.nn.Module):
 
 class VllmMixtureOfExpertsOpFP8(torch.nn.Module):
 
-    def __init__(self, num_experts: int, experts_min: int = 0, experts_max: int = 8):
+    def __init__(self,
+                 num_experts: int,
+                 experts_min: int = 0,
+                 experts_max: int = 8,
+                 dispatch_fn: Callable[[torch.Tensor], torch.Tensor] = None):
         super().__init__()
         self.w13_list = torch.nn.ModuleList(
             [MoeFP8Matmul(quant_method=FusedMoeWeightScaleSupported.BLOCK.value) for _ in range(num_experts)])
@@ -951,6 +965,11 @@ class VllmMixtureOfExpertsOpFP8(torch.nn.Module):
         self.moe_n_slice = 1 if self.num_experts <= max_expert_per_slice \
                 else self.num_experts // max_expert_per_slice
         self.num_expert_per_group = self.num_experts // self.moe_n_slice
+        self.dispatch_func = dispatch_fn
+
+    def _get_dispatch_func(self):
+        fn = self.dispatch_func
+        return fn
 
     def forward(
         self,
@@ -1003,7 +1022,11 @@ class VllmMixtureOfExpertsOpFP8(torch.nn.Module):
 
 class VllmMixtureOfExpertsOpFP8PerChannel(torch.nn.Module):
 
-    def __init__(self, num_experts: int, experts_min: int = 0, experts_max: int = 8):
+    def __init__(self,
+                 num_experts: int,
+                 experts_min: int = 0,
+                 experts_max: int = 8,
+                 dispatch_fn: Callable[[torch.Tensor], torch.Tensor] = None):
         super().__init__()
         self.w13_list = torch.nn.ModuleList([MoeFP8Matmul() for _ in range(num_experts)])
         self.w2_list = torch.nn.ModuleList([MoeFP8Matmul() for _ in range(num_experts)])
@@ -1013,6 +1036,12 @@ class VllmMixtureOfExpertsOpFP8PerChannel(torch.nn.Module):
         self.num_experts = num_experts
         self.experts_min = experts_min
         self.experts_max = experts_max
+
+        self.dispatch_func = dispatch_fn
+
+    def _get_dispatch_func(self):
+        fn = self.dispatch_func
+        return fn
 
     def forward(
         self,
