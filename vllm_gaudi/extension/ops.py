@@ -14,6 +14,7 @@ from vllm_gaudi.extension.runtime import get_config
 
 import habana_frameworks.torch.utils.experimental as htexp
 import types
+from vllm.model_executor.layers.fused_moe import FusedMoeWeightScaleSupported
 
 is_hpu_gaudi2 = htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi2
 is_hpu_gaudi3 = htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi3
@@ -873,14 +874,16 @@ def fp8_channel_moe_prepare_weights(layer):
 class MoeFP8Matmul(torch.nn.Module):
 
     def __init__(
-            self,
-            block_size: Tuple[int, int] = (128, 128),
-            high_precision=torch.bfloat16,
+        self,
+        block_size: Tuple[int, int] = (128, 128),
+        high_precision=torch.bfloat16,
+        quant_method=FusedMoeWeightScaleSupported.CHANNEL.value,
     ):
         super().__init__()
         self.block_size = block_size
         self.high_precision = high_precision
         self.is_dequantized = False
+        self.quant_method = quant_method
 
     def set_weight(self, w: torch.Tensor):
         self.weight = w
@@ -895,12 +898,19 @@ class MoeFP8Matmul(torch.nn.Module):
         self.block_size = block_size
 
     def get_dequant_weight(self):
-        return dequant_block_fp8_weight_naive(
-            self.weight,
-            self.scale_inv_fp8,
-            block_size=self.block_size,
-            dtype=self.high_precision,
-        )
+        if self.quant_method == FusedMoeWeightScaleSupported.BLOCK.value:
+            return dequant_block_fp8_weight_naive(
+                self.weight,
+                self.scale_inv_fp8,
+                block_size=self.block_size,
+                dtype=self.high_precision,
+            )
+        elif self.quant_method == FusedMoeWeightScaleSupported.CHANNEL.value:
+            scale_dtype = self.scale_inv_fp8.dtype
+            return (self.weight.to(scale_dtype) * self.scale_inv_fp8).to(self.high_precision)
+        else:
+            raise NotImplementedError(f"Dequantize weights for {self.quant_method} strategy is not supported. \
+                Currently support block-wise and channel-wise strategy.")
 
     def forward(self, state, expert_id, w):
         raise NotImplementedError()
@@ -926,8 +936,10 @@ class VllmMixtureOfExpertsOpFP8(torch.nn.Module):
 
     def __init__(self, num_experts: int, experts_min: int = 0, experts_max: int = 8):
         super().__init__()
-        self.w13_list = torch.nn.ModuleList([MoeFP8Matmul() for _ in range(num_experts)])
-        self.w2_list = torch.nn.ModuleList([MoeFP8Matmul() for _ in range(num_experts)])
+        self.w13_list = torch.nn.ModuleList(
+            [MoeFP8Matmul(quant_method=FusedMoeWeightScaleSupported.BLOCK.value) for _ in range(num_experts)])
+        self.w2_list = torch.nn.ModuleList(
+            [MoeFP8Matmul(quant_method=FusedMoeWeightScaleSupported.BLOCK.value) for _ in range(num_experts)])
         max_expert_per_slice = 32
         self.num_experts = num_experts
         self.experts_min = experts_min
