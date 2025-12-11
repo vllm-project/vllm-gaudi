@@ -272,12 +272,11 @@ run_UA_spec_decode_eagle3_test() {
     echo "✅ Test with spec decode with eagle3 passed."
 }
 
-# NOTE(Chendi): Failed due upstream, expect fix by SW-241408
 # Embedding-model-support for v1
 run_embedding_model_test() {
-    echo "➡️ Testing Embedding-model-support for v1..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=false PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/pooling.py" --model intfloat/e5-mistral-7b-instruct --trust-remote-code
-    echo "✅ Embedding-model-support for v1 successful."
+   echo "➡️ Testing Embedding-model-support for v1..."
+   HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=false PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/pooling.py" --model intfloat/e5-mistral-7b-instruct --trust-remote-code
+   echo "✅ Embedding-model-support for v1 successful."
 }
 
 # pd_disaggregate_nixl_libfabric
