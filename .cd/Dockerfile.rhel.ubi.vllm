@@ -3,12 +3,12 @@
 
 # Global build arguments - declared before first FROM to be available in all stages
 ARG ARTIFACTORY_URL="vault.habana.ai"
-ARG SYNAPSE_VERSION=1.22.1
-ARG SYNAPSE_REVISION=6
+ARG SYNAPSE_VERSION=1.22.2
+ARG SYNAPSE_REVISION=32
 ARG BASE_NAME=rhel9.6
 ARG PT_VERSION=2.7.1
 # can be upstream or fork
-ARG TORCH_TYPE='upstream'
+ARG TORCH_TYPE=upstream
 ARG VLLM_GAUDI_COMMIT=main
 ARG VLLM_PROJECT_COMMIT=
 
@@ -158,10 +158,10 @@ WORKDIR /root
 # Clone and install vLLM
 RUN set -e && \
     mkdir -p $VLLM_PATH2 && \
-    git clone --depth 1 https://github.com/vllm-project/vllm-gaudi.git $VLLM_PATH2 && \
+    git clone https://github.com/vllm-project/vllm-gaudi.git $VLLM_PATH2 && \
     cd $VLLM_PATH2 && \
     if [ -z "${VLLM_PROJECT_COMMIT}" ]; then \
-    VLLM_PROJECT_COMMIT=$(git show "origin/vllm/last-good-commit-for-vllm-gaudi:VLLM_STABLE_COMMIT" 2>/dev/null || echo "main") && \
+    VLLM_PROJECT_COMMIT=$(git show "origin/vllm/last-good-commit-for-vllm-gaudi:VLLM_STABLE_COMMIT" 2>/dev/null || { echo >&2 "Warning: Could not fetch last-good-commit, using main branch"; echo "main"; }) && \
     echo "Found vLLM commit hash: ${VLLM_PROJECT_COMMIT}"; \
     else \
     echo "Using vLLM commit: ${VLLM_PROJECT_COMMIT}"; \
@@ -171,7 +171,7 @@ RUN set -e && \
     git clone https://github.com/vllm-project/vllm.git $VLLM_PATH && \
     cd $VLLM_PATH && \
     git remote add upstream https://github.com/vllm-project/vllm.git && \
-    git -c http.postBuffer=524288000 -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=600 fetch upstream --tags && \
+    git fetch upstream --tags && \
     git checkout ${VLLM_PROJECT_COMMIT} && \
     python use_existing_torch.py && \
     VLLM_TARGET_DEVICE=empty pip install --no-build-isolation . && \
