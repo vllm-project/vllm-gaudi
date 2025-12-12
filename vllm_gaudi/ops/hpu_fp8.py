@@ -113,12 +113,14 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
         if self.block_quant and not envs.VLLM_HPU_FORCE_CHANNEL_FP8:
             layer.moe_op = VllmMixtureOfExpertsOpFP8(
+                layer.global_num_experts,
                 num_experts,
                 experts_min,
                 experts_max,
             )
         else:
             layer.moe_op = VllmMixtureOfExpertsOpFP8PerChannel(
+                layer.global_num_experts,
                 num_experts,
                 experts_min,
                 experts_max,

@@ -23,6 +23,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
         layer.moe_op = VllmMixtureOfExpertsOp(
+            layer.global_num_experts,
             num_experts,
             experts_min,
             experts_max,
