@@ -4667,8 +4667,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         ) if self.supports_mm_inputs else None
         aspect_ratios = [
             (1, 1),  # 1:1 square
-            (4, 3),   # 4:3 landscape
-            (3, 4),   # 3:4 portrait
+            (4, 3),  # 4:3 landscape
+            (3, 4),  # 3:4 portrait
             (16, 9),  # 16:9 widescreen
             (9, 16),  # 9:16 portrait
         ]
@@ -4692,10 +4692,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         **batched_dummy_mm_inputs)
                     #htorch.core.mark_step()
 
-                    #sanity_check_mm_encoder_outputs(
-                    #    dummy_encoder_outputs,
-                    #    expected_num_items=img_arg,
-                    #)
+                    sanity_check_mm_encoder_outputs(
+                        dummy_encoder_outputs,
+                        expected_num_items=img_arg,
+                    )
 
                     self.graphed_buckets.add(img_arg)
                     self.log_warmup_multimodal(phase, idx, num_candidates, 1, 0, img_arg)
