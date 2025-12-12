@@ -47,7 +47,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem)
+from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs, MultiModalKwargsItem)
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
@@ -107,6 +107,7 @@ else:
 
 from vllm_gaudi.extension.unified_batch import UnifiedBatch
 from vllm_gaudi.extension.logger import logger as init_logger
+
 logger = init_logger()
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
@@ -601,9 +602,9 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
 
     def embed_input_ids_hpu(self, input_ids, image_index_tensor, multimodal_embeddings=None):
         return self.model.embed_input_ids_hpu(input_ids=input_ids,
-                                               multimodal_embeddings=multimodal_embeddings,
-                                               image_index_tensor=image_index_tensor)
-    
+                                              multimodal_embeddings=multimodal_embeddings,
+                                              image_index_tensor=image_index_tensor)
+
     def embed_multimodal(self, **batched_mm_inputs):
         return self.model.embed_multimodal(**batched_mm_inputs)
 
@@ -1380,7 +1381,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         ):
             if req_id not in self.encoder_cache:
                 self.encoder_cache[req_id] = {}
-           
+
             self.encoder_cache[mm_hash] = scatter_mm_placeholders(
                 output,
                 is_embed=pos_info.is_embed.to(
@@ -1425,7 +1426,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     # The encoder output is already processed and stored
                     # in the decoder's KV cache.
                     continue
- 
+
                 # Calculate the overlapping range
                 overlap_start = max(num_computed_tokens, start_pos)
                 overlap_end = min(num_computed_tokens + num_scheduled_tokens, start_pos + num_encoder_tokens)
@@ -1444,7 +1445,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 assert encoder_output is not None,\
                       f"Encoder cache miss for {mm_hash}."
                 encoder_output = self.encoder_cache[mm_hash]
- 
+
                 # Get the actual slice and pad to fixed size
                 actual_slice = encoder_output[encoder_start:encoder_end]
                 max_slice_size = encoder_output.shape[0]
@@ -1452,7 +1453,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 # Pad encoder slice to fixed size
                 if actual_slice_length < max_slice_size:
                     pad_size = max_slice_size - actual_slice_length
-                    padding_shape = (pad_size,) + actual_slice.shape[1:]
+                    padding_shape = (pad_size, ) + actual_slice.shape[1:]
                     padding = torch.zeros(padding_shape, dtype=actual_slice.dtype, device=actual_slice.device)
                     padded_encoder_slice = torch.cat([actual_slice, padding], dim=0)
                 else:
@@ -1464,7 +1465,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     actual_is_embed = pos_is_embed[encoder_start:encoder_end]
                     if actual_slice_length < max_slice_size:
                         pad_size = max_slice_size - actual_slice_length
-                        padding_is_embed = torch.zeros(pad_size, dtype=actual_is_embed.dtype, device=actual_is_embed.device)
+                        padding_is_embed = torch.zeros(pad_size,
+                                                       dtype=actual_is_embed.dtype,
+                                                       device=actual_is_embed.device)
                         is_embed = torch.cat([actual_is_embed, padding_is_embed], dim=0)
                     else:
                         is_embed = actual_is_embed
@@ -1489,7 +1492,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             req_start_idx += num_scheduled_tokens
 
         is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
- 
+
         return mm_embeds, is_mm_embed
 
     def _get_model_mm_inputs(
@@ -1508,16 +1511,16 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             with self.profiler.record_event('internal', 'prepare_input_encoders'):
                 self._execute_mm_encoder(scheduler_output, req_ids)
             htorch.core.mark_step()
- 
+
             mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output,
                                                                 req_ids,
                                                                 total_num_scheduled_tokens=token_ids.shape[-1])
             htorch.core.mark_step()
- 
+
             # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa E501
             # This may require moving multimodal input preps into _prepare_inputs,        # noqa E501
             # to avoid padding issues.
- 
+
             model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
             if image_index_tensor is not None:
                 model_mm_kwargs['image_index'] = image_index_tensor
@@ -1526,16 +1529,15 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 device=self.device,
             )
             if 'image_index' in model_mm_kwargs:
-                inputs_embeds = self.model.embed_input_ids_hpu(
-                    token_ids, model_mm_kwargs['image_index'], mm_embeds)
+                inputs_embeds = self.model.embed_input_ids_hpu(token_ids, model_mm_kwargs['image_index'], mm_embeds)
                 model_mm_kwargs.pop("image_index", None)
-            else: 
+            else:
                 inputs_embeds = self.model.embed_input_ids(
                     token_ids,
                     multimodal_embeddings=mm_embeds,
                     is_multimodal=is_mm_embed,
                 )
- 
+
         return inputs_embeds, model_mm_kwargs
 
     def get_model(self) -> torch.nn.Module:
@@ -2070,7 +2072,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             dummy_prefill_input_batches = \
                 self._create_dummy_prefill_batch_contents(num_pad_across_dp)
             merge_contents(dummy_prefill_input_batches[0], *dummy_prefill_input_batches[1:])
-        
+
         return all_batches[0], dummy_prefill_input_batches[0] if dummy_prefill_input_batches else None
 
     def _prepare_unified_prefill_inputs(self,
@@ -3415,12 +3417,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         image_index_tensor = None
         image_index_tensors = []
         if self.is_mm_optimized and len(prefill_data.token_ids):
-            
-            if len(prefill_data.token_ids)>1:
-                for el in prefill_data.token_ids:
             for idx, prefill_data_slice in enumerate(prefill_data.token_ids):
-                is_image_flatten = (
-                    prefill_data_slice.squeeze().flatten() == self.image_token_id)
+                is_image_flatten = (prefill_data_slice.squeeze().flatten() == self.image_token_id)
                 is_image_flatten = is_image_flatten.flatten()
                 image_index_tensor = is_image_flatten.nonzero().squeeze(-1)
                 image_index_tensors.append(image_index_tensor)
@@ -3465,18 +3463,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             htorch.core.mark_step()
             for idx, (req_id, prompt_len, token_ids, position_ids, attn_metadata, logits_indices,
                       logits_requests) in enumerate(zip(*shallow_tuple(prefill_data))):
-                
 
                 # Prepare multimodal inputs if any
-                mm_idx_tensor = image_index_tensors[idx] if len(image_index_tensors) else None 
-
-                inputs_embeds, model_mm_kwargs = self._get_model_mm_inputs(
-                    token_ids,
-                    token_ids.shape[-1],
-                    scheduler_output,
-                    req_id,
-                    image_index_tensors[idx]
-                )
+                inputs_embeds, model_mm_kwargs = self._get_model_mm_inputs(token_ids, token_ids.shape[-1],
+                                                                           scheduler_output, req_id,
+                                                                           image_index_tensors[idx])
 
                 lora_mask, lora_logits_mask = self._configure_lora(token_ids, self.requests, req_id, True)
 
@@ -3906,8 +3897,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self._maybe_compile(self.model)
         self.model_memory_usage = m.consumed_device_memory
         logger.info("Compilation took %.4f GB", self.model_memory_usage / float(2**30))
-        self.is_mm_optimized = is_mm_optimized(self.model)    
-        self.image_token_id = 151667 if 'InternVLChatModel' in str(type(self.model.model)) else self.model.model.config.image_token_id
+        self.is_mm_optimized = is_mm_optimized(self.model)
+        self.image_token_id = 151667 if 'InternVLChatModel' in str(type(
+            self.model.model)) else self.model.model.config.image_token_id
 
     def _maybe_compile(self, *args, **kwargs):
         """Entrypoint for a torch.compilation of the model"""
