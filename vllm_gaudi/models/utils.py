@@ -3,6 +3,7 @@ from vllm.multimodal import NestedTensors
 from vllm.model_executor.models import utils
 from vllm.model_executor.models.utils import (_embedding_count_expression, _flatten_embeddings)
 
+
 # TODO: Replaced masked_scatter with torch.where to avoid HPU performance issues
 # with non_zero_i8 ops in TPC kernel. However, torch.where creates dynamic operations
 # causing recompilation on each run. Need to find a static operation alternative.
@@ -54,6 +55,7 @@ def _merge_multimodal_embeddings(
 
     return inputs_embeds
 
+
 def merge_multimodal_embeddings_static(
     is_multimodal_index: torch.Tensor,
     inputs_embeds: torch.Tensor,
@@ -64,11 +66,10 @@ def merge_multimodal_embeddings_static(
     flattened = _flatten_embeddings(multimodal_embeddings)
 
     inputs_embeds_s = inputs_embeds.shape
-    inputs_embeds = inputs_embeds.view(inputs_embeds_s[0] * inputs_embeds_s[1],
-                                       inputs_embeds_s[2])
-    inputs_embeds = inputs_embeds.index_copy_(0, is_multimodal_index,
-                                              flattened).view(inputs_embeds_s)
+    inputs_embeds = inputs_embeds.view(inputs_embeds_s[0] * inputs_embeds_s[1], inputs_embeds_s[2])
+    inputs_embeds = inputs_embeds.index_copy_(0, is_multimodal_index, flattened).view(inputs_embeds_s)
     return inputs_embeds
+
 
 def scatter_mm_placeholders_static(
     embeds: torch.Tensor,
@@ -96,6 +97,7 @@ def scatter_mm_placeholders_static(
     )
     placeholders[is_embed] = embeds
     return placeholders
+
 
 def gather_mm_placeholders(
     placeholders: torch.Tensor,

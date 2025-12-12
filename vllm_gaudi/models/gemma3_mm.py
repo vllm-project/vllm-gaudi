@@ -9,6 +9,7 @@ from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from .utils import merge_multimodal_embeddings_static
 
+
 @MULTIMODAL_REGISTRY.register_processor(Gemma3MultiModalProcessor,
                                         info=Gemma3ProcessingInfo,
                                         dummy_inputs=Gemma3DummyInputsBuilder)
