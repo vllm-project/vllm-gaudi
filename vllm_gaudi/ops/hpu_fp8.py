@@ -1,4 +1,4 @@
-from typing import Callable, Optional
+from typing import Optional
 
 import torch
 from vllm_gaudi import envs
@@ -133,29 +133,17 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
-        scoring_func: str = "softmax",
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
         **kwargs,
     ) -> torch.Tensor:
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
-        if use_grouped_topk or custom_routing_function is not None:
+        if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
             topk_weights, topk_ids, zero_expert_result = layer.select_experts(hidden_states=x,
                                                                               router_logits=router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
-            topk_weights, topk_ids = torch.topk(topk_weights, top_k, dim=-1)
+            topk_weights, topk_ids = torch.topk(topk_weights, layer.top_k, dim=-1)
             topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
             topk_weights = topk_weights.to(x.dtype)
         topk_ids = topk_ids.view(*x.shape[:-1], -1)
@@ -169,7 +157,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
             topk_ids,
             topk_weights,
             permuted_weights=True,
-            activation=activation,
+            activation=layer.activation,
         )
         return output.view(*input_shape)
 
