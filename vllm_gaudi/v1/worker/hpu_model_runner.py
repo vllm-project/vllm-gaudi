@@ -64,7 +64,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCach
 from vllm.v1.worker.kv_connector_model_runner_mixin import (KVConnectorModelRunnerMixin)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors, DraftTokenIds, ModelRunnerOutput,
                              AsyncModelRunnerOutput, KVConnectorOutput)
-from vllm.v1.pool.metadata import PoolingMetadata
+from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm.v1.utils import CpuGpuBuffer
@@ -849,6 +849,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         # Keep in int64 to avoid overflow with long context
         self.max_num_reqs = self.scheduler_config.max_num_seqs
+        self.seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
 
         # Keep in int64 to avoid overflow with long context
         self.arange_np = np.arange(max(self.max_num_reqs + 1, self.max_model_len, self.max_num_tokens), dtype=np.int64)
@@ -2929,7 +2930,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         hidden_states = hidden_states[:num_scheduled_tokens]
 
         pooling_metadata = self.input_batch.get_pooling_metadata()
-        pooling_metadata.build_pooling_cursor(num_scheduled_tokens_np.tolist(), device=hidden_states.device)
+        seq_lens_cpu = self.seq_lens.cpu[:self.input_batch.num_reqs]
+        pooling_metadata.build_pooling_cursor(num_scheduled_tokens_np.tolist(),
+                                              seq_lens_cpu,
+                                              device=hidden_states.device)
 
         num_reqs = self.input_batch.num_reqs
 
@@ -4021,8 +4025,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 prompt_lens=prompt_lens_cpu,
                 prompt_token_ids=prompt_token_ids,
                 pooling_params=pooling_params_list,
+                pooling_states=[PoolingStates() for _ in range(bs)],
             )
-            pooling_metadata.build_pooling_cursor(num_scheduled_tokens_list, device=hidden_states.device)
+            seq_lens_cpu = seq_lens_tensor.cpu().tolist()
+            pooling_metadata.build_pooling_cursor(num_scheduled_tokens_list, seq_lens_cpu, device=hidden_states.device)
 
             try:
                 _pooler_output = model.pooler(hidden_states=hidden_states, pooling_metadata=pooling_metadata)
