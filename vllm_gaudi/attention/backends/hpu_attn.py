@@ -535,8 +535,14 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             block_list = attn_metadata.block_list if attn_metadata \
                 and attn_metadata.block_list is not None else None
 
-            if self.sliding_window \
-               and attn_metadata.window_attn_bias is not None:
+            common_args = self.common_attention_args(block_list,
+                                                    key_cache,
+                                                    value_cache,
+                                                    attn_metadata.block_size,
+                                                    k_scale=layer._k_scale_float,
+                                                    v_scale=layer._v_scale_float)
+            if self.sliding_window and hasattr(attn_metadata,
+                                               'window_attn_bias') and attn_metadata.window_attn_bias is not None:
                 attn_bias = attn_metadata.window_attn_bias
 
             out = ops.prompt_attention(impl=self.prefill_impl,
@@ -547,27 +553,22 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                        attn_bias=attn_bias,
                                        position_bias=position_bias,
                                        valid_seq_lengths=attn_metadata.seq_lens_tensor,
-                                       **self.common_attention_args(block_list,
-                                                                    key_cache,
-                                                                    value_cache,
-                                                                    attn_metadata.block_size,
-                                                                    k_scale=layer._k_scale_float,
-                                                                    v_scale=layer._v_scale_float))
+                                       **common_args)
 
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
             self.is_prompt = False
             # Decoding run.
-            if not self.sliding_window:
-                block_list = attn_metadata.block_list
-                block_groups = attn_metadata.block_groups
-                block_mapping = attn_metadata.block_mapping
-                attn_bias = attn_metadata.attn_bias
-            else:
+            if self.sliding_window and attn_metadata.window_block_list is not None:
                 block_list = attn_metadata.window_block_list
                 block_groups = attn_metadata.window_block_groups
                 block_mapping = attn_metadata.window_block_mapping
                 attn_bias = attn_metadata.window_attn_bias
+            else:
+                block_list = attn_metadata.block_list
+                block_groups = attn_metadata.block_groups
+                block_mapping = attn_metadata.block_mapping
+                attn_bias = attn_metadata.attn_bias
 
             self.position_bias = None
             alibi_blocks = getattr(attn_metadata, 'alibi_blocks', None)
