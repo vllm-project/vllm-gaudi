@@ -2,7 +2,7 @@ name: Update Review Dashboard
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '0 */2 * * *' # Every 2 hours
   workflow_dispatch:
 
 permissions:

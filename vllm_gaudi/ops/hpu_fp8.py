@@ -148,10 +148,14 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
             topk_weights = topk_weights.to(x.dtype)
         topk_ids = topk_ids.view(*x.shape[:-1], -1)
         topk_weights = topk_weights.view(*x.shape[:-1], -1)
+        if not layer.use_grouped_topk:
+            topk_ids = topk_ids.to(torch.int64)
+            topk_weights = topk_weights.to(x.dtype)
+
         output = layer.moe_op(
             x,
-            topk_ids.to(torch.int64),
-            topk_weights.to(x.dtype),
+            topk_ids,
+            topk_weights,
             permuted_weights=True,
             activation=layer.activation,
         )
