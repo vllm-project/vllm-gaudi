@@ -33,7 +33,7 @@ from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import (maybe_prefix, cast_overflow_tensors)
 
 from vllm.multimodal.inputs import MultiModalFieldConfig
 
@@ -52,7 +52,7 @@ class AttentionLongSequence:
         """
         q_len = q.size(-2)
         assert q_len % q_block_size == 0
-        q_tiles = (q_len // q_block_size) if (q_len % q_block_size == 0) else math.ceil(q_len / q_block_size)
+        q_tiles = (q_len // q_block_size)
         attn_output = torch.zeros_like(q)
 
         for i in range(q_tiles):
