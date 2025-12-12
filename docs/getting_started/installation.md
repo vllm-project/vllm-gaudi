@@ -7,7 +7,7 @@ title: Installation
 There are three ways to run vLLM Hardware Plugin for Intel® Gaudi®:
 
 - **Using Docker Compose**: The easiest method that requires no image building and is supported only in 1.22 and later releases on Ubuntu. For more information and detailed instructions, see the [Quick Start](quickstart/quickstart.md) guide.
-- **Using a Dockerfile**: Allows building a container with the Intel® Gaudi® software suite using the provided Dockerfile. This options is supported only on Ubuntu.
+- **Using a Dockerfile**: Allows building a container with the Intel® Gaudi® software suite using the provided Dockerfiles (Ubuntu-based and UBI-based).
 - **Building from source**: Allows installing and running vLLM directly on your Intel® Gaudi® machine by building from source. It's supported as a standard installation and an enhanced setup with NIXL.
 
 This guide explains how to run vLLM Hardware Plugin for Intel® Gaudi® from source and using a Dockerfile.
@@ -41,6 +41,40 @@ Use the following commands to set up the container with the latest Intel® Gaudi
 
 To achieve the best performance on HPU, please follow the methods outlined in the
 [Optimizing Training Platform Guide](https://docs.habana.ai/en/latest/PyTorch/Model_Optimization_PyTorch/Optimization_in_Training_Platform.html).
+
+### UBI-based Dockerfile (RHEL UBI 9)
+
+The UBI-based Dockerfile is located at `.cd/Dockerfile.rhel.ubi.vllm`.
+
+Build from the repository root:
+
+        $ docker build -f .cd/Dockerfile.rhel.ubi.vllm -t vllm-gaudi:ubi .
+
+Build arguments (defaults shown in the Dockerfile):
+
+- `ARTIFACTORY_URL` (default: `vault.habana.ai`)
+- `SYNAPSE_VERSION` (default: `1.22.2`)
+- `SYNAPSE_REVISION` (default: `32`)
+- `BASE_NAME` (default: `rhel9.6`)
+- `PT_VERSION` (default: `2.7.1`)
+- `TORCH_TYPE` (default: `upstream`)
+- `VLLM_GAUDI_COMMIT` (default: `main`)
+- `VLLM_PROJECT_COMMIT` (default: empty)
+
+Override build arguments (example):
+
+        $ docker build -f .cd/Dockerfile.rhel.ubi.vllm -t vllm-gaudi:ubi \
+                --build-arg SYNAPSE_VERSION=1.22.2 \
+                --build-arg SYNAPSE_REVISION=32 \
+                --build-arg PT_VERSION=2.7.1 \
+                --build-arg TORCH_TYPE=upstream \
+                --build-arg VLLM_GAUDI_COMMIT=main \
+                --build-arg VLLM_PROJECT_COMMIT= \
+                .
+
+Benchmark/testing assets:
+
+The UBI Dockerfile includes commented lines to install extra Python packages and copy scripts from `.cd/templates`, `.cd/entrypoints`, `.cd/server`, and `.cd/benchmark` into `/root/scripts/`. Uncomment the relevant lines in `.cd/Dockerfile.rhel.ubi.vllm` and adjust the container `ENTRYPOINT` if needed for your workflow.
 
 ## --8<-- [end:docker_quickstart]
 
