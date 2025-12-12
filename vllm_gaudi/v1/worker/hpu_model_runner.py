@@ -1501,7 +1501,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         total_num_scheduled_tokens: Optional[int],
         scheduler_output: "SchedulerOutput",
         req_ids: list[str],
-        image_index_tensor: Optional[torch.Tensor],
+        image_index_tensor: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor | None, dict[str, Any] | None]:
         inputs_embeds = None
         model_mm_kwargs = None
@@ -3443,7 +3443,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         # NOTE(Chendi): used by spec decode draft model, since we are doing
         # prefill one by one, so save hidden states as list
-        non_flattened_hidden_states_prefills = []
+        non_flattened_hidden_states_prefills: list[torch.Tensor] = []
         aux_hidden_states_prefills = []
         sample_hidden_states_prefills = []
         decode_sampled_token_ids_device = None
