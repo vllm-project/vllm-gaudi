@@ -4632,8 +4632,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         processor = self.mm_registry.create_processor(model_config=self.model_config, cache=self.mm_budget.cache)
         profiler: MultiModalProfiler = MultiModalProfiler(processor)
         dummy_data = profiler.get_decoder_dummy_data(seq_len=4096,
-                                                    mm_counts={"image": img_count},
-                                                    mm_options={"image": image_options})
+                                                     mm_counts={"image": img_count},
+                                                     mm_options={"image": image_options})
         dummy_mm_data = dummy_data.multi_modal_data
 
         assert modality == 'image'
@@ -4661,10 +4661,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         ) if self.supports_mm_inputs else None
         aspect_ratios = [
             (1, 1),  # 1:1 square
-            #(4, 3),   # 4:3 landscape
-            #(3, 4),   # 3:4 portrait
-            #(16, 9),  # 16:9 widescreen
-            #(9, 16),  # 9:16 portrait
+            (4, 3),   # 4:3 landscape
+            (3, 4),   # 3:4 portrait
+            (16, 9),  # 16:9 widescreen
+            (9, 16),  # 9:16 portrait
         ]
         # for non-batch based, we can warmup with different aspect ratio
         #self.mm_budget.mm_limits : {'image': 2}
