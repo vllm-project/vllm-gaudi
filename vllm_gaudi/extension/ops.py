@@ -934,21 +934,23 @@ def fp8_perchannel_linear_postprocess_weights(layer):
     return layer
 
 
-def fp8_block_linear_postprocess_weights(layer, force_channel_fp8=False):
-    weight, orig_M, orig_N = pad_block_fp8_weight_naive(layer.weight.data, layer.weight_scale_inv.data,
-                                                        layer.quant_config.weight_block_size)
+def fp8_block_linear_postprocess_weights(layer, force_channel_fp8=False, weight_scale_name="weight_scale_inv"):
+    weight_scale_inv = getattr(layer, weight_scale_name)
+    weight_block_size = layer.weight_block_size if hasattr(
+        layer, 'weight_block_size') else layer.quant_config.weight_block_size
+    weight, orig_M, orig_N = pad_block_fp8_weight_naive(layer.weight.data, weight_scale_inv.data, weight_block_size)
     if force_channel_fp8:
         # convert to channel-wise fp8
         weight, weight_scale_inv = dynamic_quant(
             dequant_block_fp8_weight_naive(weight,
-                                           layer.weight_scale_inv.data,
-                                           layer.quant_config.weight_block_size,
+                                           weight_scale_inv.data,
+                                           weight_block_size,
                                            original_M=orig_M,
                                            original_N=orig_N,
                                            do_unpad=True))
         weight_scale_inv = weight_scale_inv.squeeze(-1)
         layer.weight.data.copy_(weight)
-        layer.weight_scale_inv = torch.nn.Parameter(weight_scale_inv, requires_grad=False)
+        setattr(layer, weight_scale_name, torch.nn.Parameter(weight_scale_inv, requires_grad=False))
         htorch.core.mark_step()
         return layer
     else:
