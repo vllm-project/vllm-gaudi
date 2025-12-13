@@ -3464,10 +3464,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             for idx, (req_id, prompt_len, token_ids, position_ids, attn_metadata, logits_indices,
                       logits_requests) in enumerate(zip(*shallow_tuple(prefill_data))):
 
+                mm_idx_tensor = image_index_tensors[idx] if len(image_index_tensors) else None
                 # Prepare multimodal inputs if any
                 inputs_embeds, model_mm_kwargs = self._get_model_mm_inputs(token_ids, token_ids.shape[-1],
-                                                                           scheduler_output, req_id,
-                                                                           image_index_tensors[idx])
+                                                                           scheduler_output, req_id, mm_idx_tensor)
 
                 lora_mask, lora_logits_mask = self._configure_lora(token_ids, self.requests, req_id, True)
 
@@ -3898,8 +3898,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.model_memory_usage = m.consumed_device_memory
         logger.info("Compilation took %.4f GB", self.model_memory_usage / float(2**30))
         self.is_mm_optimized = is_mm_optimized(self.model)
-        self.image_token_id = 151667 if 'InternVLChatModel' in str(type(
-            self.model.model)) else self.model.model.config.image_token_id
+        self.image_token_id = self.model.model.config.image_token_id if hasattr(self.model.model.config,
+                                                                                'image_token_id') else None
 
     def _maybe_compile(self, *args, **kwargs):
         """Entrypoint for a torch.compilation of the model"""
