@@ -4665,16 +4665,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.scheduler_config,
             self.mm_registry,
         ) if self.supports_mm_inputs else None
-        aspect_ratios = [
-            (1, 1),  # 1:1 square
-            (4, 3),  # 4:3 landscape
-            (3, 4),  # 3:4 portrait
-            (16, 9),  # 16:9 widescreen
-            (9, 16),  # 9:16 portrait
-        ]
-        # for non-batch based, we can warmup with different aspect ratio
-        #self.mm_budget.mm_limits : {'image': 2}
-        #import remote_pdb;remote_pdb.set_trace()
+        aspect_ratios = [(1, 1)]  # 1:1 square
+        if self.get_model().vision_bucket_manager.is_batch_based:
+            aspect_ratio_ext = [(4, 3),  # 4:3 landscape
+                (3, 4),  # 3:4 portrait
+                (16, 9),  # 16:9 widescreen
+                (9, 16),  # 9:16 portrait
+            ]
+            aspect_ratios.extend(aspect_ratio_ext)
         for modality, max_items in self.mm_budget.mm_limits.items():
             if modality == 'video':
                 logger.warning_once("Warming up for video is not implemented")
