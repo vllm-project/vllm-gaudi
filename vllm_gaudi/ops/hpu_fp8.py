@@ -69,12 +69,14 @@ class Fp8LinearMethod(OrigFp8LinearMethod):
 
         weight_scale = layer.weight_scale.transpose(0, 1) if layer.weight_scale.dim() > 1 else layer.weight_scale
         input_scale = getattr(layer, 'input_scale', None)
-        return hpu_ops.apply_fp8_linear_hpu(input=x,
-                                            weight=layer.weight,
-                                            weight_scale=weight_scale,
-                                            input_scale=input_scale,
-                                            bias=bias,
-                                            trans_B=False)
+        input_2d = x.view(-1, x.shape[-1])
+        output = hpu_ops.apply_fp8_linear_hpu(input=input_2d,
+                                              weight=layer.weight,
+                                              weight_scale=weight_scale,
+                                              input_scale=input_scale,
+                                              bias=bias,
+                                              trans_B=False)
+        return output.view(*x.shape[:-1], -1)
 
     def dequant_fp8_weight(self, layer) -> torch.Tensor:
         if hasattr(layer, "updated_fp8_weight") and layer.updated_fp8_weight:
