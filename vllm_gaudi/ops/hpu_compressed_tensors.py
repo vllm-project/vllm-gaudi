@@ -108,8 +108,20 @@ class HPUCompressedTensorsLinearMethod(OrigCompressedTensorsLinearMethod):
         if layer.scheme.strategy == QuantizationStrategy.CHANNEL:  # weights were quantized per-channel
             dequant_weight = layer.weight.to(layer.weight_scale.dtype) * layer.weight_scale.squeeze()
             return dequant_weight.to(torch.bfloat16).t()
+        elif layer.scheme.strategy == QuantizationStrategy.BLOCK:
+            if hasattr(layer, "updated_fp8_weight") and layer.updated_fp8_weight:
+                return layer.weight
+            dequant_weight = hpu_ops.dequant_block_fp8_weight_naive(
+                layer.weight.t(),
+                layer.weight_scale.data,
+                layer.weight_block_size,
+                original_M=layer.orig_M,
+                original_N=layer.orig_N,
+                do_unpad=True,
+            )
+            return dequant_weight.to(torch.bfloat16)
         else:
-            raise NotImplementedError("Implemented per-channel dequantization only")
+            raise NotImplementedError("Dequant implemented per-channel and per-block dequantization only")
 
 
 @CustomOp.register_oot(name='CompressedTensorsW8A8Fp8')
