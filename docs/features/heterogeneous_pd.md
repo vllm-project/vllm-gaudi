@@ -1,6 +1,8 @@
-# PD Disaggregation on CUDA+Gaudi Multi‑Node System
+---
+title: Heterogeneous PD Disaggregation on CUDA+Gaudi Multi‑Node System
+---
 
-## Overview
+# Heterogeneous PD Disaggregation on CUDA+Gaudi Multi‑Node System
 
 PD Disaggregation enables splitting model execution into prefill and decode stages,
 allowing heterogeneous compute utilization. Currently, we only support CUDA for prefill
@@ -47,7 +49,7 @@ Launching requires three independent services:
 | -------------- | ---------------------------------------------------------------------------- | -------------- |
 | `kv_layout`    | KV cache layout for each node, can be different between CUDA/Gaudi (NHD/HND) | prefill/decode |
 | `block_size`   | Block size for each node, can be different between CUDA/Gaudi                | prefill/decode |
-| `decode_port`  | Port for communications between decode and proxy services                     | decode/proxy   |
+| `decode_port`  | Port for communications between decode and proxy services                    | decode/proxy   |
 | `prefill_port` | Port for communications between prefill and proxy services                   | prefill/proxy  |
 | `port`         | Port exposed for external requests by proxy                                  | proxy          |
 
