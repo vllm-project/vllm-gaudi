@@ -10,7 +10,7 @@ in progress.
 ## Requirements
 
 All experiments were tested in docker environments with `--privileged` to allow `UCX_TLS=rc,ib`,
-and `--het=host --ipc=host` to allow for network connections. The following docker images
+and `--net=host --ipc=host` to allow for network connections. The following docker images
 were used for testing:
 
 - CUDA: `nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04`
@@ -47,7 +47,7 @@ Launching requires three independent services:
 | -------------- | ---------------------------------------------------------------------------- | -------------- |
 | `kv_layout`    | KV cache layout for each node, can be different between CUDA/Gaudi (NHD/HND) | prefill/decode |
 | `block_size`   | Block size for each node, can be different between CUDA/Gaudi                | prefill/decode |
-| `decode_port`  | Port for communcations between decode and proxy services                     | decode/proxy   |
+| `decode_port`  | Port for communications between decode and proxy services                     | decode/proxy   |
 | `prefill_port` | Port for communications between prefill and proxy services                   | prefill/proxy  |
 | `port`         | Port exposed for external requests by proxy                                  | proxy          |
 
@@ -72,7 +72,7 @@ vllm serve $MODEL \
   --port $PORT \
   --gpu-memory-utilization 0.8 \
   --block-size $BLOCK \
-  --kv-transfer-config '{"kv_connector": "NixlConnector", "kv_role": "kv_both", "kv_buffer_device", "cuda", "kv_connector_extra_config": {"enforce_handshake_compat": false}}'
+  --kv-transfer-config '{"kv_connector": "NixlConnector", "kv_role": "kv_both", "kv_buffer_device": "cuda", "kv_connector_extra_config": {"enforce_handshake_compat": false}}'
 ```
 
 For the decode (Gaudi) service:
@@ -96,7 +96,7 @@ vllm serve $MODEL \
   --port $PORT \
   --gpu-memory-utilization 0.8 \
   --block-size $BLOCK \
-  --kv-transfer-config '{"kv_connector": "NixlConnector", "kv_role": "kv_both", "kv_buffer_device", "hpu", "enable_permute_local_kv": "True", "kv_connector_extra_config": {"enforce_handshake_compat": false}}'
+  --kv-transfer-config '{"kv_connector": "NixlConnector", "kv_role": "kv_both", "kv_buffer_device": "hpu", "enable_permute_local_kv": "True", "kv_connector_extra_config": {"enforce_handshake_compat": false}}'
 ```
 
 For the proxy service:
