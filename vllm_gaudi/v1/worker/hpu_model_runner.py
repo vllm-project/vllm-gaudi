@@ -47,7 +47,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs, MultiModalKwargsItem)
+from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem)
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
@@ -1524,10 +1524,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
             if image_index_tensor is not None:
                 model_mm_kwargs['image_index'] = image_index_tensor
-            model_mm_kwargs = MultiModalKwargs.as_kwargs(
-                model_mm_kwargs,
-                device=self.device,
-            )
             if 'image_index' in model_mm_kwargs:
                 inputs_embeds = self.model.embed_input_ids_hpu(token_ids, model_mm_kwargs['image_index'], mm_embeds)
                 model_mm_kwargs.pop("image_index", None)
@@ -3443,7 +3439,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         # NOTE(Chendi): used by spec decode draft model, since we are doing
         # prefill one by one, so save hidden states as list
-        non_flattened_hidden_states_prefills: list[torch.Tensor] = []
+        non_flattened_hidden_states_prefills = []
         aux_hidden_states_prefills = []
         sample_hidden_states_prefills = []
         decode_sampled_token_ids_device = None
