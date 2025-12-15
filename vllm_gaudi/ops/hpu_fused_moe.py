@@ -1,10 +1,11 @@
-from typing import Callable, Optional, Union
+from typing import Union
 
 import torch
 import vllm
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, UnquantizedFusedMoEMethod)
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOp)
+from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_tensor, get_hpu_dp_metadata
 
 
 @UnquantizedFusedMoEMethod.register_oot
@@ -23,6 +24,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
         layer.moe_op = VllmMixtureOfExpertsOp(
+            layer.global_num_experts,
             num_experts,
             experts_min,
             experts_max,
@@ -36,32 +38,34 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         self,
         layer: FusedMoE,
         x: torch.Tensor,
-        use_grouped_topk: bool,
-        top_k: int,
         router_logits: torch.Tensor,
-        renormalize: bool,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
-        scoring_func: str = "softmax",
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
         **kwargs,
     ):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
-        if use_grouped_topk or custom_routing_function is not None:
+        if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
             topk_weights, topk_ids, zero_expert_result = layer.select_experts(hidden_states=x,
                                                                               router_logits=router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
-            topk_weights, topk_ids = torch.topk(topk_weights, top_k, dim=-1)
+            topk_weights, topk_ids = torch.topk(topk_weights, layer.top_k, dim=-1)
             topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
             topk_weights = topk_weights.to(x.dtype)
+
+        topk_ids = topk_ids.to(torch.int64)
+        topk_weights = topk_weights.to(x.dtype)
+
+        if layer.dp_size > 1:
+            hidden_states_across_dp = get_hpu_dp_metadata().hidden_states_across_dp
+            x = dispatch_tensor(x, hidden_states_across_dp, layer.is_sequence_parallel)
+
+            topk_ids_across_dp = get_hpu_dp_metadata().topk_ids_across_dp
+            topk_ids = dispatch_tensor(topk_ids, topk_ids_across_dp, layer.is_sequence_parallel)
+
+            topk_weights_across_dp = get_hpu_dp_metadata().topk_weights_across_dp
+            topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, layer.is_sequence_parallel)
+
         topk_ids = topk_ids.view(*x.shape[:-1], -1)
         topk_weights = topk_weights.view(*x.shape[:-1], -1)
         if not layer.use_grouped_topk:
@@ -73,8 +77,8 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids,
             topk_weights,
             permuted_weights=True,
-            activation=activation,
-        ).view(*input_shape)
+            activation=layer.activation,
+        ).view(*(x.size(0), *input_shape[1:]))
 
 
 def reduce_output(self, states: torch.Tensor) -> torch.Tensor:
