@@ -34,7 +34,7 @@ class CacheUtils:
                 If False, standard attention with per-head K/V caches.
     """
 
-    def __init__(self, key_cache, value_cache, block_size, is_mla=False):
+    def __init__(self, key_cache, value_cache, block_size, k_scales=None, v_scales=None, is_mla=False):
         self.key_cache = key_cache
         self.value_cache = value_cache
         self.block_size = block_size
@@ -45,6 +45,8 @@ class CacheUtils:
             assert value_cache is None, "MLA mode requires value_cache=None (latent stored in key_cache)"
 
         self.kv_heads = 1 if is_mla else key_cache.size(1)
+        self.k_scales = k_scales
+        self.v_scales = v_scales
 
     def fetch_shared(self, blocks: BlocksT) -> torch.tensor:
         """Fetch selected shared blocks"""
