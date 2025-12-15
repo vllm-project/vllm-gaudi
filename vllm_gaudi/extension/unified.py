@@ -29,11 +29,13 @@ BlocksT: TypeAlias = Union[torch.tensor, int]
 class CacheUtils:
     """Helper utilities for kv-cache"""
 
-    def __init__(self, key_cache, value_cache, block_size):
+    def __init__(self, key_cache, value_cache, block_size, k_scales=None, v_scales=None):
         self.key_cache = key_cache
         self.value_cache = value_cache
         self.block_size = block_size
         self.kv_heads = key_cache.size(1)
+        self.k_scales = k_scales
+        self.v_scales = v_scales
 
     def fetch_shared(self, blocks: BlocksT) -> torch.tensor:
         """Fetch selected shared blocks"""

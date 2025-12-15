@@ -102,6 +102,11 @@ def get_features():
         Value('track_graph_compilation', False, env_var='PT_HPU_METRICS_GC_DETAILS', env_var_type=boolean),
         Value('use_output_tensor_in_matmulqk',
               All(VersionRange(">=1.24.0.171"), MinPackageVersion("neural_compressor_pt", "3.6")),
-              env_var_type=boolean)
+              env_var_type=boolean),
+        Value('per_token_kv_scaling_support',
+              All(VersionRange(">=1.24.0.350"), MinPackageVersion("neural_compressor_pt", "3.6")),
+              env_var_type=boolean),
+        Value('moe_chunk', "", env_var='VLLM_MOE_CHUNK', env_var_type=list_of(int)),
+        Value('moe_token_boundary', "", env_var='VLLM_MOE_TOKEN_BOUNDARY', env_var_type=list_of(int)),
     ]
     return split_values_and_flags(features)
