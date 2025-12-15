@@ -876,7 +876,7 @@ class HPUUnifiedAttentionImpl(AttentionImpl, torch.nn.Module):
             else FP8Matmul()
         self.block2batch_matmul = Matmul() if not self.enable_fp8_attn \
             else FP8Matmul()
-        
+
     def forward(
         self,
         layer: AttentionLayer,
