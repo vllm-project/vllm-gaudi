@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import math
 import habana_frameworks.torch.core as htcore
 from vllm_gaudi.extension.runtime import get_config
+from vllm_gaudi.extension.utils import get_kv_fetch_extra_args
 
 import habana_frameworks.torch.utils.experimental as htexp
 import types
@@ -175,15 +176,23 @@ def flat_pa_mla(query, key_cache, value_cache, block_list, block_mapping, block_
 
 def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias, block_groups, block_size, scale,
             matmul_qk_op, position_bias, matmul_av_op, batch2block_matmul_op, block2batch_matmul_op, keys_fetch_func,
-            values_fetch_func, **ignored_args):
+            values_fetch_func, k_scales, v_scales, **ignored_args):
     batch_size, _, hidden_size = query.shape
     _, kv_heads, head_size = key_cache.shape
     q_heads = hidden_size // head_size
+    k_scales_uf = None
+    v_scales_uf = None
+    if k_scales is not None:
+        k_scales_uf = k_scales.unflatten(0, (-1, block_size))
+    if v_scales is not None:
+        v_scales_uf = v_scales.unflatten(0, (-1, block_size))
 
     query_shape = (-1, q_heads, 1, head_size)
     query = batch2block(scale * query, block_mapping, batch2block_matmul_op).view(query_shape)
-    key = keys_fetch_func(key_cache.unflatten(0, (-1, block_size)), block_list).transpose(1, 2)
-    value = values_fetch_func(value_cache.unflatten(0, (-1, block_size)), block_list).transpose(1, 2)
+    key = keys_fetch_func(key_cache.unflatten(0, (-1, block_size)),
+                          **get_kv_fetch_extra_args(blocks=block_list, scales=k_scales_uf)).transpose(1, 2)
+    value = values_fetch_func(value_cache.unflatten(0, (-1, block_size)),
+                              **get_kv_fetch_extra_args(blocks=block_list, scales=v_scales_uf)).transpose(1, 2)
     block_bias = block_bias.view(key.size(0), 1, 1, -1)
     if kv_heads != q_heads:
         query = query.unflatten(1, (kv_heads, -1))
