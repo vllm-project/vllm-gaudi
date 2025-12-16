@@ -13,6 +13,166 @@ from vllm.forward_context import override_forward_context
 from safetensors import safe_open
 
 
+def test_compressed_tensors_linear_method_w8a8fp8_static_per_tensor(dist_init):
+    """weight per-tensor, activation per-tensor
+    """
+    config = {
+        'config_groups': {
+            'group_0': {
+                'input_activations': {
+                    'block_structure': None,
+                    'dynamic': False,
+                    'group_size': None,
+                    'num_bits': 8,
+                    'observer': 'memoryless',
+                    'observer_kwargs': {},
+                    'strategy': 'tensor',
+                    'symmetric': True,
+                    'type': 'float'
+                },
+                'output_activations': None,
+                'targets': ['Linear'],
+                'weights': {
+                    'block_structure': None,
+                    'dynamic': False,
+                    'group_size': None,
+                    'num_bits': 8,
+                    'observer': 'minmax',
+                    'observer_kwargs': {},
+                    'strategy': 'tensor',
+                    'symmetric': True,
+                    'type': 'float'
+                }
+            }
+        },
+        'format': 'float-quantized',
+        'global_compression_ratio': 1.239290831149584,
+        'ignore': [],
+        'kv_cache_scheme': None,
+        'quant_method': 'compressed-tensors',
+        'quantization_status': 'compressed'
+    }
+    oot_quant_config = CompressedTensorsConfig.from_config(config)
+
+    # Prepare linear layer with oot CompressedTensorsLinearMethod
+    # with HPUCompressedTensorsW8A8Fp8 scheme
+    oot_op = create_row_parallel_linear(input_size=2048, output_size=8, quant_config=oot_quant_config).to("hpu")
+    assert isinstance(oot_op.quant_method, HPUCompressedTensorsLinearMethod)
+    assert isinstance(oot_op.scheme, HPUCompressedTensorsW8A8Fp8)
+
+    # Weight and weight_scale_inv were extracted from first o_proj layer of Intel/Qwen3-0.6B-FP8-Test-Only
+    # which is RowParallelLinear
+    # (with adjusted shapes, to make tensors smaller)
+    with safe_open(get_data_path("data/compressed_tensors/linear_w8a8fp8_static_per_tensor.safetensors"),
+                   framework="pt",
+                   device="hpu") as f:
+        oot_op.weight.copy_(f.get_tensor("weight"))
+        oot_op.weight_scale.copy_(f.get_tensor("weight_scale"))
+        oot_op.input_scale.copy_(f.get_tensor("input_scale"))
+
+    oot_op.quant_method.process_weights_after_loading(oot_op)
+    """
+    if not htorch.utils.internal.is_lazy():
+        compile_config = HPUCompileConfig()
+        oot_op = torch.compile(oot_op, **compile_config.get_compile_args())
+    """
+
+    # Input and expected output
+    # Output tensor holds data that was returned by cuda impl of CompressedTensorsLinearMethod for given input
+    # (CompressedTensorsLinearMethod was triggered offline with the same input as below to get the ref_output)
+    with safe_open(get_data_path("data/compressed_tensors/linear_w8a8fp8_static_per_tensor.safetensors"),
+                   framework="pt",
+                   device="hpu") as f:
+        input = f.get_tensor("input")
+        ref_output = f.get_tensor("ref_output")
+
+    # Execute layer
+    out = oot_op(input)
+
+    # Check correctness
+    torch.testing.assert_close(ref_output, out, atol=1e-3, rtol=1e-3)
+
+
+def test_compressed_tensors_linear_method_w8a8fp8_static_per_channel(dist_init):
+    """weight per-channel, activation per-tensor
+    """
+    config = {
+        'config_groups': {
+            'group_0': {
+                'input_activations': {
+                    'block_structure': None,
+                    'dynamic': False,
+                    'group_size': None,
+                    'num_bits': 8,
+                    'observer': 'memoryless',
+                    'observer_kwargs': {},
+                    'strategy': 'tensor',
+                    'symmetric': True,
+                    'type': 'float'
+                },
+                'output_activations': None,
+                'targets': ['Linear'],
+                'weights': {
+                    'block_structure': None,
+                    'dynamic': False,
+                    'group_size': None,
+                    'num_bits': 8,
+                    'observer': 'minmax',
+                    'observer_kwargs': {},
+                    'strategy': 'channel',
+                    'symmetric': True,
+                    'type': 'float'
+                }
+            }
+        },
+        'format': 'float-quantized',
+        'global_compression_ratio': 1.239290831149584,
+        'ignore': [],
+        'kv_cache_scheme': None,
+        'quant_method': 'compressed-tensors',
+        'quantization_status': 'compressed'
+    }
+    oot_quant_config = CompressedTensorsConfig.from_config(config)
+
+    # Prepare linear layer with oot CompressedTensorsLinearMethod
+    # with HPUCompressedTensorsW8A8Fp8 scheme
+    oot_op = create_row_parallel_linear(input_size=2048, output_size=8, quant_config=oot_quant_config).to("hpu")
+    assert isinstance(oot_op.quant_method, HPUCompressedTensorsLinearMethod)
+    assert isinstance(oot_op.scheme, HPUCompressedTensorsW8A8Fp8)
+
+    # Weight and weight_scale_inv were extracted from first o_proj layer of Intel/Qwen3-0.6B-FP8-Static-Test-Only
+    # which is RowParallelLinear
+    # (with adjusted shapes, to make tensors smaller)
+    with safe_open(get_data_path("data/compressed_tensors/linear_w8a8fp8_static_per_channel.safetensors"),
+                   framework="pt",
+                   device="hpu") as f:
+        oot_op.weight.copy_(f.get_tensor("weight"))
+        oot_op.weight_scale.copy_(f.get_tensor("weight_scale"))
+        oot_op.input_scale.copy_(f.get_tensor("input_scale"))
+
+    oot_op.quant_method.process_weights_after_loading(oot_op)
+    """
+    if not htorch.utils.internal.is_lazy():
+        compile_config = HPUCompileConfig()
+        oot_op = torch.compile(oot_op, **compile_config.get_compile_args())
+    """
+
+    # Input and expected output
+    # Output tensor holds data that was returned by cuda impl of CompressedTensorsLinearMethod for given input
+    # (CompressedTensorsLinearMethod was triggered offline with the same input as below to get the ref_output)
+    with safe_open(get_data_path("data/compressed_tensors/linear_w8a8fp8_static_per_channel.safetensors"),
+                   framework="pt",
+                   device="hpu") as f:
+        input = f.get_tensor("input")
+        ref_output = f.get_tensor("ref_output")
+
+    # Execute layer
+    out = oot_op(input)
+
+    # Check correctness
+    torch.testing.assert_close(ref_output, out, atol=1e-3, rtol=1e-3)
+
+
 def test_compressed_tensors_linear_method_w8a8fp8(dist_init):
     config = {
         'config_groups': {
