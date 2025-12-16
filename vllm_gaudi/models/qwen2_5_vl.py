@@ -14,8 +14,7 @@ from vllm.distributed import parallel_state
 
 from transformers import BatchFeature
 from vllm.transformers_utils.processor import (cached_image_processor_from_config)
-from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
-    Qwen2_5_VLVisionConfig, )
+from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (Qwen2_5_VLVisionConfig)
 
 from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionAttention, Qwen2_5_VisionBlock, Qwen2_5_VisionTransformer, Qwen2_5_VLDummyInputsBuilder,
