@@ -186,11 +186,13 @@ RUN set -e && \
 #
 ## Copy utility scripts and configuration
 #RUN mkdir -p /root/scripts/
-#COPY templates /root/scripts/templates/
-#COPY entrypoints /root/scripts/entrypoints/
-#COPY server /root/scripts/server/
-#COPY benchmark /root/scripts/benchmark/
+#COPY .cd/templates /root/scripts/templates/
+#COPY .cd/entrypoints /root/scripts/entrypoints/
+#COPY .cd/server /root/scripts/server/
+#COPY .cd/benchmark /root/scripts/benchmark/
 #WORKDIR /root/scripts
+# Set testing entrypoint script
+#ENTRYPOINT ["python3", "-m", "entrypoints.entrypoint_main"]
 
 # Setup non-root user for OpenShift compatibility
 RUN umask 002 && \
