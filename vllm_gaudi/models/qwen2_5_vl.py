@@ -14,8 +14,7 @@ from vllm.distributed import parallel_state
 
 from transformers import BatchFeature
 from vllm.transformers_utils.processor import (cached_image_processor_from_config)
-from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
-    Qwen2_5_VLVisionConfig, )
+from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLVisionConfig
 
 from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionAttention, Qwen2_5_VisionBlock, Qwen2_5_VisionTransformer, Qwen2_5_VLDummyInputsBuilder,
@@ -23,16 +22,15 @@ from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VLImageInputs, Qwen2_5_VLImageEmbeddingInputs, Qwen2_5_VLImagePixelInputs, Qwen2_5_VLVideoEmbeddingInputs,
     Qwen2_5_VLVideoPixelInputs, Qwen2_5_VLProcessor)
 
-from vllm.model_executor.models.qwen2_vl import (apply_rotary_pos_emb_vision)
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
 
-from vllm.config import VllmConfig
+from vllm.config import MultiModalConfig, VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.model_executor.models.utils import maybe_prefix
 
 from vllm.multimodal.inputs import MultiModalFieldConfig
@@ -106,27 +104,21 @@ class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
         num_heads: int,
         projection_size: int,
         quant_config: Optional[QuantizationConfig] = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
-        attn_backend: AttentionBackendEnum = AttentionBackendEnum.TORCH_SDPA,
-        attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__(
             embed_dim=embed_dim,
             num_heads=num_heads,
             projection_size=projection_size,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=prefix,
-            use_data_parallel=use_data_parallel,
-            attn_backend=attn_backend,
-            attn_backend_override=attn_backend_override,
         )
 
         self.softmax_mode = 'fp32' if os.environ.get('VLLM_FP32_SOFTMAX_VISION', 'false').lower() in ['true', '1'
                                                                                                       ] else 'None'
-        assert_msg = ("Flash Attention backend is not supported on HPU for Vision Transformer "
-                      "in Qwen2_5_VL model. Please use TORCH_SDPA backend.")
-        assert self.attn_backend != AttentionBackendEnum.FLASH_ATTN, assert_msg
+        self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
 
     def forward(
         self,
@@ -150,7 +142,7 @@ class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
             qk, v = qkv[:, :, :2], qkv[:, :, 2]
 
             qk_reshaped = rearrange(qk, "b s two head head_dim -> (two b) s head head_dim", two=2)
-            qk_rotated = apply_rotary_pos_emb_vision(qk_reshaped, cos=rotary_pos_emb_cos, sin=rotary_pos_emb_sin)
+            qk_rotated = self.apply_rotary_emb(qk_reshaped, rotary_pos_emb_cos, rotary_pos_emb_sin)
             qk_rotated = qk_rotated.view(
                 2,
                 batch_size,
@@ -218,10 +210,8 @@ class HPUQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
         norm_layer: Callable[[int], nn.Module] | None = None,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
-        attn_backend: AttentionBackendEnum = AttentionBackendEnum.TORCH_SDPA,
-        attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__(
             dim=dim,
@@ -230,20 +220,16 @@ class HPUQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
             act_fn=act_fn,
             norm_layer=norm_layer,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=prefix,
-            use_data_parallel=use_data_parallel,
-            attn_backend=attn_backend,
-            attn_backend_override=attn_backend_override,
         )
         self.attn = HPUQwen2_5_VisionAttention(
             embed_dim=dim,
             num_heads=num_heads,
             projection_size=dim,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=maybe_prefix(prefix, "attn."),
-            use_data_parallel=use_data_parallel,
-            attn_backend=attn_backend,
-            attn_backend_override=attn_backend_override,
         )
 
     def forward(
@@ -282,17 +268,15 @@ class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
         vision_config: Qwen2_5_VLVisionConfig,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
-        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__(
             vision_config=vision_config,
             norm_eps=norm_eps,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=prefix,
-            use_data_parallel=use_data_parallel,
-            attn_backend_override=attn_backend_override,
         )
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
@@ -308,10 +292,8 @@ class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
                     act_fn=get_act_and_mul_fn(vision_config.hidden_act),
                     norm_layer=norm_layer,
                     quant_config=quant_config,
+                    multimodal_config=multimodal_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
-                    use_data_parallel=use_data_parallel,
-                    attn_backend=self.attn_backend,
-                    attn_backend_override=attn_backend_override,
                 ) for layer_idx in range(depth)
             ])
 
