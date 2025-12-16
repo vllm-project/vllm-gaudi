@@ -10,10 +10,12 @@ services:
       - HF_TOKEN
       - HABANA_VISIBLE_DEVICES=${HABANA_VISIBLE_DEVICES:-all}
       - PYTHONUNBUFFERED=1
+      - DRYRUN_SERVER=${DRYRUN_SERVER:-0}
     env_file:
       - ./server/server_user.env
     volumes:
       - /mnt/hf_cache:/mnt/hf_cache
+      - ${PWD}:/local
     ports:
       - "8000:8000"
     cap_add:
@@ -40,8 +42,10 @@ services:
       - MODEL
       - HF_TOKEN=${HF_TOKEN}
       - PYTHONUNBUFFERED=1
+      - DRYRUN_BENCHMARK=${DRYRUN_BENCHMARK:-0}
     env_file:
       - ./benchmark/benchmark_user.env
     volumes:
       - /tmp/logs:/root/scripts/logs
+      - ${PWD}:/local
     command: ["benchmark", "--config-file", "${VLLM_BENCHMARK_CONFIG_FILE}", "--config-name", "${VLLM_BENCHMARK_CONFIG_NAME}"]
