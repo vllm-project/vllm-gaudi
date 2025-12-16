@@ -10,6 +10,7 @@ services:
       - HF_TOKEN
       - HABANA_VISIBLE_DEVICES=${HABANA_VISIBLE_DEVICES:-all}
       - PYTHONUNBUFFERED=1
+      - DRYRUN_SERVER=${DRYRUN_SERVER:-0}
     env_file:
       - ./server/server_user.env
     volumes:
@@ -17,6 +18,8 @@ services:
       # Example usage: LOCAL_PATH=/home/user/hf_cache <...>
       # Expected format: absolute path. Defaults to /mnt/hf_cache if not set.
       - ${LOCAL_PATH:-/mnt/hf_cache}:/mnt/hf_cache
+      - /tmp:/root/scripts/logs
+      - /tmp:/local
     ports:
       - "8000:8000"
     cap_add:
@@ -43,8 +46,10 @@ services:
       - MODEL
       - HF_TOKEN=${HF_TOKEN}
       - PYTHONUNBUFFERED=1
+      - DRYRUN_BENCHMARK=${DRYRUN_BENCHMARK:-0}
     env_file:
       - ./benchmark/benchmark_user.env
     volumes:
-      - /tmp/logs:/root/scripts/logs
+      - /tmp:/root/scripts/logs
+      - /tmp:/local
     command: ["benchmark", "--config-file", "${VLLM_BENCHMARK_CONFIG_FILE}", "--config-name", "${VLLM_BENCHMARK_CONFIG_NAME}"]
