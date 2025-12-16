@@ -14,8 +14,7 @@ from vllm.distributed import parallel_state
 
 from transformers import BatchFeature
 from vllm.transformers_utils.processor import (cached_image_processor_from_config)
-from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
-    Qwen2_5_VLVisionConfig, )
+from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLVisionConfig
 
 from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionAttention, Qwen2_5_VisionBlock, Qwen2_5_VisionTransformer, Qwen2_5_VLDummyInputsBuilder,
@@ -23,7 +22,7 @@ from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VLImageInputs, Qwen2_5_VLImageEmbeddingInputs, Qwen2_5_VLImagePixelInputs, Qwen2_5_VLVideoEmbeddingInputs,
     Qwen2_5_VLVideoPixelInputs, Qwen2_5_VLProcessor)
 
-from vllm.model_executor.models.qwen2_vl import (apply_rotary_pos_emb_vision)
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
@@ -119,6 +118,7 @@ class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
 
         self.softmax_mode = 'fp32' if os.environ.get('VLLM_FP32_SOFTMAX_VISION', 'false').lower() in ['true', '1'
                                                                                                       ] else 'None'
+        self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
 
     def forward(
         self,
@@ -142,7 +142,7 @@ class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
             qk, v = qkv[:, :, :2], qkv[:, :, 2]
 
             qk_reshaped = rearrange(qk, "b s two head head_dim -> (two b) s head head_dim", two=2)
-            qk_rotated = apply_rotary_pos_emb_vision(qk_reshaped, cos=rotary_pos_emb_cos, sin=rotary_pos_emb_sin)
+            qk_rotated = self.apply_rotary_emb(qk_reshaped, rotary_pos_emb_cos, rotary_pos_emb_sin)
             qk_rotated = qk_rotated.view(
                 2,
                 batch_size,
