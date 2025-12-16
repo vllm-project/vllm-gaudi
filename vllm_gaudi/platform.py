@@ -248,7 +248,8 @@ class HpuPlatform(Platform):
     ) -> None:
         """Copy blocks from src_cache to dst_cache on HPU."""
         # WA: https://github.com/pytorch/pytorch/issues/169656
-        view_as_uint = src_cache.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]
+        original_src_dtype = src_cache.dtype
+        view_as_uint = original_src_dtype in [torch.float8_e4m3fn, torch.float8_e5m2]
         if view_as_uint:
             src_cache = src_cache.view(torch.uint8)
         if isinstance(dst_cache, tuple):
@@ -256,12 +257,12 @@ class HpuPlatform(Platform):
             for i in range(len(dst_cache)):
                 indexed_cache = _src_cache[i]
                 if view_as_uint:
-                    indexed_cache = indexed_cache.view(src_cache.dtype)
+                    indexed_cache = indexed_cache.view(original_src_dtype)
                 dst_cache[i].index_copy_(0, dst_block_indices, indexed_cache.to(dst_cache[i].device))
         else:
             indexed_cache = src_cache[src_block_indices]
             if view_as_uint:
-                indexed_cache = indexed_cache.view(src_cache.dtype)
+                indexed_cache = indexed_cache.view(original_src_dtype)
             dst_cache.index_copy_(0, dst_block_indices, indexed_cache.to(dst_cache.device))
         torch.hpu.synchronize()
 
