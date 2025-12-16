@@ -142,7 +142,7 @@ class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
             qk, v = qkv[:, :, :2], qkv[:, :, 2]
 
             qk_reshaped = rearrange(qk, "b s two head head_dim -> (two b) s head head_dim", two=2)
-            qk_rotated = self.apply_rotary_pos_emb(qk_reshaped, rotary_pos_emb_cos, rotary_pos_emb_sin)
+            qk_rotated = self.apply_rotary_emb(qk_reshaped, rotary_pos_emb_cos, rotary_pos_emb_sin)
             qk_rotated = qk_rotated.view(
                 2,
                 batch_size,
