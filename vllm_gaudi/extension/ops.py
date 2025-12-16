@@ -64,8 +64,8 @@ def matmul_shape(lhs, rhs):
     return result
 
 
-def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, batch_size, matmul_av_op, batch2block_matmul_op,
-                 block2batch_matmul_op):
+def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, sink, block_size, batch_size, matmul_av_op,
+                 batch2block_matmul_op, block2batch_matmul_op):
     # When fp32_softmax is enabled attn is left in fp32 after Q@K
     # We can return to native dtype after we renormalize and calculate the adjustments
     if block_bias is not None and attn.dtype != block_bias.dtype:
@@ -79,11 +79,27 @@ def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, batch_siz
         if block_bias is not None:
             attn.add_(block_bias)
         block_max = attn.amax(dim=-1, keepdim=True)
+        if sink is not None:
+            block_max = torch.maximum(block_max, sink)
         attn = attn.sub(block_max)
         attn = attn.exp()
         if attn.dtype == torch.float32:
             attn = attn.to(value.dtype)
-        block_sums = attn.sum(dim=-1, keepdim=True)
+        attn_shape = attn.shape
+        block_sums = attn.view(-1, attn_shape[-1]).sum(dim=-1, keepdim=True)
+        attn_shape = list(attn_shape)
+        attn_shape[-1] = 1
+        block_sums = block_sums.view(attn_shape)
+        if sink is not None:
+            attn_sink = sink.sub(block_max)
+            attn_sink = attn_sink.exp()
+            if attn_sink.dtype == torch.float32:
+                attn_sink = attn_sink.to(value.dtype)
+            #TODO: Removing this .sum and using attn_sink directly
+            #results in wrong output which does not make sense.
+            #Looks like a Synapse issue, need to investigate further.
+            block_sums_sink = attn_sink.sum(dim=-1, keepdim=True)
+            block_sums = block_sums + block_sums_sink
     attn = matmul_av_op(attn, value)
     if get_config().fused_block_softmax_adjustment:
         out_shape = list(attn.shape[:3]) + [1] * (attn.dim() - 3)
@@ -194,6 +210,13 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
     value = values_fetch_func(value_cache.unflatten(0, (-1, block_size)),
                               **get_kv_fetch_extra_args(blocks=block_list, scales=v_scales_uf)).transpose(1, 2)
     block_bias = block_bias.view(key.size(0), 1, 1, -1)
+    sink = None
+    if sinks is not None:
+        sinks = sinks.reshape(sinks.shape[0], 1)
+        sink = sinks.reshape(1, sinks.shape[0], 1, sinks.shape[1])
+        sink = sink.expand(query.shape[0], -1, query.shape[-2], -1)
+        if kv_heads != q_heads:
+            sink = sink.unflatten(1, (kv_heads, -1))
     if kv_heads != q_heads:
         query = query.unflatten(1, (kv_heads, -1))
         key = key.unflatten(1, (kv_heads, 1))
@@ -231,6 +254,8 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
                         block_bias,
                         block_groups,
                         block_mapping,
+                        sink,
+                        block_size,
                         batch_size=batch_size,
                         matmul_av_op=matmul_av_op,
                         batch2block_matmul_op=batch2block_matmul_op,
@@ -289,6 +314,7 @@ def _naive_prompt_attention(query: torch.Tensor,
                             matmul_qk_op=torch.matmul,
                             softmax_op=torch.softmax,
                             matmul_av_op=torch.matmul,
+                            sinks: Optional[torch.Tensor] = None,
                             **ignored_args) -> torch.Tensor:
     query = query.transpose(1, 2)
     key = key.transpose(1, 2)
@@ -320,10 +346,19 @@ def _naive_prompt_attention(query: torch.Tensor,
         if attn_weights.dtype != attn_bias.dtype:
             attn_bias = attn_bias.to(dtype=attn_weights.dtype)
         attn_weights.add_(attn_bias)
+    if sinks is not None:
+        sink = sinks.reshape(1, -1, 1, 1).expand(query.shape[0], -1, query.shape[-2], -1)
+        if query_heads != kv_heads:
+            sink = sink.unflatten(1, (kv_heads, -1))
+        combined_logits = torch.cat([attn_weights, sink], dim=-1)
+        combined_logits = combined_logits - combined_logits.max(dim=-1, keepdim=True).values
+        attn_weights = combined_logits
     if get_config().fp32_softmax:
         attn_weights = torch.softmax(attn_weights, dim=-1)
     else:
         attn_weights = softmax_op(attn_weights, dim=-1)
+    if sinks is not None:
+        attn_weights = attn_weights[..., :-1]
     attn_weights = attn_weights.to(query.dtype)
     attn_weights = matmul_av_op(attn_weights, value)
 
@@ -342,6 +377,7 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
                             attn_bias: Optional[torch.Tensor] = None,
                             valid_seq_lengths: Optional[torch.Tensor] = None,
                             window_size: Optional[int] = None,
+                            sinks: Optional[torch.Tensor] = None,
                             **ignored_args) -> torch.Tensor:
     query = query.transpose(1, 2)
     key = key.transpose(1, 2)
@@ -358,15 +394,24 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
         # TODO: causal + attn_bias is not yet supported
         is_causal = False
         valid_seq_lengths = None
-
+    # TODO - remove this once fsdpa op support fast mode for sliding window
+    if window_size is not None:
+        #causal window sdpa kernel only supports softmax None
+        softmax_mode = 'None'
     args = [
         query, key, value, attn_bias, 0.0, is_causal, scale, softmax_mode, recompute_mode, valid_seq_lengths,
         padding_side
     ]
-    args += [window_size] if window_size else []
-    attn_weights = fsdpa_op(*args)
+    args += [window_size] if window_size else [None]
+    # use sinks in fsdpa
+    if sinks is not None:
+        args += [sinks]
 
+    attn_weights = fsdpa_op(*args)
     attn_weights = attn_weights.transpose(1, 2)
+    if sinks is not None:
+        # TODO - check if we can remove this
+        htcore.mark_step()
     return attn_weights
 
 
@@ -485,6 +530,9 @@ class MoeMatmul(torch.nn.Module):
 
     def set_weight(self, w):
         self.weight = w
+
+    def set_bias(self, b):
+        self.bias = b
 
     def forward(self, state, expert_id, w):
         raise NotImplementedError()

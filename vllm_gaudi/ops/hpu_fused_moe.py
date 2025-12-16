@@ -15,12 +15,15 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         torch.hpu.synchronize()
+        vllm_config = get_current_vllm_config()
+        self.model_type = vllm_config.model_config.hf_config.model_type
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
         # custom handling for HPU
         num_experts = layer.local_num_experts
         ep_shift = layer.ep_rank * num_experts
+        has_bias = hasattr(layer, 'w13_bias') and hasattr(layer, 'w2_bias')
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
         layer.moe_op = VllmMixtureOfExpertsOp(
@@ -28,11 +31,15 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             num_experts,
             experts_min,
             experts_max,
+            bias=has_bias,
         )
 
         for expert_id in range(layer.local_num_experts):
             layer.moe_op.w13_list[expert_id].set_weight(layer.w13_weight.data[expert_id])
             layer.moe_op.w2_list[expert_id].set_weight(layer.w2_weight.data[expert_id])
+            if has_bias:
+                layer.moe_op.w13_list[expert_id].set_bias(layer.w13_bias.data[expert_id])
+                layer.moe_op.w2_list[expert_id].set_bias(layer.w2_bias.data[expert_id])
 
     def forward_oot(
         self,
