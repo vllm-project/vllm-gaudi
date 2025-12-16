@@ -920,6 +920,8 @@ class HPUUnifiedAttentionImpl(AttentionImpl, torch.nn.Module):
             key_cache=key_cache,
             value_cache=value_cache,
             scale=self.scale,
+            matmul_qk_op=self.matmul_qk,
+            matmul_av_op=self.matmul_av,
             metadata=attn_metadata,
         )
         output = output.unflatten(0, (query_shape[0], query_shape[1])).flatten(-2, -1)
