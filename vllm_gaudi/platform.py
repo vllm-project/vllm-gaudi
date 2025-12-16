@@ -50,6 +50,7 @@ class HpuPlatform(Platform):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         attn_type: str | None = None,
     ) -> str:
         if use_sparse:
@@ -81,6 +82,24 @@ class HpuPlatform(Platform):
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         return cls.device_name
+
+    @classmethod
+    def get_device_total_memory(cls, device_id: int = 0) -> int:
+        """Get the total memory of a device in bytes."""
+        # NOTE: This is a workaround.
+        # The correct implementation of the method in this place should look as follows:
+        # total_hpu_memory = torch.hpu.mem_get_info()[1]
+        # A value of 0 is returned to preserve the current logic in
+        # vllm/vllm/engine/arg_utils.py → get_batch_defaults() →
+        # default_max_num_batched_tokens, in order to avoid the
+        # error in hpu_perf_test, while also preventing a
+        # NotImplementedError in test_defaults_with_usage_context.
+        logger.warning("This is a workaround! Please check the NOTE "
+                       "in the get_device_total_memory definition.")
+
+        total_hpu_memory = 0
+
+        return total_hpu_memory
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
@@ -121,6 +140,10 @@ class HpuPlatform(Platform):
         compilation_config.custom_ops = ["all"]
         compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         compilation_config.cudagraph_capture_sizes = []
+
+        if get_config().VLLM_CONTIGUOUS_PA and not get_config().unified_attn:
+            logger.warning("Using Contiguous PA, disabling prefix caching")
+            vllm_config.cache_config.enable_prefix_caching = False
 
         if compilation_config.mode != CompilationMode.NONE:
             logger.info("[HPU] Forcing CompilationMode.NONE "
@@ -164,6 +187,9 @@ class HpuPlatform(Platform):
             return "VRAM"
         else:
             return "DRAM"
+
+    def is_sleep_mode_available(cls) -> bool:
+        return True
 
     @classmethod
     def set_torch_compile(cls) -> None:
@@ -221,14 +247,23 @@ class HpuPlatform(Platform):
         dst_block_indices: torch.Tensor,
     ) -> None:
         """Copy blocks from src_cache to dst_cache on HPU."""
+        # WA: https://github.com/pytorch/pytorch/issues/169656
+        original_src_dtype = src_cache.dtype
+        view_as_uint = original_src_dtype in [torch.float8_e4m3fn, torch.float8_e5m2]
+        if view_as_uint:
+            src_cache = src_cache.view(torch.uint8)
         if isinstance(dst_cache, tuple):
             _src_cache = src_cache[:, src_block_indices]
-            if _src_cache.shape[2:] != dst_cache.shape[2:]:  # type: ignore[attr-defined]
-                _src_cache = _src_cache.permute(0, 1, 3, 2, 4)
             for i in range(len(dst_cache)):
-                dst_cache[i].index_copy_(0, dst_block_indices, _src_cache[i].to(dst_cache[i].device))
+                indexed_cache = _src_cache[i]
+                if view_as_uint:
+                    indexed_cache = indexed_cache.view(original_src_dtype)
+                dst_cache[i].index_copy_(0, dst_block_indices, indexed_cache.to(dst_cache[i].device))
         else:
-            dst_cache.index_copy_(0, dst_block_indices, src_cache[src_block_indices].to(dst_cache.device))
+            indexed_cache = src_cache[src_block_indices]
+            if view_as_uint:
+                indexed_cache = indexed_cache.view(original_src_dtype)
+            dst_cache.index_copy_(0, dst_block_indices, indexed_cache.to(dst_cache.device))
         torch.hpu.synchronize()
 
     @classmethod
@@ -242,9 +277,6 @@ class HpuPlatform(Platform):
         """Copy blocks from HPU to host (CPU)."""
         if isinstance(src_cache, tuple):
             _src_cache = torch.stack([c[src_block_indices] for c in src_cache], dim=0)
-            # permute back to original shape
-            if _src_cache.shape[2:] != dst_cache.shape[2:]:  # type: ignore[attr-defined]
-                _src_cache = _src_cache.permute(0, 1, 3, 2, 4)
             dst_cache[:, dst_block_indices] = _src_cache.cpu()
         else:
             dst_cache[dst_block_indices] = src_cache[src_block_indices].cpu()

@@ -35,4 +35,6 @@ vllm bench serve \
                 --metric-percentiles 90 \
                 --ignore-eos \
                 --trust-remote-code \
-2>&1 | tee -a logs/perftest_inp${INPUT_TOK}_out${OUTPUT_TOK}_user${CONCURRENT_REQ}.log
+                --save-result \
+                --result-dir logs \
+                --result-filename summary_inp${INPUT_TOK}_out${OUTPUT_TOK}_user${CONCURRENT_REQ}.json 2>&1 | stdbuf -o0 -e0 tr '\r' '\n' | tee -a logs/summary_inp${INPUT_TOK}_out${OUTPUT_TOK}_user${CONCURRENT_REQ}.log #save results to logs on a host
