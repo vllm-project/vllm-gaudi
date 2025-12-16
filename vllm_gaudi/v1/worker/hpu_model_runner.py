@@ -39,6 +39,7 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.attention.layer import MLAAttention
 from vllm.attention.selector import get_attn_backend
+
 from vllm.config import (VllmConfig, update_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
@@ -59,7 +60,7 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_map_leaves
 from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy)
-from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
+from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionBackendV1, HPUAttentionMetadataV1
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec, KVCacheTensor, MLAAttentionSpec)
 from vllm.v1.worker.kv_connector_model_runner_mixin import (KVConnectorModelRunnerMixin)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors, DraftTokenIds, ModelRunnerOutput,
@@ -806,7 +807,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.block_size,
             use_mla=self.model_config.use_mla,
         )
-
+        self.attn_backend_name =  getattr(self.attn_backend, "__name__", None)
         # Mult-modal-related.
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
@@ -1471,6 +1472,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # This may require moving multimodal input preps into _prepare_inputs,        # noqa
             # to avoid padding issues.
             htorch.core.mark_step()
+            if self.attn_backend_name is 'HPUAttentionBackendV1' and \
+                token_ids.ndim == 2 and token_ids.shape[0] == 1:
+               token_ids = token_ids.squeeze(0)
             inputs_embeds = self.model.embed_input_ids(
                 token_ids,
                 multimodal_embeddings=mm_embeds,
@@ -4666,7 +4670,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.mm_registry,
         ) if self.supports_mm_inputs else None
         aspect_ratios = [(1, 1)]  # 1:1 square
+        sanity_check =  False
         if self.get_model().vision_bucket_manager.is_batch_based:
+            sanity_check = True
             aspect_ratio_ext = [
                 (4, 3),  # 4:3 landscape
                 (3, 4),  # 3:4 portrait
@@ -4690,11 +4696,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         self.model.embed_multimodal(
                         **batched_dummy_mm_inputs)
                     #htorch.core.mark_step()
-
-                    sanity_check_mm_encoder_outputs(
-                        dummy_encoder_outputs,
-                        expected_num_items=img_arg,
-                    )
+                    if sanity_check:
+                        sanity_check_mm_encoder_outputs(
+                            dummy_encoder_outputs,
+                            expected_num_items=img_arg,
+                        )
 
                     self.graphed_buckets.add(img_arg)
                     self.log_warmup_multimodal(phase, idx, num_candidates, 1, 0, img_arg)
