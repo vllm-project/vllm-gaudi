@@ -30,13 +30,20 @@ class ExponentialBucketingStrategy():
 
     def get_prompt_cfgs(self, max_num_prefill_seqs, block_size, max_num_batched_tokens, max_model_len):
         self.check_for_user_flags('prompt')
+        if getattr(get_config(), 'VLLM_PROMPT_QUERY_BUCKET_MIN') == 1:
+            query_min = 1
+            logger().warning(
+                f"It's only recommended to use VLLM_PROMPT_QUERY_BUCKET_MIN=1 on the decode instance under P/D disaggregation scenario."
+            )
+        else:
+            query_min = block_size
         use_merged_prefill = get_config().merged_prefill
 
         # cfgs shape: [min, step, max, limit]
         prompt_bs_limit = math.ceil(math.log2(max_num_prefill_seqs)) + 1
         prompt_bs_bucket_cfg = [1, 2, max_num_prefill_seqs, prompt_bs_limit]
         max_prompt_seq_limit = math.ceil(math.log2(max_num_batched_tokens))
-        prompt_query_bucket_cfg = [block_size, block_size, max_num_batched_tokens, max_prompt_seq_limit]
+        prompt_query_bucket_cfg = [query_min, block_size, max_num_batched_tokens, max_prompt_seq_limit]
         max_ctx = max(1, math.ceil((max_model_len - prompt_query_bucket_cfg[0]) // block_size))
         max_prompt_ctx_limit = 2 if max_ctx == 1 else math.ceil(math.log2(max_ctx)) + 1
         prompt_ctx_bucket_cfg = [0, 1, max_ctx, max_prompt_ctx_limit]
@@ -124,8 +131,9 @@ def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=Fals
     """ # noqa: E501
 
     bmin, bstep, bmax, num_buckets = config
-    add_zero_bucket = bmin == 0
-    if add_zero_bucket:
+    add_zero_or_one_bucket = bmin in [0, 1]
+    if add_zero_or_one_bucket:
+        bmin_origin = bmin
         bmin = bstep
     linear_buckets = set(np.arange(bmin, bmax + 1, step=bstep))
     assert num_buckets > 0, "num_buckets must be a positive integer"
@@ -174,6 +182,6 @@ def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=Fals
             '''
             if bucket not in buckets:
                 buckets.add(bucket)
-    if add_zero_bucket:
-        buckets.add(0)
+    if add_zero_or_one_bucket:
+        buckets.add(bmin_origin)
     return list(sorted(buckets))
