@@ -198,7 +198,7 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
         moe: FusedMoEConfig,
     ):
         """
-        Copied from CompressedTensorsW8A8Fp8MoEMethod.__int__: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe.py#L665
+        Copied from CompressedTensorsW8A8Fp8MoEMethod.__init__: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe.py#L665
         The only differences are:
             - remove some useless code.
             - extend per-channel weight and per-tensor activation format
