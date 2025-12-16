@@ -7,6 +7,7 @@
 
 import habana_frameworks.torch as htorch
 import torch
+import itertools
 
 
 def swap_blocks(src, dst, block_mapping):
@@ -23,7 +24,7 @@ def swap_blocks(src, dst, block_mapping):
     torch.hpu.synchronize()
 
 
-def copy_blocks(key_caches, value_caches, block_mapping):
+def copy_blocks(key_caches, value_caches, key_scales, value_scales, block_mapping):
     if block_mapping.numel() == 0:
         return
 
@@ -31,9 +32,14 @@ def copy_blocks(key_caches, value_caches, block_mapping):
     src = block_mapping[0]
     dst = block_mapping[1]
 
-    for key_cache, value_cache in zip(key_caches, value_caches):
+    for key_cache, value_cache, k_scales, v_scales in itertools.zip_longest(key_caches, value_caches, key_scales,
+                                                                            value_scales):
         key_cache.index_copy_(0, dst, key_cache.index_select(0, src))
         value_cache.index_copy_(0, dst, value_cache.index_select(0, src))
+        if k_scales is not None:
+            k_scales.index_copy_(0, dst, k_scales.index_select(0, src))
+        if v_scales is not None:
+            v_scales.index_copy_(0, dst, v_scales.index_select(0, src))
 
     if key_caches[0].device.type == 'hpu':
         htorch.core.mark_step()
