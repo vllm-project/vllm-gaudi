@@ -10,7 +10,7 @@ services:
       - HF_TOKEN
       - HABANA_VISIBLE_DEVICES=${HABANA_VISIBLE_DEVICES:-all}
       - PYTHONUNBUFFERED=1
-      - DRYRUN_SERVER=${DRYRUN_SERVER:-0}
+      - DRY_RUN=${DRY_RUN:-0}
     env_file:
       - ./server/server_user.env
     volumes:
@@ -29,7 +29,13 @@ services:
     restart: unless-stopped
     command: ["server", "--config-file", "${VLLM_SERVER_CONFIG_FILE}", "--config-name", "${VLLM_SERVER_CONFIG_NAME}"]
     healthcheck:
-      test: ["CMD", "sh", "-c", "[ -f logs/vllm_server.log ] && grep -q 'Application startup complete' logs/vllm_server.log"]
+      test:
+        [
+          "CMD",
+          "sh",
+          "-c",
+          "if [ \"$DRY_RUN\" = \"1\" ]; then exit 0; else [ -f logs/vllm_server.log ] && grep -q 'Application startup complete' logs/vllm_server.log; fi"
+        ]
       interval: 10s
       timeout: 2s
       retries: 500
@@ -46,7 +52,7 @@ services:
       - MODEL
       - HF_TOKEN=${HF_TOKEN}
       - PYTHONUNBUFFERED=1
-      - DRYRUN_BENCHMARK=${DRYRUN_BENCHMARK:-0}
+      - DRY_RUN=${DRY_RUN:-0}
     env_file:
       - ./benchmark/benchmark_user.env
     volumes:
