@@ -63,7 +63,8 @@ class HpuCommunicator(DeviceCommunicatorBase):
     def dispatch(self,
                  hidden_states: torch.Tensor,
                  router_logits: torch.Tensor,
-                 is_sequence_parallel: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
+                 is_sequence_parallel: bool = False,
+                 extra_tensors: list[torch.Tensor] | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         # Use dispatch_tensor in the plugin FusedMoEMethod for better performance
         return hidden_states, router_logits
 
