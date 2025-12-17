@@ -3,9 +3,6 @@ Please Note: HPU integration for LMCache will be upstreamed. After that, the fol
 
 This folder demonstrates how to use LMCache for disaggregated prefilling and  KV cache sharing.
 
-The test scripts are dependent on [vllm/benchmark](https://github.com/vllm-project/vllm/tree/main/benchmarks) scripts.
-Please download them and set their path in disagg_example.sh.
-
 ## 1. Disaggregated Prefill in vLLM v1
 
 This example demonstrates how to run LMCache with disaggregated prefill using lm or redis on a single node.
