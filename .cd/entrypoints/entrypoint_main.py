@@ -189,7 +189,6 @@ class EntrypointMain:
                 template_script_path="templates/template_vllm_server.sh",
                 output_script_path="vllm_server.sh",
                 variables=variables,
-                mode=self.mode,
                 log_dir="logs",
                 varlist_conf_path="server/server_output.env",
             ).create_and_run()
@@ -200,7 +199,6 @@ class EntrypointMain:
                 template_script_path="templates/template_vllm_benchmark.sh",
                 output_script_path="vllm_benchmark.sh",
                 variables=self.config_envs,
-                mode=self.mode,
                 log_dir="logs",
             ).create_and_run()
         else:
