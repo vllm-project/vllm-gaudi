@@ -3769,6 +3769,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 disable_mark_scales_as_const = os.getenv("VLLM_DISABLE_MARK_SCALES_AS_CONST", "false") in ("1", "true")
                 self._inc_preprocess()
                 if config.measure:
+                    assert self.parallel_config.data_parallel_size == 1, \
+                        "Data parallelism is not supported during the calibration stage."
                     self.model = prepare(self.model, config)
                 elif config.quantize:
                     self.model = convert(self.model, config)
