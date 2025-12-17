@@ -39,6 +39,12 @@ def test_warmup_range():
     assert result == [2, 4, 8, 16, 32, 64, 128]
 
 
+def test_warmup_range_with_one():
+    config = (1, 64, 128)
+    result = linear.warmup_range(config)
+    assert result == [1, 2, 4, 8, 16, 32, 64, 128]
+
+
 def test_generate_prompt_buckets():
     max_num_batched_tokens = 2048
     block_size = 64
