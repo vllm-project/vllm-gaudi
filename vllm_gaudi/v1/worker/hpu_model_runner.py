@@ -60,7 +60,7 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_map_leaves
 from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy)
-from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionBackendV1, HPUAttentionMetadataV1
+from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec, KVCacheTensor, MLAAttentionSpec)
 from vllm.v1.worker.kv_connector_model_runner_mixin import (KVConnectorModelRunnerMixin)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors, DraftTokenIds, ModelRunnerOutput,
@@ -4622,8 +4622,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if self.get_model().vision_bucket_manager.is_batch_based:
             # Create ImageDummyOptions for Gemma3
             image_options = ImageDummyOptions(
-                width=896,  #pixels as in gemma3 config
-                height=896  #pixels as in gemma3 config
+                width=896,  # pixels as in gemma3 config
+                height=896  # pixels as in gemma3 config
             )
             batch = image_args
         else:
@@ -4672,7 +4672,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.mm_registry,
         ) if self.supports_mm_inputs else None
         aspect_ratios = [(1, 1)]  # 1:1 square
-        sanity_check =  False
+        sanity_check = False
         if self.get_model().vision_bucket_manager.is_batch_based:
             sanity_check = True
             aspect_ratio_ext = [
@@ -4690,14 +4690,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_candidates = len(buckets)
             for idx, img_arg in enumerate(buckets):
                 for (ratio_w, ratio_h) in aspect_ratios:
-                    # Create dummy batch of multimodal inputs.
                     batched_dummy_mm_inputs = self._get_mm_dummy_batch(modality, img_arg, ratio_w, ratio_h)
-                    #htorch.core.mark_step()
-                    # Run multimodal encoder.
                     dummy_encoder_outputs = \
                         self.model.embed_multimodal(
                         **batched_dummy_mm_inputs)
-                    #htorch.core.mark_step()
                     if sanity_check:
                         sanity_check_mm_encoder_outputs(
                             dummy_encoder_outputs,
