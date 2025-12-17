@@ -264,7 +264,6 @@ def partial_attn_unique(query: torch.tensor, blocks: torch.tensor, block_mapping
     block_bias = bias.unsqueeze(1).unsqueeze(1).unsqueeze(1)
     if get_config().unified_attn_block_softmax:
         attn, block_max, block_sum = torch.ops.hpu.block_softmax(attn, block_bias, block_mapping, fp8_exp=False)
-        torch.hpu.synchronize()
     else:
         attn = attn + block_bias
         block_max = torch.maximum(attn.amax(-1), fmin)
@@ -274,14 +273,18 @@ def partial_attn_unique(query: torch.tensor, blocks: torch.tensor, block_mapping
     attn = torch.matmul(attn, value)
 
     if get_config().unified_attn_block_softmax:
-        # Reshape outputs
+        out_shape = list(attn.shape[:3]) + [1] * (attn.dim() - 3)  # [num_blocks, kv_heads, query_heads, 1]
+        block_adjustment = torch.ops.hpu.block_softmax_adjustment(block_max, block_sum, block_mapping, batch_size,
+                                                                  out_shape)
+
         block_max = block_max[:, :kv_heads * query_heads].view(-1, kv_heads, query_heads,
                                                                1)  # [num_blocks, kv_heads, query_heads, 1]
         block_sum = block_sum[:, :kv_heads * query_heads].view(-1, kv_heads, query_heads,
                                                                1)  # [num_blocks, kv_heads, query_heads, 1]
-
-    group_max = reduce_max(block_max, batch_size, block_mapping)
-    block_adjustment = torch.exp(block_max - group_max.index_select(0, block_mapping))
+        group_max = reduce_max(block_max, batch_size, block_mapping)
+    else:
+        group_max = reduce_max(block_max, batch_size, block_mapping)
+        block_adjustment = torch.exp(block_max - group_max.index_select(0, block_mapping))
 
     block_sum = block_sum * block_adjustment
     group_sum = block2batch(block_sum, block_mapping_2d)
