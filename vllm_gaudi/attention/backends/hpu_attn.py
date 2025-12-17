@@ -201,7 +201,9 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
             else FP8Matmul()
         self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn \
             else VLLMFP8KVCache()
-        self.fused_scaled_dot_product_attention = kernels.fsdpa()
+        HPUFusedSDPA = kernels.fsdpa()
+        self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
+            else ModuleFusedSDPA(HPUFusedSDPA)
         self.use_merged_prefill = get_config().merged_prefill
         self.prefill_impl = get_config().prompt_attn_impl
         assert self.prefill_impl != 'fsdpa_impl' or alibi_slopes is None, \
@@ -300,23 +302,21 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         else:
             v_padded = v
 
-        output = ops.prompt_attention(
-            impl=self.prefill_impl,
-            query=q,
-            key=k,
-            value=v_padded,
-            is_causal=True,
-            attn_bias=attn_metadata.attn_bias,
-            position_bias=None,
-            valid_seq_lengths=attn_metadata.seq_lens_tensor,
-            scale=self.scale,
-            matmul_qk_op=self.matmul_qk,
-            softmax_op=self.softmax,
-            matmul_av_op=self.matmul_av,
-            keys_fetch_func=self.latent_cache_k.fetch_from_cache,
-            values_fetch_func = None,
-            fsdpa_op=self.fused_scaled_dot_product_attention.apply \
-            if self.fused_scaled_dot_product_attention is not None else None)
+        output = ops.prompt_attention(impl=self.prefill_impl,
+                                      query=q,
+                                      key=k,
+                                      value=v_padded,
+                                      is_causal=True,
+                                      attn_bias=attn_metadata.attn_bias,
+                                      position_bias=None,
+                                      valid_seq_lengths=attn_metadata.seq_lens_tensor,
+                                      scale=self.scale,
+                                      matmul_qk_op=self.matmul_qk,
+                                      softmax_op=self.softmax,
+                                      matmul_av_op=self.matmul_av,
+                                      keys_fetch_func=self.latent_cache_k.fetch_from_cache,
+                                      values_fetch_func=None,
+                                      fsdpa_op=self.fused_scaled_dot_product_attention)
         # remove padding
         output = output.view(batch_size, -1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]
 
