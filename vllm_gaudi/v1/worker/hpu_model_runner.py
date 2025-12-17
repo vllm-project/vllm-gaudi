@@ -2035,10 +2035,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
     def _create_dummy_prefill_batch_contents(self, num_prefills: int) -> list[PrefillInputData]:
         req_id = str(-1)
-        context_len = 0
-        query_len = 128
+        context_len = 127 if has_kv_transfer_group() else 0
+        query_len = 1 if has_kv_transfer_group() else 128
         prompt_tokens = 128
-        token_ids = list(int(i) for i in range(prompt_tokens))
+        token_ids = list(int(i) for i in range(query_len))
         num_blocks = round_up(context_len + query_len, self.block_size) // self.block_size
         blocks = [0] * num_blocks
         num_output_logits = context_len + query_len - prompt_tokens + 1
@@ -3836,6 +3836,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 disable_mark_scales_as_const = os.getenv("VLLM_DISABLE_MARK_SCALES_AS_CONST", "false") in ("1", "true")
                 self._inc_preprocess()
                 if config.measure:
+                    assert self.parallel_config.data_parallel_size == 1, \
+                        "Data parallelism is not supported during the calibration stage."
                     self.model = prepare(self.model, config)
                 elif config.quantize:
                     self.model = convert(self.model, config)
