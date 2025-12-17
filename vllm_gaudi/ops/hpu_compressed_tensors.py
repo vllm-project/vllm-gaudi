@@ -14,7 +14,8 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter, ModelWeig
                                            PackedvLLMParameter, RowvLLMParameter)
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
-    CompressedTensorsLinearMethod as OrigCompressedTensorsLinearMethod, CompressedTensorsConfig, CompressedTensorsMoEMethod)
+    CompressedTensorsLinearMethod as OrigCompressedTensorsLinearMethod, CompressedTensorsConfig,
+    CompressedTensorsMoEMethod)
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors_moe)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (  # noqa: E501
     CompressedTensorsScheme, CompressedTensorsWNA16)

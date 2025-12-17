@@ -2,14 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-import habana_frameworks.torch as htorch
 from utils import get_data_path, create_fused_moe
 from unittest.mock import MagicMock
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import CompressedTensorsConfig
-from vllm_gaudi.ops.hpu_compressed_tensors import (
-    HPUCompressedTensorsW8A8Fp8MoEMethod
-)
-from vllm_gaudi.utils import HPUCompileConfig
+from vllm_gaudi.ops.hpu_compressed_tensors import (HPUCompressedTensorsW8A8Fp8MoEMethod)
 from vllm.forward_context import override_forward_context
 from safetensors import safe_open
 
@@ -62,7 +58,8 @@ def test_compressed_tensors_moe_method_w8a8fp8_static_per_channel(dist_init):
     # Weights were extracted from first FusedMoE layer of RedHatAI/Qwen3-30B-A3B-quantized.w4a16
     # (with adjusted shapes, to make tensors smaller)
 
-    with safe_open(get_data_path("data/compressed_tensors/moe_w8a8fp8_static_per_channel.safetensors"), framework="pt") as f:
+    with safe_open(get_data_path("data/compressed_tensors/moe_w8a8fp8_static_per_channel.safetensors"),
+                   framework="pt") as f:
         w2_weight = f.get_tensor("w2_weight").to("hpu").repeat(128, 1, 1)
         oot_op.w2_weight.copy_(w2_weight)
 
@@ -81,11 +78,11 @@ def test_compressed_tensors_moe_method_w8a8fp8_static_per_channel(dist_init):
         w2_input_scale = f.get_tensor("w2_input_scale").to("hpu").repeat(128)
         oot_op.w2_input_scale.copy_(w2_input_scale)
 
-
     oot_op.quant_method.process_weights_after_loading(oot_op)
 
     # Input and expected output
-    with safe_open(get_data_path("data/compressed_tensors/moe_w8a8fp8_static_per_channel.safetensors"), framework="pt") as f:
+    with safe_open(get_data_path("data/compressed_tensors/moe_w8a8fp8_static_per_channel.safetensors"),
+                   framework="pt") as f:
         hidden_states = f.get_tensor("hidden_states").to("hpu")
         router_logits = f.get_tensor("router_logits").to("hpu").repeat(1, 128)
         ref_output = f.get_tensor("ref_output").to("hpu")
@@ -148,7 +145,8 @@ def test_compressed_tensors_moe_method_w8a8fp8_static_per_tensor(dist_init):
     # Weights were extracted from first FusedMoE layer of RedHatAI/Qwen3-30B-A3B-quantized.w4a16
     # (with adjusted shapes, to make tensors smaller)
 
-    with safe_open(get_data_path("data/compressed_tensors/moe_w8a8fp8_static_per_tensor.safetensors"), framework="pt") as f:
+    with safe_open(get_data_path("data/compressed_tensors/moe_w8a8fp8_static_per_tensor.safetensors"),
+                   framework="pt") as f:
         w2_weight = f.get_tensor("w2_weight").to("hpu").repeat(128, 1, 1)
         oot_op.w2_weight.copy_(w2_weight)
 
@@ -170,7 +168,8 @@ def test_compressed_tensors_moe_method_w8a8fp8_static_per_tensor(dist_init):
     oot_op.quant_method.process_weights_after_loading(oot_op)
 
     # Input and expected output
-    with safe_open(get_data_path("data/compressed_tensors/moe_w8a8fp8_static_per_tensor.safetensors"), framework="pt") as f:
+    with safe_open(get_data_path("data/compressed_tensors/moe_w8a8fp8_static_per_tensor.safetensors"),
+                   framework="pt") as f:
         hidden_states = f.get_tensor("hidden_states").to("hpu")
         router_logits = f.get_tensor("router_logits").to("hpu").repeat(1, 128)
         ref_output = f.get_tensor("ref_output").to("hpu")
