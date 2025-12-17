@@ -93,6 +93,7 @@ from vllm_gaudi.extension.ops import LoraMask as LoraMask
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnectorMetadata
 from vllm.v1.core.sched.output import GrammarOutput
+from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -2652,7 +2653,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                kv_caches,
                                lora_logits_mask,
                                lora_mask,
-                               scheduler_output,
                                warmup_mode=False,
                                inputs_embeds=None,
                                model_mm_kwargs=None):
@@ -3115,8 +3115,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     lora_mask=None,
                     inputs_embeds=inputs_embeds,
                     model_mm_kwargs=model_mm_kwargs,
-                    warmup_mode=warmup_mode,
-                    scheduler_output=scheduler_output)
+                    warmup_mode=warmup_mode)
         selected_req_ids = [batch.req_ids_cpu[idx] for idx in batch.logits_groups_cpu.tolist()]
         htorch.core.mark_step()
         ##### Sampling Start #####
@@ -3370,11 +3369,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         #    assert not (num_prefills > 0 and num_decodes > 0)
         # skip kv_connector if dummy run
         if not warmup_mode:
-            if isinstance(scheduler_output.kv_connector_metadata, NixlConnectorMetadata):
-                with set_forward_context(None, self.vllm_config):
+            if isinstance(scheduler_output.kv_connector_metadata, LMCacheConnectorMetadata):
+                with set_forward_context(prefill_data.attn_metadata, self.vllm_config):
                     self.maybe_setup_kv_connector(scheduler_output)
             else:
-                with set_forward_context(prefill_data.attn_metadata, self.vllm_config):
+                with set_forward_context(None, self.vllm_config):
                     self.maybe_setup_kv_connector(scheduler_output)
         finished_sending, finished_recving = set(), set()
 
@@ -3442,8 +3441,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         lora_mask,
                         inputs_embeds=inputs_embeds,
                         model_mm_kwargs=model_mm_kwargs,
-                        warmup_mode=warmup_mode,
-                        scheduler_output=scheduler_output)
+                        warmup_mode=warmup_mode)
                 htorch.core.mark_step()
                 non_flattened_hidden_states_prefills.append(non_flattened_hidden_states)
                 if self.use_aux_hidden_state_outputs:
@@ -3493,8 +3491,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     self.kv_caches,
                     None,
                     None,
-                    warmup_mode=warmup_mode,
-                    scheduler_output=scheduler_output)
+                    warmup_mode=warmup_mode)
                 htorch.core.mark_step()
 
         ######################### DECODES #########################
@@ -3516,8 +3513,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 self.kv_caches,
                 lora_logits_mask,
                 lora_mask,
-                warmup_mode=warmup_mode,
-                scheduler_output=scheduler_output)
+                warmup_mode=warmup_mode)
             htorch.core.mark_step()
 
             if structured_output:
@@ -3586,8 +3582,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                        self.kv_caches,
                                                                        None,
                                                                        None,
-                                                                       warmup_mode=warmup_mode,
-                                                                       scheduler_output=scheduler_output)
+                                                                       warmup_mode=warmup_mode)
             htorch.core.mark_step()
 
         if structured_output:
