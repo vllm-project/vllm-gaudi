@@ -248,8 +248,10 @@ class HpuPlatform(Platform):
         if isinstance(dst_cache, tuple):
             _src_cache = src_cache[:, src_block_indices]
             _src_cache = _src_cache.to(dst_cache[0].device)
-            dst_cache[0].index_copy_(0, dst_block_indices, _src_cache[0].view(original_src_dtype) if view_as_uint else _src_cache[0])
-            dst_cache[1].index_copy_(0, dst_block_indices, _src_cache[1].view(original_src_dtype) if view_as_uint else _src_cache[1])
+            dst_cache[0].index_copy_(0, dst_block_indices,
+                                     _src_cache[0].view(original_src_dtype) if view_as_uint else _src_cache[0])
+            dst_cache[1].index_copy_(0, dst_block_indices,
+                                     _src_cache[1].view(original_src_dtype) if view_as_uint else _src_cache[1])
         else:
             indexed_cache = src_cache[src_block_indices]
             if view_as_uint:
