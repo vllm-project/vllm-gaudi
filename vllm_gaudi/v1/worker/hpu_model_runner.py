@@ -74,7 +74,7 @@ from vllm.model_executor.models.interfaces import (SupportsMultiModal, supports_
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.transformers_utils.config import is_interleaved
-from vllm.v1.worker.utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
+from vllm.v1.worker.utils import (sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -90,6 +90,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm_gaudi.extension.ops import LoraMask as LoraMask
+from vllm_gaudi.models.utils import gather_mm_placeholders
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.v1.core.sched.output import GrammarOutput
 
@@ -598,6 +599,11 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         return self.model.embed_input_ids(input_ids=input_ids,
                                           multimodal_embeddings=multimodal_embeddings,
                                           is_multimodal=is_multimodal)
+
+    def embed_input_ids_hpu(self, input_ids, image_index_tensor, multimodal_embeddings=None):
+        return self.model.embed_input_ids_hpu(input_ids=input_ids,
+                                              multimodal_embeddings=multimodal_embeddings,
+                                              image_index_tensor=image_index_tensor)
 
     def embed_multimodal(self, **batched_mm_inputs):
         return self.model.embed_multimodal(**batched_mm_inputs)
@@ -1397,11 +1403,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         is_mm_embed[:total_num_scheduled_tokens] = False
 
         req_start_idx = 0
+
         for req_id in req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             req_state = self.requests[req_id]
             num_computed_tokens = \
                 req_state.num_computed_tokens + shift_computed_tokens
+
             for mm_feature in req_state.mm_features:
                 pos_info = mm_feature.mm_position
                 start_pos = pos_info.offset
@@ -1419,25 +1427,65 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     # in the decoder's KV cache.
                     continue
 
-                start_idx = max(num_computed_tokens - start_pos, 0)
-                end_idx = min(num_computed_tokens - start_pos + num_scheduled_tokens, num_encoder_tokens)
-                assert start_idx < end_idx
+                # Calculate the overlapping range
+                overlap_start = max(num_computed_tokens, start_pos)
+                overlap_end = min(num_computed_tokens + num_scheduled_tokens, start_pos + num_encoder_tokens)
+
+                # Convert to indices relative to the encoder output
+                encoder_start = overlap_start - start_pos
+                encoder_end = overlap_end - start_pos
+
+                # Calculate actual slice length
+                actual_slice_length = encoder_end - encoder_start
+
+                assert encoder_start < encoder_end
+
                 mm_hash = mm_feature.identifier
                 encoder_output = self.encoder_cache.get(mm_hash, None)
                 assert encoder_output is not None,\
                       f"Encoder cache miss for {mm_hash}."
                 encoder_output = self.encoder_cache[mm_hash]
 
-                if (is_embed := pos_info.is_embed) is not None:
-                    is_embed = is_embed[start_idx:end_idx]
+                # Get the actual slice and pad to fixed size
+                actual_slice = encoder_output[encoder_start:encoder_end]
+                max_slice_size = encoder_output.shape[0]
 
-                mm_embeds_item = gather_mm_placeholders(
-                    encoder_output[start_idx:end_idx],
+                # Pad encoder slice to fixed size
+                if actual_slice_length < max_slice_size:
+                    pad_size = max_slice_size - actual_slice_length
+                    padding_shape = (pad_size, ) + actual_slice.shape[1:]
+                    padding = torch.zeros(padding_shape, dtype=actual_slice.dtype, device=actual_slice.device)
+                    padded_encoder_slice = torch.cat([actual_slice, padding], dim=0)
+                else:
+                    padded_encoder_slice = actual_slice
+
+                # Handle is_embed with same padding
+                is_embed = None
+                if (pos_is_embed := pos_info.is_embed) is not None:
+                    actual_is_embed = pos_is_embed[encoder_start:encoder_end]
+                    if actual_slice_length < max_slice_size:
+                        pad_size = max_slice_size - actual_slice_length
+                        padding_is_embed = torch.zeros(pad_size,
+                                                       dtype=actual_is_embed.dtype,
+                                                       device=actual_is_embed.device)
+                        is_embed = torch.cat([actual_is_embed, padding_is_embed], dim=0)
+                    else:
+                        is_embed = actual_is_embed
+
+                # Call gather_mm_placeholders with fixed-size padded tensors
+                padded_mm_embeds_item, actual_embed_count = gather_mm_placeholders(
+                    padded_encoder_slice,
                     is_embed=is_embed,
+                    max_output_size=max_slice_size,
                 )
-                req_start_pos = req_start_idx + start_pos - num_computed_tokens
-                is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
-                    = True
+
+                # Trim the result to the actual number of embeddings (not slice length)
+                mm_embeds_item = padded_mm_embeds_item[:actual_embed_count]
+
+                # Calculate position in the request's token sequence
+                req_start_pos = req_start_idx + overlap_start - num_computed_tokens
+                req_end_pos = req_start_idx + overlap_end - num_computed_tokens
+                is_mm_embed[req_start_pos:req_end_pos] = True
 
                 # Only whole mm items are processed
                 mm_embeds.append(mm_embeds_item)
@@ -1453,28 +1501,38 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         total_num_scheduled_tokens: Optional[int],
         scheduler_output: "SchedulerOutput",
         req_ids: list[str],
+        image_index_tensor: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor | None, dict[str, Any] | None]:
         inputs_embeds = None
         model_mm_kwargs = None
+
         if self.supports_mm_inputs:
             # Run the multimodal encoder if any.
             with self.profiler.record_event('internal', 'prepare_input_encoders'):
                 self._execute_mm_encoder(scheduler_output, req_ids)
+            htorch.core.mark_step()
 
             mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output,
                                                                 req_ids,
-                                                                total_num_scheduled_tokens=total_num_scheduled_tokens)
-            # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa
-            # This may require moving multimodal input preps into _prepare_inputs,        # noqa
-            # to avoid padding issues.
+                                                                total_num_scheduled_tokens=token_ids.shape[-1])
             htorch.core.mark_step()
-            inputs_embeds = self.model.embed_input_ids(
-                token_ids,
-                multimodal_embeddings=mm_embeds,
-                is_multimodal=is_mm_embed,
-            )
+
+            # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa E501
+            # This may require moving multimodal input preps into _prepare_inputs,        # noqa E501
+            # to avoid padding issues.
 
             model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
+            if image_index_tensor is not None:
+                model_mm_kwargs['image_index'] = image_index_tensor
+            if 'image_index' in model_mm_kwargs:
+                inputs_embeds = self.model.embed_input_ids_hpu(token_ids, model_mm_kwargs['image_index'], mm_embeds)
+                model_mm_kwargs.pop("image_index", None)
+            else:
+                inputs_embeds = self.model.embed_input_ids(
+                    token_ids,
+                    multimodal_embeddings=mm_embeds,
+                    is_multimodal=is_mm_embed,
+                )
 
         return inputs_embeds, model_mm_kwargs
 
@@ -2010,6 +2068,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             dummy_prefill_input_batches = \
                 self._create_dummy_prefill_batch_contents(num_pad_across_dp)
             merge_contents(dummy_prefill_input_batches[0], *dummy_prefill_input_batches[1:])
+
         return all_batches[0], dummy_prefill_input_batches[0] if dummy_prefill_input_batches else None
 
     def _prepare_unified_prefill_inputs(self,
@@ -3350,6 +3409,16 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                          warmup_mode)
         prefill_data, \
             dummy_prefill_input_data_batches_across_dp = prefill_input_data
+
+        image_index_tensor = None
+        image_index_tensors = []
+        if self.is_mm_optimized and len(prefill_data.token_ids):
+            for idx, prefill_data_slice in enumerate(prefill_data.token_ids):
+                is_image_flatten = (prefill_data_slice.squeeze().flatten() == self.image_token_id)
+                is_image_flatten = is_image_flatten.flatten()
+                image_index_tensor = is_image_flatten.nonzero().squeeze(-1)
+                image_index_tensors.append(image_index_tensor)
+
         num_pad_prefill_batch_across_dp = \
             0 if dummy_prefill_input_data_batches_across_dp is None \
             else len(dummy_prefill_input_data_batches_across_dp.request_ids)
@@ -3384,19 +3453,17 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             structured_output = True
         if self.use_async_scheduling:
             invalid_req_indices = []
+
         ######################### PREFILLS #########################
         if num_prefills > 0:
             htorch.core.mark_step()
             for idx, (req_id, prompt_len, token_ids, position_ids, attn_metadata, logits_indices,
                       logits_requests) in enumerate(zip(*shallow_tuple(prefill_data))):
 
+                mm_idx_tensor = image_index_tensors[idx] if len(image_index_tensors) else None
                 # Prepare multimodal inputs if any
-                inputs_embeds, model_mm_kwargs = self._get_model_mm_inputs(
-                    token_ids,
-                    token_ids.shape[-1],
-                    scheduler_output,
-                    req_id,
-                )
+                inputs_embeds, model_mm_kwargs = self._get_model_mm_inputs(token_ids, token_ids.shape[-1],
+                                                                           scheduler_output, req_id, mm_idx_tensor)
 
                 lora_mask, lora_logits_mask = self._configure_lora(token_ids, self.requests, req_id, True)
 
@@ -3829,6 +3896,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self._maybe_compile(self.model)
         self.model_memory_usage = m.consumed_device_memory
         logger.info("Compilation took %.4f GB", self.model_memory_usage / float(2**30))
+        self.is_mm_optimized = is_mm_optimized(self.model)
+        self.image_token_id = self.model.model.config.image_token_id if hasattr(self.model.model.config,
+                                                                                'image_token_id') else None
 
     def _maybe_compile(self, *args, **kwargs):
         """Entrypoint for a torch.compilation of the model"""
