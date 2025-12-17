@@ -29,6 +29,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (pack_quan
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (marlin_repeat_scales_on_all_ranks)
 from vllm.model_executor.utils import set_weight_attrs
 import vllm_gaudi.extension.ops as hpu_ops
+from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel, VllmMixtureOfExpertsOpWNA16)
 
 SUPPORTED_STRATEGIES = [QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR]
@@ -107,6 +108,8 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         return -1
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+
+        # If channelwise, scales are already lined up
         if layer.scheme.strategy == QuantizationStrategy.TENSOR:
             ws_channelwise = convert_to_channelwise(layer.weight_scale, layer.logical_widths)
             layer.weight_scale = torch.nn.Parameter(ws_channelwise, requires_grad=False)
@@ -120,7 +123,10 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         # see the reference: https://github.com/vllm-project/vllm/blob/v0.11.2/vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_w8a8_fp8.py#L169-L173
         if layer.scheme.is_static_input_scheme and hasattr(layer, "input_scale"):
             # required by torch.compile to be torch.nn.Parameter, only per-tensor supported
-            layer.input_scale = torch.nn.Parameter(layer.input_scale.max(), requires_grad=False)
+            input_scale = layer.input_scale.max()
+            # hw aligned
+            input_scale = ConvertScaleToHwAligned().calc(input_scale)
+            layer.input_scale = torch.nn.Parameter(input_scale, requires_grad=False)
         else:
             layer.input_scale = None
 
