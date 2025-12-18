@@ -42,3 +42,9 @@ def rms_norm():
 def block_softmax_adjustment():
     import torch
     return torch.ops.hpu.block_softmax_adjustment
+
+
+@_kernel("softmax_fa2")
+def softmax_fa2():
+    import torch
+    return torch.ops.hpu.softmax_fa2

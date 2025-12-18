@@ -1,5 +1,6 @@
 from functools import cache
 import os
+from vllm.config import ModelConfig
 from vllm.utils.torch_utils import make_tensor_with_pad, TORCH_DTYPE_TO_NUMPY_DTYPE
 from vllm_gaudi.extension.runtime import get_config
 from typing import (Any, Optional, TypeVar, Union)
@@ -27,6 +28,10 @@ def hpu_device_string():
 def hpu_backend_string():
     backend_string = 'hccl' if not is_fake_hpu() else 'gloo'
     return backend_string
+
+
+def has_quant_config(model_config: ModelConfig) -> bool:
+    return model_config.quantization == "inc" or os.getenv("QUANT_CONFIG", None) is not None
 
 
 def async_h2d_copy(source, dest_tensor=None, dtype=None, device='hpu'):

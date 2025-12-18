@@ -15,7 +15,7 @@ vLLM Hardware Plugin for Intel® Gaudi®
 ---
 *Latest News* 🔥
 
-- [2025/11] The 0.10.2 release introduces the production-ready version of the vLLM Hardware Plugin for Intel® Gaudi® v1.23.0. The plugin is an alternative to the [vLLM fork](https://github.com/HabanaAI/vllm-fork), which reaches end of life with this release and will be deprecated in v1.24.0, remaining functional only for legacy use cases. We strongly encourage all fork users to begin planning their migration to the plugin. For more information about this release, see the [Release Notes](docs/release_notes.md).
+- [2025/11] The 0.11.2 release introduces the production-ready version of the vLLM Hardware Plugin for Intel® Gaudi® v1.22.2. The plugin is an alternative to the [vLLM fork](https://github.com/HabanaAI/vllm-fork), which reaches end of life with this release and will be deprecated in v1.24.0, remaining functional only for legacy use cases. We strongly encourage all fork users to begin planning their migration to the plugin. For more information about this release, see the [Release Notes](docs/release_notes.md).
 - [2025/06] We introduced an early developer preview of the vLLM Hardware Plugin for Intel® Gaudi®, which is not yet intended for general use.
 
 ---
@@ -67,7 +67,4 @@ We welcome and value any contributions and collaborations.
 
 <!-- --8<-- [start:contact-us] -->
 - For technical questions and feature requests, please use GitHub [Issues](https://github.com/vllm-project/vllm-gaudi/issues).
-- For discussing with fellow users, please use the [vLLM Forum](https://discuss.vllm.ai).
-- For coordinating contributions and development, please use [Slack](https://slack.vllm.ai).
-- For security disclosures, please use GitHub's [Security Advisories](https://github.com/vllm-project/vllm/security/advisories) feature.
 <!-- --8<-- [end:contact-us] -->

@@ -172,6 +172,7 @@ async def send_request_to_service(
         "do_remote_decode": True,
         "do_remote_prefill": False,
         "remote_engine_id": None,
+        "remote_request_id": f"prefill-{request_id}",
         "remote_block_ids": None,
         "remote_host": None,
         "remote_port": None,

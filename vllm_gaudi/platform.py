@@ -12,6 +12,7 @@ from vllm.platforms import Platform, PlatformEnum
 from vllm_gaudi.extension.runtime import get_config
 
 if TYPE_CHECKING:
+    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import ModelConfig, VllmConfig
     from vllm.attention.backends.registry import AttentionBackendEnum
 else:
@@ -43,18 +44,11 @@ class HpuPlatform(Platform):
     def get_attn_backend_cls(
         cls,
         selected_backend: "AttentionBackendEnum",
-        head_size: int,
-        dtype: torch.dtype,
-        kv_cache_dtype: Optional[str],
-        block_size: int,
-        use_mla: bool,
-        has_sink: bool,
-        use_sparse: bool,
-        attn_type: str | None = None,
+        attn_selector_config: "AttentionSelectorConfig",
     ) -> str:
-        if use_sparse:
+        if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on HPU.")
-        if use_mla:
+        if attn_selector_config.use_mla:
             logger.info("Using HPUAttentionMLA backend.")
             return ("vllm_gaudi.attention.backends.hpu_attn."
                     "HPUMLAAttentionBackend")
@@ -81,6 +75,24 @@ class HpuPlatform(Platform):
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         return cls.device_name
+
+    @classmethod
+    def get_device_total_memory(cls, device_id: int = 0) -> int:
+        """Get the total memory of a device in bytes."""
+        # NOTE: This is a workaround.
+        # The correct implementation of the method in this place should look as follows:
+        # total_hpu_memory = torch.hpu.mem_get_info()[1]
+        # A value of 0 is returned to preserve the current logic in
+        # vllm/vllm/engine/arg_utils.py → get_batch_defaults() →
+        # default_max_num_batched_tokens, in order to avoid the
+        # error in hpu_perf_test, while also preventing a
+        # NotImplementedError in test_defaults_with_usage_context.
+        logger.warning("This is a workaround! Please check the NOTE "
+                       "in the get_device_total_memory definition.")
+
+        total_hpu_memory = 0
+
+        return total_hpu_memory
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
@@ -169,6 +181,9 @@ class HpuPlatform(Platform):
         else:
             return "DRAM"
 
+    def is_sleep_mode_available(cls) -> bool:
+        return True
+
     @classmethod
     def set_torch_compile(cls) -> None:
         # NOTE: PT HPU lazy backend (PT_HPU_LAZY_MODE = 1)
@@ -225,12 +240,23 @@ class HpuPlatform(Platform):
         dst_block_indices: torch.Tensor,
     ) -> None:
         """Copy blocks from src_cache to dst_cache on HPU."""
+        # WA: https://github.com/pytorch/pytorch/issues/169656
+        original_src_dtype = src_cache.dtype
+        view_as_uint = original_src_dtype in [torch.float8_e4m3fn, torch.float8_e5m2]
+        if view_as_uint:
+            src_cache = src_cache.view(torch.uint8)
         if isinstance(dst_cache, tuple):
             _src_cache = src_cache[:, src_block_indices]
             for i in range(len(dst_cache)):
-                dst_cache[i].index_copy_(0, dst_block_indices, _src_cache[i].to(dst_cache[i].device))
+                indexed_cache = _src_cache[i]
+                if view_as_uint:
+                    indexed_cache = indexed_cache.view(original_src_dtype)
+                dst_cache[i].index_copy_(0, dst_block_indices, indexed_cache.to(dst_cache[i].device))
         else:
-            dst_cache.index_copy_(0, dst_block_indices, src_cache[src_block_indices].to(dst_cache.device))
+            indexed_cache = src_cache[src_block_indices]
+            if view_as_uint:
+                indexed_cache = indexed_cache.view(original_src_dtype)
+            dst_cache.index_copy_(0, dst_block_indices, indexed_cache.to(dst_cache.device))
         torch.hpu.synchronize()
 
     @classmethod

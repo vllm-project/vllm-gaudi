@@ -5,7 +5,7 @@ title: Unified Attention
 
 ## Overview
 
-vLLM Hardware Plugin for Intel® Gaudi® v1.23.0 introduces a new attention backend called Unified Attention, which unifies several previous algorithms into a single implementation. As a newly added backend, it currently supports a subset of the planned features. Compared to earlier approaches, it provides the following advantages:
+vLLM Hardware Plugin for Intel® Gaudi® v1.24.0 will introduce a new attention backend called Unified Attention, which unifies several previous algorithms into a single implementation. As a newly added backend, it currently supports a subset of the planned features. Compared to earlier approaches, it provides the following advantages:
 
 - Proper handling of shared blocks when using a contiguous KV cache
 - Support for mixed batches, enabling prefill and decode tokens to run in a single batch
