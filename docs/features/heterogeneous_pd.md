@@ -109,6 +109,7 @@ export UCX_TLS=ib,rc,cuda_copy
 export UCX_MEMTYPE_CACHE=0
 export LD_LIBRARY_PATH="/tmp/ucx_install/lib:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
 export VLLM_NIXL_SIDE_CHANNEL_HOST=$HOST
+export VLLM_NIXL_DEVICE_TO_DEVICE=1
 export VLLM_USE_V1=1
 
 vllm serve "$MODEL" \
@@ -137,6 +138,7 @@ export UCX_TLS=ib,rc,gaudi_gdr
 export UCX_MEMTYPE_CACHE=0
 export LD_LIBRARY_PATH="/tmp/ucx_install/lib:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
 export VLLM_NIXL_SIDE_CHANNEL_HOST=$HOST
+export VLLM_NIXL_DEVICE_TO_DEVICE=1
 export VLLM_USE_V1=1
 
 vllm serve "$MODEL" \
@@ -179,6 +181,7 @@ export UCX_TLS=ib,rc,cuda_copy
 export UCX_MEMTYPE_CACHE=0
 export LD_LIBRARY_PATH="/tmp/ucx_install/lib:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
 export VLLM_NIXL_SIDE_CHANNEL_HOST=$HOST
+export VLLM_NIXL_DEVICE_TO_DEVICE=1
 export VLLM_USE_V1=1
 
 vllm serve "$MODEL" \
@@ -207,6 +210,7 @@ export UCX_TLS=ib,rc,gaudi_gdr
 export UCX_MEMTYPE_CACHE=0
 export LD_LIBRARY_PATH="/tmp/ucx_install/lib:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
 export VLLM_NIXL_SIDE_CHANNEL_HOST=$HOST
+export VLLM_NIXL_DEVICE_TO_DEVICE=1
 export VLLM_USE_V1=1
 
 vllm serve "$MODEL" \
