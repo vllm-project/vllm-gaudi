@@ -807,7 +807,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.block_size,
             use_mla=self.model_config.use_mla,
         )
-        self.attn_backend_name =  getattr(self.attn_backend, "__name__", None)
+        self.attn_backend_name = getattr(self.attn_backend, "__name__", None)
         # Mult-modal-related.
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
@@ -1472,9 +1472,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # This may require moving multimodal input preps into _prepare_inputs,        # noqa
             # to avoid padding issues.
             htorch.core.mark_step()
-            if self.attn_backend_name is 'HPUAttentionBackendV1' and \
+            if self.attn_backend_name == 'HPUAttentionBackendV1' and \
                 token_ids.ndim == 2 and token_ids.shape[0] == 1:
-               token_ids = token_ids.squeeze(0)
+                token_ids = token_ids.squeeze(0)
             inputs_embeds = self.model.embed_input_ids(
                 token_ids,
                 multimodal_embeddings=mm_embeds,
