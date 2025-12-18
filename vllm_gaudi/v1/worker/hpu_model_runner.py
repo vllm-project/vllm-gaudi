@@ -1799,7 +1799,19 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # self.input_batch.num_prompt_tokens[batch_idx] == self.input_batch.num_tokens[batch_idx].
             # In preemption scenario num_tokens will also include the tokens emitted before preemption
             num_prompt_tokens = self.input_batch.num_prompt_tokens[batch_idx]
-            num_output_logits = max(0, seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1)
+            if self.use_async_scheduling or self.use_structured_output:
+                # NOTE(tianmu-li): align behavior of incomplete prompt with gpu_model_runner
+                # Always have at least 1 logit when using async scheduling
+                # or structured output
+                if seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1 < 1:
+                    num_output_logits = 1
+                    if self.use_async_scheduling:
+                        # Discard partial prefill logit for async scheduling
+                        self.invalid_req_indices.append(batch_idx)
+                else:
+                    num_output_logits = seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1
+            else:
+                num_output_logits = max(0, seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1)
             logits_positions = list(range(seq_num_scheduled_tokens - num_output_logits, seq_num_scheduled_tokens))
 
             new_batch_contents = BatchContents(
@@ -3352,6 +3364,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         num_decodes = len(pd_info.decode_req_ids)
         num_prefills = len(pd_info.prompt_req_ids)
         num_reqs = num_decodes + num_prefills
+        if self.use_async_scheduling:
+            self.invalid_req_indices = []
         with self.profiler.record_event('internal', 'prepare_input_tensors'):
             prefill_input_data, decode_input_data = self._prepare_inputs(scheduler_output, num_prefills, num_decodes,
                                                                          warmup_mode)
@@ -3383,14 +3397,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         decode_sampled_token_ids_device = None
         # NOTE(tianmu-li): For structured output, combine logits before
         # postprocessing. Should it be done for all requests?
-        structured_output = False
+        self.use_structured_output = False
         spec_decode_num_tokens = None
         if grammar_output is not None:
             logits_prompt = []
             logits_decode = []
-            structured_output = True
-        if self.use_async_scheduling:
-            invalid_req_indices = []
+            self.use_structured_output = True
+
         ######################### PREFILLS #########################
         if num_prefills > 0:
             htorch.core.mark_step()
@@ -3409,25 +3422,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
                 self.event_start = self.profiler.get_timestamp_us()
                 self.profiler.start("internal", "prefill")
-                # NOTE(tianmu-li): Align behavior of incomplete prompt with gpu_model_runner
-                # If logits_indices is smaller than req_id, the last request is a chunked prompt request that
-                # hasn't finished in this step. We add the last token position to logits_indices to ensure
-                # the last token of the chunk is sampled. This sampled token will be discarded later
-                if logits_indices.shape[0] < len(req_id):
-                    if structured_output or self.use_async_scheduling:
-                        # When there are multiple requests in the batch (e.g. self.use_merged_prefill=True),
-                        # the last token position is the sum of all prompt lengths - 1
-                        # This logic also holds when there is only one request in the batch
-                        logits_indices_append = torch.full((1, ),
-                                                           torch.sum(prompt_len) - 1,
-                                                           device=logits_indices.device,
-                                                           dtype=logits_indices.dtype)
-                        logits_indices = torch.cat([logits_indices, logits_indices_append])
-                    if self.use_async_scheduling:
-                        # Discard partial prefill logit for async scheduling
-                        # Depends on 1 decode token/batch
-                        prefill_start_idx = num_decodes
-                        invalid_req_indices.append(prefill_start_idx + idx)
 
                 htorch.core.mark_step()
                 non_flattened_hidden_states, aux_hidden_states, \
@@ -3446,7 +3440,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     aux_hidden_states_prefills.append(aux_hidden_states)
                 sample_hidden_states_prefills.append(sample_hidden_states)
                 # Skip separate sampling for structured output
-                if structured_output:
+                if self.use_structured_output:
                     logits_prompt.append(logits_device)
                     prefill_sampled_requests.extend(logits_requests)
                 else:
@@ -3516,7 +3510,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 warmup_mode=warmup_mode)
             htorch.core.mark_step()
 
-            if structured_output:
+            if self.use_structured_output:
                 logits_decode.append(logits_device[:num_decodes])
                 decode_sampled_requests.extend(self.input_batch.req_ids[:num_decodes])
             else:
@@ -3585,7 +3579,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                        warmup_mode=warmup_mode)
             htorch.core.mark_step()
 
-        if structured_output:
+        if self.use_structured_output:
             # Scheduler places cached before prompt
             logits_combined = logits_decode + logits_prompt
             logits = torch.cat(logits_combined, dim=0)
@@ -3620,7 +3614,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if self.use_async_scheduling:
             self.input_batch.prev_sampled_token_ids = sampled_token_ids.flatten()
             # self.input_batch.prev_sampled_token_ids_invalid_indices
-            invalid_req_indices_set = set(invalid_req_indices)
+            invalid_req_indices_set = set(self.invalid_req_indices)
             self.input_batch.prev_sampled_token_ids_invalid_indices = \
                 invalid_req_indices_set
             self.input_batch.prev_req_id_to_index = {
@@ -3737,7 +3731,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             return AsyncHPUModelRunnerOutput(
                 model_runner_output=model_runner_output,
                 sampled_token_ids=sampled_token_ids,
-                invalid_req_indices=invalid_req_indices,
+                invalid_req_indices=self.invalid_req_indices,
                 async_output_copy_stream=self.async_output_copy_stream,
             )
         model_runner_output = ModelRunnerOutput(
