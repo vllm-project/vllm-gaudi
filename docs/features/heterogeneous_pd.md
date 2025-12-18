@@ -171,6 +171,9 @@ vllm serve "$MODEL" \
 > [dev/prefill_KV_process](https://github.com/xuechendi/vllm-fork/tree/dev/prefill_KV_process) or cherry-pick the commits on both
 > nodes before installing via `pip install`.
 
+> [!NOTE]
+> When using `agreed_block_size`, set it to the GCD of the prefill and decode `--block-size` values so both sides share a compatible KV block size.
+
 CUDA launch script:
 
 ```sh
