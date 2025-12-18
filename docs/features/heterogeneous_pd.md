@@ -28,14 +28,17 @@ The following installation is supported with vLLM and vLLM Gaudi versions:
 ### CUDA Node Installation
 
 ```sh
+# Install prerequisites
+apt install -y python3.12 python3-pip git
+
 # Install default NIXL (comes with UCX)
-pip install nixl[cu12]
+pip3 install nixl[cu12]
 
 # Install vLLM from source
 git clone https://github.com/vllm-project/vllm
 cd vllm
 git checkout $vllm_commit
-pip install -e .
+pip3 install -e .
 ```
 
 ### Gaudi Node Installation
