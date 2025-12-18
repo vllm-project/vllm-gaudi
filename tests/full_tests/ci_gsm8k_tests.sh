@@ -234,6 +234,14 @@ run_qwen2_5_vl_unified_attn_test() {
     echo "✅ Test multimodal-support + unified attention with qwen2.5-vl-7b passed."
 }
 
+# Multimodal-support with qwen3-vl
+run_qwen3_vl_test() {
+    echo "➡️ Testing Qwen3-VL-32B..."
+    VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=0 \
+    python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen3-vl-32b.yaml"
+    echo "✅ Test with multimodal-support with qwen3-vl-32b passed."
+}
+
 # Spec decode with ngram
 run_spec_decode_ngram_test() {
     echo "➡️ Testing Spec-decode with ngram..."
