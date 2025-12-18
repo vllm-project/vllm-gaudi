@@ -6,7 +6,8 @@ title: Heterogeneous PD Disaggregation on CUDA+Gaudi Multi‑Node System
 
 ## Overview
 
-PD Disaggregation splits model execution into prefill and decode stages. The validated topology uses CUDA GPUs for prefill nodes and Gaudi HPUs for decode nodes connected through UCX over InfiniBand. Reverse roles are not yet supported.
+PD Disaggregation splits model execution into prefill and decode stages. This separation allows for heterogeneous deployments, with
+different devices for prefill and decode stages.
 
 ## Prerequisites
 
@@ -160,7 +161,7 @@ vllm serve "$MODEL" \
 > To enable this, set the vLLM branch to [dev/decode_KV_post_process](https://github.com/xuechendi/vllm-fork/tree/dev/decode_KV_post_process)
 > or cherry-pick the commits on both nodes before installing via `pip install`.
 
-### Case 2: Gaudi Decode + CUDA Prefill
+### Case 2: Gaudi Prefill + CUDA Decode
 
 > [!IMPORTANT]
 > This case is enabled with [#30448](https://github.com/vllm-project/vllm/pull/30448). To enable this example, set the vLLM branch to
