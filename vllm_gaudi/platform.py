@@ -12,6 +12,7 @@ from vllm.platforms import Platform, PlatformEnum
 from vllm_gaudi.extension.runtime import get_config
 
 if TYPE_CHECKING:
+    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import ModelConfig, VllmConfig
     from vllm.attention.backends.registry import AttentionBackendEnum
 else:
@@ -43,20 +44,12 @@ class HpuPlatform(Platform):
     def get_attn_backend_cls(
         cls,
         selected_backend: "AttentionBackendEnum",
-        head_size: int,
-        dtype: torch.dtype,
-        kv_cache_dtype: Optional[str],
-        block_size: int,
-        use_mla: bool,
-        has_sink: bool,
-        use_sparse: bool,
-        use_mm_prefix: bool,
-        attn_type: str | None = None,
+        attn_selector_config: "AttentionSelectorConfig",
     ) -> str:
-        if use_sparse:
+        if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on HPU.")
         elif get_config().unified_attn:
-            if use_mla:
+            if attn_selector_config.use_mla:
                 logger.info("Using HPUUnifiedMLA backend.")
                 return ("vllm_gaudi.attention.backends.hpu_attn."
                         "HPUUnifiedMLABackend")
@@ -64,7 +57,7 @@ class HpuPlatform(Platform):
             return ("vllm_gaudi.attention.backends."
                     "hpu_attn.HPUUnifiedAttentionBackend")
         else:
-            if use_mla:
+            if attn_selector_config.use_mla:
                 logger.info("Using HPUAttentionMLA backend.")
                 return ("vllm_gaudi.attention.backends.hpu_attn."
                         "HPUMLAAttentionBackend")
