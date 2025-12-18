@@ -39,6 +39,7 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.attention.layer import MLAAttention
 from vllm.attention.selector import get_attn_backend
+
 from vllm.config import (VllmConfig, update_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
@@ -92,6 +93,8 @@ from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm_gaudi.extension.ops import LoraMask as LoraMask
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.v1.core.sched.output import GrammarOutput
+from vllm.config.multimodal import ImageDummyOptions
+from vllm.multimodal.profiling import MultiModalProfiler
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -804,10 +807,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.block_size,
             use_mla=self.model_config.use_mla,
         )
-
+        self.attn_backend_name =  getattr(self.attn_backend, "__name__", None)
         # Mult-modal-related.
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
+
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(model_config)
         if self.supports_mm_inputs:
             self.is_mm_embed = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
@@ -1468,6 +1472,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # This may require moving multimodal input preps into _prepare_inputs,        # noqa
             # to avoid padding issues.
             htorch.core.mark_step()
+            if self.attn_backend_name is 'HPUAttentionBackendV1' and \
+                token_ids.ndim == 2 and token_ids.shape[0] == 1:
+               token_ids = token_ids.squeeze(0)
             inputs_embeds = self.model.embed_input_ids(
                 token_ids,
                 multimodal_embeddings=mm_embeds,
@@ -1977,10 +1984,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
     def _create_dummy_prefill_batch_contents(self, num_prefills: int) -> list[PrefillInputData]:
         req_id = str(-1)
-        context_len = 0
-        query_len = 128
+        context_len = 127 if has_kv_transfer_group() else 0
+        query_len = 1 if has_kv_transfer_group() else 128
         prompt_tokens = 128
-        token_ids = list(int(i) for i in range(prompt_tokens))
+        token_ids = list(int(i) for i in range(query_len))
         num_blocks = round_up(context_len + query_len, self.block_size) // self.block_size
         blocks = [0] * num_blocks
         num_output_logits = context_len + query_len - prompt_tokens + 1
@@ -3769,6 +3776,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 disable_mark_scales_as_const = os.getenv("VLLM_DISABLE_MARK_SCALES_AS_CONST", "false") in ("1", "true")
                 self._inc_preprocess()
                 if config.measure:
+                    assert self.parallel_config.data_parallel_size == 1, \
+                        "Data parallelism is not supported during the calibration stage."
                     self.model = prepare(self.model, config)
                 elif config.quantize:
                     self.model = convert(self.model, config)
@@ -4593,27 +4602,59 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             decode_cfg = (decode_cfg[0], 1, decode_cfg[1])
         return prompt_cfg, decode_cfg
 
+    def get_patch_size_from_model(self):
+        """Get patch_size from the loaded vision model."""
+        # For Qwen2.5-VL and similar models
+        if hasattr(self.model.model, 'visual'):
+            return self.model.model.visual.patch_size
+        return 1
+
     def _get_mm_dummy_batch(
         self,
         modality: str,
-        max_items_per_batch: int,
+        image_args: int,
+        ratio_w: int,
+        ratio_h: int,
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
         assert self.mm_budget is not None
+        img_count = 1
+        if self.get_model().vision_bucket_manager.is_batch_based:
+            # Create ImageDummyOptions for Gemma3
+            image_options = ImageDummyOptions(
+                width=896,  # pixels as in gemma3 config
+                height=896  # pixels as in gemma3 config
+            )
+            batch = image_args
+        else:
+            patch_size = int(self.get_patch_size_from_model())
+            # Calculate width and height to maintain aspect ratio and patch count
+            # Total patches = (width/patch_size) * (height/patch_size)
+            # We want: (w/ps) * (h/ps) = num_patch where num_patch is image_args
+            # And: w/h = ratio_w/ratio_h
+            grid_w = int(math.sqrt(image_args * ratio_w / ratio_h))
+            grid_h = int(image_args / grid_w)
+            w = grid_w * patch_size
+            h = grid_h * patch_size
+            image_options = ImageDummyOptions(
+                width=w,  # Custom width in pixels
+                height=h  # Custom height in pixels
+            )
+            batch = img_count
+        processor = self.mm_registry.create_processor(model_config=self.model_config, cache=self.mm_budget.cache)
+        profiler: MultiModalProfiler = MultiModalProfiler(processor)
+        dummy_data = profiler.get_decoder_dummy_data(seq_len=4096,
+                                                     mm_counts={"image": img_count},
+                                                     mm_options={"image": image_options})
+        dummy_mm_data = dummy_data.multi_modal_data
 
-        dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
-            model_config=self.model_config,
-            seq_len=self.max_model_len,
-            mm_counts={modality: 1},
-            cache=self.mm_budget.cache,
-        )
-        dummy_mm_data = dummy_decoder_data.multi_modal_data
-
+        assert modality == 'image'
         # Result in the maximum GPU consumption of the model
-        dummy_mm_item = dummy_mm_data[modality][0]
-        dummy_mm_items = [dummy_mm_item] * max_items_per_batch
+        dummy_mm_item = dummy_mm_data['image'][0]
+        dummy_mm_items = [dummy_mm_item] * batch
 
         self.model.model = cast(SupportsMultiModal, self.model.model)
+
         return next(mm_kwargs_group for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
             dummy_mm_items,
             device=self.device,
@@ -4630,32 +4671,37 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.scheduler_config,
             self.mm_registry,
         ) if self.supports_mm_inputs else None
-
-        #self.mm_budget.mm_limits : {'image': 2}
+        aspect_ratios = [(1, 1)]  # 1:1 square
+        sanity_check = False
+        if self.get_model().vision_bucket_manager.is_batch_based:
+            sanity_check = True
+            aspect_ratio_ext = [
+                (4, 3),  # 4:3 landscape
+                (3, 4),  # 3:4 portrait
+                (16, 9),  # 16:9 widescreen
+                (9, 16),  # 9:16 portrait
+            ]
+            aspect_ratios.extend(aspect_ratio_ext)
         for modality, max_items in self.mm_budget.mm_limits.items():
+            if modality == 'video':
+                logger.warning_once("Warming up for video is not implemented")
+                continue
             phase = f'Graph/Multimodal({modality})'
             num_candidates = len(buckets)
-
             for idx, img_arg in enumerate(buckets):
-                # Create dummy batch of multimodal inputs.
-                batched_dummy_mm_inputs = self._get_mm_dummy_batch(
-                    modality,
-                    img_arg,
-                )
-                #htorch.core.mark_step()
-                # Run multimodal encoder.
-                dummy_encoder_outputs = \
-                     self.model.embed_multimodal(
-                     **batched_dummy_mm_inputs)
-                #htorch.core.mark_step()
+                for (ratio_w, ratio_h) in aspect_ratios:
+                    batched_dummy_mm_inputs = self._get_mm_dummy_batch(modality, img_arg, ratio_w, ratio_h)
+                    dummy_encoder_outputs = \
+                        self.model.embed_multimodal(
+                        **batched_dummy_mm_inputs)
+                    if sanity_check:
+                        sanity_check_mm_encoder_outputs(
+                            dummy_encoder_outputs,
+                            expected_num_items=img_arg,
+                        )
 
-                sanity_check_mm_encoder_outputs(
-                    dummy_encoder_outputs,
-                    expected_num_items=img_arg,
-                )
-
-                self.graphed_buckets.add(img_arg)
-                self.log_warmup_multimodal(phase, idx, num_candidates, 1, 0, img_arg)
+                    self.graphed_buckets.add(img_arg)
+                    self.log_warmup_multimodal(phase, idx, num_candidates, 1, 0, img_arg)
 
     @torch.inference_mode()
     def warmup_model(self) -> None:
