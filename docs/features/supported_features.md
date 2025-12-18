@@ -16,7 +16,6 @@ This document summarizes the features currently supported by the vLLM Hardware P
 | Paged KV cache with algorithms enabled for Intel® Gaudi® accelerators   | Provides a custom paged attention and cache operators implementations optimized for Intel® Gaudi® devices.   | N/A   |
 | Custom Intel® Gaudi® operator implementations   | Provides optimized implementations of operators, such as prefill attention, Root Mean Square Layer Normalization, and Rotary Positional Encoding.     | N/A   |
 | Tensor parallel inference      | Supports multi-HPU inference with tensor parallelism and multiprocessing.  | [Documentation](https://docs.vllm.ai/en/v0.10.0/serving/distributed_serving.html), [HCCL reference](https://docs.habana.ai/en/latest/API_Reference_Guides/HCCL_APIs/index.html)    |
-| Pipeline parallel inference    | Supports multi-HPU inference with pipeline parallelism.   | [Documentation](https://docs.vllm.ai/en/v0.10.0/serving/distributed_serving.html), [Running Pipeline Parallelism](https://vllm-gaudi.readthedocs.io/en/latest/configuration/pipeline_parallelism.html)   |
 | Inference with HPU Graphs     | Reduces host overheads by using HPU Graphs, which record execution graphs ahead of time and replay them during inference.  | [Documentation](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html)   |
 | Inference with `torch.compile`   | Supports inference with `torch.compile`, which is the default setting for HPU.    | [vLLM HPU backend execution modes](https://docs.vllm.ai/en/v0.10.1.1/getting_started/installation/intel_gaudi.html#execution-modes)    |
 | INC quantization  | Supports the FP8 model, KV cache quantization, and calibration with Intel Neural Compressor (INC). This feature is not fully supported with the `torch.compile` execution mode.    | [Documentation](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_FP8.html)   |
@@ -66,6 +65,7 @@ Future plugin releases are planned to provide support for the following vLLM fea
 - In-place weight update
 - MLA with unified attention
 - Multinode support
+- Pipeline parallel inference
 
 ## Discontinued Features
 
