@@ -3374,7 +3374,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         num_prefills = len(pd_info.prompt_req_ids)
         num_reqs = num_decodes + num_prefills
         if self.use_async_scheduling:
-            self.invalid_req_indices = []
+            self.invalid_req_indices: list[int] = []
         with self.profiler.record_event('internal', 'prepare_input_tensors'):
             prefill_input_data, decode_input_data = self._prepare_inputs(scheduler_output, num_prefills, num_decodes,
                                                                          warmup_mode)
@@ -3411,7 +3411,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         decode_sampled_token_ids_device = None
         # NOTE(tianmu-li): For structured output, combine logits before
         # postprocessing. Should it be done for all requests?
-        self.use_structured_output = False
+        self.use_structured_output: bool = False
         spec_decode_num_tokens = None
         if grammar_output is not None:
             logits_prompt = []
