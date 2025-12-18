@@ -205,11 +205,6 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
             - extend per-channel weight and per-tensor activation format
         """
         CompressedTensorsMoEMethod.__init__(self, moe)
-        """
-        self.quant_config = quant_config
-        self.weight_quant = self.quant_config.target_scheme_map["Linear"].get("weights")
-        self.input_quant = self.quant_config.target_scheme_map["Linear"].get("input_activations")
-        """
         self.weight_quant = weight_quant
         self.input_quant = input_quant
 
