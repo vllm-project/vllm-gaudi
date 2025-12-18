@@ -269,7 +269,8 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
 
         if self.weight_quant.strategy == QuantizationStrategy.TENSOR:
             assert layer.w13_weight_scale is not None
-            # Convert per-tensor weight scales to per-channel format by repeating scale values across the intermediate dimension.
+            # Convert per-tensor weight scales to per-channel format
+            # by repeating scale values across the intermediate dimension.
             w13_s0 = layer.w13_weight_scale[:, :1]
             w13_s1 = layer.w13_weight_scale[:, 1:]
             w13_s0_exp = torch.repeat_interleave(w13_s0, repeats=layer.intermediate_size_per_partition, dim=1)
