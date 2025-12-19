@@ -26,7 +26,7 @@ Before you start, ensure that your environment meets the following requirements:
 - Ubuntu 22.04 or 24.04
 - Python 3.10
 - Intel® Gaudi® 2 or 3 AI accelerator
-- Intel® Gaudi® software version 1.21.0 or later
+- Intel® Gaudi® software version {{ VERSION }} or later
 
 Additionally, ensure that the Intel® Gaudi® execution environment is properly set up. If
 it is not, complete the setup by following the [Installation
@@ -54,7 +54,7 @@ Follow these steps to run the vLLM server or launch benchmarks on Gaudi using Do
     | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
     | `MODEL`        | Preferred large language model. For a list of the available models, see the next table.                                                                                      |
     | `HF_TOKEN`     | Hugging Face token generated from <https://huggingface.co>.                                                                                                                  |
-    | `DOCKER_IMAGE` | Docker image name or URL for the vLLM Gaudi container. When using the Gaudi repository, make sure to select Docker images with the *vllm-installer* prefix in the file name. |
+    | `DOCKER_IMAGE` | Docker image name or URL for the vLLM Gaudi container. When using the Gaudi repository, make sure to select Docker images with the *vllm-plugin* prefix in the file name. |
 
     The following table lists the supported vLLM models:
 
@@ -81,7 +81,7 @@ Follow these steps to run the vLLM server or launch benchmarks on Gaudi using Do
     ```bash
     MODEL="Qwen/Qwen2.5-14B-Instruct" \
     HF_TOKEN="<your huggingface token>" \
-    DOCKER_IMAGE="vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/vllm-installer-{{ PT_VERSION }}:latest"
+    DOCKER_IMAGE="vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/vllm-plugin-{{ PT_VERSION }}:latest"
     ```
 
 5. Run the vLLM server using Docker Compose.
