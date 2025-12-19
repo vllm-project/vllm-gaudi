@@ -107,6 +107,9 @@ jobs:
           echo "${{ steps.get_vllm_commit.outputs.commit_id }}" > VLLM_STABLE_COMMIT
           git add VLLM_STABLE_COMMIT
           git commit -m "Set vLLM stable commit for ${{ steps.extract_tag.outputs.tag_name }}"
+          echo "* @mgawarkiewicz-intel @wpyszka @piotrbocian" > .github/CODEOWNERS
+          git add .github/CODEOWNERS
+          git commit -m "update CODEOWNERS for ${{ steps.extract_tag.outputs.tag_name }}"
           git push -u origin "$BRANCH_NAME"
           echo "✅ Successfully created and pushed new branch '$BRANCH_NAME'."
 
