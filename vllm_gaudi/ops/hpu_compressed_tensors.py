@@ -31,6 +31,7 @@ from vllm.model_executor.utils import set_weight_attrs
 import vllm_gaudi.extension.ops as hpu_ops
 from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel, VllmMixtureOfExpertsOpWNA16)
+from vllm_gaudi.extension.runtime import get_config
 
 SUPPORTED_STRATEGIES = [QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR]
 
@@ -125,7 +126,8 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             # required by torch.compile to be torch.nn.Parameter, only per-tensor supported
             input_scale = layer.input_scale.max()
             # hw aligned
-            input_scale = ConvertScaleToHwAligned().calc(input_scale)
+            if get_config().use_hpu_aligned_scale:
+                input_scale = ConvertScaleToHwAligned().calc(input_scale)
             layer.input_scale = torch.nn.Parameter(input_scale, requires_grad=False)
         else:
             layer.input_scale = None
