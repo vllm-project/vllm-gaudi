@@ -13,6 +13,8 @@ def rejection_sample_pytorch(
     padded_draft_token_ids: torch.Tensor,
     padded_target_token_ids: torch.Tensor,
     bonus_token_ids: torch.Tensor,
+    # [batch_size]
+    num_draft_tokens: list[int],
     cu_num_draft_tokens: torch.Tensor,
 ) -> torch.Tensor:
     """
@@ -23,20 +25,24 @@ def rejection_sample_pytorch(
     bonus token is appended. This version handles variable numbers of draft 
     tokens per sequence.
 
+    The current HPU implementation of spec decode will flatten the num_draft_tokens
+    to 1. And so the shape size of padded_draft_token_ids will be
+    the [real batch size * num_draft_tokens, 1].
+
     Args:
         padded_draft_token_ids (torch.Tensor): A 2D tensor of draft tokens.
-            Shape: (num_seqs, max_draft_tokens)
-        padded_target_token_ids (torch.Tensor): A 2D tensor of target tokens
+            Shape: (num_seqs * max_draft_tokens, 1)
+        padded_target_token_ids (torch.Tensor): A 1D tensor of target tokens
             predicted by the main model.
-            Shape: (num_seqs, max_draft_tokens)
+            Shape: (num_seqs * max_draft_tokens)
         bonus_token_ids (torch.Tensor): A single bonus token for each sequence,
             to be used if all draft tokens are accepted.
             Shape: (num_seqs, 1)
+        num_draft_tokens: list[int]: List of number draft tokens for each sequence.
+            Shape: (num_seqs)
         cu_num_draft_tokens (torch.Tensor): The cumulative sum of the number of
             draft tokens for each request. Used to determine actual sequence 
             lengths. Shape: (num_seqs,)
-        padding_token_id (int): The value used to pad the output tensor.
-            Defaults to -1.
 
     Returns:
         torch.Tensor: The resulting tensor of accepted tokens.
@@ -49,7 +55,9 @@ def rejection_sample_pytorch(
     bonus_token_ids = bonus_token_ids.cpu().to(torch.int32)
     cu_num_draft_tokens = cu_num_draft_tokens.cpu()
     # 1. Get tensor dimensions and device for calculations
-    num_seqs, max_draft_tokens = padded_draft_token_ids.shape
+    num_seqs = len(num_draft_tokens)
+    padded_draft_token_ids = padded_draft_token_ids.view(num_seqs, -1)
+    max_draft_tokens = padded_draft_token_ids.shape[-1]
     padded_target_token_ids = padded_target_token_ids.view(num_seqs, -1)
     bonus_token_ids = bonus_token_ids.view(num_seqs, -1)
     device = padded_draft_token_ids.device
@@ -69,6 +77,8 @@ def rejection_sample_pytorch(
 
     mismatches = ~matches
     any_mismatch = mismatches.any(dim=1)
+    # For sequence that the num draft tokens is 0, always consider all match
+    any_mismatch[num_draft_tokens_per_seq == 0] = False
     first_mismatch_idx = torch.argmax(mismatches.int(), dim=1)
 
     # 4. Determine the number of accepted tokens for each sequence
@@ -135,7 +145,8 @@ def rejection_sample(
     # Rejection sampling for greedy sampling requests.
 
     target_argmax = target_probs.argmax(dim=-1)
-    output_token_ids = rejection_sample_pytorch(draft_token_ids, target_argmax, bonus_token_ids, cu_num_draft_tokens)
+    output_token_ids = rejection_sample_pytorch(draft_token_ids, target_argmax, bonus_token_ids, num_draft_tokens,
+                                                cu_num_draft_tokens)
     return output_token_ids
 
 
