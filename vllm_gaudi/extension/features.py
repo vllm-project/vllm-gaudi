@@ -92,6 +92,7 @@ def get_features():
         Value('unified_attn', False),
         Value('unified_attn_softmax_fa2',
               All(VersionRange(">=1.24.0.279"), Enabled('unified_attn'), Kernel(softmax_fa2), Hardware('gaudi3'))),
+        Value('unified_attn_block_softmax', All(Enabled('unified_attn'), Hardware('gaudi3'))),
         Value('scale_adjustment', True, env_var='VLLM_SCALE_ADJUSTMENT', env_var_type=boolean),
         Value('flatten_input', Any(ModelType('qwen3_moe'), ModelType('granitemoe'), ModelType('glm4_moe'))),
         Value('unified_attn_shared_cache_ratio',
