@@ -441,6 +441,7 @@ def generate_buckets(bs_range,
             if all(bucket_filter(bs, query, blocks) for bucket_filter in filters):
                 buckets.add(corrector(bs, query, blocks))
     else:
+        max_ctx = max(ctx for _, ctx in buckets_2d)
         for bs_idx, bs in enumerate(bs_range):
             for ctx_idx, ctx in enumerate(ctx_range):
                 local_buckets = expand_to_neighbor_buckets(bs_idx, bs_range, ctx_idx, ctx_range,
@@ -448,6 +449,9 @@ def generate_buckets(bs_range,
                 buckets_2d.update(local_buckets)
 
         for bs, ctx in buckets_2d:
+            if is_prompt and ctx == max_ctx:
+                # skip biggest ctx only in prompt mode; we will add it via get_max_bucket_per_query later
+                continue
             for query in query_range:
                 if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
                     buckets.add(corrector(bs, query, ctx))
