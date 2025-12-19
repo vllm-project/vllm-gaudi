@@ -15,7 +15,7 @@ from vllm_gaudi.extension.runtime import get_config, clear_config
 @pytest.fixture(autouse=True)
 def default_config():
     clear_config()
-    get_config(prefix_caching=True)
+    get_config()
     yield
     clear_config()
 
@@ -37,6 +37,12 @@ def test_warmup_range():
     config = (2, 64, 128)
     result = linear.warmup_range(config)
     assert result == [2, 4, 8, 16, 32, 64, 128]
+
+
+def test_warmup_range_with_one():
+    config = (1, 64, 128)
+    result = linear.warmup_range(config)
+    assert result == [1, 2, 4, 8, 16, 32, 64, 128]
 
 
 def test_generate_prompt_buckets():

@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       branch_name:
-        description: "The new release branch name (e.g., 'releases/v0.11.0')"
+        description: "The new release branch name (e.g., 'pre-releases/v0.11.0')"
         required: true
         type: string
 
@@ -59,11 +59,11 @@ jobs:
         id: extract_tag
         run: |
           BRANCH_NAME="${{ github.event.inputs.branch_name }}"
-          if [[ "$BRANCH_NAME" != releases/* ]]; then
-            echo "::error::Branch name must follow the 'releases/**' pattern."
+          if [[ "$BRANCH_NAME" != pre-releases/* ]]; then
+            echo "::error::Branch name must follow the 'pre-releases/**' pattern."
             exit 1
           fi
-          TAG_NAME="${BRANCH_NAME#releases/}"
+          TAG_NAME="${BRANCH_NAME#pre-releases/}"
           echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
           echo "Extracted tag name: $TAG_NAME"
 
@@ -107,6 +107,9 @@ jobs:
           echo "${{ steps.get_vllm_commit.outputs.commit_id }}" > VLLM_STABLE_COMMIT
           git add VLLM_STABLE_COMMIT
           git commit -m "Set vLLM stable commit for ${{ steps.extract_tag.outputs.tag_name }}"
+          echo "* @mgawarkiewicz-intel @wpyszka @piotrbocian" > .github/CODEOWNERS
+          git add .github/CODEOWNERS
+          git commit -m "update CODEOWNERS for ${{ steps.extract_tag.outputs.tag_name }}"
           git push -u origin "$BRANCH_NAME"
           echo "✅ Successfully created and pushed new branch '$BRANCH_NAME'."
 
@@ -154,7 +157,7 @@ jobs:
             --build-arg VLLM_COMMIT_ARG=${{ needs.prepare-release-branch.outputs.commit_id }} \
             -t hpu-plugin-v1-${{ needs.prepare-release-branch.outputs.tag_name }} \
             -f - . <<EOF
-          FROM vault.habana.ai/gaudi-docker/1.22.0/ubuntu24.04/habanalabs/pytorch-installer-2.7.1:latest
+          FROM vault.habana.ai/gaudi-docker/1.22.2/ubuntu24.04/habanalabs/pytorch-installer-2.7.1:latest
 
           COPY ./ /workspace/vllm-gaudi
           WORKDIR /workspace
@@ -258,6 +261,7 @@ jobs:
 
           echo "Running HPU plugin test: ${{ matrix.test_function }}"
           docker run --rm --runtime=habana --name=$CONTAINER_NAME --network=host \
+            --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
@@ -283,6 +287,7 @@ jobs:
 
           echo "Running HPU plugin v1 dp tests"
           docker run --rm --runtime=habana --name=hpu-plugin-v1-test-dp-tests-hourly-ci --network=host \
+            --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e VLLM_SKIP_WARMUP=true \
@@ -310,6 +315,7 @@ jobs:
 
           echo "Running HPU plugin v1 nixl pd tests"
           docker run --rm --runtime=habana --name=hpu-plugin-v1-test-pd-tests-hourly-ci --network=host \
+            --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
@@ -340,6 +346,7 @@ jobs:
 
           echo "Running HPU plugin v1 perf tests"
           docker run --rm --runtime=habana --name=$CONTAINER_NAME --network=host \
+            --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -e HF_HOME=/workspace/hf_cache \

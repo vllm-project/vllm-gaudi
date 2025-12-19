@@ -5,11 +5,12 @@ nav:
       - getting_started/quickstart/quickstart.md
       - getting_started/quickstart/quickstart_configuration.md
       - getting_started/quickstart/quickstart_inference.md
-    - Installation: getting_started/installation.md
+    - getting_started/installation.md
+    - release_notes.md
     - getting_started/compatibility_matrix.md
     - getting_started/validated_models.md
   - Configuration Guides:
-    - configuration/env_vars.md
+    - configuration/env_variables.md
     - configuration/long_context.md
     - Calibration: 
       - configuration/calibration/calibration.md
@@ -20,12 +21,18 @@ nav:
       - configuration/quantization/inc.md
       - configuration/quantization/auto_awq.md
       - configuration/quantization/gptqmodel.md
-    - configuration/optimization.md
-    - configuration/pipeline_parallelism.md
+    - configuration/performance_tuning.md
+    # - configuration/pipeline_parallelism.md
+    - Warm-up:
+      - configuration/warm-up/warm-up.md
+      - configuration/warm-up/sampler_warm-up.md
+      - configuration/warm-up/defragmenter_warm-up.md
+      - configuration/warm-up/managing_warm-up.md
   - Features:
     - features/supported_features.md
-    - features/*
-    - features/quantization
+    - features/bucketing_mechanism.md
+    - features/floating_point_8.md
+    - features/warmup.md
   - Developer Guides:
     - dev_guide/plugin_system.md
     - dev_guide/ci-failures.md

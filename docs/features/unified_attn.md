@@ -5,7 +5,7 @@ title: Unified Attention
 
 ## Overview
 
-vLLM Hardware Plugin for Intel® Gaudi® v1.23.0 introduces a new attention backend called Unified Attention, which unifies several previous algorithms into a single implementation. As a newly added backend, it currently supports a subset of the planned features. Compared to earlier approaches, it provides the following advantages:
+vLLM Hardware Plugin for Intel® Gaudi® v1.24.0 will introduce a new attention backend called Unified Attention, which unifies several previous algorithms into a single implementation. As a newly added backend, it currently supports a subset of the planned features. Compared to earlier approaches, it provides the following advantages:
 
 - Proper handling of shared blocks when using a contiguous KV cache
 - Support for mixed batches, enabling prefill and decode tokens to run in a single batch
@@ -83,7 +83,7 @@ Since we know that each block is used by upmost one token, we can use two optimi
 
 The first optimization allows better handling of batches with large differences between sequence lengths. For example, if we have two samples in a batch, using [4, 12] context blocks respectively, instead of padding the `block_table` to the highest number of blocks, we can use flattened list of blocks. This way, the amount of compute we need scales with the sum of `blocks_used` instead of `bs * max(num_blocks)`. This simplified diagram presents how it works:
 
-![](../../docs/assets/unified_attn/unique.png)
+![](../assets/unified_attn/unique.png)
 
 The main difficulty in this approach is that several blocks may be used in a single query token, preventing direct softmax computation. However, we can use the same approach to calculate softmax in parts and then readjust.
 
