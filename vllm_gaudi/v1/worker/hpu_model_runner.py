@@ -39,6 +39,7 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.attention.layer import MLAAttention
 from vllm.attention.selector import get_attn_backend
+
 from vllm.config import (VllmConfig, update_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
@@ -91,7 +92,10 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm_gaudi.extension.ops import LoraMask as LoraMask
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnectorMetadata
 from vllm.v1.core.sched.output import GrammarOutput
+from vllm.config.multimodal import ImageDummyOptions
+from vllm.multimodal.profiling import MultiModalProfiler
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -108,6 +112,11 @@ from vllm_gaudi.extension.unified_batch import UnifiedBatch
 from vllm_gaudi.extension.logger import logger as init_logger
 
 logger = init_logger()
+
+try:
+    from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
+except ImportError:
+    LMCacheConnectorMetadata = None
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
@@ -804,10 +813,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.block_size,
             use_mla=self.model_config.use_mla,
         )
-
+        self.attn_backend_name = getattr(self.attn_backend, "__name__", None)
         # Mult-modal-related.
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
+
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(model_config)
         if self.supports_mm_inputs:
             self.is_mm_embed = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
@@ -1468,6 +1478,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # This may require moving multimodal input preps into _prepare_inputs,        # noqa
             # to avoid padding issues.
             htorch.core.mark_step()
+            if self.attn_backend_name == 'HPUAttentionBackendV1' and \
+                token_ids.ndim == 2 and token_ids.shape[0] == 1:
+                token_ids = token_ids.squeeze(0)
             inputs_embeds = self.model.embed_input_ids(
                 token_ids,
                 multimodal_embeddings=mm_embeds,
@@ -1520,12 +1533,15 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         requests_type = {}
         if scheduler_output.kv_connector_metadata:
-            for req in scheduler_output.kv_connector_metadata.reqs_to_save:
-                requests_type[req] = 'prefill'
-            for req in scheduler_output.kv_connector_metadata.reqs_to_recv:
-                requests_type[req] = 'decode'
-            requests = scheduler_output.kv_connector_metadata.reqs_to_save | \
-                        scheduler_output.kv_connector_metadata.reqs_to_recv
+            if isinstance(scheduler_output.kv_connector_metadata, NixlConnectorMetadata):
+                for req in scheduler_output.kv_connector_metadata.reqs_to_save:
+                    requests_type[req] = 'prefill'
+                for req in scheduler_output.kv_connector_metadata.reqs_to_recv:
+                    requests_type[req] = 'decode'
+                requests = scheduler_output.kv_connector_metadata.reqs_to_save | \
+                            scheduler_output.kv_connector_metadata.reqs_to_recv
+            else:
+                requests = scheduler_output.kv_connector_metadata.requests
         else:
             requests = None
 
@@ -3364,8 +3380,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         #    assert not (num_prefills > 0 and num_decodes > 0)
         # skip kv_connector if dummy run
         if not warmup_mode:
-            with set_forward_context(None, self.vllm_config):
-                self.maybe_setup_kv_connector(scheduler_output)
+            if LMCacheConnectorMetadata is not None and isinstance(scheduler_output.kv_connector_metadata,
+                                                                   LMCacheConnectorMetadata):
+                with set_forward_context(prefill_data.attn_metadata, self.vllm_config):
+                    self.maybe_setup_kv_connector(scheduler_output)
+            else:
+                with set_forward_context(None, self.vllm_config):
+                    self.maybe_setup_kv_connector(scheduler_output)
         finished_sending, finished_recving = set(), set()
 
         # NOTE(Chendi): used by spec decode draft model, since we are doing
@@ -3432,7 +3453,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         lora_mask,
                         inputs_embeds=inputs_embeds,
                         model_mm_kwargs=model_mm_kwargs,
-                        warmup_mode=warmup_mode,)
+                        warmup_mode=warmup_mode)
                 htorch.core.mark_step()
                 non_flattened_hidden_states_prefills.append(non_flattened_hidden_states)
                 if self.use_aux_hidden_state_outputs:
@@ -3465,8 +3486,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                              prompt_batch_idx=idx,
                                                                              is_prompt=True)
                     self.profiler.record_counter(self.event_start, counters)
-            if not warmup_mode:
-                self.maybe_wait_for_kv_save()
 
             if self.is_driver_worker and self.profiler.enabled:
                 self.profiler_counter_helper.reset_prompt_seq_stats()
@@ -3713,6 +3732,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         logprobs = None
 
         if not warmup_mode:
+            self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = self.get_finished_kv_transfers(scheduler_output)
 
         if self.use_async_scheduling:
@@ -4595,27 +4615,59 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             decode_cfg = (decode_cfg[0], 1, decode_cfg[1])
         return prompt_cfg, decode_cfg
 
+    def get_patch_size_from_model(self):
+        """Get patch_size from the loaded vision model."""
+        # For Qwen2.5-VL and similar models
+        if hasattr(self.model.model, 'visual'):
+            return self.model.model.visual.patch_size
+        return 1
+
     def _get_mm_dummy_batch(
         self,
         modality: str,
-        max_items_per_batch: int,
+        image_args: int,
+        ratio_w: int,
+        ratio_h: int,
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
         assert self.mm_budget is not None
+        img_count = 1
+        if self.get_model().vision_bucket_manager.is_batch_based:
+            # Create ImageDummyOptions for Gemma3
+            image_options = ImageDummyOptions(
+                width=896,  # pixels as in gemma3 config
+                height=896  # pixels as in gemma3 config
+            )
+            batch = image_args
+        else:
+            patch_size = int(self.get_patch_size_from_model())
+            # Calculate width and height to maintain aspect ratio and patch count
+            # Total patches = (width/patch_size) * (height/patch_size)
+            # We want: (w/ps) * (h/ps) = num_patch where num_patch is image_args
+            # And: w/h = ratio_w/ratio_h
+            grid_w = int(math.sqrt(image_args * ratio_w / ratio_h))
+            grid_h = int(image_args / grid_w)
+            w = grid_w * patch_size
+            h = grid_h * patch_size
+            image_options = ImageDummyOptions(
+                width=w,  # Custom width in pixels
+                height=h  # Custom height in pixels
+            )
+            batch = img_count
+        processor = self.mm_registry.create_processor(model_config=self.model_config, cache=self.mm_budget.cache)
+        profiler: MultiModalProfiler = MultiModalProfiler(processor)
+        dummy_data = profiler.get_decoder_dummy_data(seq_len=4096,
+                                                     mm_counts={"image": img_count},
+                                                     mm_options={"image": image_options})
+        dummy_mm_data = dummy_data.multi_modal_data
 
-        dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
-            model_config=self.model_config,
-            seq_len=self.max_model_len,
-            mm_counts={modality: 1},
-            cache=self.mm_budget.cache,
-        )
-        dummy_mm_data = dummy_decoder_data.multi_modal_data
-
+        assert modality == 'image'
         # Result in the maximum GPU consumption of the model
-        dummy_mm_item = dummy_mm_data[modality][0]
-        dummy_mm_items = [dummy_mm_item] * max_items_per_batch
+        dummy_mm_item = dummy_mm_data['image'][0]
+        dummy_mm_items = [dummy_mm_item] * batch
 
         self.model.model = cast(SupportsMultiModal, self.model.model)
+
         return next(mm_kwargs_group for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
             dummy_mm_items,
             device=self.device,
@@ -4632,32 +4684,37 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.scheduler_config,
             self.mm_registry,
         ) if self.supports_mm_inputs else None
-
-        #self.mm_budget.mm_limits : {'image': 2}
+        aspect_ratios = [(1, 1)]  # 1:1 square
+        sanity_check = False
+        if self.get_model().vision_bucket_manager.is_batch_based:
+            sanity_check = True
+            aspect_ratio_ext = [
+                (4, 3),  # 4:3 landscape
+                (3, 4),  # 3:4 portrait
+                (16, 9),  # 16:9 widescreen
+                (9, 16),  # 9:16 portrait
+            ]
+            aspect_ratios.extend(aspect_ratio_ext)
         for modality, max_items in self.mm_budget.mm_limits.items():
+            if modality == 'video':
+                logger.warning_once("Warming up for video is not implemented")
+                continue
             phase = f'Graph/Multimodal({modality})'
             num_candidates = len(buckets)
-
             for idx, img_arg in enumerate(buckets):
-                # Create dummy batch of multimodal inputs.
-                batched_dummy_mm_inputs = self._get_mm_dummy_batch(
-                    modality,
-                    img_arg,
-                )
-                #htorch.core.mark_step()
-                # Run multimodal encoder.
-                dummy_encoder_outputs = \
-                     self.model.embed_multimodal(
-                     **batched_dummy_mm_inputs)
-                #htorch.core.mark_step()
+                for (ratio_w, ratio_h) in aspect_ratios:
+                    batched_dummy_mm_inputs = self._get_mm_dummy_batch(modality, img_arg, ratio_w, ratio_h)
+                    dummy_encoder_outputs = \
+                        self.model.embed_multimodal(
+                        **batched_dummy_mm_inputs)
+                    if sanity_check:
+                        sanity_check_mm_encoder_outputs(
+                            dummy_encoder_outputs,
+                            expected_num_items=img_arg,
+                        )
 
-                sanity_check_mm_encoder_outputs(
-                    dummy_encoder_outputs,
-                    expected_num_items=img_arg,
-                )
-
-                self.graphed_buckets.add(img_arg)
-                self.log_warmup_multimodal(phase, idx, num_candidates, 1, 0, img_arg)
+                    self.graphed_buckets.add(img_arg)
+                    self.log_warmup_multimodal(phase, idx, num_candidates, 1, 0, img_arg)
 
     @torch.inference_mode()
     def warmup_model(self) -> None:
