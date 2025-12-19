@@ -390,6 +390,9 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
                         self.model.multi_modal_projector, \
                         disable_tensor_cache=True)
 
+    def _update_metadata(self, attn_metadata, batch_size, seq_len, device, dtype):
+        return self.metadata_processor.process_metadata(attn_metadata, batch_size, seq_len, device, dtype)
+
     def _get_rotary_embedding_module(self, model: torch.nn.Module):
         """
         Dynamically get the RotaryEmbedding layer in the model.
@@ -434,9 +437,8 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
             kwargs.pop('warmup_mode')
         input_ids = kwargs['input_ids']
         if not self.unified_attn:
-            kwargs['attn_metadata'] = self.metadata_processor.process_metadata(kwargs['attn_metadata'],
-                                                                               input_ids.size(0), input_ids.size(1),
-                                                                               input_ids.device, self.dtype)
+            kwargs['attn_metadata'] = self._update_metadata(kwargs['attn_metadata'], input_ids.size(0),
+                                                            input_ids.size(1), input_ids.device, self.dtype)
         if self._rotary_prepare_cos_sin is not None:
             self._rotary_prepare_cos_sin(kwargs['positions'], recompute_cos_sin=self.recompute_cos_sin)
         attn_meta = kwargs.pop('attn_metadata')
@@ -5524,36 +5526,4 @@ class HPUAttentionMetadataProcessor:
             attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype)
             if self.interleaved_sliding_window:
                 attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype, True)
-        return attn_metadata
-
-    def process_metadata_dict(self, attn_metadata: dict, batch_size: int, seq_len: int, device: torch.device,
-                              dtype: torch.dtype) -> dict:
-        """
-        Post-process a dictionary of attention metadata (for multi-layer models).
-
-        This method optimizes the processing by checking if all metadata objects in the
-        dictionary are the same instance, and if so, processes only once.
-
-        Args:
-            attn_metadata: Dictionary mapping layer names to attention metadata
-            batch_size: Batch size
-            seq_len: Sequence length (for prompt phase)
-            device: Device to create tensors on
-            dtype: Data type for tensors
-
-        Returns:
-            Dictionary with post-processed attention metadata
-        """
-        from vllm_gaudi.extension.logger import logger
-
-        first_attn_metadata = next(iter(attn_metadata.values()))
-        updated_attn_metadata = self.process_metadata(first_attn_metadata, batch_size, seq_len, device, dtype)
-
-        for key in attn_metadata:
-            if attn_metadata[key] is first_attn_metadata:
-                attn_metadata[key] = updated_attn_metadata
-            else:
-                msg = f"Different attn_metadata encountered on layer {key}. Processing it individually."
-                logger.warning(msg)
-                attn_metadata[key] = self.process_metadata(attn_metadata[key], batch_size, seq_len, device, dtype)
         return attn_metadata
