@@ -27,13 +27,24 @@ BlocksT: TypeAlias = Union[torch.tensor, int]
 
 
 class CacheUtils:
-    """Helper utilities for kv-cache"""
+    """Helper utilities for kv-cache
+    
+    Args:
+        is_mla: If True, cache stores MLA latent vectors (no head dimension, single cache).
+                If False, standard attention with per-head K/V caches.
+    """
 
-    def __init__(self, key_cache, value_cache, block_size, k_scales=None, v_scales=None):
+    def __init__(self, key_cache, value_cache, block_size, k_scales=None, v_scales=None, is_mla=False):
         self.key_cache = key_cache
         self.value_cache = value_cache
         self.block_size = block_size
-        self.kv_heads = key_cache.size(1)
+        self.is_mla = is_mla
+
+        # MLA stores latent vectors in a single cache
+        if is_mla:
+            assert value_cache is None, "MLA mode requires value_cache=None (latent stored in key_cache)"
+
+        self.kv_heads = 1 if is_mla else key_cache.size(1)
         self.k_scales = k_scales
         self.v_scales = v_scales
 
@@ -48,24 +59,35 @@ class CacheUtils:
     def _fetch_all(self, fn: Callable[[torch.tensor, BlocksT], torch.tensor],
                    blocks: BlocksT) -> tuple[torch.tensor, torch.tensor]:
         """Fetch both key and values using selected function"""
+        if self.value_cache is None:
+            return fn(self.key_cache, blocks)
         return fn(self.key_cache, blocks), fn(self.value_cache, blocks)
 
     def _fetch_single_shared(self, cache: torch.tensor, blocks: BlocksT) -> torch.tensor:
         """Fetch selected shared blocks from given cache"""
-        return (cache.unflatten(0, (-1, self.block_size)).index_select(0, blocks).flatten(0,
-                                                                                          1).transpose(0, 1).unflatten(
-                                                                                              0, (self.kv_heads, -1)))
+        result = cache.unflatten(0, (-1, self.block_size)).index_select(0, blocks).flatten(0, 1)
+        if not self.is_mla:
+            result = result.transpose(0, 1).unflatten(0, (self.kv_heads, -1))
+        return result
 
     def _fetch_single_unique(self, cache: torch.tensor, blocks: BlocksT) -> torch.tensor:
         """Fetch selected unique blocks from given cache"""
-        cache = cache.unflatten(0, (-1, self.block_size)).transpose(1, 2)
+        cache = cache.unflatten(0, (-1, self.block_size))
+        if not self.is_mla:
+            cache = cache.transpose(1, 2)
+
         if torch.is_tensor(blocks):
             result = cache.index_select(0, blocks)
         elif type(blocks) == int:
             result = cache[:blocks]
         else:
             raise RuntimeError(f'Unsupported type for blocks: {type(blocks)}')
-        return result.unflatten(1, (self.kv_heads, -1))
+
+        if not self.is_mla:
+            result = result.unflatten(1, (self.kv_heads, -1))
+        else:
+            result = result.flatten(0, 1)
+        return result
 
 
 def reduce_max(local_max: torch.tensor, batch_size: int, mapping: torch.tensor):
@@ -166,11 +188,21 @@ def merge(*attn_results: torch.tensor, feps: torch.tensor) -> torch.tensor:
     return attn
 
 
-def partial_attn_causal(
-        query: torch.tensor, key: torch.tensor, value: torch.tensor, bias: Optional[torch.tensor], slice_size: int,
-        fmin: torch.tensor, inputL_hpu_tensors: Dict[tuple, torch.Tensor],
-        inputM_hpu_tensors: Dict[tuple, torch.Tensor]) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
-    """Partial attention where qkv are assumed to be causal between slices"""
+def partial_attn_causal(query: torch.tensor,
+                        key: torch.tensor,
+                        value: torch.tensor,
+                        bias: Optional[torch.tensor],
+                        slice_size: int,
+                        fmin: torch.tensor,
+                        inputL_hpu_tensors: Dict[tuple, torch.Tensor],
+                        inputM_hpu_tensors: Dict[tuple, torch.Tensor],
+                        w_uv: Optional[torch.tensor] = None) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
+    """Partial attention where qkv are assumed to be causal between slices
+    
+    Args:
+        w_uv: Optional MLA projection matrix [num_heads, latent_dim, v_head_dim].
+              If provided, value is assumed to be in latent space and will be projected.
+    """
     if bias is None:
         return (None, None, None)
 
@@ -207,7 +239,17 @@ def partial_attn_causal(
             s_max = torch.maximum(s_attn.amax(-1), fmin)
             s_attn = torch.exp(s_attn - s_max.unsqueeze(-1))
             s_sum = torch.sum(s_attn, -1)
+
+        # Attention: s_attn @ v
         s_attn = torch.matmul(s_attn, v)
+
+        # MLA: Project from latent V to full V
+        if w_uv is not None:
+            orig_shape = s_attn.shape
+            s_attn = s_attn.flatten(0, 1)  # [num_heads, tokens, latent_dim]
+            s_attn = torch.bmm(s_attn, w_uv)  # [num_heads, tokens, v_head_dim]
+            s_attn = s_attn.unflatten(0, orig_shape[:2])  # [kv_heads, q_heads_per_kv, tokens, v_head_dim]
+
         attn_slices.append(s_attn)
         max_slices.append(s_max)
         sum_slices.append(s_sum)
@@ -219,15 +261,39 @@ def partial_attn_causal(
     return combine(attn_slices), combine(max_slices), combine(sum_slices)
 
 
-def partial_attn_shared(query: torch.tensor, blocks: torch.tensor, bias: Optional[torch.tensor], fmin: torch.tensor,
-                        inputL_hpu_tensors: Dict[tuple, torch.Tensor], inputM_hpu_tensors: Dict[tuple, torch.Tensor],
-                        cache_utils: CacheUtils) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
-    """Partial attention where all shared blocks are compared with whole query"""
+def partial_attn_shared(query: torch.tensor,
+                        blocks: torch.tensor,
+                        bias: Optional[torch.tensor],
+                        fmin: torch.tensor,
+                        inputL_hpu_tensors: Dict[tuple, torch.Tensor],
+                        inputM_hpu_tensors: Dict[tuple, torch.Tensor],
+                        cache_utils: CacheUtils,
+                        w_uv: Optional[torch.tensor] = None) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
+    """Partial attention where all shared blocks are compared with whole query
+    
+    Args:
+        w_uv: Optional MLA projection matrix [num_heads, latent_dim, v_head_dim].
+              If provided, assumes MLA mode where query/key/value are in latent space.
+    """
     if bias is None:
         return (None, None, None)
-    kv_heads = cache_utils.kv_heads
-    query = query.transpose(0, 1).unflatten(0, (kv_heads, -1))
-    key, value = cache_utils.fetch_shared(blocks)
+
+    is_mla = w_uv is not None
+
+    if is_mla:
+        # MLA: Single latent cache contains both K and V
+        latent_kv = cache_utils.fetch_shared(blocks)
+        num_heads = query.size(1)
+        query = query.transpose(0, 1).unsqueeze(1)  # [num_heads, 1, tokens, latent_dim + rope_dim]
+        key = latent_kv.unsqueeze(0).unsqueeze(0).expand(num_heads, 1, -1, -1)
+        value = latent_kv.unsqueeze(0).unsqueeze(0).expand(num_heads, 1, -1, -1)
+        kv_heads = 1
+    else:
+        # Standard attention: Separate K and V caches
+        kv_heads = cache_utils.kv_heads
+        query = query.transpose(0, 1).unflatten(0, (kv_heads, -1))
+        key, value = cache_utils.fetch_shared(blocks)
+
     bias = bias.flatten(-2, -1).unsqueeze(0)
 
     attn = torch.matmul(query, key.transpose(-1, -2))
@@ -245,21 +311,52 @@ def partial_attn_shared(query: torch.tensor, blocks: torch.tensor, bias: Optiona
         local_max = torch.maximum(attn.amax(-1), fmin)
         attn = torch.exp(attn - local_max.unsqueeze(-1))
         local_sum = attn.sum(-1)
-    attn = torch.matmul(attn.unflatten(0, (kv_heads, -1)), value).flatten(0, 1)
+
+    attn = torch.matmul(attn.unflatten(0, (kv_heads if not is_mla else num_heads, -1)), value).flatten(0, 1)
+
+    # MLA: Extract latent part and project to full V
+    if is_mla:
+        latent_dim = w_uv.size(1)
+        attn_latent = attn[..., :latent_dim]  # Extract only latent dimension (exclude rope_dim)
+        attn = torch.bmm(attn_latent, w_uv)  # [num_heads, tokens, v_head_dim]
+
     return attn.transpose(0, 1), local_max.transpose(0, 1), local_sum.transpose(0, 1)
 
 
-def partial_attn_unique(query: torch.tensor, blocks: torch.tensor, block_mapping: torch.tensor,
-                        bias: Optional[torch.tensor], fmin: torch.tensor,
-                        cache_utils: CacheUtils) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
-    """Partial attention where all blocks are used by max one query"""
+def partial_attn_unique(query: torch.tensor,
+                        blocks: torch.tensor,
+                        block_mapping: torch.tensor,
+                        bias: Optional[torch.tensor],
+                        fmin: torch.tensor,
+                        cache_utils: CacheUtils,
+                        w_uv: Optional[torch.tensor] = None) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
+    """Partial attention where all blocks are used by max one query
+    
+    Args:
+        w_uv: Optional MLA projection matrix [num_heads, latent_dim, v_head_dim].
+              If provided, assumes MLA mode where query/key/value are in latent space.
+    """
     if bias is None:
         return (None, None, None)
-    batch_size = query.size(0)
-    kv_heads = cache_utils.kv_heads
 
-    query = query.index_select(0, block_mapping).unflatten(1, (kv_heads, -1)).unsqueeze(-2)
-    key, value = cache_utils.fetch_unique(blocks)
+    batch_size = query.size(0)
+    is_mla = w_uv is not None
+
+    if is_mla:
+        # MLA: Single latent cache
+        num_heads = query.size(1)
+        latent_kv = cache_utils.fetch_unique(blocks)
+        latent_kv = latent_kv.unflatten(0, (-1, cache_utils.block_size))
+
+        query = query.index_select(0, block_mapping).unflatten(1, (1, num_heads)).unsqueeze(-2)
+        key = latent_kv.unsqueeze(1).unsqueeze(1).expand(-1, 1, num_heads, -1, -1)
+        value = latent_kv.unsqueeze(1).unsqueeze(1).expand(-1, 1, num_heads, -1, -1)
+    else:
+        # Standard attention
+        kv_heads = cache_utils.kv_heads
+        query = query.index_select(0, block_mapping).unflatten(1, (kv_heads, -1)).unsqueeze(-2)
+        key, value = cache_utils.fetch_unique(blocks)
+
     block_mapping_2d = torch.nn.functional.one_hot(block_mapping, num_classes=batch_size).to(query.dtype)
 
     attn = torch.matmul(query, key.transpose(-1, -2))
@@ -268,6 +365,14 @@ def partial_attn_unique(query: torch.tensor, blocks: torch.tensor, block_mapping
     attn = torch.exp(attn - block_max.unsqueeze(-1))
     block_sum = attn.sum(-1)
     attn = torch.matmul(attn, value)
+
+    # MLA: Extract latent part and project to full V
+    if is_mla:
+        latent_dim = w_uv.size(1)
+        attn_latent = attn[..., :latent_dim]  # [num_blocks, 1, num_heads, 1, latent_dim]
+        attn_latent = attn_latent.squeeze(1).squeeze(-2).transpose(0, 1)  # [num_heads, num_blocks, latent_dim]
+        attn = torch.bmm(attn_latent, w_uv)  # [num_heads, num_blocks, v_head_dim]
+        attn = attn.transpose(0, 1).unsqueeze(1).unsqueeze(-2)  # [num_blocks, 1, num_heads, 1, v_head_dim]
 
     group_max = reduce_max(block_max, batch_size, block_mapping)
     block_adjustment = torch.exp(block_max - group_max.index_select(0, block_mapping))
@@ -328,21 +433,109 @@ def unified_attn(query: torch.tensor, key: torch.tensor, value: torch.tensor, ke
                                  slice_size=metadata.causal_width,
                                  fmin=metadata.fmin,
                                  inputL_hpu_tensors=metadata.inputL_hpu_tensors,
-                                 inputM_hpu_tensors=metadata.inputM_hpu_tensors)
+                                 inputM_hpu_tensors=metadata.inputM_hpu_tensors,
+                                 w_uv=None)
     shared = partial_attn_shared(query=scaled_query,
                                  blocks=metadata.shared_blocks,
                                  bias=metadata.shared_bias,
                                  fmin=metadata.fmin,
                                  inputL_hpu_tensors=metadata.inputL_hpu_tensors,
                                  inputM_hpu_tensors=metadata.inputM_hpu_tensors,
-                                 cache_utils=cache_utils)
+                                 cache_utils=cache_utils,
+                                 w_uv=None)
     unique = partial_attn_unique(query=scaled_query,
                                  blocks=metadata.unique_blocks,
                                  block_mapping=metadata.unique_block_mapping,
                                  bias=metadata.unique_bias,
                                  fmin=metadata.fmin,
-                                 cache_utils=cache_utils)
+                                 cache_utils=cache_utils,
+                                 w_uv=None)
     attn = merge(causal, shared, unique, feps=metadata.feps)
     if attn is None:
         return query
+    return attn
+
+
+def unified_mla(query: Optional[torch.tensor],
+                key: Optional[torch.tensor],
+                value: Optional[torch.tensor],
+                latent_cache: torch.tensor,
+                scale: float,
+                metadata: HPUUnifiedAttentionMetadata,
+                w_uv: torch.tensor,
+                query_latent: Optional[torch.tensor] = None) -> torch.tensor:
+    """Main entry point for Unified MLA
+    
+    Args:
+        query: Query tensor for causal path (already uncompressed) [tokens, num_heads, qk_head_dim]
+               None if only cached attention is needed.
+        key: Key tensor for causal part [tokens, num_heads, qk_head_dim]. None for cached-only.
+        value: Value tensor for causal part in latent space [tokens, num_heads, latent_dim]. None for cached-only.
+        latent_cache: Cached latent KV [num_blocks * block_size, latent_dim + rope_dim]
+        scale: Attention scale factor
+        metadata: Unified attention metadata
+        w_uv: Projection matrix from latent to full V [num_heads, latent_dim, v_head_dim]
+        query_latent: Query tensor for cached path (in latent space) [tokens, num_heads, latent_dim + rope_dim]
+                     None if only causal attention is needed.
+    
+    Returns:
+        Attention output [tokens, num_heads * v_head_dim]
+    
+    Note:
+        - For causal-only: pass query/key/value, set query_latent=None
+        - For cached-only: pass query_latent, set query/key/value=None
+        - For mixed batches: pass both query and query_latent
+    """
+    assert query is not None or query_latent is not None, \
+        "At least one of query or query_latent must be provided"
+
+    # Use appropriate query for each path
+    scaled_query_causal = query * scale if query is not None else None
+    scaled_query_latent = query_latent * scale if query_latent is not None else None
+
+    # MLA: latent cache has no head dimension, value_cache is None (stored in same cache)
+    cache_utils = CacheUtils(latent_cache, value_cache=None, block_size=metadata.block_size, is_mla=True)
+
+    # Causal: compute-friendly path (expand K/V from latent)
+    # key and value already expanded by caller
+    # w_uv projection applied by unified function
+    causal = partial_attn_causal(query=scaled_query_causal,
+                                 key=key,
+                                 value=value,
+                                 bias=metadata.causal_bias,
+                                 slice_size=metadata.causal_width,
+                                 fmin=metadata.fmin,
+                                 inputL_hpu_tensors=metadata.inputL_hpu_tensors,
+                                 inputM_hpu_tensors=metadata.inputM_hpu_tensors,
+                                 w_uv=w_uv) if scaled_query_causal is not None else (None, None, None)
+
+    # Shared/Unique: memory-friendly path (Q in latent space, fetch cached latent KV)
+    # query_latent is already transformed to latent space by caller
+    # For these paths, we need to expand K/V from cached latent vectors
+    shared = partial_attn_shared(query=scaled_query_latent,
+                                 blocks=metadata.shared_blocks,
+                                 bias=metadata.shared_bias,
+                                 fmin=metadata.fmin,
+                                 inputL_hpu_tensors=metadata.inputL_hpu_tensors,
+                                 inputM_hpu_tensors=metadata.inputM_hpu_tensors,
+                                 cache_utils=cache_utils,
+                                 w_uv=w_uv) if scaled_query_latent is not None else (None, None, None)
+
+    unique = partial_attn_unique(query=scaled_query_latent,
+                                 blocks=metadata.unique_blocks,
+                                 block_mapping=metadata.unique_block_mapping,
+                                 bias=metadata.unique_bias,
+                                 fmin=metadata.fmin,
+                                 cache_utils=cache_utils,
+                                 w_uv=w_uv) if scaled_query_latent is not None else (None, None, None)
+
+    attn = merge(causal, shared, unique, feps=metadata.feps)
+    if attn is None:
+        # No attention computed, return original query
+        # Use whichever query was provided
+        # FIXME(kzawora): I'm not quite sure if that's correct, needs verification
+        if query is not None:
+            return query.flatten(-2, -1)  # [tokens, num_heads * head_dim]
+        else:
+            return query_latent.flatten(-2, -1)  # [tokens, num_heads * head_dim]
     return attn

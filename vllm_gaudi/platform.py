@@ -39,19 +39,27 @@ class HpuPlatform(Platform):
     additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int, dtype: torch.dtype,
-                             kv_cache_dtype: Optional[str], block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink: bool) -> str:
-        assert use_v1, 'Only V1 is supported!'
-        if use_mla:
-            logger.info("Using HPUAttentionMLA backend.")
-            return ("vllm_gaudi.attention.backends.hpu_attn."
-                    "HPUMLAAttentionBackend")
+    def get_attn_backend_cls(
+        cls,
+        selected_backend: "AttentionBackendEnum",
+        attn_selector_config: "AttentionSelectorConfig",
+    ) -> str:
+        if attn_selector_config.use_sparse:
+            raise NotImplementedError("Sparse Attention is not supported on HPU.")
         elif get_config().unified_attn:
+            if attn_selector_config.use_mla:
+                logger.info("Using HPUUnifiedMLA backend.")
+                return ("vllm_gaudi.attention.backends.hpu_attn."
+                        "HPUUnifiedMLABackend")
             logger.info("Using UnifiedAttention backend.")
             return ("vllm_gaudi.attention.backends."
                     "hpu_attn.HPUUnifiedAttentionBackend")
         else:
+            if attn_selector_config.use_mla:
+                logger.info("Using HPUAttentionMLA backend.")
+                return ("vllm_gaudi.attention.backends.hpu_attn."
+                        "HPUMLAAttentionBackend")
+
             logger.info("Using HPUAttentionV1 backend.")
             return ("vllm_gaudi.v1.attention.backends."
                     "hpu_attn.HPUAttentionBackendV1")
