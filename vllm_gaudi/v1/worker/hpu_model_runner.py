@@ -1049,7 +1049,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
             # TODO: Support other attention modules, e.g., sliding window,
             # cross-attention
-            if isinstance(attn_module, Attention):
+            if isinstance(attn_module, MambaBase):
+                kv_cache_spec[layer_name] = attn_module.get_kv_cache_spec(self.vllm_config)
+            elif isinstance(attn_module, Attention):
                 if attn_module.attn_type == AttentionType.DECODER:
                     kv_cache_spec[layer_name] = FullAttentionSpec(block_size=block_size,
                                                                   num_kv_heads=attn_module.num_kv_heads,
@@ -4763,6 +4765,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
                 "for more details.")
+            # recreate with block size set for hybrid mamba+attention as got from HybridAttentionMambaModelConfig.verify_and_update_config
+            # block size is set also in platform.py::check_and_update_config but respects set above
             self.input_batch = InputBatch(
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=max(self.max_model_len, self.max_encoder_len),
@@ -4770,7 +4774,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 device=self.device,
                 pin_memory=self.pin_memory,
                 vocab_size=self.model_config.get_vocab_size(),
-                block_sizes=block_sizes,
+                block_sizes=block_sizes,                
+                kernel_block_sizes=block_sizes, # no splitting for Mamba
                 is_spec_decode=bool(self.vllm_config.speculative_config),
                 logitsprocs=self.input_batch.logitsprocs,
                 is_pooling_model=self.is_pooling_model,
