@@ -4736,6 +4736,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             kv_cache_spec = group.kv_cache_spec
             for layer_name in group.layer_names:
                 kv_cache = kv_caches[layer_name]
+                print(f'{layer_name} kv_cache shape {kv_cache.shape}')
                 if isinstance(kv_cache_spec, AttentionSpec) and kv_cache.shape[0] == 2:
                     assert kv_cache.shape[1] != 2, (
                         "Fail to determine whether the layout is "
