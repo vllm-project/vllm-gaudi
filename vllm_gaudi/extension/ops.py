@@ -186,7 +186,7 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
     if k_scales is not None:
         k_scales_uf = k_scales.unflatten(0, (-1, block_size))
     if v_scales is not None:
-        v_scales_uf = v_scales.unflatten(0, (-1, block_size))
+        v_scales_uf = (v_scales[0].unflatten(0, (-1, block_size)), v_scales[1])
 
     query_shape = (-1, q_heads, 1, head_size)
     query = batch2block(scale * query, block_mapping, batch2block_matmul_op).view(query_shape)

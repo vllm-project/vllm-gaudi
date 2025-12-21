@@ -98,8 +98,8 @@ class HPUPagedAttention:
 
     @staticmethod
     def swap_blocks(
-        src_kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-        dst_kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        src_kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        dst_kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
         src_to_dsts: torch.Tensor,
     ) -> None:
         src_key_cache = src_kv_cache[0]
