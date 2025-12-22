@@ -390,9 +390,6 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
                         self.model.multi_modal_projector, \
                         disable_tensor_cache=True)
 
-    def _update_metadata(self, attn_metadata, batch_size, seq_len, device, dtype):
-        return self.metadata_processor.process_metadata(attn_metadata, batch_size, seq_len, device, dtype)
-
     def _get_rotary_embedding_module(self, model: torch.nn.Module):
         """
         Dynamically get the RotaryEmbedding layer in the model.
@@ -437,8 +434,9 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
             kwargs.pop('warmup_mode')
         input_ids = kwargs['input_ids']
         if not self.unified_attn:
-            kwargs['attn_metadata'] = self._update_metadata(kwargs['attn_metadata'], input_ids.size(0),
-                                                            input_ids.size(1), input_ids.device, self.dtype)
+            kwargs['attn_metadata'] = self.metadata_processor.process_metadata(kwargs['attn_metadata'],
+                                                                               input_ids.size(0), input_ids.size(1),
+                                                                               input_ids.device, self.dtype)
         if self._rotary_prepare_cos_sin is not None:
             self._rotary_prepare_cos_sin(kwargs['positions'], recompute_cos_sin=self.recompute_cos_sin)
         attn_meta = kwargs.pop('attn_metadata')
@@ -3734,7 +3732,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         Compile methods which are not part of the compiled model i.e. those
         which will not be compiled during model's compilation.
         """
-        compiled_methods = ['_update_metadata', '_rotary_prepare_cos_sin']
+        compiled_methods = ['metadata_processor.process_metadata', '_rotary_prepare_cos_sin']
         for method_name in compiled_methods:
             method = getattr(self.model, method_name, None)
             if method is not None:
@@ -5317,8 +5315,10 @@ class HPUAttentionMetadataProcessor:
         self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
 
         if self.interleaved_sliding_window:
-            self.use_window_sdpa = os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
-            self.slice_size = int(os.getenv("PT_HPU_SDPA_BC_FACTOR", "1024"))
+            self.use_window_sdpa = with_default(get_config().PT_HPU_SDPA_QKV_SLICE_MODE_FWD, False)
+            #os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
+            self.slice_size = with_default(get_config().PT_HPU_SDPA_BC_FACTOR, False)
+            # int(os.getenv("PT_HPU_SDPA_BC_FACTOR", "1024"))
             self.slice_thld = int(os.environ.get('VLLM_FUSEDSDPA_SLIDE_THLD', '8192'))
 
     def _set_attn_bias(self, attn_metadata: HPUAttentionMetadataV1, batch_size: int, seq_len: int, device: torch.device,
