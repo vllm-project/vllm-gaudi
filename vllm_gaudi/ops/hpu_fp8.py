@@ -102,6 +102,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
 
         # Disable marlin
         self.use_marlin = False
+        self.fp8_backend = False
 
         # disable DeepGemm support.
         self.allow_deep_gemm = False
