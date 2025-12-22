@@ -1,18 +1,19 @@
 import torch
 import torch.nn.functional as F
-from vllm.attention.layer import MultiHeadAttention
-from vllm.attention import layer
+from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 
 
-class HpuMultiHeadAttention(MultiHeadAttention):
+@MMEncoderAttention.register_oot()
+class HpuMMEncoderAttention(MMEncoderAttention):
 
-    def forward(
+    def _forward_sdpa(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Input shape: 
+        """Input shape:
         (batch_size x seq_len x hidden_size) or
         (batch_size x seq_len x num_heads x head_size)
         """
@@ -55,6 +56,3 @@ class HpuMultiHeadAttention(MultiHeadAttention):
 
         out = out.transpose(1, 2)
         return out.reshape(bsz, q_len, -1)
-
-
-layer.MultiHeadAttention = HpuMultiHeadAttention
