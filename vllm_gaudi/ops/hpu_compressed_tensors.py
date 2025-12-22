@@ -149,8 +149,7 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             layer.weight_scale = torch.nn.Parameter(ws_channelwise, requires_grad=False)
         elif layer.scheme.strategy == QuantizationStrategy.BLOCK:
             layer = hpu_ops.fp8_block_linear_postprocess_weights(layer,
-                                                                 envs.VLLM_HPU_FORCE_CHANNEL_FP8,
-                                                                 weight_scale_name="weight_scale")
+                                                                 envs.VLLM_HPU_FORCE_CHANNEL_FP8)
         else:
             # required by torch.compile to be torch.nn.Parameter
             layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data, requires_grad=False)
@@ -359,7 +358,11 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
             w2_weight_scale_channel[:, :, 0] = layer.w2_weight_scale.reshape(-1, 1)
             layer.w2_weight_scale = torch.nn.Parameter(w2_weight_scale_channel, requires_grad=False)
 
-        layer = hpu_ops.fp8_channel_moe_prepare_weights(layer)
+        elif self.block_quant:
+            assert layer.weight_block_size is not None
+            layer = hpu_ops.fp8_block_moe_prepare_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
+        else:
+            layer = hpu_ops.fp8_channel_moe_prepare_weights(layer)
         return
 
     def apply_monolithic(
