@@ -239,6 +239,7 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
                              "channelwise, dynamic per token quantization.")
 
         self.use_marlin = False
+        self.fp8_backend = False
         self.disable_expert_map = False
 
         torch.hpu.synchronize()
