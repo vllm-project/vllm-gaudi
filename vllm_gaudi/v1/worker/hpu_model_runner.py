@@ -370,11 +370,11 @@ def patch_llama4_get_attn_scale(model):
         attn = layer.self_attn
         orig = attn._get_attn_scale
 
-        def my_get_attn_scale(self, positions, _orig=orig):
+        def _get_attn_scale_for_hpu(self, positions, _orig=orig):
             positions = positions.flatten()
             return _orig(positions)
 
-        attn._get_attn_scale = types.MethodType(my_get_attn_scale, attn)
+        attn._get_attn_scale = types.MethodType(_get_attn_scale_for_hpu, attn)
 
 
 def apply_model_specific_patches(model):
