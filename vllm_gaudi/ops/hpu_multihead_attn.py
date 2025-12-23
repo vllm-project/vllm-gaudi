@@ -1,9 +1,5 @@
-import torch
-import torch.nn.functional as F
-from vllm.attention.layer import MultiHeadAttention
-from vllm.attention import layer
-
-
+#from vllm.attention.layer import MultiHeadAttention
+'''
 class HpuMultiHeadAttention(MultiHeadAttention):
 
     def forward(
@@ -58,3 +54,4 @@ class HpuMultiHeadAttention(MultiHeadAttention):
 
 
 layer.MultiHeadAttention = HpuMultiHeadAttention
+'''
