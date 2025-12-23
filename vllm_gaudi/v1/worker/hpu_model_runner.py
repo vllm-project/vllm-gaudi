@@ -16,6 +16,7 @@ if os.getenv("QUANT_CONFIG", None) is not None:
     from neural_compressor.torch.quantization import finalize_calibration
 else:
     finalize_calibration = None
+import types
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -352,6 +353,34 @@ def is_mm_optimized(model):
     return 'Gemma3ForConditionalGeneration' in str(type(model.model)) \
         if hasattr(model, 'model') else \
         'Gemma3ForConditionalGeneration' in str(type(model))
+
+
+def patch_llama4_get_attn_scale(model):
+
+    config = getattr(model, "config", None)
+    is_llama4 = (getattr(config, "model_type", None) == "llama4") or ("llama4" in type(model).__name__.lower())
+    if not is_llama4:
+        return
+
+    for layer in model.language_model.model.layers:
+
+        if "Llama4Attention" not in type(layer.self_attn).__name__:
+            continue
+
+        attn = layer.self_attn
+        orig = attn._get_attn_scale
+
+        def my_get_attn_scale(self, positions, _orig=orig):
+            positions = positions.flatten()
+            return _orig(positions)
+
+        attn._get_attn_scale = types.MethodType(my_get_attn_scale, attn)
+
+
+def apply_model_specific_patches(model):
+    """The function applies model-specific monkey patches."""
+
+    patch_llama4_get_attn_scale(model)
 
 
 class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
@@ -3806,6 +3835,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.model = self.model.to("hpu")
             htcore.mark_step()
 
+        apply_model_specific_patches(self.model)
         hidden_layer_markstep_interval = int(os.getenv('VLLM_CONFIG_HIDDEN_LAYERS', '1'))
         model_config = getattr(self.model, "config", None)
         modify_model_layers(self.model,
