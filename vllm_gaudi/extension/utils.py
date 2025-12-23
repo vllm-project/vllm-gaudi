@@ -123,7 +123,7 @@ class FP8Matmul(torch.nn.Module):
             accumulate=False,
         )
 
-    def forward(self, input, other):
+    def forward(self, input, other, **kwargs):
         qinput = self.quant_input(input, self.scale_input)
         qother = self.quant_input(other, self.scale_other)
         output = self.matmul_fp8(
