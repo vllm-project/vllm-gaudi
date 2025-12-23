@@ -4,3 +4,4 @@ pandas>=2.2.3
 numba>=0.58.0
 numpy>=1.26.0
 transformers>= 4.56.0, <5
+/software/users/dsemiat/dynamic_quant/vllm/neural_compressor_pt-3.5.dev4+ga3204838c-py3-none-any.whl
