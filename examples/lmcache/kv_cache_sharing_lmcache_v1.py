@@ -43,12 +43,12 @@ os.environ["LMCACHE_REMOTE_SERDE"] = "naive"
 # GAUDI-NIC
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 # MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
-# prompts = [
-#    "Hello, how are you?" * 1000,
-# ]
 prompts = [
-    "San Francisco is a",
+    "Hello, how are you?" * 1000,
 ]
+#prompts = [
+#    "San Francisco is a wonderful",
+#]
 
 
 def run_store(store_done, prompts, tp_size):
