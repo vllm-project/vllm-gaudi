@@ -4798,14 +4798,20 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         create_dynamic_scales = True
                     else:
                         create_dynamic_scales = False
-                    kv_scales_shape = kv_cache_shape[:-1] + (1, )
+                    kv_scales_shape = list(kv_cache_shape)
+                    kv_scales_shape[-1] = 1
                     key_cache = torch.zeros(kv_cache_shape, dtype=dtype, device=self.device)
                     key_scales = torch.ones(kv_scales_shape, dtype=torch.bfloat16, device=self.device) if \
                         create_dynamic_scales else None
                     if v_cache_shape is not None:
                         value_cache = torch.zeros(v_cache_shape, dtype=dtype, device=self.device)
-                        value_scales = torch.ones(kv_scales_shape, dtype=torch.bfloat16, device=self.device) if \
+                        value_scales_on_T = torch.ones(kv_scales_shape, dtype=torch.bfloat16, device=self.device) if \
                             create_dynamic_scales else None
+                        value_scales_on_hidden = torch.ones(
+                            [num_blocks+1, kv_cache_spec.num_kv_heads, 1],
+                            dtype=torch.bfloat16,
+                            device=self.device) if create_dynamic_scales else None
+                        value_scales = (value_scales_on_T, value_scales_on_hidden) if create_dynamic_scales else None
                     else:
                         value_cache = None
                         value_scales = None
