@@ -1,6 +1,5 @@
 from vllm.model_executor.models.registry import ModelRegistry
 
-
 def register_model():
     from vllm_gaudi.models.gemma3_mm import HpuGemma3ForConditionalGeneration  # noqa: F401
 

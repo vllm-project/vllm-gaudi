@@ -3,7 +3,6 @@ from vllm.multimodal import NestedTensors
 from vllm.model_executor.models import utils
 from vllm.model_executor.models.utils import (_embedding_count_expression, _flatten_embeddings)
 
-
 # TODO: Replaced masked_scatter with torch.where to avoid HPU performance issues
 # with non_zero_i8 ops in TPC kernel. However, torch.where creates dynamic operations
 # causing recompilation on each run. Need to find a static operation alternative.
@@ -29,6 +28,8 @@ def _merge_multimodal_embeddings(
     mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
     input_dtype = inputs_embeds.dtype
 
+    if is_multimodal.dtype == torch.int64:
+        return inputs_embeds.index_copy_(0, is_multimodal, mm_embeds_flat)
     try:
         # For debugging
         # inputs_embeds[is_multimodal] = mm_embeds_flat.to(dtype=input_dtype)
