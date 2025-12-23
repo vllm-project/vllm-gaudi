@@ -15,9 +15,7 @@ class UnifiedBucketingStrategy():
     def get_unified_cfgs(self, bs, max_model_len, block_size, max_blocks, max_num_batched_tokens):
         # [min, max, turning_point]
         query_cfg = [1, max_num_batched_tokens, bs]
-        # TODO(adobrzyn) WA for oom with huge shared bias
-        # max_shared_ctx = min(math.ceil(max_model_len // block_size), max_blocks)
-        max_shared_ctx = block_size
+        max_shared_ctx = min(math.ceil(max_model_len // block_size), max_blocks)
         shared_ctx_cfg = [0, max_shared_ctx, bs]
         max_unique_ctx = max_blocks
         unique_ctx_cfg = [0, max_unique_ctx, bs]
