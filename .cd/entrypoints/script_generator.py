@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
+import shutil
+import sys
+import time
 
 
 class ScriptGenerator:
@@ -57,4 +60,16 @@ class ScriptGenerator:
         # Run the generated script and redirect output to log file
         print(f"Starting script, logging to {self.log_file}")
         os.makedirs(self.log_dir, exist_ok=True)
-        os.execvp("bash", ["bash", self.output_script_path])
+        shutil.copy(self.output_script_path, "/local/")
+        print(f"[INFO] The command line file {self.output_script_path} saved at .cd/{self.output_script_path}")
+        if os.environ.get("DRY_RUN") == '1':
+            print(f"[INFO] This is a dry run to save the command line file {self.output_script_path}.")
+            try:
+                while True:
+                    print("[INFO] Press Ctrl+C to exit.")
+                    time.sleep(60)
+            except KeyboardInterrupt:
+                print("Exiting the DRY_RUN execution.")
+                sys.exit(0)
+        else:
+            os.execvp("bash", ["bash", self.output_script_path])
