@@ -75,6 +75,8 @@ def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, batch_siz
         block_bias = block_bias.to(dtype=attn.dtype)
     # TODO: w/a with 5D req as the block_softmax kernel does not support 4D attn tensor, which is used in e.g. Granite-3B
     if get_config().fused_block_softmax and get_config().fused_block_softmax_adjustment and attn.dim() == 5:
+        print("Danny Warning: fused_block_softmax with 5D attn tensor is not supported yet, falling back to unfused path.")
+        print("Danny using fused_block_softmax without calling the nn.Module member.")
         attn, block_max, block_sums = torch.ops.hpu.block_softmax(attn, block_bias, block_groups)
         if attn.dtype == torch.float32:
             attn = attn.to(value.dtype)
