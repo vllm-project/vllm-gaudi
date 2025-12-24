@@ -91,11 +91,8 @@ class HPUBucketingManager():
     def get_bucketing_strategy(self):
         strategy = None
         # TODO - we can use different strategies for decode and prompt
-        use_exponential_bucketing = True if \
-                get_config().VLLM_EXPONENTIAL_BUCKETING == None else \
-                get_config().VLLM_EXPONENTIAL_BUCKETING
 
-        if use_exponential_bucketing:
+        if get_config().VLLM_EXPONENTIAL_BUCKETING:
             from vllm_gaudi.extension.bucketing.exponential import (ExponentialBucketingStrategy)
             strategy = ExponentialBucketingStrategy()
         else:
@@ -182,9 +179,9 @@ class HPUBucketingManager():
                 strategy = self.get_bucketing_strategy()
 
                 bs_cfg, query_cfg, ctx_cfg = strategy.get_decode_cfgs(max_num_seqs=self.max_num_seqs,
-                    block_size=self.block_size,
-                    max_model_len=self.max_model_len,
-                    max_blocks=self.num_hpu_blocks)
+                                                                      block_size=self.block_size,
+                                                                      max_model_len=self.max_model_len,
+                                                                      max_blocks=self.num_hpu_blocks)
 
                 bs_range = strategy.get_range(bs_cfg)
                 query_range = strategy.get_range(query_cfg)
