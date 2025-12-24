@@ -125,8 +125,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-            topk_weights, topk_ids, zero_expert_result = layer.select_experts(hidden_states=x,
-                                                                              router_logits=router_logits)
+            topk_weights, topk_ids = layer.select_experts(hidden_states=x, router_logits=router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
@@ -188,14 +187,7 @@ def patched_fused_moe_forward(
         if use_direct_implementation:
             fused_output = self.forward_impl(hidden_states, router_logits)
             assert not isinstance(fused_output, tuple)
-
-            if self.zero_expert_num is not None and self.zero_expert_num > 0:
-                assert isinstance(fused_output, tuple)
-                fused_output, zero_expert_result = fused_output
-                return (reduce_output(self, fused_output) + zero_expert_result)[..., :og_hidden_states]
-            else:
-                return reduce_output(self, fused_output)[..., :og_hidden_states]
-
+            return reduce_output(self, fused_output)[..., :og_hidden_states]
         else:
             fused_output = torch.ops.vllm.moe_forward(hidden_states, router_logits, self.layer_name)
 
