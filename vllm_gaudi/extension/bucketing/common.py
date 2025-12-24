@@ -427,6 +427,9 @@ def generate_buckets(bs_range,
         else:
             return correct_for_max_model_len
 
+    def get_max_bucket_per_query(bs, query):
+        return (bs, query, math.ceil((max_model_len - query) // block_size))
+
     buckets = set()
     buckets_2d = set()
     omitted_buckets = set()
@@ -443,11 +446,16 @@ def generate_buckets(bs_range,
                 local_buckets = expand_to_neighbor_buckets(bs_idx, bs_range, ctx_idx, ctx_range,
                                                            max_num_batched_tokens) if not is_prompt else {(bs, ctx)}
                 buckets_2d.update(local_buckets)
-
+        max_ctx = max(ctx for _, ctx in buckets_2d)
         for bs, ctx in buckets_2d:
+            if is_prompt and ctx == max_ctx:
+                # skip biggest ctx only in prompt mode; we will add it via get_max_bucket_per_query later
+                continue
             for query in query_range:
                 if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
                     buckets.add(corrector(bs, query, ctx))
+                    if is_prompt:
+                        buckets.add(get_max_bucket_per_query(bs, query))
     if not buckets:
         phase = 'prompt' if is_prompt else 'decode'
         for bucket in omitted_buckets:

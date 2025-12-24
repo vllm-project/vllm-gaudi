@@ -11,6 +11,7 @@ from vllm_gaudi.extension.runtime import get_config
 
 
 class ExponentialBucketingStrategy():
+    long_context: bool = False
 
     def check_for_user_flags(self, phase):
         dim = ['bs', 'seq'] if phase == 'prompt' else ['bs', 'block']
@@ -38,13 +39,15 @@ class ExponentialBucketingStrategy():
         else:
             query_min = block_size
         use_merged_prefill = get_config().merged_prefill
+        self.long_context = max_model_len >= 8192
 
         # cfgs shape: [min, step, max, limit]
         prompt_bs_limit = math.ceil(math.log2(max_num_prefill_seqs)) + 1
         prompt_bs_bucket_cfg = [1, 2, max_num_prefill_seqs, prompt_bs_limit]
         max_prompt_seq_limit = math.ceil(math.log2(max_num_batched_tokens))
         prompt_query_bucket_cfg = [query_min, block_size, max_num_batched_tokens, max_prompt_seq_limit]
-        max_ctx = max(1, math.ceil((max_model_len - prompt_query_bucket_cfg[0]) // block_size))
+        # Max ctx for all queries; later we generate additional buckets for max ctx per query
+        max_ctx = max(1, math.ceil((max_model_len - max_num_batched_tokens) // block_size))
         max_prompt_ctx_limit = 2 if max_ctx == 1 else math.ceil(math.log2(max_ctx)) + 1
         prompt_ctx_bucket_cfg = [0, 1, max_ctx, max_prompt_ctx_limit]
 
@@ -95,7 +98,7 @@ class ExponentialBucketingStrategy():
         return decode_bs_bucket_cfg, decode_query_bucket_cfg, decode_block_bucket_cfg
 
     def get_range(self, cfg):
-        range_for_cfg = warmup_range_with_limit(cfg)
+        range_for_cfg = warmup_range_with_limit(cfg, self.long_context)
         return sorted(range_for_cfg)
 
 
@@ -135,7 +138,6 @@ def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=Fals
     if add_zero_or_one_bucket:
         bmin_origin = bmin
         bmin = bstep
-    linear_buckets = set(np.arange(bmin, bmax + 1, step=bstep))
     assert num_buckets > 0, "num_buckets must be a positive integer"
     if num_buckets == 1:
         return [bmax]
@@ -168,18 +170,6 @@ def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=Fals
                 bucket = bmax
             else:
                 bucket = math.ceil(power_unpadded / bstep) * bstep
-            '''if fill and bucket in buckets:
-                available_buckets = linear_buckets.difference(buckets)
-                if len(available_buckets) == 0:
-                    break  # there are no more unique buckets, let's exit now
-                new_bucket = min(available_buckets,
-                             key=lambda x: abs(x - power_unpadded))
-                if new_bucket not in buckets:
-                    buckets.add(new_bucket)
-            else:
-                if bucket not in buckets:
-                    buckets.add(bucket)
-            '''
             if bucket not in buckets:
                 buckets.add(bucket)
     if add_zero_or_one_bucket:
