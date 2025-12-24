@@ -69,6 +69,7 @@ def matmul_shape(lhs, rhs):
 
 def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, batch_size, matmul_av_op, batch2block_matmul_op,
                  block2batch_matmul_op):
+    print(f"Danny running pipelined_pa {get_config().fused_block_softmax=} {get_config().fused_block_softmax_adjustment=}")
     # When fp32_softmax is enabled attn is left in fp32 after Q@K
     # We can return to native dtype after we renormalize and calculate the adjustments
     if block_bias is not None and attn.dtype != block_bias.dtype:
