@@ -66,8 +66,7 @@ class LinearBucketingStrategy:
 
         return prompt_bs_bucket_cfg, prompt_query_bucket_cfg, prompt_ctx_bucket_cfg
 
-    def get_decode_cfgs(self, max_num_seqs, block_size, max_num_batched_tokens, max_model_len, max_blocks):
-        prefix_caching = get_config().prefix_caching
+    def get_decode_cfgs(self, max_num_seqs, block_size, max_model_len, max_blocks):
         contiguous_pa = get_config().use_contiguous_pa
 
         decode_bs_bucket_cfg = read_bucket_settings('decode',
