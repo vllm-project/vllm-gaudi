@@ -1508,9 +1508,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 start_idx = max(num_computed_tokens - start_pos, 0)
                 end_idx = min(num_computed_tokens - start_pos + num_scheduled_tokens, num_encoder_tokens)
                 assert start_idx < end_idx
-                curr_embeds_start, curr_embeds_end = (
-                    pos_info.get_embeds_indices_in_range(start_idx, end_idx)
-                )
+                curr_embeds_start, curr_embeds_end = (pos_info.get_embeds_indices_in_range(start_idx, end_idx))
                 # If there are no embeddings in the current range, we skip
                 # gathering the embeddings.
                 if curr_embeds_start == curr_embeds_end:
@@ -1528,9 +1526,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     mm_embeds_item = encoder_output[start_idx:end_idx]
 
                 req_start_pos = req_start_idx + start_pos - num_computed_tokens
-                is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] = (
-                    True if is_embed is None else is_embed
-                )
+                is_mm_embed[req_start_pos + start_idx : req_start_pos +
+                            end_idx] = (True if is_embed is None else is_embed)
                 mm_embeds_req.append(mm_embeds_item)
             mm_embeds.extend(mm_embeds_req)
             req_start_idx += num_scheduled_tokens
