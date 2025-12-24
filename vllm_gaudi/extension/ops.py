@@ -92,6 +92,7 @@ def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, batch_siz
         block_sums = attn.sum(dim=-1, keepdim=True)
     attn = matmul_av_op(attn, value)
     if get_config().fused_block_softmax_adjustment:
+        print("Danny using block_softmax_adjustment without calling the nn.Module member.")
         out_shape = list(attn.shape[:3]) + [1] * (attn.dim() - 3)
         rescale = torch.ops.hpu.block_softmax_adjustment(block_max, block_sums.to(block_max.dtype), block_groups,
                                                          batch_size, out_shape).to(attn.dtype)
