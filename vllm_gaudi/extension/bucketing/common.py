@@ -181,10 +181,8 @@ class HPUBucketingManager():
             else:
                 strategy = self.get_bucketing_strategy()
 
-                bs_cfg, query_cfg, ctx_cfg = strategy.get_decode_cfgs(
-                    max_num_seqs=self.max_num_seqs,
+                bs_cfg, query_cfg, ctx_cfg = strategy.get_decode_cfgs(max_num_seqs=self.max_num_seqs,
                     block_size=self.block_size,
-                    max_num_batched_tokens=self.max_num_batched_tokens,
                     max_model_len=self.max_model_len,
                     max_blocks=self.num_hpu_blocks)
 
