@@ -3,6 +3,7 @@ from vllm.multimodal import NestedTensors
 from vllm.model_executor.models import utils
 from vllm.model_executor.models.utils import (_embedding_count_expression, _flatten_embeddings)
 
+
 # TODO: Replaced masked_scatter with torch.where to avoid HPU performance issues
 # with non_zero_i8 ops in TPC kernel. However, torch.where creates dynamic operations
 # causing recompilation on each run. Need to find a static operation alternative.
