@@ -85,7 +85,6 @@ class HPUQwen3_VisionTransformerStaticShape(Qwen3_VisionTransformer):
             ) for layer_idx in range(depth)
         ])
 
-
 class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
 
     def _compute_deepstack_embeds(
