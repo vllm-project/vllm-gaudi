@@ -304,10 +304,12 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
                             is_causal: bool,
                             attn_bias: Optional[torch.Tensor] = None,
                             valid_seq_lengths: Optional[torch.Tensor] = None,
+                            window_size: Optional[int] = None,
                             **ignored_args) -> torch.Tensor:
     query = query.transpose(1, 2)
     key = key.transpose(1, 2)
     value = value.transpose(1, 2)
+    padding_side = 'right'
     if get_config().fp32_softmax:
         softmax_mode = 'fp32'
     else:
@@ -319,8 +321,13 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
         # TODO: causal + attn_bias is not yet supported
         is_causal = False
         valid_seq_lengths = None
-    attn_weights = fsdpa_op(query, key, value, attn_bias, 0.0, is_causal, scale, softmax_mode, recompute_mode,
-                            valid_seq_lengths, 'right')
+    args = [
+        query, key, value, attn_bias, 0.0, is_causal, scale, softmax_mode, recompute_mode, valid_seq_lengths,
+        padding_side
+    ]
+    print(f"libin debug fusedsdpa {is_causal=} {window_size=}")
+    args += [window_size] if window_size else []
+    attn_weights = fsdpa_op(*args)
     attn_weights = attn_weights.transpose(1, 2)
     return attn_weights
 
