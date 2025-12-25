@@ -2,6 +2,7 @@ import torch
 from .utils import _merge_multimodal_embeddings
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
+<<<<<<< HEAD
 from vllm.model_executor.models.interfaces import _require_is_multimodal
 from torch import nn
 from vllm.model_executor.layers.activation import get_act_fn
@@ -83,6 +84,8 @@ class HPUQwen3_VisionTransformerStaticShape(Qwen3_VisionTransformer):
                 prefix=f"{prefix}.blocks.{layer_idx}",
             ) for layer_idx in range(depth)
         ])
+=======
+>>>>>>> 7c6329e (precommit fix and fix use_window_sdpa)
 
 
 class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
@@ -109,7 +112,11 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
         multimodal_embeddings_multiscale = torch.split(multimodal_embeddings_multiscale, visual_lens, dim=0)
 
         deepstack_input_embeds = inputs_embeds.new_zeros(inputs_embeds.size(0),
+<<<<<<< HEAD
                                                          self.deepstack_num_level * inputs_embeds.size(1))
+=======
+                                                        self.deepstack_num_level * inputs_embeds.size(1))
+>>>>>>> 7c6329e (precommit fix and fix use_window_sdpa)
 
         deepstack_input_embeds = _merge_multimodal_embeddings(
             inputs_embeds=deepstack_input_embeds,
@@ -117,7 +124,11 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
             is_multimodal=is_multimodal,
         )
         deepstack_input_embeds = deepstack_input_embeds.view(inputs_embeds.shape[0], self.deepstack_num_level,
+<<<<<<< HEAD
                                                              self.visual_dim)
+=======
+                                                            self.visual_dim)
+>>>>>>> 7c6329e (precommit fix and fix use_window_sdpa)
         deepstack_input_embeds = deepstack_input_embeds.permute(1, 0, 2)
 
         return deepstack_input_embeds, multimodal_embeddings
