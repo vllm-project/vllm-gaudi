@@ -2,8 +2,10 @@ import torch
 from .utils import _merge_multimodal_embeddings
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
-    
+
+
 class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
+
     def _compute_deepstack_embeds(
         self,
         inputs_embeds: torch.Tensor,
@@ -22,29 +24,23 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
             dim=-1,
         )
 
-        multimodal_embeddings = torch.split(
-            multimodal_embeddings_main, visual_lens, dim=0
-        )
-        multimodal_embeddings_multiscale = torch.split(
-            multimodal_embeddings_multiscale, visual_lens, dim=0
-        )
+        multimodal_embeddings = torch.split(multimodal_embeddings_main, visual_lens, dim=0)
+        multimodal_embeddings_multiscale = torch.split(multimodal_embeddings_multiscale, visual_lens, dim=0)
 
-        deepstack_input_embeds = inputs_embeds.new_zeros(
-            inputs_embeds.size(0), self.deepstack_num_level * inputs_embeds.size(1)
-        )
+        deepstack_input_embeds = inputs_embeds.new_zeros(inputs_embeds.size(0),
+                                                        self.deepstack_num_level * inputs_embeds.size(1))
 
         deepstack_input_embeds = _merge_multimodal_embeddings(
             inputs_embeds=deepstack_input_embeds,
             multimodal_embeddings=multimodal_embeddings_multiscale,
             is_multimodal=is_multimodal,
         )
-        deepstack_input_embeds = deepstack_input_embeds.view(
-            inputs_embeds.shape[0], self.deepstack_num_level, self.visual_dim
-        )
+        deepstack_input_embeds = deepstack_input_embeds.view(inputs_embeds.shape[0], self.deepstack_num_level,
+                                                            self.visual_dim)
         deepstack_input_embeds = deepstack_input_embeds.permute(1, 0, 2)
 
         return deepstack_input_embeds, multimodal_embeddings
-    
+
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,

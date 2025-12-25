@@ -1248,6 +1248,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 self.encoder_cache[req_id] = {}
 
             self.encoder_cache[mm_hash] = output
+
     # modified from: vllm/v1/worker/gpu_model_runner.py
     def _gather_mm_embeddings(
         self,
@@ -1307,7 +1308,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     mm_embeds_item = encoder_output[start_idx:end_idx]
 
                 req_start_pos = req_start_idx + start_pos - num_computed_tokens
-                is_mm_embed[req_start_pos + start_idx : req_start_pos +
+                is_mm_embed[req_start_pos + start_idx:req_start_pos +
                             end_idx] = (True if is_embed is None else is_embed)
                 mm_embeds_req.append(mm_embeds_item)
             mm_embeds.extend(mm_embeds_req)
@@ -1316,6 +1317,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # Convert bool tensor to index tensor for merge embedding statically if optimized mm
         if self.uses_mrope:
             is_mm_embed_index = torch.nonzero(is_mm_embed[:total_num_scheduled_tokens], as_tuple=True)[0]
+            # Bounds validation on CPU
+            if len(is_mm_embed_index) > 0 and is_mm_embed_index.max() >= total_num_scheduled_tokens:
+                raise ValueError(f"Index {is_mm_embed_index.max()} exceeds tensor size {total_num_scheduled_tokens}")
             is_mm_embed = is_mm_embed_index.to(self.device)
         else:
             is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
@@ -5321,7 +5325,7 @@ class HPUAttentionMetadataProcessor:
         if self.interleaved_sliding_window:
             self.use_window_sdpa = with_default(get_config().PT_HPU_SDPA_QKV_SLICE_MODE_FWD, False)
             #os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
-            self.slice_size = with_default(get_config().PT_HPU_SDPA_BC_FACTOR, False)
+            self.slice_size = int(with_default(get_config().PT_HPU_SDPA_BC_FACTOR, "1024"))
             # int(os.getenv("PT_HPU_SDPA_BC_FACTOR", "1024"))
             self.slice_thld = int(os.environ.get('VLLM_FUSEDSDPA_SLIDE_THLD', '8192'))
 
