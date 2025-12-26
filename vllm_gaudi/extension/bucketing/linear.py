@@ -23,7 +23,7 @@ class LinearBucketingStrategy:
                                                        min=block_size,
                                                        step=block_size,
                                                        max=max_num_batched_tokens,
-                                                       pad_max=8192,
+                                                       pad_max=max_num_batched_tokens,
                                                        pad_percent=25)
         max_ctx = math.ceil((max_model_len - prompt_query_bucket_cfg[0]) // block_size)
         prompt_ctx_bucket_cfg = read_bucket_settings('prompt',
@@ -31,7 +31,7 @@ class LinearBucketingStrategy:
                                                      min=0,
                                                      step=1,
                                                      max=max_ctx,
-                                                     pad_max=8192 // block_size,
+                                                     pad_max=max_num_batched_tokens // block_size,
                                                      pad_percent=25)
 
         if use_merged_prefill:
@@ -48,7 +48,7 @@ class LinearBucketingStrategy:
                                                          min=0,
                                                          step=4,
                                                          max=max_ctx * max_num_prefill_seqs,
-                                                         pad_max=8192 // block_size,
+                                                         pad_max=max_num_batched_tokens // block_size,
                                                          pad_percent=25)
 
             msg = ('Merged prefill is enabled!\n'
@@ -85,7 +85,7 @@ class LinearBucketingStrategy:
                                                        min=block_size,
                                                        step=block_size,
                                                        max=max_decode_blocks,
-                                                       pad_max=1024,
+                                                       pad_max=max_num_batched_tokens * max_num_seqs // block_size,
                                                        pad_percent=25)
         if decode_block_bucket_cfg[2] > max_blocks:
             logger().info(
