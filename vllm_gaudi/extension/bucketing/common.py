@@ -149,6 +149,9 @@ class HPUBucketingManager():
                 bs_range = strategy.get_range(bs_cfg)
                 query_range = strategy.get_range(query_cfg)
                 ctx_range = strategy.get_range(ctx_cfg)
+                logger().debug(f"Prompt BS range: {bs_range}")
+                logger().debug(f"Prompt query range: {query_range}")
+                logger().debug(f"Prompt context range: {ctx_range}")
 
             self.prompt_buckets = generate_buckets(bs_range, query_range, ctx_range, True, self.max_model_len,
                                                    self.max_num_seqs, self.max_num_prefill_seqs,
@@ -189,6 +192,10 @@ class HPUBucketingManager():
 
                 if get_config().use_contiguous_pa and ctx_range[-1] < self.num_hpu_blocks:
                     ctx_range.append(self.num_hpu_blocks)
+
+                logger().debug(f"Decode BS range: {bs_range}")
+                logger().debug(f"Decode query range: {query_range}")
+                logger().debug(f"Decode context range: {ctx_range}")
 
             self.decode_buckets = generate_buckets(bs_range, query_range, ctx_range, False, self.max_model_len,
                                                    self.max_num_seqs, self.max_num_prefill_seqs,
