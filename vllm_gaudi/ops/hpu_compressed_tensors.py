@@ -738,10 +738,10 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
 
 
 class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
-    # pass
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
-        fp8_max = 240.0
+        fp8_max = 240.0 if hpu_ops.is_hpu_gaudi2 else 448.0
         max_k = layer._k_scale * fp8_max
         max_v = layer._v_scale * fp8_max
         max_kv = max(max_k, max_v)
@@ -750,18 +750,13 @@ class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
         v_scale = fp8_max / max_v
         layer.impl.latent_cache_k.input_scale = kv_scale
         layer.impl.latent_cache_k.output_scale = 1.0 / kv_scale
-        # q_scale:
-        # orig_q_max = max(orig_q)
-        # _q_scale = fp8_max / orig_q_max
-        # cur_q = orig_q * softmax_sacle
-        # cur_q_max = max(cur_q) = orig_q_max * softmax_sacle
-        # cur_q_scale = fp8_max / cur_q_max = fp8_max / (orig_q_max * softmax_sacle)
-        orig_q_max = layer._q_scale * fp8_max
+        # TODO: (yiliu30) support loading q_scale from checkpoint later
         orig_q_max = 1.0 * fp8_max
         softmax_sacle = layer.impl.scale
         layer.impl.matmul_qk.scale_input = fp8_max / (orig_q_max * softmax_sacle)
         layer.impl.matmul_qk.scale_other = k_scale
-        # for a in a@v, we keep 1.0/240 as its scale
+        # For a in a@v, as a is the output of softmax, its max value is 1.0,
+        # we keep fp8_max as its scale
         layer.impl.matmul_av.scale_input = fp8_max
         layer.impl.matmul_av.scale_other = v_scale
 
