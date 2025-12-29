@@ -104,7 +104,7 @@ def get_features():
               All(VersionRange(">=1.24.0.171"), MinPackageVersion("neural_compressor_pt", "3.7")),
               env_var_type=boolean),
         Value('per_token_kv_scaling_support',
-              All(VersionRange(">=1.24.0.350"), MinPackageVersion("neural_compressor_pt", "3.7")),
+              All(VersionRange(">=1.24.0.350"), MinPackageVersion("neural_compressor_pt", "3.4")),
               env_var_type=boolean),
         Value('moe_chunk', "", env_var='VLLM_MOE_CHUNK', env_var_type=list_of(int)),
         Value('moe_token_boundary', "", env_var='VLLM_MOE_TOKEN_BOUNDARY', env_var_type=list_of(int)),
