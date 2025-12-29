@@ -737,48 +737,6 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         return output.view(*input_shape)
 
 
-# @CustomOp.register_oot(name='CompressedTensorsKVCacheMethod')
-# class HPUCompressedTensorsKVCacheMethod(CompressedTensorsKVCacheMethod):
-#     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-#         super().process_weights_after_loading(layer)
-#         max_kv_scale = 1.0 / max(layer._k_scale, layer._v_scale)
-#         layer.impl.latent_cache_k.input_scale = max_kv_scale
-#         layer.impl.latent_cache_k.output_scale = 1.0 / max_kv_scale
-#         # q_scale:
-#         softmax_sacle = layer.impl.scale
-#         layer.impl.matmul_qk.scale_input = 1.0 / (layer._q_scale * softmax_sacle)
-#         layer.impl.matmul_qk.scale_other = max_kv_scale
-#         # for a in a@v, we keep 1.0/240 as its scale
-#         layer.impl.matmul_av.scale_input = 240
-#         layer.impl.matmul_av.scale_other = max_kv_scale
-
-# @CustomOp.register_oot(name='CompressedTensorsKVCacheMethod')
-# class HPUCompressedTensorsKVCacheMethod(CompressedTensorsKVCacheMethod):
-#     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-#         super().process_weights_after_loading(layer)
-#         fp8_max = 240.0
-#         max_k = layer._k_scale * fp8_max
-#         max_v = layer._v_scale * fp8_max
-#         max_kv = max(max_k, max_v)
-#         kv_scale = fp8_max / max_kv
-#         layer.impl.latent_cache_k.input_scale = kv_scale
-#         layer.impl.latent_cache_k.output_scale = 1.0 / kv_scale
-#         # q_scale:
-#         # orig_q_max = max(orig_q)
-#         # _q_scale = fp8_max / orig_q_max
-#         # cur_q = orig_q * softmax_sacle
-#         # cur_q_max = max(cur_q) = orig_q_max * softmax_sacle
-#         # cur_q_scale = fp8_max / cur_q_max = fp8_max / (orig_q_max * softmax_sacle)
-#         orig_q_max = layer._q_scale * fp8_max
-#         softmax_sacle = layer.impl.scale
-#         layer.impl.matmul_qk.scale_input = fp8_max / (orig_q_max * softmax_sacle)
-#         layer.impl.matmul_qk.scale_other = kv_scale
-#         # for a in a@v, we keep 1.0/240 as its scale
-#         layer.impl.matmul_av.scale_input = fp8_max
-#         layer.impl.matmul_av.scale_other = kv_scale
-
-
-# @CustomOp.register_oot(name='CompressedTensorsKVCacheMethod')
 class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
     # pass
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -808,35 +766,6 @@ class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
         layer.impl.matmul_av.scale_other = v_scale
 
 
-# @CustomOp.register_oot(name='CompressedTensorsKVCacheMethod')
-class HPUCompressedTensorsKVCacheMethodForMHA(CompressedTensorsKVCacheMethod):
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        super().process_weights_after_loading(layer)
-        fp8_max = 240.0
-        max_k = layer._k_scale * fp8_max
-        max_v = layer._v_scale * fp8_max
-        k_scale = fp8_max / max_k
-        v_scale = fp8_max / max_v
-        layer.impl.k_cache.input_scale = k_scale
-        layer.impl.k_cache.output_scale = 1.0 / k_scale
-        layer.impl.v_cache.input_scale = v_scale
-        layer.impl.v_cache.output_scale = 1.0 / v_scale
-        # q_scale:
-        # orig_q_max = max(orig_q)
-        # _q_scale = fp8_max / orig_q_max
-        # cur_q = orig_q * softmax_sacle
-        # cur_q_max = max(cur_q) = orig_q_max * softmax_sacle
-        # cur_q_scale = fp8_max / cur_q_max = fp8_max / (orig_q_max * softmax_sacle)
-        orig_q_max = layer._q_scale * fp8_max
-        softmax_sacle = layer.impl.scale
-        layer.impl.matmul_qk.scale_input = fp8_max / (orig_q_max * softmax_sacle)
-        layer.impl.matmul_qk.scale_other = k_scale
-        # for a in a@v, we keep 1.0/240 as its scale
-        layer.impl.matmul_av.scale_input = fp8_max
-        layer.impl.matmul_av.scale_other = v_scale
-
-
 class HPUCompressedTensorsConfig(CompressedTensorsConfig):
 
     def get_quant_method(
@@ -845,11 +774,8 @@ class HPUCompressedTensorsConfig(CompressedTensorsConfig):
         prefix: str,
     ) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import MLAAttention
-        # # MLAAttention
         if isinstance(layer, MLAAttention):
             return HPUCompressedTensorsKVCacheMethodForMLA(self)
-        # if isinstance(layer,  Attention):
-        #     return HPUCompressedTensorsKVCacheMethodForMHA(self)
         else:
             return super().get_quant_method(layer, prefix)
 
@@ -910,7 +836,7 @@ def oot_maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         attn_str = "attn"
     # Define scale name mapping patterns in order of precedence
     scale_mapping_patterns = [
-        # AR format:
+        # LLMC format:
         #  .self_attn.{q,k,v}_scale ->
         #  .attn.{attn_str}.{q,k,v}_scale
         (
