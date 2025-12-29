@@ -12,6 +12,7 @@ import math
 import habana_frameworks.torch.core as htcore
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.extension.utils import get_kv_fetch_extra_args
+from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
 
 import habana_frameworks.torch.utils.experimental as htexp
 import types
@@ -1108,7 +1109,8 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
                                                                    **kwargs)
         else:
             x_scale = self.w13_input_scale.data
-            w2_input_scale = self.w2_input_scale.data
+            # w2_input_scale should be List[Tensor] when static and fused
+            w2_input_scale = [self.w2_input_scale[i] for i in experts_range]
             x_fp8 = torch.ops.hpu.cast_to_fp8_v2(x, 1.0 / x_scale, False, False, torch.float8_e4m3fn)[0]
             final_hidden_states = torch.ops.hpu.mixture_of_experts(hidden_states=x_fp8,
                                                                    expert_routing_table=topk_ids.to(torch.int64),
@@ -1186,6 +1188,9 @@ def requantize_with_max_scale(weight: torch.Tensor, weight_scale: torch.Tensor,
                               logical_widths: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
     # Max scale to be used for requanitzation.
     max_w_scale = weight_scale.max()
+    # hw aligned
+    if get_config().use_hpu_aligned_scale:
+        max_w_scale = ConvertScaleToHwAligned().calc(max_w_scale)
     # QKV / MLP is fused in the on disk checkpoint if any of the
     # weight scales are still set to the default since we initialize
     # N weight scales for N shards but we only load 1 weight scale

@@ -16,6 +16,7 @@ if os.getenv("QUANT_CONFIG", None) is not None:
     from neural_compressor.torch.quantization import finalize_calibration
 else:
     finalize_calibration = None
+import types
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -39,6 +40,7 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.attention.layer import MLAAttention
 from vllm.attention.selector import get_attn_backend
+
 from vllm.config import (VllmConfig, update_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
@@ -52,7 +54,6 @@ from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingType
-from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -70,7 +71,7 @@ from vllm.v1.worker.utils import bind_kv_cache
 from vllm.v1.utils import CpuGpuBuffer
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
 from vllm.distributed.parallel_state import get_pp_group, get_dp_group
-from vllm.model_executor.models.interfaces import (SupportsMultiModal, supports_eagle3, supports_transcription)
+from vllm.model_executor.models.interfaces import (supports_eagle3, supports_transcription)
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.transformers_utils.config import is_interleaved
@@ -92,7 +93,10 @@ from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm_gaudi.extension.ops import LoraMask as LoraMask
 from vllm_gaudi.models.utils import gather_mm_placeholders
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnectorMetadata
 from vllm.v1.core.sched.output import GrammarOutput
+from vllm.config.multimodal import ImageDummyOptions
+from vllm.multimodal.profiling import MultiModalProfiler
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -109,6 +113,11 @@ from vllm_gaudi.extension.unified_batch import UnifiedBatch
 from vllm_gaudi.extension.logger import logger as init_logger
 
 logger = init_logger()
+
+try:
+    from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
+except ImportError:
+    LMCacheConnectorMetadata = None
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
@@ -346,12 +355,39 @@ def is_mm_optimized(model):
         'Gemma3ForConditionalGeneration' in str(type(model))
 
 
+def patch_llama4_get_attn_scale(model):
+
+    config = getattr(model, "config", None)
+    is_llama4 = (getattr(config, "model_type", None) == "llama4") or ("llama4" in type(model).__name__.lower())
+    if not is_llama4:
+        return
+
+    for layer in model.language_model.model.layers:
+
+        if "Llama4Attention" not in type(layer.self_attn).__name__:
+            continue
+
+        attn = layer.self_attn
+        orig = attn._get_attn_scale
+
+        def _get_attn_scale_for_hpu(self, positions, _orig=orig):
+            positions = positions.flatten()
+            return _orig(positions)
+
+        attn._get_attn_scale = types.MethodType(_get_attn_scale_for_hpu, attn)
+
+
+def apply_model_specific_patches(model):
+    """The function applies model-specific monkey patches."""
+
+    patch_llama4_get_attn_scale(model)
+
+
 class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
 
     def __init__(self, model, vllm_config):
         super().__init__()
         self.model = model
-        self.prefill_use_fusedsdpa = get_config().prompt_attn_impl == 'fsdpa_impl'
         self.recompute_cos_sin = os.getenv('VLLM_COS_SIN_RECOMPUTE', 'false').lower() in ['1', 'true']
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
@@ -362,12 +398,8 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         self.unified_attn_persistent_ctx = None
         self.flatten_input = get_config().flatten_input
         self.is_mm_optimized = is_mm_optimized(self.model)
-        self.sliding_window = vllm_config.model_config.get_sliding_window()
         self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
-        if self.interleaved_sliding_window and self.sliding_window is not None:
-            self.use_window_sdpa = os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
-            self.slice_size = int(os.getenv("PT_HPU_SDPA_BC_FACTOR", "1024"))
-            self.slice_thld = int(os.environ.get('VLLM_FUSEDSDPA_SLIDE_THLD', '8192'))
+        self.metadata_processor = HPUAttentionMetadataProcessor(vllm_config)
 
         # for DP
         self.dummy_num_input_tokens = -1
@@ -418,141 +450,6 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         if hasattr(self._rotary_embed_module, "sin"):
             delattr(self._rotary_embed_module, "sin")
 
-    def _set_attn_bias(self, attn_metadata, batch_size, seq_len, device, dtype):
-        if (attn_metadata is None or (self.prefill_use_fusedsdpa and attn_metadata.block_list is None)
-                or not attn_metadata.is_prompt):
-            return attn_metadata
-
-        if attn_metadata.attn_bias is not None:
-            return attn_metadata
-
-        prefill_metadata = attn_metadata
-
-        seq_lens_t = prefill_metadata.seq_lens_tensor
-        context_lens_t = prefill_metadata.context_lens_tensor
-
-        block_list = attn_metadata.block_list
-        max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
-        max_context_len = max_context_len * self.block_size
-        past_mask = torch.arange(0, max_context_len, dtype=torch.int32, device=device)
-        past_mask = (past_mask.view(1, -1).expand(batch_size, -1).ge(context_lens_t.view(-1, 1)).view(
-            batch_size, 1, -1).expand(batch_size, seq_len, -1).view(batch_size, 1, seq_len, -1))
-
-        len_mask = (torch.arange(0, seq_len, device=device, dtype=torch.int32).view(1, seq_len).ge(
-            seq_lens_t.unsqueeze(-1)).view(batch_size, 1, 1, seq_len))
-        causal_mask = torch.triu(torch.ones((batch_size, 1, seq_len, seq_len), device=device, dtype=torch.bool),
-                                 diagonal=1)
-        mask = causal_mask.logical_or(len_mask)
-        mask = torch.concat((past_mask, mask), dim=-1)
-        attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(mask, -math.inf))
-        attn_metadata = custom_tuple_replace(prefill_metadata, "TrimmedAttentionMetadata", attn_bias=attn_bias)
-        return attn_metadata
-
-    def _set_attn_bias_for_sliding_window(self, attn_metadata, batch_size, seq_len, window_size, device, dtype):
-
-        if (attn_metadata is None or not attn_metadata.is_prompt):
-            return attn_metadata
-
-        prefill_metadata = attn_metadata
-        shift = 0
-
-        # FusedSDPA with window_size is only supported when the seq_len is multiple of the slice_size
-        if self.prefill_use_fusedsdpa and self.use_window_sdpa and \
-            seq_len >= self.slice_thld and self.slice_size != 0 and \
-            seq_len % self.slice_size == 0 and attn_metadata.block_list is None:
-            # no need to set sliding window mask, just use built-in window-sdpa
-            return attn_metadata
-
-        if self.prefill_use_fusedsdpa and attn_metadata.block_list is not None:
-            context_lens_t = prefill_metadata.context_lens_tensor
-
-            block_list = attn_metadata.block_list
-            max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
-            max_context_len = max_context_len * self.block_size
-
-            invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=device) - 1
-            past_indices = torch.arange(max_context_len, device=device)
-            past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
-                         (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
-
-            # Create boolean sliding window mask
-            causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=shift)
-            causal_mask = torch.triu(causal_mask, diagonal=shift - window_size + 1)
-            causal_mask = causal_mask.view(batch_size, 1, seq_len, seq_len)
-
-            # TODO: Investigate further - Removing Padding cause accuracy issue
-            # seq_lens_t = prefill_metadata.seq_lens_tensor
-            # len_mask = (torch.arange(0, seq_len, device=device, dtype=torch.int32).view(1, seq_len).lt(
-            #     seq_lens_t.unsqueeze(-1)).view(batch_size, 1, 1, seq_len))
-            # causal_mask = causal_mask.logical_and(len_mask)
-
-            mask = torch.concat((past_mask, causal_mask), dim=-1)
-            attn_bias = torch.where(mask, torch.tensor(0.0, dtype=dtype, device=device),
-                                    torch.tensor(float('-inf'), dtype=dtype, device=device))
-        else:
-            # CAUSAL MASK without removing padding (CAUSAL+sliding window)
-            # removing padding cause accuracy issue for images input
-            tensor = torch.full((batch_size, 1, seq_len, seq_len), device=device, dtype=dtype, fill_value=1)
-            mask = torch.tril(tensor, diagonal=shift)
-            mask = torch.triu(mask, diagonal=shift - window_size + 1)
-            attn_bias = torch.log(mask)
-
-        attn_metadata = prefill_metadata._replace(window_attn_bias=attn_bias)
-        return attn_metadata
-
-    def _set_block_mapping(self, metadata, batch_size, device, dtype, is_window_block=False):
-        if is_window_block:
-            block_usage = metadata.window_block_usage
-            block_groups = metadata.window_block_groups
-        else:
-            block_usage = metadata.block_usage
-            block_groups = metadata.block_groups
-
-        mask = torch.arange(0, self.block_size, device=device, dtype=torch.int32).unsqueeze(0)
-        mask = mask >= block_usage.unsqueeze(-1)
-        attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(mask, -math.inf))
-
-        if not is_fake_hpu():
-            block_mapping = torch.nn.functional.one_hot(block_groups, num_classes=batch_size)
-        else:
-            # Unfortunately one_hot on CPU
-            # doesn't handle out of bounds classes so we need to convert
-            # all negative values to 0 (block_mapping) or bs (block_groups)
-            block_groups = block_groups.to(torch.long)
-            block_mapping = torch.nn.functional.relu(block_groups)
-            block_mapping = torch.nn.functional.one_hot(block_mapping, num_classes=batch_size)
-            oob_values = block_groups.lt(0)
-            block_mapping.masked_fill_(oob_values.unsqueeze(-1), 0)
-            block_groups.masked_fill_(oob_values, batch_size)
-            if is_window_block:
-                metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata", window_block_groups=block_groups)
-            else:
-                metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata", block_groups=block_groups)
-        block_mapping = block_mapping.to(dtype)
-        if is_window_block:
-            metadata = custom_tuple_replace(metadata,
-                                            "TrimmedAttentionMetadata",
-                                            window_block_mapping=block_mapping,
-                                            window_attn_bias=attn_bias)
-        else:
-            metadata = custom_tuple_replace(metadata,
-                                            "TrimmedAttentionMetadata",
-                                            block_mapping=block_mapping,
-                                            attn_bias=attn_bias)
-        return metadata
-
-    def _update_metadata(self, attn_metadata, batch_size, seq_len, device, dtype):
-        if attn_metadata.is_prompt:
-            attn_metadata = self._set_attn_bias(attn_metadata, batch_size, seq_len, device, dtype)
-            if self.interleaved_sliding_window and self.sliding_window is not None:
-                attn_metadata = self._set_attn_bias_for_sliding_window(attn_metadata, batch_size, seq_len,
-                                                                       self.sliding_window, device, dtype)
-        else:
-            attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype)
-            if self.interleaved_sliding_window and self.sliding_window is not None:
-                attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype, True)
-        return attn_metadata
-
     def forward(self, *args, **kwargs):
         # TODO(kzawora): something goes VERY WRONG when operating on
         # kwargs['attn_metadata'].slot_mapping, compared to untrimmed metadata
@@ -566,8 +463,9 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
             kwargs.pop('warmup_mode')
         input_ids = kwargs['input_ids']
         if not self.unified_attn:
-            kwargs['attn_metadata'] = self._update_metadata(kwargs['attn_metadata'], input_ids.size(0),
-                                                            input_ids.size(1), input_ids.device, self.dtype)
+            kwargs['attn_metadata'] = self.metadata_processor.process_metadata(kwargs['attn_metadata'],
+                                                                               input_ids.size(0), input_ids.size(1),
+                                                                               input_ids.device, self.dtype)
         if self._rotary_prepare_cos_sin is not None:
             self._rotary_prepare_cos_sin(kwargs['positions'], recompute_cos_sin=self.recompute_cos_sin)
         attn_meta = kwargs.pop('attn_metadata')
@@ -810,10 +708,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.block_size,
             use_mla=self.model_config.use_mla,
         )
-
+        self.attn_backend_name = getattr(self.attn_backend, "__name__", None)
         # Mult-modal-related.
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
+
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(model_config)
         if self.supports_mm_inputs:
             self.is_mm_embed = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
@@ -916,7 +815,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             logger.info("Bucketing is OFF.")
         self._PAD_SLOT_ID = -1
         self._PAD_BLOCK_ID = -1
-        self._tokenizer = init_tokenizer_from_configs(model_config=vllm_config.model_config)
 
         if self.vllm_config.parallel_config.data_parallel_size > 1 and htorch.utils.internal.is_lazy(
         ) and not self.model_config.enforce_eager:
@@ -1293,13 +1191,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     mm_kwargs.extend(req_mm_kwargs)
 
                 # Input all modalities at once
-                self.model.model = cast(SupportsMultiModal, self.model.model)
                 mm_kwargs_combined: BatchedTensorInputs = {}
                 for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
                         mm_kwargs,
                         device=self.device,
                         pin_memory=self.pin_memory,
-                        merge_by_field_config=self.model.model.merge_by_field_config,
                 ):
                     mm_kwargs_combined.update(mm_kwargs_group)
 
@@ -1347,12 +1243,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # multimodal inputs. The proper solution should be reordering the
         # encoder outputs.
         encoder_outputs = []
-        self.model.model = cast(SupportsMultiModal, self.model.model)
         for _, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
                 mm_kwargs,
                 device=self.device,
                 pin_memory=self.pin_memory,
-                merge_by_field_config=self.model.model.merge_by_field_config,
         ):
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
@@ -1516,10 +1410,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                 req_ids,
                                                                 total_num_scheduled_tokens=token_ids.shape[-1])
             htorch.core.mark_step()
-
-            # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa E501
-            # This may require moving multimodal input preps into _prepare_inputs,        # noqa E501
-            # to avoid padding issues.
+            if self.attn_backend_name == 'HPUAttentionBackendV1' and \
+                token_ids.ndim == 2 and token_ids.shape[0] == 1:
+                token_ids = token_ids.squeeze(0)
+            inputs_embeds = self.model.embed_input_ids(
+                token_ids,
+                multimodal_embeddings=mm_embeds,
+                is_multimodal=is_mm_embed,
+            )
 
             model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
             if image_index_tensor is not None:
@@ -1578,12 +1476,15 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         requests_type = {}
         if scheduler_output.kv_connector_metadata:
-            for req in scheduler_output.kv_connector_metadata.reqs_to_save:
-                requests_type[req] = 'prefill'
-            for req in scheduler_output.kv_connector_metadata.reqs_to_recv:
-                requests_type[req] = 'decode'
-            requests = scheduler_output.kv_connector_metadata.reqs_to_save | \
-                        scheduler_output.kv_connector_metadata.reqs_to_recv
+            if isinstance(scheduler_output.kv_connector_metadata, NixlConnectorMetadata):
+                for req in scheduler_output.kv_connector_metadata.reqs_to_save:
+                    requests_type[req] = 'prefill'
+                for req in scheduler_output.kv_connector_metadata.reqs_to_recv:
+                    requests_type[req] = 'decode'
+                requests = scheduler_output.kv_connector_metadata.reqs_to_save | \
+                            scheduler_output.kv_connector_metadata.reqs_to_recv
+            else:
+                requests = scheduler_output.kv_connector_metadata.requests
         else:
             requests = None
 
@@ -3433,8 +3334,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         #    assert not (num_prefills > 0 and num_decodes > 0)
         # skip kv_connector if dummy run
         if not warmup_mode:
-            with set_forward_context(None, self.vllm_config):
-                self.maybe_setup_kv_connector(scheduler_output)
+            if LMCacheConnectorMetadata is not None and isinstance(scheduler_output.kv_connector_metadata,
+                                                                   LMCacheConnectorMetadata):
+                with set_forward_context(prefill_data.attn_metadata, self.vllm_config):
+                    self.maybe_setup_kv_connector(scheduler_output)
+            else:
+                with set_forward_context(None, self.vllm_config):
+                    self.maybe_setup_kv_connector(scheduler_output)
         finished_sending, finished_recving = set(), set()
 
         # NOTE(Chendi): used by spec decode draft model, since we are doing
@@ -3499,7 +3405,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         lora_mask,
                         inputs_embeds=inputs_embeds,
                         model_mm_kwargs=model_mm_kwargs,
-                        warmup_mode=warmup_mode,)
+                        warmup_mode=warmup_mode)
                 htorch.core.mark_step()
                 non_flattened_hidden_states_prefills.append(non_flattened_hidden_states)
                 if self.use_aux_hidden_state_outputs:
@@ -3532,8 +3438,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                              prompt_batch_idx=idx,
                                                                              is_prompt=True)
                     self.profiler.record_counter(self.event_start, counters)
-            if not warmup_mode:
-                self.maybe_wait_for_kv_save()
 
             if self.is_driver_worker and self.profiler.enabled:
                 self.profiler_counter_helper.reset_prompt_seq_stats()
@@ -3780,6 +3684,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         logprobs = None
 
         if not warmup_mode:
+            self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = self.get_finished_kv_transfers(scheduler_output)
 
         if self.use_async_scheduling:
@@ -3853,6 +3758,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.model = self.model.to("hpu")
             htcore.mark_step()
 
+        apply_model_specific_patches(self.model)
         hidden_layer_markstep_interval = int(os.getenv('VLLM_CONFIG_HIDDEN_LAYERS', '1'))
         model_config = getattr(self.model, "config", None)
         modify_model_layers(self.model,
@@ -3921,7 +3827,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         Compile methods which are not part of the compiled model i.e. those
         which will not be compiled during model's compilation.
         """
-        compiled_methods = ['_update_metadata', '_rotary_prepare_cos_sin']
+        compiled_methods = ['metadata_processor.process_metadata', '_rotary_prepare_cos_sin']
         for method_name in compiled_methods:
             method = getattr(self.model, method_name, None)
             if method is not None:
@@ -4665,32 +4571,61 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             decode_cfg = (decode_cfg[0], 1, decode_cfg[1])
         return prompt_cfg, decode_cfg
 
+    def get_patch_size_from_model(self):
+        """Get patch_size from the loaded vision model."""
+        # For Qwen2.5-VL and similar models
+        if hasattr(self.model.model, 'visual'):
+            return self.model.model.visual.patch_size
+        return 1
+
     def _get_mm_dummy_batch(
         self,
         modality: str,
-        max_items_per_batch: int,
+        image_args: int,
+        ratio_w: int,
+        ratio_h: int,
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
         assert self.mm_budget is not None
+        img_count = 1
+        if self.get_model().vision_bucket_manager.is_batch_based:
+            # Create ImageDummyOptions for Gemma3
+            image_options = ImageDummyOptions(
+                width=896,  # pixels as in gemma3 config
+                height=896  # pixels as in gemma3 config
+            )
+            batch = image_args
+        else:
+            patch_size = int(self.get_patch_size_from_model())
+            # Calculate width and height to maintain aspect ratio and patch count
+            # Total patches = (width/patch_size) * (height/patch_size)
+            # We want: (w/ps) * (h/ps) = num_patch where num_patch is image_args
+            # And: w/h = ratio_w/ratio_h
+            grid_w = int(math.sqrt(image_args * ratio_w / ratio_h))
+            grid_h = int(image_args / grid_w)
+            w = grid_w * patch_size
+            h = grid_h * patch_size
+            image_options = ImageDummyOptions(
+                width=w,  # Custom width in pixels
+                height=h  # Custom height in pixels
+            )
+            batch = img_count
+        processor = self.mm_registry.create_processor(model_config=self.model_config, cache=self.mm_budget.cache)
+        profiler: MultiModalProfiler = MultiModalProfiler(processor)
+        dummy_data = profiler.get_decoder_dummy_data(seq_len=4096,
+                                                     mm_counts={"image": img_count},
+                                                     mm_options={"image": image_options})
+        dummy_mm_data = dummy_data.multi_modal_data
 
-        dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
-            model_config=self.model_config,
-            seq_len=self.max_model_len,
-            mm_counts={modality: 1},
-            cache=self.mm_budget.cache,
-        )
-        dummy_mm_data = dummy_decoder_data.multi_modal_data
-
+        assert modality == 'image'
         # Result in the maximum GPU consumption of the model
-        dummy_mm_item = dummy_mm_data[modality][0]
-        dummy_mm_items = [dummy_mm_item] * max_items_per_batch
+        dummy_mm_item = dummy_mm_data['image'][0]
+        dummy_mm_items = [dummy_mm_item] * batch
 
-        self.model.model = cast(SupportsMultiModal, self.model.model)
         return next(mm_kwargs_group for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
             dummy_mm_items,
             device=self.device,
             pin_memory=self.pin_memory,
-            merge_by_field_config=self.model.model.merge_by_field_config,
         ))
 
     def warmup_multimodal_graphs(self, buckets):
@@ -4702,32 +4637,37 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.scheduler_config,
             self.mm_registry,
         ) if self.supports_mm_inputs else None
-
-        #self.mm_budget.mm_limits : {'image': 2}
+        aspect_ratios = [(1, 1)]  # 1:1 square
+        sanity_check = False
+        if self.get_model().vision_bucket_manager.is_batch_based:
+            sanity_check = True
+            aspect_ratio_ext = [
+                (4, 3),  # 4:3 landscape
+                (3, 4),  # 3:4 portrait
+                (16, 9),  # 16:9 widescreen
+                (9, 16),  # 9:16 portrait
+            ]
+            aspect_ratios.extend(aspect_ratio_ext)
         for modality, max_items in self.mm_budget.mm_limits.items():
+            if modality == 'video':
+                logger.warning_once("Warming up for video is not implemented")
+                continue
             phase = f'Graph/Multimodal({modality})'
             num_candidates = len(buckets)
-
             for idx, img_arg in enumerate(buckets):
-                # Create dummy batch of multimodal inputs.
-                batched_dummy_mm_inputs = self._get_mm_dummy_batch(
-                    modality,
-                    img_arg,
-                )
-                #htorch.core.mark_step()
-                # Run multimodal encoder.
-                dummy_encoder_outputs = \
-                     self.model.embed_multimodal(
-                     **batched_dummy_mm_inputs)
-                #htorch.core.mark_step()
+                for (ratio_w, ratio_h) in aspect_ratios:
+                    batched_dummy_mm_inputs = self._get_mm_dummy_batch(modality, img_arg, ratio_w, ratio_h)
+                    dummy_encoder_outputs = \
+                        self.model.embed_multimodal(
+                        **batched_dummy_mm_inputs)
+                    if sanity_check:
+                        sanity_check_mm_encoder_outputs(
+                            dummy_encoder_outputs,
+                            expected_num_items=img_arg,
+                        )
 
-                sanity_check_mm_encoder_outputs(
-                    dummy_encoder_outputs,
-                    expected_num_items=img_arg,
-                )
-
-                self.graphed_buckets.add(img_arg)
-                self.log_warmup_multimodal(phase, idx, num_candidates, 1, 0, img_arg)
+                    self.graphed_buckets.add(img_arg)
+                    self.log_warmup_multimodal(phase, idx, num_candidates, 1, 0, img_arg)
 
     @torch.inference_mode()
     def warmup_model(self) -> None:
@@ -5440,3 +5380,242 @@ class TensorTuple(tuple):
     def dtype(self):
         """Returns the torch.dtype of the tensors within the tuple."""
         return self._dtype
+
+
+class HPUAttentionMetadataProcessor:
+    """
+    Processor class for post-processing HPU attention metadata.
+    
+    This class takes already-built attention metadata and augments it with
+    additional tensors such as attention bias masks and block mappings that
+    are required for efficient attention computation on HPU. It does NOT build
+    the metadata from scratch - it post-processes existing metadata structures.
+    """
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+    ):
+        """
+        Initialize the attention metadata processor.
+        """
+        self.prefill_use_fusedsdpa = get_config().prompt_attn_impl == 'fsdpa_impl'
+        self.vllm_config = vllm_config
+        self.block_size = vllm_config.cache_config.block_size
+        self.dtype = vllm_config.model_config.dtype
+        self.sliding_window = vllm_config.model_config.get_sliding_window()
+        self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
+
+        if self.interleaved_sliding_window:
+            self.use_window_sdpa = with_default(get_config().PT_HPU_SDPA_QKV_SLICE_MODE_FWD, False)
+            #os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
+            self.slice_size = with_default(get_config().PT_HPU_SDPA_BC_FACTOR, False)
+            # int(os.getenv("PT_HPU_SDPA_BC_FACTOR", "1024"))
+            self.slice_thld = int(os.environ.get('VLLM_FUSEDSDPA_SLIDE_THLD', '8192'))
+
+    def _set_attn_bias(self, attn_metadata: HPUAttentionMetadataV1, batch_size: int, seq_len: int, device: torch.device,
+                       dtype: torch.dtype) -> HPUAttentionMetadataV1:
+        """
+        Set attention bias for prompt phase.
+
+        Creates causal attention masks with proper handling of padding and context.
+
+        Args:
+            attn_metadata: Input attention metadata
+            batch_size: Batch size
+            seq_len: Sequence length
+            device: Device to create tensors on
+            dtype: Data type for the bias tensor
+
+        Returns:
+            Updated attention metadata with attn_bias set
+        """
+        if (attn_metadata is None or (self.prefill_use_fusedsdpa and attn_metadata.block_list is None)
+                or not attn_metadata.is_prompt):
+            return attn_metadata
+
+        if attn_metadata.attn_bias is not None:
+            return attn_metadata
+
+        prefill_metadata = attn_metadata
+
+        seq_lens_t = prefill_metadata.seq_lens_tensor
+        assert seq_lens_t is not None, "seq_lens_tensor is required to build attn_bias"
+        context_lens_t = prefill_metadata.context_lens_tensor
+        assert context_lens_t is not None, "context_lens_tensor is required to build attn_bias"
+
+        block_list = attn_metadata.block_list
+        max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
+        max_context_len = max_context_len * self.block_size
+        past_mask = torch.arange(0, max_context_len, dtype=torch.int32, device=device)
+        past_mask = (past_mask.view(1, -1).expand(batch_size, -1).ge(context_lens_t.view(-1, 1)).view(
+            batch_size, 1, -1).expand(batch_size, seq_len, -1).view(batch_size, 1, seq_len, -1))
+
+        len_mask = (torch.arange(0, seq_len, device=device, dtype=torch.int32).view(1, seq_len).ge(
+            seq_lens_t.unsqueeze(-1)).view(batch_size, 1, 1, seq_len))
+        causal_mask = torch.triu(torch.ones((batch_size, 1, seq_len, seq_len), device=device, dtype=torch.bool),
+                                 diagonal=1)
+        mask = causal_mask.logical_or(len_mask)
+        mask = torch.concat((past_mask, mask), dim=-1)
+        attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(mask, -math.inf))
+        attn_metadata = custom_tuple_replace(prefill_metadata, "TrimmedAttentionMetadata", attn_bias=attn_bias)
+        return attn_metadata
+
+    def _set_attn_bias_for_sliding_window(self, attn_metadata: HPUAttentionMetadataV1, batch_size: int, seq_len: int,
+                                          window_size: int, device: torch.device,
+                                          dtype: torch.dtype) -> HPUAttentionMetadataV1:
+        """
+        Set attention bias for sliding window attention in prompt phase.
+
+        Args:
+            attn_metadata: Input attention metadata
+            batch_size: Batch size
+            seq_len: Sequence length
+            window_size: Sliding window size
+            device: Device to create tensors on
+            dtype: Data type for the bias tensor
+
+        Returns:
+            Updated attention metadata with window_attn_bias set
+        """
+        if (attn_metadata is None or not attn_metadata.is_prompt):
+            return attn_metadata
+
+        prefill_metadata = attn_metadata
+        shift = 0
+
+        # FusedSDPA with window_size is only supported when the seq_len is multiple of the slice_size
+        if self.prefill_use_fusedsdpa and self.use_window_sdpa and \
+            seq_len >= self.slice_thld and self.slice_size != 0 and \
+            seq_len % self.slice_size == 0 and attn_metadata.block_list is None:
+            # no need to set sliding window mask, just use built-in window-sdpa
+            return attn_metadata
+
+        if self.prefill_use_fusedsdpa and attn_metadata.block_list is not None:
+            context_lens_t = prefill_metadata.context_lens_tensor
+            assert context_lens_t is not None, "context_lens_tensor is required to build attn_bias"
+
+            block_list = attn_metadata.block_list
+            max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
+            max_context_len = max_context_len * self.block_size
+
+            invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=device) - 1
+            past_indices = torch.arange(max_context_len, device=device)
+            past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
+                         (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+
+            # Create boolean sliding window mask
+            causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=shift)
+            causal_mask = torch.triu(causal_mask, diagonal=shift - window_size + 1)
+            causal_mask = causal_mask.view(batch_size, 1, seq_len, seq_len)
+
+            # TODO: Investigate further - Removing Padding cause accuracy issue
+            # seq_lens_t = prefill_metadata.seq_lens_tensor
+            # len_mask = (torch.arange(0, seq_len, device=device, dtype=torch.int32).view(1, seq_len).lt(
+            #     seq_lens_t.unsqueeze(-1)).view(batch_size, 1, 1, seq_len))
+            # causal_mask = causal_mask.logical_and(len_mask)
+
+            mask = torch.concat((past_mask, causal_mask), dim=-1)
+            attn_bias = torch.where(mask, torch.tensor(0.0, dtype=dtype, device=device),
+                                    torch.tensor(float('-inf'), dtype=dtype, device=device))
+        else:
+            # CAUSAL MASK without removing padding (CAUSAL+sliding window)
+            # removing padding cause accuracy issue for images input
+            tensor = torch.full((batch_size, 1, seq_len, seq_len), device=device, dtype=dtype, fill_value=1)
+            mask = torch.tril(tensor, diagonal=shift)
+            mask = torch.triu(mask, diagonal=shift - window_size + 1)
+            attn_bias = torch.log(mask)
+
+        attn_metadata = prefill_metadata._replace(window_attn_bias=attn_bias)
+        return attn_metadata
+
+    def _set_block_mapping(self,
+                           metadata: HPUAttentionMetadataV1,
+                           batch_size: int,
+                           device: torch.device,
+                           dtype: torch.dtype,
+                           is_window_block: bool = False) -> HPUAttentionMetadataV1:
+        """
+        Set block mapping for decode phase.
+
+        Creates block mapping and attention bias for paged attention during decode.
+
+        Args:
+            metadata: Input attention metadata
+            batch_size: Batch size
+            device: Device to create tensors on
+            dtype: Data type for tensors
+            is_window_block: Whether this is for window blocks
+
+        Returns:
+            Updated attention metadata with block_mapping and attn_bias set
+        """
+        if is_window_block:
+            block_usage = metadata.window_block_usage
+            block_groups = metadata.window_block_groups
+        else:
+            block_usage = metadata.block_usage
+            block_groups = metadata.block_groups
+
+        mask = torch.arange(0, self.block_size, device=device, dtype=torch.int32).unsqueeze(0)
+        mask = mask >= block_usage.unsqueeze(-1)
+        attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(mask, -math.inf))
+
+        if not is_fake_hpu():
+            block_mapping = torch.nn.functional.one_hot(block_groups, num_classes=batch_size)
+        else:
+            # Unfortunately one_hot on CPU
+            # doesn't handle out of bounds classes so we need to convert
+            # all negative values to 0 (block_mapping) or bs (block_groups)
+            block_groups = block_groups.to(torch.long)
+            block_mapping = torch.nn.functional.relu(block_groups)
+            block_mapping = torch.nn.functional.one_hot(block_mapping, num_classes=batch_size)
+            oob_values = block_groups.lt(0)
+            block_mapping.masked_fill_(oob_values.unsqueeze(-1), 0)
+            block_groups.masked_fill_(oob_values, batch_size)
+            if is_window_block:
+                metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata", window_block_groups=block_groups)
+            else:
+                metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata", block_groups=block_groups)
+        block_mapping = block_mapping.to(dtype)
+        if is_window_block:
+            metadata = custom_tuple_replace(metadata,
+                                            "TrimmedAttentionMetadata",
+                                            window_block_mapping=block_mapping,
+                                            window_attn_bias=attn_bias)
+        else:
+            metadata = custom_tuple_replace(metadata,
+                                            "TrimmedAttentionMetadata",
+                                            block_mapping=block_mapping,
+                                            attn_bias=attn_bias)
+        return metadata
+
+    def process_metadata(self, attn_metadata: HPUAttentionMetadataV1, batch_size: int, seq_len: int,
+                         device: torch.device, dtype: torch.dtype) -> HPUAttentionMetadataV1:
+        """
+        Post-process attention metadata with appropriate masks and mappings.
+
+        This is the main entry point for processing attention metadata. It augments
+        the metadata with attention bias masks (for prompt phase) or block mappings
+        (for decode phase), with support for sliding window attention.
+
+        Args:
+            attn_metadata: Input attention metadata (already built)
+            batch_size: Batch size
+            seq_len: Sequence length (for prompt phase)
+            device: Device to create tensors on
+            dtype: Data type for tensors
+
+        Returns:
+            Post-processed attention metadata with additional tensors
+        """
+        if attn_metadata.is_prompt:
+            attn_metadata = self._set_attn_bias(attn_metadata, batch_size, seq_len, device, dtype)
+            if self.interleaved_sliding_window:
+                attn_metadata = self._set_attn_bias_for_sliding_window(attn_metadata, batch_size, seq_len,
+                                                                       self.sliding_window, device, dtype)
+        else:
+            attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype)
+            if self.interleaved_sliding_window:
+                attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype, True)
+        return attn_metadata
