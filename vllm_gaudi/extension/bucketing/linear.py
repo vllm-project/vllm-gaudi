@@ -116,7 +116,6 @@ def warmup_range(config: Tuple[int, int, int]):
     add_zero_bucket = bmin == 0
     if add_zero_bucket:
         bmin = bstep
-    print(f"libin deug {bmin=} {bmax=}")
     assert bmin <= bmax, ("Min. batch size cannot be greater than max. "
                           "batch size. If you want to skip warmup, "
                           "set VLLM_SKIP_WARMUP=true")

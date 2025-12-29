@@ -325,7 +325,6 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
         query, key, value, attn_bias, 0.0, is_causal, scale, softmax_mode, recompute_mode, valid_seq_lengths,
         padding_side
     ]
-    print(f"libin debug fusedsdpa {is_causal=} {window_size=}")
     args += [window_size] if window_size else []
     attn_weights = fsdpa_op(*args)
     attn_weights = attn_weights.transpose(1, 2)
