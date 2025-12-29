@@ -28,7 +28,7 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
         multimodal_embeddings_multiscale = torch.split(multimodal_embeddings_multiscale, visual_lens, dim=0)
 
         deepstack_input_embeds = inputs_embeds.new_zeros(inputs_embeds.size(0),
-                                                        self.deepstack_num_level * inputs_embeds.size(1))
+                                                         self.deepstack_num_level * inputs_embeds.size(1))
 
         deepstack_input_embeds = _merge_multimodal_embeddings(
             inputs_embeds=deepstack_input_embeds,
