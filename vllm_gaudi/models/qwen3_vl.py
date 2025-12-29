@@ -36,7 +36,7 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
             is_multimodal=is_multimodal,
         )
         deepstack_input_embeds = deepstack_input_embeds.view(inputs_embeds.shape[0], self.deepstack_num_level,
-                                                            self.visual_dim)
+                                                             self.visual_dim)
         deepstack_input_embeds = deepstack_input_embeds.permute(1, 0, 2)
 
         return deepstack_input_embeds, multimodal_embeddings
