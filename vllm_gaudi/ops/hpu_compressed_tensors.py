@@ -15,7 +15,7 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter, ModelWeig
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsLinearMethod as OrigCompressedTensorsLinearMethod, CompressedTensorsConfig,
-    CompressedTensorsMoEMethod)
+    CompressedTensorsMoEMethod, CompressedTensorsKVCacheMethod)
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors_moe)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (  # noqa: E501
     CompressedTensorsScheme, CompressedTensorsWNA16)
@@ -33,10 +33,12 @@ import vllm_gaudi.extension.ops as hpu_ops
 from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel, VllmMixtureOfExpertsOpWNA16)
 from vllm_gaudi.extension.runtime import get_config
-
-SUPPORTED_STRATEGIES = [QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR]
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizeMethodBase, )
+import vllm.model_executor.model_loader.weight_utils as vllm_weight_utils
 
 logger = init_logger(__name__)
+SUPPORTED_STRATEGIES = [QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR]
 
 
 @CustomOp.register_oot(name='CompressedTensorsLinearMethod')
@@ -309,7 +311,7 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-            topk_weights, topk_ids = layer.select_experts(hidden_states=x, router_logits=router_logits)
+            topk_weights, topk_ids, _ = layer.select_experts(hidden_states=x, router_logits=router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
@@ -735,6 +737,122 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         return output.view(*input_shape)
 
 
+# @CustomOp.register_oot(name='CompressedTensorsKVCacheMethod')
+# class HPUCompressedTensorsKVCacheMethod(CompressedTensorsKVCacheMethod):
+#     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+#         super().process_weights_after_loading(layer)
+#         max_kv_scale = 1.0 / max(layer._k_scale, layer._v_scale)
+#         layer.impl.latent_cache_k.input_scale = max_kv_scale
+#         layer.impl.latent_cache_k.output_scale = 1.0 / max_kv_scale
+#         # q_scale:
+#         softmax_sacle = layer.impl.scale
+#         layer.impl.matmul_qk.scale_input = 1.0 / (layer._q_scale * softmax_sacle)
+#         layer.impl.matmul_qk.scale_other = max_kv_scale
+#         # for a in a@v, we keep 1.0/240 as its scale
+#         layer.impl.matmul_av.scale_input = 240
+#         layer.impl.matmul_av.scale_other = max_kv_scale
+
+# @CustomOp.register_oot(name='CompressedTensorsKVCacheMethod')
+# class HPUCompressedTensorsKVCacheMethod(CompressedTensorsKVCacheMethod):
+#     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+#         super().process_weights_after_loading(layer)
+#         fp8_max = 240.0
+#         max_k = layer._k_scale * fp8_max
+#         max_v = layer._v_scale * fp8_max
+#         max_kv = max(max_k, max_v)
+#         kv_scale = fp8_max / max_kv
+#         layer.impl.latent_cache_k.input_scale = kv_scale
+#         layer.impl.latent_cache_k.output_scale = 1.0 / kv_scale
+#         # q_scale:
+#         # orig_q_max = max(orig_q)
+#         # _q_scale = fp8_max / orig_q_max
+#         # cur_q = orig_q * softmax_sacle
+#         # cur_q_max = max(cur_q) = orig_q_max * softmax_sacle
+#         # cur_q_scale = fp8_max / cur_q_max = fp8_max / (orig_q_max * softmax_sacle)
+#         orig_q_max = layer._q_scale * fp8_max
+#         softmax_sacle = layer.impl.scale
+#         layer.impl.matmul_qk.scale_input = fp8_max / (orig_q_max * softmax_sacle)
+#         layer.impl.matmul_qk.scale_other = kv_scale
+#         # for a in a@v, we keep 1.0/240 as its scale
+#         layer.impl.matmul_av.scale_input = fp8_max
+#         layer.impl.matmul_av.scale_other = kv_scale
+
+
+# @CustomOp.register_oot(name='CompressedTensorsKVCacheMethod')
+class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
+    # pass
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        fp8_max = 240.0
+        max_k = layer._k_scale * fp8_max
+        max_v = layer._v_scale * fp8_max
+        max_kv = max(max_k, max_v)
+        kv_scale = fp8_max / max_kv
+        k_scale = fp8_max / max_k
+        v_scale = fp8_max / max_v
+        layer.impl.latent_cache_k.input_scale = kv_scale
+        layer.impl.latent_cache_k.output_scale = 1.0 / kv_scale
+        # q_scale:
+        # orig_q_max = max(orig_q)
+        # _q_scale = fp8_max / orig_q_max
+        # cur_q = orig_q * softmax_sacle
+        # cur_q_max = max(cur_q) = orig_q_max * softmax_sacle
+        # cur_q_scale = fp8_max / cur_q_max = fp8_max / (orig_q_max * softmax_sacle)
+        orig_q_max = layer._q_scale * fp8_max
+        orig_q_max = 1.0 * fp8_max
+        softmax_sacle = layer.impl.scale
+        layer.impl.matmul_qk.scale_input = fp8_max / (orig_q_max * softmax_sacle)
+        layer.impl.matmul_qk.scale_other = k_scale
+        # for a in a@v, we keep 1.0/240 as its scale
+        layer.impl.matmul_av.scale_input = fp8_max
+        layer.impl.matmul_av.scale_other = v_scale
+
+
+# @CustomOp.register_oot(name='CompressedTensorsKVCacheMethod')
+class HPUCompressedTensorsKVCacheMethodForMHA(CompressedTensorsKVCacheMethod):
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        fp8_max = 240.0
+        max_k = layer._k_scale * fp8_max
+        max_v = layer._v_scale * fp8_max
+        k_scale = fp8_max / max_k
+        v_scale = fp8_max / max_v
+        layer.impl.k_cache.input_scale = k_scale
+        layer.impl.k_cache.output_scale = 1.0 / k_scale
+        layer.impl.v_cache.input_scale = v_scale
+        layer.impl.v_cache.output_scale = 1.0 / v_scale
+        # q_scale:
+        # orig_q_max = max(orig_q)
+        # _q_scale = fp8_max / orig_q_max
+        # cur_q = orig_q * softmax_sacle
+        # cur_q_max = max(cur_q) = orig_q_max * softmax_sacle
+        # cur_q_scale = fp8_max / cur_q_max = fp8_max / (orig_q_max * softmax_sacle)
+        orig_q_max = layer._q_scale * fp8_max
+        softmax_sacle = layer.impl.scale
+        layer.impl.matmul_qk.scale_input = fp8_max / (orig_q_max * softmax_sacle)
+        layer.impl.matmul_qk.scale_other = k_scale
+        # for a in a@v, we keep 1.0/240 as its scale
+        layer.impl.matmul_av.scale_input = fp8_max
+        layer.impl.matmul_av.scale_other = v_scale
+
+
+class HPUCompressedTensorsConfig(CompressedTensorsConfig):
+
+    def get_quant_method(
+        self,
+        layer: torch.nn.Module,
+        prefix: str,
+    ) -> Optional["QuantizeMethodBase"]:
+        from vllm.attention.layer import MLAAttention
+        # # MLAAttention
+        if isinstance(layer, MLAAttention):
+            return HPUCompressedTensorsKVCacheMethodForMLA(self)
+        # if isinstance(layer,  Attention):
+        #     return HPUCompressedTensorsKVCacheMethodForMHA(self)
+        else:
+            return super().get_quant_method(layer, prefix)
+
 compressed_tensors.CompressedTensorsLinearMethod = \
     HPUCompressedTensorsLinearMethod
 compressed_tensors_moe.CompressedTensorsW8A8Fp8MoEMethod = \
@@ -743,6 +861,103 @@ compressed_tensors_moe.CompressedTensorsWNA16MoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod
 compressed_tensors_moe.CompressedTensorsWNA16MarlinMoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod # Override default WNA16 MoE method
+compressed_tensors.CompressedTensorsConfig = HPUCompressedTensorsConfig
 
 # support weight_loader_v2
 WEIGHT_LOADER_V2_SUPPORTED.append(HPUCompressedTensorsLinearMethod.__name__)
+
+
+def oot_maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
+    """Remap the name of FP8 k/v_scale parameters.
+
+    This function handles the remapping of FP8 k/v_scale parameter names.
+    It detects if the given name ends with a suffix and attempts to remap
+    it to the expected name format in the model. If the remapped name is not
+    found in the params_dict, a warning is printed and None is returned.
+
+    Args:
+        name (str): The original loaded checkpoint parameter name.
+        params_dict (dict): Dictionary containing the model's named parameters.
+
+    Returns:
+        str: The remapped parameter name if successful, or the original name
+             if no remapping is needed.
+        None: If the remapped name is not found in params_dict.
+    """
+
+    if name.endswith(".kv_scale"):
+        logger.warning_once("DEPRECATED. Found kv_scale in the checkpoint. "
+                            "This format is deprecated in favor of separate k_scale and "
+                            "v_scale tensors and will be removed in a future release. "
+                            "Functionally, we will remap kv_scale to k_scale and duplicate "
+                            "k_scale to v_scale")
+        # NOTE: we remap the deprecated kv_scale to k_scale
+        remapped_name = name.replace(".kv_scale", ".attn.k_scale")
+        if remapped_name not in params_dict:
+            logger.warning_once(
+                "Found kv_scale in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). kv_scale is not loaded.",  #  noqa: E501
+                name,
+                remapped_name,
+            )
+            return None
+        return remapped_name
+
+    if any("mla_attn" in key for key in params_dict):
+        attn_str = "mla_attn.mla_attn"
+        logger.debug_once(f"Found mla_attn with k_scale and v_scale in "
+                          f"the checkpoint, using {attn_str} as attn_str")
+    else:
+        attn_str = "attn"
+    # Define scale name mapping patterns in order of precedence
+    scale_mapping_patterns = [
+        # AR format:
+        #  .self_attn.{q,k,v}_scale ->
+        #  .attn.{attn_str}.{q,k,v}_scale
+        (
+            r"\.self_attn\.([qkv])_scale$",
+            rf".self_attn.{attn_str}.\1_scale",
+        ),
+        (
+            r"\.self_attn\.([kv])_proj\.([kv])_scale$",
+            rf".self_attn.{attn_str}.\2_scale",
+        ),
+        # ModelOpt format: .self_attn.{k,v}_proj.{k,v}_scale ->
+        # .self_attn.attn.{k,v}_scale
+        (
+            r"\.self_attn\.([kv])_proj\.([kv])_scale$",
+            rf".self_attn.{attn_str}.\2_scale",
+        ),
+        # QKV proj format: .self_attn.qkv_proj.{k,v}_scale ->
+        # .self_attn.attn.{k,v}_scale
+        (r"\.self_attn\.qkv_proj\.([kv])_scale$", r".self_attn.attn.\1_scale"),
+        # Qwen3 MoE format: .self_attn.qkqkv_proj.{k,v}_scale ->
+        # .self_attn.attn.{k,v}_scale
+        (r"\.self_attn\.qkqkv_proj\.([kv])_scale$", r".self_attn.attn.\1_scale"),
+        # Default format: .{k,v}_scale -> .attn.{k,v}_scale
+        (r"\.([kv])_scale$", r".attn.\1_scale"),
+    ]
+
+    # Check if name ends with k_scale or v_scale
+    if name.endswith((".k_scale", ".v_scale", ".q_scale")):
+        import regex as re
+
+        for pattern, replacement in scale_mapping_patterns:
+            if re.search(pattern, name):
+                remapped_name = re.sub(pattern, replacement, name)
+                if remapped_name not in params_dict:
+                    scale_type = name.split(".")[-1]
+                    logger.warning_once(
+                        "Found %s in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). %s is not loaded.",  # noqa: E501
+                        scale_type,
+                        name,
+                        remapped_name,
+                        scale_type,
+                    )
+                    return None
+                return remapped_name
+
+    # If there were no matches, return the untouched param name
+    return name
+
+
+vllm_weight_utils.maybe_remap_kv_scale_name = oot_maybe_remap_kv_scale_name
