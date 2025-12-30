@@ -42,8 +42,8 @@ def test_warmup_range():
 
 
 def test_warmup_range_with_one():
-    config = (1, 64, 128)
-    result = linear.warmup_range(config)
+    config = (1, 64, 128, 32, 25)
+    result = linear.warmup_range_with_limits(config)
     assert result == [1, 2, 4, 8, 16, 32, 64, 128]
 
 
