@@ -32,6 +32,11 @@ class HPUAttentionBackendV1(HPUAttentionBackend):
     def get_metadata_cls() -> type["AttentionMetadata"]:
         return HPUAttentionMetadataV1
 
+    # need to check if we need support for virtual spliting for mamba
+    @staticmethod
+    def get_supported_kernel_block_size() -> list[Union[int, MultipleOf]]:
+        return [128]
+
 
 @dataclass
 class HPUAttentionMetadataV1(HPUAttentionMetadata):
