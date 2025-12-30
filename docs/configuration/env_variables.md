@@ -52,8 +52,8 @@ HPU PyTorch bridge environment variables impacting vLLM execution:
 
 `VLLM_{phase}_{dim}_BUCKET_{param}` is a collection of environment variables configuring ranges of linear bucketing mechanism, where:
 
-- `{phase}` is in `['PROMPT', 'DECODE]`.
-- `{dim}` is in `['BS', 'QUERY', 'CTX']` for `PROMPT` phase or in `'BS', 'BLOCK']` for `DECODE` phase.
+- `{phase}` is in `['PROMPT', 'DECODE']`.
+- `{dim}` is in `['BS', 'QUERY', 'CTX']` for `PROMPT` phase or in `['BS', 'BLOCK']` for `DECODE` phase.
 - `{param}` is in `['MIN', 'STEP', 'MAX', 'PAD_MAX', 'PAD_PERCENT']`.
 
 The following table lists the available variables with their default values:
