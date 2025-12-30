@@ -22,7 +22,7 @@ from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention, HPUPaged
                                                      HPUPagedAttentionMetadataBuilder)
 
 from vllm_gaudi.extension.logger import logger as init_logger
-from vllm_gaudi.extension.unified import (unified_attn, HPUUnifiedAttentionMetadata)
+from vllm_gaudi.extension.unified import (unified_attn, unified_mla, HPUUnifiedAttentionMetadata)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.attention.backends.registry import (register_backend, AttentionBackendEnum)
 from vllm._aiter_ops import rocm_aiter_ops
@@ -112,6 +112,33 @@ class HPUUnifiedAttentionBackend(HPUAttentionBackend):
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
         return HPUUnifiedAttentionMetadata
+
+
+@register_backend(AttentionBackendEnum.CUSTOM, "HPU_UNIFIED_MLA")
+class HPUUnifiedMLABackend(HPUAttentionBackend):
+
+    @staticmethod
+    def get_name() -> str:
+        return "CUSTOM"
+
+    @staticmethod
+    def get_impl_cls() -> type["AttentionImpl"]:
+        return HPUUnifiedMLAImpl
+
+    @staticmethod
+    def get_metadata_cls() -> type["AttentionMetadata"]:
+        return HPUUnifiedAttentionMetadata
+
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+    ) -> tuple[int, ...]:
+        # MLA stores latent vectors without per-head dimension
+        # Return 2D shape: [num_slots, latent_dim]
+        return (num_blocks * block_size, head_size)
 
 
 @dataclass
@@ -205,7 +232,9 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
             else FP8Matmul()
         self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn \
             else VLLMFP8KVCache()
-        self.fused_scaled_dot_product_attention = kernels.fsdpa()
+        HPUFusedSDPA = kernels.fsdpa()
+        self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
+            else ModuleFusedSDPA(HPUFusedSDPA)
         self.use_merged_prefill = get_config().merged_prefill
         self.prefill_impl = get_config().prompt_attn_impl
         assert self.prefill_impl != 'fsdpa_impl' or alibi_slopes is None, \
@@ -305,23 +334,21 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         else:
             v_padded = v
 
-        output = ops.prompt_attention(
-            impl=self.prefill_impl,
-            query=q,
-            key=k,
-            value=v_padded,
-            is_causal=True,
-            attn_bias=attn_metadata.attn_bias,
-            position_bias=None,
-            valid_seq_lengths=attn_metadata.seq_lens_tensor,
-            scale=self.scale,
-            matmul_qk_op=self.matmul_qk,
-            softmax_op=self.softmax,
-            matmul_av_op=self.matmul_av,
-            keys_fetch_func=self.latent_cache_k.fetch_from_cache,
-            values_fetch_func = None,
-            fsdpa_op=self.fused_scaled_dot_product_attention.apply \
-            if self.fused_scaled_dot_product_attention is not None else None)
+        output = ops.prompt_attention(impl=self.prefill_impl,
+                                      query=q,
+                                      key=k,
+                                      value=v_padded,
+                                      is_causal=True,
+                                      attn_bias=attn_metadata.attn_bias,
+                                      position_bias=None,
+                                      valid_seq_lengths=attn_metadata.seq_lens_tensor,
+                                      scale=self.scale,
+                                      matmul_qk_op=self.matmul_qk,
+                                      softmax_op=self.softmax,
+                                      matmul_av_op=self.matmul_av,
+                                      keys_fetch_func=self.latent_cache_k.fetch_from_cache,
+                                      values_fetch_func=None,
+                                      fsdpa_op=self.fused_scaled_dot_product_attention)
         # remove padding
         output = output.view(batch_size, -1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]
 
@@ -916,3 +943,218 @@ class HPUUnifiedAttentionImpl(AttentionImpl, torch.nn.Module):
         )
         output = output.unflatten(0, (query_shape[0], query_shape[1])).flatten(-2, -1)
         return output
+
+
+class HPUUnifiedMLAImpl(MLACommonImpl[HPUUnifiedAttentionMetadata], torch.nn.Module):
+    """Unified MLA (Multi-head Latent Attention) implementation for HPU.
+    
+    MLA compresses KV pairs into a shared latent space to reduce memory usage.
+    Instead of caching [num_heads, head_dim] per token, MLA caches a single
+    latent vector of size kv_lora_rank (~512 dims) that's shared across heads.
+    
+    Compared to "standard" attention:
+    - Standard: Each head has its own K/V cache [num_heads, kv_head_dim]
+    - MLA: Shared latent cache [kv_lora_rank] + projection matrices W_UV/W_UK_T
+    
+    In terms of getting this thing working with unified attention - we implement 
+    two computation paths simultaneously within a single unified_mla forward pass:
+    1. Causal (fresh tokens) - used by unified_attn's causal path:
+        - "Compute Friendly Approach" from mla/common.py
+        - Expand latent KV → full attention with uncompressed Q 
+    2. Cached (prefix/decode) - used by unified_attn's shared and unique paths: 
+        - "Data-Movement Friendly Approach" from mla/common.py
+        - Project Q to latent space → attention in compressed space
+         
+    Both paths use W_UV to project latent attention output → full V dimension.
+    Weights W_UV and W_UK_T are initialized in process_weights_after_loading()
+    by parent MLACommonImpl from kv_b_proj weights.
+    
+    With that, we don't need to split the batch into separate prefill/decode passes, 
+    and just handle everything in one go.
+    """
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: Optional[list[float]],
+        sliding_window: Optional[int],
+        kv_cache_dtype: str,
+        logits_soft_cap: Optional[float],
+        attn_type: str,
+        kv_sharing_target_layer_name: Optional[str],
+        # MLA-specific
+        # NOTE(kzawora): for dum-dums like me: kv_lora_rank is the latent space dimension (not actual LoRA!)
+        q_lora_rank: Optional[int],
+        kv_lora_rank: int,  # Latent compression dimension (~512)
+        qk_nope_head_dim: int,  # Non-RoPE query/key dimension
+        qk_rope_head_dim: int,  # RoPE dimension
+        qk_head_dim: int,  # Total Q/K head dim = nope + rope
+        v_head_dim: int,  # Value head dimension
+        kv_b_proj: ColumnParallelLinear,  # Latent → full KV expansion
+        **kwargs,
+    ) -> None:
+        torch.nn.Module.__init__(self)
+
+        supported_head_sizes = HPUUnifiedMLAImpl.get_supported_head_sizes()
+        if head_size not in supported_head_sizes:
+            raise ValueError(f"Head size {head_size} is not supported by PagedAttention. "
+                             f"Supported head sizes are: {supported_head_sizes}.")
+
+        unsupported_features = {
+            'KV sharing': kv_sharing_target_layer_name is not None,
+            'Alibi': alibi_slopes is not None,
+            'Sliding window': sliding_window is not None,
+            'non-GQA attention': num_kv_heads is None,
+            'Encoder attn': attn_type != AttentionType.DECODER,
+            'fp32 softmax': get_config().fp32_softmax,
+        }
+        for feature, check in unsupported_features.items():
+            if check:
+                raise NotImplementedError(feature + ' is not implemented for HPU unified attn')
+
+        self.enable_fp8_attn = kv_cache_dtype == 'fp8_inc' and os.environ.get('QUANT_CONFIG', None) is None
+        self.kv_cache_dtype = kv_cache_dtype
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.scale = float(scale)
+        self.num_kv_heads = num_kv_heads
+
+        # MLA dimensions
+        self.q_lora_rank = q_lora_rank
+        self.kv_lora_rank = kv_lora_rank  # Latent space size
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.qk_head_dim = qk_head_dim
+        self.v_head_dim = v_head_dim
+        self.kv_b_proj = kv_b_proj  # Used to expand latent → full KV in causal path
+
+        assert self.num_heads % self.num_kv_heads == 0
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+        self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn \
+            else VLLMFP8KVCache()
+        self.is_aiter_triton_fp8_bmm_enabled = False
+
+    def forward(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,  # [tokens, num_heads, qk_head_dim] - already uncompressed
+        k_c_normed: torch.Tensor,  # [tokens, kv_lora_rank] - compressed latent KV
+        k_pe: torch.Tensor,  # [tokens, qk_rope_head_dim] - RoPE positional info
+        kv_cache: torch.Tensor,
+        attn_metadata: HPUUnifiedAttentionMetadata,
+        output: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Forward pass for unified MLA attention.
+        
+        Prepares inputs for two possible attention paths:
+        - Causal: Fresh tokens → expand K, full-dimensional attention, compute-friendly
+        - Cached (shared + unique): Cached tokens → project Q to latent, compressed attention, memory-friendly
+        
+        Both can be active in same forward pass (e.g., cached prefix + new tokens).
+        unified_mla handles the routing based on which inputs are non-None.
+        
+        NOTE(kzawora): As always, shared part is tricky and could be optimized further. 
+        A hybrid approach might be worth investigating, where cached tokens go through 
+        the cached part, and fresh tokens go through the causal part.
+        """
+
+        if output is not None:
+            raise NotImplementedError("output is not yet supported for HPUUnifiedMLAImpl")
+
+        if not hasattr(self, 'W_UV'):
+            raise RuntimeError("W_UV not initialized! process_weights_after_loading() may not have been called.")
+        expected_shape = (self.num_heads, self.kv_lora_rank, self.v_head_dim)
+        if self.W_UV.shape != expected_shape:
+            raise RuntimeError(f"W_UV has wrong shape: {self.W_UV.shape}, expected {expected_shape}")
+
+        # Cache stores concatenated [latent KV (kv_lora_rank), RoPE (qk_rope_head_dim)]
+        latent_vec_k = torch.cat([k_c_normed, k_pe.view(*k_c_normed.shape[:-1], self.qk_rope_head_dim)], dim=-1)
+        latent_vec_k = latent_vec_k.view(-1, self.qk_rope_head_dim + self.kv_lora_rank)
+
+        slot_mapping = attn_metadata.slot_mapping.flatten() if attn_metadata.slot_mapping is not None else None
+        if kv_cache is not None and len(kv_cache) >= 2:
+            self.latent_cache_k(latent_vec_k, kv_cache[0], slot_mapping, kv_cache[2])
+            k_cache = kv_cache[0]
+        else:
+            k_cache = None
+
+        # Causal Path: For fresh tokens not yet in cache
+        # (aka Compute Friendly Approach from mla/common.py)
+        if attn_metadata.causal_bias is not None:
+            k_c_normed_causal, k_pe_causal = latent_vec_k.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+            k_pe_causal = k_pe_causal.view(-1, 1, self.qk_rope_head_dim)
+
+            # kv_b_proj expands latent → [k_nope, v] but we only need k_nope here
+            # V stays compressed! unified_mla will apply W_UV projection later
+            # Shape: [tokens, kv_lora_rank] → [tokens, num_heads, qk_nope_head_dim + v_head_dim]
+            kv_nope = self.kv_b_proj(k_c_normed_causal)[0]\
+                .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+            k_nope, _ = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+
+            # Shape: [tokens, num_heads, qk_head_dim] = [k_nope, k_pe]
+            k_causal = torch.cat((k_nope, k_pe_causal.expand((*k_nope.shape[:-1], -1))), dim=-1)
+            # Shape: [tokens, num_heads, kv_lora_rank] - V in latent space
+            v_causal_latent = k_c_normed_causal.view(-1, 1, self.kv_lora_rank).expand(-1, self.num_heads, -1)
+            q_causal = query
+        else:
+            q_causal = None
+            k_causal = None
+            v_causal_latent = None
+
+        # Cached Path: For tokens already in cache
+        # (aka Data-Movement Friendly Approach from mla/common.py)
+        # Used during prefix caching and prefix-prefills (shared blocks), decode (unique per-seq blocks)
+        # NOTE(kzawora): Prefix-prefills might suffer here, performance-wise - might want to
+        # try compute-friendly or hybrid approach
+        if attn_metadata.shared_blocks is not None or attn_metadata.unique_blocks is not None:
+            q_nope, q_pe = query.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+
+            # W_UK_T projects Q from full space → latent space
+            # This is the "inverse" of kv_b_proj, allowing Q to match cached latent KV
+            # Shape: [tokens, num_heads, qk_nope_head_dim] @ [num_heads, qk_nope_head_dim, kv_lora_rank]
+            #     → [tokens, num_heads, kv_lora_rank]
+            q_nope_transposed = q_nope.transpose(0, 1)  # [num_heads, tokens, qk_nope_head_dim]
+            ql_nope = torch.bmm(q_nope_transposed, self.W_UK_T)  # [num_heads, tokens, kv_lora_rank]
+            ql_nope = ql_nope.transpose(0, 1)  # [tokens, num_heads, kv_lora_rank]
+
+            # Shape: [tokens, num_heads, kv_lora_rank + qk_rope_head_dim]
+            q_latent = torch.cat([ql_nope, q_pe], dim=-1)
+        else:
+            q_latent = None
+
+        result = unified_mla(
+            query=q_causal,
+            key=k_causal,
+            value=v_causal_latent,
+            latent_cache=k_cache,
+            scale=self.scale,
+            metadata=attn_metadata,
+            w_uv=self.W_UV,  # Projects latent attention output → full V dimension
+            query_latent=q_latent)
+
+        return result.reshape(-1, self.num_heads * self.v_head_dim)
+
+    @staticmethod
+    def get_supported_head_sizes() -> list[int]:
+        # head_size = kv_lora_rank + qk_rope_head_dim (e.g., 512 + 64 = 576)
+        return [576]
+
+    @classmethod
+    def is_mla(cls) -> bool:
+        return True
+
+    def _forward_decode(self, *args, **kwargs) -> torch.Tensor:
+        raise NotImplementedError("Use forward method for HPUUnifiedMLAImpl")
+
+    def _forward_prefill(self, *args, **kwargs) -> torch.Tensor:
+        raise NotImplementedError("Use forward method for HPUUnifiedMLAImpl")
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        # Parent MLACommonImpl extracts W_UV and W_UK_T from kv_b_proj weights
+        # These projection matrices are used for latent ↔ full space conversions
+        super().process_weights_after_loading(act_dtype)
+        self.W_UV: torch.Tensor = self.W_UV.contiguous()
+        self.W_UK_T: torch.Tensor = self.W_UK_T.contiguous()

@@ -48,15 +48,20 @@ class HpuPlatform(Platform):
     ) -> str:
         if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on HPU.")
-        if attn_selector_config.use_mla:
-            logger.info("Using HPUAttentionMLA backend.")
-            return ("vllm_gaudi.attention.backends.hpu_attn."
-                    "HPUMLAAttentionBackend")
         elif get_config().unified_attn:
+            if attn_selector_config.use_mla:
+                logger.info("Using HPUUnifiedMLA backend.")
+                return ("vllm_gaudi.attention.backends.hpu_attn."
+                        "HPUUnifiedMLABackend")
             logger.info("Using UnifiedAttention backend.")
             return ("vllm_gaudi.attention.backends."
                     "hpu_attn.HPUUnifiedAttentionBackend")
         else:
+            if attn_selector_config.use_mla:
+                logger.info("Using HPUAttentionMLA backend.")
+                return ("vllm_gaudi.attention.backends.hpu_attn."
+                        "HPUMLAAttentionBackend")
+
             logger.info("Using HPUAttentionV1 backend.")
             return ("vllm_gaudi.v1.attention.backends."
                     "hpu_attn.HPUAttentionBackendV1")
@@ -247,11 +252,11 @@ class HpuPlatform(Platform):
             src_cache = src_cache.view(torch.uint8)
         if isinstance(dst_cache, tuple):
             _src_cache = src_cache[:, src_block_indices]
-            for i in range(len(dst_cache)):
-                indexed_cache = _src_cache[i]
-                if view_as_uint:
-                    indexed_cache = indexed_cache.view(original_src_dtype)
-                dst_cache[i].index_copy_(0, dst_block_indices, indexed_cache.to(dst_cache[i].device))
+            _src_cache = _src_cache.to(dst_cache[0].device)
+            dst_cache[0].index_copy_(0, dst_block_indices,
+                                     _src_cache[0].view(original_src_dtype) if view_as_uint else _src_cache[0])
+            dst_cache[1].index_copy_(0, dst_block_indices,
+                                     _src_cache[1].view(original_src_dtype) if view_as_uint else _src_cache[1])
         else:
             indexed_cache = src_cache[src_block_indices]
             if view_as_uint:
