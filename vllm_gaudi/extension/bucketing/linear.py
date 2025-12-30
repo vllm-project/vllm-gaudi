@@ -144,17 +144,31 @@ def read_bucket_settings(phase: str, dim: str, **defaults):
 
 
 def warmup_range_with_limits(config: Tuple[int, int, int, int, int]) -> List[int]:
-    """Generate a warmup range.
+    """Generate a warmup range with absolute and relative padding limits.
 
-    Start from bucket_min and multiply by 2 until you reach bucket_step.
-    Then, increase the values in the range by the value of bucket_step until you
-    reach bucket_max if the absolute padding and padding ratio are within the limit.
+    1. Starts from `bucket_min` and multiply by 2 (or +1 for 0) till to `bucket_step`.
+    2. Add `bucket_step` to the values till to `bucket_max` and choose current bucket if:
+        a. the next bucket exceeds the absolute padding limit `pad_max`,
+        b. or the next bucket exceeds the padding ratio limit `pad_percent`,
+        c. or the current bucket is a multiple of `pad_max`.
+    3. Always include `bucket_max` as the last bucket.
 
     Example:
-    bucket_min = 2, bucket_step = 32, bucket_max = 64
-    => ramp_up = (2, 4, 8, 16)
-    => stable = (32, 64)
-    => return ramp_up + stable => (2, 4, 8, 16, 32, 64)
+    1. for cofig = (0, 8, 64, 64, 0)
+        ramp_up = [0, 1, 2, 4, 8]
+        stable = [16, 24, 32, 40, 48, 56, 64]
+        return [0, 1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64]
+    2. for cofig = (0, 8, 64, 64, 50)
+        ramp_up = [0, 1, 2, 4, 8]
+        stable = [16, 24, 32, 48, 64]  # 40 and 56 are skipped due to padding ratio limit
+        return [0, 1, 2, 4, 8, 16, 24, 32, 48, 64]
+    3. for cofig = (0, 8, 64, 16, 50)
+        ramp_up = [0, 1, 2, 4, 8]
+        stable = [16, 32, 48, 64]  # 24, 40, 56 are skipped due to absolute padding limit
+        return [0, 1, 2, 4, 8, 16, 32, 48, 64]
+    4. for cofig = (16, 16, 128, 32, 25)
+        stable = [16, 32, 48, 64, 80, 96, 112, 128]  # no ramp up phase
+        return [16, 32, 48, 64, 80, 96, 112, 128]
     """
     bucket_min, bucket_step, bucket_max, pad_max, pad_percent = config
     assert bucket_min <= bucket_max, ("bucket_min cannot be greater than bucket_max. "
@@ -176,8 +190,12 @@ def warmup_range_with_limits(config: Tuple[int, int, int, int, int]) -> List[int
             next_bucket = current_bucket + bucket_step
             max_padding = next_bucket - last_bucket - 1
             max_padding_ratio = max_padding / next_bucket
-            if ((max_padding_ratio > pad_percent / 100.0 or max_padding > pad_max or current_bucket % pad_max == 0)
-                    and current_bucket != last_bucket):
+            keep_bucket = (
+                max_padding_ratio > pad_percent / 100.0  # next bucket exceeds padding ratio limit
+                or max_padding > pad_max  # next bucket exceeds absolute padding limit
+                or current_bucket % pad_max == 0  # current bucket is a multiple of pad_max
+            )
+            if keep_bucket and current_bucket != last_bucket:
                 buckets.append(current_bucket)
         current_bucket = next_bucket
     if buckets[-1] != bucket_max:
