@@ -739,26 +739,74 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
 
 class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
 
+    def _convert_all_scale_to_nn_param(self, layer: torch.nn.Module) -> None:
+        #         layer._k_scale.copy_(k_scale)
+        # layer._v_scale.copy_(v_scale)
+        # layer._k_scale_float = k_scale
+        # layer._v_scale_float = v_scale
+        for scale_name in [
+                "_k_scale",
+                "_v_scale",
+                "_q_scale",
+                "_v_scale_float",
+                "_k_scale_float",
+                "_q_scale_float",
+                "_prob_scale",
+        ]:
+            scale_tensor = getattr(layer, scale_name, None)
+
+            def convert_float_to_tensor(scale_value: float) -> torch.Tensor:
+                return torch.tensor(scale_value, dtype=torch.float32)
+
+            if isinstance(scale_tensor, float):
+                scale_tensor = convert_float_to_tensor(scale_tensor)
+
+            if scale_tensor is not None and not isinstance(scale_tensor, torch.nn.Parameter):
+                scale_param = torch.nn.Parameter(scale_tensor.data, requires_grad=False)
+                setattr(layer, scale_name, scale_param)
+
+    def _remove_kv_scale(self, layer: torch.nn.Module) -> None:
+        for scale_name in ["k_scale", "v_scale", "q_scale"]:
+            if hasattr(layer, scale_name):
+                delattr(layer, scale_name)
+                logger.warning_once(f"Removed deprecated attribute {scale_name} from layer {layer}")
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # self._remove_kv_scale(layer)
+        # FIXME: refine code
         super().process_weights_after_loading(layer)
+        self._convert_all_scale_to_nn_param(layer)
+
+        # breakpoint()
         fp8_max = 240.0 if hpu_ops.is_hpu_gaudi2 else 448.0
         max_k = layer._k_scale * fp8_max
         max_v = layer._v_scale * fp8_max
         max_kv = max(max_k, max_v)
         kv_scale = fp8_max / max_kv
-        k_scale = fp8_max / max_k
-        v_scale = fp8_max / max_v
+        # k_scale = fp8_max / max_k
+        # v_scale = fp8_max / max_v
         layer.impl.latent_cache_k.input_scale = kv_scale
         layer.impl.latent_cache_k.output_scale = 1.0 / kv_scale
         # TODO: (yiliu30) support loading q_scale from checkpoint later
         orig_q_max = 1.0 * fp8_max
-        softmax_sacle = layer.impl.scale
-        layer.impl.matmul_qk.scale_input = fp8_max / (orig_q_max * softmax_sacle)
-        layer.impl.matmul_qk.scale_other = k_scale
+        softmax_scale = layer.impl.scale
+        layer.impl.matmul_qk.scale_input = fp8_max / (orig_q_max * softmax_scale)
+        layer.impl.matmul_qk.scale_other = kv_scale
         # For a in a@v, as a is the output of softmax, its max value is 1.0,
         # we keep fp8_max as its scale
         layer.impl.matmul_av.scale_input = fp8_max
-        layer.impl.matmul_av.scale_other = v_scale
+        layer.impl.matmul_av.scale_other = kv_scale
+
+        # convert latent_cache_k, matmul_qk, matmul_av input_scale and output_scale to nn.Parameter
+        for submodule_name in ["latent_cache_k", "matmul_qk", "matmul_av"]:
+            submodule = getattr(layer.impl, submodule_name, None)
+            if submodule is not None:
+                for scale_attr in ["input_scale", "output_scale", "scale_input", "scale_other"]:
+                    scale_value = getattr(submodule, scale_attr, None)
+                    if scale_value is not None and not isinstance(scale_value, torch.nn.Parameter):
+                        scale_param = torch.nn.Parameter(torch.tensor(scale_value, dtype=torch.float32),
+                                                         requires_grad=False)
+                        setattr(submodule, scale_attr, scale_param)
 
 
 class HPUCompressedTensorsConfig(CompressedTensorsConfig):
