@@ -159,6 +159,8 @@ def warmup_range_with_limits(config: Tuple[int, int, int, int, int]) -> List[int
     bucket_min, bucket_step, bucket_max, pad_max, pad_percent = config
     assert bucket_min <= bucket_max, ("bucket_min cannot be greater than bucket_max. "
                                       "If you want to skip warmup, set VLLM_SKIP_WARMUP=true")
+    assert pad_max % bucket_step == 0, "pad_max must be a multiple of bucket_step"
+    assert 0 <= pad_percent <= 50, "pad_percent must be between 0 and 50"
 
     buckets = [bucket_min]
     current_bucket = bucket_min

@@ -36,13 +36,13 @@ def test_read_bucket_settings_empty_flags():
 
 
 def test_warmup_range():
-    config = (2, 64, 128, 32, 25)
+    config = (2, 64, 128, 64, 25)
     result = linear.warmup_range_with_limits(config)
     assert result == [2, 4, 8, 16, 32, 64, 128]
 
 
 def test_warmup_range_with_one():
-    config = (1, 64, 128, 32, 25)
+    config = (1, 64, 128, 64, 25)
     result = linear.warmup_range_with_limits(config)
     assert result == [1, 2, 4, 8, 16, 32, 64, 128]
 
