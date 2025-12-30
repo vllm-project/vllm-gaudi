@@ -2,6 +2,7 @@ import torch
 from .utils import _merge_multimodal_embeddings
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
+from vllm.model_executor.models.interfaces import _require_is_multimodal
 
 
 class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
