@@ -168,8 +168,8 @@ def warmup_range_with_limits(config: Tuple[int, int, int, int, int]) -> List[int
         last_bucket = buckets[-1]
         if current_bucket <= bucket_step:
             next_bucket = last_bucket * 2
-            if next_bucket == current_bucket:
-                next_bucket += bucket_step
+            if next_bucket == 0:
+                next_bucket += 1
             if next_bucket <= bucket_max:
                 buckets.append(next_bucket)
         else:
