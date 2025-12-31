@@ -18,7 +18,8 @@ def mock_config():
     with patch('vllm_gaudi.extension.defragmentation.get_config') as mock_cfg:
         config = MagicMock()
         config.defrag = True
-        config.VLLM_DEFRAG_THRESHOLD = 32
+        config.VLLM_DEFRAG_RATIO_LIMIT = 1.5
+        config.VLLM_DEFRAG_MIN_SWAPS = 4
         config.VLLM_DEFRAG_WITH_GRAPHS = False
         config.bridge_mode = 'eager'
         mock_cfg.return_value = config
@@ -188,54 +189,95 @@ class TestOnlineDefragmenter:
         # Should return early without errors
         assert defragmenter.used_blocks == {}
 
-    def test_defragment_below_threshold(self, defragmenter):
-        """Test defragmentation when fragmentation below threshold"""
-        # Use blocks close together (max_used - threshold <= num_used)
-        # With threshold=32, using blocks 1-19 means max_used=19, num_used=19
-        # 19 - 32 = -13, which is <= 19, so no defrag
+    def test_defragment_below_frag_limit(self, defragmenter):
+        """Test defragmentation when fragmentation ratio below limit"""
+        # Defragmentation should NOT trigger when fragmentation ratio
+        # (max_phys / num_used) is <= frag_limit.
+        # Here we use contiguous blocks 1..N so frag_ratio = 1.0,
+        # which is <= default frag_limit (1.5).
+    
+        # Use a dense, contiguous allocation: blocks 1..19
         for i in range(1, 20):
             defragmenter.use_block(i)
 
-        max_before = max(defragmenter.used_blocks.keys())
-        defragmenter._extend_mapping_table(max_before)
+        # Mapping table needs to cover max_phys
+        max_phys_before = max(defragmenter.used_blocks.keys())
+        defragmenter._extend_mapping_table(max_phys_before)
         defragmenter.cache_utils = MagicMock()
         defragmenter.defragment()
 
-        # Should not trigger defragmentation
         defragmenter.cache_utils.swap.assert_not_called()
-        assert max(defragmenter.used_blocks.keys()) == max_before
+
+        # Sanity: used blocks unchanged, and max_phys is the same
+        assert max(defragmenter.used_blocks.keys()) == max_phys_before
+
+    def test_dynamic_padding_power_of_two(self, defragmenter):
+        """Test dynamic padding produces smallest power-of-two >= len(to_swap)"""
+        used_blocks_case1 = [100, 101, 102, 103]
+        for b in used_blocks_case1:
+            defragmenter.use_block(b)
+        defragmenter._extend_mapping_table(max(used_blocks_case1))
+        defragmenter.cache_utils = MagicMock()
+
+        defragmenter.defragment()
+
+        assert defragmenter.cache_utils.swap.called, "Expected swap() to be called"
+
+        to_swap_1, pad_1 = defragmenter.cache_utils.swap.call_args[0]
+        assert len(to_swap_1) == 4, f"expected 4 swaps, got {len(to_swap_1)}"
+        assert pad_1 == 4, f"expected pad=4, got {pad_1}"
+        for victim, free_slot in to_swap_1:
+            assert victim >= free_slot, f"invalid pair: ({victim}, {free_slot})"
+
+        defragmenter.cache_utils.swap.reset_mock()
+
+        # Add one more high block; num_used=5 -> free_tail = [5,6,7,8,9]
+        used_blocks_case2 = [200, 201, 202, 203, 204]
+        for b in used_blocks_case2:
+            defragmenter.use_block(b)
+        defragmenter._extend_mapping_table(max(used_blocks_case2))
+
+        defragmenter.defragment()
+
+        assert defragmenter.cache_utils.swap.called, "Expected swap() to be called"
+
+        to_swap_2, pad_2 = defragmenter.cache_utils.swap.call_args[0]
+        assert len(to_swap_2) == 5, f"expected 5 swaps, got {len(to_swap_2)}"
+        assert pad_2 == 8, f"expected pad=8, got {pad_2}"
+        for victim, free_slot in to_swap_2:
+            assert victim >= free_slot, f"invalid pair: ({victim}, {free_slot})"
 
     def test_defragment_triggers(self, defragmenter):
-        """Test defragmentation triggers when fragmented"""
-        # Create fragmentation: blocks at 1, 2, 3 and 100, 101, 102
-        # max_used=102, num_used=6, threshold=32
-        # Check: 102 - 32 = 70 > 6, so triggers defrag
-        for i in [1, 2, 3, 100, 101, 102]:
-            defragmenter.use_block(i)
+        """Test defragmentation triggers when frag_ratio > frag_limit and len(to_swap) >= min_swaps"""
+        # - Use exactly 4 high physical IDs (num_used=4) so tail_start = 4 and tail holes will be [4,5,6,7]
+        # - Choose large max_phys to ensure frag_ratio = max_phys / num_used is > frag_limit (1.5)
+        #   Here: max_phys = 103, num_used = 4  => frag_ratio = 25.75 > 1.5
+        used_blocks = [100, 101, 102, 103]
+        for b in used_blocks:
+            defragmenter.use_block(b)
 
-        defragmenter._extend_mapping_table(102)
+        defragmenter._extend_mapping_table(max(used_blocks))
         defragmenter.cache_utils = MagicMock()
 
         defragmenter.defragment()
 
-        # Should call swap with high blocks moved to low positions
+        # Assert swap was called once
         defragmenter.cache_utils.swap.assert_called_once()
-        args = defragmenter.cache_utils.swap.call_args[0]
-        to_swap = args[0]
-        threshold = args[1]
+        to_swap, pad = defragmenter.cache_utils.swap.call_args[0]
 
-        # Verify swaps move high blocks to low free positions
-        assert len(to_swap) > 0
+        # Verify we swapped exactly min_swaps (4) pairs moving high -> lower tail holes
+        assert len(to_swap) == 4, f"Expected 4 swaps, got {len(to_swap)}"
         for high, low in to_swap:
-            assert high > low
+            assert high >= low, f"Invalid swap pair: ({high}, {low})"
 
-        # Verify threshold is padded correctly
-        assert threshold in defragmenter.to_swap_pad_thresholds
-        assert threshold >= len(to_swap)
+        assert pad == 4, f"Expected pad=4 for 4 swaps, got {pad}"
 
     def test_defragment_early_exit(self, defragmenter):
-        """Test defragmentation exits early when no swaps needed"""
-        # Scenario where free_block > used_block early
+        """Test defragmentation exits early when len(to_swap) < min_swaps"""
+        # Used blocks at 2 and 100 -> num_used=2, max_phys=100 -> frag_ratio=50 > 1.5
+        # Tail holes start at tail_start=num_used=2: free_tail ~ [3,4,5,...,99]
+        # Victims (descending) ~ [100, 2]; zipping yields (100,3) valid, then (2,4) invalid (f > v)
+        # => len(to_swap) == 1, which is < min_swaps (configured as 4), so no swap should occur.
         defragmenter.use_block(2)
         defragmenter.use_block(100)
 
@@ -244,15 +286,8 @@ class TestOnlineDefragmenter:
 
         defragmenter.defragment()
 
-        # Free blocks: 1, 3, 4, 5...
-        # Used blocks (descending): 100, 2
-        # Pair (100, 1): valid swap
-        # Pair (2, 3): 3 > 2, so break
-        args = defragmenter.cache_utils.swap.call_args[0]
-        to_swap = args[0]
-
-        assert len(to_swap) == 1
-        assert to_swap[0] == (100, 1)
+        # Assert that physical copying (swap) was not invoked
+        defragmenter.cache_utils.swap.assert_not_called()
 
 
 class TestCacheSwapUtils:
