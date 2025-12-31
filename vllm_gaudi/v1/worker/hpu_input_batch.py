@@ -77,7 +77,10 @@ class InputBatch:
         kernel_block_sizes: list[int],
         logitsprocs: Optional[LogitsProcessors] = None,
         is_spec_decode: bool = False,
+        is_pooling_model: bool = False,
+        num_speculative_tokens: int = 0,
     ):
+        self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -121,6 +124,7 @@ class InputBatch:
             device=device,
             block_sizes=block_sizes,
             kernel_block_sizes=kernel_block_sizes,
+            num_speculative_tokens=num_speculative_tokens,
         )
 
         # Sampling-related.
@@ -399,6 +403,11 @@ class InputBatch:
                 self.lora_id_to_lora_request.pop(lora_id)
             self.request_lora_mapping[req_index] = 0
 
+        if self.is_pooling_model:
+            self.pooling_params.pop(req_id, None)
+            self.pooling_states.pop(req_id, None)
+            return req_index
+
         self.has_allowed_token_ids.discard(req_id)
         if self.allowed_token_ids_mask_cpu_tensor is not None:
             # False means we don't fill with -inf.
@@ -455,6 +464,10 @@ class InputBatch:
 
         self.request_lora_mapping[i1], self.request_lora_mapping[i2] =\
             self.request_lora_mapping[i2], self.request_lora_mapping[i1]
+
+        if self.is_pooling_model:
+            # Sampling and logits parameters don't apply to pooling models.
+            return
 
         if self.allowed_token_ids_mask_cpu_tensor is not None:
             self.allowed_token_ids_mask_cpu_tensor[i1], \
@@ -514,6 +527,11 @@ class InputBatch:
 
             self.request_lora_mapping[empty_index] = self.request_lora_mapping[last_req_index]
 
+            if self.is_pooling_model:
+                last_req_index -= 1
+                # Sampling state not used by pooling models.
+                continue
+
             if self.allowed_token_ids_mask_cpu_tensor is not None:
                 self.allowed_token_ids_mask_cpu_tensor[empty_index] = self.allowed_token_ids_mask_cpu_tensor[
                     last_req_index]
@@ -533,6 +551,11 @@ class InputBatch:
         * Apply batch add/remove/permute to logits procs' states
         * If batch state is modified, update sampling metadata
         """
+        # if self.is_pooling_model:
+        #     batch_changed = self.batch_update_builder.reset()
+        #     if batch_changed:
+        #         self.sampling_metadata = self._make_sampling_metadata()
+        #     return
         # NOTE(chendi): don't reset batch_update_builder here
         # TODO: follow upstream PR#16728 for enabling batch_update
         self.sampling_metadata = self._make_sampling_metadata()
