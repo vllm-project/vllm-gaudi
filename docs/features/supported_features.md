@@ -56,6 +56,25 @@ The following values are supported:
 - `1`: Removes scales equal to 1.0 in `cast_to_fp8_v2` and `cast_from_fp8`, disabling the corresponding `mult_fwd` (multiplication) node.
 - `2`: Applies the same optimization as mode `1`, and additionally removes reciprocal scales in `fp8_gemm_v2`.
 
+### Dynamic Quantization for MatMul and KV‑cache Operations
+
+This feature applies dynamic quantization to MatMul operations and KV-cache storage, improving performance with minimal expected impact on accuracy.
+
+To enable the feature:
+
+1. Set the environment variable:
+
+   ```
+   export VLLM_DYNAMIC_KV_QUANT=1
+   ```
+
+2. Update your quantization configuration file with the following options:
+
+   ```
+   "dynamicquantization": "True",
+   "scaleformat": "CONST"
+   ```
+
 ## Planned Features
 
 Future plugin releases are planned to provide support for the following vLLM features:
