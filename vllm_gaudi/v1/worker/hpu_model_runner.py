@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import collections
 import contextlib
+from copy import deepcopy
 import functools
 from functools import partial
 import itertools
@@ -11,7 +12,7 @@ import time
 from contextlib import suppress
 from tqdm import tqdm
 from dataclasses import dataclass, field, fields
-from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast)
+from typing import (TYPE_CHECKING, Any, Callable, NamedTuple, Optional, TypeAlias, Union, cast)
 if os.getenv("QUANT_CONFIG", None) is not None:
     from neural_compressor.torch.quantization import finalize_calibration
 else:
@@ -36,17 +37,19 @@ from vllm_gaudi.extension.utils import align_and_pad, pad_list, with_default
 from vllm_gaudi.extension.debug import init_debug_logger
 from vllm_gaudi.v1.worker.hpu_dp_utils import set_hpu_dp_metadata
 
-from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.attention.layer import Attention
 from vllm.attention.layer import MLAAttention
 from vllm.v1.attention.selector import get_attn_backend
 
-from vllm.config import (VllmConfig, update_config)
+from vllm.config import (VllmConfig, get_layers_from_vllm_config, update_config)
 from vllm.config.multimodal import ImageDummyOptions, VideoDummyOptions
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -63,7 +66,18 @@ from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_map_leaves
 from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy)
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec, KVCacheTensor, MLAAttentionSpec)
+from vllm.v1.attention.backends.utils import create_fast_prefill_custom_backend
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheSpec,
+    KVCacheTensor,
+    MLAAttentionSpec,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.worker.kv_connector_model_runner_mixin import (KVConnectorModelRunnerMixin)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors, DraftTokenIds, ModelRunnerOutput,
                              AsyncModelRunnerOutput, KVConnectorOutput)
@@ -77,7 +91,7 @@ from vllm.model_executor.models.interfaces import (supports_eagle3, supports_tra
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.transformers_utils.config import is_interleaved
-from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
+from vllm.v1.worker.utils import (AttentionGroup, sanity_check_mm_encoder_outputs)
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -748,6 +762,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         self.unified_attn = get_config().unified_attn
 
+        self.attn_groups: list[list[AttentionGroup]] = []
         # mm_hash -> encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
         # Set up speculative decoding.
@@ -777,6 +792,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         # Keep in int64 to avoid overflow with long context
         self.arange_np = np.arange(max(self.max_num_reqs + 1, self.max_model_len, self.max_num_tokens), dtype=np.int64)
+
+        # Layer pairings for cross-layer KV sharing.
+        # If an Attention layer `layer_name` is in the keys of this dict, it
+        # means this layer will perform attention using the keys and values
+        # from the KV cache of `shared_kv_cache_layers[layer_name]`.
+        self.shared_kv_cache_layers: dict[str, str] = {}
+        self.kv_sharing_fast_prefill_eligible_layers: set[str] = set()
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
@@ -4951,11 +4973,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             kv_cache_group_spec: KVCacheGroupSpec,
         ) -> tuple[dict[AttentionGroupKey, list[str]], set[type[AttentionBackend]]]:
             layer_type = cast(type[Any], AttentionLayerBase)
-            layers = get_layers_from_vllm_config(
-                self.vllm_config, layer_type, kv_cache_group_spec.layer_names
-            )
+            layers = get_layers_from_vllm_config(self.vllm_config, layer_type, kv_cache_group_spec.layer_names)
             attn_backends = {}
-            attn_backend_layers = defaultdict(list)
+            attn_backend_layers = collections.defaultdict(list)
             # Dedupe based on full class name; this is a bit safer than
             # using the class itself as the key because when we create dynamic
             # attention backend subclasses (e.g. ChunkedLocalAttention) unless
@@ -4975,12 +4995,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                     layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
                 key = (full_cls_name, layer_kv_cache_spec)
-                attn_backends[key] = AttentionGroupKey(
-                    attn_backend, layer_kv_cache_spec
-                )
+                attn_backends[key] = AttentionGroupKey(attn_backend, layer_kv_cache_spec)
                 attn_backend_layers[key].append(layer_name)
             return (
-                {attn_backends[k]: v for k, v in attn_backend_layers.items()},
+                {
+                    attn_backends[k]: v
+                    for k, v in attn_backend_layers.items()
+                },
                 set(group_key.attn_backend for group_key in attn_backends.values()),
             )
 
@@ -5008,16 +5029,20 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             attention_backend_list.append(attn_backends[1])
 
         # Resolve cudagraph_mode before actually initialize metadata_builders
-        self._check_and_update_cudagraph_mode(
-            attention_backend_list, kv_cache_config.kv_cache_groups
-        )
+        # self._check_and_update_cudagraph_mode(
+        #     attention_backend_list, kv_cache_config.kv_cache_groups
+        # )
 
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
 
-    def _update_hybrid_attention_mamba_layout(
-        self, kv_caches: dict[str, torch.Tensor]
-    ) -> None:
+    def _kv_cache_spec_attn_group_iterator(self) -> collections.abc.Iterator[AttentionGroup]:
+        if not self.kv_cache_config.kv_cache_groups:
+            return
+        for attn_groups in self.attn_groups:
+            yield from attn_groups
+
+    def _update_hybrid_attention_mamba_layout(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """
         Update the layout of attention layers from (2, num_blocks, ...) to
         (num_blocks, 2, ...).
@@ -5030,19 +5055,21 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             kv_cache_spec = group.kv_cache_spec
             for layer_name in group.layer_names:
                 kv_cache = kv_caches[layer_name]
-                print(f'{layer_name} kv_cache shape {kv_cache.shape}')
-                if isinstance(kv_cache_spec, AttentionSpec) and kv_cache.shape[0] == 2:
-                    assert kv_cache.shape[1] != 2, (
-                        "Fail to determine whether the layout is "
-                        "(2, num_blocks, ...) or (num_blocks, 2, ...) for "
-                        f"a tensor of shape {kv_cache.shape}"
-                    )
-                    hidden_size = kv_cache.shape[2:].numel()
-                    kv_cache.as_strided_(
-                        size=kv_cache.shape,
-                        stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
-                    )
-                    
+                if isinstance(kv_cache_spec, AttentionSpec):
+                    # kv_cache is a tuple: (key_cache, value_cache, key_scales, value_scales)
+                    key_cache = kv_cache[0] if isinstance(kv_cache, (tuple, list)) else kv_cache
+                    # TODO: check if this scenario is even possible
+                    if hasattr(key_cache, 'shape') and key_cache.shape[0] == 2:
+                        print(f'{layer_name} kv_cache shape {kv_cache.shape}')
+                        assert kv_cache.shape[1] != 2, ("Fail to determine whether the layout is "
+                                                        "(2, num_blocks, ...) or (num_blocks, 2, ...) for "
+                                                        f"a tensor of shape {kv_cache.shape}")
+                        hidden_size = kv_cache.shape[2:].numel()
+                        kv_cache.as_strided_(
+                            size=kv_cache.shape,
+                            stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
+                        )
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -5050,37 +5077,35 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
+        kv_cache_config = deepcopy(kv_cache_config)
+        self.kv_cache_config = kv_cache_config
         # if len(kv_cache_config.kv_cache_groups) > 1:
-        block_sizes = [
-            kv_cache_group.kv_cache_spec.block_size
-            for kv_cache_group in kv_cache_config.kv_cache_groups
-        ]
+        block_sizes = [kv_cache_group.kv_cache_spec.block_size for kv_cache_group in kv_cache_config.kv_cache_groups]
         if block_sizes != [self.cache_config.block_size]:
             assert self.cache_config.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
                 "for more details.")
-            # recreate with block size set for hybrid mamba+attention as got from HybridAttentionMambaModelConfig.verify_and_update_config
+            # recreate with block size set for hybrid mamba+attention as got from
+            # HybridAttentionMambaModelConfig.verify_and_update_config
             # block size is set also in platform.py::check_and_update_config but respects set above
             self.input_batch = InputBatch(
                 max_num_reqs=self.max_num_reqs,
-                max_model_len=max(self.max_model_len, self.max_encoder_len),
+                max_model_len=self.max_model_len,
                 max_num_batched_tokens=self.max_num_tokens,
                 device=self.device,
                 pin_memory=self.pin_memory,
                 vocab_size=self.model_config.get_vocab_size(),
-                block_sizes=block_sizes,                
-                kernel_block_sizes=block_sizes, # no splitting for Mamba
+                block_sizes=block_sizes,
+                kernel_block_sizes=block_sizes,  # no splitting for Mamba
                 is_spec_decode=bool(self.vllm_config.speculative_config),
                 logitsprocs=self.input_batch.logitsprocs,
                 is_pooling_model=self.is_pooling_model,
-                num_speculative_tokens=(
-                    self.vllm_config.speculative_config.num_speculative_tokens
-                    if self.vllm_config.speculative_config else 0),
+                num_speculative_tokens=(self.vllm_config.speculative_config.num_speculative_tokens
+                                        if self.vllm_config.speculative_config else 0),
             )
 
         self.initialize_attn_backend(kv_cache_config)
-      
 
         # build a map from layer_name -> KVCacheTensor
         tensor_map: dict[str, KVCacheTensor] = {}
@@ -5094,10 +5119,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             assert len(kv_cache_tensor.shared_by) == 1
             kv_cache_sizes[kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
 
-        has_mamba = False
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+                # Only process tensors for layers in the current group
+                # TODO: The loops should be handled smarter, so this check is not needed
+                if not set(kv_cache_tensor.shared_by).intersection(set(kv_cache_group.layer_names)):
+                    continue
                 assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
                 num_blocks = \
                     kv_cache_tensor.size // kv_cache_spec.page_size_bytes
@@ -5142,43 +5170,48 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         value_scales = None
 
                     for layer_name in kv_cache_tensor.shared_by:
-<<<<<<< HEAD
                         kv_caches[layer_name] = (key_cache, value_cache, key_scales, value_scales)
-=======
-                        kv_caches[layer_name] = (key_cache, value_cache)
->>>>>>> d05a6d3 (Update hpu_model_runner.py)
                 elif isinstance(kv_cache_spec, MambaSpec):
-                    has_mamba = True
-                    raw_tensor = kv_cache_raw_tensors[layer_name]
-                    state_tensors = []
-                    storage_offset_bytes = 0
-                    for (shape, dtype) in zip(kv_cache_spec.shapes,
-                                              kv_cache_spec.dtypes):
-                        dtype_size = get_dtype_size(dtype)
-                        num_element_per_page = (
-                            kv_cache_spec.page_size_bytes // dtype_size)
-                        target_shape = (num_blocks, *shape)
-                        stride = torch.empty(target_shape).stride()
-                        target_stride = (num_element_per_page, *stride[1:])
-                        assert storage_offset_bytes % dtype_size == 0
-                        tensor = torch.as_strided(
-                            raw_tensor.view(dtype),
-                            size=target_shape,
-                            stride=target_stride,
-                            storage_offset=storage_offset_bytes // dtype_size,
-                        )
-                        state_tensors.append(tensor)
-                        storage_offset_bytes += stride[0] * dtype_size
+                    # raw_tensor = kv_cache_raw_tensors[layer_name]
+                    # state_tensors = []
+                    # storage_offset_bytes = 0
+                    # for (shape, dtype) in zip(kv_cache_spec.shapes,
+                    #                           kv_cache_spec.dtypes):
+                    #     dtype_size = get_dtype_size(dtype)
+                    #     num_element_per_page = (
+                    #         kv_cache_spec.page_size_bytes // dtype_size)
+                    #     target_shape = (num_blocks, *shape)
+                    #     stride = torch.empty(target_shape).stride()
+                    #     target_stride = (num_element_per_page, *stride[1:])
+                    #     assert storage_offset_bytes % dtype_size == 0
+                    #     tensor = torch.as_strided(
+                    #         raw_tensor.view(dtype),
+                    #         size=target_shape,
+                    #         stride=target_stride,
+                    #         storage_offset=storage_offset_bytes // dtype_size,
+                    #     )
+                    #     state_tensors.append(tensor)
+                    #     storage_offset_bytes += stride[0] * dtype_size
 
-                    kv_caches[layer_name] = state_tensors
+                    # kv_caches[layer_name] = state_tensors
+
+                    # ASSUMING that we use only contiguous tensor
+                    state_tensors = []
+                    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                        target_shape = (num_blocks, *shape)
+                        tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
+                        state_tensors.append(tensor)
+                    for layer_name in kv_cache_tensor.shared_by:
+                        kv_caches[layer_name] = state_tensors
                 else:
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.
                     raise ValueError("Unknown KV cache spec type.")
-            layer_names = set()
-            for group in kv_cache_config.kv_cache_groups:
-                layer_names.update(group.layer_names)
-            assert layer_names == set(kv_caches.keys()), "Some layers are not correctly initialized"
+        # TODO: Merge loops for groups
+        layer_names = set()
+        for group in kv_cache_config.kv_cache_groups:
+            layer_names.update(group.layer_names)
+        assert layer_names == set(kv_caches.keys()), "Some layers are not correctly initialized"
         bind_kv_cache(kv_caches, self.vllm_config.compilation_config.static_forward_context, self.kv_caches)
 
         if self.enable_bucketing:
@@ -5202,9 +5235,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                                  self.block_size, dtype, self.profiler)
             logger.info("Allocating unified persistent batch took %.4f GB of host memory",
                         m.consumed_host_memory / float(2**30))
-
-        if has_mamba:
-            self._update_hybrid_attention_mamba_layout(kv_caches)
+        # TODO: check if this one is needed; for now seems that not
+        # if has_mamba:
+        #     self._update_hybrid_attention_mamba_layout(kv_caches)
 
         htorch.hpu.synchronize()
 
