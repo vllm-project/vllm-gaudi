@@ -139,9 +139,6 @@ def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=Fals
         bmin_origin = bmin
         bmin = bstep
     assert num_buckets > 0, "num_buckets must be a positive integer"
-    if num_buckets == 1:
-        return [bmax]
-    buckets: Set[Tuple[int, int]] = set()
 
     if long_context:
         num_buckets_exp = math.floor(num_buckets / 2)
@@ -150,6 +147,11 @@ def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=Fals
     else:
         num_buckets_exp = num_buckets
         first_step = bmax
+
+    if num_buckets_exp <= 1:
+        return [bmax]
+
+    buckets: Set[Tuple[int, int]] = set()
 
     for i in range(num_buckets_exp):
         power_unpadded = bmin * np.float_power(first_step / bmin, (1. / float(num_buckets_exp - 1)) * i)
