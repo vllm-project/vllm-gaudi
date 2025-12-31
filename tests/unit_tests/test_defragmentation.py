@@ -195,7 +195,7 @@ class TestOnlineDefragmenter:
         # (max_phys / num_used) is <= frag_limit.
         # Here we use contiguous blocks 1..N so frag_ratio = 1.0,
         # which is <= default frag_limit (1.5).
-    
+
         # Use a dense, contiguous allocation: blocks 1..19
         for i in range(1, 20):
             defragmenter.use_block(i)
