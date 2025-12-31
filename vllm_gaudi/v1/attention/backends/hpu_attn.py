@@ -5,7 +5,8 @@
 ###############################################################################
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Union
+from vllm.attention.backends.abstract import MultipleOf
 
 import torch
 
