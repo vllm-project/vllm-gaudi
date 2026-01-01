@@ -29,6 +29,10 @@ class Matmul(torch.nn.Module):
     def forward(self, x, y, **kwargs):
         return torch.matmul(x, y, **kwargs)
 
+class B2BMatmul(Matmul):
+    def __init__(self):
+        super().__init__()
+
 
 class Softmax(torch.nn.Module):
 
