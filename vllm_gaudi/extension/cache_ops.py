@@ -38,8 +38,9 @@ def copy_blocks(key_caches, value_caches, key_scales, value_scales, block_mappin
         value_cache.index_copy_(0, dst, value_cache.index_select(0, src))
         if k_scales is not None:
             k_scales.index_copy_(0, dst, k_scales.index_select(0, src))
-        if v_scales is not None:
-            v_scales.index_copy_(0, dst, v_scales.index_select(0, src))
+        if v_scales is not None and isinstance(v_scales, tuple):
+            v_scales[0].index_copy_(0, dst, v_scales[0].index_select(0, src))
+            v_scales[1].index_copy_(0, dst, v_scales[1].index_select(0, src))
 
     if key_caches[0].device.type == 'hpu':
         htorch.core.mark_step()
