@@ -808,14 +808,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.graphed_multimodal_buckets: set[Any] = set()
         else:
             logger.info("Bucketing is OFF.")
-<<<<<<< HEAD
-        self._PAD_SLOT_ID = -1
-        self._PAD_BLOCK_ID = -1
-=======
-        # set an out of range value for the padding tokens so that they are ignored when inserting into the KV cache.
-        self._PAD_SLOT_ID = torch.iinfo(torch.int32).max
-        self._PAD_BLOCK_ID = torch.iinfo(torch.int32).max
->>>>>>> 500c8ba ([GAUDISW-244752] add dynamic scale for V-Cache on Hiddden dim)
+
+        self._PAD_SLOT_ID = 0
+        self._PAD_BLOCK_ID = 0
 
         if self.vllm_config.parallel_config.data_parallel_size > 1 and htorch.utils.internal.is_lazy(
         ) and not self.model_config.enforce_eager:
@@ -1786,7 +1781,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # For models with multimodal support, we may want to get embeddings
         # for the valid tokens before padding.
         # This would require getting multimodal input embeddings here as well
-        token_ids = align_and_pad(contents.token_ids, (target_bs, target_seq), itertools.repeat(-1))
+        token_ids = align_and_pad(contents.token_ids, (target_bs, target_seq), itertools.repeat(0))
         # Update query_lens and context_lens after padding
         query_lens.extend([0] * (target_bs - len(query_lens)))
         context_lens.extend([0] * (target_bs - len(context_lens)))
@@ -1804,11 +1799,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         else:
             token_positions = align_and_pad(token_positions, (target_bs, target_seq), itertools.repeat(-1))
-        # set an out of range value for the padding tokens so that they are ignored when inserting into the KV cache.
-        token_slots = align_and_pad(token_slots, (target_bs, target_seq),
-                                    itertools.repeat(torch.iinfo(torch.int32).max))
         token_groups = align_and_pad(token_groups, (target_bs, target_seq), itertools.repeat(-1))
-        # use 0 for padding context blocks to avoid dynamic scale calculation issues
+        # use 0 for padding to avoid dynamic scale calculation issues
+        token_slots = align_and_pad(token_slots, (target_bs, target_seq), itertools.repeat(0))
         context_blocks = align_and_pad(context_blocks, (target_bs, target_blocks), itertools.repeat(0))
         context_groups = align_and_pad(context_groups, (target_bs, target_blocks), itertools.repeat(-1))
 
@@ -4857,8 +4850,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         if self.enable_bucketing:
             self.bucketing_manager.num_hpu_blocks = num_blocks
-        self._PAD_BLOCK_ID = num_blocks
-        self._PAD_SLOT_ID = num_blocks * self.block_size
+
+        self._PAD_BLOCK_ID = 0
+        self._PAD_SLOT_ID = 0
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(self.get_kv_caches_4D(kv_caches))

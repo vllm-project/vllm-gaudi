@@ -394,9 +394,11 @@ def _include_past(tensor_str, fn_str, cache_str, scales_str, args):
     current, fn, cache, scales, block_list, block_size = all_tensors
     all_beside_scales = (current, fn, cache, block_list, block_size)
     if all(t is not None for t in all_beside_scales):
-        if scales is not None and isinstance(scales, tuple):
+        is_v_scales = scales is not None and isinstance(scales, tuple)
+        is_k_scales = scales is not None and not is_v_scales
+        if is_v_scales:
             scales_uf = (scales[0].unflatten(0, (-1, block_size)), scales[1])
-        elif scales is not None:
+        elif is_k_scales:
             scales_uf = scales.unflatten(0, (-1, block_size))
         else:
             scales_uf = None
