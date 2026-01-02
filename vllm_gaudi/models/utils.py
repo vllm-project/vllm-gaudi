@@ -29,6 +29,8 @@ def _merge_multimodal_embeddings(
     mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
     input_dtype = inputs_embeds.dtype
 
+    if is_multimodal.dtype == torch.int64:
+        return inputs_embeds.index_copy_(0, is_multimodal, mm_embeds_flat)
     try:
         # For debugging
         # inputs_embeds[is_multimodal] = mm_embeds_flat.to(dtype=input_dtype)
