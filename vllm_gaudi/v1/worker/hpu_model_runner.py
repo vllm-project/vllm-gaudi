@@ -2090,7 +2090,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             )
 
         if self.interleaved_sliding_window and self.sliding_window is not None and self.sliding_window > 0:
-            sliding_block_size = (self.sliding_window // self.block_size)
+            sliding_block_size = (self.sliding_window // self.block_size) + 1
             window_block_tables = [block_table[-sliding_block_size:] for block_table in block_tables_list]
             window_block_list, window_block_groups, window_block_usage = \
                 self.get_habana_paged_attn_buffers(
