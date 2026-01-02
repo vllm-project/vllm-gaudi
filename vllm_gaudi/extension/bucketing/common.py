@@ -448,12 +448,11 @@ def generate_buckets(bs_range,
                 buckets_2d.update(local_buckets)
         max_ctx = max(ctx for _, ctx in buckets_2d)
         for bs, ctx in buckets_2d:
-            if is_prompt and ctx == max_ctx:
-                # instead of adding bucket for max ctx, we add max "edge" bucket per query
-                for query in query_range:
-                    buckets.add(get_max_bucket_per_query(bs, query))
-                continue
+            is_max_ctx = ctx == max_ctx
             for query in query_range:
+                if is_prompt and is_max_ctx:
+                    bs, query, edge_ctx = get_max_bucket_per_query(bs, query)
+                    ctx = edge_ctx
                 if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
                     buckets.add(corrector(bs, query, ctx))
     if not buckets:
