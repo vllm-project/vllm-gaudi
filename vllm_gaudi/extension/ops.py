@@ -399,7 +399,10 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
         query, key, value, attn_bias, 0.0, is_causal, scale, softmax_mode, recompute_mode, valid_seq_lengths,
         padding_side
     ]
-    args += [window_size] if window_size else [None]
+    if sinks is not None:
+        args += [window_size] if window_size else [None]
+    else:
+        args += [window_size] if window_size else []
     # use sinks in fsdpa
     if sinks is not None:
         args += [sinks]
