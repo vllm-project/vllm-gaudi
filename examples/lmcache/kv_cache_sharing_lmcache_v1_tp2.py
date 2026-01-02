@@ -46,9 +46,9 @@ MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 prompts = [
     "Hello, how are you?" * 1000,
 ]
-#prompts = [
+# prompts = [
 #    "San Francisco is a",
-#]
+# ]
 
 
 def run_store(store_done, prompts):
