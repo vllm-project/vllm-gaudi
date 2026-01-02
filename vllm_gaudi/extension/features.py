@@ -101,12 +101,16 @@ def get_features():
         Value('high_level_profiler_enabled', False, env_var='VLLM_PROFILER_ENABLED', env_var_type=boolean),
         Value('track_graph_compilation', False, env_var='PT_HPU_METRICS_GC_DETAILS', env_var_type=boolean),
         Value('use_output_tensor_in_matmulqk',
-              All(VersionRange(">=1.24.0.171"), MinPackageVersion("neural_compressor_pt", "3.6")),
+              All(VersionRange(">=1.24.0.171"), MinPackageVersion("neural_compressor_pt", "3.7")),
               env_var_type=boolean),
         Value('per_token_kv_scaling_support',
-              All(VersionRange(">=1.24.0.350"), MinPackageVersion("neural_compressor_pt", "3.6")),
+              All(VersionRange(">=1.24.0.350"), MinPackageVersion("neural_compressor_pt", "3.7")),
               env_var_type=boolean),
         Value('moe_chunk', "", env_var='VLLM_MOE_CHUNK', env_var_type=list_of(int)),
         Value('moe_token_boundary', "", env_var='VLLM_MOE_TOKEN_BOUNDARY', env_var_type=list_of(int)),
+        Value('use_dispatch_fn',
+              All(VersionRange(">=1.24.0.460"), MinPackageVersion("neural_compressor_pt", "3.7")),
+              env_var_type=boolean),
+        Value('use_hpu_aligned_scale', False, env_var='HPU_ALIGNED_SCALE', env_var_type=boolean),
     ]
     return split_values_and_flags(features)
