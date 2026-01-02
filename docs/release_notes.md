@@ -2,6 +2,12 @@
 
 This document provides an overview of the features, changes, and fixes introduced in each release of the vLLM Hardware Plugin for Intel® Gaudi®.
 
+## 0.13.0
+
+This version is based on [vLLM 0.13.0](https://github.com/vllm-project/vllm/releases/tag/v0.13.0) and supports [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
+
+The release also includes experimental dynamic quantization for MatMul and KV‑cache operations. This feature improves performance, with minimal expected impact on accuracy. To enable the feature, see the [Dynamic Quantization for MatMul and KV‑cache Operations](features/supported_features.md#dynamic-quantization-for-matmul-and-kv-cache-operations) section.
+
 ## 0.11.2
 
 This version is based on [vLLM 0.11.2](https://github.com/vllm-project/vllm/releases/tag/v0.11.2) and supports [Intel® Gaudi® v1.22.2](https://docs.habana.ai/en/v1.22.2/Release_Notes/GAUDI_Release_Notes.html).
