@@ -10,8 +10,14 @@
     margin-block-end: 0.5em;
 }
 
-.md-nav--primary .md-nav__title {
-    display: none;
+@media screen and (min-width: 76.25em) {
+    .md-nav--primary .md-nav__title {
+        display: none;
+    }
+}
+
+.md-nav__item--section > .md-nav {
+    margin-block-start: 0;
 }
 
 .md-sidebar--primary {
