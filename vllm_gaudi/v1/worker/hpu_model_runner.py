@@ -3904,8 +3904,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 )
 
             # flattened = hidden_states.view(-1, hidden_states.shape[-1])
-            num_scheduled_tokens_list = [query_len] * bs
-            prompt_lens_cpu = torch.tensor(num_scheduled_tokens_list, dtype=torch.int32, device="cpu")
+            num_scheduled_tokens_np = np.full(query_len, bs)
+            prompt_lens_cpu = torch.tensor(num_scheduled_tokens_np, dtype=torch.int32, device="cpu")
             prompt_token_ids = dummy_input_ids.view(bs, query_len).to(device=device, dtype=torch.int32)
             supported_tasks = self.get_supported_pooling_tasks()
             if "embed" in supported_tasks:
@@ -3928,8 +3928,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 pooling_params=pooling_params_list,
                 pooling_states=[PoolingStates() for _ in range(bs)],
             )
-            seq_lens_cpu = seq_lens_tensor.cpu().tolist()
-            pooling_metadata.build_pooling_cursor(num_scheduled_tokens_list, seq_lens_cpu, device=hidden_states.device)
+            seq_lens_cpu = seq_lens_tensor.cpu()
+            pooling_metadata.build_pooling_cursor(num_scheduled_tokens_np, seq_lens_cpu, device=hidden_states.device)
 
             try:
                 _pooler_output = model.pooler(hidden_states=hidden_states, pooling_metadata=pooling_metadata)
