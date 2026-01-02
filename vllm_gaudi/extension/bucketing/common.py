@@ -452,7 +452,8 @@ def generate_buckets(bs_range,
             for query in query_range:
                 if is_prompt and is_max_ctx:
                     bs, query, edge_ctx = get_max_bucket_per_query(bs, query)
-                    ctx = edge_ctx
+                    if edge_ctx >= 0:
+                        ctx = edge_ctx
                 if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
                     buckets.add(corrector(bs, query, ctx))
     if not buckets:
