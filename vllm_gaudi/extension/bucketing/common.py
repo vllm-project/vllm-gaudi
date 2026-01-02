@@ -449,13 +449,13 @@ def generate_buckets(bs_range,
         max_ctx = max(ctx for _, ctx in buckets_2d)
         for bs, ctx in buckets_2d:
             if is_prompt and ctx == max_ctx:
-                # skip biggest ctx only in prompt mode; we will add it via get_max_bucket_per_query later
+                # instead of adding bucket for max ctx, we add max "edge" bucket per query
+                for query in query_range:
+                    buckets.add(get_max_bucket_per_query(bs, query))
                 continue
             for query in query_range:
                 if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
                     buckets.add(corrector(bs, query, ctx))
-                    if is_prompt:
-                        buckets.add(get_max_bucket_per_query(bs, query))
     if not buckets:
         phase = 'prompt' if is_prompt else 'decode'
         for bucket in omitted_buckets:
