@@ -739,31 +739,12 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
 
 class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
 
-    def _convert_all_scale_to_nn_param(self, layer: torch.nn.Module) -> None:
-        #         layer._k_scale.copy_(k_scale)
-        # layer._v_scale.copy_(v_scale)
-        # layer._k_scale_float = k_scale
-        # layer._v_scale_float = v_scale
-        for scale_name in [
-                "_k_scale",
-                "_v_scale",
-                "_q_scale",
-                "_v_scale_float",
-                "_k_scale_float",
-                "_q_scale_float",
-                "_prob_scale",
-        ]:
-            scale_tensor = getattr(layer, scale_name, None)
-
-            def convert_float_to_tensor(scale_value: float) -> torch.Tensor:
-                return torch.tensor(scale_value, dtype=torch.float32)
-
-            if isinstance(scale_tensor, float):
-                scale_tensor = convert_float_to_tensor(scale_tensor)
-
-            if scale_tensor is not None and not isinstance(scale_tensor, torch.nn.Parameter):
-                scale_param = torch.nn.Parameter(scale_tensor.data, requires_grad=False)
-                setattr(layer, scale_name, scale_param)
+    def _convert_all_scale_to_nn_param(self, module: torch.nn.Module, scale_attrs: list[str]) -> None:
+        for scale_attr in scale_attrs:
+            scale_value = getattr(module, scale_attr, None)
+            if scale_value is not None and not isinstance(scale_value, torch.nn.Parameter):
+                scale_param = torch.nn.Parameter(torch.tensor(scale_value, dtype=torch.float32), requires_grad=False)
+                setattr(module, scale_attr, scale_param)
 
     def _remove_kv_scale(self, layer: torch.nn.Module) -> None:
         for scale_name in ["k_scale", "v_scale", "q_scale"]:
@@ -771,42 +752,41 @@ class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
                 delattr(layer, scale_name)
                 logger.warning_once(f"Removed deprecated attribute {scale_name} from layer {layer}")
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # self._remove_kv_scale(layer)
-        # FIXME: refine code
-        super().process_weights_after_loading(layer)
-        self._convert_all_scale_to_nn_param(layer)
+    def _remove_attrs(self, layer: torch.nn.Module, attrs_lst: list[str]) -> None:
+        for attr_name in attrs_lst:
+            if hasattr(layer, attr_name):
+                delattr(layer, attr_name)
+                logger.debug_once(f"Removed attribute {attr_name} from layer {layer}")
 
-        # breakpoint()
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
         fp8_max = 240.0 if hpu_ops.is_hpu_gaudi2 else 448.0
         max_k = layer._k_scale * fp8_max
         max_v = layer._v_scale * fp8_max
         max_kv = max(max_k, max_v)
         kv_scale = fp8_max / max_kv
-        # k_scale = fp8_max / max_k
-        # v_scale = fp8_max / max_v
         layer.impl.latent_cache_k.input_scale = kv_scale
         layer.impl.latent_cache_k.output_scale = 1.0 / kv_scale
         # TODO: (yiliu30) support loading q_scale from checkpoint later
-        orig_q_max = 1.0 * fp8_max
-        softmax_scale = layer.impl.scale
-        layer.impl.matmul_qk.scale_input = fp8_max / (orig_q_max * softmax_scale)
+        layer.impl.matmul_qk.scale_input = 1.0
         layer.impl.matmul_qk.scale_other = kv_scale
         # For a in a@v, as a is the output of softmax, its max value is 1.0,
-        # we keep fp8_max as its scale
-        layer.impl.matmul_av.scale_input = fp8_max
+        # we keep 1.0 as its scale
+        layer.impl.matmul_av.scale_input = 1.0
         layer.impl.matmul_av.scale_other = kv_scale
 
-        # convert latent_cache_k, matmul_qk, matmul_av input_scale and output_scale to nn.Parameter
-        for submodule_name in ["latent_cache_k", "matmul_qk", "matmul_av"]:
+        # Note: The following steps are important to avoid compiling each decoding layer into a different gc recipe
+        # Step 1: Remove deprecated scale attributes
+        old_scale_attrs = ["_k_scale", "_v_scale", "_q_scale", "_k_scale_float", "_v_scale_float", "_q_scale_float"]
+        self._remove_attrs(layer, attrs_lst=old_scale_attrs)
+
+        # Step 2: Convert scales in submodules to nn.Parameter for torch.compile compatibility
+        submodules_to_check = ["latent_cache_k", "matmul_qk", "matmul_av"]
+        scale_attrs = ["input_scale", "output_scale", "scale_input", "scale_other"]
+        for submodule_name in submodules_to_check:
             submodule = getattr(layer.impl, submodule_name, None)
             if submodule is not None:
-                for scale_attr in ["input_scale", "output_scale", "scale_input", "scale_other"]:
-                    scale_value = getattr(submodule, scale_attr, None)
-                    if scale_value is not None and not isinstance(scale_value, torch.nn.Parameter):
-                        scale_param = torch.nn.Parameter(torch.tensor(scale_value, dtype=torch.float32),
-                                                         requires_grad=False)
-                        setattr(submodule, scale_attr, scale_param)
+                self._convert_all_scale_to_nn_param(submodule, scale_attrs=scale_attrs)
 
 
 class HPUCompressedTensorsConfig(CompressedTensorsConfig):
@@ -879,9 +859,8 @@ def oot_maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         attn_str = "attn"
     # Define scale name mapping patterns in order of precedence
     scale_mapping_patterns = [
-        # LLMC format:
-        #  .self_attn.{q,k,v}_scale ->
-        #  .attn.{attn_str}.{q,k,v}_scale
+        # LLMC format:  .self_attn.{q,k,v}_scale ->
+        #   .attn.{attn_str}.{q,k,v}_scale
         (
             r"\.self_attn\.([qkv])_scale$",
             rf".self_attn.{attn_str}.\1_scale",
@@ -929,4 +908,5 @@ def oot_maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
     return name
 
 
+# Patch the `maybe_remap_kv_scale_name` function to load k/v scale correctly
 vllm_weight_utils.maybe_remap_kv_scale_name = oot_maybe_remap_kv_scale_name
