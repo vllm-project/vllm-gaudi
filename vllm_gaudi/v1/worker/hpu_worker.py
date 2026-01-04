@@ -184,6 +184,11 @@ class HPUWorker(WorkerBase):
         for layer_name, layer_spec in kv_cache_spec.items():
             if isinstance(layer_spec, FullAttentionSpec):
                 dtype = layer_spec.dtype
+                if dtype == torch.float8_e4m3fn and os.environ.get('QUANT_CONFIG', None) is not None and \
+                    os.environ.get('VLLM_DYNAMIC_KV_QUANT', None) is not None and not self.model_config.use_mla:
+                    create_dynamic_scales = True
+                else:
+                    create_dynamic_scales = False
 
                 # Use an empty tensor instead of `None`` to force Dynamo to pass
                 # it by reference, rather by specializing on the value ``None``.
@@ -201,9 +206,11 @@ class HPUWorker(WorkerBase):
                 hpu_k_cache = torch.zeros(kv_cache_shape, dtype=dtype, device='hpu')
                 hpu_v_cache = None if self.model_config.use_mla else torch.zeros(
                     kv_cache_shape, dtype=dtype, device='hpu')
-                hpu_k_scales = torch.ones(kv_scales_shape, dtype=torch.bfloat16, device='hpu')
-                hpu_v_scales = None if hpu_v_cache is None else torch.ones(
-                    kv_scales_shape, dtype=torch.bfloat16, device='hpu')
+
+                hpu_k_scales = torch.ones(kv_scales_shape, dtype=torch.bfloat16,
+                                          device='hpu') if create_dynamic_scales else None
+                hpu_v_scales = None if hpu_v_cache is None else \
+                    torch.ones(kv_scales_shape, dtype=torch.bfloat16, device='hpu') if create_dynamic_scales else None
 
                 kv_caches[layer_name] = (hpu_k_cache, hpu_v_cache, hpu_k_scales, hpu_v_scales)
 
