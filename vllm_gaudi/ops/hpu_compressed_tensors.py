@@ -764,7 +764,7 @@ class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
         # TODO: (yiliu30) support loading q_scale from checkpoint later
         layer.impl.matmul_qk.scale_input = 1.0
         layer.impl.matmul_qk.scale_other = kv_scale
-        # For a in a@v, as a is the output of softmax, its max value is 1.0,
+        # For the `a`` in a@v, as `a` is the output of softmax, its max value is 1.0,
         # we keep 1.0 as its scale
         layer.impl.matmul_av.scale_input = 1.0
         layer.impl.matmul_av.scale_other = kv_scale
