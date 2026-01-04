@@ -774,7 +774,7 @@ class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
         old_scale_attrs = ["_k_scale", "_v_scale", "_q_scale", "_k_scale_float", "_v_scale_float", "_q_scale_float"]
         self._remove_attrs(layer, attrs_lst=old_scale_attrs)
 
-        # Step 2: Convert scales in submodules to nn.Parameter for torch.compile compatibility
+        # Step 2: Convert scales in submodules to nn.Parameter to avoid compiling each layer into different gc recipe
         submodules_to_check = ["latent_cache_k", "matmul_qk", "matmul_av"]
         scale_attrs = ["input_scale", "output_scale", "scale_input", "scale_other"]
         for submodule_name in submodules_to_check:
