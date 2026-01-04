@@ -746,12 +746,6 @@ class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
                 scale_param = torch.nn.Parameter(torch.tensor(scale_value, dtype=torch.float32), requires_grad=False)
                 setattr(module, scale_attr, scale_param)
 
-    def _remove_kv_scale(self, layer: torch.nn.Module) -> None:
-        for scale_name in ["k_scale", "v_scale", "q_scale"]:
-            if hasattr(layer, scale_name):
-                delattr(layer, scale_name)
-                logger.warning_once(f"Removed deprecated attribute {scale_name} from layer {layer}")
-
     def _remove_attrs(self, layer: torch.nn.Module, attrs_lst: list[str]) -> None:
         for attr_name in attrs_lst:
             if hasattr(layer, attr_name):
