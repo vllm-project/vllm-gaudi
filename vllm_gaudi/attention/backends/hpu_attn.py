@@ -947,29 +947,29 @@ class HPUUnifiedAttentionImpl(AttentionImpl, torch.nn.Module):
 
 class HPUUnifiedMLAImpl(MLACommonImpl[HPUUnifiedAttentionMetadata], torch.nn.Module):
     """Unified MLA (Multi-head Latent Attention) implementation for HPU.
-    
+
     MLA compresses KV pairs into a shared latent space to reduce memory usage.
     Instead of caching [num_heads, head_dim] per token, MLA caches a single
     latent vector of size kv_lora_rank (~512 dims) that's shared across heads.
-    
+
     Compared to "standard" attention:
     - Standard: Each head has its own K/V cache [num_heads, kv_head_dim]
     - MLA: Shared latent cache [kv_lora_rank] + projection matrices W_UV/W_UK_T
-    
-    In terms of getting this thing working with unified attention - we implement 
+
+    In terms of getting this thing working with unified attention - we implement
     two computation paths simultaneously within a single unified_mla forward pass:
     1. Causal (fresh tokens) - used by unified_attn's causal path:
         - "Compute Friendly Approach" from mla/common.py
-        - Expand latent KV → full attention with uncompressed Q 
-    2. Cached (prefix/decode) - used by unified_attn's shared and unique paths: 
+        - Expand latent KV → full attention with uncompressed Q
+    2. Cached (prefix/decode) - used by unified_attn's shared and unique paths:
         - "Data-Movement Friendly Approach" from mla/common.py
         - Project Q to latent space → attention in compressed space
-         
+
     Both paths use W_UV to project latent attention output → full V dimension.
     Weights W_UV and W_UK_T are initialized in process_weights_after_loading()
     by parent MLACommonImpl from kv_b_proj weights.
-    
-    With that, we don't need to split the batch into separate prefill/decode passes, 
+
+    With that, we don't need to split the batch into separate prefill/decode passes,
     and just handle everything in one go.
     """
 
@@ -1048,16 +1048,16 @@ class HPUUnifiedMLAImpl(MLACommonImpl[HPUUnifiedAttentionMetadata], torch.nn.Mod
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass for unified MLA attention.
-        
+
         Prepares inputs for two possible attention paths:
         - Causal: Fresh tokens → expand K, full-dimensional attention, compute-friendly
         - Cached (shared + unique): Cached tokens → project Q to latent, compressed attention, memory-friendly
-        
+
         Both can be active in same forward pass (e.g., cached prefix + new tokens).
         unified_mla handles the routing based on which inputs are non-None.
-        
-        NOTE(kzawora): As always, shared part is tricky and could be optimized further. 
-        A hybrid approach might be worth investigating, where cached tokens go through 
+
+        NOTE(kzawora): As always, shared part is tricky and could be optimized further.
+        A hybrid approach might be worth investigating, where cached tokens go through
         the cached part, and fresh tokens go through the causal part.
         """
 
