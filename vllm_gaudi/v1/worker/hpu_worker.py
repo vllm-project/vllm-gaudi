@@ -184,13 +184,33 @@ class HPUWorker(WorkerBase):
         for layer_name, layer_spec in kv_cache_spec.items():
             if isinstance(layer_spec, FullAttentionSpec):
                 dtype = layer_spec.dtype
+                if dtype == torch.float8_e4m3fn and os.environ.get('QUANT_CONFIG', None) is not None and \
+                    os.environ.get('VLLM_DYNAMIC_KV_QUANT', None) is not None and not self.model_config.use_mla:
+                    create_dynamic_scales = True
+                else:
+                    create_dynamic_scales = False
 
                 # Use an empty tensor instead of `None`` to force Dynamo to pass
                 # it by reference, rather by specializing on the value ``None``.
-                hpu_k_cache = torch.tensor([], dtype=dtype, device='hpu')
-                hpu_v_cache = torch.tensor([], dtype=dtype, device='hpu')
-                hpu_k_scales = torch.tensor([], dtype=dtype, device='hpu')
-                hpu_v_scales = torch.tensor([], dtype=dtype, device='hpu')
+
+                # Create dummy KV cache tensors with proper shapes for profiling
+                num_blocks = 1  # Use single block for profiling
+                block_size = layer_spec.block_size
+                num_kv_heads = layer_spec.num_kv_heads
+                head_size = layer_spec.head_size
+
+                kv_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(num_blocks, block_size, num_kv_heads,
+                                                                                   head_size)
+                kv_scales_shape = kv_cache_shape[:-1] + (1, )
+
+                hpu_k_cache = torch.zeros(kv_cache_shape, dtype=dtype, device='hpu')
+                hpu_v_cache = None if self.model_config.use_mla else torch.zeros(
+                    kv_cache_shape, dtype=dtype, device='hpu')
+
+                hpu_k_scales = torch.ones(kv_scales_shape, dtype=torch.bfloat16,
+                                          device='hpu') if create_dynamic_scales else None
+                hpu_v_scales = None if hpu_v_cache is None else \
+                    torch.ones(kv_scales_shape, dtype=torch.bfloat16, device='hpu') if create_dynamic_scales else None
 
                 kv_caches[layer_name] = (hpu_k_cache, hpu_v_cache, hpu_k_scales, hpu_v_scales)
 
@@ -377,7 +397,7 @@ class HPUWorker(WorkerBase):
     def wake_up(self, tags: list[str] | None = None) -> None:
         """Wake up the worker from sleep mode.
         It can move the model back to HPU and/or reinitialize KV cache.
-        
+
         Args:
             tags: Optional list of tags (kept for interface compatibility)
         """
