@@ -3497,7 +3497,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             for i in range(logits.shape[0] - num_decodes):
                 prefill_sampled_token_ids.append(sampler_output.sampled_token_ids[num_decodes + i].flatten())
             decode_sampled_token_ids.append(sampler_output.sampled_token_ids[:num_decodes].flatten())
-        elif self.use_async_scheduling:
+
+        if self.use_async_scheduling or self.use_structured_output:
             # For async scheduling: keep tokens on HPU and avoid CPU sync
             # Concatenate decode and prefill tokens on HPU
             if decode_sampled_token_ids or prefill_sampled_token_ids:
