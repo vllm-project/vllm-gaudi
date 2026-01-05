@@ -43,12 +43,12 @@ os.environ["LMCACHE_REMOTE_URL"] = f"lm://localhost:{port}"
 # `naive` indicates using raw bytes of the tensor without any compression
 os.environ["LMCACHE_REMOTE_SERDE"] = "naive"
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
-# prompts = [
-#    "Hello, how are you?" * 1000,
-# ]
 prompts = [
-    "San Francisco is a",
+    "Hello, how are you?" * 1000,
 ]
+# prompts = [
+#    "San Francisco is a",
+# ]
 
 
 def run_store(store_done, prompts):
