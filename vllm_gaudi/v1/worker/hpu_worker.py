@@ -266,7 +266,15 @@ class HPUWorker(WorkerBase):
                "reserved for usable KV cache")
 
         logger.info(msg)
+
+        # Clear the dummy KV cache to free up memory
+        kv_caches = {}
+        forward_context = self.vllm_config.compilation_config.static_forward_context
+        for layer_name in forward_context:
+            forward_context[layer_name].kv_cache = None
+        runner_kv_caches = []
         gc.collect()
+
         return cache_size_bytes - dummy_block_headroom
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
