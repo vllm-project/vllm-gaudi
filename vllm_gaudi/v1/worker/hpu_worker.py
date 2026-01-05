@@ -209,8 +209,12 @@ class HPUWorker(WorkerBase):
 
                 hpu_k_scales = torch.ones(kv_scales_shape, dtype=torch.bfloat16,
                                           device='hpu') if create_dynamic_scales else None
-                hpu_v_scales = None if hpu_v_cache is None else \
-                    torch.ones(kv_scales_shape, dtype=torch.bfloat16, device='hpu') if create_dynamic_scales else None
+                if hpu_v_cache is None:
+                    hpu_v_scales = None
+                elif create_dynamic_scales:
+                    hpu_v_scales = torch.ones(kv_scales_shape, dtype=torch.bfloat16, device='hpu')
+                else:
+                    hpu_v_scales = None
 
                 kv_caches[layer_name] = (hpu_k_cache, hpu_v_cache, hpu_k_scales, hpu_v_scales)
 
@@ -226,7 +230,8 @@ class HPUWorker(WorkerBase):
             # Create unified attention persistent context for profiling
             from vllm_gaudi.extension.unified_batch import UnifiedBatchPersistentContext
             self.model_runner.unified_attn_persistent_ctx = UnifiedBatchPersistentContext(
-                self.model_runner.max_num_batched_tokens, 0, 0, self.block_size, dtype, self.model_runner.profiler)
+                self.model_runner.max_num_batched_tokens, 0, 0, self.model_runner.block_size, dtype,
+                self.model_runner.profiler)
 
         if is_fake_hpu():
             fake_hpu_cache_alloc = 4 * 2**30  # take 4 GiB flat on fake hpu
