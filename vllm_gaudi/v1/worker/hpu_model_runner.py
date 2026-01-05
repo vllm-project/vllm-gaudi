@@ -4765,10 +4765,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if self.unified_attn:
             # For unified attention, use a simpler scenario with causal attention
             # query_len, shared_ctx_len, unique_ctx_len, is_causal
-            unified_cfg = (self.max_model_len, 0, 0, True)
+            unified_cfg = (self.max_num_batched_tokens, 0, 0, True)
             self._prepare_dummy_unified_scenario(unified_cfg)
         else:
-            prompt_cfg = (max_batch_size, self.max_model_len, 0)
+            prompt_cfg = (max_batch_size, self.max_num_batched_tokens, 0)
             decode_cfg = None
             self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
 
