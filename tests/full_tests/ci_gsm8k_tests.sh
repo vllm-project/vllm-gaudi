@@ -77,7 +77,7 @@ run_qwen3_inc_dynamic_test() {
 # DS + blockfp8 + static scaling + FP8 KV
 run_dsv2_blockfp8_static_scaling_fp8kv_test() {
     echo "➡️ Testing Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 KV..."
-    PT_HPU_LAZY_MODE=0 VLLM_SCALE_ADJUSTMENT=false  HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model INC4AI/DeepSeek-V2-Lite-Chat-BF16-FP8-STATIC-FP8-KV-TEST-ONLY --trust-remote-code
+    PT_HPU_LAZY_MODE=1 VLLM_SCALE_ADJUSTMENT=false  HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model INC4AI/DeepSeek-V2-Lite-Chat-BF16-FP8-STATIC-FP8-KV-TEST-ONLY --trust-remote-code
     echo "✅ Test with Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 KV successful."
 }
 
