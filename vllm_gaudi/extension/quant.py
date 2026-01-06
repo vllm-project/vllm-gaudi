@@ -10,7 +10,7 @@ from vllm.model_executor.layers.quantization.base_config import (QuantizationCon
 
 
 class _FakeINCConfig(QuantizationConfig):
-    """Config class for FP8 using Intel Neural Compressor."""
+    """Placeholder INC quantization config class for FP8 using Intel Neural Compressor."""
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
