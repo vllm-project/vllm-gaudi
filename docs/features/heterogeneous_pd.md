@@ -44,10 +44,8 @@ pip3 install -e .
 ### Gaudi Node Installation
 
 ```sh
-# Install NIXL with UCX support
-curl -O https://raw.githubusercontent.com/intel-staging/ucx/refs/heads/intel_gaudi_gdr_enabling_0/setup_nixl_ucx.sh
-chmod +x setup_nixl_ucx.sh
-./setup_nixl_ucx.sh
+# Install NIXL with UCX gaudi_gdr support
+bash tools/install_nixl_gaudi_gdr.sh
 
 # Necessary environment variables for NIXL
 export LD_LIBRARY_PATH=/tmp/ucx_install/lib:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
