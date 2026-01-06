@@ -753,19 +753,31 @@ class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
                 logger.debug_once(f"Removed attribute {attr_name} from layer {layer}")
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """Process KV cache scales for cross-platform FP8 quantization compatibility.
+        
+        Scale Adjustment Scenarios:
+        | No | Quant Plat   | Serve Plat | Scale Adj | FP8 Max Quant | FP8 Max Deploy |
+        |----|--------------|------------|-----------|---------------|----------------|
+        | 1  | G2           | G2         | OFF       | 240           | 240            |
+        | 2  | G3/Other GPU | G2         | ON        | 448           | 240            |
+        | 3  | G3/Other GPU | G3         | OFF       | 448           | 448            |
+        """
         super().process_weights_after_loading(layer)
-        fp8_max = 240.0 if hpu_ops.is_hpu_gaudi2 else 448.0
-        max_k = layer._k_scale * fp8_max
-        max_v = layer._v_scale * fp8_max
+        # The `k_scale` and `v_scale` are loaded from checkpoint without any adjustment.
+        # Compute KV scales based on quantization and deployment platforms
+        fp8_max_original = 448.0 if get_config().scale_adjustment else 240.0
+        max_k = layer._k_scale * fp8_max_original
+        max_v = layer._v_scale * fp8_max_original
         max_kv = max(max_k, max_v)
-        kv_scale = fp8_max / max_kv
+        fp8_max_cur_platform = 240.0 if hpu_ops.is_hpu_gaudi2 else 448.0
+        kv_scale = fp8_max_cur_platform / max_kv
+        # Configure latent cache and matmul scales
         layer.impl.latent_cache_k.input_scale = kv_scale
         layer.impl.latent_cache_k.output_scale = 1.0 / kv_scale
-        # TODO: (yiliu30) support loading q_scale from checkpoint later
+        # TODO(yiliu30): Support loading q_scale from checkpoint
         layer.impl.matmul_qk.scale_input = 1.0
         layer.impl.matmul_qk.scale_other = kv_scale
-        # For the `a`` in a@v, as `a` is the output of softmax, its max value is 1.0,
-        # we keep 1.0 as its scale
+        # For `a` in a@v, as `a` is the output of softmax, its max value is 1.0
         layer.impl.matmul_av.scale_input = 1.0
         layer.impl.matmul_av.scale_other = kv_scale
 
