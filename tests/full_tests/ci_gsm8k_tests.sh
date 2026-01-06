@@ -323,10 +323,8 @@ run_pd_disaggregate_nixl_libfabric_test() {
 
 run_pd_disaggregate_nixl_ucx_test() {
     echo "➡️ Testing PD disaggregate through NIXL UCX."
-    git clone https://github.com/intel-staging/ucx.git -b intel_gaudi_gdr_enabling_0
-    bash ucx/setup_nixl_ucx.sh
-    rm -rf ucx
-    cd ${VLLM_GAUDI_PREFIX}/tests/unit_tests; DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=UCX bash run_accuracy_test.sh
+    bash "${VLLM_GAUDI_PREFIX}/tools/install_nixl_gaudi_gdr.sh"
+    DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=UCX bash "${VLLM_GAUDI_PREFIX}/tests/unit_tests/run_accuracy_test.sh"
     echo "✅ PD disaggregate through NIXL UCX."
 }
 
