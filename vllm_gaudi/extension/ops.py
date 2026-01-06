@@ -18,7 +18,7 @@ import habana_frameworks.torch.utils.experimental as htexp
 import types
 from vllm.model_executor.layers.fused_moe import FusedMoeWeightScaleSupported
 from vllm.model_executor.layers.quantization import get_quantization_config as vllm_get_quantization_config
-from vllm.model_executor.layers.quantization.base_config import (QuantizationConfig)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 is_hpu_gaudi2 = htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi2
 is_hpu_gaudi3 = htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi3
