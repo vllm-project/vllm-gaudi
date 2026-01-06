@@ -30,6 +30,13 @@ class Matmul(torch.nn.Module):
         return torch.matmul(x, y, **kwargs)
 
 class B2BMatmul(Matmul):
+    """Specialized alias for back-to-back matmul operations.
+
+    This class is intentionally kept functionally identical to ``Matmul``.
+    It exists to provide semantic distinction in the codebase (e.g., for
+    patterns that specifically require back-to-back matmul) and to allow
+    future customization without changing call sites.
+    """
     def __init__(self):
         super().__init__()
 
