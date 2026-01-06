@@ -811,6 +811,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         self._PAD_SLOT_ID = 0
         self._PAD_BLOCK_ID = 0
+        self._dummy_num_blocks = 0
 
         if self.vllm_config.parallel_config.data_parallel_size > 1 and htorch.utils.internal.is_lazy(
         ) and not self.model_config.enforce_eager:
@@ -2186,7 +2187,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         num_dummy_decodes = 1
         num_dummy_scheduled_tokens = [1]
         context_lens = np.array([128])
-        block_table_cpu_tensor = torch.zeros([context_lens], dtype=torch.int32).reshape(1, -1)
+        block_table_cpu_tensor = torch.zeros([self._dummy_num_blocks], dtype=torch.int32).reshape(1, -1)
         return self._create_decode_input_data(num_dummy_decodes, num_dummy_scheduled_tokens, context_lens,
                                               block_table_cpu_tensor)
 
@@ -4853,6 +4854,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         self._PAD_BLOCK_ID = 0
         self._PAD_SLOT_ID = 0
+        self._dummy_num_blocks = num_blocks
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(self.get_kv_caches_4D(kv_caches))
