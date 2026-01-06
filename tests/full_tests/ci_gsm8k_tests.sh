@@ -313,6 +313,28 @@ run_pd_disaggregate_nixl_libfabric_test() {
     echo "✅ PD disaggregate through NIXL libfabric."
 }
 
+# run pd lmcache store and retrieve test
+run_pd_lmcache_store_retrieve_test() {
+    echo "➡ Testing LMCache PD test for store and retrieve"
+    git clone https://github.com/LMCache/LMCache.git /tmp/LMCache
+    cd /tmp/LMCache
+    NO_CUDA_EXT=1 BUILD_WITH_HPU=1 pip install -e .
+    cd ${VLLM_GAUDI_PREFIX}/examples/lmcache
+    python kv_cache_sharing_lmcache_v1.py
+    echo "✅ LMCache PD test for store and retrieve"
+}
+
+# run pd lmcache disaggregated test
+run_pd_lmcache_disaggregated_test() {
+    echo "➡ Testing LMCache disaggregated test"
+    git clone https://github.com/LMCache/LMCache.git /tmp/LMCache
+    cd /tmp/LMCache
+    NO_CUDA_EXT=1 BUILD_WITH_HPU=1 pip install -e .
+    cd ${VLLM_GAUDI_PREFIX}/examples/lmcache/disagg_prefill_lmcache_v1
+    bash disagg_example_gaudi_lm.sh
+    echo "✅ LMCache disaggregated test"
+}
+
 # sleep mode
 run_sleep_mode_test() {
     echo "Testing basic model with sleep mode / wake up functionality"
