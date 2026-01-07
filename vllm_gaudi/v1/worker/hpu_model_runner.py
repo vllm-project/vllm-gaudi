@@ -2841,7 +2841,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         pooling_metadata = self.input_batch.get_pooling_metadata()
         seq_lens_cpu = self.seq_lens.cpu[:self.input_batch.num_reqs]
-        pooling_metadata.build_pooling_cursor(num_scheduled_tokens_np.tolist(),
+        pooling_metadata.build_pooling_cursor(num_scheduled_tokens_np,
                                               seq_lens_cpu,
                                               device=hidden_states.device)
 
