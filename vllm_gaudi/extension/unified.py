@@ -154,13 +154,12 @@ def create_softmax_fa2_input_tensors(
 
     if t_retained_shape not in inputM_hpu_tensors:
         print("Allocating new input tensors for shape:", t_retained_shape, "for attn shape:", attn.shape)
-        inputM_hpu_tensors[t_retained_shape] = torch.full(retained_shape, fmin_val, dtype=attn.dtype, device='hpu')
-        inputL_hpu_tensors[t_retained_shape] = torch.zeros(retained_shape, dtype=attn.dtype, device="hpu")
-        return inputM_hpu_tensors[t_retained_shape], inputL_hpu_tensors[t_retained_shape]
-
+        return torch.full(retained_shape, fmin, dtype=attn.dtype, device='hpu'), torch.zeros(retained_shape,
+                                                                                             dtype=attn.dtype,
+                                                                                             device="hpu")
     torch.hpu.synchronize()
     inputL_hpu_tensors[t_retained_shape].zero_()
-    inputM_hpu_tensors[t_retained_shape].fill_(fmin_val)
+    inputM_hpu_tensors[t_retained_shape].fill_(fmin)
     return inputM_hpu_tensors[t_retained_shape], inputL_hpu_tensors[t_retained_shape]
 
 
