@@ -176,6 +176,77 @@ def convert_cl_aligned_tensor(input_hpu, reference_size) -> torch.tensor:
     return input_hpu
 
 
+def online_merge_step(
+    acc_attn: Optional[torch.tensor],
+    acc_max: Optional[torch.tensor],
+    acc_sum: Optional[torch.tensor],
+    new_attn: Optional[torch.tensor],
+    new_max: Optional[torch.tensor],
+    new_sum: Optional[torch.tensor],
+) -> tuple[Optional[torch.tensor], Optional[torch.tensor], Optional[torch.tensor]]:
+    """Incrementally merge attention results using flash-attention style rescaling.
+    
+    This implements the online softmax algorithm where we maintain running
+    unnormalized weighted values, max, and sum. The final normalization
+    (dividing by sum) is done at the end.
+    
+    Args:
+        acc_attn: Accumulated unnormalized weighted V [tokens, heads, head_dim] or None
+        acc_max: Accumulated max values [tokens, heads] or None  
+        acc_sum: Accumulated sum of exp values [tokens, heads] or None
+        new_attn: New unnormalized weighted V to merge
+        new_max: New max values to merge
+        new_sum: New sum of exp values to merge
+    
+    Returns:
+        Tuple of (merged_attn, merged_max, merged_sum)
+    """
+    if new_attn is None:
+        return acc_attn, acc_max, acc_sum
+    if acc_attn is None:
+        return new_attn, new_max, new_sum
+
+    # Flash-attention style merge
+    merged_max = torch.maximum(acc_max, new_max)
+    old_scale = torch.exp(acc_max - merged_max)
+    new_scale = torch.exp(new_max - merged_max)
+
+    merged_attn = acc_attn * old_scale.unsqueeze(-1) + new_attn * new_scale.unsqueeze(-1)
+    merged_sum = acc_sum * old_scale + new_sum * new_scale
+
+    return merged_attn, merged_max, merged_sum
+
+
+def online_merge(*attn_results: tuple[torch.tensor, torch.tensor, torch.tensor],
+                 feps: torch.tensor) -> Optional[torch.tensor]:
+    """Merge partial attention values using online (incremental) algorithm.
+    
+    Alternative to merge() that uses online_merge_step for incremental merging.
+    This approach is more memory efficient as it doesn't need to keep all
+    intermediate results simultaneously.
+    
+    Args:
+        attn_results: Variable number of (attn, max, sum) tuples
+        feps: Small epsilon for numerical stability
+    
+    Returns:
+        Final normalized attention output, or None if all inputs are None
+    """
+    acc_attn = None
+    acc_max = None
+    acc_sum = None
+
+    for attn, max_val, sum_val in attn_results:
+        acc_attn, acc_max, acc_sum = online_merge_step(acc_attn, acc_max, acc_sum, attn, max_val, sum_val)
+
+    if acc_attn is None:
+        return None
+
+    # Final normalization
+    acc_sum = torch.maximum(acc_sum, feps)
+    return acc_attn / acc_sum.unsqueeze(-1)
+
+
 def merge(*attn_results: torch.tensor, feps: torch.tensor) -> torch.tensor:
     """Merge partial attention values into final attn score"""
     all_attn, all_max, all_sum = zip(*attn_results)
@@ -645,13 +716,30 @@ class HPUUnifiedAttentionMetadata:
         return self.causal_bias is not None
 
 
-def unified_attn(query: torch.tensor, key: torch.tensor, value: torch.tensor, key_cache: torch.tensor,
-                 value_cache: torch.tensor, scale: float, metadata: HPUUnifiedAttentionMetadata) -> torch.tensor:
-    """Main entry point for unified attention"""
+def unified_attn(query: torch.tensor,
+                 key: torch.tensor,
+                 value: torch.tensor,
+                 key_cache: torch.tensor,
+                 value_cache: torch.tensor,
+                 scale: float,
+                 metadata: HPUUnifiedAttentionMetadata,
+                 use_online_merge: bool = True) -> torch.tensor:
+    """Main entry point for unified attention
+    
+    Args:
+        use_online_merge: If True, use online (incremental) merge algorithm.
+                         Merges after each partial attention to avoid large intermediate buffers.
+                         If False, use offline (single-pass) merge algorithm.
+    """
 
     scaled_query = query * scale
     cache_utils = CacheUtils(key_cache, value_cache, metadata.block_size)
 
+    if use_online_merge:
+        # Online merge: compute and merge incrementally to avoid large intermediate buffers
+        acc_attn, acc_max, acc_sum = None, None, None
+
+    # 1. Causal attention
     causal = partial_attn_causal(query=scaled_query,
                                  key=key,
                                  value=value,
@@ -661,8 +749,10 @@ def unified_attn(query: torch.tensor, key: torch.tensor, value: torch.tensor, ke
                                  inputL_hpu_tensors=metadata.inputL_hpu_tensors,
                                  inputM_hpu_tensors=metadata.inputM_hpu_tensors,
                                  w_uv=None)
+    if use_online_merge:
+        acc_attn, acc_max, acc_sum = online_merge_step(acc_attn, acc_max, acc_sum, *causal)
 
-    # Single call handles both full and chunked modes
+    # 2. Shared attention
     shared = partial_attn_shared(query=scaled_query,
                                  blocks=metadata.shared_blocks,
                                  bias=metadata.shared_bias,
@@ -674,7 +764,10 @@ def unified_attn(query: torch.tensor, key: torch.tensor, value: torch.tensor, ke
                                  w_uv=None,
                                  chunked_data=metadata.shared_bias_chunked,
                                  chunk_size=metadata.shared_chunk_size)
+    if use_online_merge:
+        acc_attn, acc_max, acc_sum = online_merge_step(acc_attn, acc_max, acc_sum, *shared)
 
+    # 3. Unique attention
     unique = partial_attn_unique(query=scaled_query,
                                  blocks=metadata.unique_blocks,
                                  block_mapping=metadata.unique_block_mapping,
@@ -682,9 +775,19 @@ def unified_attn(query: torch.tensor, key: torch.tensor, value: torch.tensor, ke
                                  fmin=metadata.fmin,
                                  cache_utils=cache_utils,
                                  w_uv=None)
-    attn = merge(causal, shared, unique, feps=metadata.feps)
-    if attn is None:
-        return query
+    if use_online_merge:
+        acc_attn, acc_max, acc_sum = online_merge_step(acc_attn, acc_max, acc_sum, *unique)
+
+    # Final normalization
+    if use_online_merge:
+        if acc_attn is None:
+            return query
+        acc_sum = torch.maximum(acc_sum, metadata.feps)
+        attn = acc_attn / acc_sum.unsqueeze(-1)
+    else:
+        attn = merge(causal, shared, unique, feps=metadata.feps)
+        if attn is None:
+            return query
     return attn
 
 
@@ -695,7 +798,8 @@ def unified_mla(query: Optional[torch.tensor],
                 scale: float,
                 metadata: HPUUnifiedAttentionMetadata,
                 w_uv: torch.tensor,
-                query_latent: Optional[torch.tensor] = None) -> torch.tensor:
+                query_latent: Optional[torch.tensor] = None,
+                use_online_merge: bool = False) -> torch.tensor:
     """Main entry point for Unified MLA
     
     Args:
@@ -709,6 +813,9 @@ def unified_mla(query: Optional[torch.tensor],
         w_uv: Projection matrix from latent to full V [num_heads, latent_dim, v_head_dim]
         query_latent: Query tensor for cached path (in latent space) [tokens, num_heads, latent_dim + rope_dim]
                      None if only causal attention is needed.
+        use_online_merge: If True, use online (incremental) merge algorithm.
+                         Merges after each partial attention to avoid large intermediate buffers.
+                         If False, use offline (single-pass) merge algorithm.
     
     Returns:
         Attention output [tokens, num_heads * v_head_dim]
@@ -727,6 +834,9 @@ def unified_mla(query: Optional[torch.tensor],
 
     # MLA: latent cache has no head dimension, value_cache is None (stored in same cache)
     cache_utils = CacheUtils(latent_cache, value_cache=None, block_size=metadata.block_size, is_mla=True)
+    if use_online_merge:
+        # Online merge: compute and merge incrementally to avoid large intermediate buffers
+        acc_attn, acc_max, acc_sum = None, None, None
 
     # Causal: compute-friendly path (expand K/V from latent)
     # key and value already expanded by caller
@@ -740,6 +850,8 @@ def unified_mla(query: Optional[torch.tensor],
                                  inputL_hpu_tensors=metadata.inputL_hpu_tensors,
                                  inputM_hpu_tensors=metadata.inputM_hpu_tensors,
                                  w_uv=w_uv) if scaled_query_causal is not None else (None, None, None)
+    if use_online_merge:
+        acc_attn, acc_max, acc_sum = online_merge_step(acc_attn, acc_max, acc_sum, *causal)
 
     # Shared/Unique: memory-friendly path (Q in latent space, fetch cached latent KV)
     # query_latent is already transformed to latent space by caller
@@ -758,6 +870,8 @@ def unified_mla(query: Optional[torch.tensor],
                                      w_uv=w_uv,
                                      chunked_data=metadata.shared_bias_chunked,
                                      chunk_size=metadata.shared_chunk_size)
+        if use_online_merge:
+            acc_attn, acc_max, acc_sum = online_merge_step(acc_attn, acc_max, acc_sum, *shared)
     else:
         shared = (None, None, None)
 
@@ -768,14 +882,24 @@ def unified_mla(query: Optional[torch.tensor],
                                  fmin=metadata.fmin,
                                  cache_utils=cache_utils,
                                  w_uv=w_uv) if scaled_query_latent is not None else (None, None, None)
-
-    attn = merge(causal, shared, unique, feps=metadata.feps)
-    if attn is None:
-        # No attention computed, return original query
-        # Use whichever query was provided
-        # FIXME(kzawora): I'm not quite sure if that's correct, needs verification
-        if query is not None:
-            return query.flatten(-2, -1)  # [tokens, num_heads * head_dim]
-        else:
-            return query_latent.flatten(-2, -1)  # [tokens, num_heads * head_dim]
+    if use_online_merge:
+        acc_attn, acc_max, acc_sum = online_merge_step(acc_attn, acc_max, acc_sum, *unique)
+    if use_online_merge:
+        if acc_attn is None:
+            if query is not None:
+                return query.flatten(-2, -1)  # [tokens, num_heads * head_dim]
+            else:
+                return query_latent.flatten(-2, -1)  # [tokens, num_heads * head_dim]
+        acc_sum = torch.maximum(acc_sum, metadata.feps)
+        attn = acc_attn / acc_sum.unsqueeze(-1)
+    else:
+        attn = merge(causal, shared, unique, feps=metadata.feps)
+        if attn is None:
+            # No attention computed, return original query
+            # Use whichever query was provided
+            # FIXME(kzawora): I'm not quite sure if that's correct, needs verification
+            if query is not None:
+                return query.flatten(-2, -1)  # [tokens, num_heads * head_dim]
+            else:
+                return query_latent.flatten(-2, -1)  # [tokens, num_heads * head_dim]
     return attn
