@@ -2532,7 +2532,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
     def _get_unified_config(self, attn_metadata, logits_indices):
         has_causal = 'c' if attn_metadata.causal_bias is not None else '-'
-        has_shared = 's' if attn_metadata.shared_bias is not None else '-'
+        has_shared_bias = attn_metadata.shared_bias is not None
+        has_chunked_bias = attn_metadata.shared_bias_chunked is not None
+        has_shared = 's' if has_shared_bias or has_chunked_bias else '-'
         has_unique = 'u' if attn_metadata.unique_bias is not None else '-'
         phase = has_causal + has_shared + has_unique
         qlen = attn_metadata.slot_mapping.size(0)
@@ -4365,7 +4367,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             for request_blocks in split_shared_blocks_ids:
                 self._add_dummy_unified_request(requests, False, False, request_blocks, num_computed_tokens, 1,
                                                 scheduled_tokens)
-
         self._execute_dummy_scenario(requests, scheduled_tokens)
 
     def _prepare_dummy_scenario(self, prompt_cfg, decode_cfg):
