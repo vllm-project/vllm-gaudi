@@ -804,8 +804,8 @@ class HPUCompressedTensorsConfig(CompressedTensorsConfig):
     def _update_scale_adjustment_if_needed(cls, config: dict[str, Any]) -> None:
         """Update scale adjustment setting based on quantization configuration.
         
-        On G2, this method automatically disables scale adjustment when the model is already
-        calibrated/quantized with FP8 E4M3 FNUZ format.
+        On G2, this method automatically disables scale adjustment when 
+        the model is already calibrated/quantized with FP8 E4M3 FNUZ format.
         
         Background:
         -----------
