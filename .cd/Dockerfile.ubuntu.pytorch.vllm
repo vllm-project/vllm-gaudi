@@ -3,9 +3,9 @@
 
 # Parameterize base image components
 ARG DOCKER_URL=vault.habana.ai/gaudi-docker
-ARG VERSION=1.22.2
+ARG VERSION=1.23.0
 ARG BASE_NAME=ubuntu24.04
-ARG PT_VERSION=2.7.1
+ARG PT_VERSION=2.9.0
 ARG REVISION=latest
 ARG REPO_TYPE=habanalabs
 ARG TORCH_TYPE_SUFFIX
@@ -13,9 +13,8 @@ ARG TORCH_TYPE_SUFFIX
 FROM ${DOCKER_URL}/${VERSION}/${BASE_NAME}/${REPO_TYPE}/pytorch-${TORCH_TYPE_SUFFIX}installer-${PT_VERSION}:${REVISION}
 
 # Parameterize commit/branch for vllm-project & vllm-gaudi checkout
-ARG VLLM_GAUDI_COMMIT=main
-# leave empty to use last-good-commit-for-vllm-gaudi
-ARG VLLM_PROJECT_COMMIT=
+ARG VLLM_GAUDI_COMMIT=v0.13.0
+ARG VLLM_PROJECT_COMMIT=v0.13.0
 ENV OMPI_MCA_btl_vader_single_copy_mechanism=none
 
 RUN apt update && \
