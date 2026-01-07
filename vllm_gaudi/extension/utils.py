@@ -30,7 +30,7 @@ class Matmul(torch.nn.Module):
         return torch.matmul(x, y, **kwargs)
 
 class B2BMatmul(Matmul):
-    """Specialized alias for back-to-back matmul operations.
+    """Specialized alias for batch2block and batch2block matmul operations.
 
     This class is intentionally kept functionally identical to ``Matmul``.
     It exists to provide semantic distinction in the codebase (e.g., for
