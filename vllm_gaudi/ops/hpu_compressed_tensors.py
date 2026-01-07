@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Union
+from typing import Callable, Optional, Union, Any
 import habana_frameworks.torch as htorch
 import torch
 
@@ -753,15 +753,7 @@ class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
                 logger.debug_once(f"Removed attribute {attr_name} from layer {layer}")
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """Process KV cache scales for cross-platform FP8 quantization compatibility.
-        
-        Scale Adjustment Scenarios:
-        | No | Quant Plat   | Serve Plat | Scale Adj | FP8 Max Quant | FP8 Max Deploy |
-        |----|--------------|------------|-----------|---------------|----------------|
-        | 1  | G2           | G2         | OFF       | 240           | 240            |
-        | 2  | G3/Other GPU | G2         | ON        | 448           | 240            |
-        | 3  | G3/Other GPU | G3         | OFF       | 448           | 448            |
-        """
+        """Process KV cache scales for cross-platform FP8 quantization compatibility."""
         super().process_weights_after_loading(layer)
         # The `k_scale` and `v_scale` are loaded from checkpoint without any adjustment.
         # Compute KV scales based on quantization and deployment platforms
@@ -807,6 +799,51 @@ class HPUCompressedTensorsConfig(CompressedTensorsConfig):
             return HPUCompressedTensorsKVCacheMethodForMLA(self)
         else:
             return super().get_quant_method(layer, prefix)
+
+    @classmethod
+    def _update_scale_adjustment_if_needed(cls, config: dict[str, Any]) -> None:
+        """Update scale adjustment setting based on quantization configuration.
+        
+        On G2, this method automatically disables scale adjustment when the model is already
+        calibrated/quantized with FP8 E4M3 FNUZ format.
+        
+        Background:
+        -----------
+        Scale adjustment is a mechanism to handle cross-platform FP8 quantization compatibility:
+        - Gaudi2 (G2) uses FP8 E4M3 FNUZ with max value ~240
+        - Gaudi3/Other GPUs use FP8 E4M3 FN with max value ~448
+        
+        When a model is quantized on G3 (max=448) but deployed on G2 (max=240), scale
+        adjustment is needed to rescale the quantization parameters. However, if the model
+        is already calibrated with FNUZ format, no adjustment is needed as it's already 
+        in the target format.
+        
+        Scale Adjustment Scenarios:
+        | No | Quant Plat   | Deply Plat | Scale Adj | FP8 Max Quant | FP8 Max Deploy |
+        |----|--------------|------------|-----------|---------------|----------------|
+        | 1  | G2           | G2         | OFF       | 240           | 240            | <- No adjustment needed
+        | 2  | G3/Other GPU | G2         | ON        | 448           | 240            |
+        | 3  | G3/Other GPU | G3         | OFF       | 448           | 448            |
+        """
+        # Early exit if scale adjustment is already disabled or not on Gaudi2
+        if get_config().scale_adjustment is False or not hpu_ops.is_hpu_gaudi2:
+            return
+
+        # Check if model was calibrated with FNUZ format (Gaudi2 native format)
+        fp8_dtype_flavor = config.get("fp8_dtype_flavor")
+
+        GAUDI2_NATIVE_FP8_FORMAT = "float8_e4m3fnuz"
+
+        if fp8_dtype_flavor == GAUDI2_NATIVE_FP8_FORMAT:
+            # Disable scale adjustment since model was calibrated/quantized for Gaudi2 hardware
+            get_config().scale_adjustment = False
+            logger.warning_once(f"Detected model calibrated/quantized with {GAUDI2_NATIVE_FP8_FORMAT} format. "
+                                "Disabling scale adjustment as the model is already compatible with Gaudi2 hardware.")
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> "CompressedTensorsConfig":
+        cls._update_scale_adjustment_if_needed(config)
+        return super().from_config(config)
 
 compressed_tensors.CompressedTensorsLinearMethod = \
     HPUCompressedTensorsLinearMethod
