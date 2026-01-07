@@ -74,6 +74,14 @@ run_qwen3_inc_dynamic_test() {
     echo "✅ Test with Qwen3-8B-FP8 + inc requant FP8 model + dynamic quant passed."
 }
 
+# DS + blockfp8 + static scaling + FP8 KV
+# The lazy mode works on 1.24.0-272
+run_dsv2_blockfp8_static_scaling_fp8kv_test() {
+    echo "➡️ Testing Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 KV..."
+    PT_HPU_LAZY_MODE=0 HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model INC4AI/DeepSeek-V2-Lite-Chat-BF16-FP8-STATIC-FP8-KV-TEST-ONLY --trust-remote-code
+    echo "✅ Test with Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 KV successful."
+}
+
 # QWEN3 + blockfp8 + dynamic scaling
 run_qwen3_blockfp8_dynamic_scaling_test() {
     echo "➡️ Testing Qwen3-8B-FP8 + blockfp8 + dynamic scaling..."
