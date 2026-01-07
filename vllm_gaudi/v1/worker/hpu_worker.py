@@ -26,7 +26,12 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.parallel_state import get_tp_group
+<<<<<<< HEAD
 from vllm.utils.torch_utils import (STR_DTYPE_TO_TORCH_DTYPE, set_random_seed)
+=======
+from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+>>>>>>> e07204d (Updated qwen3 to use HPUAttention)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec)
 from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerOutput)
 from vllm.v1.worker.utils import bind_kv_cache
