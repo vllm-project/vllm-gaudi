@@ -29,7 +29,7 @@ class LinearBucketingStrategy:
         prompt_ctx_bucket_cfg = read_bucket_settings('prompt',
                                                      'ctx',
                                                      min=0,
-                                                     step=1,
+                                                     step=2,
                                                      max=max_ctx,
                                                      pad_max=max_num_batched_tokens // block_size,
                                                      pad_percent=25)

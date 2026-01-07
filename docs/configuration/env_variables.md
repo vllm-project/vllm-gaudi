@@ -70,7 +70,7 @@ The following table lists the available variables with their default values:
 |          | **Query length max abs padding** (`VLLM_PROMPT_QUERY_BUCKET_PAD_MAX`) | `max_num_batched_tokens`                                                                      |
 |          | **Query length max padding %** (`VLLM_PROMPT_QUERY_BUCKET_PAD_PERCENT`)| `25`                                                                                         |
 |          | **Sequence ctx min** (`VLLM_PROMPT_CTX_BUCKET_MIN`)              | `0`                                                                                                |
-|          | **Sequence ctx step** (`VLLM_PROMPT_CTX_BUCKET_STEP`)            | `1`                                                                                                |
+|          | **Sequence ctx step** (`VLLM_PROMPT_CTX_BUCKET_STEP`)            | `2`                                                                                                |
 |          | **Sequence ctx max** (`VLLM_PROMPT_CTX_BUCKET_MAX`)              | `(max_model_len - block_size) // block_size`                                                       |
 |          | **Sequence ctx max abs padding** (`VLLM_PROMPT_CTX_BUCKET_PAD_MAX`)| `max_num_batched_tokens // block_size`                                                         |
 |          | **Sequence ctx max padding %** (`VLLM_PROMPT_CTX_BUCKET_PAD_PERCENT`)| `25`                                                                                         |
