@@ -830,6 +830,12 @@ def create_unified_batch(
     use_chunked_processing = bool(target_shared_blocks
                                   > default_chunk_size)  # Chunked dense processing - generates bias per chunk
 
+    # Pad target_shared_blocks to be a multiple of chunk_size for chunked processing
+    # This ensures all chunks have exactly chunk_size blocks (static shapes in the kernel)
+    if use_chunked_processing and target_shared_blocks % default_chunk_size != 0:
+        target_shared_blocks = (
+            (target_shared_blocks + default_chunk_size - 1) // default_chunk_size) * default_chunk_size
+
     # Dense bias generation: scatter on CPU (any shape), then broadcast on HPU (static shape)
     # This avoids dynamic-length coordinate arrays on HPU entirely
     use_dense_bias_generation = persistent_ctx.use_dense_shared_bias
