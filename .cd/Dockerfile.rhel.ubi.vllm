@@ -73,7 +73,7 @@ RUN alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2 && \
 
 # Install base Python packages
 RUN pip install setuptools==79.0.1 wheel setuptools_scm && \
-    pip install --upgrade Jinja2 protobuf urllib3 requests
+    pip install --upgrade Jinja2 protobuf urllib3==2.6.0 requests
 
 # Setup Habana repository and install Habana packages
 RUN printf "[habanalabs]\\nname=Habana RH9 Linux repo\\nbaseurl=https://${ARTIFACTORY_URL}/artifactory/rhel/9/9.6\\ngpgkey=https://${ARTIFACTORY_URL}/artifactory/rhel/9/9.6/repodata/repomd.xml.key\\ngpgcheck=1\\n" > /etc/yum.repos.d/habanalabs.repo && \
