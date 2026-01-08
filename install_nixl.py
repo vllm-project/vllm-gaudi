@@ -97,6 +97,7 @@ def install_system_dependencies():
 
 
 # --- Wheel Manipulation Helpers ---
+# Adapted from https://github.com/ai-dynamo/nixl/blob/b20598f2906b7037f711060b937e7156bb83f27f/contrib/wheel_add_ucx_plugins.py
 def extract_wheel(wheel_path):
     """
     Extract the wheel to a temporary directory.
