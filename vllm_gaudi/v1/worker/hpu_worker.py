@@ -128,6 +128,7 @@ class HPUWorker(WorkerBase):
                     selected_modules_str = ",".join(str(x) for x in sorted(selected_modules))
                     os.environ["HABANA_VISIBLE_MODULES"] = selected_modules_str
                     logger.info("Using available modules: %s", selected_modules_str)
+        pyhlml.hlmlShutdown()
 
     def init_profiler(self):
         """Initialize the profiler."""
