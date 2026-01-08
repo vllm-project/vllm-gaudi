@@ -354,14 +354,27 @@ def partial_attn_unique(query: torch.tensor,
     else:
         # Standard attention
         kv_heads = cache_utils.kv_heads
+        query_heads = query.size(1) // kv_heads
         query = query.index_select(0, block_mapping).unflatten(1, (kv_heads, -1)).unsqueeze(-2)
         key, value = cache_utils.fetch_unique(blocks)
 
     block_mapping_2d = torch.nn.functional.one_hot(block_mapping, num_classes=batch_size).to(query.dtype)
     attn = torch.matmul(query, key.transpose(-1, -2))
     block_bias = bias.unsqueeze(1).unsqueeze(1).unsqueeze(1)
-    if get_config().unified_attn_block_softmax:
+
+    if get_config().unified_attn_block_softmax and not is_mla:  # TODO: should be supported for MLA as well?
         attn, block_max, block_sum = torch.ops.hpu.block_softmax(attn, block_bias, block_mapping, fp8_exp=False)
+        block_max = block_max[:, :kv_heads * query_heads].view(-1, kv_heads, query_heads,
+                                                               1)  # [num_blocks, kv_heads, query_heads, 1]
+        block_sum = block_sum[:, :kv_heads * query_heads].view(-1, kv_heads, query_heads,
+                                                               1)  # [num_blocks, kv_heads, query_heads, 1]
+
+        # As per definition of block softmax kernel, if the block is a padding block its block maxes/sums
+        # will not be written - the values there are unexpected and will inluence the calculations.
+        # Apply mask based on block_mapping
+        mask = (block_mapping == -1)
+        block_max[mask] = fmin
+        block_sum[mask] = 0.0
     else:
         attn = attn + block_bias
         block_max = torch.maximum(attn.amax(-1), fmin)
