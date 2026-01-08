@@ -112,11 +112,11 @@ class HPUWorker(WorkerBase):
         if env_visible_modules is None:
             if len(available_module_ids) < self.parallel_config.world_size:
                 raise RuntimeError(f"Not enough available modules for world_size={self.parallel_config.world_size}.")
-            available_modules_str = ",".join([str(x) for x in sorted(available_module_ids)])
+            available_modules_str = ",".join(map(str, sorted(available_module_ids)))
             logger.info("HABANA_VISIBLE_MODULES is not set, using all available modules: %s", available_modules_str)
             os.environ["HABANA_VISIBLE_MODULES"] = available_modules_str
         else:
-            env_module_ids = [int(x) for x in env_visible_modules.split(",")]
+            env_module_ids = list(map(int, env_visible_modules.split(",")))
             if any(env_module_id not in available_module_ids for env_module_id in env_module_ids):
                 logger.warning("Some device for HABANA_VISIBLE_MODULES=%s are not available.", env_visible_modules)
                 selected_modules = [x for x in env_module_ids if x in available_module_ids]
@@ -125,7 +125,7 @@ class HPUWorker(WorkerBase):
                         f"Not enough available modules for world_size={self.parallel_config.world_size}. "
                         "Set HABANA_VISIBLE_MODULES to include more available modules and try again.")
                 else:
-                    selected_modules_str = ",".join(str(x) for x in sorted(selected_modules))
+                    selected_modules_str = ",".join(map(str, sorted(selected_modules)))
                     os.environ["HABANA_VISIBLE_MODULES"] = selected_modules_str
                     logger.info("Using available modules: %s", selected_modules_str)
         pyhlml.hlmlShutdown()
