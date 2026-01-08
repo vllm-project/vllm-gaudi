@@ -13,7 +13,7 @@ from unittest.mock import patch
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
-from vllm.model_executor.utils import set_random_seed
+from vllm.utils.torch_utils import set_random_seed
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.platform_utils import is_pin_memory_available

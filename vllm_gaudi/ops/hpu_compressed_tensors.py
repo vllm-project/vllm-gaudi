@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Union
+from typing import Callable, Optional, Union, Any
 import habana_frameworks.torch as htorch
 import torch
 
@@ -15,7 +15,7 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter, ModelWeig
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsLinearMethod as OrigCompressedTensorsLinearMethod, CompressedTensorsConfig,
-    CompressedTensorsMoEMethod)
+    CompressedTensorsMoEMethod, CompressedTensorsKVCacheMethod)
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors_moe)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (  # noqa: E501
     CompressedTensorsScheme, CompressedTensorsWNA16)
@@ -33,10 +33,12 @@ import vllm_gaudi.extension.ops as hpu_ops
 from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel, VllmMixtureOfExpertsOpWNA16)
 from vllm_gaudi.extension.runtime import get_config
-
-SUPPORTED_STRATEGIES = [QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR]
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizeMethodBase, )
+import vllm.model_executor.model_loader.weight_utils as vllm_weight_utils
 
 logger = init_logger(__name__)
+SUPPORTED_STRATEGIES = [QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR]
 
 
 @CustomOp.register_oot(name='CompressedTensorsLinearMethod')
@@ -735,6 +737,114 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         return output.view(*input_shape)
 
 
+class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
+
+    def _convert_all_scale_to_nn_param(self, module: torch.nn.Module, scale_attrs: list[str]) -> None:
+        for scale_attr in scale_attrs:
+            scale_value = getattr(module, scale_attr, None)
+            if scale_value is not None and not isinstance(scale_value, torch.nn.Parameter):
+                scale_param = torch.nn.Parameter(torch.tensor(scale_value, dtype=torch.float32), requires_grad=False)
+                setattr(module, scale_attr, scale_param)
+
+    def _remove_attrs(self, layer: torch.nn.Module, attrs_lst: list[str]) -> None:
+        for attr_name in attrs_lst:
+            if hasattr(layer, attr_name):
+                delattr(layer, attr_name)
+                logger.debug_once(f"Removed attribute {attr_name} from layer {layer}")
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """Process KV cache scales for cross-platform FP8 quantization compatibility."""
+        super().process_weights_after_loading(layer)
+        # The `k_scale` and `v_scale` are loaded from checkpoint without any adjustment.
+        # Compute KV scales based on quantization and deployment platforms
+        fp8_max_original = 448.0 if get_config().scale_adjustment else 240.0
+        max_k = layer._k_scale * fp8_max_original
+        max_v = layer._v_scale * fp8_max_original
+        max_kv = max(max_k, max_v)
+        fp8_max_cur_platform = 240.0 if hpu_ops.is_hpu_gaudi2 else 448.0
+        kv_scale = fp8_max_cur_platform / max_kv
+        # Configure latent cache and matmul scales
+        layer.impl.latent_cache_k.input_scale = kv_scale
+        layer.impl.latent_cache_k.output_scale = 1.0 / kv_scale
+        # TODO(yiliu30): Support loading q_scale from checkpoint
+        layer.impl.matmul_qk.scale_input = 1.0
+        layer.impl.matmul_qk.scale_other = kv_scale
+        # For `a` in a@v, as `a` is the output of softmax, its max value is 1.0
+        layer.impl.matmul_av.scale_input = 1.0
+        layer.impl.matmul_av.scale_other = kv_scale
+
+        # Note: The following steps are important to avoid compiling each decoding layer into a different gc recipe
+        # Step 1: Remove deprecated scale attributes
+        old_scale_attrs = ["_k_scale", "_v_scale", "_q_scale", "_k_scale_float", "_v_scale_float", "_q_scale_float"]
+        self._remove_attrs(layer, attrs_lst=old_scale_attrs)
+
+        # Step 2: Convert scales in submodules to nn.Parameter to avoid compiling each layer into different gc recipe
+        submodules_to_check = ["latent_cache_k", "matmul_qk", "matmul_av"]
+        scale_attrs = ["input_scale", "output_scale", "scale_input", "scale_other"]
+        for submodule_name in submodules_to_check:
+            submodule = getattr(layer.impl, submodule_name, None)
+            if submodule is not None:
+                self._convert_all_scale_to_nn_param(submodule, scale_attrs=scale_attrs)
+
+
+class HPUCompressedTensorsConfig(CompressedTensorsConfig):
+
+    def get_quant_method(
+        self,
+        layer: torch.nn.Module,
+        prefix: str,
+    ) -> Optional["QuantizeMethodBase"]:
+        from vllm.attention.layer import MLAAttention
+        if isinstance(layer, MLAAttention):
+            return HPUCompressedTensorsKVCacheMethodForMLA(self)
+        else:
+            return super().get_quant_method(layer, prefix)
+
+    @classmethod
+    def _update_scale_adjustment_if_needed(cls, config: dict[str, Any]) -> None:
+        """Update scale adjustment setting based on quantization configuration.
+        
+        On G2, this method automatically disables scale adjustment when 
+        the model is already calibrated/quantized with FP8 E4M3 FNUZ format.
+        
+        Background:
+        -----------
+        Scale adjustment is a mechanism to handle cross-platform FP8 quantization compatibility:
+        - Gaudi2 (G2) uses FP8 E4M3 FNUZ with max value ~240
+        - Gaudi3/Other GPUs use FP8 E4M3 FN with max value ~448
+        
+        When a model is quantized on G3 (max=448) but deployed on G2 (max=240), scale
+        adjustment is needed to rescale the quantization parameters. However, if the model
+        is already calibrated with FNUZ format, no adjustment is needed as it's already 
+        in the target format.
+        
+        Scale Adjustment Scenarios:
+        | No | Quant Plat   | Deply Plat | Scale Adj | FP8 Max Quant | FP8 Max Deploy |
+        |----|--------------|------------|-----------|---------------|----------------|
+        | 1  | G2           | G2         | OFF       | 240           | 240            | <- No adjustment needed
+        | 2  | G3/Other GPU | G2         | ON        | 448           | 240            |
+        | 3  | G3/Other GPU | G3         | OFF       | 448           | 448            |
+        """
+        # Early exit if scale adjustment is already disabled or not on Gaudi2
+        if get_config().scale_adjustment is False or not hpu_ops.is_hpu_gaudi2:
+            return
+
+        # Check if model was calibrated with FNUZ format (Gaudi2 native format)
+        fp8_dtype_flavor = config.get("fp8_dtype_flavor")
+
+        GAUDI2_NATIVE_FP8_FORMAT = "float8_e4m3fnuz"
+
+        if fp8_dtype_flavor == GAUDI2_NATIVE_FP8_FORMAT:
+            # Disable scale adjustment since model was calibrated/quantized for Gaudi2 hardware
+            get_config().scale_adjustment = False
+            logger.warning_once(f"Detected model calibrated/quantized with {GAUDI2_NATIVE_FP8_FORMAT} format. "
+                                "Disabling scale adjustment as the model is already compatible with Gaudi2 hardware.")
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> "CompressedTensorsConfig":
+        cls._update_scale_adjustment_if_needed(config)
+        return super().from_config(config)
+
 compressed_tensors.CompressedTensorsLinearMethod = \
     HPUCompressedTensorsLinearMethod
 compressed_tensors_moe.CompressedTensorsW8A8Fp8MoEMethod = \
@@ -743,6 +853,103 @@ compressed_tensors_moe.CompressedTensorsWNA16MoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod
 compressed_tensors_moe.CompressedTensorsWNA16MarlinMoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod # Override default WNA16 MoE method
+compressed_tensors.CompressedTensorsConfig = HPUCompressedTensorsConfig
 
 # support weight_loader_v2
 WEIGHT_LOADER_V2_SUPPORTED.append(HPUCompressedTensorsLinearMethod.__name__)
+
+
+def oot_maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
+    """Remap the name of FP8 k/v_scale parameters.
+
+    This function handles the remapping of FP8 k/v_scale parameter names.
+    It detects if the given name ends with a suffix and attempts to remap
+    it to the expected name format in the model. If the remapped name is not
+    found in the params_dict, a warning is printed and None is returned.
+
+    Args:
+        name (str): The original loaded checkpoint parameter name.
+        params_dict (dict): Dictionary containing the model's named parameters.
+
+    Returns:
+        str: The remapped parameter name if successful, or the original name
+             if no remapping is needed.
+        None: If the remapped name is not found in params_dict.
+    """
+
+    if name.endswith(".kv_scale"):
+        logger.warning_once("DEPRECATED. Found kv_scale in the checkpoint. "
+                            "This format is deprecated in favor of separate k_scale and "
+                            "v_scale tensors and will be removed in a future release. "
+                            "Functionally, we will remap kv_scale to k_scale and duplicate "
+                            "k_scale to v_scale")
+        # NOTE: we remap the deprecated kv_scale to k_scale
+        remapped_name = name.replace(".kv_scale", ".attn.k_scale")
+        if remapped_name not in params_dict:
+            logger.warning_once(
+                "Found kv_scale in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). kv_scale is not loaded.",  #  noqa: E501
+                name,
+                remapped_name,
+            )
+            return None
+        return remapped_name
+
+    if any("mla_attn" in key for key in params_dict):
+        attn_str = "mla_attn.mla_attn"
+        logger.debug_once(f"Found mla_attn with k_scale and v_scale in "
+                          f"the checkpoint, using {attn_str} as attn_str")
+    else:
+        attn_str = "attn"
+    # Define scale name mapping patterns in order of precedence
+    scale_mapping_patterns = [
+        # LLMC format:  .self_attn.{q,k,v}_scale ->
+        #   .attn.{attn_str}.{q,k,v}_scale
+        (
+            r"\.self_attn\.([qkv])_scale$",
+            rf".self_attn.{attn_str}.\1_scale",
+        ),
+        (
+            r"\.self_attn\.([kv])_proj\.([kv])_scale$",
+            rf".self_attn.{attn_str}.\2_scale",
+        ),
+        # ModelOpt format: .self_attn.{k,v}_proj.{k,v}_scale ->
+        # .self_attn.attn.{k,v}_scale
+        (
+            r"\.self_attn\.([kv])_proj\.([kv])_scale$",
+            rf".self_attn.{attn_str}.\2_scale",
+        ),
+        # QKV proj format: .self_attn.qkv_proj.{k,v}_scale ->
+        # .self_attn.attn.{k,v}_scale
+        (r"\.self_attn\.qkv_proj\.([kv])_scale$", r".self_attn.attn.\1_scale"),
+        # Qwen3 MoE format: .self_attn.qkqkv_proj.{k,v}_scale ->
+        # .self_attn.attn.{k,v}_scale
+        (r"\.self_attn\.qkqkv_proj\.([kv])_scale$", r".self_attn.attn.\1_scale"),
+        # Default format: .{k,v}_scale -> .attn.{k,v}_scale
+        (r"\.([kv])_scale$", r".attn.\1_scale"),
+    ]
+
+    # Check if name ends with k_scale or v_scale
+    if name.endswith((".k_scale", ".v_scale", ".q_scale")):
+        import regex as re
+
+        for pattern, replacement in scale_mapping_patterns:
+            if re.search(pattern, name):
+                remapped_name = re.sub(pattern, replacement, name)
+                if remapped_name not in params_dict:
+                    scale_type = name.split(".")[-1]
+                    logger.warning_once(
+                        "Found %s in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). %s is not loaded.",  # noqa: E501
+                        scale_type,
+                        name,
+                        remapped_name,
+                        scale_type,
+                    )
+                    return None
+                return remapped_name
+
+    # If there were no matches, return the untouched param name
+    return name
+
+
+# Patch the `maybe_remap_kv_scale_name` function to load k/v scale correctly
+vllm_weight_utils.maybe_remap_kv_scale_name = oot_maybe_remap_kv_scale_name
