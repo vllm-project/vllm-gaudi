@@ -4688,7 +4688,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         else:
             prompt_profile_cfg, decode_profile_cfg = self._read_profiling_cfg()
             if prompt_profile_cfg or decode_profile_cfg:
-                self._generate_profiling(prompt_profile_cfg, decode_profile_cfg, None)
+                self._generate_profiling(prompt_profile_cfg, decode_profile_cfg)
                 raise AssertionError("Finished profiling")
         kv_caches = self.kv_caches
 
