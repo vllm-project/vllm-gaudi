@@ -36,5 +36,4 @@ vllm bench throughput \
   --backend vllm \
   --dataset_path ShareGPT_V3_unfiltered_cleaned_split.json \
   --dataset_name sharegpt \
-  --num-prompts 1000 \
-  --max-model-len 32768
+  --num-prompts 1000
