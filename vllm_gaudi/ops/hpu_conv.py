@@ -3,28 +3,6 @@ import torch.nn.functional as F
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
 
 
-@Conv3dLayer.register_oot
-class HPUConv3dLayer(Conv3dLayer):
-    """Conv layer with Conv3d."""
-
-    num_dim = 3
-
-    def _forward_mulmat(self, x: torch.Tensor) -> torch.Tensor:
-        assert x.dim() == 5
-        B, C, T, H, W = x.shape
-        K1, K2, K3 = self.kernel_size
-        T, H, W = T // K1, H // K2, W // K3
-        x = x.view(B, C, T, K1, H, K2, W, K3)
-        x = x.permute(0, 2, 3, 4, 1, 5, 6, 7).reshape(-1, self.input_size)
-        x = F.linear(
-            x,
-            self.weight.view(self.out_channels, self.input_size),
-            self.bias,
-        )
-        x = x.view(B, T, H, W, self.out_channels).permute(0, 4, 1, 2, 3)
-        return x
-
-
 @Conv2dLayer.register_oot
 class HPUConv2dLayer(Conv2dLayer):
 
@@ -55,3 +33,25 @@ class HPUConv2dLayer(Conv2dLayer):
             return self._forward_mulmat(x)
         else:
             return self._forward_conv(x)
+
+
+@Conv3dLayer.register_oot
+class HPUConv3dLayer(Conv3dLayer):
+    """Conv layer with Conv3d."""
+
+    num_dim = 3
+
+    def _forward_mulmat(self, x: torch.Tensor) -> torch.Tensor:
+        assert x.dim() == 5
+        B, C, T, H, W = x.shape
+        K1, K2, K3 = self.kernel_size
+        T, H, W = T // K1, H // K2, W // K3
+        x = x.view(B, C, T, K1, H, K2, W, K3)
+        x = x.permute(0, 2, 3, 4, 1, 5, 6, 7).reshape(-1, self.input_size)
+        x = F.linear(
+            x,
+            self.weight.view(self.out_channels, self.input_size),
+            self.bias,
+        )
+        x = x.view(B, T, H, W, self.out_channels).permute(0, 4, 1, 2, 3)
+        return x
