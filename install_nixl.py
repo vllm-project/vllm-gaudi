@@ -31,10 +31,17 @@ logger = logging.getLogger(__name__)
 
 
 # --- Helper Functions ---
-def run_command(command, cwd=".", env=None):
-    """Helper function to run a shell command and check for errors."""
+def run_command(command, cwd=".", env=None, **kwargs):
+    """Helper function to run a shell command and check for errors.
+
+    Returns:
+        subprocess.CompletedProcess: The result object containing returncode, stdout, etc.
+    """
     logger.info(f"--> Running command: {' '.join(command)} in '{cwd}'")
-    subprocess.check_call(command, cwd=cwd, env=env)
+    # Default to check=True to raise exception on error, matching old check_call behavior
+    if "check" not in kwargs:
+        kwargs["check"] = True
+    return subprocess.run(command, cwd=cwd, env=env, **kwargs)
 
 
 def is_pip_package_installed(package_name):
@@ -177,7 +184,8 @@ def get_lib_deps(lib_path):
     """
     Get the dependencies of a library, as a map from library name to path.
     """
-    deps = os.popen(f"ldd {lib_path}").read().strip().split("\n")
+    # Replaced os.popen with subprocess.check_output
+    deps = run_command(["ldd", lib_path], capture_output=True, text=True).stdout.strip().split("\n")
     ret = {}
     for dep in deps:
         if "=>" in dep:
@@ -230,7 +238,8 @@ def add_plugins(wheel_path, sys_plugins_dir, install_dirname):
     # Ensure that all of them in name_map have RPATH set to $ORIGIN
     for fname in name_map.values():
         fpath = os.path.join(pkg_libs_dir, fname)
-        rpath = os.popen(f"patchelf --print-rpath {fpath}").read().strip()
+        res = run_command(["patchelf", "--print-rpath", fpath], capture_output=True, text=True, check=False)
+        rpath = res.stdout.strip() if res.returncode == 0 else ""
         if "$ORIGIN" in rpath.split(":"):
             continue
         if not rpath:
@@ -238,9 +247,7 @@ def add_plugins(wheel_path, sys_plugins_dir, install_dirname):
         else:
             rpath = "$ORIGIN:" + rpath
         logger.debug(f"Setting rpath for {fpath} to {rpath}")
-        ret = os.system(f"patchelf --set-rpath '{rpath}' {fpath}")
-        if ret != 0:
-            raise RuntimeError(f"Failed to set rpath for {fpath}")
+        run_command(["patchelf", "--set-rpath", rpath, fpath])
 
     pkg_plugins_dir = os.path.join(pkg_libs_dir, install_dirname)
     logger.debug(f"Copying plugins from {sys_plugins_dir} to {pkg_plugins_dir}")
@@ -253,15 +260,15 @@ def add_plugins(wheel_path, sys_plugins_dir, install_dirname):
         logger.debug(f"Patching {fname}")
         fpath = os.path.join(pkg_plugins_dir, fname)
         if os.path.isfile(fpath) and ".so" in fname:
-            rpath = os.popen(f"patchelf --print-rpath {fpath}").read().strip()
+            res = run_command(["patchelf", "--print-rpath", fpath], capture_output=True, text=True, check=False)
+            rpath = res.stdout.strip() if res.returncode == 0 else ""
             if not rpath:
                 rpath = "$ORIGIN/..:$ORIGIN"
             else:
                 rpath = "$ORIGIN/..:$ORIGIN:" + rpath
             logger.debug(f"Setting rpath for {fpath} to {rpath}")
-            ret = os.system(f"patchelf --set-rpath '{rpath}' {fpath}")
-            if ret != 0:
-                raise RuntimeError(f"Failed to set rpath for {fpath}")
+            run_command(["patchelf", "--set-rpath", rpath, fpath])
+
             # Replace the original libs with the patched one
             for libname, _ in get_lib_deps(fpath).items():
                 # "libuct.so.0" -> "libuct"
@@ -269,9 +276,8 @@ def add_plugins(wheel_path, sys_plugins_dir, install_dirname):
                 if base_name in name_map:
                     packaged_name = name_map[base_name]
                     logger.debug(f"Replacing {libname} with {packaged_name} in {fpath}")
-                    ret = os.system(f"patchelf --replace-needed {libname} {packaged_name} {fpath}")
-                    if ret != 0:
-                        raise RuntimeError(f"Failed to replace {libname} with {packaged_name} in {fpath}")
+                    run_command(["patchelf", "--replace-needed", libname, packaged_name, fpath])
+
             # Check that there is no breakage introduced in the patched lib
             logger.debug(f"Checking that {fpath} loads")
             original_deps = get_lib_deps(os.path.join(sys_plugins_dir, fname))
