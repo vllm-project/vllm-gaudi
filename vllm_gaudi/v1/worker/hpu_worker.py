@@ -110,7 +110,7 @@ class HPUWorker(WorkerBase):
                 continue
         env_visible_modules = os.getenv("HABANA_VISIBLE_MODULES")
         if env_visible_modules is None:
-            available_modules_str = ",".join(available_module_ids)
+            available_modules_str = ",".join([str(x) for x in sorted(available_module_ids)])
             logger.info("HABANA_VISIBLE_MODULES is not set, using all available modules: %s", available_modules_str)
             os.environ["HABANA_VISIBLE_MODULES"] = available_modules_str
         else:
@@ -122,7 +122,7 @@ class HPUWorker(WorkerBase):
                     raise RuntimeError(
                         f"Not enough available modules for world_size={self.parallel_config.world_size}.")
                 else:
-                    selected_modules_str = ",".join(str(x) for x in selected_modules[:self.parallel_config.world_size])
+                    selected_modules_str = ",".join(str(x) for x in sorted(selected_modules))
                     os.environ["HABANA_VISIBLE_MODULES"] = selected_modules_str
                     logger.info("Using available modules: %s", selected_modules_str)
 
