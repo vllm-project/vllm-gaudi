@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       branch_name:
-        description: "The new release branch name (e.g., 'pre-releases/v0.11.0')"
+        description: "The new release branch name (e.g., 'releases/v0.11.0')"
         required: true
         type: string
 
@@ -59,11 +59,11 @@ jobs:
         id: extract_tag
         run: |
           BRANCH_NAME="${{ github.event.inputs.branch_name }}"
-          if [[ "$BRANCH_NAME" != pre-releases/* ]]; then
-            echo "::error::Branch name must follow the 'pre-releases/**' pattern."
+          if [[ "$BRANCH_NAME" != releases/* ]]; then
+            echo "::error::Branch name must follow the 'releases/**' pattern."
             exit 1
           fi
-          TAG_NAME="${BRANCH_NAME#pre-releases/}"
+          TAG_NAME="${BRANCH_NAME#releases/}"
           echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
           echo "Extracted tag name: $TAG_NAME"
 
