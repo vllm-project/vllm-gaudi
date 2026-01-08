@@ -94,6 +94,38 @@ class HPUWorker(WorkerBase):
         self.kv_cache_sleeping = False
         self.kv_cache_config = None
 
+        # Select available Habana modules before initializing the device.
+        import pyhlml
+        pyhlml.hlmlInit()
+        available_module_ids = []
+        device_count = torch.hpu.device_count()
+        for i in range(device_count):
+            try:
+                device = pyhlml.hlmlDeviceGetHandleByIndex(i)
+                utility = pyhlml.hlmlDeviceGetUtilizationRates(device)
+                if utility.aip == 0 and utility.memory == 0:
+                    module_id = pyhlml.hlmlDeviceGetModuleID(device)
+                    available_module_ids.append(module_id)
+            except Exception:
+                continue
+        env_visible_modules = os.getenv("HABANA_VISIBLE_MODULES")
+        if env_visible_modules is None:
+            available_modules_str = ",".join(available_module_ids)
+            logger.info("HABANA_VISIBLE_MODULES is not set, using all available modules: %s", available_modules_str)
+            os.environ["HABANA_VISIBLE_MODULES"] = available_modules_str
+        else:
+            env_module_ids = [int(x) for x in env_visible_modules.split(",")]
+            if any(env_module_id not in available_module_ids for env_module_id in env_module_ids):
+                logger.warning("Some device for HABANA_VISIBLE_MODULES=%s are not available.", env_visible_modules)
+                selected_modules = [x for x in env_module_ids if x in available_module_ids]
+                if len(selected_modules) < self.parallel_config.world_size:
+                    raise RuntimeError(
+                        f"Not enough available modules for world_size={self.parallel_config.world_size}.")
+                else:
+                    selected_modules_str = ",".join(str(x) for x in selected_modules[:self.parallel_config.world_size])
+                    os.environ["HABANA_VISIBLE_MODULES"] = selected_modules_str
+                    logger.info("Using available modules: %s", selected_modules_str)
+
     def init_profiler(self):
         """Initialize the profiler."""
         if envs.VLLM_TORCH_PROFILER_DIR:
