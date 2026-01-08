@@ -15,6 +15,7 @@ UCX_INSTALL_DIR = os.path.join("/tmp", "ucx_install")
 UCX_REPO_URL = "https://github.com/openucx/ucx.git"
 NIXL_REPO_URL = "https://github.com/ai-dynamo/nixl.git"
 
+# Latest good commit with gaudi_gdr support
 DEFAULT_UCX_COMMIT = "1df7b045d36c1e84f2fe9f251de83fb9103fc80e"
 NIXL_VERSION = os.environ.get("NIXL_VERSION", "0.7.0")
 
