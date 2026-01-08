@@ -4450,6 +4450,22 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.sample_tokens(None)
         self.execute_model(cleanup, warmup_mode=True)
 
+    def _generate_unified_profiling(self, unified_cfgs):
+        steps = 3
+        profiler = setup_profiler(warmup=steps - 1, active=1)
+        profiler.start()
+        for _ in range(steps):
+            for unified_cfg in unified_cfgs:
+                if unified_cfg not in self.bucketing_manager.unified_buckets:
+                    self.bucketing_manager.unified_buckets.insert(0, unified_cfg)
+                torch.hpu.synchronize()
+                with torch.autograd.profiler.record_function(str(unified_cfg)):
+                    self._prepare_dummy_unified_scenario(unified_cfg)
+                    torch.hpu.synchronize()
+            profiler.step()
+        profiler.stop()
+        return profiler
+
     def _generate_profiling(self, prompt_cfg, decode_cfg):
         steps = 3
         profiler = setup_profiler(warmup=steps - 1, active=1)
@@ -4595,6 +4611,30 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     self.graphed_buckets.add(img_arg)
                     self.log_warmup_multimodal(phase, idx, num_candidates, 1, 0, img_arg)
 
+    def _maybe_profile_unified_attn(self):
+        unified_cfg_str = os.environ.get('VLLM_PROFILE_UNIFIED', None)
+        if unified_cfg_str:
+            # NOTE(kzawora): VLLM_PROFILE_UNIFIED can pass either a single tuple
+            # or a list of tuples. Examples:
+            #   VLLM_PROFILE_UNIFIED="(8,16,16,1)" or VLLM_PROFILE_UNIFIED=8,16,16,1
+            #   VLLM_PROFILE_UNIFIED="[(8,16,16,0), (4,8,8,1)]"
+            # If a list of tuples is passed, we profile each one sequentially.
+            # We're using ast.literal_eval to safely parse the string representation of the tuple/list
+            import ast
+            cfg = ast.literal_eval(unified_cfg_str)
+            cfg_list = []
+            if isinstance(cfg, tuple):
+                # Single cfg passed as tuple, e.g. 512,32,128,1 or (512,32,128,1)
+                cfg_list = [cfg]
+            elif isinstance(cfg, list):
+                # Multiple cfgs passed as a list of tuples, e.g. [(512,32,128,0),(512,32,128,1)]
+                cfg_list = cfg
+            else:
+                raise AssertionError("VLLM_PROFILE_UNIFIED value must be a tuple or a list of tuples")
+            prof = self._generate_unified_profiling(cfg_list)
+            msg = f"Finished profiling. Key averages:\n{prof.key_averages()}"
+            raise AssertionError(msg)
+
     @torch.inference_mode()
     def warmup_model(self) -> None:
         if not self.enable_bucketing:
@@ -4640,11 +4680,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 )
 
         self.defragmenter.initialize(self.kv_caches, self.block_size)
-
-        prompt_profile_cfg, decode_profile_cfg = self._read_profiling_cfg()
-        if prompt_profile_cfg or decode_profile_cfg:
-            self._generate_profiling(prompt_profile_cfg, decode_profile_cfg)
-            raise AssertionError("Finished profiling")
+        # Profiling
+        if self.unified_attn:
+            self._maybe_profile_unified_attn()
+        else:
+            prompt_profile_cfg, decode_profile_cfg = self._read_profiling_cfg()
+            if prompt_profile_cfg or decode_profile_cfg:
+                self._generate_profiling(prompt_profile_cfg, decode_profile_cfg, None)
+                raise AssertionError("Finished profiling")
         kv_caches = self.kv_caches
 
         if not htorch.utils.internal.is_lazy() and not self.model_config.enforce_eager:
