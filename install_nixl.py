@@ -1,17 +1,16 @@
 # install_nixl.py
 import argparse
-import glob
-import os
-import subprocess
-import sys
 import base64
 import csv
+import glob
 import hashlib
 import logging
+import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import zipfile
-
 
 # --- Configuration ---
 WHEELS_CACHE_HOME = os.environ.get("WHEELS_CACHE_HOME", "/tmp/wheels_cache")
@@ -26,14 +25,15 @@ NIXL_REPO_URL = "https://github.com/ai-dynamo/nixl.git"
 DEFAULT_UCX_COMMIT = "1df7b045d36c1e84f2fe9f251de83fb9103fc80e"
 NIXL_VERSION = os.environ.get("NIXL_VERSION", "0.7.0")
 
-logging.basicConfig(level=logging.INFO)
+# Configure logging to output to stdout, matching the previous print behavior
+logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 
 # --- Helper Functions ---
 def run_command(command, cwd=".", env=None):
     """Helper function to run a shell command and check for errors."""
-    print(f"--> Running command: {' '.join(command)} in '{cwd}'", flush=True)
+    logger.info(f"--> Running command: {' '.join(command)} in '{cwd}'")
     subprocess.check_call(command, cwd=cwd, env=env)
 
 
@@ -62,25 +62,18 @@ def find_nixl_wheel_in_cache(cache_dir):
 def install_system_dependencies():
     """Installs required system packages using apt-get if run as root."""
     if os.geteuid() != 0:
-        print("\n---", flush=True)
-        print(
-            "WARNING: Not running as root. Skipping system dependency installation.",
-            flush=True,
+        logger.warning(
+            "\n---\n"
+            "WARNING: Not running as root. Skipping system dependency installation.\n"
+            "Please ensure the following packages are installed on your system:\n"
+            "  patchelf build-essential git cmake ninja-build autotools-dev automake meson libtool libtool-bin\n"
+            "---\n"
         )
-        print(
-            "Please ensure the following packages are installed on your system:",
-            flush=True,
-        )
-        print(
-            "  patchelf build-essential git cmake ninja-build autotools-dev automake meson libtool libtool-bin",
-            flush=True,
-        )
-        print("---\n", flush=True)
         return
 
-    print("--- Running as root. Installing system dependencies... ---", flush=True)
+    logger.info("--- Running as root. Installing system dependencies... ---")
     apt_packages = [
-        "patchelf",  # <-- Add patchelf here
+        "patchelf",
         "build-essential",
         "git",
         "cmake",
@@ -93,7 +86,7 @@ def install_system_dependencies():
     ]
     run_command(["apt-get", "update"])
     run_command(["apt-get", "install", "-y"] + apt_packages)
-    print("--- System dependencies installed successfully. ---\n", flush=True)
+    logger.info("--- System dependencies installed successfully. ---\n")
 
 
 # --- Wheel Manipulation Helpers ---
@@ -104,7 +97,7 @@ def extract_wheel(wheel_path):
         Path to the temporary directory. The caller is responsible for cleaning up the directory.
     """
     temp_dir = tempfile.mkdtemp()
-    logger.info("Extracting wheel %s to %s", wheel_path, temp_dir)
+    logger.info(f"Extracting wheel {wheel_path} to {temp_dir}")
     with zipfile.ZipFile(wheel_path, "r") as zip_ref:
         zip_ref.extractall(temp_dir)
     return temp_dir
@@ -154,7 +147,7 @@ def create_wheel(wheel_path, temp_dir):
     """
     Create a wheel from a temporary directory.
     """
-    logger.info("Creating wheel %s from %s", wheel_path, temp_dir)
+    logger.info(f"Creating wheel {wheel_path} from {temp_dir}")
     update_wheel_record_file(temp_dir)
     with zipfile.ZipFile(wheel_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zip_ref:
         for root, _, files in os.walk(temp_dir):
@@ -176,7 +169,7 @@ def get_repaired_lib_name_map(libs_dir):
         if os.path.isfile(os.path.join(libs_dir, fname)) and ".so" in fname and "-" in fname:
             base_name = fname.split("-")[0]
             name_map[base_name] = fname
-            print(f"Found already bundled lib: {base_name} -> {fname}")
+            logger.info(f"Found already bundled lib: {base_name} -> {fname}")
     return name_map
 
 
@@ -244,20 +237,20 @@ def add_plugins(wheel_path, sys_plugins_dir, install_dirname):
             rpath = "$ORIGIN"
         else:
             rpath = "$ORIGIN:" + rpath
-        logger.debug("Setting rpath for %s to %s", fpath, rpath)
+        logger.debug(f"Setting rpath for {fpath} to {rpath}")
         ret = os.system(f"patchelf --set-rpath '{rpath}' {fpath}")
         if ret != 0:
             raise RuntimeError(f"Failed to set rpath for {fpath}")
 
     pkg_plugins_dir = os.path.join(pkg_libs_dir, install_dirname)
-    logger.debug("Copying plugins from %s to %s", sys_plugins_dir, pkg_plugins_dir)
+    logger.debug(f"Copying plugins from {sys_plugins_dir} to {pkg_plugins_dir}")
     copied_files = copytree(sys_plugins_dir, pkg_plugins_dir)
     if not copied_files:
         raise RuntimeError(f"No plugins found in {sys_plugins_dir}")
 
     # Patch all libs to load plugin deps from the wheel
     for fname in copied_files:
-        logger.debug("Patching %s", fname)
+        logger.debug(f"Patching {fname}")
         fpath = os.path.join(pkg_plugins_dir, fname)
         if os.path.isfile(fpath) and ".so" in fname:
             rpath = os.popen(f"patchelf --print-rpath {fpath}").read().strip()
@@ -265,7 +258,7 @@ def add_plugins(wheel_path, sys_plugins_dir, install_dirname):
                 rpath = "$ORIGIN/..:$ORIGIN"
             else:
                 rpath = "$ORIGIN/..:$ORIGIN:" + rpath
-            logger.debug("Setting rpath for %s to %s", fpath, rpath)
+            logger.debug(f"Setting rpath for {fpath} to {rpath}")
             ret = os.system(f"patchelf --set-rpath '{rpath}' {fpath}")
             if ret != 0:
                 raise RuntimeError(f"Failed to set rpath for {fpath}")
@@ -275,12 +268,12 @@ def add_plugins(wheel_path, sys_plugins_dir, install_dirname):
                 base_name = libname.split(".")[0]
                 if base_name in name_map:
                     packaged_name = name_map[base_name]
-                    logger.debug("Replacing %s with %s in %s", libname, packaged_name, fpath)
+                    logger.debug(f"Replacing {libname} with {packaged_name} in {fpath}")
                     ret = os.system(f"patchelf --replace-needed {libname} {packaged_name} {fpath}")
                     if ret != 0:
                         raise RuntimeError(f"Failed to replace {libname} with {packaged_name} in {fpath}")
             # Check that there is no breakage introduced in the patched lib
-            logger.debug("Checking that %s loads", fpath)
+            logger.debug(f"Checking that {fpath} loads")
             original_deps = get_lib_deps(os.path.join(sys_plugins_dir, fname))
             for libname, libpath in get_lib_deps(fpath).items():
                 if libpath is None:
@@ -289,7 +282,7 @@ def add_plugins(wheel_path, sys_plugins_dir, install_dirname):
 
     create_wheel(wheel_path, temp_dir)
     shutil.rmtree(temp_dir)
-    logger.info("Added plugins to wheel: %s", wheel_path)
+    logger.info(f"Added plugins to wheel: {wheel_path}")
 
 
 def build_and_install_prerequisites(args):
@@ -297,35 +290,28 @@ def build_and_install_prerequisites(args):
 
     # ... (initial checks and setup are unchanged) ...
     if not args.force_reinstall and is_pip_package_installed("nixl"):
-        print("--> NIXL is already installed. Nothing to do.", flush=True)
+        logger.info("--> NIXL is already installed. Nothing to do.")
         return
 
     cached_wheel = find_nixl_wheel_in_cache(WHEELS_CACHE_HOME)
     if not args.force_reinstall and cached_wheel:
-        print(
-            f"\n--> Found self-contained wheel: {os.path.basename(cached_wheel)}.",
-            flush=True,
-        )
-        print("--> Installing from cache, skipping all source builds.", flush=True)
+        logger.info(f"\n--> Found self-contained wheel: {os.path.basename(cached_wheel)}.")
+        logger.info("--> Installing from cache, skipping all source builds.")
         install_command = [sys.executable, "-m", "pip", "install", cached_wheel]
         run_command(install_command)
-        print("\n--- Installation from cache complete. ---", flush=True)
+        logger.info("\n--- Installation from cache complete. ---")
         return
 
-    print(
-        "\n--> No installed package or cached wheel found. Starting full build process...",
-        flush=True,
-    )
-    print("\n--> Installing auditwheel...", flush=True)
+    logger.info("\n--> No installed package or cached wheel found. Starting full build process...")
+    logger.info("\n--> Installing auditwheel...")
     run_command([sys.executable, "-m", "pip", "install", "auditwheel"])
     install_system_dependencies()
     ucx_install_path = os.path.abspath(UCX_INSTALL_DIR)
-    print(f"--> Using wheel cache directory: {WHEELS_CACHE_HOME}", flush=True)
+    logger.info(f"--> Using wheel cache directory: {WHEELS_CACHE_HOME}")
     os.makedirs(WHEELS_CACHE_HOME, exist_ok=True)
 
     # -- Step 1: Build UCX from source --
-    # ... (UCX build process is unchanged) ...
-    print("\n[1/4] Configuring and building UCX from source...", flush=True)
+    logger.info("\n[1/4] Configuring and building UCX from source...")
     if not os.path.exists(UCX_DIR):
         run_command(["git", "clone", UCX_REPO_URL, UCX_DIR])
     ucx_source_path = os.path.abspath(UCX_DIR)
@@ -349,16 +335,16 @@ def build_and_install_prerequisites(args):
     run_command(configure_command, cwd=ucx_source_path)
     run_command(["make", "-j", str(os.cpu_count() or 1)], cwd=ucx_source_path)
     run_command(["make", "install-strip"], cwd=ucx_source_path)
-    print("--- UCX build and install complete ---", flush=True)
+    logger.info("--- UCX build and install complete ---")
 
     # -- Step 2: Build NIXL wheel from source --
-    print("\n[2/4] Building NIXL wheel from source...", flush=True)
+    logger.info("\n[2/4] Building NIXL wheel from source...")
     if not os.path.exists(NIXL_DIR):
         run_command(["git", "clone", NIXL_REPO_URL, NIXL_DIR])
     else:
         run_command(["git", "fetch", "--tags"], cwd=NIXL_DIR)
     run_command(["git", "checkout", NIXL_VERSION], cwd=NIXL_DIR)
-    print(f"--> Checked out NIXL version: {NIXL_VERSION}", flush=True)
+    logger.info(f"--> Checked out NIXL version: {NIXL_VERSION}")
 
     build_env = os.environ.copy()
     build_env["PKG_CONFIG_PATH"] = os.path.join(ucx_install_path, "lib", "pkgconfig")
@@ -366,7 +352,7 @@ def build_and_install_prerequisites(args):
     ucx_plugin_path = os.path.join(ucx_lib_path, "ucx")
     existing_ld_path = os.environ.get("LD_LIBRARY_PATH", "")
     build_env["LD_LIBRARY_PATH"] = f"{ucx_lib_path}:{ucx_plugin_path}:{existing_ld_path}".strip(":")
-    print(f"--> Using LD_LIBRARY_PATH: {build_env['LD_LIBRARY_PATH']}", flush=True)
+    logger.info(f"--> Using LD_LIBRARY_PATH: {build_env['LD_LIBRARY_PATH']}")
 
     temp_wheel_dir = os.path.join(ROOT_DIR, "temp_wheelhouse")
     run_command(
@@ -388,7 +374,7 @@ def build_and_install_prerequisites(args):
     )
 
     # -- Step 3: Repair the wheel, excluding the already-bundled plugin --
-    print("\n[3/4] Repairing NIXL wheel to include UCX libraries...", flush=True)
+    logger.info("\n[3/4] Repairing NIXL wheel to include UCX libraries...")
     unrepaired_wheel = find_nixl_wheel_in_cache(temp_wheel_dir)
     if not unrepaired_wheel:
         raise RuntimeError("Failed to find the NIXL wheel after building it.")
@@ -407,20 +393,17 @@ def build_and_install_prerequisites(args):
     run_command(auditwheel_command, env=build_env)
 
     # -- Step 4: Bundle UCX plugins into the repaired wheel --
-    print("\n[4/4] Bundling UCX plugins into the wheel...", flush=True)
+    logger.info("\n[4/4] Bundling UCX plugins into the wheel...")
     repaired_wheel = find_nixl_wheel_in_cache(WHEELS_CACHE_HOME)
 
     ucx_plugins_src = os.path.join(ucx_install_path, "lib", "ucx")
 
     if os.path.exists(ucx_plugins_src):
-        print(f"--> Adding plugins from {ucx_plugins_src}", flush=True)
+        logger.info(f"--> Adding plugins from {ucx_plugins_src}")
         # Direct call to the ported function
         add_plugins(repaired_wheel, ucx_plugins_src, "ucx")
     else:
-        print(
-            f"--> Warning: UCX plugins not found. Skipping bundling.",
-            flush=True,
-        )
+        logger.info(f"--> Warning: UCX plugins not found. Skipping bundling.")
 
     # No more temporary files to remove, just the temp wheelhouse
     run_command(["rm", "-rf", temp_wheel_dir])
@@ -429,9 +412,8 @@ def build_and_install_prerequisites(args):
     if not newly_built_wheel:
         raise RuntimeError("Failed to find the repaired NIXL wheel.")
 
-    print(
-        f"--> Successfully built self-contained wheel: {os.path.basename(newly_built_wheel)}. Now installing...",
-        flush=True,
+    logger.info(
+        f"--> Successfully built self-contained wheel: {os.path.basename(newly_built_wheel)}. Now installing..."
     )
     install_command = [
         sys.executable,
@@ -445,7 +427,7 @@ def build_and_install_prerequisites(args):
         install_command.insert(-1, "--force-reinstall")
 
     run_command(install_command)
-    print("--- NIXL installation complete ---", flush=True)
+    logger.info("--- NIXL installation complete ---")
 
 
 if __name__ == "__main__":
