@@ -139,6 +139,70 @@ docker run -it --rm \
 
 This method provides full flexibility over how the vLLM server is executed within the container.
 
+## Dry Run to create vLLM sever and client command line
+
+Set environment variable **DRY_RUN=1**  
+DRY_RUN env var set to 1 create a copy of vllm-server.sh or vllm-benchmark.sh command line file on the host machine, without launching the server or the client.
+
+Example - Docker Compose
+
+```bash
+MODEL="Qwen/Qwen2.5-14B-Instruct" \
+HF_TOKEN="<your huggingface token>" \
+DOCKER_IMAGE="vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/vllm-installer-{{ PT_VERSION }}:latest" \
+TENSOR_PARALLEL_SIZE=1 \
+MAX_MODEL_LEN=2048 \
+DRY_RUN=1 \
+docker compose up
+```
+
+Example - Docker Run
+
+```bash
+docker run -it --rm \
+    -e MODEL=$MODEL \
+    -e HF_TOKEN=$HF_TOKEN \
+    -e http_proxy=$http_proxy \
+    -e https_proxy=$https_proxy \
+    -e no_proxy=$no_proxy \
+    --cap-add=sys_nice \
+    --ipc=host \
+    --runtime=habana \
+    -e HABANA_VISIBLE_DEVICES=all \
+    -p 8000:8000 \
+    -v ${PWD}:/local \
+    --name vllm-server \
+    <docker image name>
+```
+
+!!! note
+    While launching the vLLM server using Docker Run command for Dry Run, make sure to mount the present working directory as `-v ${PWD}:/local`.
+
+## To save vLLM sever and client log files
+
+If vLLM server is launched using Docker Compose command, the log files are saved at `vllm-gaudi/.cd/logs/` by default.
+
+If vLLM server is launched using Docker Run command, the user can save the log files by creating a directory named `logs` and mount this log directory as `-v ${PWD}/logs:/root/scripts/logs`.
+
+## To create multiple vLLM services using Docker Compose
+
+Set environment variables **HOST_PORT** and **COMPOSE_PROJECT_NAME**  
+Example
+
+```bash
+MODEL="Qwen/Qwen2.5-14B-Instruct" \
+HF_TOKEN="<your huggingface token>" \
+DOCKER_IMAGE="vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/vllm-installer-{{ PT_VERSION }}:latest" \
+TENSOR_PARALLEL_SIZE=1 \
+MAX_MODEL_LEN=2048 \
+HOST_PORT=9000 \
+COMPOSE_PROJECT_NAME=serv1 \
+docker compose up
+```
+
+!!! note
+    The default values, when these vars not set, are `HOST_PORT=8000` and `COMPOSE_PROJECT_NAME=cd`.
+
 ## Pinning CPU Cores for Memory Access Coherence
 
 To improve memory-access coherence and release CPUs to other CPU-only workloads, such as vLLM serving with Llama3 8B, you can pin CPU cores based on different CPU Non-Uniform Memory Access (NUMA) nodes using the automatically generated `docker-compose.override.yml` file. The following procedure explains the process.
