@@ -3,16 +3,47 @@ import os
 import shutil
 import sys
 import time
+from pathlib import Path
+
+
+def shutil_copy(source_file, destination_dir):
+    try:
+        src_path = Path(source_file)
+        dst_dir_path = Path(destination_dir)
+
+        dst_path = dst_dir_path / src_path.name
+
+        # Ensure the destination directory exists
+        dst_dir_path.mkdir(parents=True, exist_ok=True)
+
+        shutil.copy(src_path, dst_path)
+        print(f"[Info] File '{source_file}' saved at '{dst_path}'")
+
+    except FileNotFoundError:
+        print(f"Error: The source file '{source_file}' was not found.")
+    except PermissionError:
+        print(f"Error: Permission denied. Cannot access '{source_file}' or write to '{destination_dir}'.")
+    except shutil.SameFileError:
+        print("Error: Source and destination files are the same.")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
 
 
 class ScriptGenerator:
 
-    def __init__(self, template_script_path, output_script_path, variables, log_dir="logs", varlist_conf_path=None):
+    def __init__(self,
+                 template_script_path,
+                 output_script_path,
+                 variables,
+                 log_dir="logs",
+                 dry_run_dir="/local/",
+                 varlist_conf_path=None):
         self.template_script_path = template_script_path
         self.varlist_conf_path = varlist_conf_path
         self.output_script_path = output_script_path
         self.variables = variables
         self.log_dir = log_dir
+        self.dry_run_dir = dry_run_dir
         self.log_file = os.path.join(self.log_dir,
                                      f"{os.path.splitext(os.path.basename(self.output_script_path))[0]}.log")
 
@@ -59,10 +90,14 @@ class ScriptGenerator:
 
         # Run the generated script and redirect output to log file
         print(f"Starting script, logging to {self.log_file}")
-        os.makedirs(self.log_dir, exist_ok=True)
-        shutil.copy(self.output_script_path, "/local/")
-        print(f"[INFO] The command line file {self.output_script_path} saved at .cd/{self.output_script_path}")
+        try:
+            os.makedirs(self.log_dir, exist_ok=True)
+        except Exception:
+            print(f"Error: could not create {self.log_dir}.")
+
         if os.environ.get("DRY_RUN") == '1':
+            shutil_copy(self.output_script_path, self.dry_run_dir)
+
             print(f"[INFO] This is a dry run to save the command line file {self.output_script_path}.")
             try:
                 while True:
