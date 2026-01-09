@@ -47,7 +47,7 @@ class HPUConv3dLayer(Conv3dLayer):
         K1, K2, K3 = self.kernel_size
         T, H, W = T // K1, H // K2, W // K3
         x = x.view(B, C, T, K1, H, K2, W, K3)
-        x = x.permute(0, 2, 3, 4, 1, 5, 6, 7).reshape(-1, self.input_size)
+        x = x.permute(0, 2, 4, 6, 1, 3, 5, 7).reshape(-1, self.input_size)
         x = F.linear(
             x,
             self.weight.view(self.out_channels, self.input_size),
