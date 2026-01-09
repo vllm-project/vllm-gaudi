@@ -30,7 +30,7 @@ services:
       - SYS_NICE
     ipc: host
     runtime: habana
-    restart: unless-stopped
+    restart: on-failure
     command: ["server", "--config-file", "${VLLM_SERVER_CONFIG_FILE}", "--config-name", "${VLLM_SERVER_CONFIG_NAME}"]
     healthcheck:
       test:

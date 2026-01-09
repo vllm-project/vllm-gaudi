@@ -170,6 +170,7 @@ docker run -it --rm \
     --runtime=habana \
     -e HABANA_VISIBLE_DEVICES=all \
     -p 8000:8000 \
+    -e DRY_RUN=1 \
     -v ${PWD}:/local \
     --name vllm-server \
     <docker image name>
@@ -178,13 +179,13 @@ docker run -it --rm \
 !!! note
     While launching the vLLM server using Docker Run command for Dry Run, make sure to mount the present working directory as `-v ${PWD}:/local`.
 
-## To save vLLM sever and client log files
+## Save vLLM sever and client log files
 
 If vLLM server is launched using Docker Compose command, the log files are saved at `vllm-gaudi/.cd/logs/` by default.
 
 If vLLM server is launched using Docker Run command, the user can save the log files by creating a directory named `logs` and mount this log directory as `-v ${PWD}/logs:/root/scripts/logs`.
 
-## To create multiple vLLM services using Docker Compose
+## Create multiple vLLM services using Docker Compose
 
 Set environment variables **HOST_PORT** and **COMPOSE_PROJECT_NAME**  
 Example

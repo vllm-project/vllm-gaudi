@@ -2,7 +2,6 @@
 import os
 import shutil
 import sys
-import time
 from pathlib import Path
 
 
@@ -97,14 +96,7 @@ class ScriptGenerator:
 
         if os.environ.get("DRY_RUN") == '1':
             shutil_copy(self.output_script_path, self.dry_run_dir)
-
             print(f"[INFO] This is a dry run to save the command line file {self.output_script_path}.")
-            try:
-                while True:
-                    print("[INFO] Press Ctrl+C to exit.")
-                    time.sleep(60)
-            except KeyboardInterrupt:
-                print("Exiting the DRY_RUN execution.")
-                sys.exit(0)
+            sys.exit(0)
         else:
             os.execvp("bash", ["bash", self.output_script_path])
