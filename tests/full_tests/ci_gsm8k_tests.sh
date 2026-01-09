@@ -74,6 +74,14 @@ run_qwen3_inc_dynamic_test() {
     echo "✅ Test with Qwen3-8B-FP8 + inc requant FP8 model + dynamic quant passed."
 }
 
+# DS + blockfp8 + static scaling + FP8 KV
+# The lazy mode works on 1.24.0-272
+run_dsv2_blockfp8_static_scaling_fp8kv_test() {
+    echo "➡️ Testing Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 KV..."
+    PT_HPU_LAZY_MODE=0 HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model INC4AI/DeepSeek-V2-Lite-Chat-BF16-FP8-STATIC-FP8-KV-TEST-ONLY --trust-remote-code
+    echo "✅ Test with Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 KV successful."
+}
+
 # QWEN3 + blockfp8 + dynamic scaling
 run_qwen3_blockfp8_dynamic_scaling_test() {
     echo "➡️ Testing Qwen3-8B-FP8 + blockfp8 + dynamic scaling..."
@@ -93,6 +101,20 @@ run_qwen3_moe_compressed_tensor_dynamic_scaling_test() {
     echo "➡️ Testing Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 + moe + compressed-tensor + dynamic scaling..."
     HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 --trust-remote-code
     echo "✅ Test with Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 + moe + compressed-tensor + dynamic scaling successful."
+}
+
+# QWEN3 FP8 + MOE compressed tensor + static scaling (weight per-tensor, activation per-tensor)
+run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_test() {
+    echo "▒~^▒▒~O Testing Intel/Qwen3-30B-A3B-FP8-Test-Only + moe + compressed-tensor + static scaling..."
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
+    echo "▒~\~E Test with Intel/Qwen3-30B-A3B-FP8-Test-Only + moe + compressed-tensor + static scaling successful."
+}
+
+# QWEN3 FP8 + MOE compressed tensor + static scaling (weight per-channel, activation per-tensor)
+run_qwen3_moe_compressed_tensor_static_scaling_test() {
+    echo "▒~^▒▒~O Testing Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + moe + compressed-tensor + static scaling..."
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Static-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
+    echo "▒~\~E Test with Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + moe + compressed-tensor + static scaling successful."
 }
 
 # RedHatAI/Meta-Llama-3-8B-Instruct-FP8 Per-tensor F8 static scales
@@ -207,7 +229,16 @@ run_gsm8k_deepseek_test() {
     echo "➡️ Testing GSM8K on deepseek v2 lite..."
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml"
-    echo "✅ Test with deepseek R1 passed."
+    echo "✅ GSM8K Test with deepseek v2 lite passed."
+}
+
+
+# GSM8K on deepseek v2 lite + unified attn
+run_gsm8k_deepseek_unified_mla_test() {
+    echo "➡️ Testing GSM8K on deepseek v2 lite + Unified MLA..."
+    VLLM_UNIFIED_ATTN=true VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml"
+    echo "✅ GSM8K Test with deepseek v2 lite + Unified MLA passed."
 }
 
 # GSM8K on QWEN3-30B-A3B
@@ -316,6 +347,8 @@ launch_all_tests() {
     run_qwen3_blockfp8_dynamic_scaling_test
     run_qwen3_compressed_tensor_dynamic_scaling_test
     run_qwen3_moe_compressed_tensor_dynamic_scaling_test
+    run_qwen3_moe_compressed_tensor_static_scaling_test
+    run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_test
     run_llama3_per_tensor_scaling_test
     run_structured_output_test
     run_awq_test
@@ -327,6 +360,7 @@ launch_all_tests() {
     run_gsm8k_granite_async_test
     run_gsm8k_granite_test_unified_attn_async
     run_gsm8k_deepseek_test
+    run_gsm8k_deepseek_unified_mla_test
     run_gsm8k_qwen3_30b_test
     run_qwen2_5_vl_test
     run_qwen2_5_vl_unified_attn_test
