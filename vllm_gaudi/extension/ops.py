@@ -575,7 +575,7 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
                                                     w12=w1_list,
                                                     w3=w2_list,
                                                     permuted_weights=permuted_weights,
-                                                    activation=activation,
+                                                    activation="silu",
                                                     experts_min=self.experts_min,
                                                     experts_max=self.experts_max,
                                                     **kwargs)
