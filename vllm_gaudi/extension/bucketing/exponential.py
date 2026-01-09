@@ -176,4 +176,7 @@ def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=Fals
                 buckets.add(bucket)
     if add_zero_or_one_bucket:
         buckets.add(bmin_origin)
-    return list(sorted(buckets))
+    sorted_buckets = list(sorted(buckets))
+    if sorted_buckets and sorted_buckets[-1] > bmax:
+        sorted_buckets[-1] = bmax
+    return sorted_buckets
