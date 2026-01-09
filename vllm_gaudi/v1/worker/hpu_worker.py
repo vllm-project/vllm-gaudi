@@ -95,6 +95,9 @@ class HPUWorker(WorkerBase):
         self.kv_cache_config = None
 
         # Select available Habana modules before initializing the device.
+        self._configure_habana_visible_modules()
+
+    def _configure_habana_visible_modules(self):
         import pyhlml
         pyhlml.hlmlInit()
         available_module_ids = []
