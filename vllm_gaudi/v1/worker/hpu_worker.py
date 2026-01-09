@@ -102,6 +102,8 @@ class HPUWorker(WorkerBase):
         pyhlml.hlmlInit()
         available_module_ids = []
         device_count = torch.hpu.device_count()
+        if device_count < 1:
+            raise RuntimeError("No Habana devices found.")
         for i in range(device_count):
             try:
                 device = pyhlml.hlmlDeviceGetHandleByIndex(i)
@@ -111,6 +113,8 @@ class HPUWorker(WorkerBase):
                     available_module_ids.append(module_id)
             except Exception:
                 continue
+        if len(available_module_ids) < 1:
+            raise RuntimeError("No available Habana modules found. All modules are currently in use.")
         env_visible_modules = os.getenv("HABANA_VISIBLE_MODULES")
         if env_visible_modules is None:
             if len(available_module_ids) < self.parallel_config.world_size:
@@ -119,7 +123,13 @@ class HPUWorker(WorkerBase):
             logger.info("HABANA_VISIBLE_MODULES is not set, using all available modules: %s", available_modules_str)
             os.environ["HABANA_VISIBLE_MODULES"] = available_modules_str
         else:
+            if any(not c.isdigit() for c in env_visible_modules.split(",")) and env_visible_modules.lower() != "all":
+                raise RuntimeError(f"Invalid HABANA_VISIBLE_MODULES={env_visible_modules}. "
+                                   "It should be a comma-separated list of integers or 'all'.")
             env_module_ids = list(map(int, env_visible_modules.split(",")))
+            if any(module_id < 0 or module_id >= device_count for module_id in env_module_ids):
+                raise RuntimeError(f"Invalid HABANA_VISIBLE_MODULES={env_visible_modules}. "
+                                   f"Module IDs should be between 0 and {device_count - 1}.")
             if any(env_module_id not in available_module_ids for env_module_id in env_module_ids):
                 logger.warning("Some device for HABANA_VISIBLE_MODULES=%s are not available.", env_visible_modules)
                 selected_modules = [x for x in env_module_ids if x in available_module_ids]
