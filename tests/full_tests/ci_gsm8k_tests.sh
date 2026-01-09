@@ -324,7 +324,7 @@ run_pd_disaggregate_nixl_libfabric_test() {
 run_pd_disaggregate_nixl_ucx_test() {
     echo "➡️ Testing PD disaggregate through NIXL UCX."
     WHEELS_CACHE_HOME=/workspace/hf_cache/wheels_cache_ucx python "${VLLM_GAUDI_PREFIX}/install_nixl.py"
-    DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=UCX bash "${VLLM_GAUDI_PREFIX}/tests/unit_tests/run_accuracy_test.sh"
+    cd ${VLLM_GAUDI_PREFIX}/tests/unit_tests; DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=UCX bash run_accuracy_test.sh
     echo "✅ PD disaggregate through NIXL UCX."
 }
 
