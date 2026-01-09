@@ -29,14 +29,13 @@ export PT_HPU_LAZY_MODE=1
 NIXL_BUFFER_DEVICE=${NIXL_BUFFER_DEVICE:-"cpu"}
 VLLM_NIXL_BACKEND=${VLLM_NIXL_BACKEND:-"UCX"}
 
+export VLLM_NIXL_DEVICE_TO_DEVICE=true
 UCX_TLS="tcp"
 if [ "$VLLM_NIXL_BACKEND" == "UCX" ]; then
-  export VLLM_NIXL_DEVICE_TO_DEVICE=false
+  export UCX_MEMTYPE_CACHE=0
   if [ "$NIXL_BUFFER_DEVICE" == "hpu" ]; then
     UCX_TLS="gaudi_gdr,ib,rc,ud"
   fi
-else
-  export VLLM_NIXL_DEVICE_TO_DEVICE=true
 fi
 
 # Number of prefill and decode instances to create
