@@ -45,10 +45,9 @@ pip3 install -e .
 
 ```sh
 # Install NIXL with UCX gaudi_gdr support
-bash tools/install_nixl_gaudi_gdr.sh
+python install_nixl.py
 
 # Necessary environment variables for NIXL
-export LD_LIBRARY_PATH=/tmp/ucx_install/lib:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 export UCX_MEMTYPE_CACHE=0
 
 # Install vLLM from source
