@@ -27,7 +27,6 @@ Additionally, the following models were successfully validated:
 - [meta-llama/Meta-Llama-3.1-70B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B-Instruct)
 - [meta-llama/Meta-Llama-3.1-405B](https://huggingface.co/meta-llama/Meta-Llama-3.1-405B)
 - [meta-llama/Meta-Llama-3.1-405B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-405B-Instruct)
-- [meta-llama/Meta-Llama-3.3-70B](https://huggingface.co/meta-llama/Meta-Llama-3-70B-Instruct)
 - [mistralai/Mistral-7B-Instruct-v0.3](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3)
 
 For the list of all supported models, see [Validated Models](getting_started/validated_models.md).
