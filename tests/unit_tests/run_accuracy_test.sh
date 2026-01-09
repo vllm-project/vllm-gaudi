@@ -35,6 +35,8 @@ if [ "$VLLM_NIXL_BACKEND" == "UCX" ]; then
   export UCX_MEMTYPE_CACHE=0
   if [ "$NIXL_BUFFER_DEVICE" == "hpu" ]; then
     UCX_TLS="gaudi_gdr,ib,rc,ud"
+  else
+    export VLLM_NIXL_DEVICE_TO_DEVICE=false
   fi
 fi
 
