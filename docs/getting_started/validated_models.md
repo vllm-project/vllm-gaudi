@@ -25,7 +25,6 @@ The following configurations have been validated to function with IntelÂ® GaudiÂ
 | [meta-llama/Meta-Llama-3.1-70B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B-Instruct)     | 2, 4, 8    | BF16, FP8   |Gaudi 2, Gaudi 3|
 | [meta-llama/Meta-Llama-3.1-405B](https://huggingface.co/meta-llama/Meta-Llama-3.1-405B)     | 8    | BF16, FP8    |Gaudi 3|
 | [meta-llama/Meta-Llama-3.1-405B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-405B-Instruct)     | 8    | BF16, FP8    |Gaudi 3|
-| [meta-llama/Meta-Llama-3.3-70B](https://huggingface.co/meta-llama/Meta-Llama-3-70B-Instruct)     | 4  | BF16, FP8    | Gaudi 3|
 | [meta-llama/Meta-Llama-3.3-70B-Instruct](https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct)     | 4, 8  | BF16, FP8    | Gaudi 3|
 | [mistralai/Mistral-7B-Instruct-v0.2](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.2)     | 1   | BF16    | Gaudi 3|
 | [mistralai/Mistral-7B-Instruct-v0.3](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3)     | 1  | BF16    | Gaudi 3|
