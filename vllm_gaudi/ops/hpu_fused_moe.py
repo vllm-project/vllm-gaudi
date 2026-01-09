@@ -5,6 +5,7 @@ import torch
 import vllm
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.model_executor.layers.fused_moe.fused_moe import GroupedTopk
+from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, UnquantizedFusedMoEMethod)
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOp)
 from vllm_gaudi.extension.runtime import get_config
@@ -118,6 +119,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def forward_oot(
         self,
         layer: FusedMoE,
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         **kwargs,
