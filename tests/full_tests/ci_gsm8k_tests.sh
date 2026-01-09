@@ -323,7 +323,7 @@ run_pd_disaggregate_nixl_libfabric_test() {
 
 run_pd_disaggregate_nixl_ucx_test() {
     echo "➡️ Testing PD disaggregate through NIXL UCX."
-    bash "${VLLM_GAUDI_PREFIX}/tools/install_nixl_gaudi_gdr.sh"
+    python "${VLLM_GAUDI_PREFIX}/install_nixl.py"
     DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=UCX bash "${VLLM_GAUDI_PREFIX}/tests/unit_tests/run_accuracy_test.sh"
     echo "✅ PD disaggregate through NIXL UCX."
 }
