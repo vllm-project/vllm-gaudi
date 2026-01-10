@@ -13,10 +13,12 @@ import habana_frameworks.torch.core as htcore
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.extension.utils import get_kv_fetch_extra_args
 from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
-
+import vllm.model_executor.layers.quantization as vllm_quant
 import habana_frameworks.torch.utils.experimental as htexp
 import types
 from vllm.model_executor.layers.fused_moe import FusedMoeWeightScaleSupported
+from vllm.model_executor.layers.quantization import get_quantization_config as vllm_get_quantization_config
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 is_hpu_gaudi2 = htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi2
 is_hpu_gaudi3 = htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi3
@@ -1330,3 +1332,13 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
             else:
                 final_hidden_states += slice_final_hidden_states
         return final_hidden_states
+
+
+def oot_get_quantization_config(quantization: str) -> QuantizationConfig:
+    from .quant import _FakeINCConfig
+    if quantization == "inc":
+        return _FakeINCConfig
+    return vllm_get_quantization_config(quantization)
+
+
+vllm_quant.get_quantization_config = oot_get_quantization_config
