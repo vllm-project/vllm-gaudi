@@ -161,7 +161,7 @@ class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         """Copy the device tensors to the host and return a ModelRunnerOutput.
-        
+
         This function blocks until the copy is finished.
         """
 
@@ -2390,7 +2390,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                            scheduler_output: "SchedulerOutput",
                            return_index: bool = False) -> Optional[torch.Tensor]:
         """Prepare the input IDs for the current batch.
-        
+
         Carefully handles the `prev_sampled_token_ids` which can be cached
         from the previous engine iteration, in which case those tokens on the
         GPU need to be copied into the corresponding slots into input_ids."""
@@ -4271,7 +4271,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
     def get_merged_prefill_seq_lens(self, query_len, ctx_blocks):
         '''
-        Get seperate sequence lengths from merged layout to individual 
+        Get seperate sequence lengths from merged layout to individual
         samples.
         Returns list of sequence length (including query and context) and
         context lengths.
@@ -4754,7 +4754,27 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
     @torch.inference_mode()
     def profile_run(self) -> None:
-        return
+        # Skip profile run on decode instances
+        if (self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_consumer):
+            return
+
+        max_batch_size = min(self.max_num_seqs, self.max_num_tokens // self.max_model_len)
+        max_query_len = min(self.max_num_batched_tokens, self.max_model_len)
+
+        if self.supports_mm_inputs:
+            # Using batch_size 1 for profiling multimodal models
+            max_batch_size = 1
+
+        # Run a simple profile scenario using the existing dummy run infrastructure
+        if self.unified_attn:
+            # For unified attention, use a simpler scenario with causal attention
+            # query_len, shared_ctx_len, unique_ctx_len, is_causal
+            unified_cfg = (max_query_len, 0, 0, True)
+            self._prepare_dummy_unified_scenario(unified_cfg)
+        else:
+            prompt_cfg = (max_batch_size, max_query_len, 0)
+            decode_cfg = None
+            self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
 
     def _dummy_run(self, max_num_batched_tokens: int) -> None:
         assert max_num_batched_tokens == 1
@@ -5269,7 +5289,7 @@ class TensorTuple(tuple):
     """
     A tuple subclass designed to hold nested torch.Tensors, providing
     .shape and .device properties.
-    
+
     It ensures that the nested structure is not ragged and that all
     contained tensors reside on the same device.
     """
@@ -5313,7 +5333,7 @@ class TensorTuple(tuple):
 class HPUAttentionMetadataProcessor:
     """
     Processor class for post-processing HPU attention metadata.
-    
+
     This class takes already-built attention metadata and augments it with
     additional tensors such as attention bias masks and block mappings that
     are required for efficient attention computation on HPU. It does NOT build
