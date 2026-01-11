@@ -18,7 +18,7 @@ from vllm_gaudi.extension.profiler import (HabanaMemoryProfiler, format_bytes, s
 from vllm_gaudi.extension.runtime import get_config
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import (ensure_model_parallel_initialized, init_distributed_environment)
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
@@ -152,7 +152,8 @@ class HPUWorker(WorkerBase):
         return self.model_runner.get_model()
 
     def load_model(self) -> None:
-        self.model_runner.load_model()
+        with set_current_vllm_config(self.vllm_config):
+            self.model_runner.load_model()
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:

@@ -5203,9 +5203,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self,
         sampled_token_ids: list[list[int]],
     ) -> list[list[int]]:
-        draft_token_ids = self.drafter.propose(sampled_token_ids, self.input_batch.req_ids,
-                                               self.input_batch.num_tokens_no_spec, self.input_batch.token_ids_cpu,
-                                               self.input_batch.spec_decode_unsupported_reqs)
+        draft_token_ids = self.drafter.propose(
+            sampled_token_ids,
+            self.input_batch.num_tokens_no_spec,
+            self.input_batch.token_ids_cpu,
+        )
         # swipe draft_token_ids_native replacing [] to [-1]
         for i in range(len(draft_token_ids)):
             if len(draft_token_ids[i]) == 0:

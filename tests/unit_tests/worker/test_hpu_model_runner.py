@@ -94,15 +94,16 @@ def get_vllm_config():
 @pytest.fixture
 def model_runner():
     vllm_config = get_vllm_config()
-    model_config = vllm_config.model_config
-    num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
-    head_size = model_config.get_head_size()
-    # We need to update the environment before creating Attention
-    environment.set_vllm_config(vllm_config)
-    vllm_config.compilation_config.static_forward_context["layer.0"] = Attention(num_heads, head_size, 0.1)
-    runner = HPUModelRunner(vllm_config, DEVICE)
-    initialize_kv_cache(runner)
-    return runner
+    with set_current_vllm_config(vllm_config):
+        model_config = vllm_config.model_config
+        num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
+        head_size = model_config.get_head_size()
+        # We need to update the environment before creating Attention
+        environment.set_vllm_config(vllm_config)
+        vllm_config.compilation_config.static_forward_context["layer.0"] = Attention(num_heads, head_size, 0.1)
+        runner = HPUModelRunner(vllm_config, DEVICE)
+        initialize_kv_cache(runner)
+        yield runner
 
 
 def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
@@ -390,7 +391,7 @@ def test_reload_weights_before_load_model(model_runner):
 
 
 @pytest.mark.xfail(reason="KV sharing doesn't currently work on HPU")
-def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
+def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(default_vllm_config: None):
     torch.set_default_dtype(torch.bfloat16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -418,7 +419,7 @@ def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
 
 
 @pytest.mark.xfail(reason="KV sharing doesn't currently work on HPU")
-def test_init_kv_cache_with_kv_sharing_target_layer_not_exist():
+def test_init_kv_cache_with_kv_sharing_target_layer_not_exist(default_vllm_config: None):
     torch.set_default_dtype(torch.bfloat16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -448,7 +449,7 @@ def test_init_kv_cache_with_kv_sharing_target_layer_not_exist():
 
 
 @pytest.mark.xfail(reason="KV sharing doesn't currently work on HPU")
-def test_init_kv_cache_with_kv_sharing_target_same_as_current():
+def test_init_kv_cache_with_kv_sharing_target_same_as_current(default_vllm_config: None):
     torch.set_default_dtype(torch.bfloat16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -475,7 +476,7 @@ def test_init_kv_cache_with_kv_sharing_target_same_as_current():
         assert fwd_context is not None
 
 
-def test_init_kv_cache_without_kv_sharing():
+def test_init_kv_cache_without_kv_sharing(default_vllm_config: None):
     torch.set_default_dtype(torch.bfloat16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -544,7 +545,7 @@ def test_init_kv_cache_without_kv_sharing():
 
 
 @pytest.mark.xfail(reason="KV sharing doesn't currently work on HPU")
-def test_init_kv_cache_with_kv_sharing_valid():
+def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config: None):
     torch.set_default_dtype(torch.bfloat16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -616,7 +617,7 @@ def test_init_kv_cache_with_kv_sharing_valid():
 
 
 @pytest.mark.skipif(is_lazy(), reason="Test skipped because lazy mode is enabled.")
-def test_model_torch_regional_compilation(dist_init, model_runner):
+def test_model_torch_regional_compilation(default_vllm_config: None, dist_init, model_runner):
     from vllm_gaudi.utils import HPUCompileConfig
     from vllm.model_executor.models.opt import OPTDecoderLayer
     from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding  # noqa
