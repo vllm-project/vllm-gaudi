@@ -196,7 +196,9 @@ def partial_attn_causal(query: torch.tensor,
                         fmin: torch.tensor,
                         inputL_hpu_tensors: Dict[tuple, torch.Tensor],
                         inputM_hpu_tensors: Dict[tuple, torch.Tensor],
-                        w_uv: Optional[torch.tensor] = None) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
+                        matmul_qk_op: Optional[callable] = torch.matmul,
+                        matmul_av_op: Optional[callable] = torch.matmul,
+                        w_uv: Optional[torch.tensor] = None,) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
     """Partial attention where qkv are assumed to be causal between slices
     
     Args:
@@ -225,7 +227,7 @@ def partial_attn_causal(query: torch.tensor,
         v = value[:, :, 0:q_max, :]
         b = bias[q_min:q_max, 0:q_max]
 
-        s_attn = torch.matmul(q, k.transpose(-1, -2)) + b.unsqueeze(0).unsqueeze(0)
+        s_attn = matmul_qk_op(q, k.transpose(-1, -2)) + b.unsqueeze(0).unsqueeze(0)
         # TODO: remove dtype check once full support is added for fp8 in unified attention
         if get_config().unified_attn_softmax_fa2 and s_attn.dtype == torch.bfloat16:
             inputM_hpu, inputL_hpu = create_softmax_fa2_input_tensors(s_attn, fmin, inputL_hpu_tensors,
@@ -241,7 +243,7 @@ def partial_attn_causal(query: torch.tensor,
             s_sum = torch.sum(s_attn, -1)
 
         # Attention: s_attn @ v
-        s_attn = torch.matmul(s_attn, v)
+        s_attn = matmul_av_op(s_attn, v)
 
         # MLA: Project from latent V to full V
         if w_uv is not None:
@@ -268,7 +270,9 @@ def partial_attn_shared(query: torch.tensor,
                         inputL_hpu_tensors: Dict[tuple, torch.Tensor],
                         inputM_hpu_tensors: Dict[tuple, torch.Tensor],
                         cache_utils: CacheUtils,
-                        w_uv: Optional[torch.tensor] = None) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
+                        matmul_qk_op: Optional[callable] = torch.matmul,
+                        matmul_av_op: Optional[callable] = torch.matmul,
+                        w_uv: Optional[torch.tensor] = None,) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
     """Partial attention where all shared blocks are compared with whole query
     
     Args:
@@ -296,7 +300,7 @@ def partial_attn_shared(query: torch.tensor,
 
     bias = bias.flatten(-2, -1).unsqueeze(0)
 
-    attn = torch.matmul(query, key.transpose(-1, -2))
+    attn = matmul_qk_op(query, key.transpose(-1, -2))
     attn = attn.flatten(0, 1)
     attn = attn + bias
     # TODO: remove dtype check once full support is added for fp8 in unified attention
@@ -311,8 +315,8 @@ def partial_attn_shared(query: torch.tensor,
         local_max = torch.maximum(attn.amax(-1), fmin)
         attn = torch.exp(attn - local_max.unsqueeze(-1))
         local_sum = attn.sum(-1)
-
-    attn = torch.matmul(attn.unflatten(0, (kv_heads if not is_mla else num_heads, -1)), value).flatten(0, 1)
+  
+    attn = matmul_av_op(attn.unflatten(0, (kv_heads if not is_mla else num_heads, -1)), value).flatten(0, 1)
 
     # MLA: Extract latent part and project to full V
     if is_mla:
@@ -329,7 +333,9 @@ def partial_attn_unique(query: torch.tensor,
                         bias: Optional[torch.tensor],
                         fmin: torch.tensor,
                         cache_utils: CacheUtils,
-                        w_uv: Optional[torch.tensor] = None) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
+                        matmul_qk_op: Optional[callable] = torch.matmul,
+                        matmul_av_op: Optional[callable] = torch.matmul,
+                        w_uv: Optional[torch.tensor] = None,) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
     """Partial attention where all blocks are used by max one query
     
     Args:
@@ -359,12 +365,12 @@ def partial_attn_unique(query: torch.tensor,
 
     block_mapping_2d = torch.nn.functional.one_hot(block_mapping, num_classes=batch_size).to(query.dtype)
 
-    attn = torch.matmul(query, key.transpose(-1, -2))
+    attn = matmul_qk_op(query, key.transpose(-1, -2))
     attn = attn + bias.unsqueeze(1).unsqueeze(1).unsqueeze(1)
     block_max = torch.maximum(attn.amax(-1), fmin)
     attn = torch.exp(attn - block_max.unsqueeze(-1))
     block_sum = attn.sum(-1)
-    attn = torch.matmul(attn, value)
+    attn = matmul_av_op(attn, value)
 
     # MLA: Extract latent part and project to full V
     if is_mla:
@@ -420,7 +426,8 @@ class HPUUnifiedAttentionMetadata:
 
 
 def unified_attn(query: torch.tensor, key: torch.tensor, value: torch.tensor, key_cache: torch.tensor,
-                 value_cache: torch.tensor, scale: float, metadata: HPUUnifiedAttentionMetadata) -> torch.tensor:
+                 value_cache: torch.tensor, scale: float, matmul_qk_op: callable, matmul_av_op: callable,
+                 metadata: HPUUnifiedAttentionMetadata) -> torch.tensor:
     """Main entry point for unified attention"""
 
     scaled_query = query * scale
@@ -434,6 +441,8 @@ def unified_attn(query: torch.tensor, key: torch.tensor, value: torch.tensor, ke
                                  fmin=metadata.fmin,
                                  inputL_hpu_tensors=metadata.inputL_hpu_tensors,
                                  inputM_hpu_tensors=metadata.inputM_hpu_tensors,
+                                 matmul_qk_op=matmul_qk_op,
+                                 matmul_av_op=matmul_av_op,
                                  w_uv=None)
     shared = partial_attn_shared(query=scaled_query,
                                  blocks=metadata.shared_blocks,
@@ -442,6 +451,8 @@ def unified_attn(query: torch.tensor, key: torch.tensor, value: torch.tensor, ke
                                  inputL_hpu_tensors=metadata.inputL_hpu_tensors,
                                  inputM_hpu_tensors=metadata.inputM_hpu_tensors,
                                  cache_utils=cache_utils,
+                                 matmul_qk_op=matmul_qk_op,
+                                 matmul_av_op=matmul_av_op,
                                  w_uv=None)
     unique = partial_attn_unique(query=scaled_query,
                                  blocks=metadata.unique_blocks,
@@ -449,6 +460,8 @@ def unified_attn(query: torch.tensor, key: torch.tensor, value: torch.tensor, ke
                                  bias=metadata.unique_bias,
                                  fmin=metadata.fmin,
                                  cache_utils=cache_utils,
+                                 matmul_qk_op=matmul_qk_op,
+                                 matmul_av_op=matmul_av_op,
                                  w_uv=None)
     attn = merge(causal, shared, unique, feps=metadata.feps)
     if attn is None:
