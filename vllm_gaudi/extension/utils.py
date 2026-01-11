@@ -29,6 +29,17 @@ class Matmul(torch.nn.Module):
     def forward(self, x, y, **kwargs):
         return torch.matmul(x, y, **kwargs)
 
+class B2BMatmul(Matmul):
+    """Specialized alias for batch2block and batch2block matmul operations.
+
+    This class is intentionally kept functionally identical to ``Matmul``.
+    It exists to provide semantic distinction in the codebase (e.g., for
+    patterns that specifically require batch2block and block2batch matmul) and to allow
+    future customization without changing call sites.
+    """
+    def __init__(self):
+        super().__init__()
+
 
 class Softmax(torch.nn.Module):
 
