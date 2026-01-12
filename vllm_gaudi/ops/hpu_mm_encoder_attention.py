@@ -3,6 +3,25 @@ import torch.nn.functional as F
 from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 
 
+def create_block_diagonal_attention_mask_outerprod(indices, device):
+    maxsize = indices[-1]
+    range_to_max_for_each_img = torch.arange(maxsize,
+                                             device=indices.device).unsqueeze(0).repeat(indices.shape[0] - 1, 1)
+    lesser = range_to_max_for_each_img < indices[1:].unsqueeze(1)
+    greater_eq = range_to_max_for_each_img >= indices[:-1].unsqueeze(1)
+    range_indices = torch.logical_and(lesser, greater_eq).float()
+    # can reduce sum externally or as batchmatmul
+    if range_indices.shape[-1] > 40000:
+        log_msg = "einsum running on CPU :" + str(range_indices.shape)
+        #logger.info(log_msg)
+        range_indices = range_indices.to("cpu")
+        res = torch.einsum('bi,bj->ij', range_indices, range_indices)
+        res = res.to("hpu")
+    else:
+        res = torch.einsum('bi,bj->ij', range_indices, range_indices)
+    return res.bool()
+
+
 @MMEncoderAttention.register_oot()
 class HpuMMEncoderAttention(MMEncoderAttention):
 
@@ -31,6 +50,10 @@ class HpuMMEncoderAttention(MMEncoderAttention):
 
         query, key, value = (x.transpose(1, 2) for x in (query, key, value))
 
+        attn_mask = None
+        if cu_seqlens is not None:
+            attn_mask = create_block_diagonal_attention_mask_outerprod(cu_seqlens, device=query.device)
+
         from vllm_gaudi.extension.runtime import get_config
 
         if get_config().prompt_attn_impl == 'fsdpa_impl':
@@ -44,7 +67,7 @@ class HpuMMEncoderAttention(MMEncoderAttention):
             out = fsdpa_op(query,
                            key,
                            value,
-                           None,
+                           attn_mask,
                            dropout_p=0.0,
                            is_causal=False,
                            scale=self.scale,
@@ -52,7 +75,10 @@ class HpuMMEncoderAttention(MMEncoderAttention):
                            recompute_mode=True,
                            valid_sequence_lengths=None)
         else:
-            out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
+            if attn_mask is not None:
+                out = F.scaled_dot_product_attention(query, key, value, attn_mask=attn_mask, scale=self.scale)
+            else:
+                out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
 
         out = out.transpose(1, 2)
-        return out.reshape(bsz, q_len, -1)
+        return out
