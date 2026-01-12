@@ -4755,21 +4755,24 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if (self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_consumer):
             return
 
-        max_batch_size = min(self.max_num_seqs, self.max_num_tokens // self.max_model_len)
-        max_query_len = min(self.max_num_batched_tokens, self.max_model_len)
-
+        max_batch_size = max(1, min(self.max_num_seqs, self.max_num_tokens // self.max_model_len))
         if self.supports_mm_inputs:
             # Using batch_size 1 for profiling multimodal models
             max_batch_size = 1
 
         # Run a simple profile scenario using the existing dummy run infrastructure
         if self.unified_attn:
-            # For unified attention, use a simpler scenario with causal attention
-            # query_len, shared_ctx_len, unique_ctx_len, is_causal
-            unified_cfg = (max_query_len, 0, 0, True)
+            # (query_len, shared_ctx_len, unique_ctx_len, is_causal) for unified attention
+            unified_cfg = (self.max_model_len * max_batch_size, 0, 0, True)
             self._prepare_dummy_unified_scenario(unified_cfg)
         else:
-            prompt_cfg = (max_batch_size, max_query_len, 0)
+            if self.max_model_len < self.max_num_batched_tokens:
+                prompt_cfg = (max_batch_size, self.max_model_len, 0)
+            else:
+                # Assume bs=1 with max context for profile run
+                prompt_cfg = (1, self.max_num_batched_tokens,
+                              (self.max_model_len - self.max_num_batched_tokens + self.block_size - 1) //
+                              self.block_size)
             decode_cfg = None
             self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
 
