@@ -11,6 +11,10 @@ MULTIMODAL_CONFIG = {
     },
 
     # Pixel-based models
+    'ovis': {
+        'is_batch_based': False,
+        'buckets': [1600, 3136, 4096, 6400]
+    },
     'ovis2.5': {
         'is_batch_based': False,
         'buckets': [784, 1600, 3136, 4096, 6400, 7744, 9216, 12544]
