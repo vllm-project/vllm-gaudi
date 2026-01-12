@@ -8,7 +8,6 @@ model_text:
     - meta-llama/Llama-3.2-3B-Instruct
     - meta-llama/Llama-3.3-70B-Instruct
     - mistralai/Mistral-7B-Instruct-v0.2
-    - mistralai/Mixtral-8x22B-Instruct-v0.1
     - mistralai/Mixtral-8x7B-Instruct-v0.1
     - Qwen/Qwen2.5-14B-Instruct
     - Qwen/Qwen2.5-32B-Instruct
@@ -27,6 +26,21 @@ model_text:
   NUM_PROMPTS: 640
   MAX_MODEL_LEN: 4352
   PREFIX_LEN: 100
+
+model_text_tokenizer_mode_hf:
+  MODELS:
+    - mistralai/Mixtral-8x22B-Instruct-v0.1
+  DATASET: /workspace/vllm-project/benchmarks/sonnet.txt
+  DATASET_NAME: sonnet
+  ENDPOINT: /v1/completions
+  BACKEND: vllm
+  INPUT_TOK: 2048
+  OUTPUT_TOK: 2048
+  CONCURRENT_REQ: 64
+  NUM_PROMPTS: 640
+  MAX_MODEL_LEN: 4352
+  PREFIX_LEN: 100
+  EXTRA_BENCH_ARGS: "\"--tokenizer-mode hf\""
 
 model_vision:
   MODELS:
