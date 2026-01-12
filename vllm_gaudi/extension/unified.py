@@ -188,17 +188,19 @@ def merge(*attn_results: torch.tensor, feps: torch.tensor) -> torch.tensor:
     return attn
 
 
-def partial_attn_causal(query: torch.tensor,
-                        key: torch.tensor,
-                        value: torch.tensor,
-                        bias: Optional[torch.tensor],
-                        slice_size: int,
-                        fmin: torch.tensor,
-                        inputL_hpu_tensors: Dict[tuple, torch.Tensor],
-                        inputM_hpu_tensors: Dict[tuple, torch.Tensor],
-                        matmul_qk_op: Optional[callable] = torch.matmul,
-                        matmul_av_op: Optional[callable] = torch.matmul,
-                        w_uv: Optional[torch.tensor] = None,) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
+def partial_attn_causal(
+    query: torch.tensor,
+    key: torch.tensor,
+    value: torch.tensor,
+    bias: Optional[torch.tensor],
+    slice_size: int,
+    fmin: torch.tensor,
+    inputL_hpu_tensors: Dict[tuple, torch.Tensor],
+    inputM_hpu_tensors: Dict[tuple, torch.Tensor],
+    matmul_qk_op: Optional[callable] = torch.matmul,
+    matmul_av_op: Optional[callable] = torch.matmul,
+    w_uv: Optional[torch.tensor] = None,
+) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
     """Partial attention where qkv are assumed to be causal between slices
     
     Args:
@@ -263,16 +265,18 @@ def partial_attn_causal(query: torch.tensor,
     return combine(attn_slices), combine(max_slices), combine(sum_slices)
 
 
-def partial_attn_shared(query: torch.tensor,
-                        blocks: torch.tensor,
-                        bias: Optional[torch.tensor],
-                        fmin: torch.tensor,
-                        inputL_hpu_tensors: Dict[tuple, torch.Tensor],
-                        inputM_hpu_tensors: Dict[tuple, torch.Tensor],
-                        cache_utils: CacheUtils,
-                        matmul_qk_op: Optional[callable] = torch.matmul,
-                        matmul_av_op: Optional[callable] = torch.matmul,
-                        w_uv: Optional[torch.tensor] = None,) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
+def partial_attn_shared(
+    query: torch.tensor,
+    blocks: torch.tensor,
+    bias: Optional[torch.tensor],
+    fmin: torch.tensor,
+    inputL_hpu_tensors: Dict[tuple, torch.Tensor],
+    inputM_hpu_tensors: Dict[tuple, torch.Tensor],
+    cache_utils: CacheUtils,
+    matmul_qk_op: Optional[callable] = torch.matmul,
+    matmul_av_op: Optional[callable] = torch.matmul,
+    w_uv: Optional[torch.tensor] = None,
+) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
     """Partial attention where all shared blocks are compared with whole query
     
     Args:
@@ -315,7 +319,7 @@ def partial_attn_shared(query: torch.tensor,
         local_max = torch.maximum(attn.amax(-1), fmin)
         attn = torch.exp(attn - local_max.unsqueeze(-1))
         local_sum = attn.sum(-1)
-  
+
     attn = matmul_av_op(attn.unflatten(0, (kv_heads if not is_mla else num_heads, -1)), value).flatten(0, 1)
 
     # MLA: Extract latent part and project to full V
@@ -327,15 +331,17 @@ def partial_attn_shared(query: torch.tensor,
     return attn.transpose(0, 1), local_max.transpose(0, 1), local_sum.transpose(0, 1)
 
 
-def partial_attn_unique(query: torch.tensor,
-                        blocks: torch.tensor,
-                        block_mapping: torch.tensor,
-                        bias: Optional[torch.tensor],
-                        fmin: torch.tensor,
-                        cache_utils: CacheUtils,
-                        matmul_qk_op: Optional[callable] = torch.matmul,
-                        matmul_av_op: Optional[callable] = torch.matmul,
-                        w_uv: Optional[torch.tensor] = None,) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
+def partial_attn_unique(
+    query: torch.tensor,
+    blocks: torch.tensor,
+    block_mapping: torch.tensor,
+    bias: Optional[torch.tensor],
+    fmin: torch.tensor,
+    cache_utils: CacheUtils,
+    matmul_qk_op: Optional[callable] = torch.matmul,
+    matmul_av_op: Optional[callable] = torch.matmul,
+    w_uv: Optional[torch.tensor] = None,
+) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
     """Partial attention where all blocks are used by max one query
     
     Args:
@@ -469,6 +475,7 @@ def unified_attn(query: torch.tensor, key: torch.tensor, value: torch.tensor, ke
     return attn
 
 
+# TODO: Add fp8 support
 def unified_mla(query: Optional[torch.tensor],
                 key: Optional[torch.tensor],
                 value: Optional[torch.tensor],
