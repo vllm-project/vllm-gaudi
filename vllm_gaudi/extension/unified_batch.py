@@ -535,12 +535,13 @@ def create_unified_batch(
         num_scheduled_tokens = num_scheduled_tokens.tolist()
         # NOTE(Chendi): In spec decode case, we will return -1 as dummy draft token
         # while we need to exclude them when counting num_scheduled_tokens
-        for idx, req_id in enumerate(req_ids):
-            spec_tokens = scheduled_spec_decode_tokens.get(req_id, None)
-            if spec_tokens is None:
-                continue
-            num_spec_tokens = len([i for i in spec_tokens if i != -1])
-            num_scheduled_tokens[idx] = num_spec_tokens + 1
+        if scheduled_spec_decode_tokens is not None:
+            for idx, req_id in enumerate(req_ids):
+                spec_tokens = scheduled_spec_decode_tokens.get(req_id, None)
+                if spec_tokens is None:
+                    continue
+                num_spec_tokens = len([i for i in spec_tokens if i != -1])
+                num_scheduled_tokens[idx] = num_spec_tokens + 1
         num_scheduled_tokens = np.asarray(num_scheduled_tokens, dtype=np.int32)
 
     # Convert torch dtype to numpy dtype for internal operations
@@ -582,11 +583,12 @@ def create_unified_batch(
 
         # Used by spec decode draft model
         num_reqs = len(req_ids)
-        cu_num_tokens, _ = get_cumsum_and_arange(num_scheduled_tokens)
         query_start_loc_cpu = torch.zeros((num_reqs + 1, ), dtype=torch.int32)
-        query_start_loc_np = query_start_loc_cpu.numpy()
-        query_start_loc_np[0] = 0
-        query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
+        if get_cumsum_and_arange is not None:
+            cu_num_tokens, _ = get_cumsum_and_arange(num_scheduled_tokens)
+            query_start_loc_np = query_start_loc_cpu.numpy()
+            query_start_loc_np[0] = 0
+            query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
 
     def first_dim(t: Optional[np.ndarray]) -> int:
         """ Takes first dim size or 0 if tensor is None"""
@@ -767,7 +769,7 @@ def create_unified_batch(
             invalid_req_indices.append(len(req_ids) - 1)
 
     # call prepare_spec_decode_inputs to prepare spec decode inputs
-    if max(num_output_tokens) > 1:
+    if max(num_output_tokens) > 1 and prepare_spec_decode_inputs_fn is not None:
         with persistent_ctx.profiler.record_event('internal', 'spec_decode_metadata_prep'):
             _, spec_decode_metadata = prepare_spec_decode_inputs_fn(all_token_ids.shape[0],
                                                                     scheduled_spec_decode_tokens,

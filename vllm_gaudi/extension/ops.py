@@ -11,6 +11,8 @@ import torch.nn.functional as F
 import math
 import habana_frameworks.torch.core as htcore
 from vllm_gaudi.extension.runtime import get_config
+from vllm_gaudi.extension.utils import get_kv_fetch_extra_args
+from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
 
 import habana_frameworks.torch.utils.experimental as htexp
 import types
@@ -175,15 +177,23 @@ def flat_pa_mla(query, key_cache, value_cache, block_list, block_mapping, block_
 
 def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias, block_groups, block_size, scale,
             matmul_qk_op, position_bias, matmul_av_op, batch2block_matmul_op, block2batch_matmul_op, keys_fetch_func,
-            values_fetch_func, **ignored_args):
+            values_fetch_func, k_scales, v_scales, **ignored_args):
     batch_size, _, hidden_size = query.shape
     _, kv_heads, head_size = key_cache.shape
     q_heads = hidden_size // head_size
+    k_scales_uf = None
+    v_scales_uf = None
+    if k_scales is not None:
+        k_scales_uf = k_scales.unflatten(0, (-1, block_size))
+    if v_scales is not None:
+        v_scales_uf = v_scales.unflatten(0, (-1, block_size))
 
     query_shape = (-1, q_heads, 1, head_size)
     query = batch2block(scale * query, block_mapping, batch2block_matmul_op).view(query_shape)
-    key = keys_fetch_func(key_cache.unflatten(0, (-1, block_size)), block_list).transpose(1, 2)
-    value = values_fetch_func(value_cache.unflatten(0, (-1, block_size)), block_list).transpose(1, 2)
+    key = keys_fetch_func(key_cache.unflatten(0, (-1, block_size)),
+                          **get_kv_fetch_extra_args(blocks=block_list, scales=k_scales_uf)).transpose(1, 2)
+    value = values_fetch_func(value_cache.unflatten(0, (-1, block_size)),
+                              **get_kv_fetch_extra_args(blocks=block_list, scales=v_scales_uf)).transpose(1, 2)
     block_bias = block_bias.view(key.size(0), 1, 1, -1)
     if kv_heads != q_heads:
         query = query.unflatten(1, (kv_heads, -1))
@@ -483,7 +493,12 @@ class MoeMatmul(torch.nn.Module):
 
 class VllmMixtureOfExpertsOpBase(torch.nn.Module):
 
-    def __init__(self, global_num_experts: int, num_total_experts, experts_min: int = 0, experts_max: int = 8):
+    def __init__(self,
+                 global_num_experts: int,
+                 num_total_experts: int,
+                 experts_min: int = 0,
+                 experts_max: int = 8,
+                 dispatch_fn: Callable[[torch.Tensor], torch.Tensor] = None):
         super().__init__()
         self.experts_min = experts_min
         self.experts_max = experts_max
@@ -507,6 +522,11 @@ class VllmMixtureOfExpertsOpBase(torch.nn.Module):
         assert len(self.chunk_size_list) == len(
             self.token_boundary_list), (f"chunk_size_list({len(self.chunk_size_list)}) and "
                                         f"token_boundary_list({len(self.token_boundary_list)}) must be the same length")
+        """
+        dispatch_func is used to dispatch quantized tokens under data parallel
+        acenario.
+        """
+        self.dispatch_func = dispatch_fn
 
     def _get_extra_kwargs(self, tokens_num: int):
         if self.chunk_size_list:
@@ -523,11 +543,20 @@ class VllmMixtureOfExpertsOpBase(torch.nn.Module):
             kwargs = {}
         return kwargs
 
+    def _get_dispatch_func(self):
+        fn = self.dispatch_func
+        return fn
+
 
 class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
 
-    def __init__(self, global_num_experts: int, num_total_experts, experts_min: int = 0, experts_max: int = 8):
-        super().__init__(global_num_experts, num_total_experts, experts_min, experts_max)
+    def __init__(self,
+                 global_num_experts: int,
+                 num_total_experts: int,
+                 experts_min: int = 0,
+                 experts_max: int = 8,
+                 dispatch_fn: Callable[[torch.Tensor], torch.Tensor] = None):
+        super().__init__(global_num_experts, num_total_experts, experts_min, experts_max, dispatch_fn)
         self.w13_list = torch.nn.ModuleList([MoeMatmul() for _ in range(num_total_experts)])
         self.w2_list = torch.nn.ModuleList([MoeMatmul() for _ in range(num_total_experts)])
 
@@ -970,8 +999,13 @@ class MoeFP8Matmul(torch.nn.Module):
 
 class VllmMixtureOfExpertsOpFP8(VllmMixtureOfExpertsOpBase):
 
-    def __init__(self, global_num_experts: int, num_experts: int, experts_min: int = 0, experts_max: int = 8):
-        super().__init__(global_num_experts, num_experts, experts_min, experts_max)
+    def __init__(self,
+                 global_num_experts: int,
+                 num_experts: int,
+                 experts_min: int = 0,
+                 experts_max: int = 8,
+                 dispatch_fn: Callable[[torch.Tensor], torch.Tensor] = None):
+        super().__init__(global_num_experts, num_experts, experts_min, experts_max, dispatch_fn)
         self.w13_list = torch.nn.ModuleList(
             [MoeFP8Matmul(quant_method=FusedMoeWeightScaleSupported.BLOCK.value) for _ in range(num_experts)])
         self.w2_list = torch.nn.ModuleList(
@@ -1030,8 +1064,13 @@ class VllmMixtureOfExpertsOpFP8(VllmMixtureOfExpertsOpBase):
 
 class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
 
-    def __init__(self, global_num_experts: int, num_experts: int, experts_min: int = 0, experts_max: int = 8):
-        super().__init__(global_num_experts, num_experts, experts_min, experts_max)
+    def __init__(self,
+                 global_num_experts: int,
+                 num_experts: int,
+                 experts_min: int = 0,
+                 experts_max: int = 8,
+                 dispatch_fn: Callable[[torch.Tensor], torch.Tensor] = None):
+        super().__init__(global_num_experts, num_experts, experts_min, experts_max, dispatch_fn)
         self.w13_list = torch.nn.ModuleList([MoeFP8Matmul() for _ in range(num_experts)])
         self.w2_list = torch.nn.ModuleList([MoeFP8Matmul() for _ in range(num_experts)])
         self.w13_input_scale = None
@@ -1070,7 +1109,8 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
                                                                    **kwargs)
         else:
             x_scale = self.w13_input_scale.data
-            w2_input_scale = self.w2_input_scale.data
+            # w2_input_scale should be List[Tensor] when static and fused
+            w2_input_scale = [self.w2_input_scale[i] for i in experts_range]
             x_fp8 = torch.ops.hpu.cast_to_fp8_v2(x, 1.0 / x_scale, False, False, torch.float8_e4m3fn)[0]
             final_hidden_states = torch.ops.hpu.mixture_of_experts(hidden_states=x_fp8,
                                                                    expert_routing_table=topk_ids.to(torch.int64),
@@ -1148,6 +1188,9 @@ def requantize_with_max_scale(weight: torch.Tensor, weight_scale: torch.Tensor,
                               logical_widths: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
     # Max scale to be used for requanitzation.
     max_w_scale = weight_scale.max()
+    # hw aligned
+    if get_config().use_hpu_aligned_scale:
+        max_w_scale = ConvertScaleToHwAligned().calc(max_w_scale)
     # QKV / MLP is fused in the on disk checkpoint if any of the
     # weight scales are still set to the default since we initialize
     # N weight scales for N shards but we only load 1 weight scale

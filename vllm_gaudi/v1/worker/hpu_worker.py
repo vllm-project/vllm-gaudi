@@ -26,8 +26,7 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.model_executor import set_random_seed
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import (STR_DTYPE_TO_TORCH_DTYPE, set_random_seed)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec)
 from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerOutput)
 from vllm.v1.worker.utils import bind_kv_cache
@@ -76,6 +75,7 @@ class HPUWorker(WorkerBase):
 
         self.local_rank = local_rank
         self.rank = rank
+        self.parallel_config.rank = rank
         self.distributed_init_method = distributed_init_method
         self.is_driver_worker = is_driver_worker
 
@@ -83,11 +83,6 @@ class HPUWorker(WorkerBase):
             self.cache_dtype = self.model_config.dtype
         else:
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
-
-        if self.model_config.trust_remote_code:
-            # note: lazy import to avoid importing torch before initializing
-            from vllm.utils.import_utils import init_cached_hf_modules
-            init_cached_hf_modules()
 
         self.gc_track_recompiles = get_config().track_graph_compilation and not get_config().high_level_profiler_enabled
         self.step = 0
@@ -188,8 +183,10 @@ class HPUWorker(WorkerBase):
                 # it by reference, rather by specializing on the value ``None``.
                 hpu_k_cache = torch.tensor([], dtype=dtype, device='hpu')
                 hpu_v_cache = torch.tensor([], dtype=dtype, device='hpu')
+                hpu_k_scales = torch.tensor([], dtype=dtype, device='hpu')
+                hpu_v_scales = torch.tensor([], dtype=dtype, device='hpu')
 
-                kv_caches[layer_name] = (hpu_k_cache, hpu_v_cache)
+                kv_caches[layer_name] = (hpu_k_cache, hpu_v_cache, hpu_k_scales, hpu_v_scales)
 
                 single_kv_block_size_bytes += layer_spec.page_size_bytes
 
@@ -426,7 +423,6 @@ def init_worker_distributed_environment(
     parallel_config = vllm_config.parallel_config
     """Initialize the distributed environment."""
     init_distributed_environment(parallel_config.world_size, rank, distributed_init_method, local_rank, backend='hccl')
-    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size, parallel_config.pipeline_parallel_size)
 
     dummy_tensor_hpu = torch.ones(1).to('hpu')
     torch.distributed.all_reduce(dummy_tensor_hpu)
