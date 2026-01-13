@@ -184,9 +184,6 @@ class HPUWorker(WorkerBase):
                 else:
                     create_dynamic_scales = False
 
-                # Use an empty tensor instead of `None`` to force Dynamo to pass
-                # it by reference, rather by specializing on the value ``None``.
-
                 # Create dummy KV cache tensors with proper shapes for profiling
                 num_blocks = 1  # Use single block for profiling
                 block_size = layer_spec.block_size
