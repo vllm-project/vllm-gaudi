@@ -89,7 +89,7 @@ jobs:
         run: |
           echo "Attempting to build Docker image..."
           docker build --no-cache -t hpu-plugin-v1-test-env-hourly-ci -f - . <<EOF
-          FROM vault.habana.ai/gaudi-docker/1.22.2/ubuntu24.04/habanalabs/pytorch-installer-2.7.1:latest
+          FROM vault.habana.ai/gaudi-docker/1.23.0/ubuntu24.04/habanalabs/pytorch-installer-2.9.0:latest
 
           COPY ./ /workspace/vllm-gaudi
           WORKDIR /workspace

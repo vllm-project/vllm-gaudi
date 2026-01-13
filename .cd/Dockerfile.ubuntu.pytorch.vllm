@@ -3,9 +3,9 @@
 
 # Parameterize base image components
 ARG DOCKER_URL=vault.habana.ai/gaudi-docker
-ARG VERSION=1.22.2
+ARG VERSION=1.23.0
 ARG BASE_NAME=ubuntu24.04
-ARG PT_VERSION=2.7.1
+ARG PT_VERSION=2.9.0
 ARG REVISION=latest
 ARG REPO_TYPE=habanalabs
 ARG TORCH_TYPE_SUFFIX
