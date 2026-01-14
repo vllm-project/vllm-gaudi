@@ -4053,6 +4053,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                 delattr(mla_attn, m)
 
     def _inc_preprocess(self):
+        _apply_inc_patch()
         self._remove_duplicate_submodules()
 
     def log_graph_warmup_summary(self, buckets, is_prompt, total_mem):
@@ -5500,6 +5501,16 @@ def _find_tensors_and_validate(data, attr_name):
             raise ValueError(f"Inconsistent {attr_name}: Found tensors with both '{found_attr}' and '{current_attr}'.")
 
     return found_attr
+
+
+def _apply_inc_patch():
+    # TODO: (yiliu30) Remove this function when INC fixes the issue.
+    from neural_compressor.torch.algorithms.fp8_quant._quant_common.quant_config import (
+        supported_dynamic_ops as inc_supported_dynamic_ops, )
+    from neural_compressor.torch.algorithms.fp8_quant._quant_common import quant_config as inc_quant_config
+
+    fixed_dynamic_ops = inc_supported_dynamic_ops + ["MoeMatmul"]
+    inc_quant_config.supported_dynamic_ops = fixed_dynamic_ops
 
 
 class TensorTuple(tuple):
