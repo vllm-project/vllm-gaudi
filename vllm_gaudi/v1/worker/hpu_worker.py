@@ -196,14 +196,15 @@ class HPUWorker(WorkerBase):
 
                 single_kv_block_size_bytes += layer_spec.page_size_bytes
             elif isinstance(layer_spec, MambaSpec):
-                dtype = layer_spec.dtype
+                dtype0 = layer_spec.dtype[0]
+                dtype1 = layer_spec.dtype[1]
 
                 # Use an empty tensor instead of `None`` to force Dynamo to pass
                 # it by reference, rather by specializing on the value ``None``.
-                hpu_ssm_cache = torch.tensor([], dtype=dtype, device='hpu')
-                hpu_conv_cache = torch.tensor([], dtype=dtype, device='hpu')
-                hpu_ssm_scales = torch.tensor([], dtype=dtype, device='hpu')
-                hpu_conv_scales = torch.tensor([], dtype=dtype, device='hpu')
+                hpu_ssm_cache = torch.tensor([], dtype=dtype0, device='hpu')
+                hpu_conv_cache = torch.tensor([], dtype=dtype1, device='hpu')
+                hpu_ssm_scales = torch.tensor([], dtype=dtype0, device='hpu')
+                hpu_conv_scales = torch.tensor([], dtype=dtype1, device='hpu')
 
                 kv_caches[layer_name] = (hpu_ssm_cache, hpu_conv_cache, hpu_ssm_scales, hpu_conv_scales)
 
