@@ -22,3 +22,14 @@ def dist_init():
 @pytest.fixture(scope="session")
 def llama32_lora_files():
     return snapshot_download(repo_id="jeeejeee/llama32-3b-text2sql-spider")
+
+
+@pytest.fixture
+def default_vllm_config():
+    """Set a default VllmConfig for tests that directly test CustomOps or pathways
+    that use get_current_vllm_config() outside of a full engine context.
+    """
+    from vllm.config import VllmConfig, set_current_vllm_config
+
+    with set_current_vllm_config(VllmConfig()):
+        yield
