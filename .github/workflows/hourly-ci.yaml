@@ -230,7 +230,7 @@ jobs:
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e VLLM_SKIP_WARMUP=true \
-            -e PT_HPU_LAZY_MODE=1 \
+            -e PT_HPU_LAZY_MODE=0 \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-hourly-ci \
