@@ -328,6 +328,21 @@ run_pd_disaggregate_nixl_ucx_test() {
     echo "✅ PD disaggregate through NIXL UCX."
 }
 
+# CPU Offloading connector #YSY
+run_cpu_offloading_test() {
+    echo "➡️ Testing CPU offlading."
+    VLLM_SKIP_WARMUP=True VLLM_USE_V1=1 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/unit_tests/kv_offload/test_cpu_offloading.py" --model meta-llama/Llama-3.2-1B-Instruct
+    echo "✅ Test CPU offlading passed."
+}
+
+run_offloading_connector_test() {
+    echo "➡️ Testing OffloadingConnector."
+    VLLM_SKIP_WARMUP=True VLLM_USE_V1=1 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/unit_tests/kv_offload/test_offloading_connector.py" --model facebook/opt-125m
+    echo "✅ Test OffloadingConnector passed."
+}
+
 # sleep mode
 run_sleep_mode_test() {
     echo "Testing basic model with sleep mode / wake up functionality"

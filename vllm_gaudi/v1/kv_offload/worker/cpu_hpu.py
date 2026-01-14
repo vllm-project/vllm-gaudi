@@ -3,13 +3,16 @@
 from collections import deque
 
 import numpy as np
-import torch
 import os
+import time
+import torch
 
+from collections.abc import Iterator
+from typing import Literal
 from vllm import _custom_ops as ops
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_offload.mediums import BlockIDsLoadStoreSpec
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
@@ -21,9 +24,6 @@ from vllm.v1.kv_offload.abstract import LoadStoreSpec
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.worker.cpu_gpu import (SingleDirectionOffloadingHandler, CpuGpuOffloadingHandlers)
 
-import time
-from typing import Literal
-from collections.abc import Iterator
 
 logger = init_logger(__name__)
 
@@ -133,7 +133,6 @@ class SingleDirectionOffloadingHandlerHpu(OffloadingHandler):
         kv_dim_before_num_blocks: list[bool],
         src_block_size_factor: int,
         dst_block_size_factor: int,
-        priority: int,
     ):
         """
         Initialize a SingleDirectionOffloadingHandlerHpu.
@@ -150,8 +149,6 @@ class SingleDirectionOffloadingHandlerHpu(OffloadingHandler):
                 per KV block in a source tensor.
             dst_block_size_factor: The number of kernel blocks
                 per KV block in a destination tensor.
-            priority: The priority of the backing CUDA streams.
-                Lower numbers indicate higher priority.
         """
         assert len(src_tensors) == len(dst_tensors) == len(kv_dim_before_num_blocks)
 
@@ -160,8 +157,13 @@ class SingleDirectionOffloadingHandlerHpu(OffloadingHandler):
         self.kv_dim_before_num_blocks: list[bool] = kv_dim_before_num_blocks
         self.src_block_size_factor: int = src_block_size_factor
         self.dst_block_size_factor: int = dst_block_size_factor
-        self.priority = priority
 
+        assert len(src_tensors) > 0
+        # self.gpu_to_cpu: bool = self.src_tensors[0].is_cuda
+        self.gpu_to_cpu: bool = True if self.src_tensors[0].device.type == "hpu" else False
+
+        # job_id -> event
+        self._transfer_events: dict[int, torch.Event] = {}
         # queue of transfers (job_id, stream, event)
         self._transfers: deque[tuple[int, torch.hpu.Stream, torch.Event]] = deque()
         # list of CUDA streams available for re-use
@@ -195,12 +197,12 @@ class SingleDirectionOffloadingHandlerHpu(OffloadingHandler):
         expand_block_ids(dst_blocks, self.dst_block_size_factor, src_to_dst[:, 1])
         src_to_dst_tensor = torch.from_numpy(src_to_dst)
 
-        stream = (
-            self._stream_pool.pop()
-            if self._stream_pool
-            else torch.hpu.Stream(priority=self.priority)
-        )
+        stream = self._stream_pool.pop() if self._stream_pool else torch.hpu.Stream()
         event = self._event_pool.pop() if self._event_pool else torch.Event()
+
+        if self.gpu_to_cpu:
+            # wait for model computation to finish before offloading
+            stream.wait_stream(torch.hpu.current_stream())
         if self._transfers:
             _, _, last_event = self._transfers[-1]
             # assure job will start only after the previous one completes
@@ -217,19 +219,11 @@ class SingleDirectionOffloadingHandlerHpu(OffloadingHandler):
                     ops.swap_blocks(src_tensor, dst_tensor, src_to_dst_tensor)
             event.record(stream)
 
+        self._transfer_events[job_id] = event
         self._transfers.append((job_id, stream, event))
 
         # success
         return True
-
-    def get_finished(self) -> list[TransferResult]:
-        results: list[TransferResult] = []
-        while self._transfers and self._transfers[0][2].query():
-            job_id, stream, event = self._transfers.popleft()
-            results.append((job_id, True))
-            self._stream_pool.append(stream)
-            self._event_pool.append(event)
-        return results
 
 
 class CpuHpuOffloadingHandlers:
@@ -332,7 +326,6 @@ class CpuHpuOffloadingHandlers:
             kv_dim_before_num_blocks=kv_dim_before_num_blocks,
             src_block_size_factor=gpu_block_size_factor,
             dst_block_size_factor=cpu_block_size_factor,
-            priority=1,
         )
 
         self.cpu_to_gpu_handler = SingleDirectionOffloadingHandlerHpu(
@@ -341,7 +334,6 @@ class CpuHpuOffloadingHandlers:
             kv_dim_before_num_blocks=kv_dim_before_num_blocks,
             src_block_size_factor=cpu_block_size_factor,
             dst_block_size_factor=gpu_block_size_factor,
-            priority=-1,
         )
 
 
