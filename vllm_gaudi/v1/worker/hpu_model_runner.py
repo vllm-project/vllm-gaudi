@@ -36,10 +36,10 @@ from vllm_gaudi.extension.utils import align_and_pad, pad_list, with_default
 from vllm_gaudi.extension.debug import init_debug_logger
 from vllm_gaudi.v1.worker.hpu_dp_utils import set_hpu_dp_metadata
 
-from vllm.attention.backends.abstract import AttentionType
+from vllm.v1.attention.backend import AttentionType
 from vllm.attention.layer import Attention
 from vllm.attention.layer import MLAAttention
-from vllm.attention.selector import get_attn_backend
+from vllm.v1.attention.selector import get_attn_backend
 
 from vllm.config import (VllmConfig, update_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
@@ -96,8 +96,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiKV
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import OffloadingConnectorMetadata
 from vllm.v1.core.sched.output import GrammarOutput
-from vllm.config.multimodal import ImageDummyOptions
-from vllm.multimodal.profiling import MultiModalProfiler
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -1683,6 +1681,29 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             return self._bucketize_2d_prompt
 
     def _can_merge_prefill_contents(self, lhs, rhs):
+        # --- Logic to handle chunked prefill/prefix caching for HPU ---
+        # 1. Check basic states of LHS (accumulated batch) and RHS (incoming request).
+        # lhs_is_not_empty: Check if the accumulated batch actually contains any requests.
+        # lhs_has_history: Check if any request in the accumulated batch has a non-zero context (history).
+        lhs_is_not_empty = len(lhs.context_lens) > 0
+        lhs_has_history = any(length > 0 for length in lhs.context_lens)
+
+        # 2. Check if RHS (the incoming request) has context_len > 0 (history).
+        rhs_has_history = any(length > 0 for length in rhs.context_lens)
+
+        # 3. Apply merging restrictions based on history states:
+
+        # Condition A: If the accumulated batch is not empty, we cannot append a request that has history.
+        # This implies that a request with history (e.g., prefix caching hit) must start as a new batch.
+        if lhs_is_not_empty and rhs_has_history:
+            return False
+
+        # Condition B: If the accumulated batch already contains requests with history,
+        # we cannot append *any* new request (regardless of whether RHS has history or not).
+        # This locks the batch once it contains history (likely for decode phase or chunked prefill).
+        if lhs_has_history:
+            return False
+
         combined_num_tokens = lhs.get_num_tokens() + rhs.get_num_tokens()
         bucketing_fn = self._get_prompt_bucketing_fn()
         try:
@@ -3843,6 +3864,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                 delattr(mla_attn, m)
 
     def _inc_preprocess(self):
+        _apply_inc_patch()
         self._remove_duplicate_submodules()
 
     def log_graph_warmup_summary(self, buckets, is_prompt, total_mem):
@@ -4556,34 +4578,42 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         """Dummy data for profiling and precompiling multimodal models."""
         assert self.mm_budget is not None
         img_count = 1
-        if self.get_model().vision_bucket_manager.is_batch_based:
+        batch = image_args if self.get_model().vision_bucket_manager.is_batch_based else img_count
+        '''if self.get_model().vision_bucket_manager.is_batch_based:
             # Create ImageDummyOptions for Gemma3
-            image_options = ImageDummyOptions(
-                width=896,  # pixels as in gemma3 config
-                height=896  # pixels as in gemma3 config
-            )
+            #image_options = ImageDummyOptions(
+            #    width=896,  # pixels as in gemma3 config
+            #    height=896  # pixels as in gemma3 config
+            #)
             batch = image_args
         else:
-            patch_size = int(self.get_patch_size_from_model())
+            #patch_size = int(self.get_patch_size_from_model())
             # Calculate width and height to maintain aspect ratio and patch count
             # Total patches = (width/patch_size) * (height/patch_size)
             # We want: (w/ps) * (h/ps) = num_patch where num_patch is image_args
             # And: w/h = ratio_w/ratio_h
-            grid_w = int(math.sqrt(image_args * ratio_w / ratio_h))
-            grid_h = int(image_args / grid_w)
-            w = grid_w * patch_size
-            h = grid_h * patch_size
-            image_options = ImageDummyOptions(
-                width=w,  # Custom width in pixels
-                height=h  # Custom height in pixels
-            )
+            #grid_w = int(math.sqrt(image_args * ratio_w / ratio_h))
+            #grid_h = int(image_args / grid_w)
+            #w = grid_w * patch_size
+            #h = grid_h * patch_size
+            #image_options = ImageDummyOptions(
+            #    width=w,  # Custom width in pixels
+            #    height=h  # Custom height in pixels
+            #)
             batch = img_count
+        '''
+
         processor = self.mm_registry.create_processor(model_config=self.model_config, cache=self.mm_budget.cache)
-        profiler: MultiModalProfiler = MultiModalProfiler(processor)
-        dummy_data = profiler.get_decoder_dummy_data(seq_len=4096,
-                                                     mm_counts={"image": img_count},
-                                                     mm_options={"image": image_options})
-        dummy_mm_data = dummy_data.multi_modal_data
+        '''dummy_data = processor.dummy_inputs.get_decoder_dummy_data(processor,
+                                                                   seq_len=4096,
+                                                                   mm_counts={"image": img_count},
+                                                                   mm_options={"image": image_options}),
+
+        '''
+        dummy_mm_data = processor.dummy_inputs.get_dummy_processor_inputs(
+            seq_len=4096,
+            mm_counts={"image": img_count},
+        )
 
         assert modality == 'image'
         # Result in the maximum GPU consumption of the model
@@ -5270,9 +5300,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self,
         sampled_token_ids: list[list[int]],
     ) -> list[list[int]]:
-        draft_token_ids = self.drafter.propose(sampled_token_ids, self.input_batch.req_ids,
-                                               self.input_batch.num_tokens_no_spec, self.input_batch.token_ids_cpu,
-                                               self.input_batch.spec_decode_unsupported_reqs)
+        draft_token_ids = self.drafter.propose(
+            sampled_token_ids,
+            self.input_batch.num_tokens_no_spec,
+            self.input_batch.token_ids_cpu,
+        )
         # swipe draft_token_ids_native replacing [] to [-1]
         for i in range(len(draft_token_ids)):
             if len(draft_token_ids[i]) == 0:
@@ -5614,3 +5646,13 @@ class HPUAttentionMetadataProcessor:
             if self.interleaved_sliding_window:
                 attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype, True)
         return attn_metadata
+
+
+def _apply_inc_patch():
+    # TODO: (yiliu30) Remove this function when INC fixes the issue.
+    from neural_compressor.torch.algorithms.fp8_quant._quant_common.quant_config import (
+        supported_dynamic_ops as inc_supported_dynamic_ops, )
+    from neural_compressor.torch.algorithms.fp8_quant._quant_common import quant_config as inc_quant_config
+
+    fixed_dynamic_ops = inc_supported_dynamic_ops + ["MoeMatmul"]
+    inc_quant_config.supported_dynamic_ops = fixed_dynamic_ops
