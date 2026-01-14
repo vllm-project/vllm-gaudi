@@ -2297,7 +2297,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             seq_lens_block = [len(block_table) for block_table in block_tables_list]
             num_seq_chunks = [math.ceil(sl / chunk_size_in_blocks) - 1 for sl in seq_lens_block]
             block_tables_chunk = [
-                block_table[num_seq_chunks[i] * chunk_size_in_blocks:] for i, block_table in enumerate(block_tables_list)
+                block_table[num_seq_chunks[i] * chunk_size_in_blocks:]
+                for i, block_table in enumerate(block_tables_list)
             ]
             chunked_block_list, chunked_block_groups, chunked_block_usage = \
                 self.get_habana_paged_attn_buffers(
