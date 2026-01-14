@@ -599,6 +599,7 @@ def _prepare_shared_bias_hpu(
                 block_usages=hpu_block_usages_dense,
                 num_query_tokens=target_qlen,
                 num_shared_blocks=target_shared_blocks,
+                split_chunked_graphs=get_config().unified_attn_split_graphs,
             )
         return
 
@@ -826,9 +827,10 @@ def create_unified_batch(
     # With chunked dense generation, we only allocate (target_qlen, target_shared_blocks) for block_usages
     # instead of the full (target_qlen, target_shared_blocks, block_size) bias tensor.
     # Bias is generated per chunk: (target_qlen, chunk_size, block_size)
-    default_chunk_size = 64  # Process up to 64 blocks at a time for shared attention
-    use_chunked_processing = bool(target_shared_blocks
-                                  > default_chunk_size)  # Chunked dense processing - generates bias per chunk
+    default_chunk_size = get_config(
+    ).unified_attn_shared_attn_chunk_size  # Process up to 64 blocks at a time for shared attention
+    use_chunked_processing = get_config().unified_attn_chunked_shared_attn and bool(
+        target_shared_blocks > default_chunk_size)  # Chunked dense processing - generates bias per chunk
 
     # Pad target_shared_blocks to be a multiple of chunk_size for chunked processing
     # This ensures all chunks have exactly chunk_size blocks (static shapes in the kernel)
@@ -862,6 +864,8 @@ def create_unified_batch(
             feps=to_hpu(feps, dtype=dtype),
             inputL_hpu_tensors=dict(),
             inputM_hpu_tensors=dict(),
+            split_graphs=get_config().unified_attn_split_graphs,
+            online_merge=get_config().unified_attn_online_merge,
         )
 
     if hpu_bias_acceleration:

@@ -349,6 +349,7 @@ class SharedBlockChunkedBiasData:
     block_usages: torch.tensor  # Dense: [num_query_tokens, num_shared_blocks]
     num_query_tokens: int  # Total query length (padded)
     num_shared_blocks: int  # Total number of shared blocks (padded)
+    split_chunked_graphs: bool
 
 
 def _partial_attn_shared_core(query: torch.tensor,
@@ -545,8 +546,10 @@ def _partial_attn_shared_chunked(
     accumulated_attn = None
     global_max = None
     global_sum = None
-
+    split_graphs = chunked_data.split_chunked_graphs
     for chunk_idx in range(num_chunks):
+        if split_graphs:
+            htorch.core.mark_step()
         chunk_start = chunk_idx * chunk_size
         chunk_end = min(chunk_start + chunk_size, num_blocks)
         actual_chunk_len = chunk_end - chunk_start
@@ -610,6 +613,9 @@ def _partial_attn_shared_chunked(
             accumulated_attn = accumulated_attn * old_scale.unsqueeze(-1) + chunk_attn * new_scale.unsqueeze(-1)
             global_sum = global_sum * old_scale + chunk_sum * new_scale
             global_max = new_max
+
+        if split_graphs:
+            htorch.core.mark_step()
 
     if accumulated_attn is None:
         return (None, None, None)
@@ -695,6 +701,8 @@ class HPUUnifiedAttentionMetadata:
     feps: torch.tensor
     inputL_hpu_tensors: Optional[Dict[tuple, torch.Tensor]]
     inputM_hpu_tensors: Optional[Dict[tuple, torch.Tensor]]
+    online_merge: bool
+    split_graphs: bool
 
     def seq_len(self):
         # TODO: This needs to be changed in case of mixed batches
@@ -716,28 +724,22 @@ class HPUUnifiedAttentionMetadata:
         return self.causal_bias is not None
 
 
-def unified_attn(query: torch.tensor,
-                 key: torch.tensor,
-                 value: torch.tensor,
-                 key_cache: torch.tensor,
-                 value_cache: torch.tensor,
-                 scale: float,
-                 metadata: HPUUnifiedAttentionMetadata,
-                 use_online_merge: bool = True) -> torch.tensor:
-    """Main entry point for unified attention
-    
-    Args:
-        use_online_merge: If True, use online (incremental) merge algorithm.
-                         Merges after each partial attention to avoid large intermediate buffers.
-                         If False, use offline (single-pass) merge algorithm.
-    """
+def unified_attn(query: torch.tensor, key: torch.tensor, value: torch.tensor, key_cache: torch.tensor,
+                 value_cache: torch.tensor, scale: float, metadata: HPUUnifiedAttentionMetadata) -> torch.tensor:
+    """Main entry point for unified attention"""
 
     scaled_query = query * scale
     cache_utils = CacheUtils(key_cache, value_cache, metadata.block_size)
 
+    use_online_merge = metadata.online_merge
+    split_graphs = metadata.split_graphs
+
     if use_online_merge:
         # Online merge: compute and merge incrementally to avoid large intermediate buffers
         acc_attn, acc_max, acc_sum = None, None, None
+
+    if split_graphs:
+        htorch.core.mark_step()
 
     # 1. Causal attention
     causal = partial_attn_causal(query=scaled_query,
@@ -751,6 +753,9 @@ def unified_attn(query: torch.tensor,
                                  w_uv=None)
     if use_online_merge:
         acc_attn, acc_max, acc_sum = online_merge_step(acc_attn, acc_max, acc_sum, *causal)
+
+    if split_graphs:
+        htorch.core.mark_step()
 
     # 2. Shared attention
     shared = partial_attn_shared(query=scaled_query,
@@ -767,6 +772,9 @@ def unified_attn(query: torch.tensor,
     if use_online_merge:
         acc_attn, acc_max, acc_sum = online_merge_step(acc_attn, acc_max, acc_sum, *shared)
 
+    if split_graphs:
+        htorch.core.mark_step()
+
     # 3. Unique attention
     unique = partial_attn_unique(query=scaled_query,
                                  blocks=metadata.unique_blocks,
@@ -777,6 +785,9 @@ def unified_attn(query: torch.tensor,
                                  w_uv=None)
     if use_online_merge:
         acc_attn, acc_max, acc_sum = online_merge_step(acc_attn, acc_max, acc_sum, *unique)
+
+    if split_graphs:
+        htorch.core.mark_step()
 
     # Final normalization
     if use_online_merge:
@@ -798,8 +809,7 @@ def unified_mla(query: Optional[torch.tensor],
                 scale: float,
                 metadata: HPUUnifiedAttentionMetadata,
                 w_uv: torch.tensor,
-                query_latent: Optional[torch.tensor] = None,
-                use_online_merge: bool = False) -> torch.tensor:
+                query_latent: Optional[torch.tensor] = None) -> torch.tensor:
     """Main entry point for Unified MLA
     
     Args:
