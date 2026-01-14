@@ -23,7 +23,11 @@ MULTIMODAL_CONFIG = {
         'is_batch_based': False,
         #coverage for lmarena-ai/VisionArena-Chat
         'buckets': [512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 131076]
-    }
+    },
+    'ernie4_5_moe_vl': {
+        'is_batch_based': False,
+        'buckets': [1600, 3136, 4096, 6400, 7744, 9216, 12544]
+    },
 }
 
 
