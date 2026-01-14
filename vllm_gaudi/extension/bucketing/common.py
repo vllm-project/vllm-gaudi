@@ -224,6 +224,8 @@ class HPUBucketingManager():
     def generate_fallback_bucket(self, batch_size, seq_len, ctx):
         assert self.max_num_batched_tokens is not None
         new_batch_size = calc_fallback_value(batch_size, self.fallback_bs_base_step)
+        if new_batch_size > self.max_num_seqs:
+            new_batch_size = self.max_num_seqs
         if self.use_sliding_window and seq_len >= self.slice_thld:
             new_seq_len = math.ceil(seq_len / self.slice_size) * self.slice_size
         else:
