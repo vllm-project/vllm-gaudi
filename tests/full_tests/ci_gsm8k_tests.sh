@@ -59,10 +59,9 @@ run_deepseek_v2_inc_test() {
 
 # Deepseek v2 + INC + dynamic quantization + TP2
 run_deepseek_v2_inc_dynamic_tp2_test() {
-    #echo "➡️ Testing deepseek_v2 + inc dynamic quantization + tp2..."
-    #QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_dynamic_quant.json" \
-    #HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --tensor-parallel-size 2
-    # Temporary off because of 1.23.0 release change
+    echo "➡️ Testing deepseek_v2 + inc dynamic quantization + tp2..."
+    QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_dynamic_quant.json" \
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --tensor-parallel-size 2
     echo "✅ Test with deepseek_v2 + inc dynamic quantization + tp2 successful."
 }
 
