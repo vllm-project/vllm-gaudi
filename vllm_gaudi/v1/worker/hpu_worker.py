@@ -28,7 +28,7 @@ from vllm.distributed.kv_transfer import (
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor import set_random_seed
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec)
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, MambaSpec, KVCacheConfig, KVCacheSpec)
 from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerOutput)
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.utils import is_fake_hpu
@@ -195,7 +195,19 @@ class HPUWorker(WorkerBase):
                 kv_caches[layer_name] = (hpu_k_cache, hpu_v_cache, hpu_k_scales, hpu_v_scales)
 
                 single_kv_block_size_bytes += layer_spec.page_size_bytes
+            elif isinstance(layer_spec, MambaSpec):
+                dtype = layer_spec.dtype
 
+                # Use an empty tensor instead of `None`` to force Dynamo to pass
+                # it by reference, rather by specializing on the value ``None``.
+                hpu_k_cache = torch.tensor([], dtype=dtype, device='hpu')
+                hpu_v_cache = torch.tensor([], dtype=dtype, device='hpu')
+                hpu_k_scales = torch.tensor([], dtype=dtype, device='hpu')
+                hpu_v_scales = torch.tensor([], dtype=dtype, device='hpu')
+
+                kv_caches[layer_name] = (hpu_k_cache, hpu_v_cache, hpu_k_scales, hpu_v_scales)
+
+                single_kv_block_size_bytes += layer_spec.page_size_bytes
             else:
                 raise NotImplementedError
 
