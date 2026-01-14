@@ -1602,16 +1602,16 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         return num_decodes
 
     def maybe_set_chunked_attention_layers(self, model):
-        if hasattr(model.config, 'text_config'):  # noqa: SIM102
-            if hasattr(model.config.text_config, 'attention_chunk_size'):  # noqa: SIM102
-                if model.config.text_config.attention_chunk_size:
-                    self.model_has_chunked_attention = True
-                    try:
-                        for layer in model.language_model.model.layers:
-                            if "ChunkedLocalAttention" in layer.self_attn.attn.get_attn_backend().__name__:
-                                layer.self_attn.attn.impl.is_chunked_attention = True
-                    except Exception:
-                        pass
+        if hasattr(model.config, 'text_config') and \
+           hasattr(model.config.text_config, 'attention_chunk_size') and \
+           model.config.text_config.attention_chunk_size:
+            self.model_has_chunked_attention = True
+            try:
+                for layer in model.language_model.model.layers:
+                    if "ChunkedLocalAttention" in layer.self_attn.attn.get_attn_backend().__name__:
+                        layer.self_attn.attn.impl.is_chunked_attention = True
+            except Exception:
+                pass
 
     def _get_prompts_and_decodes(
         self,
@@ -2293,11 +2293,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     padded_batch_size * num_tokens)
 
         if self.model_has_chunked_attention:
-            chunk_size = (self.model.model.config.text_config.attention_chunk_size // self.block_size)
+            chunk_size_in_blocks = (self.model.model.config.text_config.attention_chunk_size // self.block_size)
             seq_lens_block = [len(block_table) for block_table in block_tables_list]
-            num_seq_chunks = [math.ceil(sl / chunk_size) - 1 for sl in seq_lens_block]
+            num_seq_chunks = [math.ceil(sl / chunk_size_in_blocks) - 1 for sl in seq_lens_block]
             block_tables_chunk = [
-                block_table[num_seq_chunks[i] * chunk_size:] for i, block_table in enumerate(block_tables_list)
+                block_table[num_seq_chunks[i] * chunk_size_in_blocks:] for i, block_table in enumerate(block_tables_list)
             ]
             chunked_block_list, chunked_block_groups, chunked_block_usage = \
                 self.get_habana_paged_attn_buffers(
