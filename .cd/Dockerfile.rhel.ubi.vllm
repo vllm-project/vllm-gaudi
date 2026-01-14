@@ -3,10 +3,10 @@
 
 # Global build arguments - declared before first FROM to be available in all stages
 ARG ARTIFACTORY_URL="vault.habana.ai"
-ARG SYNAPSE_VERSION=1.22.2
-ARG SYNAPSE_REVISION=32
+ARG SYNAPSE_VERSION=1.23.0
+ARG SYNAPSE_REVISION=695
 ARG BASE_NAME=rhel9.6
-ARG PT_VERSION=2.7.1
+ARG PT_VERSION=2.9.0
 # can be upstream or fork
 ARG TORCH_TYPE=upstream
 ARG VLLM_GAUDI_COMMIT=main
