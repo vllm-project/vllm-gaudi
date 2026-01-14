@@ -5046,8 +5046,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         kv_caches: dict[str, torch.Tensor] = {}
         kv_cache_sizes = {}
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            assert len(kv_cache_tensor.shared_by) == 1
-            kv_cache_sizes[kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
+            print(kv_cache_tensor.shared_by)
+            for lname in kv_cache_tensor.shared_by:
+                kv_cache_sizes[lname] = kv_cache_tensor.size # forse si, forse no
 
         has_mamba = False
         for kv_cache_group in kv_cache_config.kv_cache_groups:
