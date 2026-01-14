@@ -94,7 +94,6 @@ from vllm_gaudi.extension.ops import LoraMask as LoraMask
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnectorMetadata
 from vllm.v1.core.sched.output import GrammarOutput
-from vllm.config.multimodal import ImageDummyOptions
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -4554,34 +4553,42 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         """Dummy data for profiling and precompiling multimodal models."""
         assert self.mm_budget is not None
         img_count = 1
-        if self.get_model().vision_bucket_manager.is_batch_based:
+        batch = image_args if self.get_model().vision_bucket_manager.is_batch_based else img_count
+        '''if self.get_model().vision_bucket_manager.is_batch_based:
             # Create ImageDummyOptions for Gemma3
-            image_options = ImageDummyOptions(
-                width=896,  # pixels as in gemma3 config
-                height=896  # pixels as in gemma3 config
-            )
+            #image_options = ImageDummyOptions(
+            #    width=896,  # pixels as in gemma3 config
+            #    height=896  # pixels as in gemma3 config
+            #)
             batch = image_args
         else:
-            patch_size = int(self.get_patch_size_from_model())
+            #patch_size = int(self.get_patch_size_from_model())
             # Calculate width and height to maintain aspect ratio and patch count
             # Total patches = (width/patch_size) * (height/patch_size)
             # We want: (w/ps) * (h/ps) = num_patch where num_patch is image_args
             # And: w/h = ratio_w/ratio_h
-            grid_w = int(math.sqrt(image_args * ratio_w / ratio_h))
-            grid_h = int(image_args / grid_w)
-            w = grid_w * patch_size
-            h = grid_h * patch_size
-            image_options = ImageDummyOptions(
-                width=w,  # Custom width in pixels
-                height=h  # Custom height in pixels
-            )
+            #grid_w = int(math.sqrt(image_args * ratio_w / ratio_h))
+            #grid_h = int(image_args / grid_w)
+            #w = grid_w * patch_size
+            #h = grid_h * patch_size
+            #image_options = ImageDummyOptions(
+            #    width=w,  # Custom width in pixels
+            #    height=h  # Custom height in pixels
+            #)
             batch = img_count
+        '''
+
         processor = self.mm_registry.create_processor(model_config=self.model_config, cache=self.mm_budget.cache)
-        dummy_data = processor.dummy_inputs.get_decoder_dummy_data(processor,
+        '''dummy_data = processor.dummy_inputs.get_decoder_dummy_data(processor,
                                                                    seq_len=4096,
                                                                    mm_counts={"image": img_count},
                                                                    mm_options={"image": image_options}),
-        dummy_mm_data = dummy_data.multi_modal_data
+
+        '''
+        dummy_mm_data = processor.dummy_inputs.get_dummy_processor_inputs(
+            seq_len=4096,
+            mm_counts={"image": img_count},
+        )
 
         assert modality == 'image'
         # Result in the maximum GPU consumption of the model
