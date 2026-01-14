@@ -200,12 +200,12 @@ class HPUWorker(WorkerBase):
 
                 # Use an empty tensor instead of `None`` to force Dynamo to pass
                 # it by reference, rather by specializing on the value ``None``.
-                hpu_k_cache = torch.tensor([], dtype=dtype, device='hpu')
-                hpu_v_cache = torch.tensor([], dtype=dtype, device='hpu')
-                hpu_k_scales = torch.tensor([], dtype=dtype, device='hpu')
-                hpu_v_scales = torch.tensor([], dtype=dtype, device='hpu')
+                hpu_ssm_cache = torch.tensor([], dtype=dtype, device='hpu')
+                hpu_conv_cache = torch.tensor([], dtype=dtype, device='hpu')
+                hpu_ssm_scales = torch.tensor([], dtype=dtype, device='hpu')
+                hpu_conv_scales = torch.tensor([], dtype=dtype, device='hpu')
 
-                kv_caches[layer_name] = (hpu_k_cache, hpu_v_cache, hpu_k_scales, hpu_v_scales)
+                kv_caches[layer_name] = (hpu_ssm_cache, hpu_conv_cache, hpu_ssm_scales, hpu_conv_scales)
 
                 single_kv_block_size_bytes += layer_spec.page_size_bytes
             else:
