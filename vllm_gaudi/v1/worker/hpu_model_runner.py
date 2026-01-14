@@ -95,7 +95,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnectorMetadata
 from vllm.v1.core.sched.output import GrammarOutput
 from vllm.config.multimodal import ImageDummyOptions
-from vllm.multimodal.profiling import MultiModalProfiler
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -4578,10 +4577,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             )
             batch = img_count
         processor = self.mm_registry.create_processor(model_config=self.model_config, cache=self.mm_budget.cache)
-        profiler: MultiModalProfiler = MultiModalProfiler(processor)
-        dummy_data = profiler.get_decoder_dummy_data(seq_len=4096,
-                                                     mm_counts={"image": img_count},
-                                                     mm_options={"image": image_options})
+        dummy_data = processor.dummy_inputs.get_decoder_dummy_data(processor,
+                                                                   seq_len=4096,
+                                                                   mm_counts={"image": img_count},
+                                                                   mm_options={"image": image_options}),
         dummy_mm_data = dummy_data.multi_modal_data
 
         assert modality == 'image'

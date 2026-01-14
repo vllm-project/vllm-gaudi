@@ -9,7 +9,7 @@ from typing import Optional
 
 import torch
 from vllm_gaudi.extension import cache_ops, ops
-from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
+from vllm.v1.attention.backend import AttentionMetadataBuilder
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
