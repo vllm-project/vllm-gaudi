@@ -844,9 +844,15 @@ def unified_mla(query: Optional[torch.tensor],
 
     # MLA: latent cache has no head dimension, value_cache is None (stored in same cache)
     cache_utils = CacheUtils(latent_cache, value_cache=None, block_size=metadata.block_size, is_mla=True)
+    use_online_merge = metadata.online_merge
+    split_graphs = metadata.split_graphs
+
     if use_online_merge:
         # Online merge: compute and merge incrementally to avoid large intermediate buffers
         acc_attn, acc_max, acc_sum = None, None, None
+
+    if split_graphs:
+        htorch.core.mark_step()
 
     # Causal: compute-friendly path (expand K/V from latent)
     # key and value already expanded by caller
@@ -862,6 +868,9 @@ def unified_mla(query: Optional[torch.tensor],
                                  w_uv=w_uv) if scaled_query_causal is not None else (None, None, None)
     if use_online_merge:
         acc_attn, acc_max, acc_sum = online_merge_step(acc_attn, acc_max, acc_sum, *causal)
+
+    if split_graphs:
+        htorch.core.mark_step()
 
     # Shared/Unique: memory-friendly path (Q in latent space, fetch cached latent KV)
     # query_latent is already transformed to latent space by caller
@@ -885,6 +894,9 @@ def unified_mla(query: Optional[torch.tensor],
     else:
         shared = (None, None, None)
 
+    if split_graphs:
+        htorch.core.mark_step()
+
     unique = partial_attn_unique(query=scaled_query_latent,
                                  blocks=metadata.unique_blocks,
                                  block_mapping=metadata.unique_block_mapping,
@@ -894,6 +906,10 @@ def unified_mla(query: Optional[torch.tensor],
                                  w_uv=w_uv) if scaled_query_latent is not None else (None, None, None)
     if use_online_merge:
         acc_attn, acc_max, acc_sum = online_merge_step(acc_attn, acc_max, acc_sum, *unique)
+
+    if split_graphs:
+        htorch.core.mark_step()
+
     if use_online_merge:
         if acc_attn is None:
             if query is not None:

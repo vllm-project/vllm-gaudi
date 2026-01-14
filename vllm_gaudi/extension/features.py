@@ -66,7 +66,7 @@ def unified_attn_dev_flags():
         Value('unified_attn_dense_shared_bias', True),
         Value('unified_attn_chunked_shared_attn', True),
         Value('unified_attn_online_merge', True),
-        Value('unified_attn_shared_attn_chunk_size', 128),
+        Value('unified_attn_shared_attn_chunk_size', 64),
         Value('unified_attn_split_graphs', Enabled('unified_attn_online_merge')),
         Value(
             'unified_attn_softmax_fa2',
