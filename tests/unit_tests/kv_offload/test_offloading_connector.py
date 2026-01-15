@@ -52,6 +52,7 @@ from .utils import (
 
 
 class MockLoadStoreSpec(LoadStoreSpec):
+
     def __init__(self, block_hashes: Iterable[BlockHash]):
         self.block_hashes: list[BlockHash] = list(block_hashes)
 
@@ -64,6 +65,7 @@ class MockLoadStoreSpec(LoadStoreSpec):
 
 
 class MockOffloadingHandler(OffloadingHandler):
+
     def __init__(self):
         self.transfer_specs: dict[int, TransferSpec] = {}
         self.completed_transfers: list[TransferResult] = []
@@ -94,22 +96,19 @@ class MockOffloadingHandler(OffloadingHandler):
 
 
 class MockOffloadingSpec(OffloadingSpec):
+
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
         super().__init__(vllm_config, kv_cache_config)
 
         self.manager = MagicMock(spec=OffloadingManager)
         self.manager.lookup.return_value = 0
-        self.manager.prepare_load = lambda block_hashes: (
-            MockLoadStoreSpec(block_hashes)
-        )
+        self.manager.prepare_load = lambda block_hashes: (MockLoadStoreSpec(block_hashes))
         self.handler = MockOffloadingHandler()
 
     def get_manager(self) -> OffloadingManager:
         return self.manager
 
-    def get_handlers(
-        self, _, __
-    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
+    def get_handlers(self, _, __) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
         yield GPULoadStoreSpec, MockLoadStoreSpec, self.handler
         yield MockLoadStoreSpec, GPULoadStoreSpec, self.handler
 
@@ -117,17 +116,12 @@ class MockOffloadingSpec(OffloadingSpec):
         self.handler.complete_jobs(self.handler.waiting_jobs.copy())
 
     def get_completed_transfers(self) -> list[TransferSpec]:
-        specs = [
-            self.handler.transfer_specs[job_id]
-            for job_id in self.handler.completed_jobs
-        ]
+        specs = [self.handler.transfer_specs[job_id] for job_id in self.handler.completed_jobs]
         self.handler.completed_jobs.clear()
         return specs
 
     def get_flushed_transfers(self):
-        specs = [
-            self.handler.transfer_specs[job_id] for job_id in self.handler.flushed_jobs
-        ]
+        specs = [self.handler.transfer_specs[job_id] for job_id in self.handler.flushed_jobs]
         self.handler.flushed_jobs.clear()
         return specs
 
@@ -139,18 +133,15 @@ class TransferSummary:
 
 
 class RequestRunner:
-    def __init__(
-        self, offloaded_block_size: int, gpu_block_size: int, num_gpu_blocks: int
-    ):
+
+    def __init__(self, offloaded_block_size: int, gpu_block_size: int, num_gpu_blocks: int):
         self.offloaded_block_size: int = offloaded_block_size
         self.gpu_block_size: int = gpu_block_size
         self.num_gpu_blocks: int = num_gpu_blocks
 
         self.req_id: int = -1
 
-        vllm_config = create_vllm_config(
-            block_size=gpu_block_size, max_num_batched_tokens=1000
-        )
+        vllm_config = create_vllm_config(block_size=gpu_block_size, max_num_batched_tokens=1000)
         vllm_config.kv_transfer_config = KVTransferConfig(
             kv_connector="OffloadingConnector",
             kv_role="kv_both",
@@ -161,9 +152,7 @@ class RequestRunner:
             },
         )
 
-        self.scheduler: Scheduler = create_scheduler(
-            vllm_config, num_blocks=num_gpu_blocks
-        )
+        self.scheduler: Scheduler = create_scheduler(vllm_config, num_blocks=num_gpu_blocks)
         self.worker_connector = OffloadingConnector(vllm_config, KVConnectorRole.WORKER)
 
         # register worker kv_caches to enable OffloadingWorker creations
@@ -208,9 +197,7 @@ class RequestRunner:
         init_none_hash(sha256)
         self._block_hasher = get_request_block_hasher(gpu_block_size, sha256)
 
-        self._dummy_ctx: ForwardContext = ForwardContext(
-            no_compile_layers={}, attn_metadata={}, virtual_engine=0
-        )
+        self._dummy_ctx: ForwardContext = ForwardContext(no_compile_layers={}, attn_metadata={}, virtual_engine=0)
 
     def new_request(self, token_ids: list[int]):
         assert not self.scheduler.requests
@@ -233,9 +220,7 @@ class RequestRunner:
             assert isinstance(src_spec, GPULoadStoreSpec)
 
             for block_id in src_spec.block_ids:
-                self.flushed_gpu_block_indexes.add(
-                    self.gpu_block_index[block_id.item()]
-                )
+                self.flushed_gpu_block_indexes.add(self.gpu_block_index[block_id.item()])
 
         block_size_factor = self.offloaded_block_size // self.gpu_block_size
 
@@ -267,25 +252,17 @@ class RequestRunner:
             if store:
                 assert len(gpu_block_indices) == len(offload_addresses)
 
-                self.completed_stores.append(
-                    TransferSummary(gpu_block_indices, offload_addresses)
-                )
+                self.completed_stores.append(TransferSummary(gpu_block_indices, offload_addresses))
             else:
-                remainder_sub_block_count = len(offload_addresses) - len(
-                    gpu_block_indices
-                )
+                remainder_sub_block_count = len(offload_addresses) - len(gpu_block_indices)
                 assert remainder_sub_block_count >= 0
                 assert remainder_sub_block_count < block_size_factor
                 offload_addresses = offload_addresses[remainder_sub_block_count:]
 
-                self.completed_loads.append(
-                    TransferSummary(gpu_block_indices, offload_addresses)
-                )
+                self.completed_loads.append(TransferSummary(gpu_block_indices, offload_addresses))
 
     def _update_gpu_block_idx(self):
-        for blocks in self.scheduler.kv_cache_manager.coordinator.single_type_managers[
-            0
-        ].req_to_blocks.values():
+        for blocks in self.scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks.values():
             for block_idx, block in enumerate(blocks):
                 self.gpu_block_index[block.block_id] = block_idx
 
@@ -312,9 +289,7 @@ class RequestRunner:
             assert isinstance(kv_connector_metadata, OffloadingConnectorMetadata)
 
             if scheduler_output.preempted_req_ids:
-                self.worker_connector.handle_preemptions(
-                    scheduler_output.preempted_req_ids
-                )
+                self.worker_connector.handle_preemptions(scheduler_output.preempted_req_ids)
 
             self.worker_connector.bind_connector_metadata(kv_connector_metadata)
             self.worker_connector.start_load_kv(self._dummy_ctx)
@@ -325,9 +300,7 @@ class RequestRunner:
             if complete_transfers:
                 self.offloading_spec.complete_transfers()
 
-            finished_sending, finished_recving = self.worker_connector.get_finished(
-                scheduler_output.finished_req_ids
-            )
+            finished_sending, finished_recving = self.worker_connector.get_finished(scheduler_output.finished_req_ids)
 
             self.worker_connector.clear_connector_metadata()
 
@@ -356,25 +329,22 @@ class RequestRunner:
                 scheduler_output = self.scheduler.schedule()
 
                 finished_sending, finished_recving = self.worker_connector.get_finished(
-                    scheduler_output.finished_req_ids
-                )
+                    scheduler_output.finished_req_ids)
 
                 assert not finished_recving
 
                 model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
-                model_runner_output.kv_connector_output = KVConnectorOutput(
-                    finished_sending=finished_sending
-                )
+                model_runner_output.kv_connector_output = KVConnectorOutput(finished_sending=finished_sending)
 
                 self.scheduler.update_from_output(scheduler_output, model_runner_output)
 
     def run(
-        self,
-        decoded_tokens: list[int],
-        complete_transfers: bool = True,
-        expected_stored_gpu_block_indexes: tuple[int, ...] = (),
-        expected_loaded_gpu_block_indexes: tuple[int, ...] = (),
-        expected_flushed_gpu_block_indexes: tuple[int, ...] = (),
+            self,
+            decoded_tokens: list[int],
+            complete_transfers: bool = True,
+            expected_stored_gpu_block_indexes: tuple[int, ...] = (),
+            expected_loaded_gpu_block_indexes: tuple[int, ...] = (),
+            expected_flushed_gpu_block_indexes: tuple[int, ...] = (),
     ):
         """
         Runs multiple engine (scheduler + worker) steps.
@@ -396,9 +366,7 @@ class RequestRunner:
 
         loaded_gpu_block_indexes: set[int] = set()
         for transfer in self.completed_loads:
-            for gpu_block_idx, offloaded_address in zip(
-                transfer.gpu_block_indices, transfer.offload_addresses
-            ):
+            for gpu_block_idx, offloaded_address in zip(transfer.gpu_block_indices, transfer.offload_addresses):
                 loaded_gpu_block_indexes.add(gpu_block_idx)
                 assert gpu_block_idx == self.offloaded[offloaded_address]
 
@@ -407,9 +375,7 @@ class RequestRunner:
 
         stored_gpu_block_indexes: set[int] = set()
         for transfer in self.completed_stores:
-            for gpu_block_idx, offloaded_address in zip(
-                transfer.gpu_block_indices, transfer.offload_addresses
-            ):
+            for gpu_block_idx, offloaded_address in zip(transfer.gpu_block_indices, transfer.offload_addresses):
                 stored_gpu_block_indexes.add(gpu_block_idx)
                 self.offloaded[offloaded_address] = gpu_block_idx
 
@@ -460,9 +426,7 @@ def test_offloading_connector(request_runner):
     # 3 blocks, store just the middle block (skip first and last)
     # blocks = [0, 1, 2], [3, 4, 5], [6, 7, 8]
     runner.new_request(token_ids=[0] * offloaded_block_size * 3)
-    runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output(list(block_hashes)[1:2])
-    )
+    runner.manager.prepare_store.side_effect = (lambda block_hashes: generate_store_output(list(block_hashes)[1:2]))
     runner.run(decoded_tokens=[0])
 
     # add block missing 1 token -> no offload
@@ -478,15 +442,11 @@ def test_offloading_connector(request_runner):
     runner.manager.prepare_store.assert_called()
 
     # 1 more block, now set block_hashes_to_store = []
-    runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output([])
-    )
+    runner.manager.prepare_store.side_effect = (lambda block_hashes: generate_store_output([]))
     runner.run(decoded_tokens=[0] * offloaded_block_size)
 
     # 1 more block, now check touch was called with all 6 blocks
-    runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output(block_hashes)
-    )
+    runner.manager.prepare_store.side_effect = (lambda block_hashes: generate_store_output(block_hashes))
     runner.run(decoded_tokens=[0] * offloaded_block_size)
     runner.manager.touch.assert_called()
     block_hashes1 = list(runner.manager.touch.call_args.args[0])
@@ -516,20 +476,14 @@ def test_offloading_connector(request_runner):
     )
 
     # full_block_tokens - num_computed_tokens < offloaded_block_size
-    runner.new_request(
-        token_ids=[0] * gpu_block_size + [1] * (offloaded_block_size - gpu_block_size)
-    )
-    runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output([])
-    )
+    runner.new_request(token_ids=[0] * gpu_block_size + [1] * (offloaded_block_size - gpu_block_size))
+    runner.manager.prepare_store.side_effect = (lambda block_hashes: generate_store_output([]))
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
     runner.manager.lookup.assert_not_called()
 
     # single block lookup with no hits
     runner.new_request(token_ids=[1] * offloaded_block_size)
-    runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output([])
-    )
+    runner.manager.prepare_store.side_effect = (lambda block_hashes: generate_store_output([]))
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
     runner.manager.lookup.assert_called()
     assert len(list(runner.manager.lookup.call_args.args[0])) == 1
@@ -537,37 +491,23 @@ def test_offloading_connector(request_runner):
     # single block lookup with a hit
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * offloaded_block_size)
-    runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output([])
-    )
+    runner.manager.prepare_store.side_effect = (lambda block_hashes: generate_store_output([]))
     runner.manager.lookup.return_value = 1
-    runner.run(
-        decoded_tokens=[EOS_TOKEN_ID], expected_loaded_gpu_block_indexes=(0, 1, 2)
-    )
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_loaded_gpu_block_indexes=(0, 1, 2))
 
     # single block lookup with a hit in a middle block
-    runner.new_request(
-        token_ids=[0] * offloaded_block_size * 2 + [1] * offloaded_block_size
-    )
-    runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output([])
-    )
+    runner.new_request(token_ids=[0] * offloaded_block_size * 2 + [1] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = (lambda block_hashes: generate_store_output([]))
     runner.manager.lookup.return_value = 1
-    runner.run(
-        decoded_tokens=[EOS_TOKEN_ID], expected_loaded_gpu_block_indexes=(3, 4, 5)
-    )
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_loaded_gpu_block_indexes=(3, 4, 5))
 
     # test take_events
     def to_hashes(int_hashes: list[int]) -> list[BlockHash]:
         return [BlockHash(str(i).encode()) for i in int_hashes]
 
     def take_events() -> Iterable[OffloadingEvent]:
-        yield OffloadingEvent(
-            block_hashes=to_hashes([1, 2, 3]), block_size=16, medium="A", removed=False
-        )
-        yield OffloadingEvent(
-            block_hashes=to_hashes([4, 5, 6]), block_size=32, medium="B", removed=True
-        )
+        yield OffloadingEvent(block_hashes=to_hashes([1, 2, 3]), block_size=16, medium="A", removed=False)
+        yield OffloadingEvent(block_hashes=to_hashes([4, 5, 6]), block_size=32, medium="B", removed=True)
 
     runner.manager.take_events.side_effect = take_events
     events = list(runner.scheduler_connector.take_events())
@@ -604,18 +544,14 @@ def test_request_preemption(request_runner):
     # 2 blocks, store all, without flushing
     # blocks = [0, 1, 2], [3, 4, 5]
     runner.new_request(token_ids=[0] * offloaded_block_size * 2)
-    runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output(block_hashes)
-    )
+    runner.manager.prepare_store.side_effect = (lambda block_hashes: generate_store_output(block_hashes))
     runner.run(
         decoded_tokens=[0],
         complete_transfers=False,
     )
 
     # decode 2 more blocks - 1 gpu block, storing [6, 7, 8] (no flush)
-    runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output(block_hashes)
-    )
+    runner.manager.prepare_store.side_effect = (lambda block_hashes: generate_store_output(block_hashes))
     runner.run(
         decoded_tokens=[0] * (2 * offloaded_block_size - gpu_block_size),
         complete_transfers=False,
@@ -639,9 +575,7 @@ def test_request_preemption(request_runner):
     # request should now return from preemption
     # re-load [0, ..., 8] from the CPU and store [9, 10, 11]
     runner.manager.lookup.return_value = 3
-    runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output(block_hashes)
-    )
+    runner.manager.prepare_store.side_effect = (lambda block_hashes: generate_store_output(block_hashes))
     runner.run(
         decoded_tokens=[0] * gpu_block_size,
         expected_loaded_gpu_block_indexes=(0, 1, 2, 3, 4, 5, 6, 7, 8),

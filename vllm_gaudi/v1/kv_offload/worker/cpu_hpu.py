@@ -22,8 +22,6 @@ from vllm.v1.kv_offload.worker.worker import (
 from vllm.v1.kv_offload.cpu import CPUOffloadingSpec
 from vllm.v1.kv_offload.abstract import LoadStoreSpec
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
-from vllm.v1.kv_offload.worker.cpu_gpu import (SingleDirectionOffloadingHandler, CpuGpuOffloadingHandlers)
-
 
 logger = init_logger(__name__)
 
@@ -38,7 +36,6 @@ def swap_blocks(
     direction: Literal["h2d", "d2h"],
     block_size: int = 128,
 ) -> None:
-
     """Copy kv blocks between different buffers."""
 
     src_to_dsts = src_to_dsts.transpose(0, 1)
@@ -46,8 +43,8 @@ def swap_blocks(
     dst_block_ids = src_to_dsts[1]
     assert len(src_block_ids) == len(dst_block_ids)
 
-    src_device = src_kv_caches.device
-    dst_device = dst_kv_caches.device
+    src_device = src_kv_caches[0].device
+    dst_device = dst_kv_caches[0].device
 
     src_block_ids = src_block_ids.to(src_device)
     dst_block_ids = dst_block_ids.to(dst_device)
@@ -60,28 +57,51 @@ def swap_blocks(
     key_cache = src_kv_caches[0]
     value_cache = src_kv_caches[1]
 
-    if is_hetero: # Not verified
+    if is_hetero:  # Not verified yet
         assert direction == "h2d", "hetero only supports h2d for now"
         n_kv_heads, head_dim = key_cache.shape[-2:]
-        remote_block_size = block_size//block_factor
+        remote_block_size = block_size // block_factor
         # block_factor, n_kv_heads, remote_block_size, head_dim = 8, 8, 16, 128
-        if len(src_block_ids) == src_block_ids[-1]-src_block_ids[0] + 1: # simple check if the indices are contiguous
+        if len(src_block_ids) == src_block_ids[-1] - src_block_ids[0] + 1:  # simple check if the indices are contiguous
             block_idx = src_block_ids[0]
             num_blocks = len(src_block_ids)
-            dst_kv_caches[0][block_idx*block_size: (num_blocks+block_idx)*block_size] = key_cache[block_idx*block_size: (num_blocks+block_idx)*block_size].reshape(num_blocks*block_factor, n_kv_heads, remote_block_size, head_dim).permute(0,2,1,3).contiguous().reshape(num_blocks*block_size,n_kv_heads,head_dim)
-            dst_kv_caches[1][block_idx*block_size: (num_blocks+block_idx)*block_size] = value_cache[block_idx*block_size: (num_blocks+block_idx)*block_size].reshape(num_blocks*block_factor, n_kv_heads, remote_block_size, head_dim).permute(0,2,1,3).contiguous().reshape(num_blocks*block_size,n_kv_heads,head_dim)
+            dst_kv_caches[0][block_idx * block_size:(num_blocks + block_idx) *
+                             block_size] = key_cache[block_idx * block_size:(num_blocks + block_idx) *
+                                                     block_size].reshape(num_blocks * block_factor, n_kv_heads,
+                                                                         remote_block_size,
+                                                                         head_dim).permute(0, 2, 1,
+                                                                                           3).contiguous().reshape(
+                                                                                               num_blocks * block_size,
+                                                                                               n_kv_heads, head_dim)
+            dst_kv_caches[1][block_idx * block_size:(num_blocks + block_idx) *
+                             block_size] = value_cache[block_idx *
+                                                       block_size:(num_blocks + block_idx) * block_size].reshape(
+                                                           num_blocks * block_factor, n_kv_heads, remote_block_size,
+                                                           head_dim).permute(0, 2, 1, 3).contiguous().reshape(
+                                                               num_blocks * block_size, n_kv_heads, head_dim)
 
         for block_idx in src_block_ids:
-            #print('before:', dst_kv_caches[0][block_idx*block_size: (1+block_idx)*block_size].data_ptr())
-            dst_kv_caches[0][block_idx*block_size: (1+block_idx)*block_size] = key_cache[block_idx*block_size: (1+block_idx)*block_size].reshape(block_factor, n_kv_heads, remote_block_size, head_dim).permute(0,2,1,3).contiguous().reshape(block_size,n_kv_heads,head_dim).to("hpu")
-            dst_kv_caches[1][block_idx*block_size: (1+block_idx)*block_size] = value_cache[block_idx*block_size: (1+block_idx)*block_size].reshape(block_factor, n_kv_heads, remote_block_size, head_dim).permute(0,2,1,3).contiguous().reshape(block_size,n_kv_heads,head_dim).to("hpu")
-            #print('after:', dst_kv_caches[0][block_idx*block_size: (1+block_idx)*block_size].data_ptr())
+            dst_kv_caches[0][block_idx * block_size:(1 + block_idx) *
+                             block_size] = key_cache[block_idx * block_size:(1 + block_idx) * block_size].reshape(
+                                 block_factor, n_kv_heads, remote_block_size,
+                                 head_dim).permute(0, 2, 1, 3).contiguous().reshape(block_size, n_kv_heads,
+                                                                                    head_dim).to("hpu")
+            dst_kv_caches[1][block_idx * block_size:(1 + block_idx) *
+                             block_size] = value_cache[block_idx * block_size:(1 + block_idx) * block_size].reshape(
+                                 block_factor, n_kv_heads, remote_block_size,
+                                 head_dim).permute(0, 2, 1, 3).contiguous().reshape(block_size, n_kv_heads,
+                                                                                    head_dim).to("hpu")
     else:
-        dst_kv_caches[0].index_put_((dst_block_ids,), key_cache.index_select(0, src_block_ids).to(target_device))
-        dst_kv_caches[1].index_put_((dst_block_ids,), value_cache.index_select(0, src_block_ids).to(target_device))
+        dst_kv_caches[0].index_put_((dst_block_ids, ), key_cache.index_select(0, src_block_ids).to(target_device))
+        dst_kv_caches[1].index_put_((dst_block_ids, ), value_cache.index_select(0, src_block_ids).to(target_device))
 
     torch.hpu.synchronize()
-    # logger.info(f"swap_blocks: copy takes {time.perf_counter() - start}|{direction=}|{os.getpid()=}|{block_size=}|{len(src_block_ids)=}|{len(dst_block_ids)=}| {len(src_kv_caches)=} | ")
+
+    logger.debug(
+        "swap_blocks: copy takes %s|direction=%s|pid=%s|block_size=%s|"
+        "src_block_ids_len=%s|dst_block_ids_len=%s|src_kv_caches_len=%s|",
+        time.perf_counter() - start, direction, os.getpid(), block_size, len(src_block_ids), len(dst_block_ids),
+        len(src_kv_caches))
 
 
 def expand_block_ids(
@@ -160,7 +180,7 @@ class SingleDirectionOffloadingHandlerHpu(OffloadingHandler):
 
         assert len(src_tensors) > 0
         # self.gpu_to_cpu: bool = self.src_tensors[0].is_cuda
-        self.gpu_to_cpu: bool = True if self.src_tensors[0].device.type == "hpu" else False
+        self.gpu_to_cpu: bool = self.src_tensors[0].device.type == "hpu"
 
         # job_id -> event
         self._transfer_events: dict[int, torch.Event] = {}
@@ -209,9 +229,8 @@ class SingleDirectionOffloadingHandlerHpu(OffloadingHandler):
             stream.wait_event(last_event)
 
         with torch.hpu.stream(stream):
-            for src_tensor, dst_tensor, kv_dim in zip(
-                self.src_tensors, self.dst_tensors, self.kv_dim_before_num_blocks
-            ):
+            for src_tensor, dst_tensor, kv_dim in zip(self.src_tensors, self.dst_tensors,
+                                                      self.kv_dim_before_num_blocks):
                 if kv_dim:
                     swap_blocks(src_tensor, dst_tensor, src_to_dst_tensor, \
                                 "d2h" if self.src_tensors[0].device.type == "hpu" else "h2d")
@@ -243,6 +262,7 @@ class SingleDirectionOffloadingHandlerHpu(OffloadingHandler):
 
 
 class CpuHpuOffloadingHandlers:
+
     def __init__(
         self,
         gpu_block_size: int,
@@ -269,9 +289,9 @@ class CpuHpuOffloadingHandlers:
             gpu_shape = gpu_tensor.shape
             attn_backend = attn_backends[layer_name]
             test_shape = attn_backend.get_kv_cache_shape(
-                num_blocks=1234, block_size=128, num_kv_heads=8, head_size=256
-            ) #(num_blocks * block_size, num_kv_heads, head_size)
-            test_shape = (2, test_shape[0]//128, 128, test_shape[1], test_shape[2])
+                num_blocks=1234, block_size=128, num_kv_heads=8,
+                head_size=256)  #(num_blocks * block_size, num_kv_heads, head_size)
+            test_shape = (2, test_shape[0] // 128, 128, test_shape[1], test_shape[2])
 
             has_layers_dim = False
             if len(gpu_shape) != len(test_shape):
@@ -283,7 +303,7 @@ class CpuHpuOffloadingHandlers:
                 kv_dim_before_num_blocks.append(False)
 
                 # prepend a dummy num_layers=80 to test_shape
-                test_shape = (80,) + test_shape
+                test_shape = (80, ) + test_shape
             elif test_shape[0] == 1234:
                 # shape is (num_blocks, ...)
                 num_blocks_idx = 0
@@ -299,8 +319,7 @@ class CpuHpuOffloadingHandlers:
 
             try:
                 kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                    include_num_layers_dimension=has_layers_dim
-                )
+                    include_num_layers_dimension=has_layers_dim)
                 assert len(kv_cache_stride_order) == len(gpu_shape)
             except (AttributeError, NotImplementedError):
                 kv_cache_stride_order = tuple(range(len(gpu_shape)))
@@ -320,14 +339,12 @@ class CpuHpuOffloadingHandlers:
             cpu_shape[num_blocks_idx] = num_cpu_blocks * block_size_factor
 
             logger.debug("Allocating CPU tensor of shape %r", cpu_shape)
-            cpu_tensors.append(
-                torch.zeros(
-                    cpu_shape,
-                    dtype=gpu_tensor.dtype,
-                    device="cpu",
-                    pin_memory=pin_memory,
-                )
-            )
+            cpu_tensors.append(torch.zeros(
+                cpu_shape,
+                dtype=gpu_tensor.dtype,
+                device="cpu",
+                pin_memory=pin_memory,
+            ))
 
         assert kernel_block_size is not None
         gpu_block_size_factor = gpu_block_size // kernel_block_size
@@ -354,22 +371,22 @@ class CpuHpuOffloadingHandlers:
 
 
 def get_handlers(
-        self,
-        kv_caches: dict[str, torch.Tensor],
-        attn_backends: dict[str, type[AttentionBackend]],
-    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
-        if not self._handlers:
-            self._handlers = CpuHpuOffloadingHandlers(
-                attn_backends=attn_backends,
-                gpu_block_size=self.gpu_block_size,
-                cpu_block_size=self.offloaded_block_size,
-                num_cpu_blocks=self.num_blocks,
-                gpu_caches=kv_caches,
-            )
+    self,
+    kv_caches: dict[str, torch.Tensor],
+    attn_backends: dict[str, type[AttentionBackend]],
+) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
+    if not self._handlers:
+        self._handlers = CpuHpuOffloadingHandlers(
+            attn_backends=attn_backends,
+            gpu_block_size=self.gpu_block_size,
+            cpu_block_size=self.offloaded_block_size,
+            num_cpu_blocks=self.num_blocks,
+            gpu_caches=kv_caches,
+        )
 
-        assert self._handlers is not None
-        yield GPULoadStoreSpec, CPULoadStoreSpec, self._handlers.gpu_to_cpu_handler
-        yield CPULoadStoreSpec, GPULoadStoreSpec, self._handlers.cpu_to_gpu_handler
+    assert self._handlers is not None
+    yield GPULoadStoreSpec, CPULoadStoreSpec, self._handlers.gpu_to_cpu_handler
+    yield CPULoadStoreSpec, GPULoadStoreSpec, self._handlers.cpu_to_gpu_handler
 
 
 CPUOffloadingSpec.get_handlers = get_handlers
