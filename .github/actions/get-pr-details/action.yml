@@ -46,11 +46,18 @@ runs:
           console.log('Trigger event: %s', eventName);
           if (eventName === 'merge_group') {
               const headRef = process.env.MERGE_GROUP_HEAD_REF;
-              const prMatch = headRef.match(/pr-(\d+)-/);
+              
+              if (!headRef || typeof headRef !== 'string') {
+                  console.log('❌ MERGE_GROUP_HEAD_REF is missing or invalid. Received:', headRef);
+                  core.setFailed('MERGE_GROUP_HEAD_REF is missing or invalid for merge_group event');
+                  return;
+              }
+              
+              const prMatch = headRef.match(/^pr-(\d+)-/);
               
               if (!prMatch) {
-                  console.log('❌ Could not extract PR number from head ref:', headRef);
-                  core.setFailed('Could not extract PR number from merge group head ref');
+                  console.log('❌ Merge group head ref does not match expected format "pr-<number>-...". Received:', headRef);
+                  core.setFailed('Could not extract PR number from merge group head ref: unexpected format');
                   return;
               }
               
