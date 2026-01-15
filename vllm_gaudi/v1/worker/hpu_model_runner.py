@@ -463,7 +463,8 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         if not self.unified_attn:
             kwargs['attn_metadata'] = self.metadata_processor.process_metadata(kwargs['attn_metadata'],
                                                                                input_ids.size(0), input_ids.size(1),
-                                                                               input_ids.device, self.dtype, model_has_chunked_attention)
+                                                                               input_ids.device, self.dtype,
+                                                                               model_has_chunked_attention)
         if self._rotary_prepare_cos_sin is not None:
             self._rotary_prepare_cos_sin(kwargs['positions'], recompute_cos_sin=self.recompute_cos_sin)
         attn_meta = kwargs.pop('attn_metadata')
@@ -5579,8 +5580,9 @@ class HPUAttentionMetadataProcessor:
         attn_metadata = prefill_metadata._replace(window_attn_bias=attn_bias)
         return attn_metadata
 
-    def _set_attn_bias_for_chunked_attention(self, attn_metadata: HPUAttentionMetadataV1, batch_size: int, seq_len: int, 
-                                             chunk_size: int, device: torch.device, dtype: torch.dtype) -> HPUAttentionMetadataV1:
+    def _set_attn_bias_for_chunked_attention(self, attn_metadata: HPUAttentionMetadataV1, batch_size: int, seq_len: int,
+                                             chunk_size: int, device: torch.device,
+                                             dtype: torch.dtype) -> HPUAttentionMetadataV1:
         """Set attention bias for chunked attention.
 
         Args:
@@ -5604,6 +5606,7 @@ class HPUAttentionMetadataProcessor:
         if self.prefill_use_fusedsdpa and attn_metadata.block_list is not None:
 
             context_lens_t = prefill_metadata.context_lens_tensor
+            assert context_lens_t is not None
             block_list = prefill_metadata.block_list
             max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
             max_context_len = max_context_len * self.block_size
@@ -5640,7 +5643,6 @@ class HPUAttentionMetadataProcessor:
 
         attn_metadata = custom_tuple_replace(prefill_metadata, "TrimmedAttentionMetadata", chunked_attn_bias=attn_bias)
         return attn_metadata
-
 
     def _set_block_mapping(self,
                            metadata: HPUAttentionMetadataV1,
@@ -5713,8 +5715,13 @@ class HPUAttentionMetadataProcessor:
                                             attn_bias=attn_bias)
         return metadata
 
-    def process_metadata(self, attn_metadata: HPUAttentionMetadataV1, batch_size: int, seq_len: int,
-                         device: torch.device, dtype: torch.dtype, model_has_chunked_attention: bool = False) -> HPUAttentionMetadataV1:
+    def process_metadata(self,
+                         attn_metadata: HPUAttentionMetadataV1,
+                         batch_size: int,
+                         seq_len: int,
+                         device: torch.device,
+                         dtype: torch.dtype,
+                         model_has_chunked_attention: bool = False) -> HPUAttentionMetadataV1:
         """
         Post-process attention metadata with appropriate masks and mappings.
 
@@ -5739,9 +5746,9 @@ class HPUAttentionMetadataProcessor:
                 attn_metadata = self._set_attn_bias_for_sliding_window(attn_metadata, batch_size, seq_len,
                                                                        self.sliding_window, device, dtype)
             if model_has_chunked_attention:
-                attn_metadata = self._set_attn_bias_for_chunked_attention(
-                    attn_metadata, batch_size, seq_len, self.model.config.text_config.attention_chunk_size, device,
-                    dtype)
+                attention_chunk_size = self.vllm_config.model_config.hf_config.text_config.attention_chunk_size
+                attn_metadata = self._set_attn_bias_for_chunked_attention(attn_metadata, batch_size, seq_len,
+                                                                          attention_chunk_size, device, dtype)
         else:
             attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype)
             if model_has_chunked_attention:
