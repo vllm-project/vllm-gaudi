@@ -393,6 +393,8 @@ launch_all_tests() {
     run_spec_decode_eagle3_test
     run_spec_decode_eagle3_num_spec_2_test
     run_llama3_70b_inc_dynamic_quant_test
+    run_cpu_offloading_test
+    run_offloading_connector_test
     run_sleep_mode_test
     #run_embedding_model_test
     echo "🎉 All test suites passed successfully!"
