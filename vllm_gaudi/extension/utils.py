@@ -29,8 +29,8 @@ class Matmul(torch.nn.Module):
     def forward(self, x, y, **kwargs):
         return torch.matmul(x, y, **kwargs)
 
-class B2BMatmul(Matmul):
 
+class B2BMatmul(Matmul):
     """Specialized alias for batch2block and block2batch matmul operations.
     
     This class remains functionally identical to ``Matmul`` but is used to
@@ -38,6 +38,7 @@ class B2BMatmul(Matmul):
     fix that uses the B2B output measurements as the input measurements during
     calibration, avoiding corrupted scales from the KV‑cache.
     """
+    
     def __init__(self):
         super().__init__()
 
