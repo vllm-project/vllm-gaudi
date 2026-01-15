@@ -153,6 +153,11 @@ class HpuPlatform(Platform):
 
             print(f"========={compilation_config.custom_ops=}===========")
 
+        # NOTE: vLLM has default enabled async scheduling with speculative decoding is on.
+        # However, for HPU, speculative decoding is not supported with async scheduling.
+        vllm_config.scheduler_config.async_scheduling = \
+            vllm_config.scheduler_config.async_scheduling and vllm_config.speculative_config is None
+
     @classmethod
     def is_pin_memory_available(cls):
         logger.warning("Pin memory is not supported on HPU.")
