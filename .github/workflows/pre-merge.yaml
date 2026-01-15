@@ -291,7 +291,7 @@ jobs:
       - name: Determine Target Commit Based on PR Title
         id: determine_commit
         env:
-          PR_TITLE_ENV: ${{needs.retrieve_pr_info.outputs.pr_title }}
+          PR_TITLE_ENV: ${{ needs.retrieve_pr_info.outputs.pr_title }}
         run: |
           # Default to the stable commit from the previous step
           FINAL_TARGET="${VLLM_STABLE_COMMIT}"
