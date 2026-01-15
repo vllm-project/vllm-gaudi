@@ -11,7 +11,7 @@ from vllm.forward_context import override_forward_context
 from safetensors import safe_open
 
 
-def test_unquantized_fused_moe_method(dist_init):
+def test_unquantized_fused_moe_method(default_vllm_config: None, dist_init):
     # Prepare FusedMoE layer with oot HPUUnquantizedFusedMoEMethod
     oot_op = create_fused_moe().to("hpu")
     assert isinstance(oot_op.quant_method, HPUUnquantizedFusedMoEMethod)
