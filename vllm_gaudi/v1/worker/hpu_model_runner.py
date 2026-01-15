@@ -4577,23 +4577,32 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             #    height=h  # Custom height in pixels
             #)
             batch = img_count
-        '''
 
         processor = self.mm_registry.create_processor(model_config=self.model_config, cache=self.mm_budget.cache)
-        '''dummy_data = processor.dummy_inputs.get_decoder_dummy_data(processor,
+        dummy_data = processor.dummy_inputs.get_decoder_dummy_data(processor,
                                                                    seq_len=4096,
                                                                    mm_counts={"image": img_count},
                                                                    mm_options={"image": image_options}),
 
-        '''
         dummy_mm_data = processor.dummy_inputs.get_dummy_processor_inputs(
             seq_len=4096,
             mm_counts={"image": img_count},
         )
+        '''
 
         assert modality == 'image'
         # Result in the maximum GPU consumption of the model
-        dummy_mm_item = dummy_mm_data['image'][0]
+        dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
+            self.model_config,
+            mm_counts={modality: 1},
+            cache=self.mm_budget.cache,
+        )
+
+        dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
+        # We use the cache so that the item is saved to the cache,
+        # but not read from the cache
+        assert dummy_mm_item is not None, "Item should not already be cached"
+
         dummy_mm_items = [dummy_mm_item] * batch
 
         return next(mm_kwargs_group for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
