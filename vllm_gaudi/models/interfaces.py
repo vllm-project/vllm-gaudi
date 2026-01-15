@@ -38,4 +38,4 @@ def _embed_text_input_ids(
     return embed_input_ids(input_ids)
 
 
-SupportsMultiModal._embed_text_input_ids = _embed_text_input_ids
+#SupportsMultiModal._embed_text_input_ids = _embed_text_input_ids
