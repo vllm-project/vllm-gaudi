@@ -69,15 +69,15 @@ def matmul_shape(lhs, rhs):
 
 def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, batch_size, matmul_av_op, batch2block_matmul_op,
                  block2batch_matmul_op):
-    print(f"Danny running pipelined_pa {get_config().fused_block_softmax=} {get_config().fused_block_softmax_adjustment=}")
+    # print(f"Danny running pipelined_pa {get_config().fused_block_softmax=} {get_config().fused_block_softmax_adjustment=}")
     # When fp32_softmax is enabled attn is left in fp32 after Q@K
     # We can return to native dtype after we renormalize and calculate the adjustments
     if block_bias is not None and attn.dtype != block_bias.dtype:
         block_bias = block_bias.to(dtype=attn.dtype)
     # TODO: w/a with 5D req as the block_softmax kernel does not support 4D attn tensor, which is used in e.g. Granite-3B
     if get_config().fused_block_softmax and get_config().fused_block_softmax_adjustment and attn.dim() == 5:
-        print("Danny Warning: fused_block_softmax with 5D attn tensor is not supported yet, falling back to unfused path.")
-        print("Danny using fused_block_softmax without calling the nn.Module member.")
+        # print("Danny Warning: fused_block_softmax with 5D attn tensor is not supported yet, falling back to unfused path.")
+        # print("Danny using fused_block_softmax without calling the nn.Module member.")
         attn, block_max, block_sums = torch.ops.hpu.block_softmax(attn, block_bias, block_groups)
         if attn.dtype == torch.float32:
             attn = attn.to(value.dtype)
@@ -92,7 +92,7 @@ def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, batch_siz
         block_sums = attn.sum(dim=-1, keepdim=True)
     attn = matmul_av_op(attn, value)
     if get_config().fused_block_softmax_adjustment:
-        print("Danny using block_softmax_adjustment without calling the nn.Module member.")
+        # print("Danny using block_softmax_adjustment without calling the nn.Module member.")
         out_shape = list(attn.shape[:3]) + [1] * (attn.dim() - 3)
         rescale = torch.ops.hpu.block_softmax_adjustment(block_max, block_sums.to(block_max.dtype), block_groups,
                                                          batch_size, out_shape).to(attn.dtype)
@@ -584,6 +584,7 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
         w2_list = [self.w2_list[i].weight.squeeze() for i in experts_range]
 
         if self.moe_n_slice == 1:
+            print(f"VllmMixtureOfExpertsOp: running with single slice, calling moe with {hidden_states.shape=}, {expert_routing_table.shape=}, {router_weights.shape=}, {activation=}")
             return torch.ops.hpu.mixture_of_experts(hidden_states=hidden_states,
                                                     expert_routing_table=expert_routing_table,
                                                     router_weights=router_weights,
