@@ -328,6 +328,21 @@ run_pd_disaggregate_nixl_ucx_test() {
     echo "✅ PD disaggregate through NIXL UCX."
 }
 
+# CPU Offloading connector
+run_cpu_offloading_test() {
+    echo "➡️ Testing CPU offlading."
+    VLLM_SKIP_WARMUP=True VLLM_USE_V1=1 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/unit_tests/kv_offload/test_cpu_offloading.py"
+    echo "✅ Test CPU offlading passed."
+}
+
+run_offloading_connector_test() {
+    echo "➡️ Testing OffloadingConnector."
+    VLLM_SKIP_WARMUP=True VLLM_USE_V1=1 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/unit_tests/kv_offload/test_offloading_connector.py"
+    echo "✅ Test OffloadingConnector passed."
+}
+
 # sleep mode
 run_sleep_mode_test() {
     echo "Testing basic model with sleep mode / wake up functionality"
@@ -375,6 +390,8 @@ launch_all_tests() {
     run_spec_decode_eagle3_test
     run_spec_decode_eagle3_num_spec_2_test
     run_llama3_70b_inc_dynamic_quant_test
+    run_cpu_offloading_test
+    run_offloading_connector_test
     run_sleep_mode_test
     #run_embedding_model_test
     echo "🎉 All test suites passed successfully!"
