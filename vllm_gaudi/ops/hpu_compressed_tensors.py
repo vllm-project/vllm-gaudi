@@ -9,9 +9,9 @@ from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, FusedMoEConfig
 from compressed_tensors.quantization import (QuantizationArgs, QuantizationStrategy)
 
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import convert_to_channelwise, all_close_1d
-from vllm.model_executor.parameter import (ChannelQuantScaleParameter, ModelWeightParameter, PerTensorScaleParameter,
-                                           BasevLLMParameter, GroupQuantScaleParameter, PackedColumnParameter,
-                                           PackedvLLMParameter, RowvLLMParameter)
+from vllm.model_executor.parameter import (BlockQuantScaleParameter, ChannelQuantScaleParameter, ModelWeightParameter,
+                                           PerTensorScaleParameter, BasevLLMParameter, GroupQuantScaleParameter,
+                                           PackedColumnParameter, PackedvLLMParameter, RowvLLMParameter)
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsLinearMethod as OrigCompressedTensorsLinearMethod, CompressedTensorsConfig,
@@ -38,7 +38,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 import vllm.model_executor.model_loader.weight_utils as vllm_weight_utils
 
 logger = init_logger(__name__)
-SUPPORTED_STRATEGIES = [QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR]
+SUPPORTED_STRATEGIES = [QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR, QuantizationStrategy.BLOCK]
 
 
 @CustomOp.register_oot(name='CompressedTensorsLinearMethod')
@@ -167,13 +167,23 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         # WEIGHT SCALE
         if layer.scheme.strategy == QuantizationStrategy.CHANNEL:
-            weight_scale = ChannelQuantScaleParameter(data=torch.empty((sum(output_partition_sizes), 1),
+            weight_scale = ChannelQuantScaleParameter(data=torch.empty((output_size_per_partition, 1),
                                                                        dtype=torch.float32),
                                                       output_dim=0,
                                                       weight_loader=weight_loader)
         elif layer.scheme.strategy == QuantizationStrategy.TENSOR:
             weight_scale = PerTensorScaleParameter(data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
                                                    weight_loader=weight_loader)
+        elif layer.scheme.strategy == QuantizationStrategy.BLOCK:
+            # print("AAAA", extra_weight_attrs.keys())
+            # block_n, block_k = layer.scheme.block_structure
+            # out_blks = output_size_per_partition // block_n
+            # in_blks = input_size_per_partition // block_k
+            # layer.weight_block_size = [128, 128]  # Hardcoded for now
+            weight_scale = BlockQuantScaleParameter(data=torch.empty((128, 128), dtype=torch.float32),
+                                                    input_dim=2,
+                                                    output_dim=0,
+                                                    weight_loader=weight_loader)
         else:
             raise ValueError(f"Unsupported weight strategy={layer.scheme.strategy}, "
                              f"supported strategies are {SUPPORTED_STRATEGIES}")
