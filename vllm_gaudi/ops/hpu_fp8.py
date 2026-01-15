@@ -5,6 +5,7 @@ import torch
 from vllm_gaudi import envs
 from torch.nn.parameter import Parameter
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 
 from vllm.model_executor.layers.quantization import fp8
 from vllm.model_executor.layers.quantization.fp8 import (Fp8LinearMethod as OrigFp8LinearMethod, Fp8MoEMethod,
@@ -149,6 +150,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
     def apply(
         self,
         layer: FusedMoE,
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         **kwargs,
@@ -156,7 +158,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-            topk_weights, topk_ids = layer.select_experts(hidden_states=x, router_logits=router_logits)
+            topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)

@@ -36,10 +36,10 @@ from vllm_gaudi.extension.utils import align_and_pad, pad_list, with_default
 from vllm_gaudi.extension.debug import init_debug_logger
 from vllm_gaudi.v1.worker.hpu_dp_utils import set_hpu_dp_metadata
 
-from vllm.attention.backends.abstract import AttentionType
+from vllm.v1.attention.backend import AttentionType
 from vllm.attention.layer import Attention
 from vllm.attention.layer import MLAAttention
-from vllm.attention.selector import get_attn_backend
+from vllm.v1.attention.selector import get_attn_backend
 
 from vllm.config import (VllmConfig, update_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
@@ -94,8 +94,6 @@ from vllm_gaudi.extension.ops import LoraMask as LoraMask
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnectorMetadata
 from vllm.v1.core.sched.output import GrammarOutput
-from vllm.config.multimodal import ImageDummyOptions
-from vllm.multimodal.profiling import MultiModalProfiler
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -161,7 +159,7 @@ class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         """Copy the device tensors to the host and return a ModelRunnerOutput.
-        
+
         This function blocks until the copy is finished.
         """
 
@@ -2413,7 +2411,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                            scheduler_output: "SchedulerOutput",
                            return_index: bool = False) -> Optional[torch.Tensor]:
         """Prepare the input IDs for the current batch.
-        
+
         Carefully handles the `prev_sampled_token_ids` which can be cached
         from the previous engine iteration, in which case those tokens on the
         GPU need to be copied into the corresponding slots into input_ids."""
@@ -3842,6 +3840,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                 delattr(mla_attn, m)
 
     def _inc_preprocess(self):
+        _apply_inc_patch()
         self._remove_duplicate_submodules()
 
     def log_graph_warmup_summary(self, buckets, is_prompt, total_mem):
@@ -4294,7 +4293,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
     def get_merged_prefill_seq_lens(self, query_len, ctx_blocks):
         '''
-        Get seperate sequence lengths from merged layout to individual 
+        Get seperate sequence lengths from merged layout to individual
         samples.
         Returns list of sequence length (including query and context) and
         context lengths.
@@ -4555,34 +4554,42 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         """Dummy data for profiling and precompiling multimodal models."""
         assert self.mm_budget is not None
         img_count = 1
-        if self.get_model().vision_bucket_manager.is_batch_based:
+        batch = image_args if self.get_model().vision_bucket_manager.is_batch_based else img_count
+        '''if self.get_model().vision_bucket_manager.is_batch_based:
             # Create ImageDummyOptions for Gemma3
-            image_options = ImageDummyOptions(
-                width=896,  # pixels as in gemma3 config
-                height=896  # pixels as in gemma3 config
-            )
+            #image_options = ImageDummyOptions(
+            #    width=896,  # pixels as in gemma3 config
+            #    height=896  # pixels as in gemma3 config
+            #)
             batch = image_args
         else:
-            patch_size = int(self.get_patch_size_from_model())
+            #patch_size = int(self.get_patch_size_from_model())
             # Calculate width and height to maintain aspect ratio and patch count
             # Total patches = (width/patch_size) * (height/patch_size)
             # We want: (w/ps) * (h/ps) = num_patch where num_patch is image_args
             # And: w/h = ratio_w/ratio_h
-            grid_w = int(math.sqrt(image_args * ratio_w / ratio_h))
-            grid_h = int(image_args / grid_w)
-            w = grid_w * patch_size
-            h = grid_h * patch_size
-            image_options = ImageDummyOptions(
-                width=w,  # Custom width in pixels
-                height=h  # Custom height in pixels
-            )
+            #grid_w = int(math.sqrt(image_args * ratio_w / ratio_h))
+            #grid_h = int(image_args / grid_w)
+            #w = grid_w * patch_size
+            #h = grid_h * patch_size
+            #image_options = ImageDummyOptions(
+            #    width=w,  # Custom width in pixels
+            #    height=h  # Custom height in pixels
+            #)
             batch = img_count
+        '''
+
         processor = self.mm_registry.create_processor(model_config=self.model_config, cache=self.mm_budget.cache)
-        profiler: MultiModalProfiler = MultiModalProfiler(processor)
-        dummy_data = profiler.get_decoder_dummy_data(seq_len=4096,
-                                                     mm_counts={"image": img_count},
-                                                     mm_options={"image": image_options})
-        dummy_mm_data = dummy_data.multi_modal_data
+        '''dummy_data = processor.dummy_inputs.get_decoder_dummy_data(processor,
+                                                                   seq_len=4096,
+                                                                   mm_counts={"image": img_count},
+                                                                   mm_options={"image": image_options}),
+
+        '''
+        dummy_mm_data = processor.dummy_inputs.get_dummy_processor_inputs(
+            seq_len=4096,
+            mm_counts={"image": img_count},
+        )
 
         assert modality == 'image'
         # Result in the maximum GPU consumption of the model
@@ -4820,7 +4827,30 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
     @torch.inference_mode()
     def profile_run(self) -> None:
-        return
+        # Skip profile run on decode instances
+        if (self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_consumer):
+            return
+
+        max_batch_size = max(1, min(self.max_num_seqs, self.max_num_tokens // self.max_model_len))
+        if self.supports_mm_inputs:
+            # Using batch_size 1 for profiling multimodal models
+            max_batch_size = 1
+
+        # Run a simple profile scenario using the existing dummy run infrastructure
+        if self.unified_attn:
+            # (query_len, shared_ctx_len, unique_ctx_len, is_causal) for unified attention
+            unified_cfg = (self.max_model_len * max_batch_size, 0, 0, True)
+            self._prepare_dummy_unified_scenario(unified_cfg)
+        else:
+            if self.max_model_len < self.max_num_batched_tokens:
+                prompt_cfg = (max_batch_size, self.max_model_len, 0)
+            else:
+                # Assume bs=1 with max context for profile run
+                prompt_cfg = (1, self.max_num_batched_tokens,
+                              (self.max_model_len - self.max_num_batched_tokens + self.block_size - 1) //
+                              self.block_size)
+            decode_cfg = None
+            self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
 
     def _dummy_run(self, max_num_batched_tokens: int) -> None:
         assert max_num_batched_tokens == 1
@@ -5269,9 +5299,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self,
         sampled_token_ids: list[list[int]],
     ) -> list[list[int]]:
-        draft_token_ids = self.drafter.propose(sampled_token_ids, self.input_batch.req_ids,
-                                               self.input_batch.num_tokens_no_spec, self.input_batch.token_ids_cpu,
-                                               self.input_batch.spec_decode_unsupported_reqs)
+        draft_token_ids = self.drafter.propose(
+            sampled_token_ids,
+            self.input_batch.num_tokens_no_spec,
+            self.input_batch.token_ids_cpu,
+        )
         # swipe draft_token_ids_native replacing [] to [-1]
         for i in range(len(draft_token_ids)):
             if len(draft_token_ids[i]) == 0:
@@ -5335,7 +5367,7 @@ class TensorTuple(tuple):
     """
     A tuple subclass designed to hold nested torch.Tensors, providing
     .shape and .device properties.
-    
+
     It ensures that the nested structure is not ragged and that all
     contained tensors reside on the same device.
     """
@@ -5379,7 +5411,7 @@ class TensorTuple(tuple):
 class HPUAttentionMetadataProcessor:
     """
     Processor class for post-processing HPU attention metadata.
-    
+
     This class takes already-built attention metadata and augments it with
     additional tensors such as attention bias masks and block mappings that
     are required for efficient attention computation on HPU. It does NOT build
@@ -5613,3 +5645,13 @@ class HPUAttentionMetadataProcessor:
             if self.interleaved_sliding_window:
                 attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype, True)
         return attn_metadata
+
+
+def _apply_inc_patch():
+    # TODO: (yiliu30) Remove this function when INC fixes the issue.
+    from neural_compressor.torch.algorithms.fp8_quant._quant_common.quant_config import (
+        supported_dynamic_ops as inc_supported_dynamic_ops, )
+    from neural_compressor.torch.algorithms.fp8_quant._quant_common import quant_config as inc_quant_config
+
+    fixed_dynamic_ops = inc_supported_dynamic_ops + ["MoeMatmul"]
+    inc_quant_config.supported_dynamic_ops = fixed_dynamic_ops
