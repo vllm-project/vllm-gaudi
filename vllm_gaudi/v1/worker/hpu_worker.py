@@ -134,7 +134,10 @@ class HPUWorker(WorkerBase):
         self.profiler.stop()
 
     def init_device(self):
+        # Set the device for this worker.
         self.device = torch.device("hpu")
+        torch.hpu.set_device(self.local_rank)
+
         # Initialize the distributed environment.
         init_worker_distributed_environment(self.vllm_config, self.rank, self.distributed_init_method, self.local_rank)
         # Set random seed.
