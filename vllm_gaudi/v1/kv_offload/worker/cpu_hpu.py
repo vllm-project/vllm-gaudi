@@ -225,6 +225,22 @@ class SingleDirectionOffloadingHandlerHpu(OffloadingHandler):
         # success
         return True
 
+    def get_finished(self) -> list[TransferResult]:
+        results: list[TransferResult] = []
+        while self._transfers and self._transfers[0][2].query():
+            job_id, stream, event = self._transfers.popleft()
+            results.append((job_id, True))
+            self._stream_pool.append(stream)
+            self._event_pool.append(event)
+            del self._transfer_events[job_id]
+        return results
+
+    def wait(self, job_ids: set[int]):
+        for job_id in job_ids:
+            event = self._transfer_events.get(job_id)
+            if event is not None:
+                event.synchronize()
+
 
 class CpuHpuOffloadingHandlers:
     def __init__(
@@ -347,7 +363,7 @@ def get_handlers(
                 attn_backends=attn_backends,
                 gpu_block_size=self.gpu_block_size,
                 cpu_block_size=self.offloaded_block_size,
-                num_cpu_blocks=self.num_cpu_blocks,
+                num_cpu_blocks=self.num_blocks,
                 gpu_caches=kv_caches,
             )
 
@@ -357,6 +373,5 @@ def get_handlers(
 
 
 CPUOffloadingSpec.get_handlers = get_handlers
-SingleDirectionOffloadingHandler.__init__ = SingleDirectionOffloadingHandlerHpu.__init__
-SingleDirectionOffloadingHandler.transfer_async = SingleDirectionOffloadingHandlerHpu.transfer_async
+SingleDirectionOffloadingHandler = SingleDirectionOffloadingHandlerHpu
 CpuGpuOffloadingHandlers = CpuHpuOffloadingHandlers

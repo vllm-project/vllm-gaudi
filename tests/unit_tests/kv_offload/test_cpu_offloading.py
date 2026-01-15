@@ -14,8 +14,8 @@ from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import BlockStored, KVEventBatch
 from vllm.platforms import current_platform
 
-CPU_BLOCK_SIZES = [128] #[48]
-ATTN_BACKENDS = []
+CPU_BLOCK_SIZES = [128]
+ATTN_BACKENDS = ["CUSTOM"]
 MODEL = "/software/data/pytorch/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6"
 
 if current_platform.is_cuda():

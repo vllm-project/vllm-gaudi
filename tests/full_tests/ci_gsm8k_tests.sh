@@ -331,7 +331,7 @@ run_pd_disaggregate_nixl_ucx_test() {
     echo "✅ PD disaggregate through NIXL UCX."
 }
 
-# CPU Offloading connector #YSY
+# CPU Offloading connector
 run_cpu_offloading_test() {
     echo "➡️ Testing CPU offlading."
     VLLM_SKIP_WARMUP=True VLLM_USE_V1=1 \
