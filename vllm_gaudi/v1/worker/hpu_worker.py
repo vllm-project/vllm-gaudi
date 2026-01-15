@@ -94,6 +94,60 @@ class HPUWorker(WorkerBase):
         self.kv_cache_sleeping = False
         self.kv_cache_config = None
 
+        # Select available Habana modules before initializing the device.
+        self._configure_habana_visible_modules()
+
+    def _configure_habana_visible_modules(self):
+        import pyhlml
+        pyhlml.hlmlInit()
+        try:
+            available_module_ids = []
+            device_count = torch.hpu.device_count()
+            if device_count < 1:
+                raise RuntimeError("No Habana devices found.")
+            for i in range(device_count):
+                try:
+                    device = pyhlml.hlmlDeviceGetHandleByIndex(i)
+                    utility = pyhlml.hlmlDeviceGetUtilizationRates(device)
+                    if utility.aip == 0 and utility.memory == 0:
+                        module_id = pyhlml.hlmlDeviceGetModuleID(device)
+                        available_module_ids.append(module_id)
+                except Exception:
+                    continue
+            if len(available_module_ids) < 1:
+                raise RuntimeError("No available Habana modules found. All modules are currently in use.")
+            env_visible_modules = os.getenv("HABANA_VISIBLE_MODULES")
+            if env_visible_modules is None:
+                if len(available_module_ids) < self.parallel_config.world_size:
+                    raise RuntimeError(
+                        f"Not enough available modules for world_size={self.parallel_config.world_size}.")
+                available_modules_str = ",".join(map(str, sorted(available_module_ids)))
+                logger.info("HABANA_VISIBLE_MODULES is not set, using all available modules: %s", available_modules_str)
+                os.environ["HABANA_VISIBLE_MODULES"] = available_modules_str
+            else:
+                if not all(c.isdigit() for c in env_visible_modules.split(",")):
+                    raise RuntimeError(f"Invalid HABANA_VISIBLE_MODULES={env_visible_modules}. "
+                                       "It should be a comma-separated list of integers.")
+                env_module_ids = list(map(int, env_visible_modules.split(",")))
+                if any(module_id < 0 or module_id >= device_count for module_id in env_module_ids):
+                    raise RuntimeError(f"Invalid HABANA_VISIBLE_MODULES={env_visible_modules}. "
+                                       f"Module IDs should be between 0 and {device_count - 1}.")
+                if any(env_module_id not in available_module_ids for env_module_id in env_module_ids):
+                    logger.warning("Some device for HABANA_VISIBLE_MODULES=%s are not available.", env_visible_modules)
+                    selected_modules = [x for x in env_module_ids if x in available_module_ids]
+                    if len(selected_modules) < self.parallel_config.world_size:
+                        raise RuntimeError(
+                            f"Not enough available modules for world_size={self.parallel_config.world_size}. "
+                            "Set HABANA_VISIBLE_MODULES to include more available modules and try again.")
+                    else:
+                        selected_modules_str = ",".join(map(str, sorted(selected_modules)))
+                        os.environ["HABANA_VISIBLE_MODULES"] = selected_modules_str
+                        logger.warning("Using selected available modules: %s", selected_modules_str)
+        except Exception as e:
+            raise e
+        finally:
+            pyhlml.hlmlShutdown()
+
     def init_profiler(self):
         """Initialize the profiler."""
         if envs.VLLM_TORCH_PROFILER_DIR:
