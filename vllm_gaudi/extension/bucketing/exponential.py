@@ -86,8 +86,9 @@ class ExponentialBucketingStrategy():
         decode_bs_bucket_cfg = [1, 2, max_num_seqs, decode_bs_limit]
         decode_query_bucket_cfg = [1, 1, 1, 1]
         max_decode_block_limit = math.ceil(math.log2(max_blocks)) + 1
+        max_factor = int(max_blocks * max_num_seqs // 4)
         max_decode_blocks = max_blocks if use_contiguous_pa else \
-                            (max_model_len // block_size * max_num_seqs)
+                            min((max_model_len // block_size * max_num_seqs), max_factor)
         decode_block_bucket_cfg = [1, max_num_seqs, max_decode_blocks, max_decode_block_limit]
 
         msg = ("Decode bucket config (min, step, max_warmup, limit) "
