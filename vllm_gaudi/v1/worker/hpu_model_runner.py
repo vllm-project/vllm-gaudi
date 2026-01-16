@@ -1526,7 +1526,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
                 req_start_pos = req_start_idx + start_pos - num_computed_tokens
                 is_mm_embed[req_start_pos + start_idx:req_start_pos +
-                is_mm_embed[req_start_pos + start_idx:req_start_pos +
                             end_idx] = (True if is_embed is None else is_embed)
                 mm_embeds_req.append(mm_embeds_item)
             mm_embeds.extend(mm_embeds_req)
@@ -3904,6 +3903,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
         self.model_memory_usage = m.consumed_device_memory
         logger.info("Loading model weights took %.4f GB", self.model_memory_usage / float(2**30))
+        
 
         if self._is_quant_with_inc():
             logger.info("Preparing model with INC..")
@@ -4822,8 +4822,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         phase = 'Graph/Multimodal'
         from vllm.v1.worker.utils import MultiModalBudget
         self.mm_budget = MultiModalBudget(
-            self.model_config,
-            self.scheduler_config,
+            self.vllm_config,
             self.mm_registry,
         ) if self.supports_mm_inputs else None
         aspect_ratios = [(1, 1)]  # 1:1 square
