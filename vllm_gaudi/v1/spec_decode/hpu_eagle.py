@@ -237,6 +237,9 @@ class HpuEagleProposer(EagleProposer):
             window_block_list=None,
             window_block_usage=None,
             window_block_groups=None,
+            chunked_block_list=None,
+            chunked_block_usage=None,
+            chunked_block_groups=None,
         )
 
         return common_attn_metadata
