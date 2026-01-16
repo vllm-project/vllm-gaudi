@@ -432,8 +432,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         super(AttentionImpl, self).__init__()
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         if kv_sharing_target_layer_name is not None:
-            logger.info(f"[KV sharing] HPUAttentionImpl initialized with kv_sharing_target_layer_name: "
-                        f"{self.kv_sharing_target_layer_name}")
+            logger.info("[KV sharing] HPUAttentionImpl initialized with kv_sharing_target_layer_name: %s",
+                        self.kv_sharing_target_layer_name)
         if use_irope:
             logger.warning_once("Using irope in HPU is not supported yet, it will fall back "
                                 "to global attention for long context.")

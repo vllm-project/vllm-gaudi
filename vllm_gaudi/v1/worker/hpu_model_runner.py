@@ -962,7 +962,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     )
                     self.shared_kv_cache_layers[layer_name] = kv_sharing_target_layer_name
                 except Exception as e:
-                    logger.error(f"KV sharing validation failed for {layer_name} -> {kv_sharing_target_layer_name}: {e}")
+                    logger.error("KV sharing validation failed for %s -> %s: %s", layer_name,
+                                 kv_sharing_target_layer_name, e)
                 continue
             if isinstance(attn_module, FusedMoE):
                 continue
@@ -993,7 +994,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     cache_dtype_str=cache_dtype_str,
                 )
 
-        
         return kv_cache_spec
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> bool:
@@ -4887,9 +4887,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
         return
 
-    def maybe_add_kv_sharing_layers_to_kv_cache_groups(
-        self, kv_cache_config: KVCacheConfig
-    ) -> None:
+    def maybe_add_kv_sharing_layers_to_kv_cache_groups(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Add layers that re-use KV cache to KV cache group of its target layer.
         Mapping of KV cache tensors happens in the KV cache initialization.
@@ -4897,7 +4895,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if not self.shared_kv_cache_layers:
             # No cross-layer KV sharing, return
             return
-        
+
         add_kv_sharing_layers_to_kv_cache_groups(
             self.shared_kv_cache_layers,
             kv_cache_config.kv_cache_groups,
@@ -4982,13 +4980,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             layer_names = set()
             for group in kv_cache_config.kv_cache_groups:
                 layer_names.update(group.layer_names)
-            
+
             # Set up cross-layer KV cache sharing
             if self.shared_kv_cache_layers:
-                logger.info(f"[KV sharing] Setting up tensor sharing for {len(self.shared_kv_cache_layers)} layers")
+                logger.info("[KV sharing] Setting up tensor sharing for %s layers", len(self.shared_kv_cache_layers))
                 for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
                     kv_caches[layer_name] = kv_caches[target_layer_name]
-            
+
             assert layer_names == set(kv_caches.keys()), "Some layers are not correctly initialized"
         bind_kv_cache(kv_caches, self.vllm_config.compilation_config.static_forward_context, self.kv_caches)
 
