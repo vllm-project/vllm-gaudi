@@ -5252,16 +5252,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         kv_caches: dict[str, torch.Tensor] = {}
         kv_cache_sizes = {}
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            for lname in kv_cache_tensor.shared_by:
-                kv_cache_sizes[lname] = kv_cache_tensor.size # forse si, forse no
-        has_mamba = False
-        for kv_cache_group in kv_cache_config.kv_cache_groups:
-            kv_cache_spec = kv_cache_group.kv_cache_spec
-            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                # Only process tensors for layers in the current group
-                # TODO: The loops should be handled smarter, so this check is not needed
-                if not set(kv_cache_tensor.shared_by).intersection(set(kv_cache_group.layer_names)):
-                    continue
+            for layer_name in kv_cache_tensor.shared_by:
+                # Get the correct spec for this layer
+                kv_cache_spec = None
+                for group in kv_cache_config.kv_cache_groups:
+                    if layer_name in group.layer_names:
+                        kv_cache_spec = group.kv_cache_spec
+                        break
+                assert kv_cache_spec is not None, f"No spec found for {layer_name}"
                 assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
                 num_blocks = \
                     kv_cache_tensor.size // kv_cache_spec.page_size_bytes
@@ -5275,10 +5273,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 assert num_blocks >= kv_cache_config.num_blocks
                 if isinstance(kv_cache_spec, FullAttentionSpec):
                     kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
-                                                                          kv_cache_spec.num_kv_heads,
-                                                                          kv_cache_spec.head_size)
-                    v_cache_shape = None if self.model_config.use_mla \
-                        else kv_cache_shape
+                                                                            kv_cache_spec.num_kv_heads,
+                                                                            kv_cache_spec.head_size)
+                    v_cache_shape = None if self.model_config.use_mla else kv_cache_shape
                     dtype = kv_cache_spec.dtype
                     if dtype == torch.float8_e4m3fn and os.environ.get('QUANT_CONFIG', None) is not None and \
                         os.environ.get('VLLM_DYNAMIC_KV_QUANT', None) is not None and not self.model_config.use_mla:
@@ -5304,47 +5301,20 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     else:
                         value_cache = None
                         value_scales = None
-
-                    for layer_name in kv_cache_tensor.shared_by:
-                        kv_caches[layer_name] = (key_cache, value_cache, key_scales, value_scales)
+                    kv_caches[layer_name] = (key_cache, value_cache, key_scales, value_scales)
                 elif isinstance(kv_cache_spec, MambaSpec):
-                    has_mamba = True
-                    # raw_tensor = kv_cache_raw_tensors[layer_name]
-                    # state_tensors = []
-                    # storage_offset_bytes = 0
-                    # for (shape, dtype) in zip(kv_cache_spec.shapes,
-                    #                           kv_cache_spec.dtypes):
-                    #     dtype_size = get_dtype_size(dtype)
-                    #     num_element_per_page = (
-                    #         kv_cache_spec.page_size_bytes // dtype_size)
-                    #     target_shape = (num_blocks, *shape)
-                    #     stride = torch.empty(target_shape).stride()
-                    #     target_stride = (num_element_per_page, *stride[1:])
-                    #     assert storage_offset_bytes % dtype_size == 0
-                    #     tensor = torch.as_strided(
-                    #         raw_tensor.view(dtype),
-                    #         size=target_shape,
-                    #         stride=target_stride,
-                    #         storage_offset=storage_offset_bytes // dtype_size,
-                    #     )
-                    #     state_tensors.append(tensor)
-                    #     storage_offset_bytes += stride[0] * dtype_size
-
-                    # kv_caches[layer_name] = state_tensors
-
-                    # ASSUMING that we use only contiguous tensor
                     state_tensors = []
                     for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
                         target_shape = (num_blocks, *shape)
                         tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
                         state_tensors.append(tensor)
-                    for layer_name in kv_cache_tensor.shared_by:
-                        kv_caches[layer_name] = state_tensors
+                    kv_caches[layer_name] = state_tensors
                 else:
-                    # TODO: add new branches when introducing more types of
-                    # KV cache specs.
-                    raise ValueError("Unknown KV cache spec type.")
-        # TODO: Merge loops for groups
+                    raise ValueError(f"Unknown KV cache spec type for layer {layer_name}: {type(kv_cache_spec)}")
+
+            for lname in kv_cache_tensor.shared_by:
+                kv_cache_sizes[lname] = kv_cache_tensor.size
+
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
             layer_names.update(group.layer_names)
