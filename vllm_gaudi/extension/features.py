@@ -66,7 +66,7 @@ def get_features():
     bucketing_strategies = ['exponential_bucketing', 'linear_bucketing']
     features = [
         Value('fp32_alibi_biases', True, env_var='VLLM_ALIBI_USE_FLOAT32_BIASES'),
-        Value('fp32_softmax', ModelType('qwen2')),
+        Value('fp32_softmax', Any(ModelType('qwen2'), ModelType('qwen2_5_vl'))),
         Value(
             'fused_block_softmax_adjustment',
             All(VersionRange(">=1.22.0.494"), Hardware('gaudi3'), Kernel(block_softmax_adjustment),
