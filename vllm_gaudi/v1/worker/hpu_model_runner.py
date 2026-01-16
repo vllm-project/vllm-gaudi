@@ -1519,10 +1519,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         padding_fn = None
         block_bucket_size: int
         if self.use_contiguous_pa:
-            block_bucket_size = max(max(block_list) + 1, len(block_list))
+            actual_blocks_needed = max(block_list) + 1 if block_list else 0
+
             block_bucket_size = \
                 self.bucketing_manager.find_decode_bucket(batch_size,
-                                                          block_bucket_size)[2]
+                                                          actual_blocks_needed)[2]
             block_bucket_size += self.get_dp_padding(block_bucket_size)
 
             indices: list[Any]
