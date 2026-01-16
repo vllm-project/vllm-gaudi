@@ -7,7 +7,6 @@ from torch import nn
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.config import VllmConfig
 from vllm.model_executor.models.qwen3_vl import (
-    Qwen3VLForConditionalGeneration,
     Qwen3_VisionTransformer,
     Qwen3_VisionBlock,
 )
@@ -165,7 +164,7 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
             self._set_deepstack_input_embeds(deepstack_input_embeds)
 
         return inputs_embeds
-    
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 

@@ -94,8 +94,6 @@ from vllm_gaudi.extension.ops import LoraMask as LoraMask
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnectorMetadata
 from vllm.v1.core.sched.output import GrammarOutput
-from vllm.config.multimodal import ImageDummyOptions
-from vllm.multimodal.profiling import MultiModalProfiler
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -1467,6 +1465,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 self.encoder_cache[req_id] = {}
 
             self.encoder_cache[mm_hash] = output
+
     # modified from: vllm/v1/worker/gpu_model_runner.py
     def _gather_mm_embeddings(
         self,
@@ -1526,7 +1525,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     mm_embeds_item = encoder_output[start_idx:end_idx]
 
                 req_start_pos = req_start_idx + start_pos - num_computed_tokens
-                is_mm_embed[req_start_pos + start_idx : req_start_pos +
+                is_mm_embed[req_start_pos + start_idx:req_start_pos +
                             end_idx] = (True if is_embed is None else is_embed)
                 mm_embeds_req.append(mm_embeds_item)
             mm_embeds.extend(mm_embeds_req)
@@ -4789,7 +4788,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             mm_counts={"image": img_count},
         )
         '''
-        
+
         assert modality == 'image'
         # Result in the maximum GPU consumption of the model
         dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
