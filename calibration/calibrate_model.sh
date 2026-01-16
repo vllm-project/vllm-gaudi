@@ -229,6 +229,12 @@ if $ENFORCE_EAGER; then
     EXTRA_FLAGS_STEP_4+="--enforce-eager "
 fi
 
+# if USE_EP is not empty, then add --expert-parallel flags
+if [[ -n $USE_EP ]]; then
+    EXTRA_FLAGS_STEP_2+="--expert-parallel "
+    EXTRA_FLAGS_STEP_4+="--expert-parallel "
+fi
+
 if $SKIP_STEP_1; then
     echo "Skipping step 1 - prepare calibration dataset with dataset ${DATASET_PATH_OR_NAME}"
 else
