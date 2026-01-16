@@ -94,7 +94,7 @@ MULTI_NODE_SETUP=false
 USE_EP=""
 ENFORCE_EAGER=false
 
-while getopts "m:b:l:t:d:h:o:r:u:e" OPT; do
+while getopts "m:b:l:t:d:h:o:r:ue" OPT; do
     case ${OPT} in
         m )
             MODEL_PATH="$OPTARG"
@@ -117,9 +117,9 @@ while getopts "m:b:l:t:d:h:o:r:u:e" OPT; do
         r )
             RANK="$OPTARG"
             ;;
-	u )
-	    USE_EP="--use_expert_paral"
-	    ;;
+        u )
+            USE_EP="--use_expert_paral"
+            ;;
         e ) 
             ENFORCE_EAGER=true
             ;;
