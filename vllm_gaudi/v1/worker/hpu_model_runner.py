@@ -1477,7 +1477,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
             prompt_req_ids.append(req_id)
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            prompt_scheduled_tokens.append(num_scheduled_tokens)
+            prompt_scheduled_tokens.append(int(num_scheduled_tokens))
 
         return PromptDecodeInfo(prompt_req_ids, decode_req_ids, prompt_scheduled_tokens)
 
