@@ -1411,10 +1411,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
         spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens.get(req_id)
 
-        decode_tokens = 1 if spec_decode_tokens is None else int(spec_decode_tokens)
+        num_decode_tokens = 1 if spec_decode_tokens is None else int(spec_decode_tokens)
 
         is_prompt = num_computed_tokens < num_prompt_tokens  # normal prompt
-        is_prompt = is_prompt or num_scheduled_tokens > decode_tokens  # preempted prompt
+        is_prompt = is_prompt or num_scheduled_tokens > num_decode_tokens  # preempted prompt
         is_prompt = is_prompt and not self.is_decoder_only(req_id)
 
         return is_prompt
