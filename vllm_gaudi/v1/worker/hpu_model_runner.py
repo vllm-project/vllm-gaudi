@@ -1526,6 +1526,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
                 req_start_pos = req_start_idx + start_pos - num_computed_tokens
                 is_mm_embed[req_start_pos + start_idx:req_start_pos +
+                is_mm_embed[req_start_pos + start_idx:req_start_pos +
                             end_idx] = (True if is_embed is None else is_embed)
                 mm_embeds_req.append(mm_embeds_item)
             mm_embeds.extend(mm_embeds_req)
@@ -5578,8 +5579,6 @@ class TensorTuple(tuple):
     def dtype(self):
         """Returns the torch.dtype of the tensors within the tuple."""
         return self._dtype
-<<<<<<< HEAD
-=======
 
 
 class HPUAttentionMetadataProcessor:
@@ -5819,4 +5818,3 @@ class HPUAttentionMetadataProcessor:
             if self.interleaved_sliding_window:
                 attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype, True)
         return attn_metadata
->>>>>>> 7c6329e (precommit fix and fix use_window_sdpa)
