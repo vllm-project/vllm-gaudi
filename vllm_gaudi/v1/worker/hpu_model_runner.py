@@ -993,9 +993,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     cache_dtype_str=cache_dtype_str,
                 )
 
-        logger.info(f"[KV sharing debug] Final summary:")
-        logger.info(f"[KV sharing debug]   - KV cache specs created for {len(kv_cache_spec)} layers: {list(kv_cache_spec.keys())}")
-        logger.info(f"[KV sharing debug]   - KV sharing configured for {len(self.shared_kv_cache_layers)} layers: {dict(self.shared_kv_cache_layers)}")
         
         return kv_cache_spec
 
@@ -4898,13 +4895,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         Mapping of KV cache tensors happens in the KV cache initialization.
         """
         if not self.shared_kv_cache_layers:
-            logger.info("[KV sharing] No shared KV cache layers found, skipping KV cache group modification.")
+            # No cross-layer KV sharing, return
             return
-        logger.info("[KV sharing] Adding shared KV cache layers to KV cache groups.")
+        
         add_kv_sharing_layers_to_kv_cache_groups(
             self.shared_kv_cache_layers,
             kv_cache_config.kv_cache_groups,
-            # Skip runner_only_attn_layers for HPU as mentioned in requirements
         )
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
