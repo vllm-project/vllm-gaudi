@@ -432,8 +432,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         super(AttentionImpl, self).__init__()
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         if kv_sharing_target_layer_name is not None:
-            logger.info(f"[KV sharing] HPUAttentionImpl initialized with kv_sharing_target_layer_name: "
-                        f"{self.kv_sharing_target_layer_name}")
+            logger.info("[KV sharing] HPUAttentionImpl initialized with kv_sharing_target_layer_name: %s",
+                        self.kv_sharing_target_layer_name)
         if use_irope:
             logger.warning_once("Using irope in HPU is not supported yet, it will fall back "
                                 "to global attention for long context.")
@@ -574,7 +574,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         if kv_cache is not None and isinstance(kv_cache, tuple):
             key_cache, value_cache, k_scales, v_scales = \
                 HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
-            
+
             if self.kv_sharing_target_layer_name is None:
                 # Reshape the input keys and values and store them in the cache.
                 # If kv_cache is not provided, the new key and value tensors are
