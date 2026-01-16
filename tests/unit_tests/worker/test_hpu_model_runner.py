@@ -390,7 +390,6 @@ def test_reload_weights_before_load_model(model_runner):
         model_runner.reload_weights()
 
 
-@pytest.mark.xfail(reason="KV sharing doesn't currently work on HPU")
 def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(default_vllm_config: None):
     torch.set_default_dtype(torch.bfloat16)
     layer_0 = "model.layers.0.self_attn.attn"
@@ -418,7 +417,6 @@ def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(default_vllm_c
         assert fwd_context is not None
 
 
-@pytest.mark.xfail(reason="KV sharing doesn't currently work on HPU")
 def test_init_kv_cache_with_kv_sharing_target_layer_not_exist(default_vllm_config: None):
     torch.set_default_dtype(torch.bfloat16)
     layer_0 = "model.layers.0.self_attn.attn"
@@ -448,7 +446,6 @@ def test_init_kv_cache_with_kv_sharing_target_layer_not_exist(default_vllm_confi
         assert fwd_context is not None
 
 
-@pytest.mark.xfail(reason="KV sharing doesn't currently work on HPU")
 def test_init_kv_cache_with_kv_sharing_target_same_as_current(default_vllm_config: None):
     torch.set_default_dtype(torch.bfloat16)
     layer_0 = "model.layers.0.self_attn.attn"
@@ -544,7 +541,6 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config: None):
     assert kv_cache_config.kv_cache_groups[0].layer_names[1] == layer_1
 
 
-@pytest.mark.xfail(reason="KV sharing doesn't currently work on HPU")
 def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config: None):
     torch.set_default_dtype(torch.bfloat16)
     layer_0 = "model.layers.0.self_attn.attn"
