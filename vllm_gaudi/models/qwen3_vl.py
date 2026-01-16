@@ -1,4 +1,8 @@
-<<<<<<< HEAD
+import torch
+from .utils import _merge_multimodal_embeddings
+from vllm.model_executor.models.interfaces import MultiModalEmbeddings
+from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
+from vllm.model_executor.models.interfaces import _require_is_multimodal
 from torch import nn
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.config import VllmConfig
@@ -84,27 +88,6 @@ class HPUQwen3_VisionTransformerStaticShape(Qwen3_VisionTransformer):
 
 class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
-
-        quant_config = getattr(self, "quant_config", None)
-        multimodal_config = getattr(vllm_config.model_config, "multimodal_config", None)
-
-        if hasattr(self, "visual") and self.visual is not None:
-            self.visual = HPUQwen3_VisionTransformerStaticShape(
-                self.config.vision_config,
-                norm_eps=getattr(self.config, "rms_norm_eps", 1e-6),
-                quant_config=quant_config,
-                multimodal_config=multimodal_config,
-                prefix=maybe_prefix(prefix, "visual"),
-            )
-=======
-import torch
-from .utils import _merge_multimodal_embeddings
-from vllm.model_executor.models.interfaces import MultiModalEmbeddings
-from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
-    
-class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
     def _compute_deepstack_embeds(
         self,
         inputs_embeds: torch.Tensor,
@@ -123,29 +106,23 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
             dim=-1,
         )
 
-        multimodal_embeddings = torch.split(
-            multimodal_embeddings_main, visual_lens, dim=0
-        )
-        multimodal_embeddings_multiscale = torch.split(
-            multimodal_embeddings_multiscale, visual_lens, dim=0
-        )
+        multimodal_embeddings = torch.split(multimodal_embeddings_main, visual_lens, dim=0)
+        multimodal_embeddings_multiscale = torch.split(multimodal_embeddings_multiscale, visual_lens, dim=0)
 
-        deepstack_input_embeds = inputs_embeds.new_zeros(
-            inputs_embeds.size(0), self.deepstack_num_level * inputs_embeds.size(1)
-        )
+        deepstack_input_embeds = inputs_embeds.new_zeros(inputs_embeds.size(0),
+                                                         self.deepstack_num_level * inputs_embeds.size(1))
 
         deepstack_input_embeds = _merge_multimodal_embeddings(
             inputs_embeds=deepstack_input_embeds,
             multimodal_embeddings=multimodal_embeddings_multiscale,
             is_multimodal=is_multimodal,
         )
-        deepstack_input_embeds = deepstack_input_embeds.view(
-            inputs_embeds.shape[0], self.deepstack_num_level, self.visual_dim
-        )
+        deepstack_input_embeds = deepstack_input_embeds.view(inputs_embeds.shape[0], self.deepstack_num_level,
+                                                             self.visual_dim)
         deepstack_input_embeds = deepstack_input_embeds.permute(1, 0, 2)
 
         return deepstack_input_embeds, multimodal_embeddings
-    
+
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
@@ -188,4 +165,18 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
             self._set_deepstack_input_embeds(deepstack_input_embeds)
 
         return inputs_embeds
->>>>>>> 49d7633 (add qwen3_vl.py functions)
+    
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+        quant_config = getattr(self, "quant_config", None)
+        multimodal_config = getattr(vllm_config.model_config, "multimodal_config", None)
+
+        if hasattr(self, "visual") and self.visual is not None:
+            self.visual = HPUQwen3_VisionTransformerStaticShape(
+                self.config.vision_config,
+                norm_eps=getattr(self.config, "rms_norm_eps", 1e-6),
+                quant_config=quant_config,
+                multimodal_config=multimodal_config,
+                prefix=maybe_prefix(prefix, "visual"),
+            )
