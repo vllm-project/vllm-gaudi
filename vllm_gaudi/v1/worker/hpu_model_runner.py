@@ -4751,7 +4751,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         """Dummy data for profiling and precompiling multimodal models."""
         assert self.mm_budget is not None
         img_count = 1
-        if self.get_model().vision_bucket_manager.is_batch_based:
+        '''if self.get_model().vision_bucket_manager.is_batch_based:
             # Create ImageDummyOptions for Gemma3
             image_options = ImageDummyOptions(
                 width=896,  # pixels as in gemma3 config
@@ -4773,14 +4773,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 height=h  # Custom height in pixels
             )
             batch = img_count
-<<<<<<< HEAD
-        processor = self.mm_registry.create_processor(model_config=self.model_config, cache=self.mm_budget.cache)
-        profiler: MultiModalProfiler = MultiModalProfiler(processor)
-        dummy_data = profiler.get_decoder_dummy_data(seq_len=4096,
-                                                     mm_counts={"image": img_count},
-                                                     mm_options={"image": image_options})
-        dummy_mm_data = dummy_data.multi_modal_data
-=======
 
         processor = self.mm_registry.create_processor(model_config=self.model_config, cache=self.mm_budget.cache)
         dummy_data = processor.dummy_inputs.get_decoder_dummy_data(processor,
@@ -4793,8 +4785,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             mm_counts={"image": img_count},
         )
         '''
->>>>>>> 04ce358 (fix dummy mm data init)
-
+        
         assert modality == 'image'
         # Result in the maximum GPU consumption of the model
         dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
