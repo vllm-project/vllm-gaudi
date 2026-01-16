@@ -580,10 +580,11 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config: None):
     assert runner.shared_kv_cache_layers[layer_1] == layer_0
 
     available_memory = 20 * GiB_bytes
-    # page size for layer 0's kv_cache_spec is 32KB
+    # page size for layer 0's kv_cache_spec is 256KB
     # with KV sharing, we can allocate (available_mem//page_size//1) blocks
     # which is twice as many as without KV sharing
-    num_expected_blocks = 655360  # 20GB / 32KB
+    page_size = 128 * 8 * 64 * 2 * 2  # 128 for block_size, 2 for K+V, 2 for bfloat16
+    num_expected_blocks = available_memory / page_size  # 20GB / 256KB
     kv_cache_config = get_kv_cache_configs(vllm_config, [kv_cache_spec], [available_memory])[0]
     assert kv_cache_config.num_blocks == num_expected_blocks
     assert len(kv_cache_config.kv_cache_tensors) == 1
