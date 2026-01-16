@@ -1030,7 +1030,7 @@ class HPUUnifiedMLAImpl(MLACommonImpl[HPUUnifiedAttentionMetadata], torch.nn.Mod
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj  # Used to expand latent → full KV in causal path
-
+        self.use_online_merge = get_config().unified_attn_online_merge
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn \
