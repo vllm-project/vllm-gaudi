@@ -156,6 +156,7 @@ class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
             rotary_pos_emb_cos: torch.Tensor,
             rotary_pos_emb_sin: torch.Tensor,
             attn_mask: Optional[torch.Tensor] = None,  # Only used for HPU
+            max_seqlen: Optional[int] = None,  # Only used for Flash Attention
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
