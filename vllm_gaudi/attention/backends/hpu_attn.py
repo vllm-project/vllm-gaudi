@@ -15,16 +15,16 @@ import vllm_gaudi.extension.ops as ops
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, ModuleFusedSDPA, Softmax, VLLMFP8KVCache, VLLMKVCache)
 
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl, AttentionLayer, AttentionMetadata,
-                                              AttentionType)
-from vllm.v1.attention.backends.mla.common import MLACommonImpl
+from vllm.v1.attention.backend import (AttentionBackend, AttentionImpl, AttentionLayer, AttentionMetadata,
+                                       AttentionType)
+from vllm.model_executor.layers.attention.mla_attention import MLACommonImpl
 from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention, HPUPagedAttentionMetadata,
                                                      HPUPagedAttentionMetadataBuilder)
 
 from vllm_gaudi.extension.logger import logger as init_logger
 from vllm_gaudi.extension.unified import (unified_attn, unified_mla, HPUUnifiedAttentionMetadata)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
-from vllm.attention.backends.registry import (register_backend, AttentionBackendEnum)
+from vllm.v1.attention.backends.registry import (register_backend, AttentionBackendEnum)
 from vllm._aiter_ops import rocm_aiter_ops
 
 logger = init_logger()

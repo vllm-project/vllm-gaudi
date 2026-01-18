@@ -174,6 +174,7 @@ class HpuEagleProposer(EagleProposer):
             positions,
             model_runner):
         # Prepare attn metadata on CPU. (Improve for pure HPU based attn metadata preparation)
+        block_size = model_runner.block_size
         batch_size = positions.shape[0]
         exceeds_max_model_len = positions >= self.max_model_len
         clamped_positions = torch.where(exceeds_max_model_len, 0, positions)
@@ -186,7 +187,7 @@ class HpuEagleProposer(EagleProposer):
         # block_tables_list is a nested list of shape [num_seq, num_blocks]
         # num_blocks should include the slots needed for the current token
         # positions are the context lengths, and we need +1 for num_blocks
-        num_blocks = torch.ceil((positions + 1) / self.block_size).int()
+        num_blocks = torch.ceil((positions + 1) / block_size).int()
         num_blocks = num_blocks[:num_seq].tolist()
         block_tables_list = []
         for i, n in enumerate(num_blocks):
@@ -198,7 +199,7 @@ class HpuEagleProposer(EagleProposer):
 
         # Compute slot mapping in [batch_size, 1] shape
         clamped_positions = clamped_positions.view(-1, 1)
-        block_numbers = clamped_positions // self.block_size
+        block_numbers = clamped_positions // block_size
 
         # Limit with num_seq because block_table_cpu_tensor is in the shape [num_seq, x]
         block_numbers = block_numbers.to(torch.int64)[:num_seq]
@@ -208,8 +209,8 @@ class HpuEagleProposer(EagleProposer):
         block_ids.apply_(model_runner.defragmenter.resolve)
 
         # Calculate the slot mapping and fill with padding
-        slot_mapping = block_ids * self.block_size + clamped_positions % self.block_size
-        dummy_slots = itertools.cycle(range(model_runner._PAD_SLOT_ID, model_runner._PAD_SLOT_ID + self.block_size))
+        slot_mapping = block_ids * block_size + clamped_positions % block_size
+        dummy_slots = itertools.cycle(range(model_runner._PAD_SLOT_ID, model_runner._PAD_SLOT_ID + block_size))
         slot_mapping[num_seq:].apply_(lambda _, ds=dummy_slots: next(ds))
         # Slot mapping needs to be int64 (long) type
         slot_mapping = slot_mapping.to(torch.int64)
@@ -232,7 +233,7 @@ class HpuEagleProposer(EagleProposer):
             block_groups=block_groups_device,
             input_positions=None,
             slot_mapping=slot_mapping_device,
-            block_size=self.block_size,
+            block_size=block_size,
             window_block_list=None,
             window_block_usage=None,
             window_block_groups=None,

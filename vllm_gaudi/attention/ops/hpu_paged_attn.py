@@ -9,7 +9,7 @@ from typing import Optional
 
 import torch
 from vllm_gaudi.extension import cache_ops, ops
-from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
+from vllm.v1.attention.backend import AttentionMetadataBuilder
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
@@ -56,7 +56,7 @@ class HPUPagedAttention:
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """CPU attention supports decoder and encoder-only attention."""
-        from vllm.attention.backends.abstract import AttentionType
+        from vllm.v1.attention.backend import AttentionType
 
         return attn_type in (
             AttentionType.DECODER,
