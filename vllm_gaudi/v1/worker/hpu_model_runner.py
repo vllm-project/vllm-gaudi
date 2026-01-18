@@ -809,7 +809,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         else:
             logger.info("Bucketing is OFF.")
 
-        self._PAD_SLOT_ID = 0
+        self._PAD_SLOT_ID = -1
         self._PAD_BLOCK_ID = 0
         self._dummy_num_blocks = 0
 
@@ -1782,7 +1782,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # For models with multimodal support, we may want to get embeddings
         # for the valid tokens before padding.
         # This would require getting multimodal input embeddings here as well
-        token_ids = align_and_pad(contents.token_ids, (target_bs, target_seq), itertools.repeat(0))
+        token_ids = align_and_pad(contents.token_ids, (target_bs, target_seq), itertools.repeat(-1))
         # Update query_lens and context_lens after padding
         query_lens.extend([0] * (target_bs - len(query_lens)))
         context_lens.extend([0] * (target_bs - len(context_lens)))
@@ -1800,9 +1800,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         else:
             token_positions = align_and_pad(token_positions, (target_bs, target_seq), itertools.repeat(-1))
+        token_slots = align_and_pad(token_slots, (target_bs, target_seq), itertools.repeat(-1))
         token_groups = align_and_pad(token_groups, (target_bs, target_seq), itertools.repeat(-1))
         # use 0 for padding to avoid dynamic scale calculation issues
-        token_slots = align_and_pad(token_slots, (target_bs, target_seq), itertools.repeat(0))
         context_blocks = align_and_pad(context_blocks, (target_bs, target_blocks), itertools.repeat(0))
         context_groups = align_and_pad(context_groups, (target_bs, target_blocks), itertools.repeat(-1))
 
@@ -4853,7 +4853,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.bucketing_manager.num_hpu_blocks = num_blocks
 
         self._PAD_BLOCK_ID = 0
-        self._PAD_SLOT_ID = 0
+        self._PAD_SLOT_ID = -1
         self._dummy_num_blocks = num_blocks
 
         if has_kv_transfer_group():

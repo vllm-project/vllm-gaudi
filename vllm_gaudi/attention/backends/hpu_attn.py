@@ -573,16 +573,21 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             key_cache, value_cache, k_scales, v_scales = \
                 HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
 
-            # reset the Value scales for the Hidden dim for the new sequence on prompt
-            if attn_metadata.is_prompt and value_cache is not None and isinstance(value_cache, tuple) \
-                and attn_metadata.block_list is not None:
-                v_scales[1].index_fill_(0, attn_metadata.block_list, torch.finfo(torch.bfloat16).tiny)
-
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-            key_cache = self.k_cache(key, key_cache, slot_mapping, k_scales)
-            value_cache = self.v_cache(value, value_cache, slot_mapping, v_scales)
+            key_cache = self.k_cache(key,
+                                     key_cache,
+                                     slot_mapping,
+                                     scales=k_scales,
+                                     block_size=attn_metadata.block_size,
+                                     is_prompt=attn_metadata.is_prompt)
+            value_cache = self.v_cache(value,
+                                       value_cache,
+                                       slot_mapping,
+                                       scales=v_scales,
+                                       block_size=attn_metadata.block_size,
+                                       is_prompt=attn_metadata.is_prompt)
 
         if attn_metadata.is_prompt:
             # Prompt run.
@@ -746,16 +751,21 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             key_cache, value_cache, k_scales, v_scales = \
                 HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
 
-            # reset the Value scales for the Hidden dim for the new sequence on prompt
-            if attn_metadata.is_prompt and value_cache is not None and isinstance(value_cache, tuple) \
-                and attn_metadata.block_list is not None:
-                v_scales[1].index_fill_(0, attn_metadata.block_list, torch.finfo(torch.bfloat16).tiny)
-
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-            key_cache = self.k_cache(key, key_cache, cross_slot_mapping, k_scales)
-            value_cache = self.v_cache(value, value_cache, cross_slot_mapping, v_scales)
+            key_cache = self.k_cache(key,
+                                     key_cache,
+                                     cross_slot_mapping,
+                                     scales=k_scales,
+                                     block_size=attn_metadata.block_size,
+                                     is_prompt=attn_metadata.is_prompt)
+            value_cache = self.v_cache(value,
+                                       value_cache,
+                                       cross_slot_mapping,
+                                       scales=v_scales,
+                                       block_size=attn_metadata.block_size,
+                                       is_prompt=attn_metadata.is_prompt)
 
         if attn_metadata.is_prompt:
             # Prompt run.
@@ -940,8 +950,16 @@ class HPUUnifiedAttentionImpl(AttentionImpl, torch.nn.Module):
         query = query.unflatten(-1, (-1, self.head_size))
         key = key.unflatten(-1, (-1, self.head_size))
         value = value.unflatten(-1, (-1, self.head_size))
-        key_cache = self.k_cache(key, key_cache, attn_metadata.slot_mapping, k_scales)
-        value_cache = self.v_cache(value, value_cache, attn_metadata.slot_mapping, v_scales)
+        key_cache = self.k_cache(key,
+                                 key_cache,
+                                 attn_metadata.slot_mapping,
+                                 scales=k_scales,
+                                 block_size=attn_metadata.block_size)
+        value_cache = self.v_cache(value,
+                                   value_cache,
+                                   attn_metadata.slot_mapping,
+                                   scales=v_scales,
+                                   block_size=attn_metadata.block_size)
         output = unified_attn(
             query=query,
             key=key,
