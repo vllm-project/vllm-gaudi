@@ -1477,6 +1477,32 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_decodes += 1
         return num_decodes
 
+    def maybe_set_chunked_attention_layers(self, model):
+        if hasattr(model.config, 'text_config') and \
+           hasattr(model.config.text_config, 'attention_chunk_size') and \
+           model.config.text_config.attention_chunk_size:
+            self.model_has_chunked_attention = True
+            try:
+                for layer in model.language_model.model.layers:
+                    if "ChunkedLocalAttention" in layer.self_attn.attn.get_attn_backend().__name__:
+                        layer.self_attn.attn.impl.is_chunked_attention = True
+            except Exception:
+                pass
+
+    def _is_prompt(self, i: int, scheduler_output: "SchedulerOutput") -> bool:
+        req_id = self.input_batch.req_ids[i]
+        num_computed_tokens = int(self.input_batch.num_computed_tokens_cpu[i])
+        num_prompt_tokens = int(self.input_batch.num_prompt_tokens[i])
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens.get(req_id)
+        spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens.get(req_id)
+
+        num_decode_tokens = 1 if spec_decode_tokens is None else len(spec_decode_tokens) + 1
+        is_prompt = num_computed_tokens < num_prompt_tokens  # normal prompt
+        is_prompt = is_prompt or num_scheduled_tokens > num_decode_tokens  # maybe preempted prompt
+        is_prompt = is_prompt and not self.is_decoder_only(req_id)
+
+        return is_prompt
+
     def _get_prompts_and_decodes(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1500,7 +1526,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 requests = scheduler_output.kv_connector_metadata.requests
         else:
             requests = None
-
         # Traverse decodes first
         decode_req_ids = []
         num_computed_tokens_decode = []
@@ -1514,19 +1539,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         self.input_batch.req_type[req_id] = requests_type[req_id]
                         break
 
-            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
-            num_prompt_tokens = self.input_batch.num_prompt_tokens[i]
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            if num_computed_tokens < num_prompt_tokens and \
-                not self.is_decoder_only(req_id):
-                # This is prompt
+            if self._is_prompt(i, scheduler_output):
                 break
 
-            # This is decode
-            # NOTE(chendi): To support spec decode,
-            # we don't assume num_scheduled_tokens == 1.
-
             decode_req_ids.append(req_id)
+            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
             num_computed_tokens_decode.append(int(num_computed_tokens + 1))
 
         if self.profiler.enabled:
@@ -1539,16 +1556,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             req_id = self.input_batch.req_ids[i]
             assert req_id is not None
 
-            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
-            num_prompt_tokens = self.input_batch.num_prompt_tokens[i]
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-
             # Must be prompt
-            assert num_computed_tokens < num_prompt_tokens
-            # NOTE(kzawora): In preempted sequences, num_output_tokens can be > 0, and still be a valid prefill
+            assert self._is_prompt(i, scheduler_output)
 
             prompt_req_ids.append(req_id)
-            prompt_scheduled_tokens.append(num_scheduled_tokens)
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            prompt_scheduled_tokens.append(int(num_scheduled_tokens))
 
         return PromptDecodeInfo(prompt_req_ids, decode_req_ids, prompt_scheduled_tokens)
 
