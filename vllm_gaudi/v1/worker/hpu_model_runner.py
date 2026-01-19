@@ -1198,23 +1198,17 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
     # source: vllm/v1/worker/gpu_model_runner.py
     def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput", req_ids: list[str]):
-        scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
-        if not scheduled_encoder_inputs:
-            return
-
         # Batch the multi-modal inputs.
         mm_kwargs = list[MultiModalKwargsItem]()
         # List of tuple (mm_hash, pos_info)
         mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
         for req_id in req_ids:
-            encoder_input_ids = scheduled_encoder_inputs.get(req_id, None)
-            if not encoder_input_ids:
-                continue
             req_state = self.requests[req_id]
 
-            for mm_input_id in encoder_input_ids:
-                mm_feature = req_state.mm_features[mm_input_id]
+            for mm_feature in req_state.mm_features:
                 mm_hash = mm_feature.identifier
+                if mm_hash in self.encoder_cache:
+                    continue
                 mm_kwargs.append(mm_feature.data)
                 mm_hashes_pos.append((mm_hash, mm_feature.mm_position))
 
@@ -4578,23 +4572,32 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             #    height=h  # Custom height in pixels
             #)
             batch = img_count
-        '''
 
         processor = self.mm_registry.create_processor(model_config=self.model_config, cache=self.mm_budget.cache)
-        '''dummy_data = processor.dummy_inputs.get_decoder_dummy_data(processor,
+        dummy_data = processor.dummy_inputs.get_decoder_dummy_data(processor,
                                                                    seq_len=4096,
                                                                    mm_counts={"image": img_count},
                                                                    mm_options={"image": image_options}),
 
-        '''
         dummy_mm_data = processor.dummy_inputs.get_dummy_processor_inputs(
             seq_len=4096,
             mm_counts={"image": img_count},
         )
+        '''
 
         assert modality == 'image'
         # Result in the maximum GPU consumption of the model
-        dummy_mm_item = dummy_mm_data['image'][0]
+        dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
+            self.model_config,
+            mm_counts={modality: 1},
+            cache=self.mm_budget.cache,
+        )
+
+        dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
+        # We use the cache so that the item is saved to the cache,
+        # but not read from the cache
+        assert dummy_mm_item is not None, "Item should not already be cached"
+
         dummy_mm_items = [dummy_mm_item] * batch
 
         return next(mm_kwargs_group for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
@@ -5649,10 +5652,14 @@ class HPUAttentionMetadataProcessor:
 
 
 def _apply_inc_patch():
-    # TODO: (yiliu30) Remove this function when INC fixes the issue.
-    from neural_compressor.torch.algorithms.fp8_quant._quant_common.quant_config import (
-        supported_dynamic_ops as inc_supported_dynamic_ops, )
-    from neural_compressor.torch.algorithms.fp8_quant._quant_common import quant_config as inc_quant_config
+    try:
+        from neural_compressor.torch.algorithms.fp8_quant._quant_common.quant_config import (
+            supported_dynamic_ops as inc_supported_dynamic_ops, )
+        from neural_compressor.torch.algorithms.fp8_quant._quant_common import quant_config as inc_quant_config
 
-    fixed_dynamic_ops = inc_supported_dynamic_ops + ["MoeMatmul"]
-    inc_quant_config.supported_dynamic_ops = fixed_dynamic_ops
+        fixed_dynamic_ops = inc_supported_dynamic_ops + ["MoeMatmul"]
+        inc_quant_config.supported_dynamic_ops = fixed_dynamic_ops
+        logger.warning_once(f"Applied INC patch for FP8 dynamic quantization support for MoE. "
+                            f"Fixed supported_dynamic_ops: {fixed_dynamic_ops}")
+    except (ImportError, AttributeError):
+        pass
