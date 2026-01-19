@@ -5651,10 +5651,14 @@ class HPUAttentionMetadataProcessor:
 
 
 def _apply_inc_patch():
-    # TODO: (yiliu30) Remove this function when INC fixes the issue.
-    from neural_compressor.torch.algorithms.fp8_quant._quant_common.quant_config import (
-        supported_dynamic_ops as inc_supported_dynamic_ops, )
-    from neural_compressor.torch.algorithms.fp8_quant._quant_common import quant_config as inc_quant_config
+    try:
+        from neural_compressor.torch.algorithms.fp8_quant._quant_common.quant_config import (
+            supported_dynamic_ops as inc_supported_dynamic_ops, )
+        from neural_compressor.torch.algorithms.fp8_quant._quant_common import quant_config as inc_quant_config
 
-    fixed_dynamic_ops = inc_supported_dynamic_ops + ["MoeMatmul"]
-    inc_quant_config.supported_dynamic_ops = fixed_dynamic_ops
+        fixed_dynamic_ops = inc_supported_dynamic_ops + ["MoeMatmul"]
+        inc_quant_config.supported_dynamic_ops = fixed_dynamic_ops
+        logger.warning_once(f"Applied INC patch for FP8 dynamic quantization support for MoE. "
+                            f"Fixed supported_dynamic_ops: {fixed_dynamic_ops}")
+    except (ImportError, AttributeError):
+        pass
