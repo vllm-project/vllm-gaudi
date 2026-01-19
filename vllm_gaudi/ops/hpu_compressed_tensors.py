@@ -6,7 +6,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, FusedMoEConfig)
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
+from vllm.model_executor.layers.fused_moe import FusedMoERouter
 from compressed_tensors.quantization import (QuantizationArgs, QuantizationStrategy)
 
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import convert_to_channelwise, all_close_1d

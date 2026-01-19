@@ -5,7 +5,7 @@ import torch
 from vllm_gaudi import envs
 from torch.nn.parameter import Parameter
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
+from vllm.model_executor.layers.fused_moe import FusedMoERouter
 
 from vllm.model_executor.layers.quantization import fp8
 from vllm.model_executor.layers.quantization.fp8 import (Fp8LinearMethod as OrigFp8LinearMethod, Fp8MoEMethod,
