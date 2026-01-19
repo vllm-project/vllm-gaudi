@@ -30,7 +30,7 @@ def register_hpu_upstream_test_op():
             return self.value * 3
 
 
-def test_dummy_custom_op_registration():
+def test_dummy_custom_op_registration(default_vllm_config: None):
     """
     Checks if a dummy op can be correctly registered 
     using the register_oot decorator.

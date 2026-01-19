@@ -1,7 +1,6 @@
 import torch
 from .utils import _merge_multimodal_embeddings
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
-from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
 from vllm.model_executor.models.interfaces import _require_is_multimodal
 from torch import nn
 from vllm.model_executor.layers.activation import get_act_fn
@@ -51,7 +50,7 @@ class HPUQwen3_VisionBlock(Qwen3_VisionBlock):
         )
 
 
-class HPUQwen3_VisionTransformerStaticShape(Qwen3_VisionTransformer):
+class HPUQwen3_VisionTransformer(Qwen3_VisionTransformer):
 
     def __init__(
         self,
@@ -172,7 +171,7 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
         multimodal_config = getattr(vllm_config.model_config, "multimodal_config", None)
 
         if hasattr(self, "visual") and self.visual is not None:
-            self.visual = HPUQwen3_VisionTransformerStaticShape(
+            self.visual = HPUQwen3_VisionTransformer(
                 self.config.vision_config,
                 norm_eps=getattr(self.config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,

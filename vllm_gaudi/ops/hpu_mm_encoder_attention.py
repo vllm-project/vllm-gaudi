@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 
 
 @MMEncoderAttention.register_oot()

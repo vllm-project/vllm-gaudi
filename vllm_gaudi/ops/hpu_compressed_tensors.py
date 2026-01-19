@@ -6,6 +6,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, FusedMoEConfig)
+from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from compressed_tensors.quantization import (QuantizationArgs, QuantizationStrategy)
 
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import convert_to_channelwise, all_close_1d
@@ -304,6 +305,7 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
     def apply(
         self,
         layer: FusedMoE,
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         **kwargs,
@@ -311,7 +313,7 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-            topk_weights, topk_ids = layer.select_experts(hidden_states=x, router_logits=router_logits)
+            topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
@@ -710,6 +712,7 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
     def apply(
         self,
         layer: FusedMoE,
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
@@ -718,7 +721,7 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         x = x.view(-1, x.shape[-1])
 
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-            topk_weights, topk_ids = layer.select_experts(hidden_states=x, router_logits=router_logits)
+            topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
