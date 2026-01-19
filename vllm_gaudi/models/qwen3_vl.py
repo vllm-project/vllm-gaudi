@@ -1,10 +1,9 @@
 import torch
 from .utils import _merge_multimodal_embeddings
-from vllm.model_executor.models.interfaces import MultiModalEmbeddings
-from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
-from vllm.model_executor.models.interfaces import _require_is_multimodal
-from vllm.model_executor.layers.activation import get_act_fn
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.models.interfaces import MultiModalEmbeddings
+from vllm.model_executor.models.interfaces import _require_is_multimodal
 from vllm.model_executor.models.qwen3_vl import (
     Qwen3VLForConditionalGeneration,
     Qwen3_VisionTransformer,
@@ -86,6 +85,7 @@ class HPUQwen3_VisionTransformer(Qwen3_VisionTransformer):
 
 
 class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -100,6 +100,7 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 multimodal_config=multimodal_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
+
     def _compute_deepstack_embeds(
         self,
         inputs_embeds: torch.Tensor,
