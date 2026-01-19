@@ -13,7 +13,7 @@ from vllm.forward_context import override_forward_context
 from safetensors import safe_open
 
 
-def test_compressed_tensors_linear_method_w8a8fp8_static_per_tensor(dist_init):
+def test_compressed_tensors_linear_method_w8a8fp8_static_per_tensor(default_vllm_config: None, dist_init):
     """weight per-tensor, activation per-tensor
     """
     config = {
@@ -93,7 +93,7 @@ def test_compressed_tensors_linear_method_w8a8fp8_static_per_tensor(dist_init):
     torch.testing.assert_close(ref_output, out, atol=1e-3, rtol=1e-3)
 
 
-def test_compressed_tensors_linear_method_w8a8fp8_static_per_channel(dist_init):
+def test_compressed_tensors_linear_method_w8a8fp8_static_per_channel(default_vllm_config: None, dist_init):
     """weight per-channel, activation per-tensor
     """
     config = {
@@ -173,7 +173,7 @@ def test_compressed_tensors_linear_method_w8a8fp8_static_per_channel(dist_init):
     torch.testing.assert_close(ref_output, out, atol=1e-3, rtol=1e-3)
 
 
-def test_compressed_tensors_linear_method_w8a8fp8(dist_init):
+def test_compressed_tensors_linear_method_w8a8fp8(default_vllm_config: None, dist_init):
     config = {
         'config_groups': {
             'group_0': {
@@ -246,7 +246,7 @@ def test_compressed_tensors_linear_method_w8a8fp8(dist_init):
     torch.testing.assert_close(ref_output, out, atol=1e-3, rtol=1e-3)
 
 
-def test_compressed_tensors_linear_method_wna16(dist_init):
+def test_compressed_tensors_linear_method_wna16(default_vllm_config: None, dist_init):
     config = {
         'config_groups': {
             'group_0': {
@@ -311,7 +311,7 @@ def test_compressed_tensors_linear_method_wna16(dist_init):
     torch.testing.assert_close(ref_output, out, atol=1e-3, rtol=1e-3)
 
 
-def test_compressed_tensors_wna16_moe_method(dist_init):
+def test_compressed_tensors_wna16_moe_method(default_vllm_config: None, dist_init):
     config = {
         'config_groups': {
             'group_0': {

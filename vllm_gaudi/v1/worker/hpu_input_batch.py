@@ -18,7 +18,6 @@ from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder, LogitsProcessors)
-from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 
 from vllm_gaudi.utils import async_h2d_copy, async_h2d_update
 
@@ -147,9 +146,6 @@ class InputBatch:
         self.min_p_cpu_tensor = torch.empty((max_num_reqs, ), dtype=torch.float32, device="cpu", pin_memory=pin_memory)
         self.min_p_cpu = self.min_p_cpu_tensor.numpy()
         self.min_p_reqs: set[str] = set()
-
-        # IDs of requests which do not support spec decoding
-        self.spec_decode_unsupported_reqs: set[str] = set()
 
         # Frequency penalty related data structures
         self.frequency_penalties = torch.empty((max_num_reqs, ), dtype=torch.float, device=device)
@@ -282,8 +278,6 @@ class InputBatch:
         self.block_table.add_row(request.block_ids, req_index)
 
         if sampling_params := request.sampling_params:
-            if (self.is_spec_decode and is_spec_decode_unsupported(sampling_params)):
-                self.spec_decode_unsupported_reqs.add(req_id)
             if sampling_params.sampling_type == SamplingType.GREEDY:
                 # Avoid later division by zero.
                 self.temperature_cpu[req_index] = -1.0
@@ -365,6 +359,7 @@ class InputBatch:
         else:
             # No LoRA
             self.request_lora_mapping[req_index] = 0
+        self._invalidate_prompt_token_ids_cache()
         return req_index
 
     def remove_request(self, req_id: str) -> Optional[int]:
@@ -381,7 +376,6 @@ class InputBatch:
         self.top_p_reqs.discard(req_id)
         self.top_k_reqs.discard(req_id)
         self.min_p_reqs.discard(req_id)
-        self.spec_decode_unsupported_reqs.discard(req_id)
         self.frequency_penalties_reqs.discard(req_id)
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
@@ -406,6 +400,7 @@ class InputBatch:
         self.bad_words_token_ids.pop(req_index, None)
         self.pooling_params.pop(req_id, None)
         self.pooling_states.pop(req_id, None)
+        self._invalidate_prompt_token_ids_cache()
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
@@ -527,6 +522,7 @@ class InputBatch:
         # Trim lists to the batch size.
         del self._req_ids[self.num_reqs:]
         del self.req_output_token_ids[self.num_reqs:]
+        self._invalidate_prompt_token_ids_cache()
 
     def refresh_sampling_metadata(self):
         """Apply batch updates, reset input batch at end of step
@@ -535,6 +531,7 @@ class InputBatch:
         """
         # NOTE(chendi): don't reset batch_update_builder here
         # TODO: follow upstream PR#16728 for enabling batch_update
+        self._invalidate_prompt_token_ids_cache()
         self.sampling_metadata = self._make_sampling_metadata()
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
@@ -590,6 +587,22 @@ class InputBatch:
             logitsprocs=self.logitsprocs,
         )
 
+    def _get_cached_prompt_token_ids(self) -> Optional[torch.Tensor]:
+        """Get or create cached prompt_token_ids tensor.
+
+        This cache is invalidated when the batch composition changes,
+        ensuring correctness while improving performance for repeated sampling.
+        """
+        cache: Optional[torch.Tensor] = getattr(self, '_prompt_token_ids_cache', None)
+        if cache is None and not self.no_penalties:
+            self._prompt_token_ids_cache = self._make_prompt_token_ids_tensor()
+        return self._prompt_token_ids_cache
+
+    def _invalidate_prompt_token_ids_cache(self):
+        """Invalidate the prompt_token_ids cache when batch changes."""
+        if hasattr(self, '_prompt_token_ids_cache'):
+            self._prompt_token_ids_cache = None
+
     def make_selective_sampling_metadata(
         self,
         req_id_output_token_ids: list[tuple[str, list[int]]],
@@ -613,7 +626,13 @@ class InputBatch:
                 # there are requests which need penalties to be applied.
                 prompt_token_ids = self._make_prompt_token_ids_tensor()[req_indices]
         else:
-            prompt_token_ids = None
+            # Even with skip_copy=True, we need prompt_token_ids for penalties
+            if not self.no_penalties:
+                cached_tensor = self._get_cached_prompt_token_ids()
+                prompt_token_ids = cached_tensor[req_indices] if cached_tensor is not None else None
+            else:
+                prompt_token_ids = None
+
         output_token_ids: list[list[int]] = []
 
         for req_id, output_tokens in req_id_output_token_ids:

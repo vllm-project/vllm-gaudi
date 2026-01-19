@@ -224,6 +224,8 @@ class HPUBucketingManager():
     def generate_fallback_bucket(self, batch_size, seq_len, ctx):
         assert self.max_num_batched_tokens is not None
         new_batch_size = calc_fallback_value(batch_size, self.fallback_bs_base_step)
+        if new_batch_size > self.max_num_seqs:
+            new_batch_size = self.max_num_seqs
         if self.use_sliding_window and seq_len >= self.slice_thld:
             new_seq_len = math.ceil(seq_len / self.slice_size) * self.slice_size
         else:
@@ -427,6 +429,9 @@ def generate_buckets(bs_range,
         else:
             return correct_for_max_model_len
 
+    def get_max_bucket_per_query(bs, query):
+        return (bs, query, math.ceil((max_model_len - query) // block_size))
+
     buckets = set()
     buckets_2d = set()
     omitted_buckets = set()
@@ -443,9 +448,14 @@ def generate_buckets(bs_range,
                 local_buckets = expand_to_neighbor_buckets(bs_idx, bs_range, ctx_idx, ctx_range,
                                                            max_num_batched_tokens) if not is_prompt else {(bs, ctx)}
                 buckets_2d.update(local_buckets)
-
+        max_ctx = max(ctx for _, ctx in buckets_2d)
         for bs, ctx in buckets_2d:
+            is_max_ctx = ctx == max_ctx
             for query in query_range:
+                if is_prompt and is_max_ctx:
+                    bs, query, edge_ctx = get_max_bucket_per_query(bs, query)
+                    if edge_ctx >= 0:
+                        ctx = edge_ctx
                 if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
                     buckets.add(corrector(bs, query, ctx))
     if not buckets:
