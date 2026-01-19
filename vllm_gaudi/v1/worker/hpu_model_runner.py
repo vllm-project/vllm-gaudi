@@ -1406,15 +1406,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
     def _is_prompt(self, i: int, scheduler_output: "SchedulerOutput") -> bool:
         req_id = self.input_batch.req_ids[i]
-        num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
-        num_prompt_tokens = self.input_batch.num_prompt_tokens[i]
-        num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+        num_computed_tokens = int(self.input_batch.num_computed_tokens_cpu[i])
+        num_prompt_tokens = int(self.input_batch.num_prompt_tokens[i])
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens.get(req_id)
         spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens.get(req_id)
 
-        num_decode_tokens = 1 if spec_decode_tokens is None else int(spec_decode_tokens)
-
         is_prompt = num_computed_tokens < num_prompt_tokens  # normal prompt
-        is_prompt = is_prompt or num_scheduled_tokens > num_decode_tokens  # preempted prompt
+        is_prompt = is_prompt or num_scheduled_tokens > 1  # maybe preempted prompt
+        is_prompt = is_prompt and spec_decode_tokens is None  # not spec decode
         is_prompt = is_prompt and not self.is_decoder_only(req_id)
 
         return is_prompt
