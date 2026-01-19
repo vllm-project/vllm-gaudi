@@ -38,7 +38,7 @@ class B2BMatmul(Matmul):
     fix that uses the B2B output measurements as the input measurements during
     calibration, avoiding corrupted scales from the KV‑cache.
     """
-    
+
     def __init__(self):
         super().__init__()
 
