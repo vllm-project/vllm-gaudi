@@ -280,6 +280,13 @@ run_qwen3_vl_test() {
     echo "✅ Test with multimodal-support with qwen3-vl-32b passed."
 }
 
+# Preemption test
+run_preemption_test() {
+    echo "➡️ Testing preemption handling..."
+    VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/preemption.py"
+    echo "✅ Test with preemption handling passed."
+}
+
 # Spec decode with ngram
 run_spec_decode_ngram_test() {
     echo "➡️ Testing Spec-decode with ngram..."
