@@ -1198,23 +1198,17 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
     # source: vllm/v1/worker/gpu_model_runner.py
     def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput", req_ids: list[str]):
-        scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
-        if not scheduled_encoder_inputs:
-            return
-
         # Batch the multi-modal inputs.
         mm_kwargs = list[MultiModalKwargsItem]()
         # List of tuple (mm_hash, pos_info)
         mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
         for req_id in req_ids:
-            encoder_input_ids = scheduled_encoder_inputs.get(req_id, None)
-            if not encoder_input_ids:
-                continue
             req_state = self.requests[req_id]
 
-            for mm_input_id in encoder_input_ids:
-                mm_feature = req_state.mm_features[mm_input_id]
+            for mm_feature in req_state.mm_features:
                 mm_hash = mm_feature.identifier
+                if mm_hash in self.encoder_cache:
+                    continue
                 mm_kwargs.append(mm_feature.data)
                 mm_hashes_pos.append((mm_hash, mm_feature.mm_position))
 
