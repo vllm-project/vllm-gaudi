@@ -90,7 +90,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             activation=layer.activation,
         )
         if layer.dp_size > 1:
-            output.view(*(output.size(0), *input_shape[1:]))
+            return output.view(*(output.size(0), *input_shape[1:]))
         else:
             return output.view(*input_shape)
 
