@@ -130,9 +130,10 @@ jobs:
   # --- NEW JOB ---
   # This job runs first on the self-hosted pool, picks a runner,
   # and outputs its name so all other jobs can target it.
+  # If PR title contains [FIX_FOR_VLLM_LATEST], it uses the hourly-ci runner pool.
   discover_runner:
     needs: gatekeeper
-    runs-on: pr-ci
+    runs-on: ${{ contains(github.event.pull_request.title, '[FIX_FOR_VLLM_LATEST]') && 'hourly-ci' || 'pr-ci' }}
     outputs:
       runner_name: ${{ steps.get_name.outputs.name }}
     steps:
