@@ -579,17 +579,17 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 # If kv_cache is not provided, the new key and value tensors are
                 # not cached. This happens during the initial memory profiling run.
                 key_cache = self.k_cache(key,
-                                        key_cache,
-                                        slot_mapping,
-                                        scales=k_scales,
-                                        block_size=attn_metadata.block_size,
-                                        is_prompt=attn_metadata.is_prompt)
+                                         key_cache,
+                                         slot_mapping,
+                                         scales=k_scales,
+                                         block_size=attn_metadata.block_size,
+                                         is_prompt=attn_metadata.is_prompt)
                 value_cache = self.v_cache(value,
-                                        value_cache,
-                                        slot_mapping,
-                                        scales=v_scales,
-                                        block_size=attn_metadata.block_size,
-                                        is_prompt=attn_metadata.is_prompt)
+                                           value_cache,
+                                           slot_mapping,
+                                           scales=v_scales,
+                                           block_size=attn_metadata.block_size,
+                                           is_prompt=attn_metadata.is_prompt)
 
         if attn_metadata.is_prompt:
             # Prompt run.
