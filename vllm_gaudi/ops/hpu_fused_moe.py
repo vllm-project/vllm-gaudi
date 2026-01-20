@@ -89,7 +89,10 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             permuted_weights=True,
             activation=layer.activation,
         )
-        return output.view(*input_shape)
+        if layer.dp_size > 1:
+            output.view(*(output.size(0), *input_shape[1:]))
+        else:
+            return output.view(*input_shape)
 
 
 def reduce_output(self, states: torch.Tensor) -> torch.Tensor:
