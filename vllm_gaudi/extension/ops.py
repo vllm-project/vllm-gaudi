@@ -776,7 +776,6 @@ def apply_fp8_linear_hpu(
     trans_B: bool = True,
 ):
     x_fp8, x_scale = dynamic_quant(input)
-    
     output = torch.ops.hpu.fp8_gemm_v2(A=x_fp8,
                                        trans_A=False,
                                        B=weight,
