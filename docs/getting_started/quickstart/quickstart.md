@@ -60,6 +60,7 @@ Follow these steps to run the vLLM server or launch benchmarks on Gaudi using Do
 
     | **Model Name**                            | **Validated TP Size** |
     | ----------------------------------------- | --------------------- |
+    | speakleash/Bielik-4.5B-v3.0-Instruct      | 1                     |
     | deepseek-ai/DeepSeek-R1-Distill-Llama-70B | 8                     |
     | meta-llama/Llama-3.1-70B-Instruct         | 4                     |
     | meta-llama/Llama-3.1-405B-Instruct        | 8                     |
