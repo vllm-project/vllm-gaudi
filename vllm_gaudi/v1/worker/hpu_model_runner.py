@@ -806,8 +806,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.graphed_multimodal_buckets: set[Any] = set()
         else:
             logger.info("Bucketing is OFF.")
+
         self._PAD_SLOT_ID = -1
-        self._PAD_BLOCK_ID = -1
+        self._PAD_BLOCK_ID = 0
+        self._dummy_num_blocks = 0
 
         if self.vllm_config.parallel_config.data_parallel_size > 1 and htorch.utils.internal.is_lazy(
         ) and not self.model_config.enforce_eager:
@@ -1816,7 +1818,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             token_positions = align_and_pad(token_positions, (target_bs, target_seq), itertools.repeat(-1))
         token_slots = align_and_pad(token_slots, (target_bs, target_seq), itertools.repeat(-1))
         token_groups = align_and_pad(token_groups, (target_bs, target_seq), itertools.repeat(-1))
-        context_blocks = align_and_pad(context_blocks, (target_bs, target_blocks), itertools.repeat(-1))
+        # use 0 for padding to avoid dynamic scale calculation issues
+        context_blocks = align_and_pad(context_blocks, (target_bs, target_blocks), itertools.repeat(0))
         context_groups = align_and_pad(context_groups, (target_bs, target_blocks), itertools.repeat(-1))
 
         # TODO: cycle through dummy slots and blocks
@@ -2200,7 +2203,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         num_dummy_decodes = 1
         num_dummy_scheduled_tokens = [1]
         context_lens = np.array([128])
-        block_table_cpu_tensor = torch.zeros([self._PAD_BLOCK_ID], dtype=torch.int32).reshape(1, -1)
+        block_table_cpu_tensor = torch.zeros([self._dummy_num_blocks], dtype=torch.int32).reshape(1, -1)
         return self._create_decode_input_data(num_dummy_decodes, num_dummy_scheduled_tokens, context_lens,
                                               block_table_cpu_tensor)
 
@@ -4918,14 +4921,22 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         create_dynamic_scales = True
                     else:
                         create_dynamic_scales = False
-                    kv_scales_shape = kv_cache_shape[:-1] + (1, )
+                    min_val = torch.finfo(torch.bfloat16).tiny
+                    kv_scales_shape = list(kv_cache_shape)
+                    kv_scales_shape[-1] = 1
                     key_cache = torch.zeros(kv_cache_shape, dtype=dtype, device=self.device)
-                    key_scales = torch.ones(kv_scales_shape, dtype=torch.bfloat16, device=self.device) if \
+                    # initialize scale tensor with minimal scale values
+                    key_scales = torch.ones(kv_scales_shape, dtype=torch.bfloat16, device=self.device) * min_val if \
                         create_dynamic_scales else None
                     if v_cache_shape is not None:
                         value_cache = torch.zeros(v_cache_shape, dtype=dtype, device=self.device)
-                        value_scales = torch.ones(kv_scales_shape, dtype=torch.bfloat16, device=self.device) if \
-                            create_dynamic_scales else None
+                        value_scales_on_T = torch.ones(kv_scales_shape, dtype=torch.bfloat16, device=self.device) * \
+                            min_val if create_dynamic_scales else None
+                        value_scales_on_hidden = torch.ones(
+                            [num_blocks + 1, kv_cache_spec.num_kv_heads, kv_cache_spec.head_size],
+                            dtype=torch.bfloat16,
+                            device=self.device) * min_val if create_dynamic_scales else None
+                        value_scales = (value_scales_on_T, value_scales_on_hidden) if create_dynamic_scales else None
                     else:
                         value_cache = None
                         value_scales = None
@@ -4944,8 +4955,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         if self.enable_bucketing:
             self.bucketing_manager.num_hpu_blocks = num_blocks
-        self._PAD_BLOCK_ID = num_blocks
-        self._PAD_SLOT_ID = num_blocks * self.block_size
+
+        self._PAD_BLOCK_ID = 0
+        self._PAD_SLOT_ID = -1
+        self._dummy_num_blocks = num_blocks
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(self.get_kv_caches_4D(kv_caches))
