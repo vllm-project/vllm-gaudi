@@ -729,7 +729,6 @@ def apply_block_fp8_linear_hpu(
             input_2d,
             layer.weight,
             layer.weight_scale_inv,
-            layer.input_scale,
             bias,
         )
         return output.to(dtype=input.dtype).view(*input.shape[:-1], -1)
@@ -773,15 +772,11 @@ def apply_fp8_linear_hpu(
     input: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
-    input_scale: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
     trans_B: bool = True,
 ):
-    if input_scale is None:
-        x_fp8, x_scale = dynamic_quant(input)
-    else:
-        x_fp8 = torch.ops.hpu.cast_to_fp8_v2(input, 1.0 / input_scale, False, False, torch.float8_e4m3fn)[0]
-        x_scale = input_scale
+    x_fp8, x_scale = dynamic_quant(input)
+    
     output = torch.ops.hpu.fp8_gemm_v2(A=x_fp8,
                                        trans_A=False,
                                        B=weight,
