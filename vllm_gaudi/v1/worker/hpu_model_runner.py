@@ -5304,7 +5304,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 elif isinstance(kv_cache_spec, MambaSpec):
                     state_tensors = []
                     for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                        target_shape = (num_blocks, *shape)
+                        target_shape = (num_blocks + 1, *shape)
                         tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
                         state_tensors.append(tensor)
                     kv_caches[layer_name] = state_tensors
