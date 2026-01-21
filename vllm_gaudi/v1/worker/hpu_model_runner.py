@@ -4243,6 +4243,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         model = self.get_model()
         if hasattr(model, "model"):
             for layer in self.get_model().model.layers:
+                if not hasattr(layer, "self_attn"):
+                    continue
                 self_attn = layer.self_attn
                 # delete attr kv_b_proj in self_attn,
                 # as they have been transferred to the MLAImpl.
