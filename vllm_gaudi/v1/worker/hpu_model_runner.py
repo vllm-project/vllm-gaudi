@@ -4034,6 +4034,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         model = self.get_model()
         if hasattr(model, "model"):
             for layer in self.get_model().model.layers:
+                if not hasattr(layer, "self_attn"):
+                    continue
                 self_attn = layer.self_attn
                 # delete attr kv_b_proj in self_attn,
                 # as they have been transferred to the MLAImpl.
@@ -5242,6 +5244,64 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         self.initialize_attn_backend(kv_cache_config)
 
+        # TODO: Enable new once memory and shapes calculation is done
+        # for kv_cache_tensor in []: # kv_cache_config.kv_cache_tensors:
+        #     # taking into account dummy block
+        #     size = (kv_cache_tensor.size +
+        #             2 * kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes)
+        #     tensor = torch.zeros(size, dtype=torch.int8, device=self.device)
+        #     for layer_name in kv_cache_tensor.shared_by:
+        #         kv_caches[layer_name] = tensor
+
+        # for group in []:# kv_cache_config.kv_cache_groups:
+        #     kv_cache_spec = group.kv_cache_spec
+        #     for layer_name in group.layer_names:
+        #         kv_cache_spec = group.kv_cache_spec
+        #         for kk in kv_cache_config.kv_cache_tensors:
+        #             if layer_name in kk.shared_by:
+        #                 kv_cache_tensor_size = kk.size
+        #                 break
+        #         num_blocks = \
+        #             kv_cache_tensor_size // kv_cache_spec.page_size_bytes
+        #         if isinstance(kv_cache_spec, FullAttentionSpec):
+        #             reshaped = kv_caches[layer_name].view(kv_cache_spec.dtype).reshape(
+        #                 2, (num_blocks + 1) * kv_cache_spec.block_size,
+        #                 kv_cache_spec.num_kv_heads, kv_cache_spec.head_size
+        #             )
+        #             kc, vc = reshaped.unbind()  # (key cache, val cache)
+        #             # adding None for scales for dynamic quantization for now, TODO: change that once needed
+        #             kv_caches[layer_name] = (kc, vc, None, None)
+        #         elif isinstance(kv_cache_spec, MambaSpec):
+        #             # This is almost the same as for gpu runner in vllm
+        #             # only change is + 1 for dummy block
+        #             raw_tensor = kv_caches[layer_name]
+        #             state_tensors = []
+        #             storage_offset_bytes = 0
+        #             for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+        #                 dtype_size = get_dtype_size(dtype)
+        #                 num_element_per_page = (
+        #                     kv_cache_spec.page_size_bytes // dtype_size
+        #                 )
+        #                 target_shape = (num_blocks + 1, *shape)
+        #                 stride = torch.empty(target_shape).stride()
+        #                 target_stride = (num_element_per_page, *stride[1:])
+        #                 assert storage_offset_bytes % dtype_size == 0
+        #                 tensor = torch.as_strided(
+        #                     raw_tensor.view(dtype),
+        #                     size=target_shape,
+        #                     stride=target_stride,
+        #                     storage_offset=storage_offset_bytes // dtype_size,
+        #                 )
+        #                 state_tensors.append(tensor)
+        #                 storage_offset_bytes += stride[0] * dtype_size
+        #             # TODO: verify if below needed for dynamic quantization
+        #             # state_tensors.append(None)
+        #             # state_tensors.append(None)
+        #             kv_caches[layer_name] = tuple(state_tensors)
+        #         else:
+        #             pass
+
+        # TODO: Use below only for non-hybrid
         # build a map from layer_name -> KVCacheTensor
         tensor_map: dict[str, KVCacheTensor] = {}
         for tensor in kv_cache_config.kv_cache_tensors:
