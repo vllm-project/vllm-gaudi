@@ -9,3 +9,4 @@ tasks:
 limit: 250
 num_fewshot: 8
 dtype: "bfloat16"
+tokenizer-mode: "hf"
