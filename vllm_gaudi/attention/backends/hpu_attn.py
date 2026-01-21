@@ -930,6 +930,14 @@ class HPUUnifiedAttentionImpl(AttentionImpl, torch.nn.Module):
             else VLLMFP8KVCache()
         self.v_cache = VLLMKVCache() if not self.enable_fp8_attn \
             else VLLMFP8KVCache()
+        self.matmul_qk = Matmul() if not self.enable_fp8_attn \
+            else FP8Matmul()
+        self.matmul_av = Matmul() if not self.enable_fp8_attn \
+            else FP8Matmul()
+        self.batch2block_matmul = Matmul() if not self.enable_fp8_attn \
+            else FP8Matmul()
+        self.block2batch_matmul = Matmul() if not self.enable_fp8_attn \
+            else FP8Matmul()
 
     def forward(
         self,
@@ -967,6 +975,8 @@ class HPUUnifiedAttentionImpl(AttentionImpl, torch.nn.Module):
             key_cache=key_cache,
             value_cache=value_cache,
             scale=self.scale,
+            matmul_qk_op=self.matmul_qk,
+            matmul_av_op=self.matmul_av,
             metadata=attn_metadata,
         )
         output = output.unflatten(0, (query_shape[0], query_shape[1])).flatten(-2, -1)
