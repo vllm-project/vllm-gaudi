@@ -74,6 +74,14 @@ run_qwen3_inc_dynamic_test() {
     echo "✅ Test with Qwen3-8B-FP8 + inc requant FP8 model + dynamic quant passed."
 }
 
+# DS + blockfp8 + static scaling + FP8 KV
+# The lazy mode works on 1.24.0-272
+run_dsv2_blockfp8_static_scaling_fp8kv_test() {
+    echo "➡️ Testing Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 KV..."
+    PT_HPU_LAZY_MODE=0 HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model INC4AI/DeepSeek-V2-Lite-Chat-BF16-FP8-STATIC-FP8-KV-TEST-ONLY --trust-remote-code
+    echo "✅ Test with Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 KV successful."
+}
+
 # QWEN3 + blockfp8 + dynamic scaling
 run_qwen3_blockfp8_dynamic_scaling_test() {
     echo "➡️ Testing Qwen3-8B-FP8 + blockfp8 + dynamic scaling..."
@@ -257,6 +265,14 @@ run_qwen2_5_vl_unified_attn_test() {
     echo "✅ Test multimodal-support + unified attention with qwen2.5-vl-7b passed."
 }
 
+# Multimodal-support with qwen3-vl
+run_qwen3_vl_test() {
+    echo "➡️ Testing Qwen3-VL-32B..."
+    VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=0 \
+    python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen3-vl-32b.yaml"
+    echo "✅ Test with multimodal-support with qwen3-vl-32b passed."
+}
+
 # Spec decode with ngram
 run_spec_decode_ngram_test() {
     echo "➡️ Testing Spec-decode with ngram..."
@@ -311,6 +327,13 @@ run_pd_disaggregate_nixl_libfabric_test() {
     rm -rf nixl
     cd ${VLLM_GAUDI_PREFIX}/tests/unit_tests; DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=OFI bash run_accuracy_test.sh
     echo "✅ PD disaggregate through NIXL libfabric."
+}
+
+run_pd_disaggregate_nixl_ucx_test() {
+    echo "➡️ Testing PD disaggregate through NIXL UCX."
+    WHEELS_CACHE_HOME=/workspace/hf_cache/wheels_cache_ucx python "${VLLM_GAUDI_PREFIX}/install_nixl.py"
+    cd ${VLLM_GAUDI_PREFIX}/tests/unit_tests; DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=UCX bash run_accuracy_test.sh
+    echo "✅ PD disaggregate through NIXL UCX."
 }
 
 # sleep mode
