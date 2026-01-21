@@ -5,9 +5,9 @@
 import torch
 from torch import nn
 
-from vllm.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import (
     divide,

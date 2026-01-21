@@ -20,7 +20,7 @@ import torch
 import torch.nn.functional as F
 # import habana_frameworks.torch.hpu as ht
 
-from vllm.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 
 @dataclass(frozen=True)
