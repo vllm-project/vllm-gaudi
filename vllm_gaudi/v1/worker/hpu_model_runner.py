@@ -383,7 +383,7 @@ def apply_model_specific_patches(model):
 
 class HpuKVConnectorModelRunnerMixin(KVConnectorModelRunnerMixin):
 
-    def __init__(self, model, vllm_config):
+    def __init__(self):
         super().__init__()
 
     @staticmethod
