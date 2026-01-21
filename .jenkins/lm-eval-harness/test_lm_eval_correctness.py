@@ -51,7 +51,7 @@ def launch_lm_eval(eval_config):
                  f"dtype={dtype}," \
                  f"max_model_len=4096," \
                  f"max_num_seqs={max_num_seqs}," \
-                 f"trust_remote_code={trust_remote_code}"
+                 f"trust_remote_code={trust_remote_code},"
     extra_model_args = eval_config.get('model_args', "")
     model_args += extra_model_args
     if eval_config.get("fp8"):
