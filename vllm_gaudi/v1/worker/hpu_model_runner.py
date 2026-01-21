@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import collections
+import copy
 import contextlib
 import functools
 from functools import partial
@@ -42,13 +43,14 @@ from vllm.attention.layer import MLAAttention
 from vllm.v1.attention.selector import get_attn_backend
 
 from vllm.config import (VllmConfig, update_config)
+from vllm.config.multimodal import ImageDummyOptions
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model, get_model_loader
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem)
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -704,10 +706,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # Mult-modal-related.
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
+        self.model_config_copy = None
 
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(model_config)
         if self.supports_mm_inputs:
             self.is_mm_embed = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
+            self.model_config_copy = copy.deepcopy(self.model_config)
         self.is_multimodal_raw_input_supported = (model_config.is_multimodal_raw_input_only_model)
 
         # Lazy initialization
@@ -3887,12 +3891,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                    f"free_mem:{free_mem}")
         tqdm.write(msg)
 
-    def log_warmup_multimodal(self, phase, i, max_i, batch_size, seq_len, img_args):
+    def log_warmup_multimodal(self, phase, i, max_i, batch_size, seq_len, w, h, f):
         free_mem = format_bytes(HabanaMemoryProfiler.current_free_device_memory())
         msg = (f"[Warmup][{phase}][{i+1}/{max_i}] "
                f"batch_size:{batch_size} "
                f"seq_len:{seq_len} "
-               f"img_args:{img_args} "
+               f"resolution:{w}X{h} "
+               f"frames:{f} "
                f"free_mem:{free_mem}")
         logger.info(msg)
 
@@ -4574,51 +4579,44 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
         assert self.mm_budget is not None
-        img_count = 1
-        batch = image_args if self.get_model().vision_bucket_manager.is_batch_based else img_count
-        '''if self.get_model().vision_bucket_manager.is_batch_based:
+        count = 1
+        num_frames = 0
+        batch = image_args if self.get_model().vision_bucket_manager.is_batch_based else count
+        if self.get_model().vision_bucket_manager.is_batch_based:
             # Create ImageDummyOptions for Gemma3
-            #image_options = ImageDummyOptions(
-            #    width=896,  # pixels as in gemma3 config
-            #    height=896  # pixels as in gemma3 config
-            #)
+            w=896,  # pixels as in gemma3 config
+            h=896  # pixels as in gemma3 config
             batch = image_args
         else:
-            #patch_size = int(self.get_patch_size_from_model())
+            patch_size = int(self.get_patch_size_from_model())
             # Calculate width and height to maintain aspect ratio and patch count
             # Total patches = (width/patch_size) * (height/patch_size)
             # We want: (w/ps) * (h/ps) = num_patch where num_patch is image_args
             # And: w/h = ratio_w/ratio_h
-            #grid_w = int(math.sqrt(image_args * ratio_w / ratio_h))
-            #grid_h = int(image_args / grid_w)
-            #w = grid_w * patch_size
-            #h = grid_h * patch_size
-            #image_options = ImageDummyOptions(
-            #    width=w,  # Custom width in pixels
-            #    height=h  # Custom height in pixels
-            #)
-            batch = img_count
+            grid_w = int(math.sqrt(image_args * ratio_w / ratio_h))
+            grid_h = int(image_args / grid_w)
+            w = grid_w * patch_size
+            h = grid_h * patch_size
+            batch = count
+        self.model_config_copy.max_model_len = 4096
+        if modality == 'image':
+            self.model_config_copy.limit_mm_per_prompt = {
+                "image": {"count": count, "width": w, "height": h}
+            }
+        elif modality == 'video':
+            video_options = self.model_config_copy.get_multimodal_config().get_dummy_options("video")
+            num_frames = video_options.num_frames if video_options and hasattr(video_options, 'num_frames') else 100
+            w = video_options.width if video_options and hasattr(video_options, 'width') else w
+            h = video_options.height if video_options and hasattr(video_options, 'height') else h
+            count = video_options.count if video_options and hasattr(video_options, 'count') else 1
+            self.model_config_copy.limit_mm_per_prompt = {
+                "video": {"count": count, "num_frames": num_frames, "width": w, "height": h}
+            }
+        else:
+            raise NotImplementedError(f"Modality '{modality}' is not supported")
 
-        processor = self.mm_registry.create_processor(model_config=self.model_config, cache=self.mm_budget.cache)
-        dummy_data = processor.dummy_inputs.get_decoder_dummy_data(processor,
-                                                                   seq_len=4096,
-                                                                   mm_counts={"image": img_count},
-                                                                   mm_options={"image": image_options}),
-
-        dummy_mm_data = processor.dummy_inputs.get_dummy_processor_inputs(
-            seq_len=4096,
-            mm_counts={"image": img_count},
-        )
-        '''
-
-        assert modality == 'image'
-        # Result in the maximum GPU consumption of the model
-        dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
-            self.model_config,
-            mm_counts={modality: 1},
-            cache=self.mm_budget.cache,
-        )
-
+        dummy_mm_inputs = MultiModalRegistry().get_dummy_mm_inputs(self.model_config_copy,
+                                                                   mm_counts={modality: count})
         dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
         # We use the cache so that the item is saved to the cache,
         # but not read from the cache
@@ -4630,7 +4628,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             dummy_mm_items,
             device=self.device,
             pin_memory=self.pin_memory,
-        ))
+        )), w, h, num_frames
 
     def warmup_multimodal_graphs(self, buckets):
 
@@ -4651,15 +4649,22 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 (9, 16),  # 9:16 portrait
             ]
             aspect_ratios.extend(aspect_ratio_ext)
+        is_video_warmup = True if self.model_config.get_multimodal_config() is not None and \
+                self.model_config.get_multimodal_config().get_dummy_options("video") is not None \
+                    and self.mm_budget.mm_limits['video'] != 999 else False
+
+        is_image_warmup = True if self.model_config.get_multimodal_config() is not None and \
+                self.model_config.get_multimodal_config().get_dummy_options("image") is not None \
+                    and self.mm_budget.mm_limits['image'] != 0 else False
         for modality, max_items in self.mm_budget.mm_limits.items():
-            if modality == 'video':
-                logger.warning_once("Warming up for video is not implemented")
+            if modality == 'image' and is_image_warmup == False or modality == 'video' \
+                and is_video_warmup == False:
                 continue
             phase = f'Graph/Multimodal({modality})'
             num_candidates = len(buckets)
             for idx, img_arg in enumerate(buckets):
                 for (ratio_w, ratio_h) in aspect_ratios:
-                    batched_dummy_mm_inputs = self._get_mm_dummy_batch(modality, img_arg, ratio_w, ratio_h)
+                    batched_dummy_mm_inputs, w, h, f = self._get_mm_dummy_batch(modality, img_arg, ratio_w, ratio_h)
                     dummy_encoder_outputs = \
                         self.model.embed_multimodal(
                         **batched_dummy_mm_inputs)
@@ -4670,7 +4675,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         )
 
                     self.graphed_buckets.add(img_arg)
-                    self.log_warmup_multimodal(phase, idx, num_candidates, 1, 0, img_arg)
+                    self.log_warmup_multimodal(phase, idx, num_candidates, 1, 0, w, h, f)
 
     def _maybe_profile_unified_attn(self):
         unified_cfg_str = os.environ.get('VLLM_PROFILE_UNIFIED', None)
