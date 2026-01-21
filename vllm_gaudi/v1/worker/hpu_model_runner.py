@@ -3668,7 +3668,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         if not warmup_mode:
             self.maybe_wait_for_kv_save()
-            finished_sending, finished_recving = self.get_finished_kv_transfers(scheduler_output)
+            finished_sending, finished_recving = self.get_finished_kv_transfers(
+                scheduler_output)  # type: ignore[arg-type]
 
         if self.use_async_scheduling:
             model_runner_output = ModelRunnerOutput(
