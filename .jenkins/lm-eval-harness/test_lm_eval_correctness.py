@@ -60,6 +60,8 @@ def launch_lm_eval(eval_config):
         kwargs['fewshot_as_multiturn'] = eval_config['fewshot_as_multiturn']
     if 'apply_chat_template' in eval_config:
         kwargs['apply_chat_template'] = eval_config['apply_chat_template']
+    if 'tokenizer_mode' in eval_config:
+        kwargs['tokenizer_mode'] = eval_config['tokenizer_mode']
     results = lm_eval.simple_evaluate(model="vllm",
                                       model_args=model_args,
                                       tasks=[task["name"] for task in eval_config["tasks"]],
