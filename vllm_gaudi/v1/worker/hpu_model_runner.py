@@ -385,7 +385,7 @@ class HpuKVConnectorModelRunnerMixin(KVConnectorModelRunnerMixin):
         super().__init__()
 
     @staticmethod
-    def maybe_setup_kv_connector(self, scheduler_output: "SchedulerOutput"):
+    def maybe_setup_kv_connector(scheduler_output: "SchedulerOutput"):
         # Update KVConnector with the KVConnector metadata forward().
         if has_kv_transfer_group():
             kv_connector = get_kv_transfer_group()
@@ -400,12 +400,12 @@ class HpuKVConnectorModelRunnerMixin(KVConnectorModelRunnerMixin):
             kv_connector.start_load_kv(get_forward_context())
 
     @staticmethod
-    def maybe_wait_for_kv_save(self) -> None:
+    def maybe_wait_for_kv_save() -> None:
         if has_kv_transfer_group():
             get_kv_transfer_group().wait_for_save()
 
     @staticmethod
-    def get_finished_kv_transfers(self, scheduler_output: "SchedulerOutput", ) -> tuple[set[str] | None, set[str] | None]:
+    def get_finished_kv_transfers(scheduler_output: "SchedulerOutput", ) -> tuple[set[str] | None, set[str] | None]:
         if has_kv_transfer_group():
             return get_kv_transfer_group().get_finished(scheduler_output.finished_req_ids)
         return None, None
