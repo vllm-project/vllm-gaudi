@@ -75,7 +75,7 @@ from vllm.model_executor.models.interfaces import (SupportsMultiModal, supports_
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.transformers_utils.config import is_interleaved
-from vllm.v1.worker.utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
+from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -94,8 +94,6 @@ from vllm_gaudi.extension.ops import LoraMask as LoraMask
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnectorMetadata
 from vllm.v1.core.sched.output import GrammarOutput
-from vllm.config.multimodal import ImageDummyOptions
-from vllm.multimodal.profiling import MultiModalProfiler
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -882,7 +880,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.head_size = self.model_config.get_head_size()
         self.hidden_size = self.model_config.get_hidden_size()
         self.is_pooling_model = (model_config.runner_type == 'pooling')
-        logger.debug("model config: ", self.model_config)
+        logger.debug("model config: %s", self.model_config)
 
         self.attn_backend = get_attn_backend(
             self.head_size,
@@ -1466,11 +1464,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if req_id not in self.encoder_cache:
                 self.encoder_cache[req_id] = {}
 
-            self.encoder_cache[mm_hash] = scatter_mm_placeholders(
-                output,
-                is_embed=pos_info.is_embed.to(
-                    device=output.device) if pos_info.is_embed is not None else pos_info.is_embed,
-            )
+            self.encoder_cache[mm_hash] = output
 
     # modified from: vllm/v1/worker/gpu_model_runner.py
     def _gather_mm_embeddings(
@@ -1488,6 +1482,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         req_start_idx = 0
         for req_id in req_ids:
+            mm_embeds_req: list[torch.Tensor] = []
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             req_state = self.requests[req_id]
             num_computed_tokens = \
@@ -1512,6 +1507,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 start_idx = max(num_computed_tokens - start_pos, 0)
                 end_idx = min(num_computed_tokens - start_pos + num_scheduled_tokens, num_encoder_tokens)
                 assert start_idx < end_idx
+                curr_embeds_start, curr_embeds_end = (pos_info.get_embeds_indices_in_range(start_idx, end_idx))
+                # If there are no embeddings in the current range, we skip
+                # gathering the embeddings.
+                if curr_embeds_start == curr_embeds_end:
+                    continue
                 mm_hash = mm_feature.identifier
                 encoder_output = self.encoder_cache.get(mm_hash, None)
                 assert encoder_output is not None,\
@@ -1520,21 +1520,26 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
+                    mm_embeds_item = encoder_output[curr_embeds_start:curr_embeds_end]
+                else:
+                    mm_embeds_item = encoder_output[start_idx:end_idx]
 
-                mm_embeds_item = gather_mm_placeholders(
-                    encoder_output[start_idx:end_idx],
-                    is_embed=is_embed,
-                )
                 req_start_pos = req_start_idx + start_pos - num_computed_tokens
-                is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
-                    = True
-
-                # Only whole mm items are processed
-                mm_embeds.append(mm_embeds_item)
+                is_mm_embed[req_start_pos + start_idx:req_start_pos +
+                            end_idx] = (True if is_embed is None else is_embed)
+                mm_embeds_req.append(mm_embeds_item)
+            mm_embeds.extend(mm_embeds_req)
             req_start_idx += num_scheduled_tokens
 
-        is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
-
+        # Convert bool tensor to index tensor for merge embedding statically if optimized mm
+        if self.uses_mrope:
+            is_mm_embed_index = torch.nonzero(is_mm_embed[:total_num_scheduled_tokens], as_tuple=True)[0]
+            # Bounds validation on CPU
+            if len(is_mm_embed_index) > 0 and is_mm_embed_index.max() >= total_num_scheduled_tokens:
+                raise ValueError(f"Index {is_mm_embed_index.max()} exceeds tensor size {total_num_scheduled_tokens}")
+            is_mm_embed = is_mm_embed_index.to(self.device)
+        else:
+            is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
         return mm_embeds, is_mm_embed
 
     def _get_model_mm_inputs(
@@ -3898,6 +3903,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
         self.model_memory_usage = m.consumed_device_memory
         logger.info("Loading model weights took %.4f GB", self.model_memory_usage / float(2**30))
+        
 
         if self._is_quant_with_inc():
             logger.info("Preparing model with INC..")
@@ -3967,6 +3973,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self._maybe_compile(self.model)
         self.model_memory_usage = m.consumed_device_memory
         logger.info("Compilation took %.4f GB", self.model_memory_usage / float(2**30))
+        self.is_mm_optimized = is_mm_optimized(self.model)
 
     def _maybe_compile(self, *args, **kwargs):
         """Entrypoint for a torch.compilation of the model"""
@@ -4751,7 +4758,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         """Dummy data for profiling and precompiling multimodal models."""
         assert self.mm_budget is not None
         img_count = 1
-        if self.get_model().vision_bucket_manager.is_batch_based:
+        '''if self.get_model().vision_bucket_manager.is_batch_based:
             # Create ImageDummyOptions for Gemma3
             image_options = ImageDummyOptions(
                 width=896,  # pixels as in gemma3 config
@@ -4773,16 +4780,32 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 height=h  # Custom height in pixels
             )
             batch = img_count
+
         processor = self.mm_registry.create_processor(model_config=self.model_config, cache=self.mm_budget.cache)
-        profiler: MultiModalProfiler = MultiModalProfiler(processor)
-        dummy_data = profiler.get_decoder_dummy_data(seq_len=4096,
-                                                     mm_counts={"image": img_count},
-                                                     mm_options={"image": image_options})
-        dummy_mm_data = dummy_data.multi_modal_data
+        dummy_data = processor.dummy_inputs.get_decoder_dummy_data(processor,
+                                                                   seq_len=4096,
+                                                                   mm_counts={"image": img_count},
+                                                                   mm_options={"image": image_options}),
+
+        dummy_mm_data = processor.dummy_inputs.get_dummy_processor_inputs(
+            seq_len=4096,
+            mm_counts={"image": img_count},
+        )
+        '''
 
         assert modality == 'image'
         # Result in the maximum GPU consumption of the model
-        dummy_mm_item = dummy_mm_data['image'][0]
+        dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
+            self.model_config,
+            mm_counts={modality: 1},
+            cache=self.mm_budget.cache,
+        )
+
+        dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
+        # We use the cache so that the item is saved to the cache,
+        # but not read from the cache
+        assert dummy_mm_item is not None, "Item should not already be cached"
+
         dummy_mm_items = [dummy_mm_item] * batch
 
         self.model.model = cast(SupportsMultiModal, self.model.model)
@@ -4799,8 +4822,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         phase = 'Graph/Multimodal'
         from vllm.v1.worker.utils import MultiModalBudget
         self.mm_budget = MultiModalBudget(
-            self.model_config,
-            self.scheduler_config,
+            self.vllm_config,
             self.mm_registry,
         ) if self.supports_mm_inputs else None
         aspect_ratios = [(1, 1)]  # 1:1 square
