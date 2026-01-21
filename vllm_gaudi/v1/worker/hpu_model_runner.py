@@ -43,6 +43,7 @@ from vllm.attention.layer import MLAAttention
 from vllm.v1.attention.selector import get_attn_backend
 
 from vllm.config import (VllmConfig, update_config)
+from vllm.config.multimodal import ImageDummyOptions, VideoDummyOptions
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
@@ -51,6 +52,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEm
 from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem)
+from vllm.multimodal.profiling import MultiModalProfiler
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
@@ -705,12 +707,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # Mult-modal-related.
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
-        self.model_config_copy = None
 
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(model_config)
         if self.supports_mm_inputs:
             self.is_mm_embed = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
-            self.model_config_copy = copy.deepcopy(self.model_config)
         self.is_multimodal_raw_input_supported = (model_config.is_multimodal_raw_input_only_model)
 
         # Lazy initialization
@@ -4582,27 +4582,38 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             w = grid_w * patch_size
             h = grid_h * patch_size
             batch = count
-        self.model_config_copy.max_model_len = 4096
+
         if modality == 'image':
-            self.model_config_copy.limit_mm_per_prompt = {"image": {"count": count, "width": w, "height": h}}
+            mm_options: Mapping[str, BaseDummyOptions] = {
+                "image": ImageDummyOptions(
+                    count=count,
+                    width=w,
+                    height=h
+                ),
+                "video": None
+            }
         elif modality == 'video':
-            video_options = self.model_config_copy.get_multimodal_config().get_dummy_options("video")
+            video_options = self.model_config.get_multimodal_config().get_dummy_options("video")
             num_frames = video_options.num_frames if video_options and hasattr(video_options, 'num_frames') else 100
             w = video_options.width if video_options and hasattr(video_options, 'width') else w
             h = video_options.height if video_options and hasattr(video_options, 'height') else h
             count = video_options.count if video_options and hasattr(video_options, 'count') else 1
-            self.model_config_copy.limit_mm_per_prompt = {
-                "video": {
-                    "count": count,
-                    "num_frames": num_frames,
-                    "width": w,
-                    "height": h
-                }
+            mm_options = VideoDummyOptions(width=w, height=h, num_frames=num_frames)
+            mm_options: Mapping[str, BaseDummyOptions] = {
+                "image": None,
+                "video": VideoDummyOptions(
+                    count=count,
+                    num_frames=num_frames,
+                    width=w,
+                    height=h
+                )
             }
         else:
             raise NotImplementedError(f"Modality '{modality}' is not supported")
 
-        dummy_mm_inputs = MultiModalRegistry().get_dummy_mm_inputs(self.model_config_copy, mm_counts={modality: count})
+        processor = MULTIMODAL_REGISTRY.create_processor(self.model_config)
+        profiler = MultiModalProfiler(processor)
+        dummy_mm_inputs = profiler._get_dummy_mm_inputs(seq_len=4196, mm_counts={modality: count}, mm_options=mm_options)
         dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
         # We use the cache so that the item is saved to the cache,
         # but not read from the cache
