@@ -380,8 +380,38 @@ def apply_model_specific_patches(model):
 
     patch_llama4_get_attn_scale(model)
 
+class HpuKVConnectorModelRunnerMixin(KVConnectorModelRunnerMixin):
+    def __init__(self, model, vllm_config):
+        super().__init__()
 
-class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
+    @staticmethod
+    def maybe_setup_kv_connector(self, scheduler_output: "SchedulerOutput"):
+        # Update KVConnector with the KVConnector metadata forward().
+        if has_kv_transfer_group():
+            kv_connector = get_kv_transfer_group()
+            assert isinstance(kv_connector, KVConnectorBase)
+            assert scheduler_output.kv_connector_metadata is not None
+            kv_connector.bind_connector_metadata(scheduler_output.kv_connector_metadata)
+
+            # Background KV cache transfers happen here.
+            # These transfers are designed to be async and the requests
+            # involved may be disjoint from the running requests.
+            # Do this here to save a collective_rpc.
+            kv_connector.start_load_kv(get_forward_context())
+
+    @staticmethod
+    def maybe_wait_for_kv_save(self) -> None:
+        if has_kv_transfer_group():
+            get_kv_transfer_group().wait_for_save()
+
+    @staticmethod
+    def get_finished_kv_transfers(self, scheduler_output: "SchedulerOutput", ) -> tuple[set[str] | None, set[str] | None]:
+        if has_kv_transfer_group():
+            return get_kv_transfer_group().get_finished(scheduler_output.finished_req_ids)
+        return None, None
+
+
+class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
 
     def __init__(self, model, vllm_config):
         super().__init__()
@@ -611,7 +641,7 @@ def get_dp_padding(num_tokens: int, dp_size: int, dp_rank: int) -> int:
     return max_tokens_across_dp_cpu - num_tokens
 
 
-class HPUModelRunner(KVConnectorModelRunnerMixin):
+class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     def __init__(
         self,
@@ -3769,32 +3799,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 self.sampler = self._compile(self.sampler)
             else:
                 self.model = self._compile(self.model)
-
-    @staticmethod
-    def maybe_setup_kv_connector(self, scheduler_output: "SchedulerOutput"):
-        # Update KVConnector with the KVConnector metadata forward().
-        if has_kv_transfer_group():
-            kv_connector = get_kv_transfer_group()
-            assert isinstance(kv_connector, KVConnectorBase)
-            assert scheduler_output.kv_connector_metadata is not None
-            kv_connector.bind_connector_metadata(scheduler_output.kv_connector_metadata)
-
-            # Background KV cache transfers happen here.
-            # These transfers are designed to be async and the requests
-            # involved may be disjoint from the running requests.
-            # Do this here to save a collective_rpc.
-            kv_connector.start_load_kv(get_forward_context())
-
-    @staticmethod
-    def maybe_wait_for_kv_save(self) -> None:
-        if has_kv_transfer_group():
-            get_kv_transfer_group().wait_for_save()
-
-    @staticmethod
-    def get_finished_kv_transfers(self, scheduler_output: "SchedulerOutput", ) -> tuple[set[str] | None, set[str] | None]:
-        if has_kv_transfer_group():
-            return get_kv_transfer_group().get_finished(scheduler_output.finished_req_ids)
-        return None, None
 
     def _compile_methods(self):
         """
