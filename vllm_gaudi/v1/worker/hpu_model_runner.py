@@ -3341,7 +3341,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             else:
                 with set_forward_context(None, self.vllm_config):
                     self.maybe_setup_kv_connector(scheduler_output)
-        finished_sending, finished_recving = set(), set()  # type: ignore[arg-type]
+        finished_sending, finished_recving = set[str](), set[str]()
 
         # NOTE(Chendi): used by spec decode draft model, since we are doing
         # prefill one by one, so save hidden states as list
