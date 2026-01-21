@@ -54,9 +54,9 @@ def launch_lm_eval(eval_config):
                  f"trust_remote_code={trust_remote_code}"
     if eval_config.get("fp8"):
         model_args += ",quantization=inc," \
-            "kv_cache_dtype=fp8_inc,"
+            "kv_cache_dtype=fp8_inc"
     if 'tokenizer_mode' in eval_config:
-        model_args += f"tokenizer_mode={eval_config['tokenizer_mode']},"
+        model_args += f",tokenizer_mode={eval_config['tokenizer_mode']}"
     kwargs = {}
     if 'fewshot_as_multiturn' in eval_config:
         kwargs['fewshot_as_multiturn'] = eval_config['fewshot_as_multiturn']
