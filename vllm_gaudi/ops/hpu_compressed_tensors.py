@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Callable, Optional, Union, Any
 import habana_frameworks.torch as htorch
 import torch
@@ -39,7 +40,7 @@ from vllm.model_executor.utils import set_weight_attrs
 import vllm_gaudi.extension.ops as hpu_ops
 from vllm_gaudi import envs
 from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
-from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel, VllmMixtureOfExpertsOpWNA16)
+from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8, VllmMixtureOfExpertsOpFP8PerChannel, VllmMixtureOfExpertsOpWNA16)
 from vllm_gaudi.extension.runtime import get_config
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase, )
@@ -319,12 +320,23 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
         ep_shift = layer.ep_rank * num_experts
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
-        layer.moe_op = VllmMixtureOfExpertsOpFP8PerChannel(
-            layer.global_num_experts,
-            num_experts,
-            experts_min,
-            experts_max,
-        )
+        
+        if self.block_quant and not envs.VLLM_HPU_FORCE_CHANNEL_FP8:
+            layer.moe_op = VllmMixtureOfExpertsOpFP8(
+                layer.global_num_experts,
+                num_experts,
+                experts_min,
+                experts_max,
+                dispatch_fn=None,
+            )
+        else:
+            layer.moe_op = VllmMixtureOfExpertsOpFP8PerChannel(
+                layer.global_num_experts,
+                num_experts,
+                experts_min,
+                experts_max,
+                dispatch_fn=None,
+            )
 
         if self.static_input_scales:
             assert self.input_quant.strategy == QuantizationStrategy.TENSOR
@@ -358,7 +370,7 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
             w2_weight_scale_channel[:, :, 0] = layer.w2_weight_scale.reshape(-1, 1)
             layer.w2_weight_scale = torch.nn.Parameter(w2_weight_scale_channel, requires_grad=False)
 
-        elif self.block_quant:
+        if self.block_quant:
             assert layer.weight_block_size is not None
             layer = hpu_ops.fp8_block_moe_prepare_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
         else:
