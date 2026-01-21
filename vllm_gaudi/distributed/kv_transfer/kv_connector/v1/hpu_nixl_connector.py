@@ -207,7 +207,7 @@ def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str):
     self.vllm_config = vllm_config
     self.block_size = vllm_config.cache_config.block_size
     self.kv_cache_layout = get_kv_cache_layout()
-    self.engine_id: EngineId = engine_id
+    self.engine_id: EngineId = engine_id  # type: ignore[misc]
     self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
     self.side_channel_port = (envs.VLLM_NIXL_SIDE_CHANNEL_PORT + vllm_config.parallel_config.data_parallel_index)
     assert vllm_config.kv_transfer_config is not None
@@ -221,7 +221,7 @@ def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str):
     self.block_size_on_save = self.block_size
 
     # list of chunked prefill partials
-    self.partial_reqs: dict[ReqId, list] = {}
+    self.partial_reqs: dict[ReqId, list] = {}  # type: ignore[misc]
 
     if vllm_config.kv_transfer_config.enable_permute_local_kv:
         (
@@ -232,21 +232,21 @@ def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str):
     logger.info("Initializing NIXL Scheduler %s", engine_id)
 
     # Background thread for handling new handshake requests.
-    self._nixl_handshake_listener_t: threading.Thread | None = None
-    self._encoded_xfer_handshake_metadata: dict[int, Any] = {}
+    self._nixl_handshake_listener_t: threading.Thread | None = None  # type: ignore[misc]
+    self._encoded_xfer_handshake_metadata: dict[int, Any] = {}  # type: ignore[misc]
     self._stop_event = threading.Event()
 
     # Requests that need to start recv/send.
     # New requests are added by update_state_after_alloc in
     # the scheduler. Used to make metadata passed to Worker.
-    self._reqs_need_recv: dict[ReqId, tuple[Request, list[int]]] = {}
-    self._reqs_need_save: dict[ReqId, Request] = {}
+    self._reqs_need_recv: dict[ReqId, tuple[Request, list[int]]] = {}  # type: ignore[misc]
+    self._reqs_need_save: dict[ReqId, Request] = {}  # type: ignore[misc]
     # Reqs to send and their expiration time
-    self._reqs_need_send: dict[ReqId, float] = {}
-    self._reqs_in_batch: set[ReqId] = set()
+    self._reqs_need_send: dict[ReqId, float] = {}  # type: ignore[misc]
+    self._reqs_in_batch: set[ReqId] = set()  # type: ignore[misc]
     # Reqs to remove from processed set because they're not to send after
     # remote prefill or aborted.
-    self._reqs_not_processed: set[ReqId] = set()
+    self._reqs_not_processed: set[ReqId] = set()  # type: ignore[misc]
 
 
 def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
@@ -480,10 +480,10 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
 
     self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), config)
     # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
-    self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
+    self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)  # type: ignore[misc]
 
     # Metadata.
-    self.engine_id: EngineId = engine_id
+    self.engine_id: EngineId = engine_id  # type: ignore[misc]
     self.tp_rank = get_tensor_model_parallel_rank()
     self.world_size = get_tensor_model_parallel_world_size()
     self.tp_group = get_tp_group()
@@ -493,17 +493,17 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
 
     # KV Caches and nixl tracking data.
     self.device_type = current_platform.device_type
-    self.kv_buffer_device: str = vllm_config.kv_transfer_config.kv_buffer_device
+    self.kv_buffer_device: str = vllm_config.kv_transfer_config.kv_buffer_device  # type: ignore[misc]
     if self.device_type not in _NIXL_SUPPORTED_DEVICE:
         raise RuntimeError(f"{self.device_type} is not supported.")
     elif self.kv_buffer_device not in _NIXL_SUPPORTED_DEVICE[self.device_type]:
         raise RuntimeError(f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
                            "is not supported.")
-    self.device_kv_caches: dict[str, torch.Tensor] = {}
+    self.device_kv_caches: dict[str, torch.Tensor] = {}  # type: ignore[misc]
 
     # cpu kv buffer for xfer
     # used when device memory can not be registered under nixl
-    self.host_xfer_buffers: dict[str, torch.Tensor] = {}
+    self.host_xfer_buffers: dict[str, torch.Tensor] = {}  # type: ignore[misc]
     if self.device_type == "cpu":
         self.use_host_buffer = False
     else:
@@ -523,10 +523,10 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
     self.nixl_memory_type = nixl_memory_type
 
     # Note: host xfer buffer ops when use_host_buffer is True
-    self.copy_blocks: CopyBlocksOp | None = None
+    self.copy_blocks: CopyBlocksOp | None = None  # type: ignore[misc]
 
     # Map of engine_id -> kv_caches_base_addr. For TP case, each local
-    self.device_id: int = 0
+    self.device_id: int = 0  # type: ignore[misc]
     # Current rank may pull from multiple remote TP workers.
     # EngineId, dict[int, list[int]] -> engine_id, tp_rank, base_addr_for_layer
     self.kv_caches_base_addr = defaultdict[EngineId, dict[int, list[int]]](dict)
@@ -537,34 +537,34 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
     self.num_layers = 0
 
     # nixl_prepped_dlist_handle.
-    self.src_xfer_handles_by_block_size: dict[int, int] = {}
+    self.src_xfer_handles_by_block_size: dict[int, int] = {}  # type: ignore[misc]
     # Populated dynamically during handshake based on remote configuration.
     # Keep track of regions at different tp_ratio values. tp_ratio->handles
-    self.src_xfer_handles_by_tp_ratio: dict[int, list[int]] = {}
+    self.src_xfer_handles_by_tp_ratio: dict[int, list[int]] = {}  # type: ignore[misc]
     # Map of engine_id -> {tp_rank: nixl_prepped_dlist_handle (int)}.
     self.dst_xfer_side_handles = defaultdict[EngineId, dict[int, int]](dict)
 
     # Map of engine_id -> num_blocks. All ranks in the same deployment will
     # have the same number of blocks.
-    self.dst_num_blocks: dict[EngineId, int] = {}
-    self._registered_descs: list[Any] = []
+    self.dst_num_blocks: dict[EngineId, int] = {}  # type: ignore[misc]
+    self._registered_descs: list[Any] = []  # type: ignore[misc]
 
     # In progress transfers.
     # [req_id -> list[handle]]
-    self._recving_metadata: dict[ReqId, ReqMeta] = {}
+    self._recving_metadata: dict[ReqId, ReqMeta] = {}  # type: ignore[misc]
     self._recving_transfers = defaultdict[ReqId, list[TransferHandle]](list)
     # Track the expiration time of requests that are waiting to be sent.
-    self._reqs_to_send: dict[ReqId, float] = {}
+    self._reqs_to_send: dict[ReqId, float] = {}  # type: ignore[misc]
     # Set of requests that have been part of a batch, regardless of status.
-    self._reqs_to_process: set[ReqId] = set()
+    self._reqs_to_process: set[ReqId] = set()  # type: ignore[misc]
 
     # invalid blocks from failed NIXL operations
-    self._invalid_block_ids: set[int] = set()
+    self._invalid_block_ids: set[int] = set()  # type: ignore[misc]
     # requests that skipped transfer (handshake or transfer failures)
-    self._failed_recv_reqs: set[ReqId] = set()
+    self._failed_recv_reqs: set[ReqId] = set()  # type: ignore[misc]
 
     # Handshake metadata of this worker for NIXL transfers.
-    self.xfer_handshake_metadata: NixlHandshakePayload | None = None
+    self.xfer_handshake_metadata: NixlHandshakePayload | None = None  # type: ignore[misc]
     # Background thread for initializing new NIXL handshakes.
     self._handshake_initiation_executor = ThreadPoolExecutor(
         # NIXL is not guaranteed to be thread-safe, limit 1 worker.
@@ -572,7 +572,7 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
         thread_name_prefix="vllm-nixl-handshake-initiator",
     )
     self._ready_requests = queue.Queue[tuple[ReqId, ReqMeta]]()
-    self._handshake_futures: dict[EngineId, Future[dict[int, str]]] = {}
+    self._handshake_futures: dict[EngineId, Future[dict[int, str]]] = {}  # type: ignore[misc]
     # Protects _handshake_futures and _remote_agents.
     self._handshake_lock = threading.RLock()
 
@@ -583,7 +583,7 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
     # TODO(mgoin): remove this once we have hybrid memory allocator
     # Optimization for models with local attention (Llama 4)
     # List of block window sizes for each layer for local attention
-    self.block_window_per_layer: list[int | None] = []
+    self.block_window_per_layer: list[int | None] = []  # type: ignore[misc]
     self.use_mla = self.model_config.use_mla
 
     # Get the attention backend from the first layer
@@ -607,8 +607,8 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
             self.block_size_on_save,
         ) = if_postprocess_kvcache_on_save(self.vllm_config, self.block_size, self.kv_cache_layout)
 
-    self._tp_size: dict[EngineId, int] = {self.engine_id: self.world_size}
-    self._block_size: dict[EngineId, int] = {self.engine_id: self.block_size}
+    self._tp_size: dict[EngineId, int] = {self.engine_id: self.world_size}  # type: ignore[misc]
+    self._block_size: dict[EngineId, int] = {self.engine_id: self.block_size}  # type: ignore[misc]
     # With heterogeneous TP, P must wait for all assigned D TP workers to
     # finish reading before safely freeing the blocks.
     self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
