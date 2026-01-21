@@ -3339,7 +3339,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             else:
                 with set_forward_context(None, self.vllm_config):
                     self.maybe_setup_kv_connector(scheduler_output)
-        finished_sending, finished_recving = set(), set()
+        finished_sending, finished_recving = set[str](), set[str]()
 
         # NOTE(Chendi): used by spec decode draft model, since we are doing
         # prefill one by one, so save hidden states as list
@@ -3666,7 +3666,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         if not warmup_mode:
             self.maybe_wait_for_kv_save()
-            finished_sending, finished_recving = self.get_finished_kv_transfers(scheduler_output)
+            finished_sending, finished_recving = self.get_finished_kv_transfers(scheduler_output)  # type: ignore
 
         if self.use_async_scheduling:
             model_runner_output = ModelRunnerOutput(
