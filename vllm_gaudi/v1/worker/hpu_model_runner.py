@@ -50,7 +50,7 @@ from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model, get_model_loader
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem)
 from vllm.multimodal.profiling import MultiModalProfiler
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
@@ -4585,11 +4585,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         if modality == 'image':
             mm_options: Mapping[str, BaseDummyOptions] = {
-                "image": ImageDummyOptions(
-                    count=count,
-                    width=w,
-                    height=h
-                ),
+                "image": ImageDummyOptions(count=count, width=w,height=h),
                 "video": None
             }
         elif modality == 'video':
@@ -4601,19 +4597,16 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             mm_options = VideoDummyOptions(width=w, height=h, num_frames=num_frames)
             mm_options: Mapping[str, BaseDummyOptions] = {
                 "image": None,
-                "video": VideoDummyOptions(
-                    count=count,
-                    num_frames=num_frames,
-                    width=w,
-                    height=h
-                )
+                "video": VideoDummyOptions(count=count, num_frames=num_frames, width=w, height=h)
             }
         else:
             raise NotImplementedError(f"Modality '{modality}' is not supported")
 
         processor = MULTIMODAL_REGISTRY.create_processor(self.model_config)
         profiler = MultiModalProfiler(processor)
-        dummy_mm_inputs = profiler._get_dummy_mm_inputs(seq_len=4196, mm_counts={modality: count}, mm_options=mm_options)
+        dummy_mm_inputs = profiler._get_dummy_mm_inputs(seq_len=4196,
+                                                        mm_counts={modality: count},
+                                                        mm_options=mm_options)
         dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
         # We use the cache so that the item is saved to the cache,
         # but not read from the cache
