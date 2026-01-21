@@ -4620,8 +4620,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         phase = 'Graph/Multimodal'
         from vllm.v1.worker.utils import MultiModalBudget
         self.mm_budget = MultiModalBudget(
-            self.model_config,
-            self.scheduler_config,
+            self.vllm_config,
             self.mm_registry,
         ) if self.supports_mm_inputs else None
 
