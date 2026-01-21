@@ -428,7 +428,9 @@ class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
         self.unified_attn_persistent_ctx = None
         self.flatten_input = get_config().flatten_input
         self.is_mm_optimized = is_mm_optimized(self.model)
-        self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
+        self.sliding_window = vllm_config.model_config.get_sliding_window()
+        self.interleaved_sliding_window = (is_interleaved(vllm_config.model_config.hf_text_config)
+                                           and self.sliding_window)
         self.metadata_processor = HPUAttentionMetadataProcessor(vllm_config)
 
         # for DP
@@ -697,7 +699,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.is_pooling_model = model_config.pooler_config is not None
 
         self.sliding_window = model_config.get_sliding_window()
-        self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
+        self.interleaved_sliding_window = (is_interleaved(vllm_config.model_config.hf_text_config)
+                                           and self.sliding_window)
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
@@ -2177,7 +2180,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 padded_batch_size * num_tokens
             )
 
-        if self.interleaved_sliding_window and self.sliding_window is not None and self.sliding_window > 0:
+        if self.interleaved_sliding_window:
             sliding_block_size = (self.sliding_window // self.block_size)
             window_block_tables = [block_table[-sliding_block_size:] for block_table in block_tables_list]
             window_block_list, window_block_groups, window_block_usage = \
@@ -2203,15 +2206,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         block_usage_device = async_h2d_copy(block_usage, device=self.device)
         block_groups_device = async_h2d_copy(block_groups, device=self.device)
         slot_mapping_device = async_h2d_copy(slot_mapping, device=self.device)
-        window_block_list_device = async_h2d_copy(
-            window_block_list,
-            device=self.device) if self.interleaved_sliding_window and self.sliding_window is not None else None
-        window_block_usage_device = async_h2d_copy(
-            window_block_usage,
-            device=self.device) if self.interleaved_sliding_window and self.sliding_window is not None else None
-        window_block_groups_device = async_h2d_copy(
-            window_block_groups,
-            device=self.device) if self.interleaved_sliding_window and self.sliding_window is not None else None
+        window_block_list_device = async_h2d_copy(window_block_list,
+                                                  device=self.device) if self.interleaved_sliding_window else None
+        window_block_usage_device = async_h2d_copy(window_block_usage,
+                                                   device=self.device) if self.interleaved_sliding_window else None
+        window_block_groups_device = async_h2d_copy(window_block_groups,
+                                                    device=self.device) if self.interleaved_sliding_window else None
         chunked_block_list_device = async_h2d_copy(chunked_block_list,
                                                    device=self.device) if self.model_has_chunked_attention else None
         chunked_block_usage_device = async_h2d_copy(chunked_block_usage,
@@ -5562,7 +5562,8 @@ class HPUAttentionMetadataProcessor:
         self.block_size = vllm_config.cache_config.block_size
         self.dtype = vllm_config.model_config.dtype
         self.sliding_window = vllm_config.model_config.get_sliding_window()
-        self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
+        self.interleaved_sliding_window = (is_interleaved(vllm_config.model_config.hf_text_config)
+                                           and self.sliding_window)
 
         if self.interleaved_sliding_window:
             self.use_window_sdpa = with_default(get_config().PT_HPU_SDPA_QKV_SLICE_MODE_FWD, False)
@@ -5849,7 +5850,7 @@ class HPUAttentionMetadataProcessor:
         """
         if attn_metadata.is_prompt:
             attn_metadata = self._set_attn_bias(attn_metadata, batch_size, seq_len, device, dtype)
-            if self.interleaved_sliding_window and self.sliding_window is not None:
+            if self.interleaved_sliding_window:
                 attn_metadata = self._set_attn_bias_for_sliding_window(attn_metadata, batch_size, seq_len,
                                                                        self.sliding_window, device, dtype)
             if model_has_chunked_attention:
@@ -5864,7 +5865,7 @@ class HPUAttentionMetadataProcessor:
                                                         device,
                                                         dtype,
                                                         update_for_chunked_attention=True)
-            if self.interleaved_sliding_window and self.sliding_window is not None:
+            if self.interleaved_sliding_window:
                 attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype, True)
         return attn_metadata
 
