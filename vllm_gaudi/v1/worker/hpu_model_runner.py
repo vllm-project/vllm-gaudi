@@ -67,7 +67,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors, DraftTo
                              AsyncModelRunnerOutput, KVConnectorOutput)
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.worker.utils import bind_kv_cache
+from vllm.v1.worker.utils import bind_kv_cache, add_kv_sharing_layers_to_kv_cache_groups
 from vllm.v1.utils import CpuGpuBuffer
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
 from vllm.distributed.parallel_state import get_pp_group, get_dp_group
@@ -713,6 +713,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # Lazy initialization
         # self.model: nn.Module  # set after load_model
         self.kv_caches: list[torch.Tensor] = []
+        self.shared_kv_cache_layers: dict[str, str] = {}
         self.inc_initialized_successfully = False
         self._is_inc_finalized = False
 
@@ -806,8 +807,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.graphed_multimodal_buckets: set[Any] = set()
         else:
             logger.info("Bucketing is OFF.")
+
         self._PAD_SLOT_ID = -1
-        self._PAD_BLOCK_ID = -1
+        self._PAD_BLOCK_ID = 0
+        self._dummy_num_blocks = 0
 
         if self.vllm_config.parallel_config.data_parallel_size > 1 and htorch.utils.internal.is_lazy(
         ) and not self.model_config.enforce_eager:
@@ -948,6 +951,20 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         cache_dtype_str = self.vllm_config.cache_config.cache_dtype
         for layer_name, attn_module in forward_ctx.items():
+            kv_sharing_target_layer_name = getattr(attn_module, 'kv_sharing_target_layer_name', None)
+            if kv_sharing_target_layer_name is not None:
+                from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
+                try:
+                    validate_kv_sharing_target(
+                        layer_name,
+                        kv_sharing_target_layer_name,
+                        forward_ctx,
+                    )
+                    self.shared_kv_cache_layers[layer_name] = kv_sharing_target_layer_name
+                except Exception as e:
+                    logger.error("KV sharing validation failed for %s -> %s: %s", layer_name,
+                                 kv_sharing_target_layer_name, e)
+                continue
             if isinstance(attn_module, FusedMoE):
                 continue
 
@@ -1198,23 +1215,17 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
     # source: vllm/v1/worker/gpu_model_runner.py
     def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput", req_ids: list[str]):
-        scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
-        if not scheduled_encoder_inputs:
-            return
-
         # Batch the multi-modal inputs.
         mm_kwargs = list[MultiModalKwargsItem]()
         # List of tuple (mm_hash, pos_info)
         mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
         for req_id in req_ids:
-            encoder_input_ids = scheduled_encoder_inputs.get(req_id, None)
-            if not encoder_input_ids:
-                continue
             req_state = self.requests[req_id]
 
-            for mm_input_id in encoder_input_ids:
-                mm_feature = req_state.mm_features[mm_input_id]
+            for mm_feature in req_state.mm_features:
                 mm_hash = mm_feature.identifier
+                if mm_hash in self.encoder_cache:
+                    continue
                 mm_kwargs.append(mm_feature.data)
                 mm_hashes_pos.append((mm_hash, mm_feature.mm_position))
 
@@ -1822,7 +1833,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             token_positions = align_and_pad(token_positions, (target_bs, target_seq), itertools.repeat(-1))
         token_slots = align_and_pad(token_slots, (target_bs, target_seq), itertools.repeat(-1))
         token_groups = align_and_pad(token_groups, (target_bs, target_seq), itertools.repeat(-1))
-        context_blocks = align_and_pad(context_blocks, (target_bs, target_blocks), itertools.repeat(-1))
+        # use 0 for padding to avoid dynamic scale calculation issues
+        context_blocks = align_and_pad(context_blocks, (target_bs, target_blocks), itertools.repeat(0))
         context_groups = align_and_pad(context_groups, (target_bs, target_blocks), itertools.repeat(-1))
 
         # TODO: cycle through dummy slots and blocks
@@ -2206,7 +2218,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         num_dummy_decodes = 1
         num_dummy_scheduled_tokens = [1]
         context_lens = np.array([128])
-        block_table_cpu_tensor = torch.zeros([self._PAD_BLOCK_ID], dtype=torch.int32).reshape(1, -1)
+        block_table_cpu_tensor = torch.zeros([self._dummy_num_blocks], dtype=torch.int32).reshape(1, -1)
         return self._create_decode_input_data(num_dummy_decodes, num_dummy_scheduled_tokens, context_lens,
                                               block_table_cpu_tensor)
 
@@ -4578,23 +4590,32 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             #    height=h  # Custom height in pixels
             #)
             batch = img_count
-        '''
 
         processor = self.mm_registry.create_processor(model_config=self.model_config, cache=self.mm_budget.cache)
-        '''dummy_data = processor.dummy_inputs.get_decoder_dummy_data(processor,
+        dummy_data = processor.dummy_inputs.get_decoder_dummy_data(processor,
                                                                    seq_len=4096,
                                                                    mm_counts={"image": img_count},
                                                                    mm_options={"image": image_options}),
 
-        '''
         dummy_mm_data = processor.dummy_inputs.get_dummy_processor_inputs(
             seq_len=4096,
             mm_counts={"image": img_count},
         )
+        '''
 
         assert modality == 'image'
         # Result in the maximum GPU consumption of the model
-        dummy_mm_item = dummy_mm_data['image'][0]
+        dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
+            self.model_config,
+            mm_counts={modality: 1},
+            cache=self.mm_budget.cache,
+        )
+
+        dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
+        # We use the cache so that the item is saved to the cache,
+        # but not read from the cache
+        assert dummy_mm_item is not None, "Item should not already be cached"
+
         dummy_mm_items = [dummy_mm_item] * batch
 
         return next(mm_kwargs_group for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
@@ -4608,8 +4629,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         phase = 'Graph/Multimodal'
         from vllm.v1.worker.utils import MultiModalBudget
         self.mm_budget = MultiModalBudget(
-            self.model_config,
-            self.scheduler_config,
+            self.vllm_config,
             self.mm_registry,
         ) if self.supports_mm_inputs else None
         aspect_ratios = [(1, 1)]  # 1:1 square
@@ -4866,6 +4886,20 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
         return
 
+    def maybe_add_kv_sharing_layers_to_kv_cache_groups(self, kv_cache_config: KVCacheConfig) -> None:
+        """
+        Add layers that re-use KV cache to KV cache group of its target layer.
+        Mapping of KV cache tensors happens in the KV cache initialization.
+        """
+        if not self.shared_kv_cache_layers:
+            # No cross-layer KV sharing, return
+            return
+
+        add_kv_sharing_layers_to_kv_cache_groups(
+            self.shared_kv_cache_layers,
+            kv_cache_config.kv_cache_groups,
+        )
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -4873,6 +4907,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
+        self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         if len(kv_cache_config.kv_cache_groups) > 1:
             raise NotImplementedError("Hybrid models with more than one KV cache type are not "
                                       "supported yet.")
@@ -4915,14 +4950,22 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         create_dynamic_scales = True
                     else:
                         create_dynamic_scales = False
-                    kv_scales_shape = kv_cache_shape[:-1] + (1, )
+                    min_val = torch.finfo(torch.bfloat16).tiny
+                    kv_scales_shape = list(kv_cache_shape)
+                    kv_scales_shape[-1] = 1
                     key_cache = torch.zeros(kv_cache_shape, dtype=dtype, device=self.device)
-                    key_scales = torch.ones(kv_scales_shape, dtype=torch.bfloat16, device=self.device) if \
+                    # initialize scale tensor with minimal scale values
+                    key_scales = torch.ones(kv_scales_shape, dtype=torch.bfloat16, device=self.device) * min_val if \
                         create_dynamic_scales else None
                     if v_cache_shape is not None:
                         value_cache = torch.zeros(v_cache_shape, dtype=dtype, device=self.device)
-                        value_scales = torch.ones(kv_scales_shape, dtype=torch.bfloat16, device=self.device) if \
-                            create_dynamic_scales else None
+                        value_scales_on_T = torch.ones(kv_scales_shape, dtype=torch.bfloat16, device=self.device) * \
+                            min_val if create_dynamic_scales else None
+                        value_scales_on_hidden = torch.ones(
+                            [num_blocks + 1, kv_cache_spec.num_kv_heads, kv_cache_spec.head_size],
+                            dtype=torch.bfloat16,
+                            device=self.device) * min_val if create_dynamic_scales else None
+                        value_scales = (value_scales_on_T, value_scales_on_hidden) if create_dynamic_scales else None
                     else:
                         value_cache = None
                         value_scales = None
@@ -4936,13 +4979,22 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             layer_names = set()
             for group in kv_cache_config.kv_cache_groups:
                 layer_names.update(group.layer_names)
+
+            # Set up cross-layer KV cache sharing
+            if self.shared_kv_cache_layers:
+                logger.info("[KV sharing] Setting up tensor sharing for %s layers", len(self.shared_kv_cache_layers))
+                for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
+                    kv_caches[layer_name] = kv_caches[target_layer_name]
+
             assert layer_names == set(kv_caches.keys()), "Some layers are not correctly initialized"
         bind_kv_cache(kv_caches, self.vllm_config.compilation_config.static_forward_context, self.kv_caches)
 
         if self.enable_bucketing:
             self.bucketing_manager.num_hpu_blocks = num_blocks
-        self._PAD_BLOCK_ID = num_blocks
-        self._PAD_SLOT_ID = num_blocks * self.block_size
+
+        self._PAD_BLOCK_ID = 0
+        self._PAD_SLOT_ID = -1
+        self._dummy_num_blocks = num_blocks
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(self.get_kv_caches_4D(kv_caches))
@@ -5638,21 +5690,25 @@ class HPUAttentionMetadataProcessor:
         """
         if attn_metadata.is_prompt:
             attn_metadata = self._set_attn_bias(attn_metadata, batch_size, seq_len, device, dtype)
-            if self.interleaved_sliding_window:
+            if self.interleaved_sliding_window and self.sliding_window is not None:
                 attn_metadata = self._set_attn_bias_for_sliding_window(attn_metadata, batch_size, seq_len,
                                                                        self.sliding_window, device, dtype)
         else:
             attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype)
-            if self.interleaved_sliding_window:
+            if self.interleaved_sliding_window and self.sliding_window is not None:
                 attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype, True)
         return attn_metadata
 
 
 def _apply_inc_patch():
-    # TODO: (yiliu30) Remove this function when INC fixes the issue.
-    from neural_compressor.torch.algorithms.fp8_quant._quant_common.quant_config import (
-        supported_dynamic_ops as inc_supported_dynamic_ops, )
-    from neural_compressor.torch.algorithms.fp8_quant._quant_common import quant_config as inc_quant_config
+    try:
+        from neural_compressor.torch.algorithms.fp8_quant._quant_common.quant_config import (
+            supported_dynamic_ops as inc_supported_dynamic_ops, )
+        from neural_compressor.torch.algorithms.fp8_quant._quant_common import quant_config as inc_quant_config
 
-    fixed_dynamic_ops = inc_supported_dynamic_ops + ["MoeMatmul"]
-    inc_quant_config.supported_dynamic_ops = fixed_dynamic_ops
+        fixed_dynamic_ops = inc_supported_dynamic_ops + ["MoeMatmul"]
+        inc_quant_config.supported_dynamic_ops = fixed_dynamic_ops
+        logger.warning_once(f"Applied INC patch for FP8 dynamic quantization support for MoE. "
+                            f"Fixed supported_dynamic_ops: {fixed_dynamic_ops}")
+    except (ImportError, AttributeError):
+        pass

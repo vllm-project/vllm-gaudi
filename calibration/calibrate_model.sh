@@ -94,7 +94,7 @@ MULTI_NODE_SETUP=false
 USE_EP=""
 ENFORCE_EAGER=false
 
-while getopts "m:b:l:t:d:h:o:r:u:e" OPT; do
+while getopts "m:b:l:t:d:h:o:r:ue" OPT; do
     case ${OPT} in
         m )
             MODEL_PATH="$OPTARG"
@@ -117,9 +117,9 @@ while getopts "m:b:l:t:d:h:o:r:u:e" OPT; do
         r )
             RANK="$OPTARG"
             ;;
-	u )
-	    USE_EP="--use_expert_paral"
-	    ;;
+        u )
+            USE_EP="--use_expert_paral"
+            ;;
         e ) 
             ENFORCE_EAGER=true
             ;;
@@ -227,6 +227,12 @@ fi
 if $ENFORCE_EAGER; then
     EXTRA_FLAGS_STEP_2+="--enforce-eager "
     EXTRA_FLAGS_STEP_4+="--enforce-eager "
+fi
+
+# if USE_EP is not empty, then add --expert-parallel flags
+if [[ -n $USE_EP ]]; then
+    EXTRA_FLAGS_STEP_2+="--expert-parallel "
+    EXTRA_FLAGS_STEP_4+="--expert-parallel "
 fi
 
 if $SKIP_STEP_1; then
