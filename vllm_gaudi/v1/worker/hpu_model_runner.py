@@ -4584,7 +4584,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         batch = image_args if self.get_model().vision_bucket_manager.is_batch_based else count
         if self.get_model().vision_bucket_manager.is_batch_based:
             # Create ImageDummyOptions for Gemma3
-            w=896,  # pixels as in gemma3 config
+            w=896  # pixels as in gemma3 config
             h=896  # pixels as in gemma3 config
             batch = image_args
         else:
