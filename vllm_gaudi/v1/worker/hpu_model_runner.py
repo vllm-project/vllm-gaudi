@@ -43,7 +43,7 @@ from vllm.v1.attention.selector import get_attn_backend
 
 from vllm.config import (VllmConfig, update_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
@@ -93,6 +93,7 @@ from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm_gaudi.extension.ops import LoraMask as LoraMask
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.v1.core.sched.output import GrammarOutput
 
 if TYPE_CHECKING:
@@ -380,7 +381,39 @@ def apply_model_specific_patches(model):
     patch_llama4_get_attn_scale(model)
 
 
-class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
+class HpuKVConnectorModelRunnerMixin(KVConnectorModelRunnerMixin):
+
+    def __init__(self):
+        super().__init__()
+
+    @staticmethod
+    def maybe_setup_kv_connector(scheduler_output: "SchedulerOutput"):
+        # Update KVConnector with the KVConnector metadata forward().
+        if has_kv_transfer_group():
+            kv_connector = get_kv_transfer_group()
+            assert isinstance(kv_connector, KVConnectorBase)
+            assert scheduler_output.kv_connector_metadata is not None
+            kv_connector.bind_connector_metadata(scheduler_output.kv_connector_metadata)
+
+            # Background KV cache transfers happen here.
+            # These transfers are designed to be async and the requests
+            # involved may be disjoint from the running requests.
+            # Do this here to save a collective_rpc.
+            kv_connector.start_load_kv(get_forward_context())
+
+    @staticmethod
+    def maybe_wait_for_kv_save() -> None:
+        if has_kv_transfer_group():
+            get_kv_transfer_group().wait_for_save()
+
+    @staticmethod
+    def get_finished_kv_transfers(scheduler_output: "SchedulerOutput", ) -> tuple[set[str] | None, set[str] | None]:
+        if has_kv_transfer_group():
+            return get_kv_transfer_group().get_finished(scheduler_output.finished_req_ids)
+        return None, None
+
+
+class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
 
     def __init__(self, model, vllm_config):
         super().__init__()
@@ -610,7 +643,7 @@ def get_dp_padding(num_tokens: int, dp_size: int, dp_rank: int) -> int:
     return max_tokens_across_dp_cpu - num_tokens
 
 
-class HPUModelRunner(KVConnectorModelRunnerMixin):
+class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     def __init__(
         self,
@@ -3323,7 +3356,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             else:
                 with set_forward_context(None, self.vllm_config):
                     self.maybe_setup_kv_connector(scheduler_output)
-        finished_sending, finished_recving = set(), set()
+        finished_sending, finished_recving = set[str](), set[str]()
 
         # NOTE(Chendi): used by spec decode draft model, since we are doing
         # prefill one by one, so save hidden states as list
@@ -3650,7 +3683,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         if not warmup_mode:
             self.maybe_wait_for_kv_save()
-            finished_sending, finished_recving = self.get_finished_kv_transfers(scheduler_output)
+            finished_sending, finished_recving = self.get_finished_kv_transfers(scheduler_output)  # type: ignore
 
         if self.use_async_scheduling:
             model_runner_output = ModelRunnerOutput(
