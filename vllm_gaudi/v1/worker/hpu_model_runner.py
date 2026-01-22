@@ -12,7 +12,6 @@ from contextlib import suppress
 from tqdm import tqdm
 from dataclasses import dataclass, field, fields
 from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast)
-from collections.abc import Mapping
 if os.getenv("QUANT_CONFIG", None) is not None:
     from neural_compressor.torch.quantization import finalize_calibration
 else:
@@ -44,7 +43,6 @@ from vllm.v1.attention.selector import get_attn_backend
 
 from vllm.config import (VllmConfig, update_config)
 from vllm.config.multimodal import ImageDummyOptions, VideoDummyOptions
-from vllm.multimodal.inputs import BaseDummyOptions
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
