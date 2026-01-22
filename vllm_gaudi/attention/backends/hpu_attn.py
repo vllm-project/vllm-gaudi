@@ -587,7 +587,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
 
             if self.enable_fp8_attn and k_scales is None and v_scales is None:  # Static FP8 without INC
-                # Reduce recompiles in torch.compile mode by using tensor scales instead of floats (e.g. layer._k_scale_float)
+                # Reduce recompiles in torch.compile mode by using tensor scales
+                # instead of floats (e.g. layer._k_scale_float)
                 k_scales = layer._k_scale
                 v_scales = layer._v_scale
 
@@ -781,7 +782,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
 
             if self.enable_fp8_attn and k_scales is None and v_scales is None:  # Static FP8 without INC
-                # Reduce recompiles in torch.compile mode by using tensor scales instead of floats (e.g. layer._k_scale_float)
+                # Reduce recompiles in torch.compile mode by using tensor scales
+                # instead of floats (e.g. layer._k_scale_float)
                 k_scales = k_scale
                 v_scales = v_scale
 
