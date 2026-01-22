@@ -13,10 +13,12 @@ import habana_frameworks.torch.core as htcore
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.extension.utils import get_kv_fetch_extra_args
 from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
-
+import vllm.model_executor.layers.quantization as vllm_quant
 import habana_frameworks.torch.utils.experimental as htexp
 import types
 from vllm.model_executor.layers.fused_moe import FusedMoeWeightScaleSupported
+from vllm.model_executor.layers.quantization import get_quantization_config as vllm_get_quantization_config
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 is_hpu_gaudi2 = htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi2
 is_hpu_gaudi3 = htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi3
@@ -186,7 +188,7 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
     if k_scales is not None:
         k_scales_uf = k_scales.unflatten(0, (-1, block_size))
     if v_scales is not None:
-        v_scales_uf = v_scales.unflatten(0, (-1, block_size))
+        v_scales_uf = (v_scales[0].unflatten(0, (-1, block_size)), v_scales[1])
 
     query_shape = (-1, q_heads, 1, head_size)
     query = batch2block(scale * query, block_mapping, batch2block_matmul_op).view(query_shape)
@@ -389,19 +391,28 @@ def _get_all(data, *keys):
     return [data.get(k, None) for k in keys]
 
 
-def _include_past(tensor_str, fn_str, cache_str, args):
-    all_tensors = _get_all(args, tensor_str, fn_str, cache_str, 'block_list', 'block_size')
-    if all(t is not None for t in all_tensors):
-        current, fn, cache, block_list, block_size = all_tensors
-        past = fn(cache.unflatten(0, (-1, block_size)), block_list)
+def _include_past(tensor_str, fn_str, cache_str, scales_str, args):
+    all_tensors = _get_all(args, tensor_str, fn_str, cache_str, scales_str, 'block_list', 'block_size')
+    current, fn, cache, scales, block_list, block_size = all_tensors
+    all_beside_scales = (current, fn, cache, block_list, block_size)
+    if all(t is not None for t in all_beside_scales):
+        is_v_scales = scales is not None and isinstance(scales, tuple)
+        is_k_scales = scales is not None and not is_v_scales
+        if is_v_scales:
+            scales_uf = (scales[0].unflatten(0, (-1, block_size)), scales[1])
+        elif is_k_scales:
+            scales_uf = scales.unflatten(0, (-1, block_size))
+        else:
+            scales_uf = None
+        past = fn(cache.unflatten(0, (-1, block_size)), **get_kv_fetch_extra_args(blocks=block_list, scales=scales_uf))
         past = past.reshape(current.size(0), -1, past.shape[2], past.shape[3])
         current = torch.concat((past, current), dim=1)
         args[tensor_str] = current
 
 
 def _get_context(args):
-    _include_past('key', 'keys_fetch_func', 'key_cache', args)
-    _include_past('value', 'values_fetch_func', 'value_cache', args)
+    _include_past('key', 'keys_fetch_func', 'key_cache', 'k_scales', args)
+    _include_past('value', 'values_fetch_func', 'value_cache', 'v_scales', args)
 
 
 class LoraMask:
@@ -1330,3 +1341,13 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
             else:
                 final_hidden_states += slice_final_hidden_states
         return final_hidden_states
+
+
+def oot_get_quantization_config(quantization: str) -> QuantizationConfig:
+    from .quant import _FakeINCConfig
+    if quantization == "inc":
+        return _FakeINCConfig
+    return vllm_get_quantization_config(quantization)
+
+
+vllm_quant.get_quantization_config = oot_get_quantization_config
