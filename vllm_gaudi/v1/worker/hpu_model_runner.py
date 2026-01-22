@@ -4690,8 +4690,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self.model_config.get_multimodal_config().get_dummy_options("image") is not None \
                     and self.mm_budget.mm_limits['image'] != 0
         for modality, max_items in self.mm_budget.mm_limits.items():
-            if modality == 'image' and is_image_warmup == False or modality == 'video' \
-                and is_video_warmup == False:
+            if modality == 'image' and not is_image_warmup or modality == 'video' \
+                and not is_video_warmup:
                 continue
             phase = f'Graph/Multimodal({modality})'
             num_candidates = len(buckets)
