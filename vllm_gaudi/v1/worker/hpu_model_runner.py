@@ -11,7 +11,7 @@ import time
 from contextlib import suppress
 from tqdm import tqdm
 from dataclasses import dataclass, field, fields
-from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast)
+from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast, Mapping)
 if os.getenv("QUANT_CONFIG", None) is not None:
     from neural_compressor.torch.quantization import finalize_calibration
 else:
@@ -4565,9 +4565,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         count = 1
         num_frames = 0
         batch = image_args if self.get_model().vision_bucket_manager.is_batch_based else count
+        mm_options: Mapping[str, BaseDummyOptions] = None
         if self.get_model().vision_bucket_manager.is_batch_based:
             # Create ImageDummyOptions for Gemma3
-            w = 896,  # pixels as in gemma3 config
+            w = 896  # pixels as in gemma3 config
             h = 896  # pixels as in gemma3 config
             batch = image_args
         else:
@@ -4583,19 +4584,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             batch = count
 
         if modality == 'image':
-            mm_options: Mapping[str, BaseDummyOptions] = {
-                "image": ImageDummyOptions(count=count, width=w, height=h),
-                "video": None
-            }
+            mm_options = {"image": ImageDummyOptions(count=count, width=w, height=h), "video": None}
         elif modality == 'video':
             video_options = self.model_config.get_multimodal_config().get_dummy_options("video")
             num_frames = video_options.num_frames if video_options and hasattr(video_options, 'num_frames') else 100
             w = video_options.width if video_options and hasattr(video_options, 'width') else w
             h = video_options.height if video_options and hasattr(video_options, 'height') else h
             count = video_options.count if video_options and hasattr(video_options, 'count') else 1
-            mm_options = VideoDummyOptions(width=w, height=h, num_frames=num_frames)
-            mm_options: Mapping[str, BaseDummyOptions] = {
-                "image": None,
+            mm_options = {"image": None,
                 "video": VideoDummyOptions(count=count, num_frames=num_frames, width=w, height=h)
             }
         else:
