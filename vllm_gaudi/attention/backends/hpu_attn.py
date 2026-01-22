@@ -433,8 +433,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         use_irope: bool = False,
     ) -> None:
         super(AttentionImpl, self).__init__()
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         if kv_sharing_target_layer_name is not None:
-            raise NotImplementedError("KV sharing is not currently supported on HPU.")
+            logger.info("[KV sharing] HPUAttentionImpl initialized with kv_sharing_target_layer_name: %s",
+                        self.kv_sharing_target_layer_name)
         if use_irope:
             logger.warning_once("Using irope in HPU is not supported yet, it will fall back "
                                 "to global attention for long context.")
@@ -575,22 +577,22 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         if kv_cache is not None and isinstance(kv_cache, tuple):
             key_cache, value_cache, k_scales, v_scales = \
                 HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
-
-            # Reshape the input keys and values and store them in the cache.
-            # If kv_cache is not provided, the new key and value tensors are
-            # not cached. This happens during the initial memory profiling run.
-            key_cache = self.k_cache(key,
-                                     key_cache,
-                                     slot_mapping,
-                                     scales=k_scales,
-                                     block_size=attn_metadata.block_size,
-                                     is_prompt=attn_metadata.is_prompt)
-            value_cache = self.v_cache(value,
-                                       value_cache,
-                                       slot_mapping,
-                                       scales=v_scales,
-                                       block_size=attn_metadata.block_size,
-                                       is_prompt=attn_metadata.is_prompt)
+            if self.kv_sharing_target_layer_name is None:
+                # Reshape the input keys and values and store them in the cache.
+                # If kv_cache is not provided, the new key and value tensors are
+                # not cached. This happens during the initial memory profiling run.
+                key_cache = self.k_cache(key,
+                                         key_cache,
+                                         slot_mapping,
+                                         scales=k_scales,
+                                         block_size=attn_metadata.block_size,
+                                         is_prompt=attn_metadata.is_prompt)
+                value_cache = self.v_cache(value,
+                                           value_cache,
+                                           slot_mapping,
+                                           scales=v_scales,
+                                           block_size=attn_metadata.block_size,
+                                           is_prompt=attn_metadata.is_prompt)
 
         if attn_metadata.is_prompt:
             # Prompt run.

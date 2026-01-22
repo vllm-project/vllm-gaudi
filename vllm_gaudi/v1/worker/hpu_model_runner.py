@@ -67,7 +67,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors, DraftTo
                              AsyncModelRunnerOutput, KVConnectorOutput)
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.worker.utils import bind_kv_cache
+from vllm.v1.worker.utils import bind_kv_cache, add_kv_sharing_layers_to_kv_cache_groups
 from vllm.v1.utils import CpuGpuBuffer
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
 from vllm.distributed.parallel_state import get_pp_group, get_dp_group
@@ -746,6 +746,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Lazy initialization
         # self.model: nn.Module  # set after load_model
         self.kv_caches: list[torch.Tensor] = []
+        self.shared_kv_cache_layers: dict[str, str] = {}
         self.inc_initialized_successfully = False
         self._is_inc_finalized = False
 
@@ -983,6 +984,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         cache_dtype_str = self.vllm_config.cache_config.cache_dtype
         for layer_name, attn_module in forward_ctx.items():
+            kv_sharing_target_layer_name = getattr(attn_module, 'kv_sharing_target_layer_name', None)
+            if kv_sharing_target_layer_name is not None:
+                from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
+                try:
+                    validate_kv_sharing_target(
+                        layer_name,
+                        kv_sharing_target_layer_name,
+                        forward_ctx,
+                    )
+                    self.shared_kv_cache_layers[layer_name] = kv_sharing_target_layer_name
+                except Exception as e:
+                    logger.error("KV sharing validation failed for %s -> %s: %s", layer_name,
+                                 kv_sharing_target_layer_name, e)
+                continue
             if isinstance(attn_module, FusedMoE):
                 continue
 
@@ -4904,6 +4919,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
         return
 
+    def maybe_add_kv_sharing_layers_to_kv_cache_groups(self, kv_cache_config: KVCacheConfig) -> None:
+        """
+        Add layers that re-use KV cache to KV cache group of its target layer.
+        Mapping of KV cache tensors happens in the KV cache initialization.
+        """
+        if not self.shared_kv_cache_layers:
+            # No cross-layer KV sharing, return
+            return
+
+        add_kv_sharing_layers_to_kv_cache_groups(
+            self.shared_kv_cache_layers,
+            kv_cache_config.kv_cache_groups,
+        )
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -4911,6 +4940,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
+        self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         if len(kv_cache_config.kv_cache_groups) > 1:
             raise NotImplementedError("Hybrid models with more than one KV cache type are not "
                                       "supported yet.")
@@ -4982,6 +5012,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             layer_names = set()
             for group in kv_cache_config.kv_cache_groups:
                 layer_names.update(group.layer_names)
+
+            # Set up cross-layer KV cache sharing
+            if self.shared_kv_cache_layers:
+                logger.info("[KV sharing] Setting up tensor sharing for %s layers", len(self.shared_kv_cache_layers))
+                for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
+                    kv_caches[layer_name] = kv_caches[target_layer_name]
+
             assert layer_names == set(kv_caches.keys()), "Some layers are not correctly initialized"
         bind_kv_cache(kv_caches, self.vllm_config.compilation_config.static_forward_context, self.kv_caches)
 
