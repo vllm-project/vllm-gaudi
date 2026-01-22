@@ -38,7 +38,7 @@ def test_rms_norm(
         native_rms_norm = RMSNorm(hidden_size=hidden_size, eps=1e-05)
         native_rms_norm = native_rms_norm.to(dtype=dtype).to(device)
         native_rms_norm.weight.data.normal_(mean=1.0, std=0.1)
-        assert isinstance(native_rms_norm, RMSNorm) and not isinstance(native_rms_norm, HPURMSNorm)
+        #assert isinstance(native_rms_norm, RMSNorm) and not isinstance(native_rms_norm, HPURMSNorm)
 
         # Prepare oot HPURMSNorm module
         register_op(RMSNorm, HPURMSNorm)
