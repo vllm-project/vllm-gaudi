@@ -739,7 +739,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Mult-modal-related.
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
-        self.model_config_copy = None
 
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(model_config)
         if self.supports_mm_inputs:
@@ -4682,13 +4681,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 (9, 16),  # 9:16 portrait
             ]
             aspect_ratios.extend(aspect_ratio_ext)
-        is_video_warmup = True if self.model_config.get_multimodal_config() is not None and \
+        is_video_warmup = self.model_config.get_multimodal_config() is not None and \
                 self.model_config.get_multimodal_config().get_dummy_options("video") is not None \
-                    and self.mm_budget.mm_limits['video'] != 999 else False
+                    and self.mm_budget.mm_limits['video'] != 999
 
-        is_image_warmup = True if self.model_config.get_multimodal_config() is not None and \
+        is_image_warmup = self.model_config.get_multimodal_config() is not None and \
                 self.model_config.get_multimodal_config().get_dummy_options("image") is not None \
-                    and self.mm_budget.mm_limits['image'] != 0 else False
+                    and self.mm_budget.mm_limits['image'] != 0
         for modality, max_items in self.mm_budget.mm_limits.items():
             if modality == 'image' and is_image_warmup == False or modality == 'video' \
                 and is_video_warmup == False:
