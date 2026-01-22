@@ -5247,7 +5247,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # TODO: Enable new once memory and shapes calculation is done 
         for kv_cache_tensor in []: # kv_cache_config.kv_cache_tensors:
             tensor = torch.zeros(
-                kv_cache_tensor.size + 2 * kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes, dtype=torch.int8, device=self.device # handle + 1
+                kv_cache_tensor.size + 2 * kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes, dtype=torch.int8, device=self.device # taking into account dummy block
             )
             for layer_name in kv_cache_tensor.shared_by:
                 kv_caches[layer_name] = tensor
@@ -5266,8 +5266,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     kc, vc = kv_caches[layer_name].view(kv_cache_spec.dtype).reshape(2, (num_blocks + 1) * kv_cache_spec.block_size,
                                                                             kv_cache_spec.num_kv_heads,
                                                                             kv_cache_spec.head_size).unbind() # (key cache, val cache)
-                    kv_caches[layer_name] = (kc, vc, None, None)
+                    kv_caches[layer_name] = (kc, vc, None, None) # adding None for scales for dynamic quantization for now, TODO: change that once needed
                 elif isinstance(kv_cache_spec, MambaSpec):
+                    # This is almost the same as for gpu runner in vllm
+                    # only change is + 1 for dummy block
                     raw_tensor = kv_caches[layer_name]
                     state_tensors = []
                     storage_offset_bytes = 0
@@ -5288,6 +5290,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         )
                         state_tensors.append(tensor)
                         storage_offset_bytes += stride[0] * dtype_size
+                    # TODO: verify if below needed for dynamic quantization
                     # state_tensors.append(None)
                     # state_tensors.append(None)
                     kv_caches[layer_name] = tuple(state_tensors)
