@@ -437,8 +437,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         sinks: Optional[torch.Tensor] = None,
     ) -> None:
         super(AttentionImpl, self).__init__()
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         if kv_sharing_target_layer_name is not None:
-            raise NotImplementedError("KV sharing is not currently supported on HPU.")
+            logger.info("[KV sharing] HPUAttentionImpl initialized with kv_sharing_target_layer_name: %s",
+                        self.kv_sharing_target_layer_name)
         if use_irope:
             logger.warning_once("Using irope in HPU is not supported yet, it will fall back "
                                 "to global attention for long context.")
@@ -584,18 +586,22 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         if kv_cache is not None and isinstance(kv_cache, tuple):
             key_cache, value_cache, k_scales, v_scales = \
                 HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
-
-            # Reshape the input keys and values and store them in the cache.
-            # If kv_cache is not provided, the new key and value tensors are
-            # not cached. This happens during the initial memory profiling run.
-            if key.dtype != key_cache.dtype:
-                key = key.to(key_cache.dtype)
-            if value.dtype != value_cache.dtype:
-                value = value.to(value_cache.dtype)
-            if query.dtype != key.dtype:
-                query = query.to(key.dtype)
-            key_cache = self.k_cache(key, key_cache, slot_mapping, k_scales)
-            value_cache = self.v_cache(value, value_cache, slot_mapping, v_scales)
+            if self.kv_sharing_target_layer_name is None:
+                # Reshape the input keys and values and store them in the cache.
+                # If kv_cache is not provided, the new key and value tensors are
+                # not cached. This happens during the initial memory profiling run.
+                key_cache = self.k_cache(key,
+                                         key_cache,
+                                         slot_mapping,
+                                         scales=k_scales,
+                                         block_size=attn_metadata.block_size,
+                                         is_prompt=attn_metadata.is_prompt)
+                value_cache = self.v_cache(value,
+                                           value_cache,
+                                           slot_mapping,
+                                           scales=v_scales,
+                                           block_size=attn_metadata.block_size,
+                                           is_prompt=attn_metadata.is_prompt)
 
         if attn_metadata.is_prompt:
             # Prompt run.
@@ -763,8 +769,18 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-            key_cache = self.k_cache(key, key_cache, cross_slot_mapping, k_scales)
-            value_cache = self.v_cache(value, value_cache, cross_slot_mapping, v_scales)
+            key_cache = self.k_cache(key,
+                                     key_cache,
+                                     cross_slot_mapping,
+                                     scales=k_scales,
+                                     block_size=attn_metadata.block_size,
+                                     is_prompt=attn_metadata.is_prompt)
+            value_cache = self.v_cache(value,
+                                       value_cache,
+                                       cross_slot_mapping,
+                                       scales=v_scales,
+                                       block_size=attn_metadata.block_size,
+                                       is_prompt=attn_metadata.is_prompt)
 
         if attn_metadata.is_prompt:
             # Prompt run.
@@ -936,7 +952,7 @@ class HPUUnifiedAttentionImpl(AttentionImpl, torch.nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
         attn_metadata: HPUUnifiedAttentionMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -949,8 +965,16 @@ class HPUUnifiedAttentionImpl(AttentionImpl, torch.nn.Module):
         query = query.unflatten(-1, (-1, self.head_size))
         key = key.unflatten(-1, (-1, self.head_size))
         value = value.unflatten(-1, (-1, self.head_size))
-        key_cache = self.k_cache(key, key_cache, attn_metadata.slot_mapping, k_scales)
-        value_cache = self.v_cache(value, value_cache, attn_metadata.slot_mapping, v_scales)
+        key_cache = self.k_cache(key,
+                                 key_cache,
+                                 attn_metadata.slot_mapping,
+                                 scales=k_scales,
+                                 block_size=attn_metadata.block_size)
+        value_cache = self.v_cache(value,
+                                   value_cache,
+                                   attn_metadata.slot_mapping,
+                                   scales=v_scales,
+                                   block_size=attn_metadata.block_size)
         output = unified_attn(
             query=query,
             key=key,
