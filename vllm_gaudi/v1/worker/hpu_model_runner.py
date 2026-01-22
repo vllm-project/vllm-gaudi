@@ -11,7 +11,8 @@ import time
 from contextlib import suppress
 from tqdm import tqdm
 from dataclasses import dataclass, field, fields
-from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast, Mapping)
+from typing import (TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, cast)
+from collections.abc import Mapping
 if os.getenv("QUANT_CONFIG", None) is not None:
     from neural_compressor.torch.quantization import finalize_calibration
 else:
@@ -4591,7 +4592,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             w = video_options.width if video_options and hasattr(video_options, 'width') else w
             h = video_options.height if video_options and hasattr(video_options, 'height') else h
             count = video_options.count if video_options and hasattr(video_options, 'count') else 1
-            mm_options = {"image": None,
+            mm_options = {
+                "image": None,
                 "video": VideoDummyOptions(count=count, num_frames=num_frames, width=w, height=h)
             }
         else:
