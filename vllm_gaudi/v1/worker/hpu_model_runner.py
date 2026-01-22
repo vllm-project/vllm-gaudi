@@ -4638,7 +4638,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             w = video_options.width if video_options and hasattr(video_options, 'width') else w
             h = video_options.height if video_options and hasattr(video_options, 'height') else h
             count = video_options.count if video_options and hasattr(video_options, 'count') else 1
-            self.model_config_copy.limit_mm_per_prompt = {"video": {"count": count, "num_frames": num_frames, "width": w, "height": h}}
+            self.model_config_copy.limit_mm_per_prompt = {
+                "video": {
+                    "count": count,
+                    "num_frames": num_frames,
+                    "width": w,
+                    "height": h
+                }
+            }
         else:
             raise NotImplementedError(f"Modality '{modality}' is not supported")
 
