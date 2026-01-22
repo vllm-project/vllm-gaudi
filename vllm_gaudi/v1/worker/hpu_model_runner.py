@@ -4585,14 +4585,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             batch = count
 
         if modality == 'image':
-            mm_options: Mapping[str, BaseDummyOptions] = {"image": ImageDummyOptions(count=count, width=w, height=h), "video": None}
+            mm_options = {"image": ImageDummyOptions(count=count, width=w, height=h), "video": None}
         elif modality == 'video':
             video_options = self.model_config.get_multimodal_config().get_dummy_options("video")
             num_frames = video_options.num_frames if video_options and hasattr(video_options, 'num_frames') else 100
             w = video_options.width if video_options and hasattr(video_options, 'width') else w
             h = video_options.height if video_options and hasattr(video_options, 'height') else h
             count = video_options.count if video_options and hasattr(video_options, 'count') else 1
-            mm_options: Mapping[str, BaseDummyOptions] = {
+            mm_options = {
                 "image": None,
                 "video": VideoDummyOptions(count=count, num_frames=num_frames, width=w, height=h)
             }
