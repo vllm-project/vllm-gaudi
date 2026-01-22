@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 import collections
-import copy
 import contextlib
 import functools
 from functools import partial
