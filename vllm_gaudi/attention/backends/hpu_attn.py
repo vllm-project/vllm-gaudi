@@ -263,8 +263,12 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         attn_metadata: HPUAttentionMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+
         if output is not None:
             raise NotImplementedError("output is not yet supported for MLAImplBase")
+
+        if self.enable_fp8_attn and layer._k_scale_float != 1.0:
+            raise NotImplementedError("Non-unit k_scale is not supported in FP8 MLA attention")
 
         is_prefill = attn_metadata.is_prompt
 
@@ -536,7 +540,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         if self.attn_type == AttentionType.ENCODER_DECODER:
             return self.forward_encoder_decoder(
                 query=query,
@@ -544,8 +547,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 value=value,
                 kv_cache=kv_cache,
                 attn_metadata=attn_metadata,
-                k_scale=layer._k_scale_float,
-                v_scale=layer._k_scale_float,
+                k_scale=layer._k_scale,
+                v_scale=layer._v_scale,
             )
         # Set return shape
         output_shape = query.shape
@@ -574,6 +577,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         if kv_cache is not None and isinstance(kv_cache, tuple):
             key_cache, value_cache, k_scales, v_scales = \
                 HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
+
+            if self.enable_fp8_attn and k_scales is None and v_scales is None:  # Static FP8 without INC
+                # Reduce recompiles in torch.compile mode by using tensor scales instead of floats (e.g. layer._k_scale_float)
+                k_scales = layer._k_scale
+                v_scales = layer._v_scale
+
             if self.kv_sharing_target_layer_name is None:
                 # Reshape the input keys and values and store them in the cache.
                 # If kv_cache is not provided, the new key and value tensors are
@@ -705,6 +714,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             'block_size': block_size,
             'k_scales': k_scales,
             'v_scales': v_scales,
+            'enable_fp8_attn': self.enable_fp8_attn
         }
 
     def forward_encoder_decoder(
@@ -714,8 +724,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: HPUAttentionMetadata,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -752,6 +762,11 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         if kv_cache is not None and isinstance(kv_cache, tuple):
             key_cache, value_cache, k_scales, v_scales = \
                 HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
+
+            if self.enable_fp8_attn and k_scales is None and v_scales is None:  # Static FP8 without INC
+                # Reduce recompiles in torch.compile mode by using tensor scales instead of floats (e.g. layer._k_scale_float)
+                k_scales = k_scale
+                v_scales = v_scale
 
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
