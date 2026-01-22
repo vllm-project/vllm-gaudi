@@ -44,6 +44,7 @@ from vllm.v1.attention.selector import get_attn_backend
 
 from vllm.config import (VllmConfig, update_config)
 from vllm.config.multimodal import ImageDummyOptions, VideoDummyOptions
+from vllm.multimodal.inputs import BaseDummyOptions
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
@@ -4566,7 +4567,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         count = 1
         num_frames = 0
         batch = image_args if self.get_model().vision_bucket_manager.is_batch_based else count
-        mm_options: Mapping[str, BaseDummyOptions] = None
         if self.get_model().vision_bucket_manager.is_batch_based:
             # Create ImageDummyOptions for Gemma3
             w = 896  # pixels as in gemma3 config
@@ -4585,14 +4585,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             batch = count
 
         if modality == 'image':
-            mm_options = {"image": ImageDummyOptions(count=count, width=w, height=h), "video": None}
+            mm_options: Mapping[str, BaseDummyOptions] = {"image": ImageDummyOptions(count=count, width=w, height=h), "video": None}
         elif modality == 'video':
             video_options = self.model_config.get_multimodal_config().get_dummy_options("video")
             num_frames = video_options.num_frames if video_options and hasattr(video_options, 'num_frames') else 100
             w = video_options.width if video_options and hasattr(video_options, 'width') else w
             h = video_options.height if video_options and hasattr(video_options, 'height') else h
             count = video_options.count if video_options and hasattr(video_options, 'count') else 1
-            mm_options = {
+            mm_options: Mapping[str, BaseDummyOptions] = {
                 "image": None,
                 "video": VideoDummyOptions(count=count, num_frames=num_frames, width=w, height=h)
             }
