@@ -72,17 +72,17 @@ class HPUCompressedTensorsLinearMethod(OrigCompressedTensorsLinearMethod):
         if scheme is None:
             raise ValueError("A scheme must be defined for each layer")
         scheme_classname = scheme.__class__.__name__
+        matched_target = find_matched_target(layer_name=layer.prefix,
+                                             module=layer,
+                                             targets=self.quantization_config.target_scheme_map.keys(),
+                                             fused_mapping=self.quantization_config.packed_modules_mapping)
+        scheme_dict = self.quantization_config.target_scheme_map[matched_target]
+        weight_quant = scheme_dict.get("weights")
+
         if (scheme_classname in ("CompressedTensorsW8A8Fp8", "CompressedTensorsW8A16Fp8")):
-            hpu_scheme = HPUCompressedTensorsW8A8Fp8(scheme.strategy, scheme.is_static_input_scheme)
+            hpu_scheme = HPUCompressedTensorsW8A8Fp8(scheme.strategy, scheme.is_static_input_scheme,
+                                                     getattr(weight_quant, "block_structure", None))
         elif (scheme_classname == "CompressedTensorsWNA16"):
-            matched_target = find_matched_target(layer_name=layer.prefix,
-                                                 module=layer,
-                                                 targets=self.quantization_config.target_scheme_map.keys(),
-                                                 fused_mapping=self.quantization_config.packed_modules_mapping)
-
-            scheme_dict = self.quantization_config.target_scheme_map[matched_target]
-            weight_quant = scheme_dict.get("weights")
-
             hpu_scheme = HPUCompressedTensorsWNA16(num_bits=weight_quant.num_bits,
                                                    strategy=scheme.strategy,
                                                    symmetric=scheme.symmetric,
@@ -103,9 +103,10 @@ class HPUCompressedTensorsLinearMethod(OrigCompressedTensorsLinearMethod):
 @CustomOp.register_oot(name='CompressedTensorsW8A8Fp8')
 class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
-    def __init__(self, strategy: str, is_static_input_scheme: bool):
+    def __init__(self, strategy: str, is_static_input_scheme: bool, block_structure: Optional[tuple[int, int]]):
         self.strategy = strategy
         self.is_static_input_scheme = is_static_input_scheme
+        self.weight_block_size = block_structure
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -138,6 +139,9 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         # postprocess weights for perchannel strategy
         if layer.scheme.strategy == QuantizationStrategy.CHANNEL:
             hpu_ops.fp8_perchannel_linear_postprocess_weights(layer)
+        elif layer.scheme.strategy == QuantizationStrategy.BLOCK:
+            raise NotImplementedError("TODO: Blockwise FP8 quantization is not supported on HPU")
+            # layer = hpu_ops.fp8_block_linear_postprocess_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
 
     def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int, output_partition_sizes: list[int],
                        input_size: int, output_size: int, params_dtype: torch.dtype, **extra_weight_attrs):
@@ -175,13 +179,17 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             weight_scale = PerTensorScaleParameter(data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
                                                    weight_loader=weight_loader)
         elif layer.scheme.strategy == QuantizationStrategy.BLOCK:
-            # print("AAAA", extra_weight_attrs.keys())
-            # block_n, block_k = layer.scheme.block_structure
-            # out_blks = output_size_per_partition // block_n
-            # in_blks = input_size_per_partition // block_k
-            # layer.weight_block_size = [128, 128]  # Hardcoded for now
-            weight_scale = BlockQuantScaleParameter(data=torch.empty((128, 128), dtype=torch.float32),
-                                                    input_dim=2,
+            assert self.weight_block_size is not None
+            layer.weight_block_size = self.weight_block_size
+            block_n, block_k = layer.weight_block_size[0], layer.weight_block_size[1]
+
+            #TODO check if validate is needed validate_fp8_block_shape
+            weight_scale = BlockQuantScaleParameter(data=torch.empty(
+                (output_size_per_partition + block_n - 1) // block_n,
+                (input_size_per_partition + block_k - 1) // block_k,
+                dtype=torch.float32,
+            ),
+                                                    input_dim=1,
                                                     output_dim=0,
                                                     weight_loader=weight_loader)
         else:

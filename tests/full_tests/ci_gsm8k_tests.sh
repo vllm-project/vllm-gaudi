@@ -120,11 +120,11 @@ run_qwen3_moe_compressed_tensor_static_scaling_test() {
 
 # QWEN3 FP8 + MOE compressed tensor + INC dynamic quant + weight per-block
 run_qwen3_moe_compressed_tensor_dynamic_quant_per_block_test() {
-    echo "➡️ Testing Llama-3.3-70B-Instruct-FP8-dynamic + MOE compressed tensor + INC dynamic quant + weight per-block in torch.compile mode ..."
-    QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_maxabs_dynamic_quant.json" \
+    echo "➡️ Testing RedHatAI/Qwen3-30B-A3B-FP8-block + MOE compressed tensor + INC dynamic quant + weight per-block in torch.compile mode ..."
+    QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/calibration/quantization_config/maxabs_quant_dynamic_quantization.json" \
     HABANA_VISIBLE_DEVICES=all RUNTIME_SCALE_PATCHING=0 VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 \
     python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Qwen3-30B-A3B-FP8-block --trust-remote-code --enable-expert-parallel
-    echo "✅ Test with Llama-3.3-70B-Instruct-FP8-dynamic + MOE compressed tensor + INC dynamic quant + weight per-block in torch.compile modepassed."
+    echo "✅ Test with RedHatAI/Qwen3-30B-A3B-FP8-block + MOE compressed tensor + INC dynamic quant + weight per-block in torch.compile mode passed."
 }
 
 # RedHatAI/Meta-Llama-3-8B-Instruct-FP8 Per-tensor F8 static scales
