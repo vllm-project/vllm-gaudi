@@ -43,7 +43,6 @@ from vllm.attention.layer import MLAAttention
 from vllm.v1.attention.selector import get_attn_backend
 
 from vllm.config import (VllmConfig, update_config)
-from vllm.config.multimodal import ImageDummyOptions
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
@@ -4616,8 +4615,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         batch = image_args if self.get_model().vision_bucket_manager.is_batch_based else count
         if self.get_model().vision_bucket_manager.is_batch_based:
             # Create ImageDummyOptions for Gemma3
-            w=896  # pixels as in gemma3 config
-            h=896  # pixels as in gemma3 config
+            w = 896  # pixels as in gemma3 config
+            h = 896  # pixels as in gemma3 config
             batch = image_args
         else:
             patch_size = int(self.get_patch_size_from_model())
@@ -4632,23 +4631,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             batch = count
         self.model_config_copy.max_model_len = 4096
         if modality == 'image':
-            self.model_config_copy.limit_mm_per_prompt = {
-                "image": {"count": count, "width": w, "height": h}
-            }
+            self.model_config_copy.limit_mm_per_prompt = {"image": {"count": count, "width": w, "height": h}}
         elif modality == 'video':
             video_options = self.model_config_copy.get_multimodal_config().get_dummy_options("video")
             num_frames = video_options.num_frames if video_options and hasattr(video_options, 'num_frames') else 100
             w = video_options.width if video_options and hasattr(video_options, 'width') else w
             h = video_options.height if video_options and hasattr(video_options, 'height') else h
             count = video_options.count if video_options and hasattr(video_options, 'count') else 1
-            self.model_config_copy.limit_mm_per_prompt = {
-                "video": {"count": count, "num_frames": num_frames, "width": w, "height": h}
-            }
+            self.model_config_copy.limit_mm_per_prompt = {"video": {"count": count, "num_frames": num_frames, "width": w, "height": h}}
         else:
             raise NotImplementedError(f"Modality '{modality}' is not supported")
 
-        dummy_mm_inputs = MultiModalRegistry().get_dummy_mm_inputs(self.model_config_copy,
-                                                                   mm_counts={modality: count})
+        dummy_mm_inputs = MultiModalRegistry().get_dummy_mm_inputs(self.model_config_copy, mm_counts={modality: count})
         dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
         # We use the cache so that the item is saved to the cache,
         # but not read from the cache
