@@ -4585,7 +4585,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         if modality == 'image':
             mm_options: Mapping[str, BaseDummyOptions] = {
-                "image": ImageDummyOptions(count=count, width=w,height=h),
+                "image": ImageDummyOptions(count=count, width=w, height=h),
                 "video": None
             }
         elif modality == 'video':
