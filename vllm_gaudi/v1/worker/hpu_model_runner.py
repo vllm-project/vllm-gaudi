@@ -370,7 +370,8 @@ def patch_llama4_get_attn_scale(model):
         orig = attn._get_attn_scale
 
         def _get_attn_scale_for_hpu(self, positions, _orig=orig):
-            positions = positions.flatten()
+            if self.qk_norm is not None:
+                positions = positions.flatten()
             return _orig(positions)
 
         attn._get_attn_scale = types.MethodType(_get_attn_scale_for_hpu, attn)
