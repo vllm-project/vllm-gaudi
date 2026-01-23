@@ -1420,7 +1420,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         layer.self_attn.attn.impl.is_chunked_attention = True
             except Exception:
                 pass
-    
     def _get_prompts_and_decodes(
         self,
         scheduler_output: "SchedulerOutput",
