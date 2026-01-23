@@ -4672,16 +4672,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.mm_registry,
         ) if self.supports_mm_inputs else None
         aspect_ratios = [(1, 1)]  # 1:1 square
-        sanity_check = False
-        if self.get_model().vision_bucket_manager.is_batch_based:
-            sanity_check = True
-            aspect_ratio_ext = [
-                (4, 3),  # 4:3 landscape
-                (3, 4),  # 3:4 portrait
-                (16, 9),  # 16:9 widescreen
-                (9, 16),  # 9:16 portrait
-            ]
-            aspect_ratios.extend(aspect_ratio_ext)
+        sanity_check = self.get_model().vision_bucket_manager.is_batch_based
+
+        aspect_ratios = [
+            (1, 1),  # 1:1 square
+            (4, 3),  # 4:3 landscape
+            (3, 4),  # 3:4 portrait
+            (16, 9),  # 16:9 widescreen
+            (9, 16),  # 9:16 portrait
+        ]
+
         is_video_warmup = self.model_config.get_multimodal_config() is not None and \
                 self.model_config.get_multimodal_config().get_dummy_options("video") is not None \
                     and self.mm_budget.mm_limits['video'] != 999
