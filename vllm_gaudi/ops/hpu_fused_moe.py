@@ -116,8 +116,8 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             num_experts,
             experts_min,
             experts_max,
-            has_bias,
             dispatch_fn,
+            has_bias
         )
 
         for expert_id in range(layer.local_num_experts):

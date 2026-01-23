@@ -617,7 +617,7 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
                  experts_max: int = 8,
                  dispatch_fn: Callable[[torch.Tensor], torch.Tensor] = None,
                  bias=None):
-        super().__init__(global_num_experts, num_total_experts, experts_min, experts_max, bias, dispatch_fn)
+        super().__init__(global_num_experts, num_total_experts, experts_min, experts_max, dispatch_fn, bias)
         self.w13_list = torch.nn.ModuleList([MoeMatmul() for _ in range(num_total_experts)])
         self.w2_list = torch.nn.ModuleList([MoeMatmul() for _ in range(num_total_experts)])
 
