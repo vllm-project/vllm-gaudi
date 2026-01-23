@@ -538,6 +538,7 @@ class MoeMatmul(torch.nn.Module):
 
     def __init__(self):
         super().__init__()
+        self.bias = None
 
     def set_weight(self, w):
         self.weight = w
@@ -557,7 +558,7 @@ class VllmMixtureOfExpertsOpBase(torch.nn.Module):
                  experts_min: int = 0,
                  experts_max: int = 8,
                  dispatch_fn: Callable[[torch.Tensor], torch.Tensor] = None,
-                 bias=None):
+                 bias=False):
         super().__init__()
         self.experts_min = experts_min
         self.experts_max = experts_max
@@ -616,7 +617,7 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
                  experts_min: int = 0,
                  experts_max: int = 8,
                  dispatch_fn: Callable[[torch.Tensor], torch.Tensor] = None,
-                 bias=None):
+                 bias=False):
         super().__init__(global_num_experts, num_total_experts, experts_min, experts_max, dispatch_fn, bias)
         self.w13_list = torch.nn.ModuleList([MoeMatmul() for _ in range(num_total_experts)])
         self.w2_list = torch.nn.ModuleList([MoeMatmul() for _ in range(num_total_experts)])
@@ -630,7 +631,8 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
         w2_list = [self.w2_list[i].weight.squeeze() for i in experts_range]
 
         if self.moe_n_slice == 1:
-            if self.bias is not None:
+            if self.bias is True and self.w13_list[i].bias is not None \
+                and self.w2_list[i].bias is not None:
                 w1_bias_list = [self.w13_list[i].bias.squeeze() for i in experts_range]
                 w2_bias_list = [self.w2_list[i].bias.squeeze() for i in experts_range]
                 return torch.ops.hpu.mixture_of_experts.bias_fused_weights(hidden_states=hidden_states,
@@ -659,7 +661,8 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
             w2_list_slice = w2_list[i * self.num_expert_per_group:(i + 1) * self.num_expert_per_group]
             min_expert = self.experts_min + i * self.num_expert_per_group
             max_expert = min_expert + self.num_expert_per_group - 1
-            if self.bias is not None:
+            if self.bias is not None and self.w13_list[i].bias is not None \
+                and self.w2_list is not None:
                 w1_bias_list = [self.w13_list[i].bias.squeeze() for i in experts_range]
                 w2_bias_list = [self.w2_list[i].bias.squeeze() for i in experts_range]
                 w1_bias_list_slice = w1_bias_list[i * self.num_expert_per_group:(i + 1) * self.num_expert_per_group]
