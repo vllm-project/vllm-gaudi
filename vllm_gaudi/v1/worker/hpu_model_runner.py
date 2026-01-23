@@ -2148,7 +2148,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 self.get_habana_paged_attn_buffers(
                     block_tables_chunk, slot_mapping.tolist(),
                     padded_batch_size * num_tokens)
-            
         # CPU<>HPU sync *should not* happen here.
         block_list_device = async_h2d_copy(block_list, device=self.device)
         block_usage_device = async_h2d_copy(block_usage, device=self.device)
