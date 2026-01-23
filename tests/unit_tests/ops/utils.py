@@ -4,6 +4,7 @@
 import os
 import torch
 import contextlib
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
@@ -17,13 +18,12 @@ def temporary_op_registry_oot():
     of the op. (Because when running tests, if registration happened in one
     of them, then it is still valid in every other test).
     """
-    from vllm.model_executor.custom_op import op_registry_oot
-    old_registry = op_registry_oot
-    op_registry_oot = {}
+    old_registry = CustomOp.op_registry_oot
+    CustomOp.op_registry_oot = {}
     try:
         yield
     finally:
-        op_registry_oot = old_registry
+        CustomOp.op_registry_oot = old_registry
 
 
 def register_op(base_cls, oot_cls):
@@ -31,8 +31,7 @@ def register_op(base_cls, oot_cls):
     Manual registration of the oot op. It should be used
     within temporary_op_registry_oot context manager.
     """
-    from vllm.model_executor.custom_op import op_registry_oot
-    op_registry_oot[base_cls.__name__] = oot_cls
+    CustomOp.op_registry_oot[base_cls.__name__] = oot_cls
 
 
 def create_row_parallel_linear(input_size, output_size, quant_config=None):
