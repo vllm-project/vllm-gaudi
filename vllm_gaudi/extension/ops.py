@@ -979,11 +979,9 @@ def fp8_block_moe_prepare_weights(layer, force_channel_fp8=False):
     if force_channel_fp8:
         # convert to channel-wise fp8
         w13_weight, w13_weight_scale_inv = dynamic_quant(
-            dequant_block_fp8_weight_naive(layer.w13_weight.data, w13_weight_scale_param.data,
-                                           weight_block_size))
+            dequant_block_fp8_weight_naive(layer.w13_weight.data, w13_weight_scale_param.data, weight_block_size))
         w2_weight, w2_weight_scale_inv = dynamic_quant(
-            dequant_block_fp8_weight_naive(layer.w2_weight.data, w2_weight_scale_param.data,
-                                           weight_block_size))
+            dequant_block_fp8_weight_naive(layer.w2_weight.data, w2_weight_scale_param.data, weight_block_size))
         w13_weight_scale_inv, w2_weight_scale_inv \
             = w13_weight_scale_inv.squeeze(-1), w2_weight_scale_inv.squeeze(-1)
         layer.w13_weight.data.copy_(w13_weight)
