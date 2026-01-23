@@ -834,7 +834,7 @@ def synced_weight_loader(weight_loader):
     return wrapper
 
 
-def fp8_perchannel_linear_postprocess_weights(layer):
+def fp8_perchannel_perblock_linear_postprocess_weights(layer):
     # For INC path, we attach the dequant func to the layer
     inc_config = os.getenv("QUANT_CONFIG", None)
     if inc_config:

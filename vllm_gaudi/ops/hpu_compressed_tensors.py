@@ -31,7 +31,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (marlin_r
 from vllm.model_executor.utils import set_weight_attrs
 import vllm_gaudi.extension.ops as hpu_ops
 from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
-from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel, VllmMixtureOfExpertsOpWNA16)
+from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8, VllmMixtureOfExpertsOpFP8PerChannel,
+                                      VllmMixtureOfExpertsOpWNA16)
 from vllm_gaudi.extension.runtime import get_config
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase, )
@@ -96,6 +97,24 @@ class HPUCompressedTensorsLinearMethod(OrigCompressedTensorsLinearMethod):
         if layer.scheme.strategy == QuantizationStrategy.CHANNEL:  # weights were quantized per-channel
             dequant_weight = layer.weight.to(layer.weight_scale.dtype) * layer.weight_scale.squeeze()
             return dequant_weight.to(torch.bfloat16).t()
+        elif layer.scheme.strategy == QuantizationStrategy.BLOCK:  # weights were quantized per-block
+            # weight has been transposed to (input_size, output_size) in process_weights_after_loading
+            # weight_scale is (output_blocks, input_blocks)
+            # we need to transpose and repeat weight_scale to match weight shape
+            scale = layer.weight_scale.t()
+            block_n, block_k = layer.weight_block_size
+
+            # Repeat scales to match the weight dimensions
+            # dim 0 corresponds to input_size (block_k)
+            # dim 1 corresponds to output_size (block_n)
+            scale = scale.repeat_interleave(block_k, dim=0).repeat_interleave(block_n, dim=1)
+
+            # Handle case where input/output size is not perfectly divisible by block size
+            scale = scale[:layer.weight.shape[0], :layer.weight.shape[1]]
+
+            dequant_weight = layer.weight.to(layer.weight_scale.dtype) * scale
+
+            return dequant_weight.to(torch.bfloat16).t()
         else:
             raise NotImplementedError("Implemented per-channel dequantization only")
 
@@ -137,11 +156,8 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             layer.input_scale = None
 
         # postprocess weights for perchannel strategy
-        if layer.scheme.strategy == QuantizationStrategy.CHANNEL:
-            hpu_ops.fp8_perchannel_linear_postprocess_weights(layer)
-        elif layer.scheme.strategy == QuantizationStrategy.BLOCK:
-            raise NotImplementedError("TODO: Blockwise FP8 quantization is not supported on HPU")
-            # layer = hpu_ops.fp8_block_linear_postprocess_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
+        if layer.scheme.strategy in [QuantizationStrategy.CHANNEL, QuantizationStrategy.BLOCK]:
+            hpu_ops.fp8_perchannel_perblock_linear_postprocess_weights(layer)
 
     def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int, output_partition_sizes: list[int],
                        input_size: int, output_size: int, params_dtype: torch.dtype, **extra_weight_attrs):
@@ -277,12 +293,21 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
         ep_shift = layer.ep_rank * num_experts
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
-        layer.moe_op = VllmMixtureOfExpertsOpFP8PerChannel(
-            layer.global_num_experts,
-            num_experts,
-            experts_min,
-            experts_max,
-        )
+
+        if self.block_quant:
+            layer.moe_op = VllmMixtureOfExpertsOpFP8(
+                layer.global_num_experts,
+                num_experts,
+                experts_min,
+                experts_max,
+            )
+        else:
+            layer.moe_op = VllmMixtureOfExpertsOpFP8PerChannel(
+                layer.global_num_experts,
+                num_experts,
+                experts_min,
+                experts_max,
+            )
 
         if self.static_input_scales:
             assert self.input_quant.strategy == QuantizationStrategy.TENSOR
