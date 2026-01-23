@@ -92,10 +92,10 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         self.use_dispatch_fn = get_config().use_dispatch_fn
         torch.hpu.synchronize()
         vllm_config = get_current_vllm_config()
-        if vllm_config is not None:
+        self.model_type = None
+        if vllm_config is not None and vllm_config.model_config is not None \
+            and vllm_config.model_config.hf_config is not None:
             self.model_type = vllm_config.model_config.hf_config.model_type
-        else:
-            self.model_type = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
