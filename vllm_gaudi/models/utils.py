@@ -30,7 +30,13 @@ def _merge_multimodal_embeddings(
     input_dtype = inputs_embeds.dtype
 
     if is_multimodal.dtype == torch.int64:
-        return inputs_embeds.index_copy_(0, is_multimodal, mm_embeds_flat)
+        if inputs_embeds.ndim == 3 and mm_embeds_flat.ndim == 2:
+            original_shape = inputs_embeds.shape
+            inputs_embeds = inputs_embeds.view(-1, inputs_embeds.shape[-1])
+            result = inputs_embeds.index_copy_(0, is_multimodal, mm_embeds_flat)
+            return inputs_embeds.view(original_shape)
+        else:  
+            return inputs_embeds.index_copy_(0, is_multimodal, mm_embeds_flat)
     try:
         # For debugging
         # inputs_embeds[is_multimodal] = mm_embeds_flat.to(dtype=input_dtype)
