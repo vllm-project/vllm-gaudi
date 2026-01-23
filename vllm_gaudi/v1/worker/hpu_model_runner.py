@@ -4625,7 +4625,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.mm_registry,
         ) if self.supports_mm_inputs else None
 
-        sanity_check = True if self.get_model().vision_bucket_manager.is_batch_based else False
+        sanity_check = self.get_model().vision_bucket_manager.is_batch_based
 
         aspect_ratios = [
             (1, 1),  # 1:1 square
