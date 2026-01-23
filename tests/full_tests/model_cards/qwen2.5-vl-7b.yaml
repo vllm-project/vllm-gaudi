@@ -1,4 +1,4 @@
-model_name: "/software/data/pytorch/huggingface/hub/models--Qwen--Qwen2.5-VL-7B-Instruct/snapshots/cc594898137f460bfe9f0759e9844b3ce807cfb5/"
+model_name: "Qwen/Qwen2.5-VL-7B-Instruct"
 test_config:                                # List of test configurations. - modality is test for <modality>
   - modality: image                         # modality (currently supports image and video)
     extra_engine_args:                      # Optional extra arguments for the engine
