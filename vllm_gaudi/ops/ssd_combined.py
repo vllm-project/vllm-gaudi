@@ -36,7 +36,6 @@ def _mamba_chunk_scan_combined_fwd(
     z=None,
     dt_bias=None,
     initial_states=None,
-    return_intermediate_states=False,
     cu_seqlens=None,
     last_chunk_indices=None,
     dt_softplus=False,
@@ -136,10 +135,7 @@ def _mamba_chunk_scan_combined_fwd(
         initial_states=initial_states,
     )
 
-    if return_intermediate_states:
-        return states
-    else:
-        return states[last_chunk_indices]
+    return states
 
 
 @torch.compiler.disable
@@ -159,7 +155,6 @@ def hpu_mamba_chunk_scan_combined_varlen(
     initial_states=None,
     dt_softplus=False,
     dt_limit=(0.0, float("inf")),
-    return_intermediate_states=False,
     state_dtype=None,
 ):
     """
@@ -198,7 +193,6 @@ def hpu_mamba_chunk_scan_combined_varlen(
         z=z,
         dt_bias=dt_bias,
         initial_states=initial_states,
-        return_intermediate_states=return_intermediate_states,
         cu_seqlens=cu_seqlens,
         last_chunk_indices=last_chunk_indices,
         dt_softplus=dt_softplus,

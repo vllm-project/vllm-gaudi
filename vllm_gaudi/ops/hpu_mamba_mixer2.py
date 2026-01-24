@@ -464,7 +464,7 @@ class HPUMambaMixer2(MambaMixer2):
 
         assert self.cache_config is not None
         mamba_block_size = self.cache_config.mamba_block_size
-        prefix_caching_enabled = self.cache_config.enable_prefix_caching
+        assert not self.cache_config.enable_prefix_caching
         if attn_metadata is not None:
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
             # conv_state = (..., dim, width-1) yet contiguous along 'dim'
@@ -564,12 +564,11 @@ class HPUMambaMixer2(MambaMixer2):
                 cu_seqlens=query_start_loc_p,
                 last_chunk_indices=last_chunk_indices_p,
                 initial_states=initial_states,
-                return_intermediate_states=prefix_caching_enabled,
                 dt_softplus=True,
                 dt_limit=(0.0, float("inf")),
                 out=output.view(output.shape[0], -1, self.head_dim),
                 state_dtype=ssm_state.dtype,
-            )
+            )[last_chunk_indices_p]
             output = output * padding_mask_flat.view(output.shape[0], 1)
 
             ssm_state[state_indices_tensor] = varlen_states
