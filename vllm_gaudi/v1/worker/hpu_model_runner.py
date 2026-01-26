@@ -4572,17 +4572,19 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             batch = image_args
         else:
             patch_size = int(self.get_patch_size_from_model())
-            # Calculate width and height to maintain aspect ratio and patch count
-            # Total patches = (width/patch_size) * (height/patch_size)
-            # We want: (w/ps) * (h/ps) = num_patch where num_patch is image_args
-            # And: w/h = ratio_w/ratio_h
-            grid_w = int(math.sqrt(image_args * ratio_w / ratio_h))
-            grid_h = int(image_args / grid_w)
-            w = grid_w * patch_size
-            h = grid_h * patch_size
             batch = count
-
+    
         if modality == 'image':
+            # vllm 
+            image_options = self.model_config.get_multimodal_config().get_dummy_options("image")
+            w = image_options.width if image_options and hasattr(image_options, 'width') else None
+            h = image_options.height if image_options and hasattr(image_options, 'height') else None
+            count = image_options.count if image_options and hasattr(image_options, 'count') else count
+            if not w or not h:
+                w, h = self.get_model().vision_bucket_manager.bucket_to_image_resolution(image_args, \
+                    ratio_w, ratio_h, patch_size)
+            else:
+                self.get_model().vision_bucket_manager.add_to_bucket(w, h, patch_size)
             mm_options = {"image": ImageDummyOptions(count=count, width=w, height=h), "video": None}
         elif modality == 'video':
             video_options = self.model_config.get_multimodal_config().get_dummy_options("video")
@@ -4594,6 +4596,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 "image": None,
                 "video": VideoDummyOptions(count=count, num_frames=num_frames, width=w, height=h)
             }
+
         else:
             raise NotImplementedError(f"Modality '{modality}' is not supported")
 

@@ -1,9 +1,14 @@
 import torch
+import numpy as np
 from .utils import _merge_multimodal_embeddings
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.interfaces import _require_is_multimodal
+
+from vllm.model_executor.models.qwen2_5_vl import (
+    Qwen2_5_VLImageInputs,
+)
 from vllm.model_executor.models.qwen3_vl import (
     Qwen3VLForConditionalGeneration,
     Qwen3_VisionTransformer,
@@ -11,7 +16,9 @@ from vllm.model_executor.models.qwen3_vl import (
 )
 from vllm.model_executor.models.utils import maybe_prefix
 
-from vllm_gaudi.models.qwen2_5_vl import (HPUQwen2_5_VisionAttention)
+from vllm_gaudi.models.qwen2_5_vl import (
+    create_block_diagonal_attention_mask,
+    HPUQwen2_5_VisionAttention)
 
 
 class HPUQwen3_VisionBlock(Qwen3_VisionBlock):
@@ -47,7 +54,27 @@ class HPUQwen3_VisionBlock(Qwen3_VisionBlock):
             multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
         )
+        
+    def forward(
+         self,
+        x: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor,
+        rotary_pos_emb_sin: torch.Tensor,
+        max_seqlen: torch.Tensor,  # Only used for Flash Attention
+        attn_mask=None,
+    ) -> torch.Tensor:
+        x = x + self.attn(
+            self.norm1(x),
+            cu_seqlens=cu_seqlens,
+            rotary_pos_emb_cos=rotary_pos_emb_cos,
+            rotary_pos_emb_sin=rotary_pos_emb_sin,
+            attn_mask=attn_mask,
+            max_seqlen=max_seqlen,
+        )
 
+        x = x + self.mlp(self.norm2(x))
+        return x
 
 class HPUQwen3_VisionTransformer(Qwen3_VisionTransformer):
 
@@ -83,6 +110,58 @@ class HPUQwen3_VisionTransformer(Qwen3_VisionTransformer):
             ) for layer_idx in range(depth)
         ])
 
+    def forward(
+        self,
+        x: torch.Tensor,
+        grid_thw: torch.Tensor | list[list[int]],
+        attn_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        print(f"libin debug HPU vision start ")
+        hidden_states = x.to(device=self.device, dtype=self.dtype, non_blocking=True)
+        hidden_states = self.patch_embed(hidden_states)
+
+        if isinstance(grid_thw, list):
+            grid_thw_list = grid_thw
+            grid_thw = np.array(grid_thw, dtype=np.int32)
+        else:
+            grid_thw_list = grid_thw.tolist()
+            grid_thw = grid_thw.numpy()
+
+        pos_embeds = self.fast_pos_embed_interpolate(grid_thw_list)
+        hidden_states = hidden_states + pos_embeds
+        rotary_pos_emb_cos, rotary_pos_emb_sin = self.rot_pos_emb(grid_thw_list)
+
+        cu_seqlens = np.repeat(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
+            axis=0, dtype=np.int32
+        )
+        cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
+        cu_seqlens = torch.from_numpy(cu_seqlens)
+        print(f"libin debug qwen3 {attn_mask=}{cu_seqlens=}")
+        hidden_states = hidden_states.unsqueeze(1)
+        max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
+        cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
+        deepstack_feature_lists = []
+        for layer_num, blk in enumerate(self.blocks):
+            hidden_states = blk(
+                hidden_states,
+                cu_seqlens=cu_seqlens,
+                rotary_pos_emb_cos=rotary_pos_emb_cos,
+                rotary_pos_emb_sin=rotary_pos_emb_sin,
+                max_seqlen=max_seqlen,
+                attn_mask = attn_mask,
+            )
+            if layer_num in self.deepstack_visual_indexes:
+                deepstack_merger_idx = self.deepstack_visual_indexes.index(layer_num)
+                deepstack_feature = self.deepstack_merger_list[deepstack_merger_idx](
+                    hidden_states
+                )
+                deepstack_feature_lists.append(deepstack_feature)
+        hidden_states = self.merger(hidden_states)
+        hidden_states = torch.cat(
+            [hidden_states] + deepstack_feature_lists, dim=1
+        )  # [seq_len, hidden_size * (1 + depth_of_deepstack)]
+        return hidden_states
+
 
 class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
 
@@ -100,6 +179,76 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 multimodal_config=multimodal_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
+            
+    def create_block_diagonal_mask_with_padding(self,
+        cu_seqlens: torch.Tensor,  
+        padded_grid_thw: torch.Tensor,  
+        device: torch.device = None,  
+        dtype: torch.dtype = torch.bool  
+    ) -> torch.Tensor:  
+        """  
+        Create block diagonal mask that excludes padded tokens for Qwen3VL attention.  
+        
+        Args:  
+            cu_seqlens: Cumulative sequence lengths from original (unpadded) grid dimensions  
+            padded_grid_thw: Padded grid dimensions with merge_size=2 compatibility  
+            device: Target device for the mask  
+            dtype: Data type for the mask (typically torch.bool)  
+        
+        Returns:  
+            Block diagonal attention mask with shape [total_seq_len, total_seq_len]  
+        """  
+        if device is None:  
+            device = cu_seqlens.device  
+        
+        # Calculate total sequence length including padding  
+        total_patches = int(padded_grid_thw.prod(-1).sum().item())  
+        
+        # Create mask with total size including padding  
+        mask = torch.zeros(total_patches, total_patches, device=device, dtype=dtype)  
+        
+        # Set block diagonal regions for real patches only (using original cu_seqlens)  
+        for i in range(len(cu_seqlens) - 1):  
+            start = cu_seqlens[i].item()  
+            end = cu_seqlens[i + 1].item()  
+            mask[start:end, start:end] = True  
+        
+        return mask
+
+    def _process_image_input(
+        self, image_input: Qwen2_5_VLImageInputs
+    ) -> tuple[torch.Tensor, ...]:
+        grid_thw = image_input["image_grid_thw"]
+        assert grid_thw.ndim == 2
+
+        if image_input["type"] == "image_embeds":
+            image_embeds = image_input["image_embeds"].type(self.visual.dtype)
+        else:
+            pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+            if self.use_data_parallel:
+                return run_dp_sharded_mrope_vision_model(
+                    self.visual, pixel_values, grid_thw.tolist(), rope_type="rope_3d"
+                )
+            else:
+                print(f"libin debug process_image_count {grid_thw.shape=} {pixel_values.shape=}")
+                if pixel_values.shape[0] < 20480 and grid_thw.shape[0] > 1:
+                    cu_seqlens = torch.repeat_interleave(  
+                        grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]  
+                    ).cumsum(dim=0, dtype=torch.int32)
+                    #pixel_values, grid_thw = \
+                    #    self.vision_bucket_manager.pad_multimodal_data(pixel_values, grid_thw)
+                    attn_mask = self.create_block_diagonal_mask_with_padding(
+                        cu_seqlens, grid_thw, pixel_values.device)
+                else:
+                    attn_mask = None
+
+                image_embeds = self.visual(pixel_values, grid_thw=grid_thw, attn_mask=attn_mask)
+
+        # Split concatenated embeddings for each image item.
+        merge_size = self.visual.spatial_merge_size
+        sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
+        return image_embeds.split(sizes)
+    
 
     def _compute_deepstack_embeds(
         self,

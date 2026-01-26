@@ -34,6 +34,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.model_executor.models.utils import (maybe_prefix, cast_overflow_tensors)
 
 from vllm.multimodal.inputs import MultiModalFieldConfig
+from vllm_gaudi.extension.runtime import get_config 
 
 import habana_frameworks.torch.core as htcore
 from habana_frameworks.torch.hpex.kernels import FusedSDPA
@@ -72,28 +73,27 @@ class HPU_Attention:
             in ['true', '1'] else 'None'
 
     @classmethod
-    def forward(cls, q, k, v, mask, q_block_size=64):
+    def forward(cls, q, k, v, mask, cu_seqlens, qwen2_5_vl, q_block_size=64):
         """
         Support long sequence at prompt phase
         """
         q_len = q.size(-2)
-        if q_len <= 65536:  # need to investigate this crosspoint
-            return FusedSDPA.apply(q, k, v, mask, 0.0, False, None, cls.softmax_mode)
-
-        assert q_len % q_block_size == 0
-        q_tiles = (q_len // q_block_size) if (q_len % q_block_size == 0) else math.ceil(q_len / q_block_size)
-        attn_output = torch.zeros_like(q)
-
-        for i in range(q_tiles):
-            s, e = i * q_block_size, (i + 1) * q_block_size
-            row_q = q[:, :, s:e, :]
-            row_mask = mask[:, :, s:e, :]
-            attn_output[:, :, s:e, :] = FusedSDPA.apply(row_q, k, v, row_mask, 0.0, False, None, cls.softmax_mode)
-            # TODO: markstep after a couple of iterations
-            # need to experiment the optimal number.
-            if i % 75 == 0:
-                htcore.mark_step()
-        return attn_output
+        lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        if mask is not None or len(lens) == 1:
+            if not qwen2_5_vl or (qwen2_5_vl and q_len < 65536):
+                return FusedSDPA.apply(q, k, v, mask, 0.0, False, None, cls.softmax_mode)
+            else:
+                return AttentionLongSequence.forward(q, k, v, mask, q_block_size, cls.softmax_mode)
+        else:
+            q_chunks = torch.split(q, lens, dim=1)
+            k_chunks = torch.split(k, lens, dim=1)
+            v_chunks = torch.split(v, lens, dim=1)
+            outputs = []
+            for q_i, k_i, v_i in zip(q_chunks, k_chunks, v_chunks):
+                output_i = FusedSDPA.apply(q_i, k_i, v_i, None, 0.0, False, None, cls.softmax_mode)
+                outputs.append(output_i)
+            context_layer = torch.cat(outputs, dim=1)
+            return context_layer
 
 
 def create_block_diagonal_attention_mask(indices):
@@ -148,6 +148,8 @@ class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
         )
 
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
+        model_type = get_config().model_type
+        self.qwen2_5_vl = 'qwen2_5_vl' in model_type.lower()
 
     def forward(
             self,
@@ -184,17 +186,24 @@ class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
             q, k = qk_rotated.unbind(dim=0)
         else:
             q, k, v = qkv.unbind(dim=2)
-
+        print(f"libin debug done with hpu1 attn")
         # performs full attention using the previous computed mask
-        q1, k1, v1 = (rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
-        output = HPU_Attention.forward(q1, k1, v1, attn_mask)
-        context_layer = rearrange(output, "b h s d -> b s h d ")
-
-        context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
-
+        if attn_mask is not None:
+            q1, k1, v1 = (rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
+        else:
+            q1, k1, v1 = (rearrange(x, "b s h d -> b s (h d)") for x in [q, k, v])
+        output = HPU_Attention.forward(q1, k1, v1, attn_mask, cu_seqlens, self.qwen2_5_vl)
+        htcore.mark_step()
+        print(f"libin debug done with hpu2 attn")
+        if attn_mask is not None:
+            context_layer = rearrange(output, "b h s d -> b s h d ")
+            context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
+        else:
+            context_layer = rearrange(output, "b s hd -> s b hd")
+        htcore.mark_step()
+        print(f"libin debug done with hpu 3 attn")
         output, _ = self.proj(context_layer)
         return output
-
 
 class HPUQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
 
