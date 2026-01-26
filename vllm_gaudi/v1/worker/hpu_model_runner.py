@@ -715,6 +715,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.is_mm_embed = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
         self.is_multimodal_raw_input_supported = (model_config.is_multimodal_raw_input_only_model)
 
+        self.num_mamba_layers = self.model_config.get_num_layers_by_block_type(self.parallel_config, "mamba")
+        self.mamba_chunk_size = self.model_config.get_mamba_chunk_size() if self.num_mamba_layers > 0 else 0
+
         # Lazy initialization
         # self.model: nn.Module  # set after load_model
         self.kv_caches: list[torch.Tensor] = []
@@ -806,7 +809,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                               block_size=self.block_size,
                                               max_num_batched_tokens=self.max_num_batched_tokens,
                                               max_model_len=self.max_model_len,
-                                              num_speculative_tokens=num_speculative_tokens)
+                                              num_speculative_tokens=num_speculative_tokens,
+                                              mamba_chunk_size=self.mamba_chunk_size)
             self.graphed_buckets: set[Any] = set()
             self.graphed_multimodal_buckets: set[Any] = set()
         else:
