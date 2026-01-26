@@ -29,18 +29,21 @@ def _merge_multimodal_embeddings(
     mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
     input_dtype = inputs_embeds.dtype
 
+    if is_multimodal.dtype == torch.int64:
+        if inputs_embeds.ndim == 3 and mm_embeds_flat.ndim == 2:
+            original_shape = inputs_embeds.shape
+            inputs_embeds = inputs_embeds.view(-1, inputs_embeds.shape[-1])
+            inputs_embeds.index_copy_(0, is_multimodal, mm_embeds_flat)
+            return inputs_embeds.view(original_shape)
+        else:
+            return inputs_embeds.index_copy_(0, is_multimodal, mm_embeds_flat)
     try:
         # For debugging
         # inputs_embeds[is_multimodal] = mm_embeds_flat.to(dtype=input_dtype)
-        # htcore.mark_step()
+
         # NOTE: This can avoid D2H sync (#22105), but fails to
         # raise an error if is_multimodal.sum() < len(mm_embeds_flat)
-        # inputs_embeds.masked_scatter_(is_multimodal.unsqueeze(-1),
-        #                               mm_embeds_flat.to(dtype=input_dtype))
-
-        multimodal_positions = torch.where(is_multimodal)[0][:mm_embeds_flat.shape[0]]
-        inputs_embeds[0, multimodal_positions] = mm_embeds_flat.to(dtype=input_dtype)
-
+        inputs_embeds.masked_scatter_(is_multimodal.unsqueeze(-1), mm_embeds_flat.to(dtype=input_dtype))
     except RuntimeError as e:
         num_actual_tokens = len(mm_embeds_flat)
         num_expected_tokens = is_multimodal.sum().item()
