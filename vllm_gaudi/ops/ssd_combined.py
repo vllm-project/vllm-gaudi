@@ -23,7 +23,7 @@ def is_int_pow_2(n):
     return isinstance(n, int) and n > 0 and (n & (n - 1)) == 0
 
 
-@torch.compiler.disable
+#@torch.compiler.disable
 def _mamba_chunk_scan_combined_fwd(
     x,
     dt,
@@ -138,7 +138,7 @@ def _mamba_chunk_scan_combined_fwd(
     return states
 
 
-@torch.compiler.disable
+#@torch.compiler.disable
 def hpu_mamba_chunk_scan_combined_varlen(
     x,
     dt,
