@@ -268,7 +268,6 @@ class HPUMambaMixer2(MambaMixer2):
             dim=-1,
         )
 
-    @torch.compiler.disable
     def forward(
         self,
         hidden_states: torch.Tensor,

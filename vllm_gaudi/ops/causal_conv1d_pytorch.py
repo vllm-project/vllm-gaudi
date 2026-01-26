@@ -346,9 +346,11 @@ def hpu_causal_conv1d_fn_update(
         # Ensure cache_indices is on the correct device
         batch_cache_idx = cache_indices.to(x_work.device) if cache_indices.device != x_work.device else cache_indices
 
-    init_state = torch.where(torch.tensor([is_prompt], device=x_work.device),
-                             torch.zeros(padded_batch, dim, state_len, device=x_work.device, dtype=work_dtype),
-                             conv_states[batch_cache_idx, :, -state_len:])
+    if is_prompt:
+        init_state = torch.zeros(padded_batch, dim, state_len, device=x_work.device, dtype=work_dtype)
+    else:
+        init_state = conv_states[batch_cache_idx, :, -state_len:]
+
     seq_input = torch.cat([init_state, x_work], dim=2)
     new_state = seq_input[:, :, -state_len:]
     seq_out = F.conv1d(seq_input, weight_dw, bias, groups=dim)
