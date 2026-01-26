@@ -1420,7 +1420,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 continue
             num_decodes += 1
         return num_decodes
-    
+
     def maybe_set_chunked_attention_layers(self, model):
         if hasattr(model.config, 'text_config') and \
            hasattr(model.config.text_config, 'attention_chunk_size') and \
@@ -2161,7 +2161,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 self.get_habana_paged_attn_buffers(
                     block_tables_chunk, slot_mapping.tolist(),
                     padded_batch_size * num_tokens)
-        
+
         # CPU<>HPU sync *should not* happen here.
         block_list_device = async_h2d_copy(block_list, device=self.device)
         block_usage_device = async_h2d_copy(block_usage, device=self.device)
@@ -2179,7 +2179,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                     device=self.device) if self.model_has_chunked_attention else None
         chunked_block_groups_device = async_h2d_copy(chunked_block_groups,
                                                      device=self.device) if self.model_has_chunked_attention else None
-        
         token_ids_device = async_h2d_copy(token_ids, device=self.device)
         # when DP also enabled, some DP ranks will exeucte dummy run with empty
         # SchedulerOutput, in this case we need skip the prepare_input_ids

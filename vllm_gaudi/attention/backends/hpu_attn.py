@@ -498,7 +498,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             raise NotImplementedError("Encoder self-attention "
                                       "is not implemented for "
                                       "HPUAttentionImpl")
-        
         self.is_chunked_attention = False
 
     def _maybe_init_alibi_biases(
@@ -638,7 +637,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                     attn_bias = None
                     window_size = (self.sliding_window, 0)
                     common_args['window_size'] = window_size
-            
             if self.is_chunked_attention and \
                 hasattr(attn_metadata, 'chunked_attn_bias') and attn_metadata.chunked_attn_bias is not None:
                 attn_bias = attn_metadata.chunked_attn_bias
