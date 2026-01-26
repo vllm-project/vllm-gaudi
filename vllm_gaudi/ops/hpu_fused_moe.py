@@ -140,14 +140,15 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_weights = topk_weights.to(x.dtype)
 
         if layer.dp_size > 1:
+            dp_metadata = get_hpu_dp_metadata()
             if not (has_quant_config(layer.vllm_config.model_config) and self.use_dispatch_fn):
-                hidden_states_across_dp = get_hpu_dp_metadata().hidden_states_across_dp
+                hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
                 x = dispatch_tensor(x, hidden_states_across_dp, layer.is_sequence_parallel)
 
-            topk_ids_across_dp = get_hpu_dp_metadata().topk_ids_across_dp
+            topk_ids_across_dp = dp_metadata.topk_ids_across_dp if dp_metadata is not None else None
             topk_ids = dispatch_tensor(topk_ids, topk_ids_across_dp, layer.is_sequence_parallel)
 
-            topk_weights_across_dp = get_hpu_dp_metadata().topk_weights_across_dp
+            topk_weights_across_dp = dp_metadata.topk_weights_across_dp if dp_metadata is not None else None
             topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, layer.is_sequence_parallel)
 
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
@@ -160,7 +161,10 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             permuted_weights=True,
             activation=layer.activation,
         )
-        return output.view(*(output.size(0), *input_shape[1:]))
+        if layer.dp_size > 1:
+            return output.view(*(output.size(0), *input_shape[1:]))
+        else:
+            return output.view(*input_shape)
 
 
 def reduce_output(self, states: torch.Tensor) -> torch.Tensor:

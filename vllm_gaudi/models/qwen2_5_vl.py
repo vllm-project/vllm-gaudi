@@ -156,6 +156,7 @@ class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
             rotary_pos_emb_cos: torch.Tensor,
             rotary_pos_emb_sin: torch.Tensor,
             attn_mask: Optional[torch.Tensor] = None,  # Only used for HPU
+            max_seqlen: Optional[int] = None,  # Only used for Flash Attention
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -237,11 +238,13 @@ class HPUQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
             seqlens: Optional[list[int]] = None,  # Only used for xFormers
             attn_mask: Optional[torch.Tensor] = None,  # Only used for HPU
     ) -> torch.Tensor:
+        mask_to_use = attn_mask if attn_mask is not None else cu_seqlens
+
         x = x + self.attn(self.norm1(x),
                           cu_seqlens=cu_seqlens,
                           rotary_pos_emb_cos=rotary_pos_emb_cos,
                           rotary_pos_emb_sin=rotary_pos_emb_sin,
-                          attn_mask=attn_mask)
+                          attn_mask=mask_to_use)
 
         x = x + self.mlp(self.norm2(x))
         return x
