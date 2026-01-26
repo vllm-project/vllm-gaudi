@@ -184,7 +184,6 @@ def hpu_causal_conv1d_fn(
             raise ValueError("'has_initial_state' must align with 'query_start_loc'.")
 
     weight_dw = _make_depthwise_weight(weight_work)
-    out = torch.zeros_like(x_work)
 
     # Get cache indices
     if cache_indices is None:
@@ -197,37 +196,32 @@ def hpu_causal_conv1d_fn(
     # Create tensor to get all data from 0 to lest sequence
     # This works bor padded_batch equal 1
     # ss = torch.arange(seq_starts[0], seq_ends[-1])
-    seq_x = x_work[:, qsl[0]:qsl[-1]]
+    seq_x = x_work[:, :]
 
     # Get init_state for all batch
-    # if  is_prompt:
-    #     init_state = torch.zeros(padded_batch, dim, state_len, device=x_work.device, dtype=work_dtype)
-    #     init_state = init_state.squeeze()
-    # else:
-    #     init_state = conv_states[batch_cache_idx, :, -state_len:]
-    #     init_state = init_state.squeeze()
-    init_state = torch.where(torch.tensor([is_prompt], device=x_work.device),
-                             torch.zeros(padded_batch, dim, state_len, device=x_work.device, dtype=work_dtype),
-                             conv_states[batch_cache_idx, :, -state_len:])
+    if is_prompt:
+        init_state = torch.zeros(padded_batch, dim, state_len, device=x_work.device, dtype=work_dtype)
+    else:
+        init_state = conv_states[batch_cache_idx, :, -state_len:]
     init_state = init_state.squeeze()
 
     # Prepare input for convolution
     seq_input = torch.cat([init_state, seq_x], dim=1)
-    new_state = seq_input[:, -state_len:]
+    end = qsl[-1]
+    idx = torch.arange(state_len, device=x.device) + end
+    new_state = seq_input.index_select(dim=1, index=idx)
 
     # Apply convolution
     seq_input = seq_input.unsqueeze(0)
     seq_out = F.conv1d(seq_input, weight_dw, bias=bias_work, groups=dim)
     seq_out = _apply_activation(seq_out, activation)
-    # out[:, ss] = seq_out.squeeze(0)
-    out[:, qsl[0]:qsl[-1]] = seq_out.squeeze(0)
 
     # Update conv state
     # Update cache with the latest state_len tokens for this sequence
     with torch.no_grad():
         conv_states[batch_cache_idx, :, -state_len:] = conv_states[batch_cache_idx, :, -state_len:].copy_(new_state)
 
-    return out.to(original_dtype)
+    return seq_out.squeeze(0).to(original_dtype)
 
 
 def hpu_causal_conv1d_update(
