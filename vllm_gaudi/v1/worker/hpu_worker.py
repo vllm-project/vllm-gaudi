@@ -201,10 +201,11 @@ class HPUWorker(WorkerBase):
 
                 hpu_k_scales = torch.ones(kv_scales_shape, dtype=torch.bfloat16,
                                           device='hpu') if create_dynamic_scales else None
-                if hpu_v_cache is None:
-                    hpu_v_scales = None
-                elif create_dynamic_scales:
-                    hpu_v_scales = torch.ones(kv_scales_shape, dtype=torch.bfloat16, device='hpu')
+                if create_dynamic_scales:
+                    hpu_v_scales = (torch.ones(kv_scales_shape, dtype=torch.bfloat16, device='hpu'),
+                                    torch.ones([num_blocks, num_kv_heads, head_size],
+                                               dtype=torch.bfloat16,
+                                               device='hpu'))
                 else:
                     hpu_v_scales = None
 
