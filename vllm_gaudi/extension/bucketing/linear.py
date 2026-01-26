@@ -77,27 +77,31 @@ class LinearBucketingStrategy:
                                                     pad_max=32,
                                                     pad_percent=25)
         decode_query_bucket_cfg = [1, 1, 1, 1, 1]
-        max_decode_blocks = max(math.ceil(max_model_len * max_num_seqs // block_size), block_size)
         if contiguous_pa:
-            max_decode_blocks = max_blocks
+            decode_blocks_min = block_size
+            decode_blocks_step = block_size
+            decode_blocks_max = max_blocks
+            decode_blocks_pad_max = max_num_batched_tokens * max_num_seqs // block_size
+            decode_blocks_pad_percent = 25
+        else:  # fallback to exponential strategy
+            decode_blocks_min = block_size
+            decode_blocks_max = max(math.ceil(max_model_len * max_num_seqs // block_size), block_size)
+            decode_blocks_step = decode_blocks_max
+            decode_blocks_pad_max = decode_blocks_max
+            decode_blocks_pad_percent = 50
         decode_block_bucket_cfg = read_bucket_settings('decode',
                                                        'block',
-                                                       min=block_size,
-                                                       step=block_size,
-                                                       max=max_decode_blocks,
-                                                       pad_max=max_num_batched_tokens * max_num_seqs // block_size,
-                                                       pad_percent=25)
-        if decode_block_bucket_cfg[2] > max_blocks:
+                                                       min=decode_blocks_min,
+                                                       step=decode_blocks_step,
+                                                       max=decode_blocks_max,
+                                                       pad_max=decode_blocks_pad_max,
+                                                       pad_percent=decode_blocks_pad_percent)
+        if decode_block_bucket_cfg[0] > max_blocks:
+            decode_block_bucket_min = max(1, max_blocks - decode_block_bucket_cfg[1])
             logger().info(
-                f'VLLM_DECODE_BLOCK_BUCKET_MAX={decode_block_bucket_cfg[2]} is higher than max_blocks={max_blocks}. Your configuration VLLM_DECODE_BLOCK_BUCKET_MAX={decode_block_bucket_cfg[2]} will be overwritten to VLLM_DECODE_BLOCK_BUCKET_MAX={max_blocks}'
+                f'VLLM_DECODE_BLOCK_BUCKET_MIN={decode_block_bucket_cfg[0]} is higher than max_blocks={max_blocks}. Your configuration VLLM_DECODE_BLOCK_BUCKET_MIN={decode_block_bucket_cfg[0]} will be overwritten to VLLM_DECODE_BLOCK_BUCKET_MIN={decode_block_bucket_min}'
             )
-            decode_block_bucket_cfg[2] = max_blocks
-            if decode_block_bucket_cfg[0] > max_blocks:
-                decode_block_bucket_min = max(1, max_blocks - decode_block_bucket_cfg[1])
-                logger().info(
-                    f'VLLM_DECODE_BLOCK_BUCKET_MIN={decode_block_bucket_cfg[0]} is higher than max_blocks={max_blocks}. Your configuration VLLM_DECODE_BLOCK_BUCKET_MIN={decode_block_bucket_cfg[0]} will be overwritten to VLLM_DECODE_BLOCK_BUCKET_MIN={decode_block_bucket_min}'
-                )
-                decode_block_bucket_cfg[0] = decode_block_bucket_min
+            decode_block_bucket_cfg[0] = decode_block_bucket_min
 
         msg = ("Decode bucket config (min, step, max_warmup, pad_max, pad_percent) "
                f"bs:{decode_bs_bucket_cfg}, "
