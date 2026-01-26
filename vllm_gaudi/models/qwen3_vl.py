@@ -114,7 +114,6 @@ class HPUQwen3_VisionTransformer(Qwen3_VisionTransformer):
         grid_thw: torch.Tensor | list[list[int]],
         attn_mask: torch.Tensor,
     ) -> torch.Tensor:
-        print(f"libin debug HPU vision start ")
         hidden_states = x.to(device=self.device, dtype=self.dtype, non_blocking=True)
         hidden_states = self.patch_embed(hidden_states)
 
@@ -235,7 +234,6 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
                     #    self.vision_bucket_manager.pad_multimodal_data(pixel_values, grid_thw)
                     attn_mask = self.create_block_diagonal_mask(
                         cu_seqlens, grid_thw, pixel_values.device)
-                    print(f"libin debug {attn_mask=}")
                 else:
                     attn_mask = None
                 image_embeds = self.visual(pixel_values, grid_thw=grid_thw, attn_mask=attn_mask)
