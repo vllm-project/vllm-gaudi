@@ -190,11 +190,9 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor, bias: Optional[torch.Tensor] = None):
         weight_scale = layer.weight_scale.transpose(0, 1) if layer.weight_scale.dim() > 1 else layer.weight_scale
-        input_scale = getattr(layer, 'input_scale', None)
         return hpu_ops.apply_fp8_linear_hpu(input=x,
                                             weight=layer.weight,
                                             weight_scale=weight_scale,
-                                            input_scale=input_scale,
                                             bias=bias,
                                             trans_B=False)
 
