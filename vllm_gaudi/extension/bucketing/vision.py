@@ -128,75 +128,6 @@ class HPUVisionBucketManager:
       
         return best_pad_h, best_pad_w
 
-    def find_padding2(self, h_orig: int, w_orig: int, desired_patches: int) -> tuple[int, int]:
-        """Direct calculation without explicit loops - match h_adj and calculate w_adj."""
-        merge_size = 2
-        # Calculate target aspect ratio preservation
-        target_ratio = h_orig / w_orig
-
-        # Calculate height based on aspect ratio and desired patches
-        # h * w = desired_patches and h/w = target_ratio
-        # h = sqrt(desired_patches * target_ratio)
-        h_target = int((desired_patches * target_ratio) ** 0.5)
-        
-        # Adjust height for merge_size divisibility
-        h_adj = ((h_target + merge_size - 1) // merge_size) * merge_size
-        # Calculate width to achieve exact patch count
-        w_adj = desired_patches // h_adj
-        # Ensure width is also divisible by merge_size
-        if w_adj % merge_size != 0:
-            w_adj = ((w_adj + merge_size - 1) // merge_size) * merge_size
-        # Final verification - adjust if needed
-        if h_adj * w_adj != desired_patches:
-            # If still not matching, try the reverse approach
-            w_target = int((desired_patches / target_ratio) ** 0.5)
-            w_adj = ((w_target + merge_size - 1) // merge_size) * merge_size
-            h_adj = desired_patches // w_adj
-            if h_adj % merge_size != 0:
-                h_adj = ((h_adj + merge_size - 1) // merge_size) * merge_size
-
-        # Final check
-        if h_adj * w_adj != desired_patches:
-            return 0, 0
-        return h_adj - h_orig, w_adj - w_orig
-
-    def pad_multimodal_data(self, pixel_values, image_grid_thw):
-        # Only position 0 is dynamic
-        desired_number_of_pixels = self.get_multimodal_bucket(pixel_values.shape[0])
-
-        padding_len = desired_number_of_pixels - pixel_values.shape[0]
-        if padding_len <= 0:
-            return pixel_values, image_grid_thw
-
-        logger_msg = "Padding current number pixel " \
-            + str(pixel_values.shape[0]) \
-            + " to " \
-            + str(desired_number_of_pixels)
-        logger.info(logger_msg)
-
-        h_orig, w_orig = image_grid_thw[0, 1].item(), image_grid_thw[0, 2].item()
-        if self.qwen2_5_vl:
-            pad_h, pad_w = self.find_padding(h_orig, w_orig, desired_number_of_pixels)
-        else:
-            pad_h, pad_w = self.find_padding2(h_orig, w_orig, desired_number_of_pixels)
-        if pad_h == 0 and pad_w == 0:
-            return pixel_values, image_grid_thw
-
-        constant_value = -100
-        pixel_values = torch.cat([
-            pixel_values,
-            torch.ones((padding_len, pixel_values.shape[1]), device=pixel_values.device) * constant_value
-        ])
-
-        image_grid_thw = torch.tensor([[1, h_orig + pad_h, w_orig + pad_w]],
-                                      device=image_grid_thw.device,
-                                      dtype=image_grid_thw.dtype)
-        print(f"libin debug padded {image_grid_thw.prod(-1).sum()=}{desired_number_of_pixels=} {image_grid_thw=} ")
-        assert image_grid_thw.prod(-1).sum() == desired_number_of_pixels
-        print(f"libin debug padded {image_grid_thw=} {desired_number_of_pixels=}")
-        return pixel_values, image_grid_thw
-
-
     def greedy_plan(self, batchsize, available_batchsizes):
         # sort descending
         available_batchsizes_sorted = sorted(available_batchsizes, key=lambda x: -x)
@@ -235,17 +166,14 @@ class HPUVisionBucketManager:
         """
         # Find largest scale that fits within patch budget
         max_scale = int((target_patches  / (ratio_w * ratio_h)) ** 0.5)
-        print(f"libin debug bucket_to_image_resolution1 {ratio_w=} {ratio_h=} {target_patches=}")
         for scale in range(max_scale, 0, -1):
             grid_w = ratio_w * scale
             grid_h = ratio_h * scale
-            print(f"libin debug bucket_to_image_resolution2 {scale=} {grid_w=}{grid_h=} {grid_h * grid_w=} ")
             if grid_w * grid_h <= target_patches:
                 break
         # Convert grid dimensions to pixel dimensions
         width = grid_w * patch_size
         height = grid_h * patch_size
-        print(f"libin debug bucket_to_image_resolution3 {grid_w=} {grid_h=} {width=} {height=} ")
         return width, height
 
     def _patches_per_image(self, width: int, height: int, patch_size: int = 14):
@@ -253,7 +181,6 @@ class HPUVisionBucketManager:
         grid_h = height // patch_size
         grid_w = width // patch_size
         patches_per_image = grid_h * grid_w
-        print(f"libin debug {height=} {width=} {grid_h=} {grid_w=} {patches_per_image=}")
         return patches_per_image
 
     def add_to_bucket(self, width: int, height: int, patch_size: int = 14):

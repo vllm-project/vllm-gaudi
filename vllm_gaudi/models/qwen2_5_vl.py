@@ -81,7 +81,6 @@ class HPU_Attention:
         lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         if mask is not None or len(lens) == 1:
             if not qwen2_5_vl or (qwen2_5_vl and q_len < 65536):
-                print(f"libin debug step1 {q.shape=}")
                 return FusedSDPA.apply(q, k, v, mask, 0.0, False, None, cls.softmax_mode)
             else:
                 return AttentionLongSequence.forward(q, k, v, mask, q_block_size, cls.softmax_mode)
@@ -90,7 +89,6 @@ class HPU_Attention:
             k_chunks = torch.split(k, lens, dim=2)
             v_chunks = torch.split(v, lens, dim=2)
             outputs = []
-            print(f"libin debug step2")
             for q_i, k_i, v_i in zip(q_chunks, k_chunks, v_chunks):
                 output_i = FusedSDPA.apply(q_i, k_i, v_i, None, 0.0, False, None, cls.softmax_mode)
                 outputs.append(output_i)
@@ -190,18 +188,10 @@ class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
             q, k, v = qkv.unbind(dim=2)
 
         # performs full attention using the previous computed mask
-        if self.qwen2_5_vl or attn_mask is None:
-            print(f"libin debug 4D {q.shape=} {attn_mask=}")
-            q1, k1, v1 = (rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
-        else:
-            print(f"libin debug 3D {q.shape=} {attn_mask=}")
-            q1, k1, v1 = (rearrange(x, "b s h d -> b s (h d)") for x in [q, k, v])
+        q1, k1, v1 = (rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
         output = HPU_Attention.forward(q1, k1, v1, attn_mask, cu_seqlens, self.qwen2_5_vl)
-        if self.qwen2_5_vl or attn_mask is None:
-            context_layer = rearrange(output, "b h s d -> b s h d ")
-            context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
-        else:
-            context_layer = rearrange(output, "b s hd -> s b hd").contiguous()
+        context_layer = rearrange(output, "b h s d -> b s h d ")
+        context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
         output, _ = self.proj(context_layer)
         return output
 
