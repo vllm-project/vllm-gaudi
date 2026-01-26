@@ -157,9 +157,7 @@ class HPUVisionBucketManager:
 
         # Final check
         if h_adj * w_adj != desired_patches:
-            print(f"libin debug padding 0")
             return 0, 0
-        print(f"libin debug padding {h_adj - h_orig}, {w_adj - w_orig}")
         return h_adj - h_orig, w_adj - w_orig
 
     def pad_multimodal_data(self, pixel_values, image_grid_thw):

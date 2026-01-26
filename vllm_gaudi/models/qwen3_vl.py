@@ -16,9 +16,7 @@ from vllm.model_executor.models.qwen3_vl import (
 )
 from vllm.model_executor.models.utils import maybe_prefix
 
-from vllm_gaudi.models.qwen2_5_vl import (
-    create_block_diagonal_attention_mask,
-    HPUQwen2_5_VisionAttention)
+from vllm_gaudi.models.qwen2_5_vl import HPUQwen2_5_VisionAttention
 
 
 class HPUQwen3_VisionBlock(Qwen3_VisionBlock):
@@ -180,9 +178,9 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 prefix=maybe_prefix(prefix, "visual"),
             )
             
-    def create_block_diagonal_mask_with_padding(self,
+    def create_block_diagonal_mask(self,
         cu_seqlens: torch.Tensor,  
-        padded_grid_thw: torch.Tensor,  
+        grid_thw: list[int],
         device: torch.device = None,  
         dtype: torch.dtype = torch.bool  
     ) -> torch.Tensor:  
@@ -190,29 +188,28 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
         Create block diagonal mask that excludes padded tokens for Qwen3VL attention.  
         
         Args:  
-            cu_seqlens: Cumulative sequence lengths from original (unpadded) grid dimensions  
-            padded_grid_thw: Padded grid dimensions with merge_size=2 compatibility  
-            device: Target device for the mask  
-            dtype: Data type for the mask (typically torch.bool)  
-        
+            cu_seqlens: Cumulative sequence lengths from grid dimensions
+            grid_thw: The grid dimensions with merge_size=2 compatibility
+            device: Target device for the mask
+            dtype: Data type for the mask (typically torch.bool)
+
         Returns:  
             Block diagonal attention mask with shape [total_seq_len, total_seq_len]  
         """  
         if device is None:  
             device = cu_seqlens.device  
         
-        # Calculate total sequence length including padding  
-        total_patches = int(padded_grid_thw.prod(-1).sum().item())  
-        
-        # Create mask with total size including padding  
-        mask = torch.zeros(total_patches, total_patches, device=device, dtype=dtype)  
-        
-        # Set block diagonal regions for real patches only (using original cu_seqlens)  
+        # Calculate total sequence length including padding
+        total_patches = int(grid_thw.prod(-1).sum().item())
+        # Create mask with total size including padding
+        mask = torch.zeros(total_patches, total_patches, device=device, dtype=dtype)
+        cu_seqlens = cu_seqlens.tolist()
+        cu_seqlens = [0] + cu_seqlens
+
         for i in range(len(cu_seqlens) - 1):  
-            start = cu_seqlens[i].item()  
-            end = cu_seqlens[i + 1].item()  
-            mask[start:end, start:end] = True  
-        
+            start = cu_seqlens[i]
+            end = cu_seqlens[i + 1]
+            mask[start:end, start:end] = True
         return mask
 
     def _process_image_input(
@@ -230,18 +227,17 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
                     self.visual, pixel_values, grid_thw.tolist(), rope_type="rope_3d"
                 )
             else:
-                print(f"libin debug process_image_count {grid_thw.shape=} {pixel_values.shape=}")
-                if pixel_values.shape[0] < 20480 and grid_thw.shape[0] > 1:
-                    cu_seqlens = torch.repeat_interleave(  
-                        grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]  
+                SPLIT_THRESHOLD = 20480
+                if pixel_values.shape[0] < SPLIT_THRESHOLD and grid_thw.shape[0] > 1:
+                    cu_seqlens = torch.repeat_interleave(
+                        grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
                     ).cumsum(dim=0, dtype=torch.int32)
                     #pixel_values, grid_thw = \
                     #    self.vision_bucket_manager.pad_multimodal_data(pixel_values, grid_thw)
-                    attn_mask = self.create_block_diagonal_mask_with_padding(
+                    attn_mask = self.create_block_diagonal_mask(
                         cu_seqlens, grid_thw, pixel_values.device)
                 else:
                     attn_mask = None
-
                 image_embeds = self.visual(pixel_values, grid_thw=grid_thw, attn_mask=attn_mask)
 
         # Split concatenated embeddings for each image item.
