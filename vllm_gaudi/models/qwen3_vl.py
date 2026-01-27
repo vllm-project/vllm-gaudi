@@ -54,7 +54,6 @@ class HPUQwen3_VisionBlock(Qwen3_VisionBlock):
             prefix=f"{prefix}.attn",
         )
 
-
     def forward(
         self,
         x: torch.Tensor,
