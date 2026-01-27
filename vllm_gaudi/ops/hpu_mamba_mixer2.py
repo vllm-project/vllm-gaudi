@@ -293,10 +293,9 @@ class HPUMambaMixer2(MambaMixer2):
         # 3. conv + SSM
         # (split `projected_states` into hidden_states_B_C, dt in the custom op to
         # ensure it is not treated as an intermediate tensor by torch compile)
-        torch.ops.vllm.mamba_mixer2(
+        self.conv_ssm_forward(
             projected_states,
             ssm_output,
-            self.prefix,
         )
 
         # 4. gated MLP
