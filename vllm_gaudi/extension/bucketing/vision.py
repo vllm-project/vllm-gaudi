@@ -1,5 +1,4 @@
 import os
-import torch
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -46,8 +45,6 @@ class HPUVisionBucketManager:
         else:
             if envvar == "":
                 multimodal_buckets = config['buckets']
-                #multimodal_buckets = \
-                    #self.get_buckets_from_lists_with_ratios([480], 16)
             else:
                 multimodal_buckets = [int(x) for x in envvar.split(',')]
             self.multimodal_buckets = self._process_buckets(multimodal_buckets)
@@ -117,15 +114,7 @@ class HPUVisionBucketManager:
 
         if (best_pad_h + h_orig) * (best_pad_w + w_orig) != desired_patches:
             best_pad_h, best_pad_w = 0, 0
-        final_h = h_orig + best_pad_h  
-        final_w = w_orig + best_pad_w  
-            
-        if final_h % merge_size != 0:  
-            best_pad_h += merge_size - (final_h % merge_size)
-        final_w = desired_patches 
-        if final_w % merge_size != 0:
-            best_pad_w += merge_size - (final_w % merge_size)  
-      
+
         return best_pad_h, best_pad_w
 
     def greedy_plan(self, batchsize, available_batchsizes):
@@ -188,23 +177,3 @@ class HPUVisionBucketManager:
         if value not in lst:
             self.multimodal_buckets.append(patches_per_image)
             self._process_buckets()
-    '''
-    def get_buckets_from_lists_with_ratios(self,
-        heights: list[int],   
-        patch_size: int = 14 
-    ) -> list[int]:
-        # Total patches = (height/patch_size) * (width/patch_size)
-        ratio_wh =[(1, 1), (3, 4), (4, 3), (16, 9), (9,16)]
-        buckets = []
-        for ratios in ratio_wh:
-            for height in heights:
-                ratio_w, ratio_h = ratios
-                # Calculate width from height and ratio  
-                width = int(height * ratio_w / ratio_h)
-
-                patches_per_image = self._patches_per_image(width, height, patch_size)
-                buckets.append(patches_per_image)
-                print(f"libin debug get_bucket_from_list {ratio_w=} {ratio_h=} {height=} {width=} {patches_per_image=} ")
-        print(f"debug bucket = {buckets=}")
-        return buckets
-        '''
