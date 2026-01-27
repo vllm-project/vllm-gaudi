@@ -3,6 +3,7 @@ from typing import Union
 
 import torch
 import vllm
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, UnquantizedFusedMoEMethod)
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOp)
 from vllm_gaudi.extension.runtime import get_config
@@ -18,6 +19,11 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         super().__init__(*args, **kwargs)
         self.use_dispatch_fn = get_config().use_dispatch_fn
         torch.hpu.synchronize()
+        vllm_config = get_current_vllm_config()
+        self.model_type = None
+        if vllm_config is not None and vllm_config.model_config is not None \
+            and vllm_config.model_config.hf_config is not None:
+            self.model_type = vllm_config.model_config.hf_config.model_type
 
     @property
     def is_monolithic(self) -> bool:
@@ -28,6 +34,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # custom handling for HPU
         num_experts = layer.local_num_experts
         ep_shift = layer.ep_rank * num_experts
+        has_bias = hasattr(layer, 'w13_bias') and hasattr(layer, 'w2_bias')
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
 
@@ -36,17 +43,15 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         else:
             dispatch_fn = None
 
-        layer.moe_op = VllmMixtureOfExpertsOp(
-            layer.global_num_experts,
-            num_experts,
-            experts_min,
-            experts_max,
-            dispatch_fn,
-        )
+        layer.moe_op = VllmMixtureOfExpertsOp(layer.global_num_experts, num_experts, experts_min, experts_max,
+                                              dispatch_fn, has_bias)
 
         for expert_id in range(layer.local_num_experts):
             layer.moe_op.w13_list[expert_id].set_weight(layer.w13_weight.data[expert_id])
             layer.moe_op.w2_list[expert_id].set_weight(layer.w2_weight.data[expert_id])
+            if has_bias:
+                layer.moe_op.w13_list[expert_id].set_bias(layer.w13_bias.data[expert_id])
+                layer.moe_op.w2_list[expert_id].set_bias(layer.w2_bias.data[expert_id])
 
     def apply_monolithic(
         self,
@@ -110,9 +115,13 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
         else:
             import torch.nn.functional as F
-            topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
-            topk_weights, topk_ids = torch.topk(topk_weights, layer.top_k, dim=-1)
-            topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+            if self.model_type is not None and self.model_type in ["gpt_oss"]:
+                topk_weights, topk_ids = torch.topk(router_logits, layer.top_k, dim=-1)
+                topk_weights = F.softmax(topk_weights, dim=-1, dtype=torch.float32)
+            else:
+                topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
+                topk_weights, topk_ids = torch.topk(topk_weights, layer.top_k, dim=-1)
+                topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
             topk_weights = topk_weights.to(x.dtype)
 
         if not layer.use_grouped_topk:
@@ -133,6 +142,15 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
+
+        if self.model_type in ["gpt_oss"]:
+            return layer.moe_op(
+                x,
+                topk_ids.to(torch.int64),
+                topk_weights.to(x.dtype),
+                permuted_weights=True,
+                activation=layer.activation,
+            ).view(*input_shape)
 
         output = layer.moe_op(
             x,
