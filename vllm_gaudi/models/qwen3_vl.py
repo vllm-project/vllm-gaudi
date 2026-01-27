@@ -7,8 +7,7 @@ from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.interfaces import _require_is_multimodal
 
 from vllm.model_executor.models.qwen2_5_vl import (
-    Qwen2_5_VLImageInputs,
-)
+    Qwen2_5_VLImageInputs,)
 from vllm.model_executor.models.qwen3_vl import (
     Qwen3VLForConditionalGeneration,
     Qwen3_VisionTransformer,
@@ -54,7 +53,7 @@ class HPUQwen3_VisionBlock(Qwen3_VisionBlock):
         )
         
     def forward(
-         self,
+        self,
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
         rotary_pos_emb_cos: torch.Tensor,
@@ -128,9 +127,7 @@ class HPUQwen3_VisionTransformer(Qwen3_VisionTransformer):
         hidden_states = hidden_states + pos_embeds
         rotary_pos_emb_cos, rotary_pos_emb_sin = self.rot_pos_emb(grid_thw_list)
 
-        cu_seqlens = np.repeat(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
-            axis=0, dtype=np.int32
-        )
+        cu_seqlens = np.repeat(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(axis=0, dtype=np.int32)
         cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
         cu_seqlens = torch.from_numpy(cu_seqlens)
         hidden_states = hidden_states.unsqueeze(1)
@@ -144,18 +141,15 @@ class HPUQwen3_VisionTransformer(Qwen3_VisionTransformer):
                 rotary_pos_emb_cos=rotary_pos_emb_cos,
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen,
-                attn_mask = attn_mask,
+                attn_mask=attn_mask,
             )
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_merger_idx = self.deepstack_visual_indexes.index(layer_num)
-                deepstack_feature = self.deepstack_merger_list[deepstack_merger_idx](
-                    hidden_states
-                )
+                deepstack_feature = self.deepstack_merger_list[deepstack_merger_idx](hidden_states)
                 deepstack_feature_lists.append(deepstack_feature)
         hidden_states = self.merger(hidden_states)
-        hidden_states = torch.cat(
-            [hidden_states] + deepstack_feature_lists, dim=1
-        )  # [seq_len, hidden_size * (1 + depth_of_deepstack)]
+        hidden_states = torch.cat([hidden_states] + deepstack_feature_lists,
+                                  dim=1)  # [seq_len, hidden_size * (1 + depth_of_deepstack)]
         return hidden_states
 
 
@@ -180,7 +174,7 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
                                    cu_seqlens: torch.Tensor,
                                    grid_thw: list[int],
                                    device: torch.device = None,
-                                   dtype: torch.dtype = torch.bool) -> torch.Tensor:  
+                                   dtype: torch.dtype = torch.bool) -> torch.Tensor:
         """
         Create block diagonal mask that excludes padded tokens for Qwen3VL attention.
         Args:
