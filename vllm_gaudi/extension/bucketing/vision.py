@@ -26,6 +26,7 @@ MULTIMODAL_CONFIG = {
     }
 }
 
+
 class HPUVisionBucketManager:
     '''
     This class is used to bucket image tokens
@@ -35,7 +36,6 @@ class HPUVisionBucketManager:
         config = self._get_multimodal_config(model_name)
 
         self.is_batch_based = is_batch_based if is_batch_based is not None else config['is_batch_based']
-
 
         self.qwen2_5_vl = 'qwen2_5_vl' in model_name.lower()
 
