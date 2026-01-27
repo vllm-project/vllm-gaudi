@@ -34,7 +34,6 @@ if __name__ == "__main__":
         tensor_parallel_size=args.tensor_parallel_size,
         enforce_eager=args.enforce_eager,
         dtype=torch.bfloat16,
-        quantization="fp8" if args.block_quant else "inc",
         kv_cache_dtype="fp8_inc",
         max_model_len=128,
         trust_remote_code=True,
