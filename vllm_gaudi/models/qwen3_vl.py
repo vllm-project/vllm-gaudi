@@ -221,19 +221,19 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
             if self.use_data_parallel:
-                return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values, grid_thw.tolist(), rope_type="rope_3d"
+                return run_dp_sharded_mrope_vision_model(self.visual,
+                                                         pixel_values,
+                                                         grid_thw.tolist(),
+                                                         rope_type="rope_3d"
                 )
             else:
                 SPLIT_THRESHOLD = 20480
                 if pixel_values.shape[0] < SPLIT_THRESHOLD and grid_thw.shape[0] > 1:
-                    cu_seqlens = torch.repeat_interleave(
-                        grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
-                    ).cumsum(dim=0, dtype=torch.int32)
+                    cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
+                                                         grid_thw[:, 0]).cumsum(dim=0, dtype=torch.int32)
                     #pixel_values, grid_thw = \
                     #    self.vision_bucket_manager.pad_multimodal_data(pixel_values, grid_thw)
-                    attn_mask = self.create_block_diagonal_mask(
-                        cu_seqlens, grid_thw, pixel_values.device)
+                    attn_mask = self.create_block_diagonal_mask(cu_seqlens, grid_thw, pixel_values.device)
                 else:
                     attn_mask = None
                 image_embeds = self.visual(pixel_values, grid_thw=grid_thw, attn_mask=attn_mask)
