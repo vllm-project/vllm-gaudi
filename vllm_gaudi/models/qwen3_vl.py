@@ -210,9 +210,7 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
             mask[start:end, start:end] = True
         return mask
 
-    def _process_image_input(
-        self, image_input: Qwen2_5_VLImageInputs
-    ) -> tuple[torch.Tensor, ...]:
+    def _process_image_input(self, image_input: Qwen2_5_VLImageInputs) -> tuple[torch.Tensor, ...]:
         grid_thw = image_input["image_grid_thw"]
         assert grid_thw.ndim == 2
 
@@ -241,7 +239,6 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
         merge_size = self.visual.spatial_merge_size
         sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
         return image_embeds.split(sizes)
-    
 
     def _compute_deepstack_embeds(
         self,
