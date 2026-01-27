@@ -114,7 +114,7 @@ class HPUQwen3_VisionTransformer(Qwen3_VisionTransformer):
         self,
         x: torch.Tensor,
         grid_thw: torch.Tensor | list[list[int]],
-        attn_mask: torch.Tensor,
+        attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = x.to(device=self.device, dtype=self.dtype, non_blocking=True)
         hidden_states = self.patch_embed(hidden_states)
