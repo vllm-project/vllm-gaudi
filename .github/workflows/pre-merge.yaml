@@ -197,7 +197,25 @@ jobs:
         with:
           event_name: ${{ github.event_name }}
           pr_number: ${{ github.event.pull_request.number }}
-          merge_group_head_ref: ${{ github.event.merge_group.head_ref }}  
+          merge_group_head_ref: ${{ github.event.merge_group.head_ref }}
+
+      - name: Validate PR info was retrieved
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Treat these as required for the rest of the workflow
+          PR_NUMBER='${{ steps.get_pr_info.outputs.pr_number }}'
+          PR_TITLE='${{ steps.get_pr_info.outputs.pr_title }}'
+          PR_BASE_REF='${{ steps.get_pr_info.outputs.pr_base_ref }}'
+
+          if [[ -z "$PR_NUMBER" || -z "$PR_TITLE" || -z "$PR_BASE_REF" ]]; then
+            echo "::error::retrieve_pr_info failed: missing required outputs from get-pr-details."
+            echo "pr_number='$PR_NUMBER'"
+            echo "pr_title='$PR_TITLE'"
+            echo "pr_base_ref='$PR_BASE_REF'"
+            exit 1
+          fi
 
       - name: Display retrieved PR information
         run: |
