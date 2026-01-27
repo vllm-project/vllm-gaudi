@@ -4582,8 +4582,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if not w or not h:
                 w, h = self.get_model().vision_bucket_manager.bucket_to_image_resolution(image_args, \
                     ratio_w, ratio_h, patch_size)
-            #else:
-                #self.get_model().vision_bucket_manager.add_to_bucket(w, h, patch_size)
             mm_options = {"image": ImageDummyOptions(count=count, width=w, height=h), "video": None}
         elif modality == 'video':
             video_options = self.model_config.get_multimodal_config().get_dummy_options("video")

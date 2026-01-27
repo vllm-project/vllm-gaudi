@@ -7,7 +7,7 @@ from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.interfaces import _require_is_multimodal
 
 from vllm.model_executor.models.qwen2_5_vl import (
-    Qwen2_5_VLImageInputs,)
+    Qwen2_5_VLImageInputs, )
 from vllm.model_executor.models.qwen3_vl import (
     Qwen3VLForConditionalGeneration,
     Qwen3_VisionTransformer,
@@ -51,6 +51,7 @@ class HPUQwen3_VisionBlock(Qwen3_VisionBlock):
             multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
         )
+
         
     def forward(
         self,
@@ -72,6 +73,7 @@ class HPUQwen3_VisionBlock(Qwen3_VisionBlock):
 
         x = x + self.mlp(self.norm2(x))
         return x
+
 
 class HPUQwen3_VisionTransformer(Qwen3_VisionTransformer):
 
