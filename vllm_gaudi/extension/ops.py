@@ -662,7 +662,7 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
             min_expert = self.experts_min + i * self.num_expert_per_group
             max_expert = min_expert + self.num_expert_per_group - 1
             if self.bias is not None and self.w13_list[i].bias is not None \
-                and self.w2_list is not None:
+                and self.w2_list[i].bias is not None:
                 w1_bias_list = [self.w13_list[i].bias.squeeze() for i in experts_range]
                 w2_bias_list = [self.w2_list[i].bias.squeeze() for i in experts_range]
                 w1_bias_list_slice = w1_bias_list[i * self.num_expert_per_group:(i + 1) * self.num_expert_per_group]
