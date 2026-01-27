@@ -1,4 +1,3 @@
-import math
 import os
 from functools import partial
 from typing import Optional, Callable, Union
@@ -34,7 +33,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.model_executor.models.utils import (maybe_prefix, cast_overflow_tensors)
 
 from vllm.multimodal.inputs import MultiModalFieldConfig
-from vllm_gaudi.extension.runtime import get_config 
+from vllm_gaudi.extension.runtime import get_config
 
 import habana_frameworks.torch.core as htcore
 from habana_frameworks.torch.hpex.kernels import FusedSDPA
@@ -195,6 +194,7 @@ class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
         output, _ = self.proj(context_layer)
         return output
 
+
 class HPUQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
 
     def __init__(
@@ -237,11 +237,13 @@ class HPUQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
             seqlens: Optional[list[int]] = None,  # Only used for xFormers
             attn_mask: Optional[torch.Tensor] = None,  # Only used for HPU
     ) -> torch.Tensor:
+        mask_to_use = attn_mask if attn_mask is not None else cu_seqlens
+
         x = x + self.attn(self.norm1(x),
                           cu_seqlens=cu_seqlens,
                           rotary_pos_emb_cos=rotary_pos_emb_cos,
                           rotary_pos_emb_sin=rotary_pos_emb_sin,
-                          attn_mask=attn_mask)
+                          attn_mask=mask_to_use)
 
         x = x + self.mlp(self.norm2(x))
         return x

@@ -137,11 +137,10 @@ class HPUVisionBucketManager:
         return str(self.multimodal_buckets)
 
     def bucket_to_image_resolution(self,
-        target_patches: int,
-        ratio_w: int,
-        ratio_h: int,
-        patch_size: int = 14
-    ) -> tuple[int, int]:
+                                   target_patches: int,
+                                   ratio_w: int,
+                                   ratio_h: int,
+                                   patch_size: int = 14) -> tuple[int, int]:
         """
         Convert bucket patch count to image resolution for specific aspect ratio.
         Assumption is patch number are the same for each image
@@ -154,7 +153,7 @@ class HPUVisionBucketManager:
             (width, height) in pixels
         """
         # Find largest scale that fits within patch budget
-        max_scale = int((target_patches  / (ratio_w * ratio_h)) ** 0.5)
+        max_scale = int((target_patches / (ratio_w * ratio_h)) ** 0.5)
         for scale in range(max_scale, 0, -1):
             grid_w = ratio_w * scale
             grid_h = ratio_h * scale
@@ -166,7 +165,7 @@ class HPUVisionBucketManager:
         return width, height
 
     def _patches_per_image(self, width: int, height: int, patch_size: int = 14):
-        # Calculate patches 
+        # Calculate patches
         grid_h = height // patch_size
         grid_w = width // patch_size
         patches_per_image = grid_h * grid_w
