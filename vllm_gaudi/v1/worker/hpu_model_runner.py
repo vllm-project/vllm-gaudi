@@ -1581,7 +1581,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             input_mrope_position = \
                 self.requests[req_id].mrope_positions[:, cl:cl + qsl] # type: ignore[index]
             dst_end = dst_start + qsl
-            mrope_position_tensor[:, dst_start:dst_end].copy_(input_mrope_position, non_blocking=True)
+            mrope_position_tensor[:, dst_start:dst_end] = input_mrope_position.to(mrope_position_tensor.device, non_blocking=True)
 
             # Update dst_start depending on if pos_ids of requests are meant to be adjacent # noqa 501
             if target_bs == 1:
