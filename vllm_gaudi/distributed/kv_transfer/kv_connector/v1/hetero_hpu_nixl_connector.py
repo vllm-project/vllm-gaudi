@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 import torch
 import math
 import queue
@@ -999,15 +998,14 @@ def _read_blocks(
         self._failed_recv_reqs.add(request_id)
 
 
-if os.getenv('VLLM_HPU_HETERO_KV_LAYOUT', 'false').lower() == 'true':
-    NixlConnector.wait_for_save = wait_for_save
-    NixlConnectorScheduler.__init__ = NixlConnectorScheduler_init_
-    NixlConnectorScheduler.update_state_after_alloc = update_state_after_alloc
-    NixlConnectorScheduler.build_connector_meta = build_connector_meta
-    NixlConnectorScheduler.request_finished = request_finished
-    NixlConnectorWorker.__init__ = NixlConnectorWorker_init_
-    NixlConnectorWorker.register_kv_caches = register_kv_caches
-    NixlConnectorWorker.register_local_xfer_handler = register_local_xfer_handler
-    NixlConnectorWorker.kv_caches_postprocess = kv_caches_postprocess
-    NixlConnectorWorker.post_process_device_kv_on_save = post_process_device_kv_on_save
-    NixlConnectorWorker._read_blocks = _read_blocks
+NixlConnector.wait_for_save = wait_for_save
+NixlConnectorScheduler.__init__ = NixlConnectorScheduler_init_
+NixlConnectorScheduler.update_state_after_alloc = update_state_after_alloc
+NixlConnectorScheduler.build_connector_meta = build_connector_meta
+NixlConnectorScheduler.request_finished = request_finished
+NixlConnectorWorker.__init__ = NixlConnectorWorker_init_
+NixlConnectorWorker.register_kv_caches = register_kv_caches
+NixlConnectorWorker.register_local_xfer_handler = register_local_xfer_handler
+NixlConnectorWorker.kv_caches_postprocess = kv_caches_postprocess
+NixlConnectorWorker.post_process_device_kv_on_save = post_process_device_kv_on_save
+NixlConnectorWorker._read_blocks = _read_blocks
