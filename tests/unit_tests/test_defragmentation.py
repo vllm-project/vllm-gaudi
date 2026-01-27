@@ -36,7 +36,7 @@ def mock_debug_logger():
 @pytest.fixture
 def defragmenter(mock_config, mock_debug_logger):
     """Create OnlineDefragmenter instance"""
-    kv_caches = ((torch.empty(0, device='meta'), torch.empty(0, device='meta')),)
+    kv_caches = ((torch.empty(0, device='meta'), torch.empty(0, device='meta')), )
     return OnlineDefragmenter(kv_caches, block_size=0)
 
 
@@ -176,7 +176,7 @@ class TestOnlineDefragmenter:
         """Test defragmentation when disabled"""
         mock_config.defrag = False
 
-        kv_caches = ((torch.empty(0, device='meta'), torch.empty(0, device='meta')),)
+        kv_caches = ((torch.empty(0, device='meta'), torch.empty(0, device='meta')), )
         defrag = OnlineDefragmenter(kv_caches, 0)
 
         defrag.use_block(100)
@@ -257,7 +257,6 @@ class TestOnlineDefragmenter:
         assert len(to_swap) == 1
         assert to_swap[0] == (100, 1)
 
-
     def test_swap_execution(self):
         """Test swap method execution flow on HPU"""
         import habana_frameworks.torch as htorch
@@ -294,6 +293,20 @@ class TestOnlineDefragmenter:
         assert torch.allclose(swapped_k_10, orig_k_5)
         assert torch.allclose(swapped_k_5, orig_k_10)
 
+    @patch('vllm_gaudi.extension.defragmentation.htorch')
+    def test_swap_mla_single_call(self, mock_htorch):
+        """Test MLA swap only calls forward once (no value cache)"""
+        mla_caches = [(torch.randn(100, 8, 64), None), (torch.randn(100, 8, 64), None)]
+        defragmenter = OnlineDefragmenter(mla_caches, block_size=16)
+
+        to_swap = [(10, 5)]
+        threshold = 8
+
+        with patch.object(defragmenter.cache_utils, 'forward') as mock_forward:
+            defragmenter._swap(to_swap, threshold)
+
+            # Should only be called once for keys (no values)
+            assert mock_forward.call_count == 1
 
 
 class TestCacheSwapUtils:
@@ -320,21 +333,6 @@ class TestCacheSwapUtils:
         """Create CacheSwapUtils instance"""
         with patch('vllm_gaudi.extension.defragmentation.htorch'):
             return CacheSwapUtils(16, 'hpu')
-
-    @patch('vllm_gaudi.extension.defragmentation.htorch')
-    def test_swap_mla_single_call(self, mock_htorch):
-        """Test MLA swap only calls forward once (no value cache)"""
-        mla_caches = [(torch.randn(100, 8, 64), None), (torch.randn(100, 8, 64), None)]
-        utils = CacheSwapUtils(block_size=16, device='hpu')
-
-        to_swap = [(10, 5)]
-        threshold = 8
-
-        with patch.object(utils, 'forward') as mock_forward:
-            utils(to_swap, threshold)
-
-            # Should only be called once for keys (no values)
-            assert mock_forward.call_count == 1
 
 
 class TestDefragmentationIntegration:

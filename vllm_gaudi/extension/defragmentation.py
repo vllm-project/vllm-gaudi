@@ -16,9 +16,8 @@ from vllm_gaudi.extension.logger import logger as init_logger
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.extension.utils import pad_list, with_default
 
-
-
 logger = init_logger()
+
 
 class CacheSwapUtils(torch.nn.Module):
     """ KV-cache swapping utilities """
@@ -70,10 +69,7 @@ class OnlineDefragmenter:
             if config.bridge_mode == 'lazy':
                 self.cache_utils = htorch.hpu.wrap_in_hpu_graph(self.cache_utils, disable_tensor_cache=True)
             elif config.bridge_mode == 'eager':
-                self.cache_utils = torch.compile(self.cache_utils,
-                                                         backend='hpu_backend',
-                                                         fullgraph=True,
-                                                         dynamic=False)
+                self.cache_utils = torch.compile(self.cache_utils, backend='hpu_backend', fullgraph=True, dynamic=False)
         if self.debug:
             self.debug('initialized')
 
@@ -199,7 +195,6 @@ class OnlineDefragmenter:
             post_status = f'max_id_used={pre_max_used}->{max_used} num_used={num_used} swapped={len(to_swap)}/{to_swap_pad}'
             self.debug(f'defragmentation done {post_status}')
 
-
     def _swap(self, to_swap, threshold):
         """ Swap block_ids between srcs and dsts"""
         assert self.cache_utils is not None
@@ -214,8 +209,6 @@ class OnlineDefragmenter:
             value_caches = [cache[1] for cache in self.kv_caches]
             self.cache_utils(srcs, dsts, value_caches, self.block_size)
 
-
-
     def warmup(self):
         """Warm up defragmentation swap graphs for different thresholds.
 
@@ -226,7 +219,6 @@ class OnlineDefragmenter:
         # If defragmenter is disabled or cache utils not prepared, skip.
         if not (self.enabled and self.cache_utils):
             return
-
 
         # Use simple valid block ids present in caches (assume at least 2 blocks allocated when kv caches created)
         # We only need distinct ids for a swap. They will be scaled by block_size inside swap.
@@ -239,7 +231,6 @@ class OnlineDefragmenter:
         if num_blocks_available < 2:
             logger.warning("Skipping defragmenter warmup, insufficient blocks (%s)", num_blocks_available)
             return
-
 
         thresholds = self.to_swap_pad_thresholds
         logger.info("Warming up defragmenter with thresholds: %s", thresholds)
@@ -254,5 +245,3 @@ class OnlineDefragmenter:
             self._swap(to_swap, thresholds[0])
 
         logger.info("Defragmenter warmup completed successfully")
-
-
