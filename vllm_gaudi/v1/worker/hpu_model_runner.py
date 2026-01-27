@@ -2002,6 +2002,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             last_chunk_indices_p = async_h2d_copy(last_chunk_indices, dtype=torch.int32)
 
             padding_mask_flat = async_h2d_copy(padding_mask_flat_cpu, device=self.device)
+            query_start_loc_p = async_h2d_copy(query_start_loc_p_cpu, dtype=torch.int32)
 
         else:
             prep_initial_states = None
@@ -2009,6 +2010,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             has_initial_states_p = None
             last_chunk_indices_p = None
             padding_mask_flat = None
+            query_start_loc_p = None
 
         query_lens = async_h2d_copy(query_lens, dtype=torch.int32)
         token_ids = async_h2d_copy(token_ids, dtype=torch.int32)
@@ -2029,7 +2031,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                      has_initial_states_p=has_initial_states_p,
                                                                      last_chunk_indices_p=last_chunk_indices_p,
                                                                      state_indices_tensor=state_indices_tensor,
-                                                                     query_start_loc=query_start_loc_p_cpu,
+                                                                     query_start_loc=query_start_loc_p,
                                                                      padding_mask_flat=padding_mask_flat)
         return PrefillInputData(request_ids=[req_ids],
                                 prompt_lens=[query_lens],
