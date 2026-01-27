@@ -8,6 +8,7 @@ from vllm_gaudi.models.qwen3_moe import upgrade_qwen3_moe_blocks_inplace
 
 
 class HpuQwen3_VLMoeForConditionalGeneration(Qwen3VLMoeForConditionalGeneration):
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
