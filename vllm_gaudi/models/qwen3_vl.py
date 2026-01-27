@@ -177,26 +177,24 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
             )
             
     def create_block_diagonal_mask(self,
-        cu_seqlens: torch.Tensor,  
-        grid_thw: list[int],
-        device: torch.device = None,  
-        dtype: torch.dtype = torch.bool  
-    ) -> torch.Tensor:  
-        """  
-        Create block diagonal mask that excludes padded tokens for Qwen3VL attention.  
-        
-        Args:  
+                                   cu_seqlens: torch.Tensor,
+                                   grid_thw: list[int],
+                                   device: torch.device = None,
+                                   dtype: torch.dtype = torch.bool) -> torch.Tensor:  
+        """
+        Create block diagonal mask that excludes padded tokens for Qwen3VL attention.
+        Args:
             cu_seqlens: Cumulative sequence lengths from grid dimensions
             grid_thw: The grid dimensions with merge_size=2 compatibility
             device: Target device for the mask
             dtype: Data type for the mask (typically torch.bool)
 
-        Returns:  
-            Block diagonal attention mask with shape [total_seq_len, total_seq_len]  
-        """  
-        if device is None:  
-            device = cu_seqlens.device  
-        
+        Returns:
+            Block diagonal attention mask with shape [total_seq_len, total_seq_len]
+        """
+        if device is None:
+            device = cu_seqlens.device
+
         # Calculate total sequence length including padding
         total_patches = int(grid_thw.prod(-1).sum().item())
         # Create mask with total size including padding
@@ -204,7 +202,7 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
         cu_seqlens = cu_seqlens.tolist()
         cu_seqlens = [0] + cu_seqlens
 
-        for i in range(len(cu_seqlens) - 1):  
+        for i in range(len(cu_seqlens) - 1):
             start = cu_seqlens[i]
             end = cu_seqlens[i + 1]
             mask[start:end, start:end] = True
