@@ -13,6 +13,8 @@ from vllm.model_executor.models.qwen3_vl import (
     Qwen3_VisionTransformer,
     Qwen3_VisionBlock,
 )
+from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
+
 from vllm.model_executor.models.utils import maybe_prefix
 
 from vllm_gaudi.models.qwen2_5_vl import HPUQwen2_5_VisionAttention
