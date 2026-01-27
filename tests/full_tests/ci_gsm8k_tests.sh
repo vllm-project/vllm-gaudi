@@ -273,6 +273,14 @@ run_qwen3_vl_test() {
     echo "✅ Test with multimodal-support with qwen3-vl-32b passed."
 }
 
+# Multimodal-support with ernie4.5-vl
+run_ernie4.5_vl_test() {
+    echo "➡️ TestingErnie4.5-VL-28B-A3B..."
+    VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 \
+    python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/ernie4.5-vl-28b.yaml"
+    echo "✅ Test with multimodal-support with ernie4.5-vl-28b passed."
+}
+
 # Spec decode with ngram
 run_spec_decode_ngram_test() {
     echo "➡️ Testing Spec-decode with ngram..."
