@@ -224,8 +224,7 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 return run_dp_sharded_mrope_vision_model(self.visual,
                                                          pixel_values,
                                                          grid_thw.tolist(),
-                                                         rope_type="rope_3d"
-                )
+                                                         rope_type="rope_3d")
             else:
                 SPLIT_THRESHOLD = 20480
                 if pixel_values.shape[0] < SPLIT_THRESHOLD and grid_thw.shape[0] > 1:
