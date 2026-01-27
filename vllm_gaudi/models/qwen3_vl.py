@@ -52,7 +52,7 @@ class HPUQwen3_VisionBlock(Qwen3_VisionBlock):
             prefix=f"{prefix}.attn",
         )
 
-        
+
     def forward(
         self,
         x: torch.Tensor,
@@ -171,7 +171,7 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 multimodal_config=multimodal_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
-            
+
     def create_block_diagonal_mask(self,
                                    cu_seqlens: torch.Tensor,
                                    grid_thw: list[int],

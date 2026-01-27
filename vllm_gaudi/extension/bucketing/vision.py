@@ -35,7 +35,8 @@ class HPUVisionBucketManager:
         config = self._get_multimodal_config(model_name)
 
         self.is_batch_based = is_batch_based if is_batch_based is not None else config['is_batch_based']
-        
+
+
         self.qwen2_5_vl = 'qwen2_5_vl' in model_name.lower()
 
         envvar = os.environ.get('VLLM_MULTIMODAL_BUCKETS', "")
@@ -153,7 +154,7 @@ class HPUVisionBucketManager:
             (width, height) in pixels
         """
         # Find largest scale that fits within patch budget
-        max_scale = int((target_patches / (ratio_w * ratio_h)) ** 0.5)
+        max_scale = int((target_patches / (ratio_w * ratio_h))**0.5)
         for scale in range(max_scale, 0, -1):
             grid_w = ratio_w * scale
             grid_h = ratio_h * scale
