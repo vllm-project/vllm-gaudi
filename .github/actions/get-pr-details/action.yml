@@ -53,7 +53,7 @@ runs:
                   return;
               }
               
-              const prMatch = headRef.match(/^pr-(\d+)-/);
+              const prMatch = headRef.match(/pr-(\d+)-/);
               
               if (!prMatch) {
                   console.log('❌ Merge group head ref does not match expected format "pr-<number>-...". Received:', headRef);
