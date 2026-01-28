@@ -36,5 +36,5 @@ python3 -m vllm.entrypoints.openai.api_server \
   --no-enable-prefix-caching \
   --disable-log-requests \
   --disable-log-stats \
-  --trust-remote-code 2>&1 | tee Llama-3.3-70B-Instruct.txt
+  --trust-remote-code 2>&1 | tee Llama-4-Maverick-17B-128E-Instruct.txt
 
