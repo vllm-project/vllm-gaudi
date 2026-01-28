@@ -169,6 +169,12 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     window_block_groups: Optional[torch.Tensor] = None
     window_block_usage: Optional[torch.Tensor] = None
     window_attn_bias: Optional[torch.Tensor] = None
+    chunked_slot_mapping: Optional[torch.Tensor] = None
+    chunked_attn_bias: Optional[torch.Tensor] = None
+    chunked_block_mapping: Optional[torch.Tensor] = None
+    chunked_block_list: Optional[torch.Tensor] = None
+    chunked_block_groups: Optional[torch.Tensor] = None
+    chunked_block_usage: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -495,6 +501,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                       "is not implemented for "
                                       "HPUAttentionImpl")
 
+        self.is_chunked_attention = False
+
     def _maybe_init_alibi_biases(
         self,
         max_seq_len,
@@ -632,6 +640,9 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                     attn_bias = None
                     window_size = (self.sliding_window, 0)
                     common_args['window_size'] = window_size
+            if self.is_chunked_attention and \
+                hasattr(attn_metadata, 'chunked_attn_bias') and attn_metadata.chunked_attn_bias is not None:
+                attn_bias = attn_metadata.chunked_attn_bias
 
             out = ops.prompt_attention(impl=self.prefill_impl,
                                        query=query.view(query_shape),
@@ -652,6 +663,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 block_groups = attn_metadata.window_block_groups
                 block_mapping = attn_metadata.window_block_mapping
                 attn_bias = attn_metadata.window_attn_bias
+            elif self.is_chunked_attention and \
+                attn_metadata.chunked_block_list is not None:
+                block_list = attn_metadata.chunked_block_list
+                block_groups = attn_metadata.chunked_block_groups
+                block_mapping = attn_metadata.chunked_block_mapping
+                attn_bias = attn_metadata.chunked_attn_bias
             else:
                 block_list = attn_metadata.block_list
                 block_groups = attn_metadata.block_groups
@@ -1060,7 +1077,7 @@ class HPUUnifiedMLAImpl(MLACommonImpl[HPUUnifiedAttentionMetadata], torch.nn.Mod
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj  # Used to expand latent → full KV in causal path
-
+        self.use_online_merge = get_config().unified_attn_online_merge
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn \
