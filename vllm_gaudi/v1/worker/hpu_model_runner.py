@@ -378,17 +378,17 @@ def patch_llama4_get_attn_scale(model):
 
 
 def maybe_set_chunked_attention_layers(model_runner):
-        if hasattr(model_runner.model.config, 'text_config') and \
-           hasattr(model_runner.model.config.text_config, 'attention_chunk_size') and \
-           model_runner.model.config.text_config.attention_chunk_size:
-            model_runner.model_has_chunked_attention = True
-            try:
-                for layer in model_runner.model.language_model.model.layers:
-                    if "ChunkedLocalAttention" in layer.self_attn.attn.get_attn_backend().__name__:
-                        layer.self_attn.attn.impl.is_chunked_attention = True
-            except Exception:
-                # add explicit warning
-                pass
+    if hasattr(model_runner.model.config, 'text_config') and \
+        hasattr(model_runner.model.config.text_config, 'attention_chunk_size') and \
+        model_runner.model.config.text_config.attention_chunk_size:
+        model_runner.model_has_chunked_attention = True
+        try:
+            for layer in model_runner.model.language_model.model.layers:
+                if "ChunkedLocalAttention" in layer.self_attn.attn.get_attn_backend().__name__:
+                    layer.self_attn.attn.impl.is_chunked_attention = True
+        except Exception:
+            # add explicit warning
+            pass
 
 
 def apply_model_specific_patches(model_runner):
