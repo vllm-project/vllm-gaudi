@@ -43,10 +43,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         else:
             dispatch_fn = None
 
-        if has_bias is True:
-            bias = has_bias
-        else:
-            bias = None
+        bias = has_bias if has_bias is True else None
         layer.moe_op = VllmMixtureOfExpertsOp(layer.global_num_experts, num_experts, experts_min, experts_max, bias,
                                               dispatch_fn)
 
