@@ -1486,6 +1486,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         #TODO: remove later
 
         requests_type = {}
+        requests = None
         if scheduler_output.kv_connector_metadata:
             if isinstance(scheduler_output.kv_connector_metadata, NixlConnectorMetadata):
                 for req in scheduler_output.kv_connector_metadata.reqs_to_save:
@@ -1518,8 +1519,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         requests = metadata.reqs_to_store | metadata.reqs_to_load
             else:
                 requests = scheduler_output.kv_connector_metadata.requests
-        else:
-            requests = None
 
         # Traverse decodes first
         decode_req_ids = []
