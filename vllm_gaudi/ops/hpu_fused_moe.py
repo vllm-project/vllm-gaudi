@@ -47,8 +47,8 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             bias = has_bias
         else:
             bias = None
-        layer.moe_op = VllmMixtureOfExpertsOp(layer.global_num_experts, num_experts, experts_min, experts_max,
-                                              bias, dispatch_fn)
+        layer.moe_op = VllmMixtureOfExpertsOp(layer.global_num_experts, num_experts, experts_min, experts_max, bias,
+                                              dispatch_fn)
 
         for expert_id in range(layer.local_num_experts):
             layer.moe_op.w13_list[expert_id].set_weight(layer.w13_weight.data[expert_id])
