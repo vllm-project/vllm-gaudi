@@ -160,7 +160,12 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             permuted_weights=True,
             activation=layer.activation,
         )
-        return output.view(*(output.size(0), *input_shape[1:]))
+
+        # fix needed for llama4 when context len > 32K. Change in shape
+        if layer.dp_size > 1:
+            return output.view(*(output.size(0), *input_shape[1:]))
+        else:
+            return output.view(*input_shape)
 
 
 def reduce_output(self, states: torch.Tensor) -> torch.Tensor:
