@@ -199,10 +199,11 @@ def hpu_causal_conv1d_fn(
     seq_x = x_work[:, :]
 
     # Get init_state for all batch
-    if is_prompt:
-        init_state = torch.zeros(padded_batch, dim, state_len, device=x_work.device, dtype=work_dtype)
+    if has_initial_state is not None:
+        init_state = torch.where(has_initial_state, conv_states[batch_cache_idx, :, -state_len:],
+                                 torch.zeros(padded_batch, dim, state_len, device=x_work.device, dtype=work_dtype))
     else:
-        init_state = conv_states[batch_cache_idx, :, -state_len:]
+        init_state = torch.zeros(padded_batch, dim, state_len, device=x_work.device, dtype=work_dtype)
     init_state = init_state.squeeze()
 
     # Prepare input for convolution
@@ -340,10 +341,7 @@ def hpu_causal_conv1d_fn_update(
         # Ensure cache_indices is on the correct device
         batch_cache_idx = cache_indices.to(x_work.device) if cache_indices.device != x_work.device else cache_indices
 
-    if is_prompt:
-        init_state = torch.zeros(padded_batch, dim, state_len, device=x_work.device, dtype=work_dtype)
-    else:
-        init_state = conv_states[batch_cache_idx, :, -state_len:]
+    init_state = conv_states[batch_cache_idx, :, -state_len:]
 
     seq_input = torch.cat([init_state, x_work], dim=2)
     new_state = seq_input[:, :, -state_len:]
