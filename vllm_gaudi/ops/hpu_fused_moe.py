@@ -160,6 +160,8 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             permuted_weights=True,
             activation=layer.activation,
         )
+
+        # fix needed for llama4 when context len > 32K. Change in shape
         if layer.dp_size > 1:
             return output.view(*(output.size(0), *input_shape[1:]))
         else:
