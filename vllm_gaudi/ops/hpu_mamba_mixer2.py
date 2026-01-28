@@ -341,7 +341,7 @@ class HPUMambaMixer2(MambaMixer2):
             # conv_state = (..., dim, width-1) yet contiguous along 'dim'
             conv_state = self_kv_cache[0].transpose(-1, -2)
             ssm_state = self_kv_cache[1]
-            state_indices_tensor = attn_metadata.state_indices_tensor
+            state_indices_tensor = attn_metadata.state_indices_tensor[self.cache_group_idx]
             has_initial_states_p = attn_metadata.has_initial_states_p
             prep_initial_states = attn_metadata.prep_initial_states
             # is below sufficient to get chunk_size or does it need to passed via metadata

@@ -405,6 +405,28 @@ def maybe_set_chunked_attention_layers(model_runner):
             pass
 
 
+def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
+    if isinstance(model, HpuModelAdapter):
+        model = model.model
+
+    if "GraniteMoeHybridForCausalLM" not in getattr(model.config, 'architectures', []):
+        return
+
+    # Iterate through all KV cache groups
+    for group_idx, kv_group in enumerate(kv_cache_config.kv_cache_groups):
+        # kv_group.layer_names contains strings like "model.layers.5.mixer"
+        for layer_name in kv_group.layer_names:
+            # Extract layer index from name (e.g., "model.layers.5.mixer" -> 5)
+            if ".mixer" in layer_name:  # Only process mamba layers
+                parts = layer_name.split('.')
+                layer_idx = int(parts[2])  # "model.layers.5.mixer" -> 5
+
+                # Access the actual layer
+                layer = model.model.layers[layer_idx]
+                assert hasattr(layer, 'mamba')
+                layer.mamba.cache_group_idx = group_idx
+
+
 def apply_model_specific_patches(model_runner):
     """The function applies model-specific monkey patches."""
     maybe_set_chunked_attention_layers(model_runner)
@@ -1968,25 +1990,30 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 assert this_new_tokens == 0
                 last_chunk_indices.append(last_chunk_index)
 
-            block_table_cpu_tensor = self.input_batch.block_table[0].get_cpu_tensor()
-
             num_prefill_reqs = len(contents.req_ids)
-            state_indices_cpu = torch.zeros(num_prefill_reqs, dtype=torch.int32)
+            all_state_indices_cpu = []
+            for group_idx in range(len(self.input_batch.block_table.block_tables)):
+                block_table_cpu_tensor = self.input_batch.block_table[group_idx].get_cpu_tensor()
 
-            for i, req_id in enumerate(contents.req_ids):
-                req_idx = self.input_batch.req_id_to_index[req_id]
-                # Get the first block for this request (same logic as decode)
-                first_block = block_table_cpu_tensor[req_idx, 0]
-                state_indices_cpu[i] = first_block
+                state_indices_cpu = torch.zeros(num_prefill_reqs, dtype=torch.int32)
 
-            if num_prefill_reqs < target_bs:
-                padding = torch.full((target_bs - num_prefill_reqs, ),
-                                     self._PAD_BLOCK_ID,
-                                     dtype=torch.int32,
-                                     device='cpu')
-                state_indices_cpu = torch.cat([state_indices_cpu, padding])
+                for i, req_id in enumerate(contents.req_ids):
+                    req_idx = self.input_batch.req_id_to_index[req_id]
+                    # Get the first block for this request (same logic as decode)
+                    first_block = block_table_cpu_tensor[req_idx, 0]
+                    state_indices_cpu[i] = first_block
 
-            state_indices_cpu[state_indices_cpu == self._PAD_BLOCK_ID] = -1
+                if num_prefill_reqs < target_bs:
+                    padding = torch.full((target_bs - num_prefill_reqs, ),
+                                         self._PAD_BLOCK_ID,
+                                         dtype=torch.int32,
+                                         device='cpu')
+                    state_indices_cpu = torch.cat([state_indices_cpu, padding])
+
+                state_indices_cpu[state_indices_cpu == self._PAD_BLOCK_ID] = -1
+                all_state_indices_cpu.append(state_indices_cpu)
+
+            all_state_indices_cpu = torch.stack(all_state_indices_cpu, dim=0)  # Shape: [num_groups, target_bs]
 
             # CREATE PADDING MASK HERE using target_bs and target_seq
             # Create mask on CPU: [target_bs, target_seq]
@@ -2006,7 +2033,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # Flatten to [target_bs * target_seq, 1] for easy multiplication
             padding_mask_flat_cpu = padding_mask_cpu.view(-1, 1)
 
-            state_indices_tensor = async_h2d_copy(state_indices_cpu, device=self.device)
+            state_indices_tensor = async_h2d_copy(all_state_indices_cpu, device=self.device)
 
             has_initial_states_p = async_h2d_copy(has_initial_states_cpu, dtype=torch.int32)
             last_chunk_indices_p = async_h2d_copy(last_chunk_indices, dtype=torch.int32)
@@ -2310,15 +2337,21 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     padded_batch_size * num_tokens)
 
         if self.num_mamba_layers > 0:
-            state_indices_cpu = block_table_cpu_tensor[:num_decodes, 0].clone()
-            if num_decodes < padded_batch_size:
-                padding = torch.full((padded_batch_size - num_decodes, ),
-                                     self._PAD_BLOCK_ID,
-                                     dtype=torch.int32,
-                                     device='cpu')
-                state_indices_cpu = torch.cat([state_indices_cpu, padding])
+            all_state_indices_cpu = []
+            for group_idx in range(len(self.input_batch.block_table.block_tables)):
+                block_table_cpu_tensor = self.input_batch.block_table[group_idx].get_cpu_tensor()
+                state_indices_cpu = block_table_cpu_tensor[:num_decodes, 0].clone()
+                if num_decodes < padded_batch_size:
+                    padding = torch.full((padded_batch_size - num_decodes, ),
+                                         self._PAD_BLOCK_ID,
+                                         dtype=torch.int32,
+                                         device='cpu')
+                    state_indices_cpu = torch.cat([state_indices_cpu, padding])
 
-            state_indices_cpu[state_indices_cpu == self._PAD_BLOCK_ID] = -1
+                state_indices_cpu[state_indices_cpu == self._PAD_BLOCK_ID] = -1
+                all_state_indices_cpu.append(state_indices_cpu)
+
+            all_state_indices_cpu = torch.stack(all_state_indices_cpu, dim=0)  # Shape: [num_groups, target_bs]
 
             seq_lens_cpu = torch.tensor(num_tokens_per_req, dtype=torch.int32, device='cpu', pin_memory=self.pin_memory)
 
@@ -2329,7 +2362,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             query_start_loc_p_cpu[1:] = torch.cumsum(seq_lens_cpu.clone().to(dtype=torch.int32), dim=0)
 
             seq_lens_tensor = async_h2d_copy(seq_lens_cpu, device=self.device)
-            state_indices_tensor = async_h2d_copy(state_indices_cpu, device=self.device)
+            state_indices_tensor = async_h2d_copy(all_state_indices_cpu, device=self.device)
             query_start_loc_p = async_h2d_copy(query_start_loc_p_cpu, dtype=torch.int32)
 
         else:
@@ -5234,6 +5267,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         """
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+        if self.num_mamba_layers > 0:
+            maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
         # if len(kv_cache_config.kv_cache_groups) > 1:
         block_sizes = [kv_cache_group.kv_cache_spec.block_size for kv_cache_group in kv_cache_config.kv_cache_groups]
         if block_sizes != [self.cache_config.block_size]:
