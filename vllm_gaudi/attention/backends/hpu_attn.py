@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
+from vllm.config import get_current_vllm_config
 import vllm_gaudi.extension.kernels as kernels
 import vllm_gaudi.extension.ops as ops
 from vllm_gaudi.extension.runtime import get_config
@@ -598,12 +599,18 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         if kv_cache is not None and isinstance(kv_cache, tuple):
             key_cache, value_cache, k_scales, v_scales = \
                 HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
-            if key.dtype != key_cache.dtype:
-                key = key.to(key_cache.dtype)
-            if value.dtype != value_cache.dtype:
-                value = value.to(value_cache.dtype)
-            if query.dtype != key.dtype:
-                query = query.to(key.dtype)
+            vllm_config = get_current_vllm_config()
+            model_type = None
+            if vllm_config is not None and vllm_config.model_config is not None \
+            and vllm_config.model_config.hf_config is not None:
+                model_type = vllm_config.model_config.hf_config.model_type
+            if model_type is not None and model_type in ["gpt_oss"]:
+                if key.dtype != key_cache.dtype:
+                    key = key.to(key_cache.dtype)
+                if value.dtype != value_cache.dtype:
+                    value = value.to(value_cache.dtype)
+                if query.dtype != key.dtype:
+                    query = query.to(key.dtype)
             if self.kv_sharing_target_layer_name is None:
                 # Reshape the input keys and values and store them in the cache.
                 # If kv_cache is not provided, the new key and value tensors are

@@ -182,6 +182,7 @@ def flat_pa_mla(query, key_cache, value_cache, block_list, block_mapping, block_
                         block_bias,
                         block_groups,
                         block_mapping,
+                        None,
                         batch_size=batch_size,
                         matmul_av_op=matmul_av_op,
                         batch2block_matmul_op=batch2block_matmul_op,
