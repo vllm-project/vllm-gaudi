@@ -753,6 +753,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.is_mm_embed = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
         self.is_multimodal_raw_input_supported = (model_config.is_multimodal_raw_input_only_model)
 
+        self.num_mamba_layers = self.model_config.get_num_layers_by_block_type(self.parallel_config, "mamba")
+        self.mamba_chunk_size = self.model_config.get_mamba_chunk_size() if self.num_mamba_layers > 0 else 0
+
         # Lazy initialization
         # self.model: nn.Module  # set after load_model
         self.kv_caches: list[torch.Tensor] = []
@@ -845,7 +848,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                               block_size=self.block_size,
                                               max_num_batched_tokens=self.max_num_batched_tokens,
                                               max_model_len=self.max_model_len,
-                                              num_speculative_tokens=num_speculative_tokens)
+                                              num_speculative_tokens=num_speculative_tokens,
+                                              mamba_chunk_size=self.mamba_chunk_size)
             self.graphed_buckets: set[Any] = set()
             self.graphed_multimodal_buckets: set[Any] = set()
         else:
@@ -2644,7 +2648,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     def _get_unified_config(self, attn_metadata, logits_indices):
         has_causal = 'c' if attn_metadata.causal_bias is not None else '-'
-        has_shared = 's' if attn_metadata.shared_bias is not None else '-'
+        has_shared_bias = attn_metadata.shared_bias is not None
+        has_chunked_bias = attn_metadata.shared_bias_chunked is not None
+        has_shared = 's' if has_shared_bias or has_chunked_bias else '-'
         has_unique = 'u' if attn_metadata.unique_bias is not None else '-'
         phase = has_causal + has_shared + has_unique
         qlen = attn_metadata.slot_mapping.size(0)
@@ -4482,7 +4488,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             for request_blocks in split_shared_blocks_ids:
                 self._add_dummy_unified_request(requests, False, False, request_blocks, num_computed_tokens, 1,
                                                 scheduled_tokens)
-
         self._execute_dummy_scenario(requests, scheduled_tokens)
 
     def _prepare_dummy_scenario(self, prompt_cfg, decode_cfg):
