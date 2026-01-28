@@ -91,14 +91,17 @@ run_tests_for_model() {
     echo "Starting prefill instance $i on port $PORT"
 
     # Build the command with or without model-specific args
-    BASE_CMD="HABANA_VISIBLE_DEVICES=0 RANK=0 UCX_TLS=gaudi_gdr,rc,ud,ib VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
+    BASE_CMD="HABANA_VISIBLE_DEVICES=0 RANK=0 UCX_TLS=gaudi_gdr,rc,ud,ib VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
+    VLLM_NIXL_DEVICE_TO_DEVICE=1 UCX_MEMTYPE_CACHE=0 \
+    vllm serve $model_name \
     --port $PORT \
     --long_prefill_token_threshold 8192 \
     --max_num_batched_tokens 8192 \
     --disable-log-requests \
     --gpu-memory-utilization 0.3 \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
-    --kv-transfer-config '{\"kv_connector\":\"MultiConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"connectors\":[{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"hpu\"},{\"kv_connector\":\"OffloadingConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"num_cpu_blocks\":1000,\"block_size\":128}}]}}' "
+    --no-enable-prefix-caching \
+    --kv-transfer-config '{\"kv_connector\":\"MultiConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"connectors\":[{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"hpu\"},{\"kv_connector\":\"OffloadingConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"block_size\":128,\"cpu_bytes_to_use\":1073741824}}]}}' "
 
 
     if [ -n "$model_args" ]; then
@@ -124,14 +127,17 @@ run_tests_for_model() {
     echo "Starting decode instance $i on port $PORT"
 
     # Build the command with or without model-specific args
-    BASE_CMD="HABANA_VISIBLE_DEVICES=1 RANK=1 UCX_TLS=gaudi_gdr,rc,ud,ib VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
+    BASE_CMD="HABANA_VISIBLE_DEVICES=1 RANK=1 UCX_TLS=gaudi_gdr,rc,ud,ib VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
+    VLLM_NIXL_DEVICE_TO_DEVICE=1 UCX_MEMTYPE_CACHE=0 \
+    vllm serve $model_name \
     --port $PORT \
     --gpu-memory-utilization 0.3 \
     --tensor-parallel-size $DECODER_TP_SIZE \
     --long_prefill_token_threshold 8192 \
     --max_num_batched_tokens 8192 \
     --disable-log-requests \
-    --kv-transfer-config '{\"kv_connector\":\"MultiConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"connectors\":[{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"hpu\"},{\"kv_connector\":\"OffloadingConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"num_cpu_blocks\":1000,\"block_size\":128}}]}}' "
+    --no-enable-prefix-caching \
+    --kv-transfer-config '{\"kv_connector\":\"MultiConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"connectors\":[{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"hpu\"},{\"kv_connector\":\"OffloadingConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"block_size\":128,\"cpu_bytes_to_use\":1073741824}}]}}' "
 
 
     if [ -n "$model_args" ]; then
