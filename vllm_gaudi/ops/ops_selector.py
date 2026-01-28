@@ -44,7 +44,7 @@ except (ImportError, AttributeError):
         return fn
 
 
-@disable_compile
+# @disable_compile TODO: maybe remove wrapper and this method?
 def get_selective_state_update_impl():
     """
     Returns the selective state update implementation.
@@ -62,7 +62,7 @@ def get_selective_state_update_impl():
     pytorch_wrapped = _wrap_selective_state_update_ref(selective_state_update_ref)
 
     # Return a runtime dispatcher
-    @disable_compile
+    # @disable_compile TODO: maybe remove wrapper and this method?
     def dispatcher(state,
                    x,
                    dt,
