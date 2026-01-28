@@ -4635,6 +4635,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 w, h = self.get_model().vision_bucket_manager.bucket_to_image_resolution(image_args, \
                     ratio_w, ratio_h, patch_size)
             mm_options = {"image": ImageDummyOptions(count=count, width=w, height=h), "video": None}
+            batch = count
         elif modality == 'video':
             video_options = self.model_config.get_multimodal_config().get_dummy_options("video")
             num_frames = video_options.num_frames if video_options and hasattr(video_options, 'num_frames') else 100
