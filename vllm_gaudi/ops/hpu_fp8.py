@@ -5,7 +5,6 @@ import torch
 from vllm_gaudi import envs
 from torch.nn.parameter import Parameter
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter
 
 from vllm.model_executor.layers.quantization import fp8
 from vllm.model_executor.layers.quantization.fp8 import (Fp8LinearMethod as OrigFp8LinearMethod, Fp8MoEMethod,
@@ -110,6 +109,10 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
 
         self.use_dispatch_fn = get_config().use_dispatch_fn
 
+    @property
+    def is_monolithic(self) -> bool:
+        return True
+
     def create_weights(self, *args, **kwargs) -> None:
         if hpu_ops.is_hpu_gaudi2:
             kwargs['weight_loader'] = hpu_ops.gaudi_weight_wrapper(kwargs.get('weight_loader'))
@@ -147,10 +150,9 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         else:
             layer = hpu_ops.fp8_channel_moe_prepare_weights(layer)
 
-    def apply(
+    def apply_monolithic(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         **kwargs,
@@ -158,7 +160,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-            topk_weights, topk_ids = router.select_experts(hidden_states=x, router_logits=router_logits)
+            topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)

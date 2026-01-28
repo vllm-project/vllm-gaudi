@@ -3,7 +3,6 @@ from typing import Union
 
 import torch
 import vllm
-from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, UnquantizedFusedMoEMethod)
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOp)
 from vllm_gaudi.extension.runtime import get_config
@@ -19,6 +18,10 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         super().__init__(*args, **kwargs)
         self.use_dispatch_fn = get_config().use_dispatch_fn
         torch.hpu.synchronize()
+
+    @property
+    def is_monolithic(self) -> bool:
+        return True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
@@ -45,10 +48,9 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             layer.moe_op.w13_list[expert_id].set_weight(layer.w13_weight.data[expert_id])
             layer.moe_op.w2_list[expert_id].set_weight(layer.w2_weight.data[expert_id])
 
-    def forward_oot(
+    def apply_monolithic(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         **kwargs,
@@ -56,7 +58,56 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-            topk_weights, topk_ids = router.select_experts(hidden_states=x, router_logits=router_logits)
+            topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
+        else:
+            import torch.nn.functional as F
+            topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
+            topk_weights, topk_ids = torch.topk(topk_weights, layer.top_k, dim=-1)
+            topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+            topk_weights = topk_weights.to(x.dtype)
+
+        if not layer.use_grouped_topk:
+            topk_ids = topk_ids.to(torch.int64)
+            topk_weights = topk_weights.to(x.dtype)
+
+        if layer.dp_size > 1:
+            dp_metadata = get_hpu_dp_metadata()
+            if not (has_quant_config(layer.vllm_config.model_config) and self.use_dispatch_fn):
+                hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
+                x = dispatch_tensor(x, hidden_states_across_dp, layer.is_sequence_parallel)
+
+            topk_ids_across_dp = dp_metadata.topk_ids_across_dp if dp_metadata is not None else None
+            topk_ids = dispatch_tensor(topk_ids, topk_ids_across_dp, layer.is_sequence_parallel)
+
+            topk_weights_across_dp = dp_metadata.topk_weights_across_dp if dp_metadata is not None else None
+            topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, layer.is_sequence_parallel)
+
+        topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
+        topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
+
+        output = layer.moe_op(
+            x,
+            topk_ids,
+            topk_weights,
+            permuted_weights=True,
+            activation=layer.activation,
+        )
+        if layer.dp_size > 1:
+            return output.view(*(output.size(0), *input_shape[1:]))
+        else:
+            return output.view(*input_shape)
+
+    def forward_oot(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        **kwargs,
+    ):
+        input_shape = x.shape
+        x = x.view(-1, x.shape[-1])
+        if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
+            topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
