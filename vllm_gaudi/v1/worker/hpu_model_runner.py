@@ -3037,7 +3037,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     @torch.inference_mode()
     def run_defragmenter(self, scheduler_output: "SchedulerOutput", warmup_mode: bool = False):
 
-        if self.defragmenter and self.defragmenter.enabled and self.kv_caches and not warmup_mode:
+        if getattr(self, 'defragmenter', None) and self.defragmenter.enabled and self.kv_caches and not warmup_mode:
             new = {req.req_id: flatten(req.block_ids) for req in scheduler_output.scheduled_new_reqs if req.block_ids}
             #TODO: Add support for preempted blocks
             cached = {
