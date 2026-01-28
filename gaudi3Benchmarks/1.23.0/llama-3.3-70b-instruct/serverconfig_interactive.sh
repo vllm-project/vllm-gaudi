@@ -1,4 +1,4 @@
-#Llama-3.3-70B-Instruct for interactive with batch size 8 with SLA TTFT <2s 
+#Llama-3.3-70B-Instruct for interactive with batch size 4 with SLA TTFT <2s 
 #
 
 VLLM_ENGINE_ITERATION_TIMEOUT_S=3600 \
@@ -23,7 +23,7 @@ vllm serve meta-llama/Llama-3.3-70B-Instruct \
     --quantization inc \
     --kv-cache-dtype fp8_inc \
     --tensor_parallel_size 2 \
-    --max-num-seqs 8 \
+    --max-num-seqs 4 \
     --dtype=bfloat16 \
     --gpu-memory-util 0.9 \
     --tensor-parallel-size=2 \

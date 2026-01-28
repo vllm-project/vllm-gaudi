@@ -22,7 +22,7 @@ vllm serve meta-llama/Llama-3.3-70B-Instruct \
     --quantization inc \
     --kv-cache-dtype fp8_inc \
     --tensor_parallel_size 2 \
-    --max-num-seqs 128 \
+    --max-num-seqs 192 \
     --dtype=bfloat16 \
     --gpu-memory-util 0.9 \
     --tensor-parallel-size=2 \
