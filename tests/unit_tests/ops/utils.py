@@ -7,7 +7,6 @@ import contextlib
 import vllm.model_executor.custom_op as custom_op
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-#op_registry_oot = op_registry_oot
 
 
 @contextlib.contextmanager
