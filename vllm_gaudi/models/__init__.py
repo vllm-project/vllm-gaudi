@@ -16,4 +16,8 @@ def register_model():
     ModelRegistry.register_model("Qwen3VLForConditionalGeneration",
                                  "vllm_gaudi.models.qwen3_vl:HpuQwen3_VLForConditionalGeneration")
 
+    from vllm_gaudi.models.pixtral import HPUPixtralForConditionalGeneration  # noqa: F401
+    ModelRegistry.register_model("PixtralForConditionalGeneration",
+                                 "vllm_gaudi.models.pixtral:HPUPixtralForConditionalGeneration")
+
     import vllm_gaudi.models.deepseek_v2  # noqa: F401
