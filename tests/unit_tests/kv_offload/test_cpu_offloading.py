@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import socket
 import time
 
@@ -146,6 +147,7 @@ def test_cpu_offloading(cpu_block_size: int, attn_backend: str) -> None:
     """
     Tests OffloadingConnector with CPUOffloadingSpec.
     """
+    os.environ['VLLM_SKIP_WARMUP'] = 'true'
 
     # configure OffloadingConnector (spec_name=CPUOffloadingSpec by default)
     kv_transfer_config = KVTransferConfig(
