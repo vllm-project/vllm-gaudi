@@ -198,10 +198,9 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
         mask = torch.zeros(total_patches, total_patches, device=device, dtype=dtype)
         cu_seqlens = cu_seqlens.tolist()
         cu_seqlens = [0] + cu_seqlens
-
-        for i in range(len(cu_seqlens) - 1):
-            start = cu_seqlens[i]
-            end = cu_seqlens[i + 1]
+        starts = cu_seqlens[:-1]
+        ends = cu_seqlens[1:]
+        for start, end in zip(starts, ends):
             mask[start:end, start:end] = True
         return mask
 
