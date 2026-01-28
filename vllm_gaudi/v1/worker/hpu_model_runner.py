@@ -5116,7 +5116,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         """
         Initialize the attention backends and attention metadata builders.
         """
-        assert len(self.attn_groups) == 0, "Attention backends are already initialized"
+        if len(self.attn_groups) > 0:
+            # Attention backends are already initialized
+            return
 
         class AttentionGroupKey(NamedTuple):
             attn_backend: type[AttentionBackend]
