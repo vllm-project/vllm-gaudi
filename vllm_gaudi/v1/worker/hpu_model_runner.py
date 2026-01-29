@@ -4869,7 +4869,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if modality == 'image':
                 mm_options = {"image": ImageDummyOptions(count=count, width=width, height=height), "video": None}
             elif modality == 'video':
-                num_frames = mm_options.num_frames if video_options and hasattr(video_options, 'num_frames') else num_frames
+                num_frames = mm_options.num_frames if video_options and hasattr(video_options,
+                                                                                'num_frames') else num_frames
                 mm_options = {
                     "image": None,
                     "video": VideoDummyOptions(count=count, num_frames=num_frames, width=width, height=height)
@@ -4909,13 +4910,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         is_batch_based = vision_bucket_manager.is_batch_based
         mm_config = self.model_config.get_multimodal_config()
 
-        is_image_warmup = (mm_config is not None and
-                   mm_config.get_dummy_options("image") is not None and
-                   self.mm_budget.mm_limits['image'] != 0)
+        is_image_warmup = (mm_config is not None and mm_config.get_dummy_options("image") is not None
+                           and self.mm_budget.mm_limits['image'] != 0)
   
-        is_video_warmup = (mm_config is not None and   
-                   mm_config.get_dummy_options("video") is not None and
-                   self.mm_budget.mm_limits['video'] != 999)
+        is_video_warmup = (mm_config is not None and mm_config.get_dummy_options("video") is not None
+                           and self.mm_budget.mm_limits['video'] != 999)
         warmup_configs = {
             "image": (0, lambda: mm_config.get_dummy_options("image")),
             "video": (999, lambda: mm_config.get_dummy_options("video"))
@@ -4924,7 +4923,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         warmup_lists = []
         for modality, (limit_value, get_options) in warmup_configs.items():
             if (mm_config and mm_config.get_dummy_options(modality)
-                and self.mm_budget.mm_limits[modality] != limit_value):
+                    and self.mm_budget.mm_limits[modality] != limit_value):
                 options = get_options()
                 width = options.width if hasattr(options, 'width') else None
                 height = options.height if hasattr(options, 'height') else None

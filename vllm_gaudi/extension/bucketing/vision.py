@@ -26,6 +26,7 @@ MULTIMODAL_CONFIG = {
     }
 }
 
+
 class HPUVisionBucketManager:
     '''
     This class is used to bucket image tokens
