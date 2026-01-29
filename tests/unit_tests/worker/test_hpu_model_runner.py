@@ -7,7 +7,7 @@ import habana_frameworks.torch  # noqa: F401
 from habana_frameworks.torch.utils.internal import is_lazy
 from vllm.model_executor.model_loader import get_model
 
-from vllm.model_executor.layers.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig, SchedulerConfig, VllmConfig, set_current_vllm_config)
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
