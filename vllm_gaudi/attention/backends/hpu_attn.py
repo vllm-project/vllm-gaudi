@@ -246,6 +246,9 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         assert self.prefill_impl != 'fsdpa_impl' or alibi_slopes is None, \
             'Prefill with FusedSDPA not supported with alibi slopes!'
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
+        # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
+        self.is_aiter_triton_fp4_bmm_enabled = (rocm_aiter_ops.is_fp4bmm_enabled()
+                                                and self.kv_b_proj.weight.dtype == torch.bfloat16)
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
@@ -1083,6 +1086,7 @@ class HPUUnifiedMLAImpl(MLACommonImpl[HPUUnifiedAttentionMetadata], torch.nn.Mod
         self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn \
             else VLLMFP8KVCache()
         self.is_aiter_triton_fp8_bmm_enabled = False
+        self.is_aiter_triton_fp4_bmm_enabled = False
 
     def forward(
         self,
