@@ -37,8 +37,7 @@ from vllm_gaudi.extension.debug import init_debug_logger
 from vllm_gaudi.v1.worker.hpu_dp_utils import set_hpu_dp_metadata
 
 from vllm.v1.attention.backend import AttentionType
-from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.attention import MLAAttention
+from vllm.attention.layer import (Attention, MLAAttention)
 from vllm.v1.attention.selector import get_attn_backend
 
 from vllm.config import (VllmConfig, update_config)
