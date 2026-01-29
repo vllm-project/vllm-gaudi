@@ -88,12 +88,14 @@ def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, sink, bat
         attn = attn.exp()
         if attn.dtype == torch.float32:
             attn = attn.to(value.dtype)
-        attn_shape = attn.shape
-        block_sums = attn.view(-1, attn_shape[-1]).sum(dim=-1, keepdim=True)
-        attn_shape = list(attn_shape)
-        attn_shape[-1] = 1
-        block_sums = block_sums.view(attn_shape)
-        if sink is not None:
+        if sink is None:
+            block_sums = attn.sum(dim=-1, keepdim=True)
+        else:
+            attn_shape = attn.shape
+            block_sums = attn.view(-1, attn_shape[-1]).sum(dim=-1, keepdim=True)
+            attn_shape = list(attn_shape)
+            attn_shape[-1] = 1
+            block_sums = block_sums.view(attn_shape)
             attn_sink = sink.sub(block_max)
             attn_sink = attn_sink.exp()
             if attn_sink.dtype == torch.float32:
@@ -411,9 +413,8 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
         args += [sinks]
     attn_weights = fsdpa_op(*args)
 
-    attn_weights = attn_weights.transpose(1, 2)
+    attn_weights = attn_weights.transpose(1, 2)``
     if sinks is not None:
-        # TODO - check if we can remove this
         htcore.mark_step()
     return attn_weights
 
