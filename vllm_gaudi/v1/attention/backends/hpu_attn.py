@@ -5,7 +5,8 @@
 ###############################################################################
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Union
+from vllm.v1.attention.backend import MultipleOf
 
 import torch
 
@@ -32,6 +33,12 @@ class HPUAttentionBackendV1(HPUAttentionBackend):
     def get_metadata_cls() -> type["AttentionMetadata"]:
         return HPUAttentionMetadataV1
 
+    @staticmethod
+    def get_supported_kernel_block_size() -> list[Union[int, MultipleOf]]:
+        # for mamba models we don't split block size across kernels
+        # kernel_block_sizes in InputBatch are the same as block_sizes
+        return [128]
+
 
 @dataclass
 class HPUAttentionMetadataV1(HPUAttentionMetadata):
@@ -40,10 +47,11 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
     """Metadata for HPUAttentionbackend."""
     is_prompt: bool
     attn_bias: Optional[torch.Tensor]
-
     seq_lens_tensor: Optional[torch.Tensor]
     context_lens_tensor: Optional[torch.Tensor]
     query_start_loc: Optional[torch.Tensor] = None
+    query_start_loc_p: Optional[torch.Tensor] = None
+    padding_mask_flat: Optional[torch.Tensor] = None
 
     def seq_len(self):
         return self.slot_mapping.size(-1)
@@ -61,7 +69,12 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                               seq_lens_tensor,
                               slot_mapping,
                               block_size,
-                              query_start_loc=None):
+                              prep_initial_states=None,
+                              has_initial_states_p=None,
+                              last_chunk_indices_p=None,
+                              state_indices_tensor=None,
+                              query_start_loc=None,
+                              padding_mask_flat=None):
         return cls(is_prompt=True,
                    block_list=block_list,
                    block_mapping=None,
@@ -74,7 +87,13 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    input_positions=None,
                    slot_mapping=slot_mapping,
                    block_size=block_size,
-                   query_start_loc=query_start_loc)
+                   prep_initial_states=prep_initial_states,
+                   has_initial_states_p=has_initial_states_p,
+                   last_chunk_indices_p=last_chunk_indices_p,
+                   state_indices_tensor=state_indices_tensor,
+                   query_start_loc=query_start_loc,
+                   query_start_loc_p=query_start_loc,
+                   padding_mask_flat=padding_mask_flat)
 
     @classmethod
     def make_decode_metadata(cls,
@@ -90,12 +109,14 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                              chunked_block_list,
                              chunked_block_usage,
                              chunked_block_groups,
-                             query_start_loc=None):
+                             state_indices_tensor=None,
+                             query_start_loc=None,
+                             seq_lens_tensor=None):
         return cls(is_prompt=False,
                    block_mapping=None,
                    alibi_blocks=None,
                    attn_bias=None,
-                   seq_lens_tensor=None,
+                   seq_lens_tensor=seq_lens_tensor,
                    context_lens_tensor=None,
                    block_list=block_list,
                    block_usage=block_usage,
@@ -109,4 +130,7 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    input_positions=input_positions,
                    slot_mapping=slot_mapping,
                    block_size=block_size,
-                   query_start_loc=query_start_loc)
+                   prep_initial_states=None,
+                   state_indices_tensor=state_indices_tensor,
+                   query_start_loc=query_start_loc,
+                   query_start_loc_p=query_start_loc)
