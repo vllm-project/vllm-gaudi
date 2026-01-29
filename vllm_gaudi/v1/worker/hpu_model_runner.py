@@ -43,6 +43,7 @@ from vllm.attention.layer import MLAAttention
 from vllm.v1.attention.selector import get_attn_backend
 
 from vllm.config import (VllmConfig, get_layers_from_vllm_config, update_config)
+from vllm.config.multimodal import ImageDummyOptions, VideoDummyOptions
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -4868,10 +4869,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if modality == 'image':
                 mm_options = {"image": ImageDummyOptions(count=count, width=width, height=height), "video": None}
             elif modality == 'video':
-                num_frames = video_options.num_frames if video_options and hasattr(video_options, 'num_frames') else num_frames
+                num_frames = mm_options.num_frames if video_options and hasattr(video_options, 'num_frames') else num_frames
                 mm_options = {
                     "image": None,
-                    "video": VideoDummyOptions(count=count, num_frames=num_frames, width=w, height=h)
+                    "video": VideoDummyOptions(count=count, num_frames=num_frames, width=width, height=height)
                 }
             else:
                 raise NotImplementedError(f"Modality '{modality}' is not supported")
