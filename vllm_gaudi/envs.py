@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Callable
 if TYPE_CHECKING:
     VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
     VLLM_HPU_FORCE_CHANNEL_FP8: bool = True
+    VLLM_HPU_HETERO_KV_LAYOUT: bool = False
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -23,6 +24,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_HPU_FORCE_CHANNEL_FP8":
     lambda: os.environ.get("VLLM_HPU_FORCE_CHANNEL_FP8", "true").lower() in
     ("1", "true") and os.environ.get("QUANT_CONFIG", None) is None,
+
+    # Enable prefill side kv_layout and block_size for heterogeneous run.
+    "VLLM_HPU_HETERO_KV_LAYOUT":
+    lambda: os.environ.get("VLLM_HPU_HETERO_KV_LAYOUT", "false").lower() in ("0", "false"),
 }
 
 # end-env-vars-definition
