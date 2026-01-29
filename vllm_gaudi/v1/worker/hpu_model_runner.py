@@ -871,7 +871,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.profiler = HabanaHighLevelProfiler()
         self.profiler_counter_helper = HabanaProfilerCounterHelper()
 
-        self.defragmenter = OnlineDefragmenter()
         self.debug_fwd = init_debug_logger('fwd')
 
         self.get_dp_padding = partial(get_dp_padding,
@@ -3037,7 +3036,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     @torch.inference_mode()
     def run_defragmenter(self, scheduler_output: "SchedulerOutput", warmup_mode: bool = False):
-        if self.defragmenter.enabled and self.kv_caches and not warmup_mode:
+
+        if getattr(self, 'defragmenter', None) and self.defragmenter.enabled and self.kv_caches and not warmup_mode:
             new = {req.req_id: flatten(req.block_ids) for req in scheduler_output.scheduled_new_reqs if req.block_ids}
             #TODO: Add support for preempted blocks
             cached = {
@@ -4166,47 +4166,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         logger.info("Sampler warmup completed successfully")
 
-    def warmup_defragmenter(self):
-        """Warm up defragmentation swap graphs for different thresholds.
-
-        We execute a minimal swap (1 pair) which will be padded internally to the
-        requested threshold size. Thresholds chosen to mirror potential production
-        values: 8, 16, 32, 64, 128, 256, 512.
-        """
-        # If defragmenter is disabled or cache utils not prepared, skip.
-        if not getattr(self.defragmenter, 'enabled', False):
-            return
-        if self.defragmenter.cache_utils is None:
-            return
-
-        thresholds = self.defragmenter.to_swap_pad_thresholds
-
-        logger.info("Warming up defragmenter with thresholds: %s", thresholds)
-
-        # Use simple valid block ids present in caches (assume at least 2 blocks allocated when kv caches created)
-        # We only need distinct ids for a swap. They will be scaled by block_size inside swap.
-        # If for some reason only 1 block exists, skip warmup gracefully.
-        try:
-            k_cache = self.defragmenter.cache_utils.kv_caches[0][0]
-            num_blocks_available = k_cache.shape[0] // self.block_size
-        except Exception:
-            num_blocks_available = 0
-        if num_blocks_available < 2:
-            logger.warning("Skipping defragmenter warmup, insufficient blocks (%s)", num_blocks_available)
-            return
-
-        # Minimal pair to trigger a swap path
-        to_swap = [(1, 0)]
-
-        for th in thresholds:
-            self.defragmenter.cache_utils.swap(to_swap, th)
-
-        # If the number of swaps was odd, do one more to make it even and return to original state.
-        if len(thresholds) % 2 == 1:
-            self.defragmenter.cache_utils.swap(to_swap, thresholds[0])
-
-        logger.info("Defragmenter warmup completed successfully")
-
     def warmup_graphs(self, buckets, is_prompt, kv_caches, starting_mem=0, total_batch_seq=0.001):
         total_mem = starting_mem
         idx = 0
@@ -4816,7 +4775,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                   self.vllm_config.model_config.logits_processors),
                 )
 
-        self.defragmenter.initialize(self.kv_caches, self.block_size)
+        self.defragmenter = OnlineDefragmenter(self.kv_caches, self.block_size)
         # Profiling
         if self.unified_attn:
             self._maybe_profile_unified_attn()
@@ -4875,7 +4834,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     self.warmup_pooler()
                 else:
                     self.warmup_sampler()
-                    self.warmup_defragmenter()
+                    self.defragmenter.warmup()
 
                 # TODO(kzawora): align_workers
                 if self.unified_attn:
@@ -4909,8 +4868,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # NOTE(kzawora): This is a nasty workaround - for whatever cache_utils-related reason,
         # reusing defragmenter used in warmup causes accuracy drops, which is why we re-create
         # and re-initialize it.
-        self.defragmenter = OnlineDefragmenter()
-        self.defragmenter.initialize(self.kv_caches, self.block_size)
+        self.defragmenter = OnlineDefragmenter(self.kv_caches, self.block_size)
 
     def shutdown_inc(self, suppress=suppress, finalize_calibration=finalize_calibration):
         global shutdown_inc_called
