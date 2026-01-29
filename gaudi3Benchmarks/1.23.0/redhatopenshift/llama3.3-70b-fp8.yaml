@@ -1,0 +1,187 @@
+---
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  annotations:
+    opendatahub.io/accelerator-name: habanaaigaudi
+    opendatahub.io/apiProtocol: REST
+    opendatahub.io/recommended-accelerators: '["habana.ai/gaudi"]'
+    opendatahub.io/runtime-version: v0.8.5
+    opendatahub.io/serving-runtime-scope: global
+    opendatahub.io/template-display-name: vLLM Intel Gaudi Accelerator ServingRuntime for KServe
+    opendatahub.io/template-name: vllm-gaudi-runtime
+    openshift.io/display-name: Llama-3.3-70B-Instruct
+  labels:
+    opendatahub.io/dashboard: "true"
+  name: Llama-3.3-70B-Instruct
+  namespace: models-test
+spec:
+  annotations:
+    prometheus.io/path: /metrics
+    prometheus.io/port: "8080"
+  builtInAdapter:
+    modelLoadingTimeoutMillis: 90000
+  containers:
+  - args:
+    - --port=8080
+    - --model=/mnt/models
+    - --served-model-name={{.Name}}
+    command:
+    - python
+    - -m
+    - vllm.entrypoints.openai.api_server
+    env:
+    - name: HF_HOME
+      value: /tmp/hf_home
+    image: registry.redhat.io/rhoai/odh-vllm-gaudi-rhel9@sha256:1041bb23d3078ad4767e77cf1996959e4ab9214730bbac657741891b4fb0bba9
+    name: kserve-container
+    ports:
+    - containerPort: 8080
+      protocol: TCP
+    volumeMounts:
+    - mountPath: /dev/shm
+      name: shm
+    - mountPath: /tmp/llama-3.3-70b-instruct
+      name: quant-source
+      subPath: llama-3.3-70b-instruct-2x
+  multiModel: false
+  supportedModelFormats:
+  - autoSelect: false
+    name: vLLM
+  volumes:
+  - name: quant-source
+    persistentVolumeClaim:
+      claimName: quant-pvc
+  - emptyDir:
+      medium: Memory
+      sizeLimit: 2Gi
+    name: shm
+  
+
+---
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  annotations:
+    openshift.io/display-name: Llama-3.3-70B-Instruct
+    serving.knative.openshift.io/enablePassthrough: "true"
+    serving.kserve.io/deploymentMode: Serverless
+    sidecar.istio.io/inject: "true"
+    sidecar.istio.io/rewriteAppHTTPProbers: "true"
+  labels:
+    networking.knative.dev/visibility: cluster-local
+    opendatahub.io/dashboard: "true"
+  name: Llama-3.3-70B-Instruct
+  namespace: models-test
+spec:
+  predictor:
+    automountServiceAccountToken: false
+    maxReplicas: 1
+    minReplicas: 1
+    model:
+      args:
+      - --max-model-len=131072
+      - --tensor-parallel-size=2
+      - --dtype=bfloat16
+      - --max-num-seqs=4
+      - --block-size=128
+      - --gpu-memory-utilization=0.9
+      - --quantization=inc
+      - --kv-cache-dtype=fp8_inc
+      - --trust-remote-code
+      - --async_scheduling 
+      - --no-enable-prefix-caching 
+      - --disable-log-stats
+      - --disable-log-requests
+      env:
+      - name: VLLM_SKIP_WARMUP
+        value: "true"
+      - name: HF_HOME
+        value: /tmp/hf_home
+      - name: QUANT_CONFIG
+        value: "/tmp/llama-3.3-70b-instruct/maxabs_quant_g3.json"
+      - name: NEURAL_COMPRESSOR_CACHE_DIR
+        value: "/tmp/nc_cache"
+      - name: INC_CACHE_DIR
+        value: "/tmp/inc_cache"
+      - name: TMPDIR
+        value: "/tmp"
+      - name: MAX_SEQUENCE_LENGTH
+        value: "131072"
+      - name: MAX_NUM_SEQS
+        value: "4"
+      - name: VLLM_PROMPT_USE_FUSEDSDPA
+        value: "1"
+      - name: PT_HPUGRAPH_DISABLE_TENSOR_CACHE
+        value: "1"
+      - name: VLLM_ENGINE_ITERATION_TIMEOUT_S
+        value: "3600"
+      - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+        value: "1"
+      - name: MAX_NEW_TOKENS
+        value: "4096"
+      - name: DISABLE_PROMPT_LOGPROBS
+        value: "true"
+      - name: DEFAULT_INCLUDE_STOP_SEQS
+        value: "false"
+      - name: ENFORCE_EAGER
+        value: "false"
+      - name: ENABLE_AUTO_TOOL_CHOICE
+        value: "true"
+      - name: TOOL_CALL_PARSER
+        value: llama3_json
+      - name: VLLM_RPC_TIMEOUT
+        value: "10000000"
+      - name: NUM_GPUS
+        value: "2"
+      - name: VLLM_EXPONENTIAL_BUCKETING
+        value: "true"
+      - name: HUGGINGFACE_HUB_CACHE
+        value: /mnt/models/
+      - name: HF_MODULES_CACHE
+        value: /tmp/huggingface/modules
+      - name: MAX_LOG_LEN
+        value: "100"
+      - name: GPRC_PORT
+        value: "8033"
+      - name: ENABLE_VLLM_LOG_REQUESTS
+        value: "FALSE"
+      - name: VLLM_TARGET_DEVICE
+        value: hpu
+      - name: PT_HPU_LAZY_MODE
+        value: "0"
+      - name: HABANA_VISIBLE_DEVICES
+        value: all
+      - name: OMPI_MCA_btl_vader_single_copy_mechanism
+        value: none
+      - name: PT_HPU_ENABLE_LAZY_COLLECTIVES
+        value: "true"
+      - name: FUSER_ENABLE_LOW_UTILIZATION
+        value: "true" 
+      - name: ENABLE_FUSION_BEFORE_NORM
+        value: "true" 
+      - name: VLLM_WEIGHT_LOAD_FORCE_SYNC
+        value: "1" 
+      - name: VLLM_USE_V1
+        value: "1" 
+      - name: VLLM_CONTIGUOUS_PA
+        value: "true" 
+      - name: VLLM_DEFRAG
+        value: "true" 
+      - name: VLLM_FUSED_BLOCK_SOFTMAX
+        value: "true" 
+      - name: VLLM_HANDLE_TOPK_DUPLICATES
+        value: "true"
+      modelFormat:
+        name: vLLM
+      resources:
+        limits:
+          cpu: "40"
+          habana.ai/gaudi: "2"
+          memory: 400Gi
+        requests:
+          cpu: "40"
+          habana.ai/gaudi: "2"
+          memory: 400Gi
+      runtime: Llama-3.3-70B-Instruct
+      storageUri: pvc://models-pvc/Llama-3.3-70b
