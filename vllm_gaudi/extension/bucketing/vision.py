@@ -23,7 +23,11 @@ MULTIMODAL_CONFIG = {
         'is_batch_based': False,
         #coverage for lmarena-ai/VisionArena-Chat
         'buckets': [512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 131076]
-    }
+    },
+    'deepseek_ocr': {
+        'is_batch_based': False,
+        'buckets': [1600, 2048, 3072, 6144, 8192, 131076]
+    },
 }
 
 
