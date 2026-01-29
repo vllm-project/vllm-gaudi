@@ -547,11 +547,6 @@ class InputBatch:
         * Apply batch add/remove/permute to logits procs' states
         * If batch state is modified, update sampling metadata
         """
-        # if self.is_pooling_model:
-        #     batch_changed = self.batch_update_builder.reset()
-        #     if batch_changed:
-        #         self.sampling_metadata = self._make_sampling_metadata()
-        #     return
         # NOTE(chendi): don't reset batch_update_builder here
         # TODO: follow upstream PR#16728 for enabling batch_update
         self._invalidate_prompt_token_ids_cache()
