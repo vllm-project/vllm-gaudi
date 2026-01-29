@@ -40,8 +40,9 @@ class Softmax(torch.nn.Module):
 
 
 def get_kv_fetch_extra_args(**kwargs):
-    if not get_config().per_token_kv_scaling_support:
+    if not get_config().per_token_kv_scaling_support and not kwargs.get('enable_fp8_attn', False):
         kwargs.pop('scales', None)
+    kwargs.pop('enable_fp8_attn', None)
     return kwargs
 
 
@@ -69,30 +70,31 @@ class VLLMKVCache(torch.nn.Module):
 
 class VLLMFP8KVCache(VLLMKVCache):
 
-    def __init__(self, input_scale=1.0):
+    def __init__(self):
         super().__init__()
         self.use_contiguous_pa = get_config().use_contiguous_pa
-        self.input_scale = input_scale
-        self.output_scale = 1.0 / self.input_scale
 
-    def quant_input(self, input):
-        return torch.ops.hpu.cast_to_fp8_v2(input, self.input_scale, False, False, torch.float8_e4m3fn)[0]
+    def quant_input(self, input, input_scale):
+        return torch.ops.hpu.cast_to_fp8_v2(input, input_scale, False, False, torch.float8_e4m3fn)[0]
 
-    def dequant_output(self, output):
-        return torch.ops.hpu.cast_from_fp8(output, self.output_scale, torch.bfloat16)
+    def dequant_output(self, output, input_scale):
+        output_scale = 1.0 / input_scale
+        return torch.ops.hpu.cast_from_fp8(output, output_scale, torch.bfloat16)
 
-    def forward(self, input, *args, **kwargs):
-        qinput = self.quant_input(input)
-        return super().forward(qinput, *args, **kwargs)
+    def forward(self, input, cache, slot_mapping, scales=None, block_size=None, is_prompt=False, **kwargs):
+        assert scales is not None, "FP8 KV cache requires scales for quantization"
+        qinput = self.quant_input(input, scales)
+        return super().forward(qinput, cache, slot_mapping, scales, block_size, is_prompt, **kwargs)
 
-    def fetch_from_cache(self, quant_cache, blocks, permutations=None):
+    def fetch_from_cache(self, quant_cache, blocks, scales=None, permutations=None):
+        assert scales is not None, "FP8 KV cache requires scales for quantization"
         if permutations:
-            output_cache = super().fetch_from_cache(quant_cache, blocks, permutations)
+            output_cache = super().fetch_from_cache(quant_cache, blocks, scales=scales, permutations=permutations)
             for i in range(len(output_cache)):
-                output_cache[i] = self.dequant_output(output_cache[i])
+                output_cache[i] = self.dequant_output(output_cache[i], scales)
             return output_cache
-        output_cache = super().fetch_from_cache(quant_cache, blocks)
-        return self.dequant_output(output_cache)
+        output_cache = super().fetch_from_cache(quant_cache, blocks, scales=scales)
+        return self.dequant_output(output_cache, scales)
 
 
 class FP8Matmul(torch.nn.Module):
