@@ -4869,8 +4869,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if modality == 'image':
                 mm_options = {"image": ImageDummyOptions(count=count, width=width, height=height), "video": None}
             elif modality == 'video':
-                num_frames = mm_options.num_frames if mm_options and hasattr(mm_options,
-                                                                             'num_frames') else num_frames
+                num_frames = mm_options.num_frames if mm_options and hasattr(mm_options, 'num_frames') else num_frames
                 mm_options = {
                     "image": None,
                     "video": VideoDummyOptions(count=count, num_frames=num_frames, width=width, height=height)
@@ -4912,7 +4911,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         is_image_warmup = (mm_config is not None and mm_config.get_dummy_options("image") is not None
                            and self.mm_budget.mm_limits['image'] != 0)
-  
         is_video_warmup = (mm_config is not None and mm_config.get_dummy_options("video") is not None
                            and self.mm_budget.mm_limits['video'] != 999)
         warmup_configs = {
