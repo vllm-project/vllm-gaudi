@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from vllm.config import VllmConfig
 from vllm.model_executor.models.ovis import (Ovis, OvisMultiModalProcessor, OvisProcessingInfo, OvisDummyInputsBuilder)
 from vllm.multimodal import MULTIMODAL_REGISTRY
