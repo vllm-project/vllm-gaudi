@@ -4935,7 +4935,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             patch_size = int(self.get_patch_size_from_model())
             warmup_lists = warmup_lists + \
                 vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
-        logger.info(f"libin debug add list {warmup_lists=}")
         for modality, max_items in self.mm_budget.mm_limits.items():
             if modality == 'image' and not is_image_warmup or modality == 'video' \
                 and not is_video_warmup:
