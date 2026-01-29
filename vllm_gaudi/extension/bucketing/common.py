@@ -408,9 +408,6 @@ def generate_buckets(bs_range,
     def correct_for_max_model_len(bs, query, ctx):
         return (bs, query, min(ctx, bs * math.ceil(max_model_len / block_size)))
 
-    def correct_for_mamba_chunk_size(bs, query, ctx):
-        return (bs, math.ceil(query / mamba_chunk_size) * mamba_chunk_size, ctx)
-
     def batch_size_smaller_than_blocks(bs, query, ctx):
         if not bs <= ctx:
             omitted_buckets.add(("condition: bs <= ctx, ", "-> bs, query, ctx: ", bs, query, ctx))
