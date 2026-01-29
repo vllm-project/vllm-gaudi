@@ -1636,13 +1636,52 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         dst_start = 0
         dst_end = dst_start
         for b_idx, req_id in enumerate(req_ids):
-            cl = context_lens[b_idx]
-            qsl = query_lens[b_idx]
-            assert self.requests[req_id].mrope_positions is not None
-            input_mrope_position = \
-                self.requests[req_id].mrope_positions[:, cl:cl + qsl] # type: ignore[index]
+            cl = int(context_lens[b_idx])
+            qsl = int(query_lens[b_idx])
+
+            req = self.requests[req_id]
+            assert req.mrope_positions is not None
+            mp = req.mrope_positions
+
+            mp_total = int(mp.size(1))
+            remain = max(0, mp_total - cl)
+
+            if remain >= qsl:
+                # normal case: fully within precomputed prompt mrope positions
+                input_mrope_position = mp[:, cl:cl + qsl]
+            else:
+                # problem case: need to stitch (prompt tail) + (generated tail) mrope positions
+                prompt_part = mp[:, cl:mp_total]
+                extra = qsl - remain
+
+                delta = getattr(req, "mrope_position_delta", None)
+                if delta is None:
+                    raise RuntimeError(f"MROPE needs extension beyond prompt but mrope_position_delta is None: "
+                                       f"req_id={req_id} cl={cl} qsl={qsl} mp_total={mp_total} remain={remain}")
+
+                # generate mrope positions for the extra using delta.
+                extra_pos = MRotaryEmbedding.get_next_input_positions(
+                    mrope_position_delta=int(delta),
+                    context_len=mp_total,
+                    seq_len=mp_total + extra,
+                )
+
+                extra_part = torch.as_tensor(extra_pos, dtype=torch.int32, device=prompt_part.device)
+
+                # normalize shapes to (3, extra)
+                if extra_part.ndim == 1:  # repeat for 3 axes
+                    extra_part = extra_part.unsqueeze(0).repeat(3, 1)
+                elif extra_part.ndim == 2:  # (3, extra) or (extra, 3)
+                    if extra_part.shape[0] == extra and extra_part.shape[1] == 3:
+                        extra_part = extra_part.transpose(0, 1).contiguous()
+                else:
+                    raise RuntimeError(f"Unexpected extra_part shape: {tuple(extra_part.shape)}")
+
+                input_mrope_position = torch.cat([prompt_part, extra_part], dim=1)
+
             dst_end = dst_start + qsl
-            mrope_position_tensor[:, dst_start:dst_end].copy_(input_mrope_position, non_blocking=True)
+            mrope_position_tensor[:, dst_start:dst_end] = input_mrope_position.to(mrope_position_tensor.device,
+                                                                                  non_blocking=True)
 
             # Update dst_start depending on if pos_ids of requests are meant to be adjacent # noqa 501
             if target_bs == 1:
