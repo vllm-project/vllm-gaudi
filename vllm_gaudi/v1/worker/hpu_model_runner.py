@@ -856,7 +856,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             logger.info("Bucketing is OFF.")
 
         self._PAD_SLOT_ID = -1
-        self._PAD_BLOCK_ID = 0
+        self._PAD_BLOCK_ID = -1
         self._dummy_num_blocks = 0
 
         if self.vllm_config.parallel_config.data_parallel_size > 1 and htorch.utils.internal.is_lazy(
@@ -5076,7 +5076,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.enable_bucketing:
             self.bucketing_manager.num_hpu_blocks = num_blocks
 
-        self._PAD_BLOCK_ID = 0
+        self._PAD_BLOCK_ID = -1
         self._PAD_SLOT_ID = -1
         self._dummy_num_blocks = num_blocks
 
