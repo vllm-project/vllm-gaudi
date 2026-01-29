@@ -117,6 +117,36 @@ class HPUVisionBucketManager:
             best_pad_h, best_pad_w = 0, 0
 
         return best_pad_h, best_pad_w
+    
+    def pad_multimodal_data(self, pixel_values, image_grid_thw):
+        desired_number_of_pixels = self.get_multimodal_bucket(pixel_values.shape[0])
+        padding_len = desired_number_of_pixels - pixel_values.shape[0]
+        if padding_len <= 0:
+            return pixel_values, image_grid_thw
+
+        logger_msg = "Padding current number pixel " \
+            + str(pixel_values.shape[0]) \
+            + " to " \
+            + str(desired_number_of_pixels)
+        logger.info(logger_msg)
+
+        h_orig, w_orig = image_grid_thw[0, 1].item(), image_grid_thw[0, 2].item()
+        pad_h, pad_w = self.find_padding(h_orig, w_orig, desired_number_of_pixels)
+        if pad_h == 0 and pad_w == 0:
+            return pixel_values, image_grid_thw
+
+        constant_value = -100
+        pixel_values = torch.cat([
+            pixel_values,
+            torch.ones((padding_len, pixel_values.shape[1]), device=pixel_values.device) * constant_value
+        ])
+
+        image_grid_thw = torch.tensor([[1, h_orig + pad_h, w_orig + pad_w]],
+                                      device=image_grid_thw.device,
+                                      dtype=image_grid_thw.dtype)
+
+        assert image_grid_thw.prod(-1).sum() == desired_number_of_pixels
+        return pixel_values, image_grid_thw
 
     def greedy_plan(self, batchsize, available_batchsizes):
         # sort descending
@@ -162,15 +192,3 @@ class HPUVisionBucketManager:
                 resolution_list.append((grid_w * patch_size, height))
         return resolution_list
 
-    def _patches_per_image(self, width: int, height: int, patch_size: int = 14):
-        # Calculate patches
-        grid_h = height // patch_size
-        grid_w = width // patch_size
-        patches_per_image = grid_h * grid_w
-        return patches_per_image
-
-    def add_to_bucket(self, width: int, height: int, patch_size: int = 14):
-        patches_per_image = self._patches_per_image(width, height, patch_size)
-        if value not in lst:
-            self.multimodal_buckets.append(patches_per_image)
-            self._process_buckets()
