@@ -4866,16 +4866,16 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             mm_options = self.model_config.get_multimodal_config().get_dummy_options(modality)
             count = mm_options.count if mm_options and hasattr(mm_options, 'count') else count
             batch = count
-            if modality == 'image':
-                mm_options = {"image": ImageDummyOptions(count=count, width=width, height=height), "video": None}
-            elif modality == 'video':
-                num_frames = mm_options.num_frames if mm_options and hasattr(mm_options, 'num_frames') else num_frames
-                mm_options = {
-                    "image": None,
-                    "video": VideoDummyOptions(count=count, num_frames=num_frames, width=width, height=height)
-                }
-            else:
-                raise NotImplementedError(f"Modality '{modality}' is not supported")
+        if modality == 'image':
+            mm_options = {"image": ImageDummyOptions(count=count, width=width, height=height), "video": None}
+        elif modality == 'video':
+            num_frames = mm_options.num_frames if mm_options and hasattr(mm_options, 'num_frames') else num_frames
+            mm_options = {
+                "image": None,
+                "video": VideoDummyOptions(count=count, num_frames=num_frames, width=width, height=height)
+            }
+        else:
+            raise NotImplementedError(f"Modality '{modality}' is not supported")
 
         processor = MULTIMODAL_REGISTRY.create_processor(self.model_config)
         profiler = MultiModalProfiler(processor)
