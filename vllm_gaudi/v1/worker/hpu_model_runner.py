@@ -4869,8 +4869,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if modality == 'image':
                 mm_options = {"image": ImageDummyOptions(count=count, width=width, height=height), "video": None}
             elif modality == 'video':
-                num_frames = mm_options.num_frames if video_options and hasattr(video_options,
-                                                                                'num_frames') else num_frames
+                num_frames = mm_options.num_frames if mm_options and hasattr(mm_options,
+                                                                             'num_frames') else num_frames
                 mm_options = {
                     "image": None,
                     "video": VideoDummyOptions(count=count, num_frames=num_frames, width=width, height=height)
