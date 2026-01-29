@@ -1086,6 +1086,7 @@ class HPUUnifiedMLAImpl(MLACommonImpl[HPUUnifiedAttentionMetadata], torch.nn.Mod
         self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn \
             else VLLMFP8KVCache()
         self.is_aiter_triton_fp8_bmm_enabled = False
+        self.is_aiter_triton_fp4_bmm_enabled = False
 
     def forward(
         self,
