@@ -22,10 +22,9 @@ MULTIMODAL_CONFIG = {
     'qwen3_vl': {
         'is_batch_based': False,
         # patches per image
-        'buckets': [256, 480, 512, 660, 900, 1024, 1200, 1590, 2048, 3520]
+        'buckets': [196, 256, 441, 480, 576, 900, 1156]
     }
 }
-
 
 class HPUVisionBucketManager:
     '''
@@ -137,33 +136,31 @@ class HPUVisionBucketManager:
     def __repr__(self):
         return str(self.multimodal_buckets)
 
-    def bucket_to_image_resolution(self,
-                                   target_patches: int,
-                                   ratio_w: int,
-                                   ratio_h: int,
-                                   patch_size: int = 14) -> tuple[int, int]:
+    def bucket_to_image_resolution(self, patch_size: int = 14):
         """
-        Convert bucket patch count to image resolution for specific aspect ratio.
-        Assumption is patch number are the same for each image
-        Args:
-            target_patches: Number of patches from bucket
-            ratio_w, ratio_h: Target aspect ratio (width:height)
-            patch_size: Vision model patch size (default 14 for Qwen3VL)
-
-        Returns:
-            (width, height) in pixels
+        Calculate image resolution by first determining height from target_patches,
+        then deriving width from aspect ratio.
         """
-        # Find largest scale that fits within patch budget
-        max_scale = int((target_patches / (ratio_w * ratio_h))**0.5)
-        for scale in range(max_scale, 0, -1):
-            grid_w = ratio_w * scale
-            grid_h = ratio_h * scale
-            if grid_w * grid_h <= target_patches:
-                break
-        # Convert grid dimensions to pixel dimensions
-        width = grid_w * patch_size
-        height = grid_h * patch_size
-        return width, height
+        aspect_ratios = [
+            (1, 1),  # 1:1 square
+            (4, 3),  # 4:3 landscape
+            (3, 4),  # 3:4 portrait
+            (16, 9),  # 16:9 widescreen
+            (9, 16),  # 9:16 portrait
+        ]
+        merge_size = 2  # Qwen2.5/3VL spatial_merge_size
+        resolution_list = []
+        for target_patches in self.multimodal_buckets:
+            for (ratio_w, ratio_h) in aspect_ratios:
+                grid_h = int(target_patches ** 0.5)
+                height = grid_h * patch_size
+                width = int(height * ratio_w / ratio_h)
+                grid_w = width // patch_size
+                if grid_w * grid_h // merge_size != 0:
+                    grid_w = ((grid_w + merge_size - 1) // merge_size) * merge_size
+                resolution_list.append((grid_w * patch_size, height))
+                logger.info(f"libin debug {target_patches=} {grid_w * patch_size=} {height=} {ratio_w=} {ratio_h}")
+        return resolution_list
 
     def _patches_per_image(self, width: int, height: int, patch_size: int = 14):
         # Calculate patches

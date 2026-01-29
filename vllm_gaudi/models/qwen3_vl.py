@@ -218,8 +218,8 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
                                                          grid_thw.tolist(),
                                                          rope_type="rope_3d")
             else:
-                attn_mask = None
-                image_embeds = self.visual(pixel_values, grid_thw=grid_thw, attn_mask=attn_mask)
+                print(f"libin debug {grid_thw=}")
+                image_embeds = self.visual(pixel_values, grid_thw=grid_thw, attn_mask=None)
 
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
