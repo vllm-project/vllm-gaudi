@@ -10,11 +10,12 @@ import torch
 import functools
 from dataclasses import dataclass
 import itertools
-from typing import Optional, Callable, TypeAlias, Union
+from typing import Dict, Optional, Callable, TypeAlias, Union
 from dataclasses import dataclass
 import habana_frameworks.torch as htorch
 
 from vllm_gaudi.extension.runtime import get_config
+import vllm_gaudi.extension.ops as hpu_ops
 
 
 def block2batch(tensor, block_mapping):
@@ -26,13 +27,26 @@ BlocksT: TypeAlias = Union[torch.tensor, int]
 
 
 class CacheUtils:
-    """Helper utilities for kv-cache"""
+    """Helper utilities for kv-cache
+    
+    Args:
+        is_mla: If True, cache stores MLA latent vectors (no head dimension, single cache).
+                If False, standard attention with per-head K/V caches.
+    """
 
-    def __init__(self, key_cache, value_cache, block_size):
+    def __init__(self, key_cache, value_cache, block_size, k_scales=None, v_scales=None, is_mla=False):
         self.key_cache = key_cache
         self.value_cache = value_cache
         self.block_size = block_size
-        self.kv_heads = key_cache.size(1)
+        self.is_mla = is_mla
+
+        # MLA stores latent vectors in a single cache
+        if is_mla:
+            assert value_cache is None, "MLA mode requires value_cache=None (latent stored in key_cache)"
+
+        self.kv_heads = 1 if is_mla else key_cache.size(1)
+        self.k_scales = k_scales
+        self.v_scales = v_scales
 
     def fetch_shared(self, blocks: BlocksT) -> torch.tensor:
         """Fetch selected shared blocks"""
@@ -45,24 +59,35 @@ class CacheUtils:
     def _fetch_all(self, fn: Callable[[torch.tensor, BlocksT], torch.tensor],
                    blocks: BlocksT) -> tuple[torch.tensor, torch.tensor]:
         """Fetch both key and values using selected function"""
+        if self.value_cache is None:
+            return fn(self.key_cache, blocks)
         return fn(self.key_cache, blocks), fn(self.value_cache, blocks)
 
     def _fetch_single_shared(self, cache: torch.tensor, blocks: BlocksT) -> torch.tensor:
         """Fetch selected shared blocks from given cache"""
-        return (cache.unflatten(0, (-1, self.block_size)).index_select(0, blocks).flatten(0,
-                                                                                          1).transpose(0, 1).unflatten(
-                                                                                              0, (self.kv_heads, -1)))
+        result = cache.unflatten(0, (-1, self.block_size)).index_select(0, blocks).flatten(0, 1)
+        if not self.is_mla:
+            result = result.transpose(0, 1).unflatten(0, (self.kv_heads, -1))
+        return result
 
     def _fetch_single_unique(self, cache: torch.tensor, blocks: BlocksT) -> torch.tensor:
         """Fetch selected unique blocks from given cache"""
-        cache = cache.unflatten(0, (-1, self.block_size)).transpose(1, 2)
+        cache = cache.unflatten(0, (-1, self.block_size))
+        if not self.is_mla:
+            cache = cache.transpose(1, 2)
+
         if torch.is_tensor(blocks):
             result = cache.index_select(0, blocks)
         elif type(blocks) == int:
             result = cache[:blocks]
         else:
             raise RuntimeError(f'Unsupported type for blocks: {type(blocks)}')
-        return result.unflatten(1, (self.kv_heads, -1))
+
+        if not self.is_mla:
+            result = result.unflatten(1, (self.kv_heads, -1))
+        else:
+            result = result.flatten(0, 1)
+        return result
 
 
 def reduce_max(local_max: torch.tensor, batch_size: int, mapping: torch.tensor):
@@ -101,6 +126,127 @@ def optional(op):
     return opt_impl
 
 
+def get_last_dim_size(last_dim, vec_size, pack_size):
+    return math.ceil(last_dim / pack_size) * vec_size
+
+
+def get_vecsize_packsize(dtype: torch.dtype) -> tuple[int, int]:
+    """Get vecsize and packsize for given dtype"""
+    pack_size = 8
+    if hpu_ops.is_hpu_gaudi3:
+        return 128 if dtype == torch.bfloat16 else 64, pack_size
+    return 1, pack_size
+
+
+def create_softmax_fa2_input_tensors(
+        attn: torch.tensor, fmin: torch.tensor, inputL_hpu_tensors: Dict[tuple, torch.Tensor],
+        inputM_hpu_tensors: Dict[tuple, torch.Tensor]) -> tuple[torch.tensor, torch.tensor]:
+    """Create dummy input tensors for the softmax_fa2 operation."""
+    # Assumes input tensors are already allocated with correct shape.
+    # The filling is done on each call to avoid potential stale data issues.
+    vec_size, pack_size = get_vecsize_packsize(attn.dtype)
+    retained_shape = list(attn.shape[:-1])
+    retained_shape[-1] = get_last_dim_size(retained_shape[-1], vec_size, pack_size)
+    t_retained_shape = tuple(retained_shape)
+
+    # Convert fmin to scalar once
+    fmin_val = fmin.item() if isinstance(fmin, torch.Tensor) else fmin
+
+    if t_retained_shape not in inputM_hpu_tensors:
+        print("Allocating new input tensors for shape:", t_retained_shape, "for attn shape:", attn.shape)
+        return torch.full(retained_shape, fmin, dtype=attn.dtype, device='hpu'), torch.zeros(retained_shape,
+                                                                                             dtype=attn.dtype,
+                                                                                             device="hpu")
+    torch.hpu.synchronize()
+    inputL_hpu_tensors[t_retained_shape].zero_()
+    inputM_hpu_tensors[t_retained_shape].fill_(fmin)
+    return inputM_hpu_tensors[t_retained_shape], inputL_hpu_tensors[t_retained_shape]
+
+
+def convert_cl_aligned_tensor(input_hpu, reference_size) -> torch.tensor:
+    """Convert a CL-aligned tensor to the reference size"""
+    vec_size, pack_size = get_vecsize_packsize(input_hpu.dtype)
+    input_hpu_shape = list(reference_size)
+    input_hpu_shape[-1] = -1
+    input_hpu_shape.append(vec_size)
+    input_hpu = input_hpu.reshape(input_hpu_shape)
+    input_hpu = input_hpu[..., :pack_size]
+    input_hpu = torch.flatten(input_hpu, start_dim=-2, end_dim=-1)
+    input_hpu = input_hpu[..., :reference_size[-1]]
+    return input_hpu
+
+
+def online_merge_step(
+    acc_attn: Optional[torch.tensor],
+    acc_max: Optional[torch.tensor],
+    acc_sum: Optional[torch.tensor],
+    new_attn: Optional[torch.tensor],
+    new_max: Optional[torch.tensor],
+    new_sum: Optional[torch.tensor],
+) -> tuple[Optional[torch.tensor], Optional[torch.tensor], Optional[torch.tensor]]:
+    """Incrementally merge attention results using flash-attention style rescaling.
+    
+    This implements the online softmax algorithm where we maintain running
+    unnormalized weighted values, max, and sum. The final normalization
+    (dividing by sum) is done at the end.
+    
+    Args:
+        acc_attn: Accumulated unnormalized weighted V [tokens, heads, head_dim] or None
+        acc_max: Accumulated max values [tokens, heads] or None  
+        acc_sum: Accumulated sum of exp values [tokens, heads] or None
+        new_attn: New unnormalized weighted V to merge
+        new_max: New max values to merge
+        new_sum: New sum of exp values to merge
+    
+    Returns:
+        Tuple of (merged_attn, merged_max, merged_sum)
+    """
+    if new_attn is None:
+        return acc_attn, acc_max, acc_sum
+    if acc_attn is None:
+        return new_attn, new_max, new_sum
+
+    # Flash-attention style merge
+    merged_max = torch.maximum(acc_max, new_max)
+    old_scale = torch.exp(acc_max - merged_max)
+    new_scale = torch.exp(new_max - merged_max)
+
+    merged_attn = acc_attn * old_scale.unsqueeze(-1) + new_attn * new_scale.unsqueeze(-1)
+    merged_sum = acc_sum * old_scale + new_sum * new_scale
+
+    return merged_attn, merged_max, merged_sum
+
+
+def online_merge(*attn_results: tuple[torch.tensor, torch.tensor, torch.tensor],
+                 feps: torch.tensor) -> Optional[torch.tensor]:
+    """Merge partial attention values using online (incremental) algorithm.
+    
+    Alternative to merge() that uses online_merge_step for incremental merging.
+    This approach is more memory efficient as it doesn't need to keep all
+    intermediate results simultaneously.
+    
+    Args:
+        attn_results: Variable number of (attn, max, sum) tuples
+        feps: Small epsilon for numerical stability
+    
+    Returns:
+        Final normalized attention output, or None if all inputs are None
+    """
+    acc_attn = None
+    acc_max = None
+    acc_sum = None
+
+    for attn, max_val, sum_val in attn_results:
+        acc_attn, acc_max, acc_sum = online_merge_step(acc_attn, acc_max, acc_sum, attn, max_val, sum_val)
+
+    if acc_attn is None:
+        return None
+
+    # Final normalization
+    acc_sum = torch.maximum(acc_sum, feps)
+    return acc_attn / acc_sum.unsqueeze(-1)
+
+
 def merge(*attn_results: torch.tensor, feps: torch.tensor) -> torch.tensor:
     """Merge partial attention values into final attn score"""
     all_attn, all_max, all_sum = zip(*attn_results)
@@ -116,9 +262,21 @@ def merge(*attn_results: torch.tensor, feps: torch.tensor) -> torch.tensor:
     return attn
 
 
-def partial_attn_causal(query: torch.tensor, key: torch.tensor, value: torch.tensor, bias: Optional[torch.tensor],
-                        slice_size: int, fmin: torch.tensor) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
-    """Partial attention where qkv are assumed to be causal between slices"""
+def partial_attn_causal(query: torch.tensor,
+                        key: torch.tensor,
+                        value: torch.tensor,
+                        bias: Optional[torch.tensor],
+                        slice_size: int,
+                        fmin: torch.tensor,
+                        inputL_hpu_tensors: Dict[tuple, torch.Tensor],
+                        inputM_hpu_tensors: Dict[tuple, torch.Tensor],
+                        w_uv: Optional[torch.tensor] = None) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
+    """Partial attention where qkv are assumed to be causal between slices
+    
+    Args:
+        w_uv: Optional MLA projection matrix [num_heads, latent_dim, v_head_dim].
+              If provided, value is assumed to be in latent space and will be projected.
+    """
     if bias is None:
         return (None, None, None)
 
@@ -142,10 +300,30 @@ def partial_attn_causal(query: torch.tensor, key: torch.tensor, value: torch.ten
         b = bias[q_min:q_max, 0:q_max]
 
         s_attn = torch.matmul(q, k.transpose(-1, -2)) + b.unsqueeze(0).unsqueeze(0)
-        s_max = torch.maximum(s_attn.amax(-1), fmin)
-        s_attn = torch.exp(s_attn - s_max.unsqueeze(-1))
-        s_sum = torch.sum(s_attn, -1)
+        # TODO: remove dtype check once full support is added for fp8 in unified attention
+        if get_config().unified_attn_softmax_fa2 and s_attn.dtype == torch.bfloat16:
+            inputM_hpu, inputL_hpu = create_softmax_fa2_input_tensors(s_attn, fmin, inputL_hpu_tensors,
+                                                                      inputM_hpu_tensors)
+            s_attn, s_max, s_sum, _exp_max_fixup_hpu = torch.ops.hpu.softmax_fa2(s_attn,
+                                                                                 inputM=inputM_hpu,
+                                                                                 inputL=inputL_hpu)
+            s_max = convert_cl_aligned_tensor(s_max, list(s_attn.shape[:-1]))
+            s_sum = convert_cl_aligned_tensor(s_sum, list(s_attn.shape[:-1]))
+        else:
+            s_max = torch.maximum(s_attn.amax(-1), fmin)
+            s_attn = torch.exp(s_attn - s_max.unsqueeze(-1))
+            s_sum = torch.sum(s_attn, -1)
+
+        # Attention: s_attn @ v
         s_attn = torch.matmul(s_attn, v)
+
+        # MLA: Project from latent V to full V
+        if w_uv is not None:
+            orig_shape = s_attn.shape
+            s_attn = s_attn.flatten(0, 1)  # [num_heads, tokens, latent_dim]
+            s_attn = torch.bmm(s_attn, w_uv)  # [num_heads, tokens, v_head_dim]
+            s_attn = s_attn.unflatten(0, orig_shape[:2])  # [kv_heads, q_heads_per_kv, tokens, v_head_dim]
+
         attn_slices.append(s_attn)
         max_slices.append(s_max)
         sum_slices.append(s_sum)
@@ -157,37 +335,328 @@ def partial_attn_causal(query: torch.tensor, key: torch.tensor, value: torch.ten
     return combine(attn_slices), combine(max_slices), combine(sum_slices)
 
 
-def partial_attn_shared(query: torch.tensor, blocks: torch.tensor, bias: Optional[torch.tensor], fmin: torch.tensor,
-                        cache_utils: CacheUtils) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
-    """Partial attention where all shared blocks are compared with whole query"""
-    if bias is None:
-        return (None, None, None)
-    kv_heads = cache_utils.kv_heads
-    query = query.transpose(0, 1).unflatten(0, (kv_heads, -1))
-    key, value = cache_utils.fetch_shared(blocks)
-    bias = bias.flatten(-2, -1).unsqueeze(0)
+@dataclass
+class SharedBlockChunkedBiasData:
+    """Data needed to compute shared block bias per-chunk during chunked attention.
+    
+    This avoids materializing the full [query_len, num_shared_blocks, block_size] 
+    bias tensor which can be prohibitively large with many shared blocks.
+    
+    Contains dense block_usages of shape (num_query_tokens, num_shared_blocks).
+    During chunked attention, we slice block_usages[:, chunk_start:chunk_end] and
+    generate bias for each chunk on-the-fly.
+    """
+    block_usages: torch.tensor  # Dense: [num_query_tokens, num_shared_blocks]
+    num_query_tokens: int  # Total query length (padded)
+    num_shared_blocks: int  # Total number of shared blocks (padded)
+    split_chunked_graphs: bool
+
+
+def _partial_attn_shared_core(query: torch.tensor,
+                              key: torch.tensor,
+                              value: torch.tensor,
+                              bias: torch.tensor,
+                              fmin: torch.tensor,
+                              inputL_hpu_tensors: Dict[tuple, torch.Tensor],
+                              inputM_hpu_tensors: Dict[tuple, torch.Tensor],
+                              kv_heads: int,
+                              is_mla: bool,
+                              w_uv: Optional[torch.tensor] = None) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
+    """Core shared attention computation.
+    
+    This is the inner loop extracted for reuse between full and chunked paths.
+    
+    Args:
+        query: Query tensor, already transposed [kv_heads, q_heads_per_kv, tokens, head_dim] or similar
+        key: Key tensor from cache [kv_heads, q_heads_per_kv, kv_len, head_dim]
+        value: Value tensor from cache
+        bias: Attention bias [1, kv_len] (already flattened from [num_blocks, block_size])
+        fmin: Minimum float for softmax stability
+        inputL_hpu_tensors: Cache for FA2 tensors
+        inputM_hpu_tensors: Cache for FA2 tensors
+        kv_heads: Number of KV heads
+        is_mla: Whether using MLA attention
+        w_uv: Optional MLA projection matrix
+    
+    Returns:
+        Tuple of (unnormalized_weighted_V, local_max, local_sum)
+    """
+    num_heads = query.size(0) * query.size(1) if not is_mla else query.size(0)
 
     attn = torch.matmul(query, key.transpose(-1, -2))
     attn = attn.flatten(0, 1)
     attn = attn + bias
-    local_max = torch.maximum(attn.amax(-1), fmin)
-    attn = torch.exp(attn - local_max.unsqueeze(-1))
-    local_sum = attn.sum(-1)
-    attn = torch.matmul(attn.unflatten(0, (kv_heads, -1)), value).flatten(0, 1)
+
+    # TODO: remove dtype check once full support is added for fp8 in unified attention
+    if get_config().unified_attn_softmax_fa2 and attn.dtype == torch.bfloat16:
+        inputM_hpu, inputL_hpu = create_softmax_fa2_input_tensors(attn, fmin, inputL_hpu_tensors, inputM_hpu_tensors)
+        attn, local_max, local_sum, _exp_max_fixup_hpu = torch.ops.hpu.softmax_fa2(attn,
+                                                                                   inputM=inputM_hpu,
+                                                                                   inputL=inputL_hpu)
+        local_max = convert_cl_aligned_tensor(local_max, list(attn.shape[:-1]))
+        local_sum = convert_cl_aligned_tensor(local_sum, list(attn.shape[:-1]))
+    else:
+        local_max = torch.maximum(attn.amax(-1), fmin)
+        attn = torch.exp(attn - local_max.unsqueeze(-1))
+        local_sum = attn.sum(-1)
+
+    attn = torch.matmul(attn.unflatten(0, (kv_heads if not is_mla else num_heads, -1)), value).flatten(0, 1)
+
+    # MLA: Extract latent part and project to full V
+    if is_mla and w_uv is not None:
+        latent_dim = w_uv.size(1)
+        attn_latent = attn[..., :latent_dim]
+        attn = torch.bmm(attn_latent, w_uv)
+
     return attn.transpose(0, 1), local_max.transpose(0, 1), local_sum.transpose(0, 1)
 
 
-def partial_attn_unique(query: torch.tensor, blocks: torch.tensor, block_mapping: torch.tensor,
-                        bias: Optional[torch.tensor], fmin: torch.tensor,
-                        cache_utils: CacheUtils) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
-    """Partial attention where all blocks are used by max one query"""
+def partial_attn_shared(query: torch.tensor,
+                        blocks: torch.tensor,
+                        bias: Optional[torch.tensor],
+                        fmin: torch.tensor,
+                        inputL_hpu_tensors: Dict[tuple, torch.Tensor],
+                        inputM_hpu_tensors: Dict[tuple, torch.Tensor],
+                        cache_utils: CacheUtils,
+                        dtype: torch.dtype,
+                        w_uv: Optional[torch.tensor] = None,
+                        chunked_data: Optional[SharedBlockChunkedBiasData] = None,
+                        chunk_size: int = 0) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
+    """Partial attention where all shared blocks are compared with whole query.
+    
+    Supports two modes:
+    1. Full bias mode (default): bias tensor is provided, process all blocks at once
+    2. Chunked mode: chunk_size > 0, process blocks in chunks
+       - If bias is provided, slice from it
+       - If bias is None but chunked_data is provided, generate bias per chunk from dense block_usages
+    
+    Args:
+        query: Query tensor [tokens, num_heads, head_dim]
+        blocks: Shared block indices [num_shared_blocks]
+        bias: Pre-computed bias tensor [query_len, num_blocks, block_size]. Can be None for chunked generation.
+        fmin: Minimum float value for softmax stability
+        inputL_hpu_tensors: Cache for softmax input tensors
+        inputM_hpu_tensors: Cache for softmax input tensors
+        cache_utils: Cache utilities for fetching KV
+        dtype: Output dtype for bias generation
+        w_uv: Optional MLA projection matrix [num_heads, latent_dim, v_head_dim]
+        chunked_data: Metadata for chunked processing (contains dense block_usages)
+        chunk_size: Number of blocks per chunk (0 = full mode, >0 = chunked mode)
+    
+    Returns:
+        Tuple of (unnormalized_weighted_V, local_max, local_sum)
+    """
+    # Determine mode
+    use_chunked = chunk_size > 0 and chunked_data is not None
+
+    if not use_chunked:
+        # Full bias mode - original implementation
+        if bias is None:
+            return (None, None, None)
+        return _partial_attn_shared_full(query, blocks, bias, fmin, inputL_hpu_tensors, inputM_hpu_tensors, cache_utils,
+                                         w_uv)
+    else:
+        # Chunked mode - process blocks in chunks
+        # bias can be None for chunked generation (will generate from chunked_data.block_usages per chunk)
+        if blocks is None:
+            return (None, None, None)
+        return _partial_attn_shared_chunked(query, blocks, bias, chunked_data, chunk_size, fmin, inputL_hpu_tensors,
+                                            inputM_hpu_tensors, cache_utils, dtype, w_uv)
+
+
+def _partial_attn_shared_full(query: torch.tensor,
+                              blocks: torch.tensor,
+                              bias: torch.tensor,
+                              fmin: torch.tensor,
+                              inputL_hpu_tensors: Dict[tuple, torch.Tensor],
+                              inputM_hpu_tensors: Dict[tuple, torch.Tensor],
+                              cache_utils: CacheUtils,
+                              w_uv: Optional[torch.tensor] = None) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
+    """Full bias implementation of partial_attn_shared."""
+    is_mla = w_uv is not None
+
+    if is_mla:
+        # MLA: Single latent cache contains both K and V
+        latent_kv = cache_utils.fetch_shared(blocks)
+        num_heads = query.size(1)
+        query_t = query.transpose(0, 1).unsqueeze(1)  # [num_heads, 1, tokens, latent_dim + rope_dim]
+        key = latent_kv.unsqueeze(0).unsqueeze(0).expand(num_heads, 1, -1, -1)
+        value = latent_kv.unsqueeze(0).unsqueeze(0).expand(num_heads, 1, -1, -1)
+        kv_heads = 1
+    else:
+        # Standard attention: Separate K and V caches
+        kv_heads = cache_utils.kv_heads
+        query_t = query.transpose(0, 1).unflatten(0, (kv_heads, -1))
+        key, value = cache_utils.fetch_shared(blocks)
+
+    bias_flat = bias.flatten(-2, -1).unsqueeze(0)
+
+    return _partial_attn_shared_core(query_t, key, value, bias_flat, fmin, inputL_hpu_tensors, inputM_hpu_tensors,
+                                     kv_heads, is_mla, w_uv)
+
+
+def _partial_attn_shared_chunked(
+        query: torch.tensor,
+        blocks: torch.tensor,
+        bias: Optional[torch.tensor],
+        chunked_data: SharedBlockChunkedBiasData,
+        chunk_size: int,
+        fmin: torch.tensor,
+        inputL_hpu_tensors: Dict[tuple, torch.Tensor],
+        inputM_hpu_tensors: Dict[tuple, torch.Tensor],
+        cache_utils: CacheUtils,
+        dtype: torch.dtype,
+        w_uv: Optional[torch.tensor] = None) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
+    """Chunked implementation of partial_attn_shared with per-chunk bias generation.
+    
+    Generates bias per chunk from dense block_usages to save memory.
+    Avoids materializing the full (query_len, num_blocks, block_size) bias tensor.
+    
+    Strategy:
+    1. Process blocks in chunks of chunk_size
+    2. For each chunk, slice block_usages and generate chunk bias on-the-fly
+    3. Compute attention for the chunk using _partial_attn_shared_core
+    4. Merge chunk results using flash-attention style online softmax
+    """
+    num_blocks = chunked_data.num_shared_blocks
+    block_size = cache_utils.block_size
+    num_query_tokens = chunked_data.num_query_tokens
+
+    is_mla = w_uv is not None
+    kv_heads = 1 if is_mla else cache_utils.kv_heads
+
+    # Calculate number of chunks
+    num_chunks = math.ceil(num_blocks / chunk_size)
+
+    # Check if we have pre-computed bias or need to generate per-chunk
+    generate_bias_per_chunk = (bias is None)
+
+    # Pre-allocate reusable tensors outside the loop (avoid allocations per iteration)
+    if generate_bias_per_chunk:
+        block_len_range = torch.arange(1,
+                                       block_size + 1,
+                                       dtype=chunked_data.block_usages.dtype,
+                                       device=chunked_data.block_usages.device)
+        # Pre-allocate chunk_bias buffer - will be overwritten each iteration
+        chunk_bias_buffer = torch.empty((num_query_tokens, chunk_size, block_size),
+                                        dtype=dtype,
+                                        device=chunked_data.block_usages.device)
+
+    # Accumulators for online softmax-style merging
+    accumulated_attn = None
+    global_max = None
+    global_sum = None
+    split_graphs = chunked_data.split_chunked_graphs
+    for chunk_idx in range(num_chunks):
+        if split_graphs:
+            htorch.core.mark_step()
+        chunk_start = chunk_idx * chunk_size
+        chunk_end = min(chunk_start + chunk_size, num_blocks)
+        actual_chunk_len = chunk_end - chunk_start
+
+        # Slice blocks for this chunk
+        chunk_blocks = blocks[chunk_start:chunk_end]
+
+        if generate_bias_per_chunk:
+            # Generate bias for this chunk from dense block_usages
+            # chunked_data.block_usages is (num_query_tokens, num_shared_blocks)
+            # Slice to get (num_query_tokens, actual_chunk_len) for this chunk
+            chunk_block_usages = chunked_data.block_usages[:, chunk_start:chunk_end]
+
+            # Generate chunk bias using dense broadcast into pre-allocated buffer
+            # chunk_block_usages.unsqueeze(-1): (num_query_tokens, actual_chunk_len, 1)
+            # broadcast comparison: (num_query_tokens, actual_chunk_len, block_size)
+            chunk_mask = block_len_range > chunk_block_usages.unsqueeze(-1)
+
+            # Use view of pre-allocated buffer for actual chunk size
+            chunk_bias = chunk_bias_buffer[:, :actual_chunk_len, :]
+            chunk_bias.zero_()
+            chunk_bias.masked_fill_(chunk_mask, -math.inf)
+        else:
+            # Pre-computed: slice from full bias tensor
+            chunk_bias = bias[:, chunk_start:chunk_end, :]
+
+        # Fetch KV for this chunk
+        if is_mla:
+            latent_kv = cache_utils.fetch_shared(chunk_blocks)
+            num_heads = query.size(1)
+            query_t = query.transpose(0, 1).unsqueeze(1)
+            key = latent_kv.unsqueeze(0).unsqueeze(0).expand(num_heads, 1, -1, -1)
+            value = latent_kv.unsqueeze(0).unsqueeze(0).expand(num_heads, 1, -1, -1)
+        else:
+            query_t = query.transpose(0, 1).unflatten(0, (kv_heads, -1))
+            key, value = cache_utils.fetch_shared(chunk_blocks)
+
+        # Flatten bias for attention: [1, query_len, chunk_len * block_size]
+        chunk_bias_flat = chunk_bias.flatten(-2, -1).unsqueeze(0)
+
+        # Compute attention for this chunk
+        chunk_attn, chunk_max, chunk_sum = _partial_attn_shared_core(query_t, key, value, chunk_bias_flat, fmin,
+                                                                     inputL_hpu_tensors, inputM_hpu_tensors, kv_heads,
+                                                                     is_mla, w_uv)
+
+        # Online merge: combine this chunk with accumulated results
+        if accumulated_attn is None:
+            # First chunk - just store
+            accumulated_attn = chunk_attn
+            global_max = chunk_max
+            global_sum = chunk_sum
+        else:
+            # Merge with existing - use flash-attention style rescaling
+            new_max = torch.maximum(global_max, chunk_max)
+
+            # Rescale factors
+            old_scale = torch.exp(global_max - new_max)
+            new_scale = torch.exp(chunk_max - new_max)
+
+            # Rescale accumulated values and sums
+            accumulated_attn = accumulated_attn * old_scale.unsqueeze(-1) + chunk_attn * new_scale.unsqueeze(-1)
+            global_sum = global_sum * old_scale + chunk_sum * new_scale
+            global_max = new_max
+
+        if split_graphs:
+            htorch.core.mark_step()
+
+    if accumulated_attn is None:
+        return (None, None, None)
+
+    return accumulated_attn, global_max, global_sum
+
+
+def partial_attn_unique(query: torch.tensor,
+                        blocks: torch.tensor,
+                        block_mapping: torch.tensor,
+                        bias: Optional[torch.tensor],
+                        fmin: torch.tensor,
+                        cache_utils: CacheUtils,
+                        w_uv: Optional[torch.tensor] = None) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
+    """Partial attention where all blocks are used by max one query
+    
+    Args:
+        w_uv: Optional MLA projection matrix [num_heads, latent_dim, v_head_dim].
+              If provided, assumes MLA mode where query/key/value are in latent space.
+    """
     if bias is None:
         return (None, None, None)
-    batch_size = query.size(0)
-    kv_heads = cache_utils.kv_heads
 
-    query = query.index_select(0, block_mapping).unflatten(1, (kv_heads, -1)).unsqueeze(-2)
-    key, value = cache_utils.fetch_unique(blocks)
+    batch_size = query.size(0)
+    is_mla = w_uv is not None
+
+    if is_mla:
+        # MLA: Single latent cache
+        num_heads = query.size(1)
+        latent_kv = cache_utils.fetch_unique(blocks)
+        latent_kv = latent_kv.unflatten(0, (-1, cache_utils.block_size))
+
+        query = query.index_select(0, block_mapping).unflatten(1, (1, num_heads)).unsqueeze(-2)
+        key = latent_kv.unsqueeze(1).unsqueeze(1).expand(-1, 1, num_heads, -1, -1)
+        value = latent_kv.unsqueeze(1).unsqueeze(1).expand(-1, 1, num_heads, -1, -1)
+    else:
+        # Standard attention
+        kv_heads = cache_utils.kv_heads
+        query = query.index_select(0, block_mapping).unflatten(1, (kv_heads, -1)).unsqueeze(-2)
+        key, value = cache_utils.fetch_unique(blocks)
+
     block_mapping_2d = torch.nn.functional.one_hot(block_mapping, num_classes=batch_size).to(query.dtype)
 
     attn = torch.matmul(query, key.transpose(-1, -2))
@@ -196,6 +665,14 @@ def partial_attn_unique(query: torch.tensor, blocks: torch.tensor, block_mapping
     attn = torch.exp(attn - block_max.unsqueeze(-1))
     block_sum = attn.sum(-1)
     attn = torch.matmul(attn, value)
+
+    # MLA: Extract latent part and project to full V
+    if is_mla:
+        latent_dim = w_uv.size(1)
+        attn_latent = attn[..., :latent_dim]  # [num_blocks, 1, num_heads, 1, latent_dim]
+        attn_latent = attn_latent.squeeze(1).squeeze(-2).transpose(0, 1)  # [num_heads, num_blocks, latent_dim]
+        attn = torch.bmm(attn_latent, w_uv)  # [num_heads, num_blocks, v_head_dim]
+        attn = attn.transpose(0, 1).unsqueeze(1).unsqueeze(-2)  # [num_blocks, 1, num_heads, 1, v_head_dim]
 
     group_max = reduce_max(block_max, batch_size, block_mapping)
     block_adjustment = torch.exp(block_max - group_max.index_select(0, block_mapping))
@@ -214,11 +691,18 @@ class HPUUnifiedAttentionMetadata:
     causal_width: int
     shared_blocks: Optional[torch.tensor]
     shared_bias: Optional[torch.tensor]
+    # Chunked bias data for chunk-wise computation (used when shared_bias is None but shared_blocks exists)
+    shared_bias_chunked: Optional[SharedBlockChunkedBiasData]
+    shared_chunk_size: int  # Number of blocks to process per chunk (0 = use full bias)
     unique_blocks: Optional[torch.tensor] | Optional[int]
     unique_block_mapping: Optional[torch.tensor]
     unique_bias: Optional[torch.tensor]
     fmin: torch.tensor
     feps: torch.tensor
+    inputL_hpu_tensors: Optional[Dict[tuple, torch.Tensor]]
+    inputM_hpu_tensors: Optional[Dict[tuple, torch.Tensor]]
+    online_merge: bool
+    split_graphs: bool
 
     def seq_len(self):
         # TODO: This needs to be changed in case of mixed batches
@@ -247,263 +731,201 @@ def unified_attn(query: torch.tensor, key: torch.tensor, value: torch.tensor, ke
     scaled_query = query * scale
     cache_utils = CacheUtils(key_cache, value_cache, metadata.block_size)
 
+    use_online_merge = metadata.online_merge
+    split_graphs = metadata.split_graphs
+
+    if use_online_merge:
+        # Online merge: compute and merge incrementally to avoid large intermediate buffers
+        acc_attn, acc_max, acc_sum = None, None, None
+
+    if split_graphs:
+        htorch.core.mark_step()
+
+    # 1. Causal attention
     causal = partial_attn_causal(query=scaled_query,
                                  key=key,
                                  value=value,
                                  bias=metadata.causal_bias,
                                  slice_size=metadata.causal_width,
-                                 fmin=metadata.fmin)
+                                 fmin=metadata.fmin,
+                                 inputL_hpu_tensors=metadata.inputL_hpu_tensors,
+                                 inputM_hpu_tensors=metadata.inputM_hpu_tensors,
+                                 w_uv=None)
+    if use_online_merge:
+        acc_attn, acc_max, acc_sum = online_merge_step(acc_attn, acc_max, acc_sum, *causal)
+
+    if split_graphs:
+        htorch.core.mark_step()
+
+    # 2. Shared attention
     shared = partial_attn_shared(query=scaled_query,
                                  blocks=metadata.shared_blocks,
                                  bias=metadata.shared_bias,
                                  fmin=metadata.fmin,
-                                 cache_utils=cache_utils)
+                                 inputL_hpu_tensors=metadata.inputL_hpu_tensors,
+                                 inputM_hpu_tensors=metadata.inputM_hpu_tensors,
+                                 cache_utils=cache_utils,
+                                 dtype=query.dtype,
+                                 w_uv=None,
+                                 chunked_data=metadata.shared_bias_chunked,
+                                 chunk_size=metadata.shared_chunk_size)
+    if use_online_merge:
+        acc_attn, acc_max, acc_sum = online_merge_step(acc_attn, acc_max, acc_sum, *shared)
+
+    if split_graphs:
+        htorch.core.mark_step()
+
+    # 3. Unique attention
     unique = partial_attn_unique(query=scaled_query,
                                  blocks=metadata.unique_blocks,
                                  block_mapping=metadata.unique_block_mapping,
                                  bias=metadata.unique_bias,
                                  fmin=metadata.fmin,
-                                 cache_utils=cache_utils)
+                                 cache_utils=cache_utils,
+                                 w_uv=None)
+    if use_online_merge:
+        acc_attn, acc_max, acc_sum = online_merge_step(acc_attn, acc_max, acc_sum, *unique)
 
-    attn = merge(causal, shared, unique, feps=metadata.feps)
-    if attn is None:
-        return query
+    if split_graphs:
+        htorch.core.mark_step()
+
+    # Final normalization
+    if use_online_merge:
+        if acc_attn is None:
+            return query
+        acc_sum = torch.maximum(acc_sum, metadata.feps)
+        attn = acc_attn / acc_sum.unsqueeze(-1)
+    else:
+        attn = merge(causal, shared, unique, feps=metadata.feps)
+        if attn is None:
+            return query
     return attn
 
 
-def to_hpu(data: Optional[Union[torch.tensor, list]], dtype: Optional[torch.dtype] = None) -> torch.tensor:
-    """Copy either data or a cpu tensor to hpu"""
-    if data is None:
-        return None
-    if torch.is_tensor(data):
-        return data.to('hpu', non_blocking=True)
+def unified_mla(query: Optional[torch.tensor],
+                key: Optional[torch.tensor],
+                value: Optional[torch.tensor],
+                latent_cache: torch.tensor,
+                scale: float,
+                metadata: HPUUnifiedAttentionMetadata,
+                w_uv: torch.tensor,
+                query_latent: Optional[torch.tensor] = None) -> torch.tensor:
+    """Main entry point for Unified MLA
+    
+    Args:
+        query: Query tensor for causal path (already uncompressed) [tokens, num_heads, qk_head_dim]
+               None if only cached attention is needed.
+        key: Key tensor for causal part [tokens, num_heads, qk_head_dim]. None for cached-only.
+        value: Value tensor for causal part in latent space [tokens, num_heads, latent_dim]. None for cached-only.
+        latent_cache: Cached latent KV [num_blocks * block_size, latent_dim + rope_dim]
+        scale: Attention scale factor
+        metadata: Unified attention metadata
+        w_uv: Projection matrix from latent to full V [num_heads, latent_dim, v_head_dim]
+        query_latent: Query tensor for cached path (in latent space) [tokens, num_heads, latent_dim + rope_dim]
+                     None if only causal attention is needed.
+        use_online_merge: If True, use online (incremental) merge algorithm.
+                         Merges after each partial attention to avoid large intermediate buffers.
+                         If False, use offline (single-pass) merge algorithm.
+    
+    Returns:
+        Attention output [tokens, num_heads * v_head_dim]
+    
+    Note:
+        - For causal-only: pass query/key/value, set query_latent=None
+        - For cached-only: pass query_latent, set query/key/value=None
+        - For mixed batches: pass both query and query_latent
+    """
+    assert query is not None or query_latent is not None, \
+        "At least one of query or query_latent must be provided"
+
+    # Use appropriate query for each path
+    scaled_query_causal = query * scale if query is not None else None
+    scaled_query_latent = query_latent * scale if query_latent is not None else None
+
+    # MLA: latent cache has no head dimension, value_cache is None (stored in same cache)
+    cache_utils = CacheUtils(latent_cache, value_cache=None, block_size=metadata.block_size, is_mla=True)
+    use_online_merge = metadata.online_merge
+    split_graphs = metadata.split_graphs
+
+    if use_online_merge:
+        # Online merge: compute and merge incrementally to avoid large intermediate buffers
+        acc_attn, acc_max, acc_sum = None, None, None
+
+    if split_graphs:
+        htorch.core.mark_step()
+
+    # Causal: compute-friendly path (expand K/V from latent)
+    # key and value already expanded by caller
+    # w_uv projection applied by unified function
+    causal = partial_attn_causal(query=scaled_query_causal,
+                                 key=key,
+                                 value=value,
+                                 bias=metadata.causal_bias,
+                                 slice_size=metadata.causal_width,
+                                 fmin=metadata.fmin,
+                                 inputL_hpu_tensors=metadata.inputL_hpu_tensors,
+                                 inputM_hpu_tensors=metadata.inputM_hpu_tensors,
+                                 w_uv=w_uv) if scaled_query_causal is not None else (None, None, None)
+    if use_online_merge:
+        acc_attn, acc_max, acc_sum = online_merge_step(acc_attn, acc_max, acc_sum, *causal)
+
+    if split_graphs:
+        htorch.core.mark_step()
+
+    # Shared/Unique: memory-friendly path (Q in latent space, fetch cached latent KV)
+    # query_latent is already transformed to latent space by caller
+    # For these paths, we need to expand K/V from cached latent vectors
+
+    # Single call handles both full and chunked modes
+    if scaled_query_latent is not None:
+        shared = partial_attn_shared(query=scaled_query_latent,
+                                     blocks=metadata.shared_blocks,
+                                     bias=metadata.shared_bias,
+                                     fmin=metadata.fmin,
+                                     inputL_hpu_tensors=metadata.inputL_hpu_tensors,
+                                     inputM_hpu_tensors=metadata.inputM_hpu_tensors,
+                                     cache_utils=cache_utils,
+                                     dtype=scaled_query_latent.dtype,
+                                     w_uv=w_uv,
+                                     chunked_data=metadata.shared_bias_chunked,
+                                     chunk_size=metadata.shared_chunk_size)
+        if use_online_merge:
+            acc_attn, acc_max, acc_sum = online_merge_step(acc_attn, acc_max, acc_sum, *shared)
     else:
-        return to_hpu(torch.tensor(data, dtype=dtype, device='cpu'))
+        shared = (None, None, None)
 
+    if split_graphs:
+        htorch.core.mark_step()
 
-def mask_to_bias(mask: torch.tensor, dtype: torch.dtype) -> torch.tensor:
-    """Convert attn mask to attn bias"""
-    return torch.zeros_like(mask, dtype=dtype).masked_fill_(mask, -math.inf)
+    unique = partial_attn_unique(query=scaled_query_latent,
+                                 blocks=metadata.unique_blocks,
+                                 block_mapping=metadata.unique_block_mapping,
+                                 bias=metadata.unique_bias,
+                                 fmin=metadata.fmin,
+                                 cache_utils=cache_utils,
+                                 w_uv=w_uv) if scaled_query_latent is not None else (None, None, None)
+    if use_online_merge:
+        acc_attn, acc_max, acc_sum = online_merge_step(acc_attn, acc_max, acc_sum, *unique)
 
+    if split_graphs:
+        htorch.core.mark_step()
 
-def create_causal_bias(groups: torch.tensor, positions: torch.tensor, dtype: torch.dtype) -> torch.tensor:
-    """Create causal bias from groups and positions"""
-    group_mask = groups.unsqueeze(-1) != groups.unsqueeze(0)
-    position_mask = positions.unsqueeze(-1) < positions.unsqueeze(0)
-    causal_mask = (group_mask | position_mask)
-    return mask_to_bias(causal_mask, dtype)
-
-
-def indices_and_offsets(counts: torch.tensor) -> tuple[torch.tensor, torch.tensor]:
-    """Split groups of sizes 'counts' into individual indices and offsets. Example:
-       counts([1, 2, 3]) -> group_indices=[0, 1, 1, 2, 2, 2] group_offsets=[0, 0, 1, 0, 1, 2]"""
-    cum_end = torch.cumsum(counts, dim=0, dtype=counts.dtype)
-    cum_start = cum_end - counts
-    total = cum_end[-1] + 1
-    indices = torch.zeros(total, dtype=counts.dtype, device=counts.device)
-    indices.scatter_add_(0, cum_end[:-1].to(torch.int64), torch.ones_like(cum_end[:-1]))
-    indices = torch.cumsum(indices, dim=0)
-    offsets = torch.arange(total, dtype=counts.dtype, device=counts.device) - cum_start.index_select(0, indices)
-    return indices[:-1], offsets[:-1]
-
-
-def fetch_2d(table: torch.tensor, indices: torch.tensor, offsets: torch.tensor) -> torch.tensor:
-    """Fetch data from a 2d table using indices and offsets"""
-    assert table.dim() == 2, 'Only 2D tables are supported!'
-    flat_indices = indices * table.size(-1) + offsets
-    return table.flatten().index_select(0, flat_indices)
-
-
-def group_sum(groups: torch.tensor, values: torch.tensor):
-    """ Sum values coresponding to the same groups """
-    max_value = groups.amax().item()
-    tmp = torch.zeros((max_value + 1, ), dtype=values.dtype, device=values.device)
-    tmp.scatter_add_(0, groups.to(torch.int64), values)
-    return tmp.index_select(0, groups)
-
-
-def generate_bias(block_usages: torch.tensor, block_size: torch.tensor, dtype: torch.dtype) -> torch.tensor:
-    """ Generate block bias based on block_usage """
-    block_len_range = torch.arange(1, block_size + 1, dtype=block_usages.dtype, device=block_usages.device)
-    block_mask = block_len_range.unsqueeze(0) > block_usages.unsqueeze(-1)
-    return mask_to_bias(block_mask, dtype=dtype)
-
-
-@dataclass
-class UnifiedBatch:
-    req_ids_cpu: list[str]
-    token_ids: torch.tensor
-    token_positions: torch.tensor
-    new_token_positions_cpu: torch.tensor
-    logits_indices: torch.tensor
-    logits_groups_cpu: torch.tensor
-    attn_metadata: HPUUnifiedAttentionMetadata
-
-
-@dataclass
-class Context:
-    """ Contains relevant information for computing past context either from shared or unique blocks"""
-    group_ids: torch.tensor
-    group_offsets: torch.tensor
-    block_ids: torch.tensor
-    block_usages: torch.tensor
-
-    @staticmethod
-    def create(total_tokens: torch.tensor, block_table: torch.tensor, block_size: int) -> 'Context':
-        """ Create a new Context obj """
-        num_ctx_blocks = (total_tokens + block_size - 1) // block_size
-        if num_ctx_blocks.sum() <= 0:
-            return None
-
-        group_ids, group_offsets = indices_and_offsets(num_ctx_blocks)
-        block_ids = fetch_2d(block_table, group_ids, group_offsets)
-        block_usages = torch.clamp(
-            total_tokens.index_select(0, group_ids) - group_offsets * block_size + 1, 1, block_size)
-
-        ctx = Context(group_ids, group_offsets, block_ids, block_usages)
-        all_shapes = [v.shape for v in ctx._values() if torch.is_tensor(v)]
-        for t in all_shapes[1:]:
-            assert all_shapes[0] == t
-        return ctx
-
-    def _values(self) -> tuple[torch.tensor, torch.tensor, torch.tensor, torch.tensor]:
-        """ Split Context into individual values """
-        return (self.group_ids, self.group_offsets, self.block_ids, self.block_usages)
-
-    def index_select(self, indices: torch.tensor) -> 'Context':
-        """ Create a new Context from only specified indices """
-        if indices.size(0) <= 0:
-            return None
-        values = [v.index_select(0, indices) for v in self._values()]
-        return Context(*values)
-
-    def split(self, num_scheduled_tokens: torch.tensor) -> tuple['Context', 'Context']:
-        """ Split a Context into a shared block Context and unique block Context"""
-        num_tokens = num_scheduled_tokens.index_select(0, self.group_ids)
-        block_tokens = group_sum(self.block_ids, num_tokens)
-        shared_idx = torch.argwhere(block_tokens > 1).flatten()
-        unique_idx = torch.argwhere(block_tokens == 1).flatten()
-        assert shared_idx.size(0) + unique_idx.size(0) == self.group_ids.size(0)
-        return self.index_select(shared_idx), self.index_select(unique_idx)
-
-
-def hpu_tensor(tensor: torch.tensor, shape: tuple, pad_value: Union[int, float]) -> torch.tensor:
-    """ Pad if necessary and move tensor to HPU"""
-    if tensor is None:
-        return None
-    assert len(tensor.shape) == len(shape)
-    orig_shape = tensor.shape
-    padding = tuple(itertools.chain(*[(0, target - cur) for cur, target in reversed(list(zip(tensor.shape, shape)))]))
-    assert all(p >= 0 for p in padding)
-    if sum(padding) > 0:
-        tensor = torch.nn.functional.pad(tensor, padding, value=pad_value)
-    return to_hpu(tensor)
-
-
-def create_unified_batch(req_ids: list[str], all_token_ids: torch.tensor, num_computed_tokens: torch.tensor,
-                         num_scheduled_tokens: torch.tensor, num_prompt_tokens: torch.tensor, block_table: torch.tensor,
-                         block_size: int, dtype: torch.dtype, bucketing_fn: Callable[[bool, int, int, int, int],
-                                                                                     tuple[int, int, int,
-                                                                                           int]]) -> UnifiedBatch:
-    """ Calculate all necessary tensors needed for batch scheduling """
-    total_tokens = num_computed_tokens + num_scheduled_tokens
-    query_len = num_scheduled_tokens.sum().item()
-    is_prompt = total_tokens <= num_prompt_tokens
-    cached_tokens = num_computed_tokens + torch.where(is_prompt, 0, num_scheduled_tokens)
-    contains_prompts = torch.any(is_prompt).item()
-    num_output_tokens = total_tokens - num_prompt_tokens + 1
-    num_output_tokens = torch.clamp(num_output_tokens, torch.zeros_like(num_scheduled_tokens), num_scheduled_tokens)
-    group_starts = torch.cumsum(num_scheduled_tokens, dim=0) - num_scheduled_tokens
-
-    token_groups, token_offsets = indices_and_offsets(num_scheduled_tokens)
-    token_positions = token_offsets + num_computed_tokens.index_select(0, token_groups)
-    token_ids = fetch_2d(all_token_ids, token_groups, token_positions)
-
-    token_blocks = fetch_2d(block_table, token_groups, token_positions.floor_divide(block_size))
-    token_slots = token_blocks * block_size + token_positions.fmod(block_size)
-
-    logits_groups, logits_offsets = indices_and_offsets(num_output_tokens)
-    start_logits_indices = torch.cumsum(num_scheduled_tokens, dim=0,
-                                        dtype=num_scheduled_tokens.dtype) - num_output_tokens
-    logits_indices = logits_offsets + start_logits_indices.index_select(0, logits_groups)
-    new_token_positions = total_tokens.index_select(0, logits_groups)
-
-    def first_dim(t: Optional[torch.tensor]) -> int:
-        """ Takes first dim size or 0 if tensor is None"""
-        return t.size(0) if t is not None else 0
-
-    causal_bias = None
-    shared_blocks = None
-    shared_bias = None
-    unique_blocks = 0
-    unique_block_mapping = None
-    unique_bias = None
-
-    if contains_prompts:
-        causal_bias = create_causal_bias(token_groups, token_positions, dtype)
-
-    ctx = Context.create(cached_tokens, block_table, block_size)
-    if ctx:
-        shared_ctx, unique_ctx = ctx.split(num_scheduled_tokens)
-        if shared_ctx:
-            shared_blocks, orig_shared_blocks = torch.unique(shared_ctx.block_ids, return_inverse=True)
-
-            shared_group_starts = group_starts.index_select(0, shared_ctx.group_ids)
-
-            shared_tokens = num_scheduled_tokens.index_select(0, shared_ctx.group_ids)
-            shared_token_indices, shared_token_offsets = indices_and_offsets(shared_tokens)
-
-            shared_token_idx = shared_group_starts.index_select(0, shared_token_indices) + shared_token_offsets
-            shared_block_idx = orig_shared_blocks.index_select(0, shared_token_indices)
-            shared_block_usage = shared_ctx.block_usages.index_select(0, shared_token_indices)
-            shared_block_bias = generate_bias(shared_block_usage, block_size, dtype)
-
-            shared_bias = torch.full((query_len, shared_blocks.size(0), block_size),
-                                     -math.inf,
-                                     dtype=dtype,
-                                     device=shared_blocks.device)
-            shared_bias.index_put_((shared_token_idx, shared_block_idx), shared_block_bias)
-
-        if unique_ctx:
-            unique_blocks = torch.amax(unique_ctx.block_ids).item() + 1
-            unique_bias = torch.full((unique_blocks, block_size),
-                                     -math.inf,
-                                     dtype=dtype,
-                                     device=unique_ctx.block_ids.device)
-            unique_block_bias = generate_bias(unique_ctx.block_usages, block_size, dtype)
-            unique_bias.index_copy_(0, unique_ctx.block_ids.to(torch.int64), unique_block_bias)
-            unique_group_starts = group_starts.index_select(0, unique_ctx.group_ids)
-            unique_block_mapping = torch.full((unique_blocks, ),
-                                              -1,
-                                              dtype=torch.int64,
-                                              device=unique_ctx.block_ids.device)
-            unique_block_mapping.index_copy_(0, unique_ctx.block_ids.to(torch.int64), unique_group_starts)
-
-    bucket = bucketing_fn(contains_prompts, first_dim(token_ids), first_dim(shared_blocks), unique_blocks,
-                          first_dim(logits_indices))
-    target_qlen, target_shared_blocks, target_unique_blocks, target_logits = bucket
-
-    default_causal_width = 512
-    fmin = torch.finfo(dtype).min
-    feps = torch.finfo(dtype).tiny
-
-    return UnifiedBatch(req_ids_cpu=req_ids,
-                        token_ids=hpu_tensor(token_ids, (target_qlen, ), -1),
-                        token_positions=hpu_tensor(token_positions, (target_qlen, ), -1),
-                        new_token_positions_cpu=new_token_positions,
-                        logits_indices=hpu_tensor(logits_indices, (target_logits, ), -1),
-                        logits_groups_cpu=logits_groups,
-                        attn_metadata=HPUUnifiedAttentionMetadata(
-                            block_size=block_size,
-                            slot_mapping=hpu_tensor(token_slots, (target_qlen, ), -1),
-                            causal_bias=hpu_tensor(causal_bias, (target_qlen, target_qlen), -math.inf),
-                            causal_width=default_causal_width,
-                            shared_blocks=hpu_tensor(shared_blocks, (target_shared_blocks, ), -1),
-                            shared_bias=hpu_tensor(shared_bias, (target_qlen, target_shared_blocks, block_size),
-                                                   -math.inf),
-                            unique_blocks=target_unique_blocks,
-                            unique_block_mapping=hpu_tensor(unique_block_mapping, (target_unique_blocks, ), -1),
-                            unique_bias=hpu_tensor(unique_bias, (target_unique_blocks, block_size), -math.inf),
-                            fmin=to_hpu(fmin),
-                            feps=to_hpu(feps),
-                        ))
+    if use_online_merge:
+        if acc_attn is None:
+            if query is not None:
+                return query.flatten(-2, -1)  # [tokens, num_heads * head_dim]
+            else:
+                return query_latent.flatten(-2, -1)  # [tokens, num_heads * head_dim]
+        acc_sum = torch.maximum(acc_sum, metadata.feps)
+        attn = acc_attn / acc_sum.unsqueeze(-1)
+    else:
+        attn = merge(causal, shared, unique, feps=metadata.feps)
+        if attn is None:
+            # No attention computed, return original query
+            # Use whichever query was provided
+            # FIXME(kzawora): I'm not quite sure if that's correct, needs verification
+            if query is not None:
+                return query.flatten(-2, -1)  # [tokens, num_heads * head_dim]
+            else:
+                return query_latent.flatten(-2, -1)  # [tokens, num_heads * head_dim]
+    return attn

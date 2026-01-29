@@ -26,8 +26,8 @@ class Matmul(torch.nn.Module):
     def __init__(self):
         super(Matmul, self).__init__()
 
-    def forward(self, x, y):
-        return torch.matmul(x, y)
+    def forward(self, x, y, **kwargs):
+        return torch.matmul(x, y, **kwargs)
 
 
 class Softmax(torch.nn.Module):
@@ -39,20 +39,28 @@ class Softmax(torch.nn.Module):
         return torch.softmax(x, dim)
 
 
+def get_kv_fetch_extra_args(**kwargs):
+    if not get_config().per_token_kv_scaling_support:
+        kwargs.pop('scales', None)
+    return kwargs
+
+
 class VLLMKVCache(torch.nn.Module):
 
-    def __init__(self):
-        super(VLLMKVCache, self).__init__()
+    def __init__(self, is_v_cache: bool = False):
+        super().__init__()
         self.use_contiguous_pa = get_config().use_contiguous_pa
+        # is_v_cache is used in INC FP8 dynamic quantization to identify V cache
+        self.is_v_cache = is_v_cache
 
-    def forward(self, input, cache, slot_mapping):
+    def forward(self, input, cache, slot_mapping, scales=None, block_size=None, is_prompt=False, **kwargs):
         # In cross-attention kv cache forward inputs are None in decode
         # We don't want to store them in the cache in such case
         if input is not None:
             cache.index_copy_(0, slot_mapping, input)
         return cache
 
-    def fetch_from_cache(self, cache, blocks):
+    def fetch_from_cache(self, cache, blocks, scales=None, **kwargs):
         if self.use_contiguous_pa:
             return cache[:blocks.size(0)]
         else:
@@ -62,7 +70,7 @@ class VLLMKVCache(torch.nn.Module):
 class VLLMFP8KVCache(VLLMKVCache):
 
     def __init__(self, input_scale=1.0):
-        super(VLLMKVCache, self).__init__()
+        super().__init__()
         self.use_contiguous_pa = get_config().use_contiguous_pa
         self.input_scale = input_scale
         self.output_scale = 1.0 / self.input_scale
@@ -115,7 +123,7 @@ class FP8Matmul(torch.nn.Module):
             accumulate=False,
         )
 
-    def forward(self, input, other):
+    def forward(self, input, other, **kwargs):
         qinput = self.quant_input(input, self.scale_input)
         qother = self.quant_input(other, self.scale_other)
         output = self.matmul_fp8(
@@ -148,20 +156,15 @@ class ModuleFusedSDPA(torch.nn.Module):
         recompute_mode,
         valid_sequence_lengths,
         padding_side="left",
+        window_size=None,
     ):
-        return self._hpu_kernel_fsdpa.apply(
-            query,
-            key,
-            value,
-            attn_mask,
-            dropout_p,
-            is_causal,
-            scale,
-            softmax_mode,
-            recompute_mode,
-            valid_sequence_lengths,
-            padding_side,
-        )
+        if window_size is not None:
+            return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode,
+                                                recompute_mode, valid_sequence_lengths, padding_side, False, False,
+                                                window_size)
+        else:
+            return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode,
+                                                recompute_mode, valid_sequence_lengths, padding_side)
 
 
 def pad_list(input, target_len, val_generator):

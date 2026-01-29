@@ -1,20 +1,21 @@
-from typing import Callable, Optional, Union
+from typing import Callable, Optional, Union, Any
 import habana_frameworks.torch as htorch
 import torch
-from compressed_tensors import CompressionFormat
 
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, FusedMoEConfig)
-from compressed_tensors.quantization import (QuantizationStrategy)
+from compressed_tensors.quantization import (QuantizationArgs, QuantizationStrategy)
 
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (convert_to_channelwise)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import convert_to_channelwise, all_close_1d
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter, ModelWeightParameter, PerTensorScaleParameter,
                                            BasevLLMParameter, GroupQuantScaleParameter, PackedColumnParameter,
                                            PackedvLLMParameter, RowvLLMParameter)
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
-    CompressedTensorsLinearMethod as OrigCompressedTensorsLinearMethod, CompressedTensorsConfig)
+    CompressedTensorsLinearMethod as OrigCompressedTensorsLinearMethod, CompressedTensorsConfig,
+    CompressedTensorsMoEMethod, CompressedTensorsKVCacheMethod)
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors_moe)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (  # noqa: E501
     CompressedTensorsScheme, CompressedTensorsWNA16)
@@ -28,13 +29,16 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (pack_quan
                                                                        unpack_quantized_values_into_int32)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (marlin_repeat_scales_on_all_ranks)
 from vllm.model_executor.utils import set_weight_attrs
-
 import vllm_gaudi.extension.ops as hpu_ops
+from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel, VllmMixtureOfExpertsOpWNA16)
-
-SUPPORTED_STRATEGIES = [QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR]
+from vllm_gaudi.extension.runtime import get_config
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizeMethodBase, )
+import vllm.model_executor.model_loader.weight_utils as vllm_weight_utils
 
 logger = init_logger(__name__)
+SUPPORTED_STRATEGIES = [QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR]
 
 
 @CustomOp.register_oot(name='CompressedTensorsLinearMethod')
@@ -88,8 +92,15 @@ class HPUCompressedTensorsLinearMethod(OrigCompressedTensorsLinearMethod):
             raise ValueError(f"{scheme_classname} compressed format is not supported on HPU")
         return hpu_scheme
 
+    def dequant_fp8_weight(self, layer: torch.nn.Module) -> torch.Tensor:
+        if layer.scheme.strategy == QuantizationStrategy.CHANNEL:  # weights were quantized per-channel
+            dequant_weight = layer.weight.to(layer.weight_scale.dtype) * layer.weight_scale.squeeze()
+            return dequant_weight.to(torch.bfloat16).t()
+        else:
+            raise NotImplementedError("Implemented per-channel dequantization only")
 
-@CustomOp.register_oot(name='CompressedTensorsW8A16Fp8')
+
+@CustomOp.register_oot(name='CompressedTensorsW8A8Fp8')
 class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
     def __init__(self, strategy: str, is_static_input_scheme: bool):
@@ -101,6 +112,8 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         return -1
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+
+        # If channelwise, scales are already lined up
         if layer.scheme.strategy == QuantizationStrategy.TENSOR:
             ws_channelwise = convert_to_channelwise(layer.weight_scale, layer.logical_widths)
             layer.weight_scale = torch.nn.Parameter(ws_channelwise, requires_grad=False)
@@ -111,9 +124,20 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         # Weights must be transposed for marlin
         layer.weight = torch.nn.Parameter(layer.weight.t(), requires_grad=False)
 
-        if layer.scheme.is_static_input_scheme:
-            # required by torch.compile to be torch.nn.Parameter
-            layer.input_scale = torch.nn.Parameter(layer.input_scale.data, requires_grad=False)
+        # see the reference: https://github.com/vllm-project/vllm/blob/v0.11.2/vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_w8a8_fp8.py#L169-L173
+        if layer.scheme.is_static_input_scheme and hasattr(layer, "input_scale"):
+            # required by torch.compile to be torch.nn.Parameter, only per-tensor supported
+            input_scale = layer.input_scale.max()
+            # hw aligned
+            if get_config().use_hpu_aligned_scale:
+                input_scale = ConvertScaleToHwAligned().calc(input_scale)
+            layer.input_scale = torch.nn.Parameter(input_scale, requires_grad=False)
+        else:
+            layer.input_scale = None
+
+        # postprocess weights for perchannel strategy
+        if layer.scheme.strategy == QuantizationStrategy.CHANNEL:
+            hpu_ops.fp8_perchannel_linear_postprocess_weights(layer)
 
     def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int, output_partition_sizes: list[int],
                        input_size: int, output_size: int, params_dtype: torch.dtype, **extra_weight_attrs):
@@ -178,9 +202,53 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
     """MoE method without quantization."""
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs,
+        moe: FusedMoEConfig,
+    ):
+        """
+        Copied from CompressedTensorsW8A8Fp8MoEMethod.__init__: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe.py#L665
+        The only differences are:
+            - remove some useless code.
+            - extend per-channel weight and per-tensor activation format
+        """
+        CompressedTensorsMoEMethod.__init__(self, moe)
+        self.weight_quant = weight_quant
+        self.input_quant = input_quant
+
+        per_tensor = (self.weight_quant.strategy == QuantizationStrategy.TENSOR
+                      and self.input_quant.strategy == QuantizationStrategy.TENSOR)
+        per_channel_token = (self.weight_quant.strategy == QuantizationStrategy.CHANNEL
+                             and self.input_quant.strategy == QuantizationStrategy.TOKEN)
+
+        # extend format
+        per_channel_tensor = (self.weight_quant.strategy == QuantizationStrategy.CHANNEL
+                              and self.input_quant.strategy == QuantizationStrategy.TENSOR)
+
+        if not (per_tensor or per_channel_token or per_channel_tensor):
+            assert self.weight_quant.strategy == QuantizationStrategy.BLOCK
+            self.weight_block_size = self.weight_quant.block_structure
+            assert self.weight_quant.dynamic is not None
+        else:
+            self.weight_block_size = None
+        self.block_quant = self.weight_block_size is not None
+
+        self.static_input_scales = not self.input_quant.dynamic
+        if self.static_input_scales and per_channel_token:
+            raise ValueError("For FP8 Fused MoE layer, we require either per tensor or "
+                             "channelwise, dynamic per token quantization.")
+
+        self.use_marlin = False
+        self.fp8_backend = False
+        self.disable_expert_map = False
+
         torch.hpu.synchronize()
+
+    @property
+    def is_monolithic(self) -> bool:
+        return True
 
     def create_weights(self, *args, **kwargs) -> None:
         if hpu_ops.is_hpu_gaudi2:
@@ -196,61 +264,73 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
         layer.moe_op = VllmMixtureOfExpertsOpFP8PerChannel(
+            layer.global_num_experts,
             num_experts,
             experts_min,
             experts_max,
         )
 
+        if self.static_input_scales:
+            assert self.input_quant.strategy == QuantizationStrategy.TENSOR
+            if (layer.w13_input_scale is None or layer.w2_input_scale is None):
+                raise ValueError("QuantConfig has static quantization, but found "
+                                 "activation scales are None.")
+
+            if (not all_close_1d(layer.w13_input_scale)):
+                logger.warning_once("Found input_scales that are not equal for "
+                                    "fp8 MoE layer. Using the maximum across experts "
+                                    "for each layer.")
+            layer.w13_input_scale = torch.nn.Parameter(layer.w13_input_scale.max(), requires_grad=False)
+
+        if self.weight_quant.strategy == QuantizationStrategy.TENSOR:
+            assert layer.w13_weight_scale is not None
+            # Convert per-tensor weight scales to per-channel format
+            # by repeating scale values across the intermediate dimension.
+            w13_s0 = layer.w13_weight_scale[:, :1]
+            w13_s1 = layer.w13_weight_scale[:, 1:]
+            w13_s0_exp = torch.repeat_interleave(w13_s0, repeats=layer.intermediate_size_per_partition, dim=1)
+            w13_s1_exp = torch.repeat_interleave(w13_s1, repeats=layer.intermediate_size_per_partition, dim=1)
+            w13_weight_scale_channel = torch.cat([w13_s0_exp, w13_s1_exp],
+                                                 dim=1).unsqueeze(-1).to(device=layer.w13_weight_scale.device,
+                                                                         dtype=torch.float32)
+            layer.w13_weight_scale = torch.nn.Parameter(w13_weight_scale_channel, requires_grad=False)
+
+            w2_weight_scale_channel = torch.empty((layer.local_num_experts, layer.hidden_size, 1),
+                                                  dtype=torch.float32,
+                                                  device=layer.w2_weight_scale.device)
+
+            w2_weight_scale_channel[:, :, 0] = layer.w2_weight_scale.reshape(-1, 1)
+            layer.w2_weight_scale = torch.nn.Parameter(w2_weight_scale_channel, requires_grad=False)
+
         layer = hpu_ops.fp8_channel_moe_prepare_weights(layer)
         return
 
-    def apply(
+    def apply_monolithic(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
-        scoring_func: str = "softmax",
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
         **kwargs,
     ) -> torch.Tensor:
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
-        if use_grouped_topk or custom_routing_function is not None:
-            topk_weights, topk_ids, zero_expert_result = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias)
+        if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
+            topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
-            topk_weights, topk_ids = torch.topk(topk_weights, top_k, dim=-1)
+            topk_weights, topk_ids = torch.topk(topk_weights, layer.top_k, dim=-1)
             topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
             topk_weights = topk_weights.to(x.dtype)
         topk_ids = topk_ids.view(*x.shape[:-1], -1)
         topk_weights = topk_weights.view(*x.shape[:-1], -1)
+
         output = layer.moe_op(
             x,
             topk_ids.to(torch.int64),
             topk_weights.to(x.dtype),
             permuted_weights=True,
-            activation=activation,
+            activation=layer.activation,
         )
         return output.view(*input_shape)
 
@@ -447,17 +527,18 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
 
     def __init__(
         self,
-        quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs | None,
         moe: FusedMoEConfig,
+        layer_name: str | None = None,
     ):
-        super().__init__(quant_config, moe)
+        super().__init__(weight_quant, input_quant, moe)
 
-        HPU_WNA16_SUPPORTED_BITS = [4]
-        if not (self.quant_config.quant_format == CompressionFormat.pack_quantized.value
-                and self.num_bits in HPU_WNA16_SUPPORTED_BITS):
-            raise ValueError("For Fused MoE layers, only ", f"{CompressionFormat.pack_quantized.value} ",
-                             "is supported for the following bits: ", f"{HPU_WNA16_SUPPORTED_BITS}")
+        self.weight_quant = weight_quant
+        self.input_quant = input_quant
+        assert weight_quant.symmetric, ("Only symmetric quantization is supported for MoE")
         self.quant_type = WNA16_SUPPORTED_TYPES_MAP[self.num_bits]
+        self.layer_name = layer_name
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int, params_dtype: torch.dtype, **extra_weight_attrs):
@@ -582,6 +663,10 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         layer.a13_scale = None
         layer.a2_scale = None
 
+    @property
+    def is_monolithic(self) -> bool:
+        return True
+
     def gptq_hpu_moe_repack(self, b_q_weight: torch.Tensor) -> torch.Tensor:
         num_experts = b_q_weight.shape[0]
         outputs = []
@@ -631,69 +716,143 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
 
         htorch.core.mark_step()
 
-    def apply(
+    def apply_monolithic(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        assert self.fused_experts is None
-
-        if enable_eplb:
-            raise NotImplementedError("EPLB not supported for "
-                                      "`CompressedTensorsWNA16MoEMethod` yet.")
-
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
 
-        if use_grouped_topk or custom_routing_function is not None:
-            topk_weights, topk_ids, zero_expert_result = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                routed_scaling_factor=routed_scaling_factor,
-                e_score_correction_bias=e_score_correction_bias,
-                indices_type=self.topk_indices_dtype)
+        if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
+            topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
-            topk_weights, topk_ids = torch.topk(topk_weights, top_k, dim=-1)
+            topk_weights, topk_ids = torch.topk(topk_weights, layer.top_k, dim=-1)
             topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
             topk_weights = topk_weights.to(x.dtype)
         topk_ids = topk_ids.view(*x.shape[:-1], -1)
         topk_weights = topk_weights.view(*x.shape[:-1], -1)
+
         output = layer.moe_op(
             x,
             topk_ids.to(torch.int64),
             topk_weights.to(x.dtype),
             permuted_weights=False,
-            activation=activation,
+            activation=layer.activation,
         )
         return output.view(*input_shape)
 
+
+class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
+
+    def _convert_all_scale_to_nn_param(self, module: torch.nn.Module, scale_attrs: list[str]) -> None:
+        for scale_attr in scale_attrs:
+            scale_value = getattr(module, scale_attr, None)
+            if scale_value is not None and not isinstance(scale_value, torch.nn.Parameter):
+                scale_param = torch.nn.Parameter(torch.tensor(scale_value, dtype=torch.float32), requires_grad=False)
+                setattr(module, scale_attr, scale_param)
+
+    def _remove_attrs(self, layer: torch.nn.Module, attrs_lst: list[str]) -> None:
+        for attr_name in attrs_lst:
+            if hasattr(layer, attr_name):
+                delattr(layer, attr_name)
+                logger.debug_once(f"Removed attribute {attr_name} from layer {layer}")
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """Process KV cache scales for cross-platform FP8 quantization compatibility."""
+        super().process_weights_after_loading(layer)
+        # The `k_scale` and `v_scale` are loaded from checkpoint without any adjustment.
+        # Compute KV scales based on quantization and deployment platforms
+        fp8_max_original = 448.0 if get_config().scale_adjustment else 240.0
+        max_k = layer._k_scale * fp8_max_original
+        max_v = layer._v_scale * fp8_max_original
+        max_kv = max(max_k, max_v)
+        fp8_max_cur_platform = 240.0 if hpu_ops.is_hpu_gaudi2 else 448.0
+        kv_scale = fp8_max_cur_platform / max_kv
+        # Configure latent cache and matmul scales
+        layer.impl.latent_cache_k.input_scale = kv_scale
+        layer.impl.latent_cache_k.output_scale = 1.0 / kv_scale
+        # TODO(yiliu30): Support loading q_scale from checkpoint
+        layer.impl.matmul_qk.scale_input = 1.0
+        layer.impl.matmul_qk.scale_other = kv_scale
+        # For `a` in a@v, as `a` is the output of softmax, its max value is 1.0
+        layer.impl.matmul_av.scale_input = 1.0
+        layer.impl.matmul_av.scale_other = kv_scale
+
+        # Note: The following steps are important to avoid compiling each decoding layer into a different gc recipe
+        # Step 1: Remove deprecated scale attributes
+        old_scale_attrs = ["_k_scale", "_v_scale", "_q_scale", "_k_scale_float", "_v_scale_float", "_q_scale_float"]
+        self._remove_attrs(layer, attrs_lst=old_scale_attrs)
+
+        # Step 2: Convert scales in submodules to nn.Parameter to avoid compiling each layer into different gc recipe
+        submodules_to_check = ["latent_cache_k", "matmul_qk", "matmul_av"]
+        scale_attrs = ["input_scale", "output_scale", "scale_input", "scale_other"]
+        for submodule_name in submodules_to_check:
+            submodule = getattr(layer.impl, submodule_name, None)
+            if submodule is not None:
+                self._convert_all_scale_to_nn_param(submodule, scale_attrs=scale_attrs)
+
+
+class HPUCompressedTensorsConfig(CompressedTensorsConfig):
+
+    def get_quant_method(
+        self,
+        layer: torch.nn.Module,
+        prefix: str,
+    ) -> Optional["QuantizeMethodBase"]:
+        from vllm.model_executor.layers.attention import MLAAttention
+        if isinstance(layer, MLAAttention):
+            return HPUCompressedTensorsKVCacheMethodForMLA(self)
+        else:
+            return super().get_quant_method(layer, prefix)
+
+    @classmethod
+    def _update_scale_adjustment_if_needed(cls, config: dict[str, Any]) -> None:
+        """Update scale adjustment setting based on quantization configuration.
+        
+        On G2, this method automatically disables scale adjustment when 
+        the model is already calibrated/quantized with FP8 E4M3 FNUZ format.
+        
+        Background:
+        -----------
+        Scale adjustment is a mechanism to handle cross-platform FP8 quantization compatibility:
+        - Gaudi2 (G2) uses FP8 E4M3 FNUZ with max value ~240
+        - Gaudi3/Other GPUs use FP8 E4M3 FN with max value ~448
+        
+        When a model is quantized on G3 (max=448) but deployed on G2 (max=240), scale
+        adjustment is needed to rescale the quantization parameters. However, if the model
+        is already calibrated with FNUZ format, no adjustment is needed as it's already 
+        in the target format.
+        
+        Scale Adjustment Scenarios:
+        | No | Quant Plat   | Deply Plat | Scale Adj | FP8 Max Quant | FP8 Max Deploy |
+        |----|--------------|------------|-----------|---------------|----------------|
+        | 1  | G2           | G2         | OFF       | 240           | 240            | <- No adjustment needed
+        | 2  | G3/Other GPU | G2         | ON        | 448           | 240            |
+        | 3  | G3/Other GPU | G3         | OFF       | 448           | 448            |
+        """
+        # Early exit if scale adjustment is already disabled or not on Gaudi2
+        if get_config().scale_adjustment is False or not hpu_ops.is_hpu_gaudi2:
+            return
+
+        # Check if model was calibrated with FNUZ format (Gaudi2 native format)
+        fp8_dtype_flavor = config.get("fp8_dtype_flavor")
+
+        GAUDI2_NATIVE_FP8_FORMAT = "float8_e4m3fnuz"
+
+        if fp8_dtype_flavor == GAUDI2_NATIVE_FP8_FORMAT:
+            # Disable scale adjustment since model was calibrated/quantized for Gaudi2 hardware
+            get_config().scale_adjustment = False
+            logger.warning_once(f"Detected model calibrated/quantized with {GAUDI2_NATIVE_FP8_FORMAT} format. "
+                                "Disabling scale adjustment as the model is already compatible with Gaudi2 hardware.")
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> "CompressedTensorsConfig":
+        cls._update_scale_adjustment_if_needed(config)
+        return super().from_config(config)
 
 compressed_tensors.CompressedTensorsLinearMethod = \
     HPUCompressedTensorsLinearMethod
@@ -703,3 +862,103 @@ compressed_tensors_moe.CompressedTensorsWNA16MoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod
 compressed_tensors_moe.CompressedTensorsWNA16MarlinMoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod # Override default WNA16 MoE method
+compressed_tensors.CompressedTensorsConfig = HPUCompressedTensorsConfig
+
+# support weight_loader_v2
+WEIGHT_LOADER_V2_SUPPORTED.append(HPUCompressedTensorsLinearMethod.__name__)
+
+
+def oot_maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
+    """Remap the name of FP8 k/v_scale parameters.
+
+    This function handles the remapping of FP8 k/v_scale parameter names.
+    It detects if the given name ends with a suffix and attempts to remap
+    it to the expected name format in the model. If the remapped name is not
+    found in the params_dict, a warning is printed and None is returned.
+
+    Args:
+        name (str): The original loaded checkpoint parameter name.
+        params_dict (dict): Dictionary containing the model's named parameters.
+
+    Returns:
+        str: The remapped parameter name if successful, or the original name
+             if no remapping is needed.
+        None: If the remapped name is not found in params_dict.
+    """
+
+    if name.endswith(".kv_scale"):
+        logger.warning_once("DEPRECATED. Found kv_scale in the checkpoint. "
+                            "This format is deprecated in favor of separate k_scale and "
+                            "v_scale tensors and will be removed in a future release. "
+                            "Functionally, we will remap kv_scale to k_scale and duplicate "
+                            "k_scale to v_scale")
+        # NOTE: we remap the deprecated kv_scale to k_scale
+        remapped_name = name.replace(".kv_scale", ".attn.k_scale")
+        if remapped_name not in params_dict:
+            logger.warning_once(
+                "Found kv_scale in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). kv_scale is not loaded.",  #  noqa: E501
+                name,
+                remapped_name,
+            )
+            return None
+        return remapped_name
+
+    if any("mla_attn" in key for key in params_dict):
+        attn_str = "mla_attn.mla_attn"
+        logger.debug_once(f"Found mla_attn with k_scale and v_scale in "
+                          f"the checkpoint, using {attn_str} as attn_str")
+    else:
+        attn_str = "attn"
+    # Define scale name mapping patterns in order of precedence
+    scale_mapping_patterns = [
+        # LLMC format:  .self_attn.{q,k,v}_scale ->
+        #   .attn.{attn_str}.{q,k,v}_scale
+        (
+            r"\.self_attn\.([qkv])_scale$",
+            rf".self_attn.{attn_str}.\1_scale",
+        ),
+        (
+            r"\.self_attn\.([kv])_proj\.([kv])_scale$",
+            rf".self_attn.{attn_str}.\2_scale",
+        ),
+        # ModelOpt format: .self_attn.{k,v}_proj.{k,v}_scale ->
+        # .self_attn.attn.{k,v}_scale
+        (
+            r"\.self_attn\.([kv])_proj\.([kv])_scale$",
+            rf".self_attn.{attn_str}.\2_scale",
+        ),
+        # QKV proj format: .self_attn.qkv_proj.{k,v}_scale ->
+        # .self_attn.attn.{k,v}_scale
+        (r"\.self_attn\.qkv_proj\.([kv])_scale$", r".self_attn.attn.\1_scale"),
+        # Qwen3 MoE format: .self_attn.qkqkv_proj.{k,v}_scale ->
+        # .self_attn.attn.{k,v}_scale
+        (r"\.self_attn\.qkqkv_proj\.([kv])_scale$", r".self_attn.attn.\1_scale"),
+        # Default format: .{k,v}_scale -> .attn.{k,v}_scale
+        (r"\.([kv])_scale$", r".attn.\1_scale"),
+    ]
+
+    # Check if name ends with k_scale or v_scale
+    if name.endswith((".k_scale", ".v_scale", ".q_scale")):
+        import regex as re
+
+        for pattern, replacement in scale_mapping_patterns:
+            if re.search(pattern, name):
+                remapped_name = re.sub(pattern, replacement, name)
+                if remapped_name not in params_dict:
+                    scale_type = name.split(".")[-1]
+                    logger.warning_once(
+                        "Found %s in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). %s is not loaded.",  # noqa: E501
+                        scale_type,
+                        name,
+                        remapped_name,
+                        scale_type,
+                    )
+                    return None
+                return remapped_name
+
+    # If there were no matches, return the untouched param name
+    return name
+
+
+# Patch the `maybe_remap_kv_scale_name` function to load k/v scale correctly
+vllm_weight_utils.maybe_remap_kv_scale_name = oot_maybe_remap_kv_scale_name

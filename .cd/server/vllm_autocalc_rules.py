@@ -4,6 +4,14 @@
 import math
 
 
+def calc_VLLM_PROMPT_BS_BUCKET_MAX(ctx):
+    return max(1, ctx['VLLM_PROMPT_BS_BUCKET_MAX'])
+
+
+def calc_MAX_NUM_BATCHED_TOKENS(ctx):
+    return max(1, ctx['MAX_NUM_BATCHED_TOKENS'])
+
+
 def calc_TENSOR_PARALLEL_SIZE(ctx):
     return max(1, min(8, ctx['TENSOR_PARALLEL_SIZE']))
 
@@ -14,6 +22,14 @@ def calc_MAX_MODEL_LEN(ctx):
 
 def calc_PT_HPU_ENABLE_LAZY_COLLECTIVES(ctx):
     return ctx['TENSOR_PARALLEL_SIZE'] > 1
+
+
+def calc_VLLM_CONTIGUOUS_PA(ctx):
+    return not ctx['ENABLE_PREFIX_CACHING']
+
+
+def calc_VLLM_DEFRAG(ctx):
+    return bool(ctx['VLLM_CONTIGUOUS_PA'])
 
 
 def calc_MODEL_MEM_FROM_CONFIG(ctx):
@@ -54,57 +70,90 @@ def calc_KV_CACHE_PER_SEQ(ctx):
 
 
 def calc_EST_MAX_NUM_SEQS(ctx):
-    return (ctx['TENSOR_PARALLEL_SIZE'] * ctx['USABLE_MEM'] * ctx['GPU_MEM_UTILIZATION'] / ctx['KV_CACHE_PER_SEQ'])
+    return max(1,
+               ctx['TENSOR_PARALLEL_SIZE'] * ctx['USABLE_MEM'] * ctx['GPU_MEM_UTILIZATION'] / ctx['KV_CACHE_PER_SEQ'])
 
 
 def calc_EST_HPU_BLOCKS(ctx):
-    return (ctx['MAX_MODEL_LEN'] * ctx['EST_MAX_NUM_SEQS'] / ctx['BLOCK_SIZE'])
+    return max(1, ctx['MAX_MODEL_LEN'] * ctx['EST_MAX_NUM_SEQS'] / ctx['BLOCK_SIZE'])
 
 
 def calc_DECODE_BS_RAMP_GRAPHS(ctx):
-    return 1 + int(math.log(ctx['VLLM_DECODE_BS_BUCKET_STEP'] / ctx['VLLM_DECODE_BS_BUCKET_MIN'], 2))
+    if ctx['VLLM_EXPONENTIAL_BUCKETING']:
+        return 1 + math.ceil(math.log(ctx['EST_MAX_NUM_SEQS'], 2))
+    else:
+        return 1 + int(math.log(ctx['VLLM_DECODE_BS_BUCKET_STEP'] / ctx['VLLM_DECODE_BS_BUCKET_MIN'], 2))
 
 
 def calc_DECODE_BS_STEP_GRAPHS(ctx):
-    return max(
-        0, int(1 + (ctx['EST_MAX_NUM_SEQS'] - ctx['VLLM_DECODE_BS_BUCKET_STEP']) / ctx['VLLM_DECODE_BS_BUCKET_STEP']))
+    if ctx['VLLM_EXPONENTIAL_BUCKETING']:
+        return 0
+    else:
+        return max(
+            0,
+            int(1 + (ctx['EST_MAX_NUM_SEQS'] - ctx['VLLM_DECODE_BS_BUCKET_STEP']) / ctx['VLLM_DECODE_BS_BUCKET_STEP']))
 
 
 def calc_DECODE_BLOCK_RAMP_GRAPHS(ctx):
-    return 1 + int(math.log(ctx['VLLM_DECODE_BLOCK_BUCKET_STEP'] / ctx['VLLM_DECODE_BLOCK_BUCKET_MIN'], 2))
+    if ctx['VLLM_EXPONENTIAL_BUCKETING']:
+        return 1 + math.ceil(math.log(ctx['EST_HPU_BLOCKS'], 2))
+    else:
+        return 1 + int(math.log(ctx['VLLM_DECODE_BLOCK_BUCKET_STEP'] / ctx['VLLM_DECODE_BLOCK_BUCKET_MIN'], 2))
 
 
 def calc_DECODE_BLOCK_STEP_GRAPHS(ctx):
-    return max(
-        0,
-        int(1 + (ctx['EST_HPU_BLOCKS'] - ctx['VLLM_DECODE_BLOCK_BUCKET_STEP']) / ctx['VLLM_DECODE_BLOCK_BUCKET_STEP']))
+    if ctx['VLLM_EXPONENTIAL_BUCKETING']:
+        return 0
+    else:
+        return max(
+            0,
+            int(1 +
+                (ctx['EST_HPU_BLOCKS'] - ctx['VLLM_DECODE_BLOCK_BUCKET_STEP']) / ctx['VLLM_DECODE_BLOCK_BUCKET_STEP']))
 
 
 def calc_NUM_DECODE_GRAPHS(ctx):
     # 3d update
-    return ((ctx['DECODE_BS_RAMP_GRAPHS'] + ctx['DECODE_BS_STEP_GRAPHS']) *
-            (ctx['DECODE_BLOCK_RAMP_GRAPHS'] + ctx['DECODE_BLOCK_STEP_GRAPHS'])) / 2
+    decode_graphs = ((ctx['DECODE_BS_RAMP_GRAPHS'] + ctx['DECODE_BS_STEP_GRAPHS']) *
+                     (ctx['DECODE_BLOCK_RAMP_GRAPHS'] + ctx['DECODE_BLOCK_STEP_GRAPHS']))
+    if ctx['VLLM_CONTIGUOUS_PA']:
+        return max(1, decode_graphs)
+    else:
+        return max(1, decode_graphs / 2)
 
 
 def calc_PROMPT_BS_RAMP_GRAPHS(ctx):
-    return 1 + int(
-        math.log(
-            min(ctx['MAX_NUM_PREFILL_SEQS'], ctx['VLLM_PROMPT_BS_BUCKET_STEP']) / ctx['VLLM_PROMPT_BS_BUCKET_MIN'], 2))
+    if ctx['VLLM_EXPONENTIAL_BUCKETING']:
+        return 1 + math.ceil(math.log(ctx['VLLM_PROMPT_BS_BUCKET_MAX'], 2))
+    else:
+        return 1 + int(
+            math.log(
+                min(ctx['VLLM_PROMPT_BS_BUCKET_MAX'], ctx['VLLM_PROMPT_BS_BUCKET_STEP']) /
+                ctx['VLLM_PROMPT_BS_BUCKET_MIN'], 2))
 
 
 def calc_PROMPT_BS_STEP_GRAPHS(ctx):
-    return max(
-        0,
-        int(1 + (ctx['MAX_NUM_PREFILL_SEQS'] - ctx['VLLM_PROMPT_BS_BUCKET_STEP']) / ctx['VLLM_PROMPT_BS_BUCKET_STEP']))
+    if ctx['VLLM_EXPONENTIAL_BUCKETING']:
+        return 0
+    else:
+        return max(
+            0,
+            int(1 + (ctx['VLLM_PROMPT_BS_BUCKET_MAX'] - ctx['VLLM_PROMPT_BS_BUCKET_STEP']) /
+                ctx['VLLM_PROMPT_BS_BUCKET_STEP']))
 
 
 def calc_PROMPT_SEQ_RAMP_GRAPHS(ctx):
-    return 1 + int(math.log(ctx['VLLM_PROMPT_SEQ_BUCKET_STEP'] / ctx['VLLM_PROMPT_SEQ_BUCKET_MIN'], 2))
+    if ctx['VLLM_EXPONENTIAL_BUCKETING']:
+        return 1 + math.ceil(math.log(ctx['MAX_NUM_BATCHED_TOKENS'], 2))
+    else:
+        return 1 + int(math.log(ctx['VLLM_PROMPT_SEQ_BUCKET_STEP'] / ctx['VLLM_PROMPT_SEQ_BUCKET_MIN'], 2))
 
 
 def calc_PROMPT_SEQ_STEP_GRAPHS(ctx):
-    return int(1 + (min(ctx['MAX_NUM_BATCHED_TOKENS'], ctx['MAX_MODEL_LEN']) - ctx['VLLM_PROMPT_SEQ_BUCKET_STEP']) /
-               ctx['VLLM_PROMPT_SEQ_BUCKET_STEP'])
+    if ctx['VLLM_EXPONENTIAL_BUCKETING']:
+        return 0
+    else:
+        return int(1 + (min(ctx['MAX_NUM_BATCHED_TOKENS'], ctx['MAX_MODEL_LEN']) - ctx['VLLM_PROMPT_SEQ_BUCKET_STEP']) /
+                   ctx['VLLM_PROMPT_SEQ_BUCKET_STEP'])
 
 
 def calc_EST_NUM_PROMPT_GRAPHS(ctx):
@@ -113,23 +162,31 @@ def calc_EST_NUM_PROMPT_GRAPHS(ctx):
     graphs_2d = prompt_bs_graphs * prompt_seq_graphs
     if prompt_bs_graphs > 1:
         graphs_2d = graphs_2d / 2
-    ctx_block_graphs_max = (ctx['MAX_MODEL_LEN'] - ctx['VLLM_PROMPT_SEQ_BUCKET_MIN']) / ctx['BLOCK_SIZE']
-    ctx_block_graphs_min = max(1, (ctx['MAX_MODEL_LEN'] - ctx['MAX_NUM_BATCHED_TOKENS']) / ctx['BLOCK_SIZE'])
-    graphs_3d = graphs_2d * (ctx_block_graphs_max + ctx_block_graphs_min) / 2
+    ctx_blocks_max = max(1, (ctx['MAX_MODEL_LEN'] - ctx['VLLM_PROMPT_SEQ_BUCKET_MIN']) / ctx['BLOCK_SIZE'])
+    ctx_blocks_min = max(1, (ctx['MAX_MODEL_LEN'] - ctx['MAX_NUM_BATCHED_TOKENS']) / ctx['BLOCK_SIZE'])
+    if ctx['VLLM_EXPONENTIAL_BUCKETING']:
+        ctx_block_graphs_max = max(1, math.ceil(math.log(ctx_blocks_max, 2)))
+        ctx_block_graphs_min = max(1, math.ceil(math.log(ctx_blocks_min, 2)))
+    else:
+        ctx_block_graphs_max = max(1, ctx_blocks_max / ctx['VLLM_PROMPT_CTX_BUCKET_STEP'])  # ctx step
+        ctx_block_graphs_min = max(1, ctx_blocks_min / ctx['VLLM_PROMPT_CTX_BUCKET_STEP'])  # ctx step
+    graphs_3d = max(1, graphs_2d * (ctx_block_graphs_max + ctx_block_graphs_min) / 2)
     return graphs_3d
 
 
 def calc_EST_GRAPH_PROMPT_RATIO(ctx):
-    return math.ceil(ctx['EST_NUM_PROMPT_GRAPHS'] /
-                     (ctx['EST_NUM_PROMPT_GRAPHS'] + ctx['NUM_DECODE_GRAPHS']) * 100) / 100
+    est_prompt_graph_mem = ctx['EST_NUM_PROMPT_GRAPHS'] * ctx['APPROX_MEM_PER_GRAPH_MB']
+    est_decode_graph_mem = ctx['NUM_DECODE_GRAPHS'] * ctx['APPROX_MEM_PER_GRAPH_MB']
+    est_graph_prompt_ratio = est_prompt_graph_mem / (est_prompt_graph_mem + est_decode_graph_mem)
+    return est_graph_prompt_ratio
 
 
 def calc_VLLM_GRAPH_PROMPT_RATIO(ctx):
-    return math.ceil(min(max(ctx['EST_GRAPH_PROMPT_RATIO'], 0.1), 0.9) * 10) / 10
+    return math.ceil(min(max(ctx['EST_GRAPH_PROMPT_RATIO'], 0.01), 0.99) * 100) / 100
 
 
 def calc_DECODE_GRAPH_TARGET_GB(ctx):
-    return math.ceil(ctx['NUM_DECODE_GRAPHS'] * ctx['APPROX_MEM_PER_GRAPH_MB'] / 1024 * 10) / 10
+    return math.ceil(ctx['NUM_DECODE_GRAPHS'] * ctx['APPROX_MEM_PER_GRAPH_MB'] / 1024 * 100) / 100
 
 
 def calc_EST_GRAPH_RESERVE_MEM(ctx):
@@ -151,10 +208,11 @@ def calc_MAX_NUM_SEQS(ctx):
         return max(1, ctx['MAX_NUM_SEQS'])
     # Otherwise, calculate
     val = (ctx['TENSOR_PARALLEL_SIZE'] * ctx['KV_CACHE_MEM'] / ctx['KV_CACHE_PER_SEQ'])
-    if ctx['DTYPE'] == 'fp8':
-        val = (max(1, math.floor(val / ctx['VLLM_DECODE_BS_BUCKET_STEP'])) * ctx['VLLM_DECODE_BS_BUCKET_STEP'])
+    # always round down for plugin as WA
+    if val < ctx['VLLM_DECODE_BS_BUCKET_STEP']:
+        val = pow(2, math.floor(math.log(val, 2)))
     else:
-        val = (math.ceil(val / ctx['VLLM_DECODE_BS_BUCKET_STEP']) * ctx['VLLM_DECODE_BS_BUCKET_STEP'])
+        val = max(1, math.floor(val / ctx['VLLM_DECODE_BS_BUCKET_STEP'])) * ctx['VLLM_DECODE_BS_BUCKET_STEP']
     # Special limit for Vision-Instruct models
     if ctx['MODEL'] in ['meta-llama/Llama-3.2-11B-Vision-Instruct', 'meta-llama/Llama-3.2-90B-Vision-Instruct'
                         ] and val > 128:
@@ -177,9 +235,13 @@ def calc_VLLM_PROMPT_SEQ_BUCKET_MAX(ctx):
 
 # Map parameter names to calculation functions
 PARAM_CALC_FUNCS = {
+    "VLLM_PROMPT_BS_BUCKET_MAX": calc_VLLM_PROMPT_BS_BUCKET_MAX,
+    "MAX_NUM_BATCHED_TOKENS": calc_MAX_NUM_BATCHED_TOKENS,
     "TENSOR_PARALLEL_SIZE": calc_TENSOR_PARALLEL_SIZE,
     "MAX_MODEL_LEN": calc_MAX_MODEL_LEN,
     "PT_HPU_ENABLE_LAZY_COLLECTIVES": calc_PT_HPU_ENABLE_LAZY_COLLECTIVES,
+    "VLLM_CONTIGUOUS_PA": calc_VLLM_CONTIGUOUS_PA,
+    "VLLM_DEFRAG": calc_VLLM_DEFRAG,
     "MODEL_MEM_FROM_CONFIG": calc_MODEL_MEM_FROM_CONFIG,
     "DEVICE_HPU_MEM": calc_DEVICE_HPU_MEM,
     "TOTAL_GPU_MEM": calc_TOTAL_GPU_MEM,

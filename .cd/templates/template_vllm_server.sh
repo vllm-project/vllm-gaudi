@@ -2,6 +2,25 @@
 
 #@VARS
 
+if [ "$VLLM_CONTIGUOUS_PA" == "True" ]; then # Checks if using contigous pa
+    EXTRA_ARGS+=" --no-enable-prefix-caching"
+fi
+
+if [ $ASYNC_SCHEDULING -gt 0 ]; then # Checks if using async scheduling
+    EXTRA_ARGS+=" --async_scheduling"
+fi
+
+## Executing command print
+
+printf "\n---------------------Starting vLLM server with the command-------------------------"
+printf "\nvllm serve $MODEL --block-size $BLOCK_SIZE --dtype $DTYPE \
+--tensor-parallel-size $TENSOR_PARALLEL_SIZE --download_dir $HF_HOME \
+--max-model-len $MAX_MODEL_LEN --gpu-memory-utilization $GPU_MEM_UTILIZATION \
+--max-num-seqs $MAX_NUM_SEQS --generation-config vllm \
+--max-num-batched-tokens $MAX_NUM_BATCHED_TOKENS \
+--disable-log-requests $EXTRA_ARGS"
+printf "\n-----------------------------------------------------------------------------------\n"
+
 ## Start server
 vllm serve $MODEL \
         --block-size $BLOCK_SIZE \
@@ -11,5 +30,7 @@ vllm serve $MODEL \
         --max-model-len $MAX_MODEL_LEN \
         --gpu-memory-utilization $GPU_MEM_UTILIZATION \
         --max-num-seqs $MAX_NUM_SEQS \
-        --disable-log-requests \
-2>&1 | tee -a  logs/vllm_server.log
+        --generation-config vllm \
+        --max-num-batched-tokens $MAX_NUM_BATCHED_TOKENS \
+        --disable-log-requests ${EXTRA_ARGS} \
+2>&1 | stdbuf -o0 -e0 tr '\r' '\n' | tee -a  logs/vllm_server.log
