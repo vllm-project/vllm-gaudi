@@ -4515,7 +4515,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 mm_features=[],
                 sampling_params=None,
                 pooling_params=pooling_param,
-                block_ids=[block_ids],
+                block_ids=block_ids,
                 num_computed_tokens=num_computed_tokens,
                 lora_request=None,
             )
@@ -4528,7 +4528,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 mm_features=[],
                 sampling_params=sampling_params,
                 pooling_params=None,
-                block_ids=[block_ids],
+                block_ids=block_ids,
                 num_computed_tokens=num_computed_tokens,
                 lora_request=None,
             )
