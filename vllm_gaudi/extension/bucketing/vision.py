@@ -191,4 +191,3 @@ class HPUVisionBucketManager:
                     grid_w = ((grid_w + merge_size - 1) // merge_size) * merge_size
                 resolution_list.append((grid_w * patch_size, height))
         return resolution_list
-
