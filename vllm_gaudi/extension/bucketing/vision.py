@@ -117,7 +117,7 @@ class HPUVisionBucketManager:
             best_pad_h, best_pad_w = 0, 0
 
         return best_pad_h, best_pad_w
-    
+
     def pad_multimodal_data(self, pixel_values, image_grid_thw):
         desired_number_of_pixels = self.get_multimodal_bucket(pixel_values.shape[0])
         padding_len = desired_number_of_pixels - pixel_values.shape[0]
