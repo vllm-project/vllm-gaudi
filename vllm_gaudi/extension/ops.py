@@ -12,6 +12,7 @@ import math
 import habana_frameworks.torch.core as htcore
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.extension.utils import get_kv_fetch_extra_args
+from torch._higher_order_ops.hints_wrap import hints_wrapper
 
 import habana_frameworks.torch.utils.experimental as htexp
 import types
@@ -27,6 +28,39 @@ if is_hpu_gaudi2:
 import os
 # MAX_EXPERTS_PER_SLICE is needed for 1.20, up to 64 experts per slice
 MAX_EXPERTS_PER_SLICE = int(os.environ.get("MAX_EXPERTS_PER_SLICE", -1))
+
+
+# User bundling classes for pipelined_pa
+class SoftmaxMatmulAVBundle(torch.nn.Module):
+    """Bundle for block_softmax followed by matmul_av.
+    
+    This bundle must be initialized with the matmul operation to work with torch.compile.
+    The matmul_av_op is stored as a callable attribute rather than being passed through
+    hints_wrapper, since hints_wrapper only accepts tensors, ints, floats, or bools.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, attn, value, block_bias, block_groups, matmul_av_op):
+        attn, block_max, block_sums = torch.ops.hpu.block_softmax(attn, block_bias, block_groups)
+        if attn.dtype == torch.float32:
+            attn = attn.to(value.dtype)
+        attn = matmul_av_op(attn, value)
+        return attn, block_max, block_sums
+
+
+# Global bundle instances - created once at module load time
+# These must be global to work with torch.compile in vLLM's architecture
+_global_softmax_matmul_av_bundle = None
+
+
+def _get_or_create_bundle():
+    """Get or create the global bundle instance."""
+    global _global_softmax_matmul_av_bundle
+    if _global_softmax_matmul_av_bundle is None:
+        _global_softmax_matmul_av_bundle = SoftmaxMatmulAVBundle()
+    return _global_softmax_matmul_av_bundle
 
 
 def get_inc_quant_method(layer):
@@ -64,17 +98,38 @@ def matmul_shape(lhs, rhs):
     return result
 
 
-def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, batch_size, matmul_av_op, batch2block_matmul_op,
-                 block2batch_matmul_op):
+def pipelined_pa(attn,
+                 value,
+                 block_bias,
+                 block_groups,
+                 block_mapping,
+                 batch_size,
+                 matmul_av_op,
+                 batch2block_matmul_op,
+                 block2batch_matmul_op,
+                 use_bundling=None):
     # When fp32_softmax is enabled attn is left in fp32 after Q@K
     # We can return to native dtype after we renormalize and calculate the adjustments
+    if use_bundling is None:
+        use_bundling = os.environ.get("VLLM_USE_USER_BUNDLING", "0") == "1"
+
     if block_bias is not None and attn.dtype != block_bias.dtype:
         block_bias = block_bias.to(dtype=attn.dtype)
     # TODO: w/a with 5D req as the block_softmax kernel does not support 4D attn tensor, which is used in e.g. Granite-3B
     if get_config().fused_block_softmax and get_config().fused_block_softmax_adjustment and attn.dim() == 5:
-        attn, block_max, block_sums = torch.ops.hpu.block_softmax(attn, block_bias, block_groups)
-        if attn.dtype == torch.float32:
-            attn = attn.to(value.dtype)
+        if use_bundling:
+            # Bundle 1: block_softmax + matmul_av
+            # Use global bundle instance (created at module load time) for torch.compile compatibility
+            bundle = _get_or_create_bundle()
+            attn, block_max, block_sums = hints_wrapper(bundle, (attn, value, block_bias, block_groups, matmul_av_op),
+                                                        {},
+                                                        hints={"user_bundle_id": 1})
+        else:
+            attn, block_max, block_sums = torch.ops.hpu.block_softmax(attn, block_bias, block_groups)
+            if attn.dtype == torch.float32:
+                attn = attn.to(value.dtype)
+            # 3. matmul av
+            attn = matmul_av_op(attn, value)
     else:
         if block_bias is not None:
             attn.add_(block_bias)
@@ -84,11 +139,14 @@ def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, batch_siz
         if attn.dtype == torch.float32:
             attn = attn.to(value.dtype)
         block_sums = attn.sum(dim=-1, keepdim=True)
-    attn = matmul_av_op(attn, value)
+        # 3. matmul av
+        attn = matmul_av_op(attn, value)
     if get_config().fused_block_softmax_adjustment:
         out_shape = list(attn.shape[:3]) + [1] * (attn.dim() - 3)
+        # 5. block softmax adjustment
         rescale = torch.ops.hpu.block_softmax_adjustment(block_max, block_sums.to(block_max.dtype), block_groups,
                                                          batch_size, out_shape).to(attn.dtype)
+        attn = attn.mul(rescale)
     else:
         adjustment_target_shape = block_max.shape
         block_max = block_max.squeeze((-1, -2))
@@ -188,6 +246,7 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
         v_scales_uf = v_scales.unflatten(0, (-1, block_size))
 
     query_shape = (-1, q_heads, 1, head_size)
+    # 2. batch2block
     query = batch2block(scale * query, block_mapping, batch2block_matmul_op).view(query_shape)
     key = keys_fetch_func(key_cache.unflatten(0, (-1, block_size)),
                           **get_kv_fetch_extra_args(blocks=block_list, scales=k_scales_uf)).transpose(1, 2)
@@ -211,6 +270,7 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
             attn = torch.empty(matmul_shape(query, key), dtype=torch.float32, device=query.device)
             if position_bias is not None:
                 position_bias = position_bias.float()
+        # 3. matmul qk
         attn = matmul_qk_op(query, key, out=attn)
     elif get_config().fp32_softmax:
         attn = matmul_qk_op(query, key)
@@ -235,6 +295,7 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
                         matmul_av_op=matmul_av_op,
                         batch2block_matmul_op=batch2block_matmul_op,
                         block2batch_matmul_op=block2batch_matmul_op)
+    # 6. block2batch
     attn = block2batch(attn, block_mapping, block2batch_matmul_op)
     attn = attn.squeeze(-2)
 

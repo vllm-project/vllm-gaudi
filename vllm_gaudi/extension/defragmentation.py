@@ -36,6 +36,7 @@ class CacheSwapUtils(torch.nn.Module):
             prev_srcs = cache.index_select(0, srcs)
             # using apc we need to swap free blocks back as they can contain cached data
             if self.enable_prefix_caching:
+                print(f'here')
                 prev_dsts = cache.index_select(0, dsts)
                 cache.index_copy_(0, srcs, prev_dsts)
                 prev_dsts = None
