@@ -4652,11 +4652,19 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         is_batch_based = vision_bucket_manager.is_batch_based
         mm_config = self.model_config.get_multimodal_config()
 
-        warmup_configs = {  
+        is_image_warmup = (mm_config is not None and
+                   mm_config.get_dummy_options("image") is not None and
+                   self.mm_budget.mm_limits['image'] != 0)
+  
+        is_video_warmup = (mm_config is not None and   
+                   mm_config.get_dummy_options("video") is not None and
+                   self.mm_budget.mm_limits['video'] != 999)
+        warmup_configs = {
             "image": (0, lambda: mm_config.get_dummy_options("image")),
             "video": (999, lambda: mm_config.get_dummy_options("video"))
         }
-        width = height = None  
+        width = height = None
+        warmup_lists = []
         for modality, (limit_value, get_options) in warmup_configs.items():
             if (mm_config and
                 mm_config.get_dummy_options(modality) and
@@ -4664,16 +4672,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 options = get_options()
                 width = options.width if hasattr(options, 'width') else None
                 height = options.height if hasattr(options, 'height') else None
+                if width is not None and height is not None:
+                    warmup_lists.append((width, height))
                 break
 
-        warmup_lists = []
-        if not is_batch_based:
-            if (is_image_warmup or is_video_warmup) and (width is not None and height is not None):
-                warmup_lists.append((width, height))
-            if len(buckets) > 0:
-                patch_size = int(self.get_patch_size_from_model())
-                warmup_lists = warmup_lists + \
-                    vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
+        if not is_batch_based and len(buckets) > 0:
+            patch_size = int(self.get_patch_size_from_model())
+            warmup_lists = warmup_lists + \
+                vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
         logger.info(f"libin debug add list {warmup_lists=}")
         for modality, max_items in self.mm_budget.mm_limits.items():
             if modality == 'image' and not is_image_warmup or modality == 'video' \
