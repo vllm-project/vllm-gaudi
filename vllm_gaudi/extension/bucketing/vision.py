@@ -152,7 +152,7 @@ class HPUVisionBucketManager:
         resolution_list = []
         for target_patches in self.multimodal_buckets:
             for (ratio_w, ratio_h) in aspect_ratios:
-                grid_h = int(target_patches ** 0.5)
+                grid_h = int(target_patches**0.5)
                 height = grid_h * patch_size
                 width = int(height * ratio_w / ratio_h)
                 grid_w = width // patch_size

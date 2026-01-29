@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 import collections
-import copy
 import contextlib
 from copy import deepcopy
 import functools
@@ -44,7 +43,6 @@ from vllm.attention.layer import MLAAttention
 from vllm.v1.attention.selector import get_attn_backend
 
 from vllm.config import (VllmConfig, get_layers_from_vllm_config, update_config)
-from vllm.config.multimodal import ImageDummyOptions, VideoDummyOptions
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -53,8 +51,9 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model, get_model_loader
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem)
+from vllm.multimodal.profiling import MultiModalProfiler
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
@@ -757,7 +756,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(model_config)
         if self.supports_mm_inputs:
             self.is_mm_embed = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
-            self.model_config_copy = copy.deepcopy(self.model_config)
         self.is_multimodal_raw_input_supported = (model_config.is_multimodal_raw_input_only_model)
 
         self.num_mamba_layers = self.model_config.get_num_layers_by_block_type(self.parallel_config, "mamba")
@@ -4866,12 +4864,24 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         else:
             mm_options = self.model_config.get_multimodal_config().get_dummy_options(modality)
             count = mm_options.count if mm_options and hasattr(mm_options, 'count') else count
-            self.model_config_copy.get_multimodal_config().get_dummy_options(modality).width = width
-            self.model_config_copy.get_multimodal_config().get_dummy_options(modality).height = height
             batch = count
-        self.model_config_copy.max_model_len = 4096
-        dummy_mm_inputs = MultiModalRegistry().get_dummy_mm_inputs(self.model_config_copy, \
-            mm_counts={modality: count})
+            if modality == 'image':
+                mm_options = {"image": ImageDummyOptions(count=count, width=width, height=height), "video": None}
+            elif modality == 'video':
+                num_frames = video_options.num_frames if video_options and hasattr(video_options, 'num_frames') else num_frames
+                mm_options = {
+                    "image": None,
+                    "video": VideoDummyOptions(count=count, num_frames=num_frames, width=w, height=h)
+                }
+            else:
+                raise NotImplementedError(f"Modality '{modality}' is not supported")
+
+        processor = MULTIMODAL_REGISTRY.create_processor(self.model_config)
+        profiler = MultiModalProfiler(processor)
+        dummy_mm_inputs = profiler._get_dummy_mm_inputs(seq_len=4196,
+                                                        mm_counts={modality: count},
+                                                        mm_options=mm_options)
+
         dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
         # We use the cache so that the item is saved to the cache,
         # but not read from the cache
@@ -4912,9 +4922,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         width = height = None
         warmup_lists = []
         for modality, (limit_value, get_options) in warmup_configs.items():
-            if (mm_config and
-                mm_config.get_dummy_options(modality) and
-                self.mm_budget.mm_limits[modality] != limit_value):
+            if (mm_config and mm_config.get_dummy_options(modality)
+                and self.mm_budget.mm_limits[modality] != limit_value):
                 options = get_options()
                 width = options.width if hasattr(options, 'width') else None
                 height = options.height if hasattr(options, 'height') else None
@@ -4936,12 +4945,15 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             for idx in range(len(candidates)):
                 if is_batch_based:
                     image_args = candidates[idx]
-                    width = 768
-                    height = 768
+                    width = 896  # pixels as in gemma3 config
+                    height = 896  # pixels as in gemma3 config
                 else:
                     image_args = None
                     width, height = candidates[idx]
-                batched_dummy_mm_inputs = self._get_mm_dummy_batch(modality, image_args=image_args, width=width, height=height)
+                batched_dummy_mm_inputs = self._get_mm_dummy_batch(modality,
+                                                                   image_args=image_args,
+                                                                   width=width,
+                                                                   height=height)
                 dummy_encoder_outputs = \
                     self.model.embed_multimodal(
                     **batched_dummy_mm_inputs)
