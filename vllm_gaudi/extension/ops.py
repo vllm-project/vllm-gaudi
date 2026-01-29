@@ -729,7 +729,6 @@ def apply_block_fp8_linear_hpu(
             input_2d,
             layer.weight,
             layer.weight_scale_inv,
-            layer.input_scale,
             bias,
         )
         return output.to(dtype=input.dtype).view(*input.shape[:-1], -1)
@@ -738,7 +737,6 @@ def apply_block_fp8_linear_hpu(
         layer.weight,
         block_size,
         layer.weight_scale_inv,
-        input_scale=layer.input_scale,
         bias=bias,
         original_M=layer.orig_M,
         original_N=layer.orig_N,
