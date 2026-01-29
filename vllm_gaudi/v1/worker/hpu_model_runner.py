@@ -782,7 +782,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Lazy initialization
         # self.model: nn.Module  # set after load_model
         self.kv_caches: list[torch.Tensor] = []
-        self.shared_kv_cache_layers: dict[str, str] = {}
         self.inc_initialized_successfully = False
         self._is_inc_finalized = False
 
