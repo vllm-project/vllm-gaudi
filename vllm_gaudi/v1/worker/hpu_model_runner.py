@@ -4960,7 +4960,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         expected_num_items=candidates[idx],
                     )
                     self.graphed_buckets.add(candidates[idx])
-                self.log_warmup_multimodal(phase, idx, len(candidates), candidates[idx] if is_batch_based else 1, 0, width, height)
+                self.log_warmup_multimodal(phase, idx, len(candidates), candidates[idx] if is_batch_based else 1, 0,
+                                           width, height)
 
     def _maybe_profile_unified_attn(self):
         unified_cfg_str = os.environ.get('VLLM_PROFILE_UNIFIED', None)

@@ -160,7 +160,6 @@ class HPUVisionBucketManager:
                 if grid_w * grid_h // merge_size != 0:
                     grid_w = ((grid_w + merge_size - 1) // merge_size) * merge_size
                 resolution_list.append((grid_w * patch_size, height))
-                logger.info(f"libin debug {target_patches=} {grid_w * patch_size=} {height=} {ratio_w=} {ratio_h}")
         return resolution_list
 
     def _patches_per_image(self, width: int, height: int, patch_size: int = 14):
