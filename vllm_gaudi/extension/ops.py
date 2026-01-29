@@ -957,11 +957,7 @@ def fp8_channel_moe_prepare_weights(layer):
         if layer.w2_input_scale is None:
             layer.moe_op.w2_input_scale = layer.w2_input_scale
         else:
-            layer.moe_op.w2_input_scale_dmoe = [
-                layer.w2_input_scale.data.clone() for _ in range(layer.moe_op.num_experts)
-            ]
-            layer.moe_op.w2_input_scale = layer.w2_input_scale.repeat(
-                layer.moe_op.num_experts).unsqueeze(-1).unsqueeze(-1)
+            layer.moe_op.w2_input_scale = [layer.w2_input_scale.data.clone() for _ in range(layer.moe_op.num_experts)]
 
     htorch.core.mark_step()
     return layer
@@ -1106,7 +1102,6 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
         self.w2_list = torch.nn.ModuleList([MoeFP8Matmul() for _ in range(num_experts)])
         self.w13_input_scale = None
         self.w2_input_scale = None
-        self.w2_input_scale_dmoe = None
 
     def forward(
         self,
@@ -1141,8 +1136,7 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
                                                                    **kwargs)
         else:
             x_scale = self.w13_input_scale.data
-            # w2_input_scale should be List[Tensor] when static and fused
-            w2_input_scale = [self.w2_input_scale[i] for i in experts_range]
+            w2_input_scale = self.w2_input_scale
             x_fp8 = torch.ops.hpu.cast_to_fp8_v2(x, 1.0 / x_scale, False, False, torch.float8_e4m3fn)[0]
             final_hidden_states = torch.ops.hpu.mixture_of_experts(
                 hidden_states=x_fp8,
@@ -1151,7 +1145,7 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
                 w12=w13_list,
                 w3=w2_list,
                 d_scale_hidden_states=x_scale,
-                d_scale_intermediate_hidden_states=self.w2_input_scale_dmoe,
+                d_scale_intermediate_hidden_states=self.w2_input_scale,
                 d_scale_w12=w13_weight_scale,
                 d_scale_w3=w2_weight_scale,
                 permuted_weights=permuted_weights,
