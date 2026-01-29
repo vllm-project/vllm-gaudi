@@ -33,10 +33,11 @@ class HPUAttentionBackendV1(HPUAttentionBackend):
     def get_metadata_cls() -> type["AttentionMetadata"]:
         return HPUAttentionMetadataV1
 
-    # need to check if we need support for virtual spliting for mamba
     @staticmethod
     def get_supported_kernel_block_size() -> list[Union[int, MultipleOf]]:
-        return [128]
+        # for mamba models we don't split block size across kernels
+        # kernel_block_sizes in InputBatch are the same as block_sizes
+        return [128] 
 
 
 @dataclass
@@ -46,12 +47,10 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
     """Metadata for HPUAttentionbackend."""
     is_prompt: bool
     attn_bias: Optional[torch.Tensor]
-
     seq_lens_tensor: Optional[torch.Tensor]
     context_lens_tensor: Optional[torch.Tensor]
     query_start_loc: Optional[torch.Tensor] = None
     query_start_loc_p: Optional[torch.Tensor] = None
-
     padding_mask_flat: Optional[torch.Tensor] = None
 
     def seq_len(self):
