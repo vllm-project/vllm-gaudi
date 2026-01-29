@@ -4489,7 +4489,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if total_tokens_for_blocks > self.max_model_len:
                 total_tokens_for_blocks = self.max_model_len
 
-        num_blocks = round_up(total_tokens_for_blocks, self.block_size) // self.block_size
         prompt_token_ids = list(range(total_tokens))
 
         req_id = f'{len(requests)}'
