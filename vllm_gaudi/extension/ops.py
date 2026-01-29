@@ -413,7 +413,7 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
         args += [sinks]
     attn_weights = fsdpa_op(*args)
 
-    attn_weights = attn_weights.transpose(1, 2)``
+    attn_weights = attn_weights.transpose(1, 2)
     if sinks is not None:
         htcore.mark_step()
     return attn_weights
