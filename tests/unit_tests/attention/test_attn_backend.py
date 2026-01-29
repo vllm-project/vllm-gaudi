@@ -161,9 +161,9 @@ def run_attention_backend(vllm_config, device: torch.device, common_attn_metadat
         pytest.xfail("Unified attention test not supported yet")
     else:
         raise ValueError(f"Unknown backend: {backend}")
-    num_heads = vllm_config.model_config.get_num_attention_heads(vllm_config.parallel_config)
-    num_kv_heads = vllm_config.model_config.get_num_kv_heads(vllm_config.parallel_config)
-    head_size = vllm_config.model_config.get_head_size()
+    num_heads: int = vllm_config.model_config.get_num_attention_heads(vllm_config.parallel_config)
+    num_kv_heads: int = vllm_config.model_config.get_num_kv_heads(vllm_config.parallel_config)
+    head_size: int = vllm_config.model_config.get_head_size()
     scale = 1.0 / (head_size**0.5)
     impl = impl_cls(
         num_heads=num_heads,
@@ -246,7 +246,7 @@ def run_attention_backend(vllm_config, device: torch.device, common_attn_metadat
 @pytest.mark.parametrize("backend", ["unified", "non_unified"])
 def test_attention_correctness(batch_spec_name: str, mock_config_name: str, backend: str):
     batch_spec = BATCH_SPECS[batch_spec_name]
-    mock_config = MOCK_MODEL_CONFIGS[mock_config_name]
+    mock_config: dict = MOCK_MODEL_CONFIGS[mock_config_name]
     vllm_config = create_vllm_config(model_name="Qwen/Qwen2.5-7B-Instruct",
                                      max_model_len=max(batch_spec.seq_lens) + 10,
                                      block_size=BLOCK_SIZE)
@@ -257,15 +257,15 @@ def test_attention_correctness(batch_spec_name: str, mock_config_name: str, back
     vllm_config.model_config.get_hidden_size = lambda: mock_config['num_q_heads'] * mock_config['head_size']
     get_config().use_contiguous_pa = False
     get_config().prompt_attn_impl = "naive_impl"
-    num_q_heads = mock_config['num_q_heads']
-    num_kv_heads = mock_config['num_kv_heads']
-    head_size = mock_config['head_size']
-    batch_size = batch_spec.batch_size
+    num_q_heads: int = int(mock_config['num_q_heads'])
+    num_kv_heads: int = int(mock_config['num_kv_heads'])
+    head_size: int = int(mock_config['head_size'])
+    batch_size: int = batch_spec.batch_size
     seq_lens = batch_spec.seq_lens
     query_lens = batch_spec.query_lens
     dtype = torch.bfloat16
     scale = 1.0 / (head_size**0.5)
-    block_size = vllm_config.cache_config.block_size
+    block_size: int = vllm_config.cache_config.block_size
 
     torch.manual_seed(12345)
     all_q_vllm, all_k_vllm, all_v_vllm = [], [], []
