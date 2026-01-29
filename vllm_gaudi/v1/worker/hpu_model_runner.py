@@ -5384,9 +5384,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                             )
                             state_tensors.append(tensor)
                             storage_offset_bytes += stride[0] * dtype_size
-                        # TODO: verify if below needed for dynamic quantization
-                        # state_tensors.append(None)
-                        # state_tensors.append(None)
                         kv_caches[layer_name] = tuple(state_tensors)
                     else:
                         pass
