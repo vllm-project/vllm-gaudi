@@ -8,8 +8,14 @@ from typing import Union
 
 import torch
 
-from vllm.config import (CacheConfig, CompilationConfig, DeviceConfig, LoadConfig, ModelConfig, ModelDType,
-                         ParallelConfig, SchedulerConfig, VllmConfig)
+from vllm.config import VllmConfig
+from vllm.config.device import DeviceConfig
+from vllm.config.cache import CacheConfig
+from vllm.config.compilation import CompilationConfig
+from vllm.config.parallel import ParallelConfig
+from vllm.config.scheduler import SchedulerConfig
+from vllm.config.load import LoadConfig
+from vllm.config.model import ModelConfig, ModelDType
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 
