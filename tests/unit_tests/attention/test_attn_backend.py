@@ -178,9 +178,9 @@ def run_attention_backend(vllm_config, device: torch.device, common_attn_metadat
     output = torch.empty_like(query)
     if kv_cache.dim() == 5 and kv_cache.shape[0] == 2:
         flattened_kv_cache = kv_cache.view(kv_cache.shape[0], -1, kv_cache.shape[3], kv_cache.shape[4])
-        kv_cache_as_tuple = (flattened_kv_cache[0], flattened_kv_cache[1])
+        kv_cache_as_tuple = (flattened_kv_cache[0], flattened_kv_cache[1], None, None)
     else:
-        kv_cache_as_tuple = (kv_cache[0], kv_cache[1])
+        kv_cache_as_tuple = (kv_cache[0], kv_cache[1], None, None)
 
     if is_prompt:
         if query.dim() == 3:

@@ -209,17 +209,18 @@ def get_non_unified_attn_metadata(vllm_config, common_attn_metadata, batch_spec,
                                                                      attn_bias=attn_bias,
                                                                      block_size=block_size)
     else:
-        attn_metadata = HPUAttentionMetadataV1.make_decode_metadata(
-            block_list=block_list_device,
-            block_usage=block_usage_device,
-            block_groups=block_groups_device,
-            input_positions=None,
-            slot_mapping=slot_mapping,
-            block_size=block_size,
-            window_block_list=None,
-            window_block_usage=None,
-            window_block_groups=None,
-        )
+        attn_metadata = HPUAttentionMetadataV1.make_decode_metadata(block_list=block_list_device,
+                                                                    block_usage=block_usage_device,
+                                                                    block_groups=block_groups_device,
+                                                                    input_positions=None,
+                                                                    slot_mapping=slot_mapping,
+                                                                    block_size=block_size,
+                                                                    window_block_list=None,
+                                                                    window_block_usage=None,
+                                                                    window_block_groups=None,
+                                                                    chunked_block_list=None,
+                                                                    chunked_block_usage=None,
+                                                                    chunked_block_groups=None)
     attn_metadata = trim_attn_metadata(attn_metadata)
     attn_metadata = _update_metadata(attn_metadata, batch_size, max(batch_spec.query_lens), device, query_dtype,
                                      block_size)
