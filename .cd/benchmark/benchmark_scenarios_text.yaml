@@ -50,5 +50,5 @@ granite_8b_code_instruct_4k:
 granite_20b_code_instruct_8k:
   MODEL: ibm-granite/granite-20b-code-instruct-8k
    
-
-
+bielik_4.5b_v3_instruct:
+  MODEL: speakleash/Bielik-4.5B-v3.0-Instruct

@@ -15,16 +15,16 @@ import vllm_gaudi.extension.ops as ops
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, ModuleFusedSDPA, Softmax, VLLMFP8KVCache, VLLMKVCache)
 
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl, AttentionLayer, AttentionMetadata,
-                                              AttentionType)
-from vllm.v1.attention.backends.mla.common import MLACommonImpl
+from vllm.v1.attention.backend import (AttentionBackend, AttentionImpl, AttentionLayer, AttentionMetadata,
+                                       AttentionType)
+from vllm.model_executor.layers.attention.mla_attention import MLACommonImpl
 from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention, HPUPagedAttentionMetadata,
                                                      HPUPagedAttentionMetadataBuilder)
 
 from vllm_gaudi.extension.logger import logger as init_logger
 from vllm_gaudi.extension.unified import (unified_attn, unified_mla, HPUUnifiedAttentionMetadata)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
-from vllm.attention.backends.registry import (register_backend, AttentionBackendEnum)
+from vllm.v1.attention.backends.registry import (register_backend, AttentionBackendEnum)
 from vllm._aiter_ops import rocm_aiter_ops
 
 logger = init_logger()
@@ -169,6 +169,12 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     window_block_groups: Optional[torch.Tensor] = None
     window_block_usage: Optional[torch.Tensor] = None
     window_attn_bias: Optional[torch.Tensor] = None
+    chunked_slot_mapping: Optional[torch.Tensor] = None
+    chunked_attn_bias: Optional[torch.Tensor] = None
+    chunked_block_mapping: Optional[torch.Tensor] = None
+    chunked_block_list: Optional[torch.Tensor] = None
+    chunked_block_groups: Optional[torch.Tensor] = None
+    chunked_block_usage: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -240,6 +246,9 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         assert self.prefill_impl != 'fsdpa_impl' or alibi_slopes is None, \
             'Prefill with FusedSDPA not supported with alibi slopes!'
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
+        # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
+        self.is_aiter_triton_fp4_bmm_enabled = (rocm_aiter_ops.is_fp4bmm_enabled()
+                                                and self.kv_b_proj.weight.dtype == torch.bfloat16)
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
@@ -430,8 +439,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         use_irope: bool = False,
     ) -> None:
         super(AttentionImpl, self).__init__()
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         if kv_sharing_target_layer_name is not None:
-            raise NotImplementedError("KV sharing is not currently supported on HPU.")
+            logger.info("[KV sharing] HPUAttentionImpl initialized with kv_sharing_target_layer_name: %s",
+                        self.kv_sharing_target_layer_name)
         if use_irope:
             logger.warning_once("Using irope in HPU is not supported yet, it will fall back "
                                 "to global attention for long context.")
@@ -492,6 +503,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             raise NotImplementedError("Encoder self-attention "
                                       "is not implemented for "
                                       "HPUAttentionImpl")
+
+        self.is_chunked_attention = False
 
     def _maybe_init_alibi_biases(
         self,
@@ -572,12 +585,22 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         if kv_cache is not None and isinstance(kv_cache, tuple):
             key_cache, value_cache, k_scales, v_scales = \
                 HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
-
-            # Reshape the input keys and values and store them in the cache.
-            # If kv_cache is not provided, the new key and value tensors are
-            # not cached. This happens during the initial memory profiling run.
-            key_cache = self.k_cache(key, key_cache, slot_mapping, k_scales)
-            value_cache = self.v_cache(value, value_cache, slot_mapping, v_scales)
+            if self.kv_sharing_target_layer_name is None:
+                # Reshape the input keys and values and store them in the cache.
+                # If kv_cache is not provided, the new key and value tensors are
+                # not cached. This happens during the initial memory profiling run.
+                key_cache = self.k_cache(key,
+                                         key_cache,
+                                         slot_mapping,
+                                         scales=k_scales,
+                                         block_size=attn_metadata.block_size,
+                                         is_prompt=attn_metadata.is_prompt)
+                value_cache = self.v_cache(value,
+                                           value_cache,
+                                           slot_mapping,
+                                           scales=v_scales,
+                                           block_size=attn_metadata.block_size,
+                                           is_prompt=attn_metadata.is_prompt)
 
         if attn_metadata.is_prompt:
             # Prompt run.
@@ -620,6 +643,9 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                     attn_bias = None
                     window_size = (self.sliding_window, 0)
                     common_args['window_size'] = window_size
+            if self.is_chunked_attention and \
+                hasattr(attn_metadata, 'chunked_attn_bias') and attn_metadata.chunked_attn_bias is not None:
+                attn_bias = attn_metadata.chunked_attn_bias
 
             out = ops.prompt_attention(impl=self.prefill_impl,
                                        query=query.view(query_shape),
@@ -640,6 +666,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 block_groups = attn_metadata.window_block_groups
                 block_mapping = attn_metadata.window_block_mapping
                 attn_bias = attn_metadata.window_attn_bias
+            elif self.is_chunked_attention and \
+                attn_metadata.chunked_block_list is not None:
+                block_list = attn_metadata.chunked_block_list
+                block_groups = attn_metadata.chunked_block_groups
+                block_mapping = attn_metadata.chunked_block_mapping
+                attn_bias = attn_metadata.chunked_attn_bias
             else:
                 block_list = attn_metadata.block_list
                 block_groups = attn_metadata.block_groups
@@ -744,8 +776,18 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-            key_cache = self.k_cache(key, key_cache, cross_slot_mapping, k_scales)
-            value_cache = self.v_cache(value, value_cache, cross_slot_mapping, v_scales)
+            key_cache = self.k_cache(key,
+                                     key_cache,
+                                     cross_slot_mapping,
+                                     scales=k_scales,
+                                     block_size=attn_metadata.block_size,
+                                     is_prompt=attn_metadata.is_prompt)
+            value_cache = self.v_cache(value,
+                                       value_cache,
+                                       cross_slot_mapping,
+                                       scales=v_scales,
+                                       block_size=attn_metadata.block_size,
+                                       is_prompt=attn_metadata.is_prompt)
 
         if attn_metadata.is_prompt:
             # Prompt run.
@@ -917,7 +959,7 @@ class HPUUnifiedAttentionImpl(AttentionImpl, torch.nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
         attn_metadata: HPUUnifiedAttentionMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -930,8 +972,16 @@ class HPUUnifiedAttentionImpl(AttentionImpl, torch.nn.Module):
         query = query.unflatten(-1, (-1, self.head_size))
         key = key.unflatten(-1, (-1, self.head_size))
         value = value.unflatten(-1, (-1, self.head_size))
-        key_cache = self.k_cache(key, key_cache, attn_metadata.slot_mapping, k_scales)
-        value_cache = self.v_cache(value, value_cache, attn_metadata.slot_mapping, v_scales)
+        key_cache = self.k_cache(key,
+                                 key_cache,
+                                 attn_metadata.slot_mapping,
+                                 scales=k_scales,
+                                 block_size=attn_metadata.block_size)
+        value_cache = self.v_cache(value,
+                                   value_cache,
+                                   attn_metadata.slot_mapping,
+                                   scales=v_scales,
+                                   block_size=attn_metadata.block_size)
         output = unified_attn(
             query=query,
             key=key,
@@ -1030,12 +1080,13 @@ class HPUUnifiedMLAImpl(MLACommonImpl[HPUUnifiedAttentionMetadata], torch.nn.Mod
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj  # Used to expand latent → full KV in causal path
-
+        self.use_online_merge = get_config().unified_attn_online_merge
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn \
             else VLLMFP8KVCache()
         self.is_aiter_triton_fp8_bmm_enabled = False
+        self.is_aiter_triton_fp4_bmm_enabled = False
 
     def forward(
         self,

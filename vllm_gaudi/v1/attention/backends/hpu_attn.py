@@ -9,10 +9,10 @@ from typing import Optional
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionMetadata, AttentionImpl
+from vllm.v1.attention.backend import AttentionMetadata, AttentionImpl
 from vllm_gaudi.attention.backends.hpu_attn import (HPUAttentionBackend, HPUAttentionImpl, HPUAttentionMetadata)
 from vllm_gaudi.extension.logger import logger as init_logger
-from vllm.attention.backends.registry import (register_backend, AttentionBackendEnum)
+from vllm.v1.attention.backends.registry import (register_backend, AttentionBackendEnum)
 
 logger = init_logger()
 
@@ -87,6 +87,9 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                              window_block_list,
                              window_block_usage,
                              window_block_groups,
+                             chunked_block_list,
+                             chunked_block_usage,
+                             chunked_block_groups,
                              query_start_loc=None):
         return cls(is_prompt=False,
                    block_mapping=None,
@@ -100,6 +103,9 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    window_block_list=window_block_list,
                    window_block_usage=window_block_usage,
                    window_block_groups=window_block_groups,
+                   chunked_block_list=chunked_block_list,
+                   chunked_block_usage=chunked_block_usage,
+                   chunked_block_groups=chunked_block_groups,
                    input_positions=input_positions,
                    slot_mapping=slot_mapping,
                    block_size=block_size,

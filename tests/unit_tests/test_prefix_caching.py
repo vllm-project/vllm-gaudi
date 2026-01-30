@@ -5,10 +5,10 @@ import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
 
 from vllm.sampling_params import SamplingParams
-from vllm.attention.layer import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData, CachedRequestData
-from vllm.config import (VllmConfig, ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig)
+from vllm.config import (VllmConfig, ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig, set_current_vllm_config)
 
 DEVICE = current_platform.device_type
 
@@ -48,13 +48,14 @@ def get_vllm_config():
 @pytest.fixture
 def model_runner():
     vllm_config = get_vllm_config()
-    model_config = vllm_config.model_config
-    num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
-    head_size = model_config.get_head_size()
-    environment.set_vllm_config(vllm_config)
-    vllm_config.compilation_config.static_forward_context = {"layer.0": Attention(num_heads, head_size, 0.1)}
-    runner = HPUModelRunner(vllm_config, DEVICE)
-    return runner
+    with set_current_vllm_config(vllm_config):
+        model_config = vllm_config.model_config
+        num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
+        head_size = model_config.get_head_size()
+        environment.set_vllm_config(vllm_config)
+        vllm_config.compilation_config.static_forward_context = {"layer.0": Attention(num_heads, head_size, 0.1)}
+        runner = HPUModelRunner(vllm_config, DEVICE)
+        yield runner
 
 
 def make_new_request(req_id, prompt_token_ids, num_computed_tokens=0):

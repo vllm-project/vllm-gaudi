@@ -109,6 +109,10 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
 
         self.use_dispatch_fn = get_config().use_dispatch_fn
 
+    @property
+    def is_monolithic(self) -> bool:
+        return True
+
     def create_weights(self, *args, **kwargs) -> None:
         if hpu_ops.is_hpu_gaudi2:
             kwargs['weight_loader'] = hpu_ops.gaudi_weight_wrapper(kwargs.get('weight_loader'))
@@ -146,7 +150,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         else:
             layer = hpu_ops.fp8_channel_moe_prepare_weights(layer)
 
-    def apply(
+    def apply_monolithic(
         self,
         layer: FusedMoE,
         x: torch.Tensor,
@@ -156,7 +160,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-            topk_weights, topk_ids = layer.select_experts(hidden_states=x, router_logits=router_logits)
+            topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
@@ -169,14 +173,15 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
             topk_weights = topk_weights.to(x.dtype)
 
         if layer.dp_size > 1:
+            dp_metadata = get_hpu_dp_metadata()
             if not (has_quant_config(layer.vllm_config.model_config) and self.use_dispatch_fn):
-                hidden_states_across_dp = get_hpu_dp_metadata().hidden_states_across_dp
+                hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
                 x = dispatch_tensor(x, hidden_states_across_dp, layer.is_sequence_parallel)
 
-            topk_ids_across_dp = get_hpu_dp_metadata().topk_ids_across_dp
+            topk_ids_across_dp = dp_metadata.topk_ids_across_dp if dp_metadata is not None else None
             topk_ids = dispatch_tensor(topk_ids, topk_ids_across_dp, layer.is_sequence_parallel)
 
-            topk_weights_across_dp = get_hpu_dp_metadata().topk_weights_across_dp
+            topk_weights_across_dp = dp_metadata.topk_weights_across_dp if dp_metadata is not None else None
             topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, layer.is_sequence_parallel)
 
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])

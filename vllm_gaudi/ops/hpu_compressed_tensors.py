@@ -280,6 +280,10 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
 
         torch.hpu.synchronize()
 
+    @property
+    def is_monolithic(self) -> bool:
+        return True
+
     def create_weights(self, *args, **kwargs) -> None:
         if hpu_ops.is_hpu_gaudi2:
             kwargs['weight_loader'] = hpu_ops.gaudi_weight_wrapper(kwargs.get('weight_loader'))
@@ -344,7 +348,7 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
         layer = hpu_ops.fp8_channel_moe_prepare_weights(layer)
         return
 
-    def apply(
+    def apply_monolithic(
         self,
         layer: FusedMoE,
         x: torch.Tensor,
@@ -354,7 +358,7 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-            topk_weights, topk_ids = layer.select_experts(hidden_states=x, router_logits=router_logits)
+            topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
@@ -363,6 +367,7 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
             topk_weights = topk_weights.to(x.dtype)
         topk_ids = topk_ids.view(*x.shape[:-1], -1)
         topk_weights = topk_weights.view(*x.shape[:-1], -1)
+
         output = layer.moe_op(
             x,
             topk_ids.to(torch.int64),
@@ -701,6 +706,10 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         layer.a13_scale = None
         layer.a2_scale = None
 
+    @property
+    def is_monolithic(self) -> bool:
+        return True
+
     def gptq_hpu_moe_repack(self, b_q_weight: torch.Tensor) -> torch.Tensor:
         num_experts = b_q_weight.shape[0]
         outputs = []
@@ -750,18 +759,17 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
 
         htorch.core.mark_step()
 
-    def apply(
+    def apply_monolithic(
         self,
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
 
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-            topk_weights, topk_ids = layer.select_experts(hidden_states=x, router_logits=router_logits)
+            topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
@@ -770,6 +778,7 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
             topk_weights = topk_weights.to(x.dtype)
         topk_ids = topk_ids.view(*x.shape[:-1], -1)
         topk_weights = topk_weights.view(*x.shape[:-1], -1)
+
         output = layer.moe_op(
             x,
             topk_ids.to(torch.int64),
@@ -837,7 +846,7 @@ class HPUCompressedTensorsConfig(CompressedTensorsConfig):
         layer: torch.nn.Module,
         prefix: str,
     ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import MLAAttention
+        from vllm.model_executor.layers.attention import MLAAttention
         if isinstance(layer, MLAAttention):
             return HPUCompressedTensorsKVCacheMethodForMLA(self)
         else:
