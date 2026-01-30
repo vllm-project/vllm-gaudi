@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# Added by the IBM Team, 2024
+# Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/mamba_mixer2.py
+
 import torch
 from torch import nn
 
@@ -39,10 +42,8 @@ from vllm_gaudi.ops.causal_conv1d_pytorch import (
 from vllm_gaudi.ops.ssd_combined import hpu_mamba_chunk_scan_combined_varlen
 from vllm_gaudi.ops.ops_selector import get_selective_state_update_impl
 
-# Added by the IBM Team, 2024
 
-
-# Adapted from transformers.models.mamba2.modeling_mamba2.MambaRMSNormGated
+# Adapted from vllm.model_executor.layers.mamba.mamba_mixer2.Mixer2RMSNormGated
 @Mixer2RMSNormGated.register_oot
 class HPUMixer2RMSNormGated(Mixer2RMSNormGated):
 
@@ -124,7 +125,7 @@ class HPUMixer2RMSNormGated(Mixer2RMSNormGated):
         return self.weight * x.to(input_dtype)
 
 
-# Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
+# Adapted from vllm.model_executor.layers.mamba.mamba_mixer2.MambaMixer2
 @MambaMixer2.register_oot
 class HPUMambaMixer2(MambaMixer2):
 
@@ -341,6 +342,7 @@ class HPUMambaMixer2(MambaMixer2):
             # conv_state = (..., dim, width-1) yet contiguous along 'dim'
             conv_state = self_kv_cache[0].transpose(-1, -2)
             ssm_state = self_kv_cache[1]
+
             state_indices_tensor = attn_metadata.state_indices_tensor[self.cache_group_idx]
             has_initial_states_p = attn_metadata.has_initial_states_p
             prep_initial_states = attn_metadata.prep_initial_states

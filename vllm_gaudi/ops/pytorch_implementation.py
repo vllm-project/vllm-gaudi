@@ -1,4 +1,4 @@
-# Copyright (C) 2024 Habana Labs, Ltd. an Intel Company.
+# Copyright (C) 2024-2026 Habana Labs, Ltd. an Intel Company.
 
 import torch
 import torch.nn.functional as F

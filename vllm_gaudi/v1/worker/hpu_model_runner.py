@@ -61,7 +61,7 @@ from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingType
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_map_leaves
 from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy)
@@ -73,7 +73,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
-    KVCacheTensor,
     MLAAttentionSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -761,6 +760,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         self.num_mamba_layers = self.model_config.get_num_layers_by_block_type(self.parallel_config, "mamba")
         self.mamba_chunk_size = self.model_config.get_mamba_chunk_size() if self.num_mamba_layers > 0 else 0
+        self.use_hybrid_cache = os.getenv('VLLM_USE_HYBRID_CACHE', 'false').strip().lower() in ("1", "true")
+        self.use_naive_mamba_cache_sharing = os.getenv('VLLM_USE_NAIVE_MAMBA_CACHE_SHARING',
+                                                       'false').strip().lower() in ("1", "true")
 
         # Lazy initialization
         # self.model: nn.Module  # set after load_model
@@ -4171,13 +4173,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                    f"free_mem:{free_mem}")
         tqdm.write(msg)
 
-    def log_warmup_multimodal(self, phase, i, max_i, batch_size, seq_len, w, h, f):
+    def log_warmup_multimodal(self, phase, i, max_i, batch_size, seq_len, w, h):
         free_mem = format_bytes(HabanaMemoryProfiler.current_free_device_memory())
         msg = (f"[Warmup][{phase}][{i+1}/{max_i}] "
                f"batch_size:{batch_size} "
                f"seq_len:{seq_len} "
                f"resolution:{w}X{h} "
-               f"frames:{f} "
                f"free_mem:{free_mem}")
         logger.info(msg)
 
@@ -4855,42 +4856,26 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self,
         modality: str,
         image_args: int,
-        ratio_w: int,
-        ratio_h: int,
+        width: int,
+        height: int,
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
         assert self.mm_budget is not None
+        num_frames = 100
         count = 1
-        num_frames = 0
-        batch = image_args if self.get_model().vision_bucket_manager.is_batch_based else count
         if self.get_model().vision_bucket_manager.is_batch_based:
-            # Create ImageDummyOptions for Gemma3
-            w = 896  # pixels as in gemma3 config
-            h = 896  # pixels as in gemma3 config
             batch = image_args
         else:
-            patch_size = int(self.get_patch_size_from_model())
-            # Calculate width and height to maintain aspect ratio and patch count
-            # Total patches = (width/patch_size) * (height/patch_size)
-            # We want: (w/ps) * (h/ps) = num_patch where num_patch is image_args
-            # And: w/h = ratio_w/ratio_h
-            grid_w = int(math.sqrt(image_args * ratio_w / ratio_h))
-            grid_h = int(image_args / grid_w)
-            w = grid_w * patch_size
-            h = grid_h * patch_size
+            mm_options = self.model_config.get_multimodal_config().get_dummy_options(modality)
+            count = mm_options.count if mm_options and hasattr(mm_options, 'count') else count
             batch = count
-
         if modality == 'image':
-            mm_options = {"image": ImageDummyOptions(count=count, width=w, height=h), "video": None}
+            mm_options = {"image": ImageDummyOptions(count=count, width=width, height=height), "video": None}
         elif modality == 'video':
-            video_options = self.model_config.get_multimodal_config().get_dummy_options("video")
-            num_frames = video_options.num_frames if video_options and hasattr(video_options, 'num_frames') else 100
-            w = video_options.width if video_options and hasattr(video_options, 'width') else w
-            h = video_options.height if video_options and hasattr(video_options, 'height') else h
-            count = video_options.count if video_options and hasattr(video_options, 'count') else 1
+            num_frames = mm_options.num_frames if mm_options and hasattr(mm_options, 'num_frames') else num_frames
             mm_options = {
                 "image": None,
-                "video": VideoDummyOptions(count=count, num_frames=num_frames, width=w, height=h)
+                "video": VideoDummyOptions(count=count, num_frames=num_frames, width=width, height=height)
             }
         else:
             raise NotImplementedError(f"Modality '{modality}' is not supported")
@@ -4900,6 +4885,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         dummy_mm_inputs = profiler._get_dummy_mm_inputs(seq_len=4196,
                                                         mm_counts={modality: count},
                                                         mm_options=mm_options)
+
         dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
         # We use the cache so that the item is saved to the cache,
         # but not read from the cache
@@ -4911,7 +4897,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             dummy_mm_items,
             device=self.device,
             pin_memory=self.pin_memory,
-        )), w, h, num_frames
+        ))
 
     def warmup_multimodal_graphs(self, buckets):
 
@@ -4922,44 +4908,63 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             self.scheduler_config,
             self.mm_registry,
         ) if self.supports_mm_inputs else None
+        vision_bucket_manager = self.get_model().vision_bucket_manager
+        is_batch_based = vision_bucket_manager.is_batch_based
+        mm_config = self.model_config.get_multimodal_config()
 
-        sanity_check = self.get_model().vision_bucket_manager.is_batch_based
+        is_image_warmup = (mm_config is not None and mm_config.get_dummy_options("image") is not None
+                           and self.mm_budget.mm_limits['image'] != 0)
+        is_video_warmup = (mm_config is not None and mm_config.get_dummy_options("video") is not None
+                           and self.mm_budget.mm_limits['video'] != 999)
+        warmup_configs = {
+            "image": (0, lambda: mm_config.get_dummy_options("image")),
+            "video": (999, lambda: mm_config.get_dummy_options("video"))
+        }
+        width = height = None
+        warmup_lists = []
+        for modality, (limit_value, get_options) in warmup_configs.items():
+            if (mm_config and mm_config.get_dummy_options(modality)
+                    and self.mm_budget.mm_limits[modality] != limit_value):
+                options = get_options()
+                width = options.width if hasattr(options, 'width') else None
+                height = options.height if hasattr(options, 'height') else None
+                if width is not None and height is not None:
+                    warmup_lists.append((width, height))
+                break
 
-        aspect_ratios = [
-            (1, 1),  # 1:1 square
-            (4, 3),  # 4:3 landscape
-            (3, 4),  # 3:4 portrait
-            (16, 9),  # 16:9 widescreen
-            (9, 16),  # 9:16 portrait
-        ]
-
-        is_video_warmup = bool(self.model_config.get_multimodal_config() is not None and \
-                self.model_config.get_multimodal_config().get_dummy_options("video") is not None \
-                    and self.mm_budget.mm_limits['video'] != 999)
-
-        is_image_warmup = bool(self.model_config.get_multimodal_config() is not None and \
-                self.model_config.get_multimodal_config().get_dummy_options("image") is not None \
-                    and self.mm_budget.mm_limits['image'] != 0)
+        if not is_batch_based and len(buckets) > 0:
+            patch_size = int(self.get_patch_size_from_model())
+            warmup_lists = warmup_lists + \
+                vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
         for modality, max_items in self.mm_budget.mm_limits.items():
             if modality == 'image' and not is_image_warmup or modality == 'video' \
                 and not is_video_warmup:
                 continue
             phase = f'Graph/Multimodal({modality})'
-            num_candidates = len(buckets)
-            for idx, img_arg in enumerate(buckets):
-                for (ratio_w, ratio_h) in aspect_ratios:
-                    batched_dummy_mm_inputs, w, h, f = self._get_mm_dummy_batch(modality, img_arg, ratio_w, ratio_h)
-                    dummy_encoder_outputs = \
-                        self.model.embed_multimodal(
-                        **batched_dummy_mm_inputs)
-                    if sanity_check:
-                        sanity_check_mm_encoder_outputs(
-                            dummy_encoder_outputs,
-                            expected_num_items=img_arg,
-                        )
-
-                    self.graphed_buckets.add(img_arg)
-                    self.log_warmup_multimodal(phase, idx, num_candidates, 1, 0, w, h, f)
+            candidates = buckets if is_batch_based else warmup_lists
+            for idx in range(len(candidates)):
+                if is_batch_based:
+                    image_args = candidates[idx]
+                    width = 896  # pixels as in gemma3 config
+                    height = 896  # pixels as in gemma3 config
+                else:
+                    image_args = None
+                    width, height = candidates[idx]
+                batched_dummy_mm_inputs = self._get_mm_dummy_batch(modality,
+                                                                   image_args=image_args,
+                                                                   width=width,
+                                                                   height=height)
+                dummy_encoder_outputs = \
+                    self.model.embed_multimodal(
+                    **batched_dummy_mm_inputs)
+                if is_batch_based:
+                    sanity_check_mm_encoder_outputs(
+                        dummy_encoder_outputs,
+                        expected_num_items=candidates[idx],
+                    )
+                    self.graphed_buckets.add(candidates[idx])
+                self.log_warmup_multimodal(phase, idx, len(candidates), candidates[idx] if is_batch_based else 1, 0,
+                                           width, height)
 
     def _maybe_profile_unified_attn(self):
         unified_cfg_str = os.environ.get('VLLM_PROFILE_UNIFIED', None)
@@ -5337,136 +5342,159 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             )
 
         self.initialize_attn_backend(kv_cache_config)
-
-        # TODO: Enable new once memory and shapes calculation is done
-        # for kv_cache_tensor in []: # kv_cache_config.kv_cache_tensors:
-        #     # taking into account dummy block
-        #     size = (kv_cache_tensor.size +
-        #             2 * kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes)
-        #     tensor = torch.zeros(size, dtype=torch.int8, device=self.device)
-        #     for layer_name in kv_cache_tensor.shared_by:
-        #         kv_caches[layer_name] = tensor
-
-        # for group in []:# kv_cache_config.kv_cache_groups:
-        #     kv_cache_spec = group.kv_cache_spec
-        #     for layer_name in group.layer_names:
-        #         kv_cache_spec = group.kv_cache_spec
-        #         for kk in kv_cache_config.kv_cache_tensors:
-        #             if layer_name in kk.shared_by:
-        #                 kv_cache_tensor_size = kk.size
-        #                 break
-        #         num_blocks = \
-        #             kv_cache_tensor_size // kv_cache_spec.page_size_bytes
-        #         if isinstance(kv_cache_spec, FullAttentionSpec):
-        #             reshaped = kv_caches[layer_name].view(kv_cache_spec.dtype).reshape(
-        #                 2, (num_blocks + 1) * kv_cache_spec.block_size,
-        #                 kv_cache_spec.num_kv_heads, kv_cache_spec.head_size
-        #             )
-        #             kc, vc = reshaped.unbind()  # (key cache, val cache)
-        #             # adding None for scales for dynamic quantization for now, TODO: change that once needed
-        #             kv_caches[layer_name] = (kc, vc, None, None)
-        #         elif isinstance(kv_cache_spec, MambaSpec):
-        #             # This is almost the same as for gpu runner in vllm
-        #             # only change is + 1 for dummy block
-        #             raw_tensor = kv_caches[layer_name]
-        #             state_tensors = []
-        #             storage_offset_bytes = 0
-        #             for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-        #                 dtype_size = get_dtype_size(dtype)
-        #                 num_element_per_page = (
-        #                     kv_cache_spec.page_size_bytes // dtype_size
-        #                 )
-        #                 target_shape = (num_blocks + 1, *shape)
-        #                 stride = torch.empty(target_shape).stride()
-        #                 target_stride = (num_element_per_page, *stride[1:])
-        #                 assert storage_offset_bytes % dtype_size == 0
-        #                 tensor = torch.as_strided(
-        #                     raw_tensor.view(dtype),
-        #                     size=target_shape,
-        #                     stride=target_stride,
-        #                     storage_offset=storage_offset_bytes // dtype_size,
-        #                 )
-        #                 state_tensors.append(tensor)
-        #                 storage_offset_bytes += stride[0] * dtype_size
-        #             # TODO: verify if below needed for dynamic quantization
-        #             # state_tensors.append(None)
-        #             # state_tensors.append(None)
-        #             kv_caches[layer_name] = tuple(state_tensors)
-        #         else:
-        #             pass
-
-        # TODO: Use below only for non-hybrid
-        # build a map from layer_name -> KVCacheTensor
-        tensor_map: dict[str, KVCacheTensor] = {}
-        for tensor in kv_cache_config.kv_cache_tensors:
-            for lname in tensor.shared_by:
-                tensor_map[lname] = tensor
-
         kv_caches: dict[str, torch.Tensor] = {}
-        kv_cache_sizes = {}
-        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            for layer_name in kv_cache_tensor.shared_by:
-                # Get the correct spec for this layer
-                kv_cache_spec = None
-                for group in kv_cache_config.kv_cache_groups:
-                    if layer_name in group.layer_names:
-                        kv_cache_spec = group.kv_cache_spec
-                        break
-                assert kv_cache_spec is not None, f"No spec found for {layer_name}"
-                assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
-                num_blocks = \
-                    kv_cache_tensor.size // kv_cache_spec.page_size_bytes
-                # `num_blocks` is the number of blocks the model runner can use.
-                # `kv_cache_config.num_blocks` is the number of blocks that
-                # KVCacheManager may allocate.
-                # Since different GPUs may have different number of layers and
-                # different memory capacities, `num_blocks` can be different on
-                # different GPUs, and `kv_cache_config.num_blocks` is set to
-                # the min of all `num_blocks`. Verify it here.
-                assert num_blocks >= kv_cache_config.num_blocks
-                if isinstance(kv_cache_spec, FullAttentionSpec):
-                    kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
-                                                                          kv_cache_spec.num_kv_heads,
-                                                                          kv_cache_spec.head_size)
-                    v_cache_shape = None if self.model_config.use_mla else kv_cache_shape
-                    dtype = kv_cache_spec.dtype
-                    if dtype == torch.float8_e4m3fn and os.environ.get('QUANT_CONFIG', None) is not None and \
-                        os.environ.get('VLLM_DYNAMIC_KV_QUANT', None) is not None and not self.model_config.use_mla:
-                        create_dynamic_scales = True
-                    else:
-                        create_dynamic_scales = False
-                    min_val = torch.finfo(torch.bfloat16).tiny
-                    kv_scales_shape = list(kv_cache_shape)
-                    kv_scales_shape[-1] = 1
-                    key_cache = torch.zeros(kv_cache_shape, dtype=dtype, device=self.device)
-                    # initialize scale tensor with minimal scale values
-                    key_scales = torch.ones(kv_scales_shape, dtype=torch.bfloat16, device=self.device) * min_val if \
-                        create_dynamic_scales else None
-                    if v_cache_shape is not None:
-                        value_cache = torch.zeros(v_cache_shape, dtype=dtype, device=self.device)
-                        value_scales_on_T = torch.ones(kv_scales_shape, dtype=torch.bfloat16, device=self.device) * \
-                            min_val if create_dynamic_scales else None
-                        value_scales_on_hidden = torch.ones(
-                            [num_blocks + 1, kv_cache_spec.num_kv_heads, kv_cache_spec.head_size],
-                            dtype=torch.bfloat16,
-                            device=self.device) * min_val if create_dynamic_scales else None
-                        value_scales = (value_scales_on_T, value_scales_on_hidden) if create_dynamic_scales else None
-                    else:
-                        value_cache = None
-                        value_scales = None
-                    kv_caches[layer_name] = (key_cache, value_cache, key_scales, value_scales)
-                elif isinstance(kv_cache_spec, MambaSpec):
-                    state_tensors = []
-                    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                        target_shape = (num_blocks + 1, *shape)
-                        tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
-                        state_tensors.append(tensor)
-                    kv_caches[layer_name] = state_tensors
-                else:
-                    raise ValueError(f"Unknown KV cache spec type for layer {layer_name}: {type(kv_cache_spec)}")
 
-            for lname in kv_cache_tensor.shared_by:
-                kv_cache_sizes[lname] = kv_cache_tensor.size
+        if self.use_hybrid_cache and self.num_mamba_layers > 0:
+            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+                # taking into account dummy block
+                size = (kv_cache_tensor.size + kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes)
+                tensor = torch.zeros(size // 2, dtype=torch.bfloat16, device=self.device)
+                for layer_name in kv_cache_tensor.shared_by:
+                    kv_caches[layer_name] = tensor
+            for group in kv_cache_config.kv_cache_groups:
+                kv_cache_spec = group.kv_cache_spec
+                for layer_name in group.layer_names:
+                    kv_cache_spec = group.kv_cache_spec
+                    for kk in kv_cache_config.kv_cache_tensors:
+                        if layer_name in kk.shared_by:
+                            kv_cache_tensor_size = kk.size
+                            break
+                    num_blocks = \
+                        kv_cache_tensor_size // kv_cache_spec.page_size_bytes
+                    if isinstance(kv_cache_spec, FullAttentionSpec):
+                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
+                                                                              kv_cache_spec.num_kv_heads,
+                                                                              kv_cache_spec.head_size)
+                        # here attn does not share kv cache tensor, so we create separate tensors
+                        kc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
+                        vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
+                        kv_caches[layer_name] = (kc, vc, None, None)
+                    elif isinstance(kv_cache_spec, MambaSpec):
+                        # This is almost the same as for gpu runner in vllm
+                        # only change is + 1 for dummy block
+                        raw_tensor = kv_caches[layer_name]
+                        state_tensors = []
+                        storage_offset_bytes = 0
+                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                            dtype_size = get_dtype_size(dtype)
+                            num_element_per_page = (kv_cache_spec.page_size_bytes // dtype_size)
+                            target_shape = (num_blocks + 1, *shape)
+                            stride = torch.empty(target_shape).stride()
+                            target_stride = (num_element_per_page, *stride[1:])
+                            assert storage_offset_bytes % dtype_size == 0
+                            tensor = torch.as_strided(
+                                raw_tensor,
+                                size=target_shape,
+                                stride=target_stride,
+                                storage_offset=storage_offset_bytes // dtype_size,
+                            )
+                            state_tensors.append(tensor)
+                            storage_offset_bytes += stride[0] * dtype_size
+                        kv_caches[layer_name] = tuple(state_tensors)
+                    else:
+                        pass
+        elif self.use_naive_mamba_cache_sharing and self.num_mamba_layers > 0:
+            for group in kv_cache_config.kv_cache_groups:
+                kv_cache_spec = group.kv_cache_spec
+                for layer_name in group.layer_names:
+                    kv_cache_spec = group.kv_cache_spec
+                    for kk in kv_cache_config.kv_cache_tensors:
+                        if layer_name in kk.shared_by:
+                            kv_cache_tensor_size = kk.size
+                            break
+                    num_blocks = \
+                        kv_cache_tensor_size // kv_cache_spec.page_size_bytes
+                    if isinstance(kv_cache_spec, FullAttentionSpec):
+                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
+                                                                              kv_cache_spec.num_kv_heads,
+                                                                              kv_cache_spec.head_size)
+                        # here attn does not share kv cache tensor, so we create separate tensors
+                        kc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
+                        vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
+                        kv_caches[layer_name] = (kc, vc, None, None)
+                    elif isinstance(kv_cache_spec, MambaSpec):
+                        # skip if already created by another layer sharing the same kv cache tensor
+                        if layer_name in kv_caches:
+                            continue
+                        state_tensors = []
+                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                            target_shape = (num_blocks + 1, *shape)
+                            tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
+                            state_tensors.append(tensor)
+                        # find other layers sharing the same kv cache tensor and
+                        # populate all of them with the same tensor pair
+                        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+                            if layer_name not in kv_cache_tensor.shared_by:
+                                continue
+                            for shared_layer in kv_cache_tensor.shared_by:
+                                kv_caches[shared_layer] = tuple(state_tensors)
+                            break
+                    else:
+                        pass
+        else:  # non-hybrid scenario
+            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+                for layer_name in kv_cache_tensor.shared_by:
+                    # Get the correct spec for this layer
+                    kv_cache_spec = None
+                    for group in kv_cache_config.kv_cache_groups:
+                        if layer_name in group.layer_names:
+                            kv_cache_spec = group.kv_cache_spec
+                            break
+                    assert kv_cache_spec is not None, f"No spec found for {layer_name}"
+                    assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
+                    num_blocks = \
+                        kv_cache_tensor.size // kv_cache_spec.page_size_bytes
+                    # `num_blocks` is the number of blocks the model runner can use.
+                    # `kv_cache_config.num_blocks` is the number of blocks that
+                    # KVCacheManager may allocate.
+                    # Since different GPUs may have different number of layers and
+                    # different memory capacities, `num_blocks` can be different on
+                    # different GPUs, and `kv_cache_config.num_blocks` is set to
+                    # the min of all `num_blocks`. Verify it here.
+                    assert num_blocks >= kv_cache_config.num_blocks
+                    if isinstance(kv_cache_spec, FullAttentionSpec):
+                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
+                                                                              kv_cache_spec.num_kv_heads,
+                                                                              kv_cache_spec.head_size)
+                        v_cache_shape = None if self.model_config.use_mla else kv_cache_shape
+                        dtype = kv_cache_spec.dtype
+                        if dtype == torch.float8_e4m3fn and os.environ.get('QUANT_CONFIG', None) is not None and \
+                            os.environ.get('VLLM_DYNAMIC_KV_QUANT', None) is not None and not self.model_config.use_mla:
+                            create_dynamic_scales = True
+                        else:
+                            create_dynamic_scales = False
+                        min_val = torch.finfo(torch.bfloat16).tiny
+                        kv_scales_shape = list(kv_cache_shape)
+                        kv_scales_shape[-1] = 1
+                        key_cache = torch.zeros(kv_cache_shape, dtype=dtype, device=self.device)
+                        # initialize scale tensor with minimal scale values
+                        key_scales = \
+                            torch.ones(kv_scales_shape, dtype=torch.bfloat16, device=self.device) * min_val \
+                            if create_dynamic_scales else None
+                        if v_cache_shape is not None:
+                            value_cache = torch.zeros(v_cache_shape, dtype=dtype, device=self.device)
+                            value_scales_on_T = \
+                                torch.ones(kv_scales_shape, dtype=torch.bfloat16, device=self.device) * min_val \
+                                if create_dynamic_scales else None
+                            value_scales_on_hidden = torch.ones(
+                                [num_blocks + 1, kv_cache_spec.num_kv_heads, kv_cache_spec.head_size],
+                                dtype=torch.bfloat16,
+                                device=self.device) * min_val if create_dynamic_scales else None
+                            value_scales = (value_scales_on_T,
+                                            value_scales_on_hidden) if create_dynamic_scales else None
+                        else:
+                            value_cache = None
+                            value_scales = None
+                        kv_caches[layer_name] = (key_cache, value_cache, key_scales, value_scales)
+                    elif isinstance(kv_cache_spec, MambaSpec):
+                        state_tensors = []
+                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                            target_shape = (num_blocks + 1, *shape)
+                            tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
+                            state_tensors.append(tensor)
+                        kv_caches[layer_name] = state_tensors
+                    else:
+                        raise ValueError(f"Unknown KV cache spec type for layer {layer_name}: {type(kv_cache_spec)}")
 
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
