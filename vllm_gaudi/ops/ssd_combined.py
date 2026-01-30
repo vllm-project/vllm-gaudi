@@ -4,6 +4,8 @@
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 # Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/ops/triton/ssd_combined.py
 
+# Adapted from https://github.com/vllm-project/vllm/blob/releases/v0.14.1/vllm/model_executor/layers/mamba/ops/ssd_combined.py
+
 # ruff: noqa: E501
 
 import torch
@@ -17,7 +19,6 @@ def is_int_pow_2(n):
     return isinstance(n, int) and n > 0 and (n & (n - 1)) == 0
 
 
-#@torch.compiler.disable
 def _mamba_chunk_scan_combined_fwd(
         x,
         dt,
@@ -125,7 +126,6 @@ def _mamba_chunk_scan_combined_fwd(
     return states
 
 
-#@torch.compiler.disable
 def hpu_mamba_chunk_scan_combined_varlen(
         x,
         dt,

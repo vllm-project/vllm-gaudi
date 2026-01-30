@@ -1,13 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# Copyright (c) 2024, Tri Dao.
+# Adapted from https://github.com/Dao-AILab/causal-conv1d/blob/main/causal_conv1d/causal_conv1d_interface.py
 """PyTorch reference implementation for the causal conv1d kernels.
 
-This module mirrors the public APIs in ``causal_conv1d.py`` but executes with
-standard PyTorch tensor ops. The implementation favors readability and
-correctness which makes it suitable for testing and CPU execution. It does not
-implement Triton-specific optimizations such as the advanced block-level
-prefix-caching metadata. When those arguments are supplied a
-``NotImplementedError`` is raised to surface the limitation explicitly.
+This module mirrors the public APIs in:
+https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/ops/causal_conv1d.py
+but executes with standard PyTorch tensor ops. The implementation favors
+readability and correctness which makes it suitable for testing and CPU
+execution.  It does not implement Triton-specific optimizations such as the
+advanced block-level prefix-caching metadata. When those arguments are
+supplied a ``NotImplementedError`` is raised to surface the limitation
+explicitly.
 """
 
 from __future__ import annotations
