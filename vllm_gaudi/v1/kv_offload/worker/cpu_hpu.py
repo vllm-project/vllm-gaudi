@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import deque
+from dataclasses import dataclass
 
 import numpy as np
 import os
@@ -9,21 +10,30 @@ import torch
 
 from collections.abc import Iterator
 from typing import Literal
-from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_offload.mediums import BlockIDsLoadStoreSpec
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
-    TransferResult,
     TransferSpec,
 )
 from vllm.v1.kv_offload.cpu import CPUOffloadingSpec
 from vllm.v1.kv_offload.abstract import LoadStoreSpec
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
+from vllm.v1.kv_offload.worker.cpu_gpu import (SingleDirectionOffloadingHandler, CpuGpuOffloadingHandlers)
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class Transfer:
+    job_id: int
+    stream: torch.hpu.Stream
+    start_event: torch.Event
+    end_event: torch.Event
+    num_bytes: int
+
 
 is_hetero = os.getenv('PT_HPU_ENABLE_RESTORE_KV_LAYOUT', '0') == '1'
 block_factor = int(os.getenv('PT_HPU_BLOCK_SIZE_FACTOR', '1'))
@@ -137,237 +147,211 @@ def expand_block_ids(
         output_idx = output_end_idx
 
 
-class SingleDirectionOffloadingHandlerHpu(OffloadingHandler):
+def SingleDirectionOffloadingHandler_init_(
+    self,
+    src_tensors: list[torch.Tensor],
+    dst_tensors: list[torch.Tensor],
+    src_block_size_factor: int,
+    dst_block_size_factor: int,
+):
     """
-    SingleDirectionOffloadingHandlerHpu handles transfers for a single direction,
-    either CPU->GPU or GPU->CPU.
-    Transfers are guaranteed to be executed in order of their submission.
-    Each transfer uses a unique CUDA stream, and its stream will start
-    executing only after the streams of previous transfers have finished.
+    Initialize a SingleDirectionOffloadingHandler.
+
+    Args:
+        src_tensors: list of KV cache tensors to copy from.
+        dst_tensors: list of KV cache tensors to copy to.
+            Order should match src_tensors.
+        src_block_size_factor: The number of kernel blocks
+            per KV block in a source tensor.
+        dst_block_size_factor: The number of kernel blocks
+            per KV block in a destination tensor.
     """
+    assert len(src_tensors) == len(dst_tensors)
 
-    def __init__(
-        self,
-        src_tensors: list[torch.Tensor],
-        dst_tensors: list[torch.Tensor],
-        kv_dim_before_num_blocks: list[bool],
-        src_block_size_factor: int,
-        dst_block_size_factor: int,
-    ):
-        """
-        Initialize a SingleDirectionOffloadingHandlerHpu.
+    self.src_tensors: list[torch.Tensor] = src_tensors  # type: ignore[misc]
+    self.dst_tensors: list[torch.Tensor] = dst_tensors  # type: ignore[misc]
+    min_block_size_factor = min(src_block_size_factor, dst_block_size_factor)
+    self.src_block_size_factor: int = src_block_size_factor // min_block_size_factor  # type: ignore[misc]
+    self.dst_block_size_factor: int = dst_block_size_factor // min_block_size_factor  # type: ignore[misc]
 
-        Args:
-            src_tensors: list of KV cache tensors to copy from.
-            dst_tensors: list of KV cache tensors to copy to.
-                Order should match src_tensors.
-            kv_dim_before_num_blocks: list of bools, indicating
-                whether the respective KV cache tensor has a KV
-                dimension before its num_blocks dimension.
-                e.g. (2, num_blocks, ...)
-            src_block_size_factor: The number of kernel blocks
-                per KV block in a source tensor.
-            dst_block_size_factor: The number of kernel blocks
-                per KV block in a destination tensor.
-        """
-        assert len(src_tensors) == len(dst_tensors) == len(kv_dim_before_num_blocks)
+    self.block_size_in_bytes = [
+        tensor[0].element_size() * tensor[0].stride(0) * min_block_size_factor for tensor in src_tensors
+    ]
+    self.total_block_size_in_bytes = sum(self.block_size_in_bytes)
 
-        self.src_tensors: list[torch.Tensor] = src_tensors
-        self.dst_tensors: list[torch.Tensor] = dst_tensors
-        self.kv_dim_before_num_blocks: list[bool] = kv_dim_before_num_blocks
-        self.src_block_size_factor: int = src_block_size_factor
-        self.dst_block_size_factor: int = dst_block_size_factor
-
-        assert len(src_tensors) > 0
-        # self.gpu_to_cpu: bool = self.src_tensors[0].is_cuda
-        self.gpu_to_cpu: bool = self.src_tensors[0].device.type == "hpu"
-
-        # job_id -> event
-        self._transfer_events: dict[int, torch.Event] = {}
-        # queue of transfers (job_id, stream, event)
-        self._transfers: deque[tuple[int, torch.hpu.Stream, torch.Event]] = deque()
-        # list of CUDA streams available for re-use
-        self._stream_pool: list[torch.hpu.Stream] = []
-        # list of CUDA events available for re-use
-        self._event_pool: list[torch.Event] = []
-
-    def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
-        src_spec, dst_spec = transfer_spec
-        assert isinstance(src_spec, BlockIDsLoadStoreSpec)
-        assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
-
-        src_blocks = src_spec.block_ids
-        dst_blocks = dst_spec.block_ids
-        assert src_blocks.ndim == 1
-        assert dst_blocks.ndim == 1
-
-        src_sub_block_count = src_blocks.size * self.src_block_size_factor
-        dst_sub_block_count = dst_blocks.size * self.dst_block_size_factor
-        src_sub_blocks_to_skip = -dst_blocks.size % self.src_block_size_factor
-
-        assert dst_sub_block_count == src_sub_block_count - src_sub_blocks_to_skip
-
-        src_to_dst = np.empty((dst_sub_block_count, 2), dtype=np.int64)
-        expand_block_ids(
-            src_blocks,
-            self.src_block_size_factor,
-            src_to_dst[:, 0],
-            skip_count=src_sub_blocks_to_skip,
-        )
-        expand_block_ids(dst_blocks, self.dst_block_size_factor, src_to_dst[:, 1])
-        src_to_dst_tensor = torch.from_numpy(src_to_dst)
-
-        stream = self._stream_pool.pop() if self._stream_pool else torch.hpu.Stream()
-        event = self._event_pool.pop() if self._event_pool else torch.Event()
-
-        if self.gpu_to_cpu:
-            # wait for model computation to finish before offloading
-            stream.wait_stream(torch.hpu.current_stream())
-        if self._transfers:
-            _, _, last_event = self._transfers[-1]
-            # assure job will start only after the previous one completes
-            stream.wait_event(last_event)
-
-        with torch.hpu.stream(stream):
-            for src_tensor, dst_tensor, kv_dim in zip(self.src_tensors, self.dst_tensors,
-                                                      self.kv_dim_before_num_blocks):
-                if kv_dim:
-                    swap_blocks(src_tensor, dst_tensor, src_to_dst_tensor, \
-                                "d2h" if self.src_tensors[0].device.type == "hpu" else "h2d")
-                else:
-                    ops.swap_blocks(src_tensor, dst_tensor, src_to_dst_tensor)
-            event.record(stream)
-
-        self._transfer_events[job_id] = event
-        self._transfers.append((job_id, stream, event))
-
-        # success
-        return True
-
-    def get_finished(self) -> list[TransferResult]:
-        results: list[TransferResult] = []
-        while self._transfers and self._transfers[0][2].query():
-            job_id, stream, event = self._transfers.popleft()
-            results.append((job_id, True))
-            self._stream_pool.append(stream)
-            self._event_pool.append(event)
-            del self._transfer_events[job_id]
-        return results
-
-    def wait(self, job_ids: set[int]):
-        for job_id in job_ids:
-            event = self._transfer_events.get(job_id)
-            if event is not None:
-                event.synchronize()
+    assert len(src_tensors) > 0
+    self.gpu_to_cpu: bool = self.src_tensors[0].device.type == "hpu"  # type: ignore[misc]
+    self.transfer_type = ("GPU", "CPU") if self.gpu_to_cpu else ("CPU", "GPU")
+    # job_id -> event
+    self._transfer_events: dict[int, torch.Event] = {}  # type: ignore[misc]
+    # queue of transfers (job_id, stream, event)
+    self._transfers: deque[Transfer] = deque()  # type: ignore[misc]
+    # list of CUDA streams available for re-use
+    self._stream_pool: list[torch.hpu.Stream] = []  # type: ignore[misc]
+    # list of CUDA events available for re-use
+    self._event_pool: list[torch.Event] = []  # type: ignore[misc]
 
 
-class CpuHpuOffloadingHandlers:
+def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
+    src_spec, dst_spec = transfer_spec
+    assert isinstance(src_spec, BlockIDsLoadStoreSpec)
+    assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
 
-    def __init__(
-        self,
-        gpu_block_size: int,
-        cpu_block_size: int,
-        num_cpu_blocks: int,
-        gpu_caches: dict[str, torch.Tensor],
-        attn_backends: dict[str, type[AttentionBackend]],
-    ):
-        assert gpu_caches
-        assert cpu_block_size % gpu_block_size == 0
-        block_size_factor = cpu_block_size // gpu_block_size
+    src_blocks = src_spec.block_ids
+    dst_blocks = dst_spec.block_ids
+    assert src_blocks.ndim == 1
+    assert dst_blocks.ndim == 1
 
-        pin_memory = is_pin_memory_available()
+    src_sub_block_count = src_blocks.size * self.src_block_size_factor
+    dst_sub_block_count = dst_blocks.size * self.dst_block_size_factor
+    src_sub_blocks_to_skip = -dst_blocks.size % self.src_block_size_factor
 
-        # allocate cpu tensors
-        logger.info("Allocating %d CPU tensors...", len(gpu_caches))
-        gpu_tensors: list[torch.Tensor] = []
-        cpu_tensors: list[torch.Tensor] = []
-        kv_dim_before_num_blocks: list[bool] = []
-        kernel_block_size: int | None = None
-        for layer_name, gpu_tensor in gpu_caches.items():
-            gpu_tensors.append(gpu_tensor)
+    assert dst_sub_block_count == src_sub_block_count - src_sub_blocks_to_skip
 
-            gpu_shape = gpu_tensor.shape
-            attn_backend = attn_backends[layer_name]
-            test_shape = attn_backend.get_kv_cache_shape(
-                num_blocks=1234, block_size=128, num_kv_heads=8,
-                head_size=256)  #(num_blocks * block_size, num_kv_heads, head_size)
-            test_shape = (2, test_shape[0] // 128, 128, test_shape[1], test_shape[2])
+    src_to_dst = np.empty((dst_sub_block_count, 2), dtype=np.int64)
+    expand_block_ids(
+        src_blocks,
+        self.src_block_size_factor,
+        src_to_dst[:, 0],
+        skip_count=src_sub_blocks_to_skip,
+    )
+    expand_block_ids(dst_blocks, self.dst_block_size_factor, src_to_dst[:, 1])
+    src_to_dst_tensor = torch.from_numpy(src_to_dst)
 
-            has_layers_dim = False
-            if len(gpu_shape) != len(test_shape):
-                # cross-layers tensor
-                # shape is (num_blocks, ...)
-                assert len(gpu_shape) == len(test_shape) + 1
-                num_blocks_idx = 0
-                has_layers_dim = True
-                kv_dim_before_num_blocks.append(False)
+    stream = self._stream_pool.pop() if self._stream_pool else torch.hpu.Stream()
+    start_event = (self._event_pool.pop() if self._event_pool else torch.Event(enable_timing=True))
+    end_event = (self._event_pool.pop() if self._event_pool else torch.Event(enable_timing=True))
 
-                # prepend a dummy num_layers=80 to test_shape
-                test_shape = (80, ) + test_shape
-            elif test_shape[0] == 1234:
-                # shape is (num_blocks, ...)
-                num_blocks_idx = 0
-                kv_dim_before_num_blocks.append(False)
-            else:
-                # shape should be (2, num_blocks, ...)
-                assert test_shape[0] == 2
-                assert test_shape[1] == 1234
-                assert gpu_shape[0] == 2
+    if self.gpu_to_cpu:
+        # wait for model computation to finish before offloading
+        stream.wait_stream(torch.hpu.current_stream())
+    if self._transfers:
+        last_transfer: Transfer = self._transfers[-1]
+        last_event = last_transfer.end_event
+        # assure job will start only after the previous one completes
+        stream.wait_event(last_event)
+    with torch.hpu.stream(stream):
+        start_event.record(stream)
+        for src_tensor, dst_tensor, block_size_in_bytes in zip(
+                self.src_tensors,
+                self.dst_tensors,
+                self.block_size_in_bytes,
+        ):
+            swap_blocks(src_tensor, dst_tensor, src_to_dst_tensor, \
+                        "d2h" if self.src_tensors[0].device.type == "hpu" else "h2d")
+        end_event.record(stream)
 
-                num_blocks_idx = 1
-                kv_dim_before_num_blocks.append(True)
+    self._transfer_events[job_id] = end_event
+    self._transfers.append(
+        Transfer(
+            job_id=job_id,
+            stream=stream,
+            start_event=start_event,
+            end_event=end_event,
+            num_bytes=dst_sub_block_count * self.total_block_size_in_bytes,
+        ))
 
-            try:
-                kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                    include_num_layers_dimension=has_layers_dim)
-                assert len(kv_cache_stride_order) == len(gpu_shape)
-            except (AttributeError, NotImplementedError):
-                kv_cache_stride_order = tuple(range(len(gpu_shape)))
+    # success
+    return True
 
-            # permute test_shape according to stride_order
-            test_shape = tuple(test_shape[i] for i in kv_cache_stride_order)
 
-            # find block_size (128) dimension index
-            block_size_idx = test_shape.index(128)
-            if kernel_block_size is not None:
-                assert kernel_block_size == gpu_shape[block_size_idx]
-            else:
-                kernel_block_size = gpu_shape[block_size_idx]
-                assert gpu_block_size % kernel_block_size == 0
+def CpuGpuOffloadingHandlers_init_(
+    self,
+    gpu_block_size: int,
+    cpu_block_size: int,
+    num_cpu_blocks: int,
+    gpu_caches: dict[str, torch.Tensor],
+    attn_backends: dict[str, type[AttentionBackend]],
+):
+    assert gpu_caches
+    assert cpu_block_size % gpu_block_size == 0
 
-            cpu_shape = list(gpu_shape)
-            cpu_shape[num_blocks_idx] = num_cpu_blocks * block_size_factor
+    # find kernel block size and determine layout per each gpu tensor
+    kernel_block_size: int | None = None
+    # list of (gpu_tensor, split_k_and_v)
+    parsed_gpu_tensors: list[tuple[torch.Tensor, bool]] = []
 
-            logger.debug("Allocating CPU tensor of shape %r", cpu_shape)
-            cpu_tensors.append(torch.zeros(
-                cpu_shape,
-                dtype=gpu_tensor.dtype,
-                device="cpu",
-                pin_memory=pin_memory,
-            ))
+    for layer_name, gpu_tensor in gpu_caches.items():
+        gpu_shape = gpu_tensor.shape
+        attn_backend = attn_backends[layer_name]
+        test_shape = attn_backend.get_kv_cache_shape(num_blocks=1234, block_size=128, num_kv_heads=8,
+                                                     head_size=256)  #(num_blocks * block_size, num_kv_heads, head_size)
+        test_shape = (2, test_shape[0] // 128, 128, test_shape[1], test_shape[2])
 
-        assert kernel_block_size is not None
-        gpu_block_size_factor = gpu_block_size // kernel_block_size
-        cpu_block_size_factor = cpu_block_size // kernel_block_size
+        has_layers_dim = False
+        split_k_and_v = False
+        if len(gpu_shape) != len(test_shape):
+            # cross-layers tensor
+            # shape is (num_blocks, ...)
+            assert len(gpu_shape) == len(test_shape) + 1
+            has_layers_dim = True
+            # prepend a dummy num_layers=80 to test_shape
+            test_shape = (80, ) + test_shape
+        elif test_shape[0] != 1234:
+            # shape should be (2, num_blocks, ...)
+            assert test_shape[0] == 2
+            assert test_shape[1] == 1234
+            assert gpu_shape[0] == 2
+            # split_k_and_v = True # Not for hpu case
 
-        # TODO (orozery): adapt swap_blocks to support gpu_block_size_factor
-        assert gpu_block_size_factor == 1
+        try:
+            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(include_num_layers_dimension=has_layers_dim)
+            assert len(kv_cache_stride_order) == len(gpu_shape)
+        except (AttributeError, NotImplementedError):
+            kv_cache_stride_order = tuple(range(len(gpu_shape)))
 
-        self.gpu_to_cpu_handler = SingleDirectionOffloadingHandlerHpu(
-            src_tensors=gpu_tensors,
-            dst_tensors=cpu_tensors,
-            kv_dim_before_num_blocks=kv_dim_before_num_blocks,
-            src_block_size_factor=gpu_block_size_factor,
-            dst_block_size_factor=cpu_block_size_factor,
+        # permute test_shape according to stride_order
+        test_shape = tuple(test_shape[i] for i in kv_cache_stride_order)
+
+        # find block_size (128) dimension index
+        block_size_idx = test_shape.index(128)
+        if kernel_block_size is not None:
+            assert kernel_block_size == gpu_shape[block_size_idx]
+        else:
+            kernel_block_size = gpu_shape[block_size_idx]
+            assert gpu_block_size % kernel_block_size == 0
+
+        parsed_gpu_tensors.append((gpu_tensor, split_k_and_v))
+
+    # len(parsed_gpu_tensors) is 16
+    assert kernel_block_size is not None
+    cpu_block_size_factor = cpu_block_size // kernel_block_size
+    gpu_block_size_factor = gpu_block_size // kernel_block_size
+    num_cpu_kernel_blocks = num_cpu_blocks * cpu_block_size_factor
+
+    # allocate cpu tensors
+    pin_memory = is_pin_memory_available()
+    logger.info("Allocating %d CPU tensors...", len(parsed_gpu_tensors))
+    gpu_tensors: list[torch.Tensor] = []
+    cpu_tensors: list[torch.Tensor] = []
+    for gpu_tensor, split_k_and_v in parsed_gpu_tensors:
+        cpu_shape = list(gpu_tensor.shape)
+        cpu_shape[1] = num_cpu_kernel_blocks
+
+        logger.debug("Allocating CPU tensor of shape %r", cpu_shape)
+        cpu_tensor = torch.zeros(
+            cpu_shape,
+            dtype=gpu_tensor.dtype,
+            device="cpu",
+            pin_memory=pin_memory,
         )
 
-        self.cpu_to_gpu_handler = SingleDirectionOffloadingHandlerHpu(
-            src_tensors=cpu_tensors,
-            dst_tensors=gpu_tensors,
-            kv_dim_before_num_blocks=kv_dim_before_num_blocks,
-            src_block_size_factor=cpu_block_size_factor,
-            dst_block_size_factor=gpu_block_size_factor,
-        )
+        gpu_tensors.extend(gpu_tensor.unbind(0) if split_k_and_v else [gpu_tensor])
+        cpu_tensors.extend(cpu_tensor.unbind(0) if split_k_and_v else [cpu_tensor])
+
+    self.gpu_to_cpu_handler = SingleDirectionOffloadingHandler(
+        src_tensors=gpu_tensors,
+        dst_tensors=cpu_tensors,
+        src_block_size_factor=gpu_block_size_factor,
+        dst_block_size_factor=cpu_block_size_factor,
+    )
+
+    self.cpu_to_gpu_handler = SingleDirectionOffloadingHandler(
+        src_tensors=cpu_tensors,
+        dst_tensors=gpu_tensors,
+        src_block_size_factor=cpu_block_size_factor,
+        dst_block_size_factor=gpu_block_size_factor,
+    )
 
 
 def get_handlers(
@@ -376,7 +360,7 @@ def get_handlers(
     attn_backends: dict[str, type[AttentionBackend]],
 ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
     if not self._handlers:
-        self._handlers = CpuHpuOffloadingHandlers(
+        self._handlers = CpuGpuOffloadingHandlers(
             attn_backends=attn_backends,
             gpu_block_size=self.gpu_block_size,
             cpu_block_size=self.offloaded_block_size,
@@ -390,5 +374,6 @@ def get_handlers(
 
 
 CPUOffloadingSpec.get_handlers = get_handlers
-SingleDirectionOffloadingHandler = SingleDirectionOffloadingHandlerHpu
-CpuGpuOffloadingHandlers = CpuHpuOffloadingHandlers
+SingleDirectionOffloadingHandler.__init__ = SingleDirectionOffloadingHandler_init_
+SingleDirectionOffloadingHandler.transfer_async = transfer_async
+CpuGpuOffloadingHandlers.__init__ = CpuGpuOffloadingHandlers_init_
