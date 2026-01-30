@@ -803,7 +803,7 @@ class HPUCompressedTensorsConfig(CompressedTensorsConfig):
         layer: torch.nn.Module,
         prefix: str,
     ) -> Optional["QuantizeMethodBase"]:
-        from vllm.model_executor.layers.attention import MLAAttention
+        from vllm.attention.layer import MLAAttention
         if isinstance(layer, MLAAttention):
             return HPUCompressedTensorsKVCacheMethodForMLA(self)
         else:

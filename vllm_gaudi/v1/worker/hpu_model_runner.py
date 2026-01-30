@@ -1001,7 +1001,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         for layer_name, attn_module in forward_ctx.items():
             kv_sharing_target_layer_name = getattr(attn_module, 'kv_sharing_target_layer_name', None)
             if kv_sharing_target_layer_name is not None:
-                from vllm.model_executor.layers.attention.attention import validate_kv_sharing_target
+                from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
                 try:
                     validate_kv_sharing_target(
                         layer_name,
