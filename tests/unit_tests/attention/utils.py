@@ -202,3 +202,8 @@ def check_token_ordering_preservation(backend_tensor, sdpa_tensor):
 
 def is_prefill_scenario(batch_spec: BatchSpec) -> bool:
     return any(q_len > 1 for q_len in batch_spec.query_lens)
+
+
+def cdiv(a: int, b: int) -> int:
+    """Ceiling division."""
+    return -(a // -b)
