@@ -367,29 +367,6 @@ def is_mm_optimized(model):
         'Gemma3ForConditionalGeneration' in str(type(model))
 
 
-def patch_llama4_get_attn_scale(model):
-
-    config = getattr(model, "config", None)
-    is_llama4 = (getattr(config, "model_type", None) == "llama4") or ("llama4" in type(model).__name__.lower())
-    if not is_llama4:
-        return
-
-    for layer in model.language_model.model.layers:
-
-        if "Llama4Attention" not in type(layer.self_attn).__name__:
-            continue
-
-        attn = layer.self_attn
-        orig = attn._get_attn_scale
-
-        def _get_attn_scale_for_hpu(self, positions, _orig=orig):
-            if self.qk_norm is not None:
-                positions = positions.flatten()
-            return _orig(positions)
-
-        attn._get_attn_scale = types.MethodType(_get_attn_scale_for_hpu, attn)
-
-
 def maybe_set_chunked_attention_layers(model_runner):
     if hasattr(model_runner.model.config, 'text_config') and \
         hasattr(model_runner.model.config.text_config, 'attention_chunk_size') and \
@@ -429,7 +406,6 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
 def apply_model_specific_patches(model_runner):
     """The function applies model-specific monkey patches."""
     maybe_set_chunked_attention_layers(model_runner)
-    patch_llama4_get_attn_scale(model_runner.model)
 
 
 class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
