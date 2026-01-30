@@ -77,22 +77,25 @@ class HPU_Attention:
         Support long sequence at prompt phase
         """
         q_len = q.size(-2)
-        lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-        if mask is not None or len(lens) == 1:
-            if not qwen2_5_vl or (qwen2_5_vl and q_len < 65536):
+        if qwen2_5_vl:
+            if q_len < 65536:
                 return FusedSDPA.apply(q, k, v, mask, 0.0, False, None, cls.softmax_mode)
             else:
                 return AttentionLongSequence.forward(q, k, v, mask, q_block_size, cls.softmax_mode)
         else:
-            q_chunks = torch.split(q, lens, dim=2)
-            k_chunks = torch.split(k, lens, dim=2)
-            v_chunks = torch.split(v, lens, dim=2)
-            outputs = []
-            for q_i, k_i, v_i in zip(q_chunks, k_chunks, v_chunks):
-                output_i = FusedSDPA.apply(q_i, k_i, v_i, None, 0.0, False, None, cls.softmax_mode)
-                outputs.append(output_i)
-            context_layer = torch.cat(outputs, dim=2)
-            return context_layer
+            lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+            if lens == 1:
+                return FusedSDPA.apply(q, k, v, None, 0.0, False, None, cls.softmax_mode)
+            else:
+                q_chunks = torch.split(q, lens, dim=2)
+                k_chunks = torch.split(k, lens, dim=2)
+                v_chunks = torch.split(v, lens, dim=2)
+                outputs = []
+                for q_i, k_i, v_i in zip(q_chunks, k_chunks, v_chunks):
+                    output_i = FusedSDPA.apply(q_i, k_i, v_i, None, 0.0, False, None, cls.softmax_mode)
+                    outputs.append(output_i)
+                context_layer = torch.cat(outputs, dim=2)
+                return context_layer
 
 
 def create_block_diagonal_attention_mask(indices):
