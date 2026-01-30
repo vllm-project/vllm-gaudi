@@ -83,8 +83,10 @@ class HPU_Attention:
             else:
                 return AttentionLongSequence.forward(q, k, v, mask, q_block_size, cls.softmax_mode)
         else:
+            if cu_seqlens is None:
+                return FusedSDPA.apply(q, k, v, None, 0.0, False, None, cls.softmax_mode)
             lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-            if lens == 1:
+            if len(lens) == 1:
                 return FusedSDPA.apply(q, k, v, None, 0.0, False, None, cls.softmax_mode)
             else:
                 q_chunks = torch.split(q, lens, dim=2)
