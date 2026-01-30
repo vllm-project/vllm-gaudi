@@ -403,7 +403,7 @@ def generate_buckets(bs_range,
         return (bs, query, ctx)
 
     def mamba_decode_corrector(bs, query, ctx):
-        return bs, query, min(ctx, bs * math.floor(max_model_len / block_size)))
+        return (bs, query, min(ctx, bs * math.floor(max_model_len / block_size)))
 
     def correct_for_max_model_len(bs, query, ctx):
         return (bs, query, min(ctx, bs * math.ceil(max_model_len / block_size)))
