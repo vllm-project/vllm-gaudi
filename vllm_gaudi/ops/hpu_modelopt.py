@@ -3,10 +3,19 @@ import torch
 from torch.nn import Module
 
 import vllm_gaudi.extension.ops as hpu_ops
-from vllm.model_executor.layers.linear import (LinearBase, UnquantizedLinearMethod)
+from vllm.model_executor.layers.linear import (
+    LinearBase,
+    LinearMethodBase,
+    UnquantizedLinearMethod,
+)
+from vllm.model_executor.parameter import (
+    ModelWeightParameter,
+    PerTensorScaleParameter,
+)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization import modelopt
-from vllm.model_executor.layers.quantization.modelopt import ModelOptFp8LinearMethod, ModelOptFp8Config
+from vllm.model_executor.layers.quantization.modelopt import ModelOptFp8Config
 from torch.nn.parameter import Parameter
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
@@ -34,7 +43,6 @@ class HPUModelOptFp8Config(ModelOptFp8Config):
         return [torch.bfloat16]
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
         # handle kv-cache first so we can focus only on weight quantization thereafter
         if isinstance(layer, Attention):
             return self.KVCacheMethodCls(self)
@@ -63,8 +71,8 @@ class HPUModelOptFp8Config(ModelOptFp8Config):
         return None
 
 
-class HPUModelOptFp8LinearMethod(ModelOptFp8LinearMethod):
-    """Linear method for Model Optimizer static quantization.
+class HPUModelOptFp8LinearMethod(LinearMethodBase):
+    """Linear method for Model Optimizer static quantization on Gaudi.
     Supports loading FP8 checkpoints with static weight scale and
     activation scale. Future support might be added for dynamic
     scales.
@@ -75,17 +83,60 @@ class HPUModelOptFp8LinearMethod(ModelOptFp8LinearMethod):
         Args: quant_config: The ModelOpt quantization config.
     """
 
-    def create_weights(self, *args, **kwargs) -> None:
+    def __init__(self, quant_config: ModelOptFp8Config) -> None:
+        self.quant_config = quant_config
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        del input_size, output_size
+        output_size_per_partition = sum(output_partition_sizes)
         # Use V2 version of weight loader
         # See https://github.com/vllm-project/vllm/blob/releases/v0.11.2/vllm/model_executor/layers/linear.py#L493
-        layer = kwargs.get('layer')
+        weight_loader = extra_weight_attrs.get("weight_loader")
+
         if layer and hasattr(layer, "weight_loader_v2"):
-            kwargs['weight_loader'] = layer.weight_loader_v2
+            weight_loader = layer.weight_loader_v2
 
         if hpu_ops.is_hpu_gaudi2:
-            kwargs['weight_loader'] = hpu_ops.gaudi_weight_wrapper(kwargs.get('weight_loader'))
-        kwargs['weight_loader'] = hpu_ops.synced_weight_loader(kwargs.get('weight_loader'))
-        super().create_weights(*args, **kwargs)
+            weight_loader = hpu_ops.gaudi_weight_wrapper(weight_loader)
+        weight_loader = hpu_ops.synced_weight_loader(weight_loader)
+
+        layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+        weight_dtype = (torch.float8_e4m3fn if self.quant_config.is_checkpoint_fp8_serialized else params_dtype)
+        weight = ModelWeightParameter(
+            data=torch.empty(output_size_per_partition, input_size_per_partition, dtype=weight_dtype),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight", weight)
+
+        if self.quant_config.is_checkpoint_fp8_serialized:
+            # WEIGHT SCALE
+            weight_scale = PerTensorScaleParameter(
+                data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+                weight_loader=weight_loader,
+            )
+            weight_scale[:] = torch.finfo(torch.float32).min
+            layer.register_parameter("weight_scale", weight_scale)
+            # INPUT SCALE
+            scale = PerTensorScaleParameter(
+                data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+                weight_loader=weight_loader,
+            )
+
+            scale[:] = torch.finfo(torch.float32).min
+            layer.register_parameter("input_scale", scale)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         weight = layer.weight
