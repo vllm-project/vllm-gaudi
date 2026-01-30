@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from functools import partial
 from typing import Union
 
@@ -18,6 +19,10 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         super().__init__(*args, **kwargs)
         self.use_dispatch_fn = get_config().use_dispatch_fn
         torch.hpu.synchronize()
+
+    def _select_monolithic(self) -> Callable:
+        """Overriding base method"""
+        return self.apply_monolithic
 
     @property
     def is_monolithic(self) -> bool:
