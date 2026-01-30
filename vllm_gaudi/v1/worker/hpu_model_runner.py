@@ -2046,12 +2046,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
                 if num_prefill_reqs < target_bs:
                     padding = torch.full((target_bs - num_prefill_reqs, ),
-                                         self._PAD_BLOCK_ID,
+                                         self._PAD_SLOT_ID,
                                          dtype=torch.int32,
                                          device='cpu')
                     state_indices_cpu = torch.cat([state_indices_cpu, padding])
 
-                state_indices_cpu[state_indices_cpu == self._PAD_BLOCK_ID] = -1
                 all_state_indices_cpu.append(state_indices_cpu)
 
             all_state_indices_cpu = torch.stack(all_state_indices_cpu, dim=0)  # Shape: [num_groups, target_bs]
@@ -2384,12 +2383,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 state_indices_cpu = block_table_cpu_tensor[:num_decodes, 0].clone()
                 if num_decodes < padded_batch_size:
                     padding = torch.full((padded_batch_size - num_decodes, ),
-                                         self._PAD_BLOCK_ID,
+                                         self._PAD_SLOT_ID,
                                          dtype=torch.int32,
                                          device='cpu')
                     state_indices_cpu = torch.cat([state_indices_cpu, padding])
 
-                state_indices_cpu[state_indices_cpu == self._PAD_BLOCK_ID] = -1
                 all_state_indices_cpu.append(state_indices_cpu)
 
             all_state_indices_cpu = torch.stack(all_state_indices_cpu, dim=0)  # Shape: [num_groups, target_bs]
