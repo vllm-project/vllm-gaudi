@@ -7,8 +7,7 @@ import pytest
 import torch
 import habana_frameworks.torch  # noqa: F401
 
-from vllm.utils import cdiv
-from tests.unit_tests.attention.utils import (BatchSpec, create_common_attn_metadata, create_vllm_config,
+from tests.unit_tests.attention.utils import (BatchSpec, cdiv, create_common_attn_metadata, create_vllm_config,
                                               check_token_ordering_preservation, is_prefill_scenario)
 from tests.unit_tests.attention.non_unified_attn_utils import get_non_unified_attn_metadata
 
