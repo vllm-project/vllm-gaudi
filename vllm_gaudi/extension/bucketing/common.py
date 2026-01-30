@@ -433,7 +433,7 @@ def generate_buckets(bs_range,
         return filters_map[phase][use_contiguous_pa]
 
     def get_corrector(is_prompt, use_contiguous_pa):
-        if mamba_chunk_size > 0 and not is_prompt
+        if mamba_chunk_size > 0 and not is_prompt:
             return mamba_decode_corrector
         elif is_prompt or use_contiguous_pa:
             return no_corrections
