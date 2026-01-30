@@ -4,17 +4,21 @@
 Unit tests for vLLM multimodal processing components on HPU/Gaudi.
 Inspired by upstream test_processing.py but adapted for Gaudi-specific scenarios.
 """
+
 import os
-from typing import Optional, cast
+from typing import Optional
 
 import pytest
 import torch
 import habana_frameworks.torch  # noqa: F401
 
 from vllm.config import ModelConfig
-from vllm.multimodal.processing import (InputProcessingContext, PlaceholderFeaturesInfo, iter_token_matches,
-                                        replace_token_matches)
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.multimodal.processing import InputProcessingContext
+from vllm.multimodal.processing.processor import (
+    PlaceholderFeaturesInfo,
+    iter_token_matches,
+    replace_token_matches,
+)
 
 
 class DummyHPUProcessor:
@@ -107,10 +111,9 @@ def test_hf_processor_init_kwargs(
     expected_attrs,
 ):
     """Test that HPU processor is initialized with correct kwargs."""
-    mock_tokenizer = cast(AnyTokenizer, object())
     ctx = InputProcessingContext(
         model_config=ModelConfig(model_id, mm_processor_kwargs=config_kwargs),
-        tokenizer=mock_tokenizer,
+        tokenizer=None,
     )
 
     processor = ctx.get_hf_processor(
@@ -142,11 +145,10 @@ def test_hf_processor_call_kwargs(
     expected_device,
 ):
     """Test that HPU processor call uses correct device."""
-    mock_tokenizer = cast(AnyTokenizer, object())
 
     ctx = InputProcessingContext(
         model_config=ModelConfig(model_id, mm_processor_kwargs=config_kwargs),
-        tokenizer=mock_tokenizer,
+        tokenizer=None,
     )
 
     processor = ctx.get_hf_processor(DummyHPUProcessor)  # type: ignore[arg-type]
