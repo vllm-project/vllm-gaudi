@@ -4492,7 +4492,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         prompt_token_ids = list(range(total_tokens))
 
         req_id = f'{len(requests)}'
-        block_ids = [[block_id] * (round_up(total_tokens_for_blocks, g.kv_cache_spec.block_size) // g.kv_cache_spec.block_size) for g in self.kv_cache_config.kv_cache_groups]
+        block_ids = [[block_id] *
+                     (round_up(total_tokens_for_blocks, g.kv_cache_spec.block_size) // g.kv_cache_spec.block_size)
+                     for g in self.kv_cache_config.kv_cache_groups]
         if self.is_pooling_model:
             model = cast(VllmModelForPooling, self.get_model())
             supported_tasks = self.get_supported_pooling_tasks()
