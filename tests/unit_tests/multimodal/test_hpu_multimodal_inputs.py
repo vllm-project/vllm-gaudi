@@ -175,7 +175,7 @@ def test_hpu_empty_batch():
     assert result == {}
 
 
-# Test validation and error handling for HPU multimodal inputs
+# Test validation and error handling for HPU multimodal input
 @pytest.mark.parametrize(
     "tensor_shapes",
     [
