@@ -43,6 +43,7 @@ from vllm.model_executor.layers.attention import MLAAttention
 from vllm.v1.attention.selector import get_attn_backend
 
 from vllm.config import (VllmConfig, update_config)
+from vllm.config.multimodal import ImageDummyOptions, VideoDummyOptions
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
@@ -51,6 +52,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEm
 from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem)
+from vllm.multimodal.profiling import MultiModalProfiler
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
@@ -3974,13 +3976,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                    f"free_mem:{free_mem}")
         tqdm.write(msg)
 
-    def log_warmup_multimodal(self, phase, i, max_i, batch_size, seq_len, w, h, f):
+    def log_warmup_multimodal(self, phase, i, max_i, batch_size, seq_len, w, h):
         free_mem = format_bytes(HabanaMemoryProfiler.current_free_device_memory())
         msg = (f"[Warmup][{phase}][{i+1}/{max_i}] "
                f"batch_size:{batch_size} "
                f"seq_len:{seq_len} "
                f"resolution:{w}X{h} "
-               f"frames:{f} "
                f"free_mem:{free_mem}")
         logger.info(msg)
 
@@ -4656,51 +4657,36 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self,
         modality: str,
         image_args: int,
-        ratio_w: int,
-        ratio_h: int,
+        width: int,
+        height: int,
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
         assert self.mm_budget is not None
+        num_frames = 100
         count = 1
-        num_frames = 0
-        batch = image_args if self.get_model().vision_bucket_manager.is_batch_based else count
         if self.get_model().vision_bucket_manager.is_batch_based:
-            # Create ImageDummyOptions for Gemma3
-            w = 896  # pixels as in gemma3 config
-            h = 896  # pixels as in gemma3 config
             batch = image_args
         else:
-            patch_size = int(self.get_patch_size_from_model())
-            # Calculate width and height to maintain aspect ratio and patch count
-            # Total patches = (width/patch_size) * (height/patch_size)
-            # We want: (w/ps) * (h/ps) = num_patch where num_patch is image_args
-            # And: w/h = ratio_w/ratio_h
-            grid_w = int(math.sqrt(image_args * ratio_w / ratio_h))
-            grid_h = int(image_args / grid_w)
-            w = grid_w * patch_size
-            h = grid_h * patch_size
+            mm_options = self.model_config.get_multimodal_config().get_dummy_options(modality)
+            count = mm_options.count if mm_options and hasattr(mm_options, 'count') else count
             batch = count
-        self.model_config_copy.max_model_len = 4096
         if modality == 'image':
-            self.model_config_copy.limit_mm_per_prompt = {"image": {"count": count, "width": w, "height": h}}
+            mm_options = {"image": ImageDummyOptions(count=count, width=width, height=height), "video": None}
         elif modality == 'video':
-            video_options = self.model_config_copy.get_multimodal_config().get_dummy_options("video")
-            num_frames = video_options.num_frames if video_options and hasattr(video_options, 'num_frames') else 100
-            w = video_options.width if video_options and hasattr(video_options, 'width') else w
-            h = video_options.height if video_options and hasattr(video_options, 'height') else h
-            count = video_options.count if video_options and hasattr(video_options, 'count') else 1
-            self.model_config_copy.limit_mm_per_prompt = {
-                "video": {
-                    "count": count,
-                    "num_frames": num_frames,
-                    "width": w,
-                    "height": h
-                }
+            num_frames = mm_options.num_frames if mm_options and hasattr(mm_options, 'num_frames') else num_frames
+            mm_options = {
+                "image": None,
+                "video": VideoDummyOptions(count=count, num_frames=num_frames, width=width, height=height)
             }
         else:
             raise NotImplementedError(f"Modality '{modality}' is not supported")
 
-        dummy_mm_inputs = MultiModalRegistry().get_dummy_mm_inputs(self.model_config_copy, mm_counts={modality: count})
+        processor = MULTIMODAL_REGISTRY.create_processor(self.model_config)
+        profiler = MultiModalProfiler(processor)
+        dummy_mm_inputs = profiler._get_dummy_mm_inputs(seq_len=4196,
+                                                        mm_counts={modality: count},
+                                                        mm_options=mm_options)
+
         dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
         # We use the cache so that the item is saved to the cache,
         # but not read from the cache
@@ -4712,7 +4698,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             dummy_mm_items,
             device=self.device,
             pin_memory=self.pin_memory,
-        )), w, h, num_frames
+        ))
 
     def warmup_multimodal_graphs(self, buckets):
 
@@ -4722,6 +4708,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.vllm_config,
             self.mm_registry,
         ) if self.supports_mm_inputs else None
+<<<<<<< HEAD
         aspect_ratios = [(1, 1)]  # 1:1 square
         sanity_check = self.get_model().vision_bucket_manager.is_batch_based
 
@@ -4740,26 +4727,65 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         is_image_warmup = self.model_config.get_multimodal_config() is not None and \
                 self.model_config.get_multimodal_config().get_dummy_options("image") is not None \
                     and self.mm_budget.mm_limits['image'] != 0
+=======
+        vision_bucket_manager = self.get_model().vision_bucket_manager
+        is_batch_based = vision_bucket_manager.is_batch_based
+        mm_config = self.model_config.get_multimodal_config()
+
+        is_image_warmup = (mm_config is not None and mm_config.get_dummy_options("image") is not None
+                           and self.mm_budget.mm_limits['image'] != 0)
+        is_video_warmup = (mm_config is not None and mm_config.get_dummy_options("video") is not None
+                           and self.mm_budget.mm_limits['video'] != 999)
+        warmup_configs = {
+            "image": (0, lambda: mm_config.get_dummy_options("image")),
+            "video": (999, lambda: mm_config.get_dummy_options("video"))
+        }
+        width = height = None
+        warmup_lists = []
+        for modality, (limit_value, get_options) in warmup_configs.items():
+            if (mm_config and mm_config.get_dummy_options(modality)
+                    and self.mm_budget.mm_limits[modality] != limit_value):
+                options = get_options()
+                width = options.width if hasattr(options, 'width') else None
+                height = options.height if hasattr(options, 'height') else None
+                if width is not None and height is not None:
+                    warmup_lists.append((width, height))
+                break
+
+        if not is_batch_based and len(buckets) > 0:
+            patch_size = int(self.get_patch_size_from_model())
+            warmup_lists = warmup_lists + \
+                vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
+>>>>>>> 20703dd (Qwen3vl accuracy fixes (#884))
         for modality, max_items in self.mm_budget.mm_limits.items():
             if modality == 'image' and not is_image_warmup or modality == 'video' \
                 and not is_video_warmup:
                 continue
             phase = f'Graph/Multimodal({modality})'
-            num_candidates = len(buckets)
-            for idx, img_arg in enumerate(buckets):
-                for (ratio_w, ratio_h) in aspect_ratios:
-                    batched_dummy_mm_inputs, w, h, f = self._get_mm_dummy_batch(modality, img_arg, ratio_w, ratio_h)
-                    dummy_encoder_outputs = \
-                        self.model.embed_multimodal(
-                        **batched_dummy_mm_inputs)
-                    if sanity_check:
-                        sanity_check_mm_encoder_outputs(
-                            dummy_encoder_outputs,
-                            expected_num_items=img_arg,
-                        )
-
-                    self.graphed_buckets.add(img_arg)
-                    self.log_warmup_multimodal(phase, idx, num_candidates, 1, 0, w, h, f)
+            candidates = buckets if is_batch_based else warmup_lists
+            for idx in range(len(candidates)):
+                if is_batch_based:
+                    image_args = candidates[idx]
+                    width = 896  # pixels as in gemma3 config
+                    height = 896  # pixels as in gemma3 config
+                else:
+                    image_args = None
+                    width, height = candidates[idx]
+                batched_dummy_mm_inputs = self._get_mm_dummy_batch(modality,
+                                                                   image_args=image_args,
+                                                                   width=width,
+                                                                   height=height)
+                dummy_encoder_outputs = \
+                    self.model.embed_multimodal(
+                    **batched_dummy_mm_inputs)
+                if is_batch_based:
+                    sanity_check_mm_encoder_outputs(
+                        dummy_encoder_outputs,
+                        expected_num_items=candidates[idx],
+                    )
+                    self.graphed_buckets.add(candidates[idx])
+                self.log_warmup_multimodal(phase, idx, len(candidates), candidates[idx] if is_batch_based else 1, 0,
+                                           width, height)
 
     def _maybe_profile_unified_attn(self):
         unified_cfg_str = os.environ.get('VLLM_PROFILE_UNIFIED', None)
