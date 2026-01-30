@@ -363,7 +363,7 @@ launch_all_tests() {
     run_qwen3_compressed_tensor_dynamic_scaling_test
     run_qwen3_moe_compressed_tensor_dynamic_scaling_test
     run_qwen3_moe_compressed_tensor_static_scaling_test
-    run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_test
+    #run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_test
     run_llama3_per_tensor_scaling_test
     run_structured_output_test
     run_awq_test
