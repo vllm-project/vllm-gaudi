@@ -157,6 +157,7 @@ class ModuleFusedSDPA(torch.nn.Module):
         valid_sequence_lengths,
         padding_side="left",
         window_size=None,
+        **kwargs,
     ):
         if window_size is not None:
             return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode,
@@ -165,6 +166,70 @@ class ModuleFusedSDPA(torch.nn.Module):
         else:
             return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode,
                                                 recompute_mode, valid_sequence_lengths, padding_side)
+
+
+class ModuleFP8FusedSDPA(torch.nn.Module):
+
+    def __init__(self, fusedSDPA):
+        super().__init__()
+        assert fusedSDPA is not None, f'FP8 fusedSDPA kernel is None'
+        self.fp8_fused_sdpa = fusedSDPA
+
+        self.descale_amax = torch.tensor(1.0)
+        self.scale_amax = torch.tensor(1.0)
+
+    def quant_input(self, x, scale):
+        return torch.ops.hpu.cast_to_fp8_v2(x, scale, False, False, torch.float8_e4m3fn)[0]
+
+    def dequant_output(self, output, scale):
+        return torch.ops.hpu.cast_from_fp8(output, scale, torch.bfloat16)
+
+        def forward(
+        self,
+        query,
+        key,
+        value,
+        attn_mask,
+        dropout_p,
+        is_causal,
+        scale,
+        softmax_mode,
+        recompute_mode,
+        valid_sequence_lengths,
+        padding_side="left",
+        window_size=None,
+        **kwargs,
+    ):
+
+        scale_q = kwargs.get("matmul_qk_op").scale_input
+        scale_k = kwargs.get("matmul_qk_op").scale_other
+        scale_v = kwargs.get("matmul_av_op").scale_other
+        qinput = self.quant_input(query, scale_q)
+        kinput = self.quant_input(key, scale_k)
+        vinput = self.quant_input(value, scale_v)
+
+        results = self.fp8_fused_sdpa(
+            qinput,
+            kinput,
+            vinput,
+            attn_mask=attn_mask,
+            dropout_p=dropout_p,
+            is_causal=is_causal,
+            scale=scale,
+            softmax_mode=softmax_mode,
+            d_scale_q=1 / scale_q,
+            d_scale_k=1 / scale_k,
+            d_scale_v=1 / scale_v,
+            q_scale_s=self.scale_amax,
+            # q_scale_o=1 / 1.0,
+            d_scale_s=self.descale_amax,
+            is_amax_s=False,
+            valid_seq_len=valid_sequence_lengths,
+            seq_padding_type=padding_side,
+        )
+
+        output = results[0]
+        return output
 
 
 def pad_list(input, target_len, val_generator):

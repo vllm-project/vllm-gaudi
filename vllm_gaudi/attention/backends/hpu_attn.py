@@ -13,7 +13,8 @@ import torch
 import vllm_gaudi.extension.kernels as kernels
 import vllm_gaudi.extension.ops as ops
 from vllm_gaudi.extension.runtime import get_config
-from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, ModuleFusedSDPA, Softmax, VLLMFP8KVCache, VLLMKVCache)
+from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, ModuleFusedSDPA, ModuleFP8FusedSDPA, Softmax, VLLMFP8KVCache,
+                                        VLLMKVCache)
 
 from vllm.v1.attention.backend import (AttentionBackend, AttentionImpl, AttentionLayer, AttentionMetadata,
                                        AttentionType)
@@ -241,6 +242,14 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         HPUFusedSDPA = kernels.fsdpa()
         self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
             else ModuleFusedSDPA(HPUFusedSDPA)
+
+        try:
+            from habana_frameworks.torch.hpex.kernels import fp8_fused_sdpa
+            if self.enable_fp8_attn:
+                self.fused_scaled_dot_product_attention = ModuleFP8FusedSDPA(fp8_fused_sdpa)
+        except ImportError:
+            pass
+
         self.use_merged_prefill = get_config().merged_prefill
         self.prefill_impl = get_config().prompt_attn_impl
         assert self.prefill_impl != 'fsdpa_impl' or alibi_slopes is None, \

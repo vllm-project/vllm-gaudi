@@ -367,7 +367,8 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
         padding_side
     ]
     args += [window_size] if window_size else []
-    attn_weights = fsdpa_op(*args)
+    # add matmul_qk, matmul_av, etc.
+    attn_weights = fsdpa_op(*args, **ignored_args)
 
     attn_weights = attn_weights.transpose(1, 2)
     return attn_weights
