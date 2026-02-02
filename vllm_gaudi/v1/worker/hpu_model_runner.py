@@ -5177,7 +5177,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 max_ctx = (self.max_model_len - self.max_num_batched_tokens + self.block_size - 1) //
                               self.block_size
                 if self.use_contiguous_pa:
-		    max_ctx = 0
+                    max_ctx = 0
                 prompt_cfg = (1, self.max_num_batched_tokens, max_ctx)
             decode_cfg = None
             self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
