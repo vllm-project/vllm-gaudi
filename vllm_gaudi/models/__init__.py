@@ -17,4 +17,4 @@ def register_model():
                                  "vllm_gaudi.models.qwen3_vl:HpuQwen3_VLForConditionalGeneration")
 
     from vllm_gaudi.models.ovis import HpuOvis  # noqa: F401
-    ModelRegistry.register_model("HpuOvis", "vllm_gaudi.models.ovis:HpuOvis")
+    ModelRegistry.register_model("Ovis", "vllm_gaudi.models.ovis:HpuOvis")
