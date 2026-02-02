@@ -37,8 +37,8 @@ from vllm_gaudi.extension.debug import init_debug_logger
 from vllm_gaudi.v1.worker.hpu_dp_utils import set_hpu_dp_metadata
 
 from vllm.v1.attention.backend import AttentionType
-from vllm.attention.layer import Attention
-from vllm.attention.layer import MLAAttention
+from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention import MLAAttention
 from vllm.v1.attention.selector import get_attn_backend
 
 from vllm.config import (VllmConfig, update_config)
@@ -1002,7 +1002,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         for layer_name, attn_module in forward_ctx.items():
             kv_sharing_target_layer_name = getattr(attn_module, 'kv_sharing_target_layer_name', None)
             if kv_sharing_target_layer_name is not None:
-                from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
+                from vllm.model_executor.layers.attention.attention import validate_kv_sharing_target
                 try:
                     validate_kv_sharing_target(
                         layer_name,
