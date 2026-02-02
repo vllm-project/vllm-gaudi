@@ -5,7 +5,6 @@ import torch
 from vllm_gaudi import envs
 from torch.nn.parameter import Parameter
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 
 from vllm.model_executor.layers.quantization import fp8
 from vllm.model_executor.layers.quantization.fp8 import (Fp8LinearMethod as OrigFp8LinearMethod, Fp8MoEMethod,
@@ -110,6 +109,10 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
 
         self.use_dispatch_fn = get_config().use_dispatch_fn
 
+    @property
+    def is_monolithic(self) -> bool:
+        return True
+
     def create_weights(self, *args, **kwargs) -> None:
         if hpu_ops.is_hpu_gaudi2:
             kwargs['weight_loader'] = hpu_ops.gaudi_weight_wrapper(kwargs.get('weight_loader'))
@@ -147,10 +150,9 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         else:
             layer = hpu_ops.fp8_channel_moe_prepare_weights(layer)
 
-    def apply(
+    def apply_monolithic(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         **kwargs,
