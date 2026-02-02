@@ -25,7 +25,6 @@ class HPUQwen3_VisionBlock(Qwen3_VisionBlock):
         act_fn,
         norm_layer,
         quant_config=None,
-        multimodal_config=None,
         prefix: str = "",
     ):
         super().__init__(
@@ -35,7 +34,6 @@ class HPUQwen3_VisionBlock(Qwen3_VisionBlock):
             act_fn=act_fn,
             norm_layer=norm_layer,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=prefix,
         )
 
@@ -44,7 +42,6 @@ class HPUQwen3_VisionBlock(Qwen3_VisionBlock):
             num_heads=num_heads,
             projection_size=dim,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -56,14 +53,12 @@ class HPUQwen3_VisionTransformer(Qwen3_VisionTransformer):
         vision_config,
         norm_eps: float = 1e-6,
         quant_config=None,
-        multimodal_config=None,
         prefix: str = "",
     ):
         super().__init__(
             vision_config=vision_config,
             norm_eps=norm_eps,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=prefix,
         )
 
@@ -78,7 +73,6 @@ class HPUQwen3_VisionTransformer(Qwen3_VisionTransformer):
                 act_fn=get_act_fn(vision_config.hidden_act),
                 norm_layer=norm_layer,
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 prefix=f"{prefix}.blocks.{layer_idx}",
             ) for layer_idx in range(depth)
         ])
@@ -89,15 +83,10 @@ class HpuQwen3_VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
-        quant_config = getattr(self, "quant_config", None)
-        multimodal_config = getattr(vllm_config.model_config, "multimodal_config", None)
-
         if hasattr(self, "visual") and self.visual is not None:
             self.visual = HPUQwen3_VisionTransformer(
                 self.config.vision_config,
                 norm_eps=getattr(self.config, "rms_norm_eps", 1e-6),
-                quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
