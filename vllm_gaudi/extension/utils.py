@@ -188,7 +188,7 @@ class ModuleFP8FusedSDPA(torch.nn.Module):
     def dequant_output(self, output, scale):
         return torch.ops.hpu.cast_from_fp8(output, scale, torch.bfloat16)
 
-        def forward(
+    def forward(
         self,
         query,
         key,
