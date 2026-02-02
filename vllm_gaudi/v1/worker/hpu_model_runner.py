@@ -4708,26 +4708,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.vllm_config,
             self.mm_registry,
         ) if self.supports_mm_inputs else None
-<<<<<<< HEAD
-        aspect_ratios = [(1, 1)]  # 1:1 square
-        sanity_check = self.get_model().vision_bucket_manager.is_batch_based
-
-        aspect_ratios = [
-            (1, 1),  # 1:1 square
-            (4, 3),  # 4:3 landscape
-            (3, 4),  # 3:4 portrait
-            (16, 9),  # 16:9 widescreen
-            (9, 16),  # 9:16 portrait
-        ]
-
-        is_video_warmup = self.model_config.get_multimodal_config() is not None and \
-                self.model_config.get_multimodal_config().get_dummy_options("video") is not None \
-                    and self.mm_budget.mm_limits['video'] != 999
-
-        is_image_warmup = self.model_config.get_multimodal_config() is not None and \
-                self.model_config.get_multimodal_config().get_dummy_options("image") is not None \
-                    and self.mm_budget.mm_limits['image'] != 0
-=======
         vision_bucket_manager = self.get_model().vision_bucket_manager
         is_batch_based = vision_bucket_manager.is_batch_based
         mm_config = self.model_config.get_multimodal_config()
@@ -4756,7 +4736,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             patch_size = int(self.get_patch_size_from_model())
             warmup_lists = warmup_lists + \
                 vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
->>>>>>> 20703dd (Qwen3vl accuracy fixes (#884))
         for modality, max_items in self.mm_budget.mm_limits.items():
             if modality == 'image' and not is_image_warmup or modality == 'video' \
                 and not is_video_warmup:
