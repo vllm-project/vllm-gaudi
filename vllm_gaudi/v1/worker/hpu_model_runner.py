@@ -1499,10 +1499,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     mm_embeds_item = encoder_output[start_idx:end_idx]
 
                 req_start_pos = req_start_idx + start_pos - num_computed_tokens
-                is_mm_embed[req_start_pos + start_idx:req_start_pos +
-                            end_idx] = (True if is_embed is None else is_embed)
-                mm_embeds_req.append(mm_embeds_item)
-            mm_embeds.extend(mm_embeds_req)
+                is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
+                    = True
+
+                # Only whole mm items are processed
+                mm_embeds.append(encoder_output)
             req_start_idx += num_scheduled_tokens
 
         # Convert bool tensor to index tensor for merge embedding statically if optimized mm
