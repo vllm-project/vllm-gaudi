@@ -88,7 +88,7 @@ from vllm.model_executor.models.interfaces import (supports_eagle3, supports_tra
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.transformers_utils.config import is_interleaved
-from vllm.v1.worker.utils import (AttentionGroup, gather_mm_placeholders, sanity_check_mm_encoder_outputs,
+from vllm.v1.worker.utils import (AttentionGroup, sanity_check_mm_encoder_outputs,
                                   scatter_mm_placeholders)
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.eagle import EagleProposer
@@ -1419,16 +1419,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
 
-                mm_embeds_item = gather_mm_placeholders(
-                    encoder_output[start_idx:end_idx],
-                    is_embed=is_embed,
-                )
                 req_start_pos = req_start_idx + start_pos - num_computed_tokens
                 is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
                     = True
 
                 # Only whole mm items are processed
-                mm_embeds.append(mm_embeds_item)
+                mm_embeds.append(encoder_output)
             req_start_idx += num_scheduled_tokens
 
         is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
