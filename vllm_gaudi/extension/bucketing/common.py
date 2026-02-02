@@ -354,6 +354,9 @@ def generate_buckets(bs_range,
     use_merged_prefill = get_config().merged_prefill
     use_contiguous_pa = get_config().use_contiguous_pa
 
+    if is_prompt and mamba_chunk_size > 0:
+        query_range = [math.ceil(query / mamba_chunk_size) * mamba_chunk_size for query in query_range]
+
     def expand_to_neighbor_buckets(bs_idx, bs_range, ctx_idx, ctx_range, max_num_batched_tokens):
         '''
         Expand 2d bucket (bs, query) to include:
@@ -399,11 +402,11 @@ def generate_buckets(bs_range,
     def no_corrections(bs, query, ctx):
         return (bs, query, ctx)
 
+    def mamba_decode_corrector(bs, query, ctx):
+        return (bs, query, min(ctx, bs * math.floor(max_model_len / block_size)))
+
     def correct_for_max_model_len(bs, query, ctx):
         return (bs, query, min(ctx, bs * math.ceil(max_model_len / block_size)))
-
-    def correct_for_mamba_chunk_size(bs, query, ctx):
-        return (bs, math.ceil(query / mamba_chunk_size) * mamba_chunk_size, ctx)
 
     def batch_size_smaller_than_blocks(bs, query, ctx):
         if not bs <= ctx:
@@ -430,8 +433,8 @@ def generate_buckets(bs_range,
         return filters_map[phase][use_contiguous_pa]
 
     def get_corrector(is_prompt, use_contiguous_pa):
-        if is_prompt and mamba_chunk_size > 0:
-            return correct_for_mamba_chunk_size
+        if mamba_chunk_size > 0 and not is_prompt:
+            return mamba_decode_corrector
         elif is_prompt or use_contiguous_pa:
             return no_corrections
         else:
