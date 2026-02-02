@@ -8,6 +8,11 @@ def register():
     return "vllm_gaudi.platform.HpuPlatform"
 
 
+def register_utils():
+    """Register utility functions for the HPU platform."""
+    import vllm_gaudi.utils  # noqa: F401
+
+
 def register_ops():
     """Register custom ops for the HPU platform."""
     import vllm_gaudi.v1.sample.hpu_rejection_sampler  # noqa: F401

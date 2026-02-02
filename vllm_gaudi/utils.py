@@ -1,10 +1,11 @@
 from functools import cache
 import os
 from vllm.config import ModelConfig
-from vllm.utils.torch_utils import make_tensor_with_pad, TORCH_DTYPE_TO_NUMPY_DTYPE
+import vllm.utils.torch_utils as torch_utils
 from vllm_gaudi.extension.runtime import get_config
 from typing import (Any, Optional, TypeVar, Union)
 import torch
+import habana_frameworks.torch as htorch
 import numpy as np
 import numpy.typing as npt
 import math
@@ -100,27 +101,6 @@ def make_ndarray_with_pad_align(
     return padded_x
 
 
-def make_mrope_positions_tensor_with_pad(input_positions: list[list[int]], input_mrope_positions: list[list[list[int]]],
-                                         max_prompt_len: int, pad: int) -> list[list[int]]:
-    # If no mrope positions, returns a flatten (seq_len,)
-    if all(mrope_position is None for mrope_position in input_mrope_positions):
-        return make_tensor_with_pad(input_positions, max_len=max_prompt_len, pad=0, dtype=torch.long,
-                                    device='cpu').flatten()
-    # Otherwise, Qwen2.5-VL expects positions in a (3, seq_len)
-    # we are going to pad each seq_data in the list
-    # using either MRope values or regular position
-    mrope_input_positions: list[list[int]] = [[] for _ in range(3)]
-    for idx in range(3):
-        for b_idx, input_mrope_position in enumerate(input_mrope_positions):
-            positions = input_mrope_position[idx] if input_mrope_position is not None else input_positions[b_idx]
-            padding_size = max_prompt_len - len(positions)
-            assert padding_size >= 0
-            padded_positions = positions \
-                + (max_prompt_len - len(positions)) * [pad]
-            mrope_input_positions[idx].extend(padded_positions)
-    return torch.tensor(mrope_input_positions, dtype=torch.long, device='cpu')
-
-
 def make_tensor_with_pad_align(
     x: list[list[T]],
     pad: T,
@@ -136,7 +116,7 @@ def make_tensor_with_pad_align(
     max_len_aligned, max_len_aligned is max_len rounding to the nearest 
     `max_len_align`.
     """
-    np_dtype = TORCH_DTYPE_TO_NUMPY_DTYPE[dtype]
+    np_dtype = torch_utils.TORCH_DTYPE_TO_NUMPY_DTYPE[dtype]
     padded_x = make_ndarray_with_pad_align(x, pad, np_dtype, max_len_align=max_len_align)
 
     tensor = torch.from_numpy(padded_x).to(device)
@@ -144,6 +124,82 @@ def make_tensor_with_pad_align(
         tensor = tensor.pin_memory()
 
     return tensor
+
+
+if not htorch.utils.internal.is_lazy():
+
+    def make_tensor_with_pad_hpu(
+        x: list[list[T]],
+        pad: T,
+        dtype: torch.dtype,
+        *,
+        max_len: int | None = None,
+        device: Optional[Union[str, torch.device]] = None,
+        pin_memory: bool = False,
+    ) -> torch.Tensor:
+        """
+        Make a padded tensor from 2D inputs.
+
+        The padding is applied to the end of each inner list until it reaches
+        `max_len`.
+
+        HPU-compatible replacement for make_tensor_with_pad.
+        Uses pure PyTorch (pad_sequence) instead of NumPy.
+        """
+        if not x:
+            return torch.empty((0, 0), dtype=dtype, device=device)
+
+        # 1. Convert python lists to CPU tensors first
+        tensors = [torch.tensor(item, dtype=dtype, device="cpu") for item in x]
+
+        # 2. Use pad_sequence (pure torch implementation)
+        #    batch_first=True -> (Batch, Seq)
+        tensor = torch.nn.utils.rnn.pad_sequence(tensors, batch_first=True, padding_value=pad)
+
+        # 3. Handle max_len truncation or specific padding if requested
+        if max_len is not None:
+            batch_size, seq_len = tensor.shape
+            if seq_len < max_len:
+                padding_size = max_len - seq_len
+                padding = torch.full((batch_size, padding_size), pad, dtype=dtype, device="cpu")
+                tensor = torch.cat((tensor, padding), dim=1)
+            elif seq_len > max_len:
+                tensor = tensor[:, :max_len]
+
+        # 4. Move to target device
+        tensor = tensor.to(device)
+
+        # 5. Pin memory if requested
+        if pin_memory:
+            tensor = tensor.pin_memory()
+
+        return tensor
+
+    torch_utils.make_tensor_with_pad = make_tensor_with_pad_hpu
+
+
+def make_mrope_positions_tensor_with_pad(input_positions: list[list[int]], input_mrope_positions: list[list[list[int]]],
+                                         max_prompt_len: int, pad: int) -> list[list[int]]:
+    # If no mrope positions, returns a flatten (seq_len,)
+    if all(mrope_position is None for mrope_position in input_mrope_positions):
+        return torch_utils.make_tensor_with_pad(input_positions,
+                                                max_len=max_prompt_len,
+                                                pad=0,
+                                                dtype=torch.long,
+                                                device='cpu').flatten()
+    # Otherwise, Qwen2.5-VL expects positions in a (3, seq_len)
+    # we are going to pad each seq_data in the list
+    # using either MRope values or regular position
+    mrope_input_positions: list[list[int]] = [[] for _ in range(3)]
+    for idx in range(3):
+        for b_idx, input_mrope_position in enumerate(input_mrope_positions):
+            positions = input_mrope_position[idx] if input_mrope_position is not None else input_positions[b_idx]
+            padding_size = max_prompt_len - len(positions)
+            assert padding_size >= 0
+            padded_positions = positions \
+                + (max_prompt_len - len(positions)) * [pad]
+            mrope_input_positions[idx].extend(padded_positions)
+    return torch.tensor(mrope_input_positions, dtype=torch.long, device='cpu')
 
 
 class HPUCompileConfig:
