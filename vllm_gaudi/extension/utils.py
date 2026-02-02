@@ -85,7 +85,7 @@ class VLLMFP8KVCache(VLLMKVCache):
         qinput = self.quant_input(input)
         return super().forward(qinput, *args, **kwargs)
 
-    def fetch_from_cache(self, quant_cache, blocks, permutations=None):
+    def fetch_from_cache(self, quant_cache, blocks, permutations=None, **kwargs):
         if permutations:
             output_cache = super().fetch_from_cache(quant_cache, blocks, permutations)
             for i in range(len(output_cache)):
