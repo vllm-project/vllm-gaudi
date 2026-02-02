@@ -5174,8 +5174,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 prompt_cfg = (max_batch_size, self.max_model_len, 0)
             else:
                 # Assume bs=1 with max context for profile run
-                max_ctx = (self.max_model_len - self.max_num_batched_tokens + self.block_size - 1) //
-                              self.block_size
+                max_ctx = ((self.max_model_len - self.max_num_batched_tokens + self.block_size - 1) //
+                          self.block_size)
                 if self.use_contiguous_pa:
                     max_ctx = 0
                 prompt_cfg = (1, self.max_num_batched_tokens, max_ctx)
