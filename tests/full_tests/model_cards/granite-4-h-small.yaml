@@ -1,0 +1,15 @@
+model_card:
+  model_name: "ibm-granite/granite-4.0-h-small"
+  tasks: gsm8k_cot
+  num_fewshot: 8
+  limit: 500
+  max_num_seqs: 10
+  dtype: bfloat16
+
+
+
+metrics:
+  name: exact_match,strict-match
+  value: 0.6542
+
+

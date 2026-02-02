@@ -33,6 +33,7 @@ def launch_lm_eval(eval_config):
         'enable_expert_parallel': eval_config.get('enable_expert_parallel', False),
         'chat_template_args': eval_config.get('chat_template_args', {}),
         'seed': eval_config.get('seed', 42),
+        'gpu_memory_utilization': 0.005,
     }
     if kv_cache_dtype is not None:
         model_args['kv_cache_dtype'] = kv_cache_dtype
