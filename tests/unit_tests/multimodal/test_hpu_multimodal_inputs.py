@@ -58,8 +58,7 @@ def assert_nested_tensors_equal_hpu(expected: NestedTensors, actual: NestedTenso
             assert_nested_tensors_equal_hpu(expected_item, actual_item)
 
 
-def assert_multimodal_kwargs_items_equal_hpu(expected_elems: MultiModalKwargsItem,
-                                             actual: dict[str, NestedTensors] | list[NestedTensors]):
+def assert_multimodal_kwargs_items_equal_hpu(expected_elems: MultiModalKwargsItem, actual: dict[str, NestedTensors]):
     """HPU-aware assertion for multimodal input equality."""
 
     assert set(expected_elems.keys()) == set(actual.keys())
