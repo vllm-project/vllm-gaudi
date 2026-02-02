@@ -92,6 +92,7 @@ from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.transformers_utils.config import is_interleaved
 from vllm.v1.worker.utils import (AttentionGroup, sanity_check_mm_encoder_outputs)
+from vllm.v1.worker.utils import (AttentionGroup, sanity_check_mm_encoder_outputs)
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -1437,8 +1438,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         ):
             if req_id not in self.encoder_cache:
                 self.encoder_cache[req_id] = {}
-
-            self.encoder_cache[mm_hash] = output
 
     # modified from: vllm/v1/worker/gpu_model_runner.py
     def _gather_mm_embeddings(
