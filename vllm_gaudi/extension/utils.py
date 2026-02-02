@@ -175,8 +175,12 @@ class ModuleFP8FusedSDPA(torch.nn.Module):
         assert fusedSDPA is not None, f'FP8 fusedSDPA kernel is None'
         self.fp8_fused_sdpa = fusedSDPA
 
+        # set the descale_amax and scale_amax 1.0 temporarily
         self.descale_amax = torch.tensor(1.0)
         self.scale_amax = torch.tensor(1.0)
+        self.scale_q = torch.tensor(1.0)
+        self.scale_k = torch.tensor(1.0)
+        self.scale_v = torch.tensor(1.0)
 
     def quant_input(self, x, scale):
         return torch.ops.hpu.cast_to_fp8_v2(x, scale, False, False, torch.float8_e4m3fn)[0]
@@ -201,12 +205,9 @@ class ModuleFP8FusedSDPA(torch.nn.Module):
         **kwargs,
     ):
 
-        scale_q = kwargs.get("matmul_qk_op").scale_input
-        scale_k = kwargs.get("matmul_qk_op").scale_other
-        scale_v = kwargs.get("matmul_av_op").scale_other
-        qinput = self.quant_input(query, scale_q)
-        kinput = self.quant_input(key, scale_k)
-        vinput = self.quant_input(value, scale_v)
+        qinput = self.quant_input(query, self.scale_q)
+        kinput = self.quant_input(key, self.scale_k)
+        vinput = self.quant_input(value, self.scale_v)
 
         results = self.fp8_fused_sdpa(
             qinput,
@@ -217,9 +218,9 @@ class ModuleFP8FusedSDPA(torch.nn.Module):
             is_causal=is_causal,
             scale=scale,
             softmax_mode=softmax_mode,
-            d_scale_q=1 / scale_q,
-            d_scale_k=1 / scale_k,
-            d_scale_v=1 / scale_v,
+            d_scale_q=1 / self.scale_q,
+            d_scale_k=1 / self.scale_k,
+            d_scale_v=1 / self.scale_v,
             q_scale_s=self.scale_amax,
             # q_scale_o=1 / 1.0,
             d_scale_s=self.descale_amax,

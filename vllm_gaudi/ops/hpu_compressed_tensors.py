@@ -783,6 +783,11 @@ class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
         layer.impl.matmul_av.scale_input = 1.0
         layer.impl.matmul_av.scale_other = kv_scale
 
+        # Configure fp8 fused sdpa scales
+        layer.impl.fused_scaled_dot_product_attention.scale_q = q_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.scale_k = kv_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.scale_v = kv_scale.detach()
+
         # Note: The following steps are important to avoid compiling each decoding layer into a different gc recipe
         # Step 1: Remove deprecated scale attributes
         old_scale_attrs = ["_k_scale", "_v_scale", "_q_scale", "_k_scale_float", "_v_scale_float", "_q_scale_float"]
