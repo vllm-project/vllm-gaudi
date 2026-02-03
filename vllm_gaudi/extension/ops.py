@@ -936,10 +936,26 @@ def fp8_channel_moe_prepare_weights(layer):
                                           device=layer.w2_weight[index].device)
             layer.moe_op.w2_list[index].set_scale_inv_fp8(weight_scale_inv)
 
+        if len(layer.moe_op.w2_list[index].scale_inv_fp8.shape) == 0 and len(
+                layer.moe_op.w13_list[index].scale_inv_fp8.shape) == 1:
+            layer.moe_op.w2_list[index].set_scale_inv_fp8(layer.moe_op.w2_list[index].scale_inv_fp8.repeat(
+                layer.w2_weight.shape[1]).flatten().clone())
+            '''
+                When weight scale is per tensor quantized, w1 and w3 are combined so the shape of their weight scales become [2],
+                but MoE requires [2 * out_channels], so it has to be reshaped as [2, 1],
+                and repeated to [2, out_channels] and then flattened to [2 * out_channels].
+                '''
+            layer.moe_op.w13_list[index].set_scale_inv_fp8(layer.moe_op.w13_list[index].scale_inv_fp8.reshape(
+                2, 1).repeat(1, layer.w13_weight.shape[1] // 2).flatten().clone())
+
     if hasattr(layer, "w13_input_scale"):
         layer.moe_op.w13_input_scale = layer.w13_input_scale
     if hasattr(layer, "w2_input_scale"):
-        layer.moe_op.w2_input_scale = layer.w2_input_scale
+        # w2_input_scale should be converted to list
+        if layer.w2_input_scale is None:
+            layer.moe_op.w2_input_scale = layer.w2_input_scale
+        else:
+            layer.moe_op.w2_input_scale = [layer.w2_input_scale.data.clone() for _ in range(layer.moe_op.num_experts)]
 
     htorch.core.mark_step()
     return layer
@@ -1118,8 +1134,7 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
                                                                    **kwargs)
         else:
             x_scale = self.w13_input_scale.data
-            # w2_input_scale should be List[Tensor] when static and fused
-            w2_input_scale = [self.w2_input_scale[i] for i in experts_range]
+            w2_input_scale = self.w2_input_scale
             x_fp8 = torch.ops.hpu.cast_to_fp8_v2(x, 1.0 / x_scale, False, False, torch.float8_e4m3fn)[0]
             final_hidden_states = torch.ops.hpu.mixture_of_experts(hidden_states=x_fp8,
                                                                    expert_routing_table=topk_ids.to(torch.int64),
