@@ -144,13 +144,14 @@ def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=Fals
         bmin = bstep
     assert num_buckets > 0, "num_buckets must be a positive integer"
 
-    if long_context:
-        num_buckets_exp = math.floor(num_buckets / 2)
-        num_buckets_linear = num_buckets - num_buckets_exp
-        first_step = bmax / num_buckets  #or i.e. * 0.25
-    else:
-        num_buckets_exp = num_buckets
-        first_step = bmax
+    # TODO: verify whether smaller gap buckets are ever needed for long contexts
+    # if long_context:
+    #     num_buckets_exp = math.floor(num_buckets / 2)
+    #     num_buckets_linear = num_buckets - num_buckets_exp
+    #     first_step = bmax / num_buckets  #or i.e. * 0.25
+ 
+    num_buckets_exp = num_buckets
+    first_step = bmax
 
     if num_buckets_exp <= 1:
         return [bmax]
@@ -164,20 +165,21 @@ def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=Fals
         else:
             bucket = math.ceil(power_unpadded / bstep) * bstep
         buckets.add(bucket)
+        
+    # TODO: verify whether smaller gap buckets are ever needed for long contexts
+    # if long_context:
+    #     #tmp_step = bmax / num_buckets
+    #     tmp_step = (bmax - first_step) / num_buckets_linear
+    #     for i in range(1, num_buckets_linear + 1):
+    #         #for i in range(1, num_buckets+1):
+    #         power_unpadded = first_step + i * tmp_step
 
-    if long_context:
-        #tmp_step = bmax / num_buckets
-        tmp_step = (bmax - first_step) / num_buckets_linear
-        for i in range(1, num_buckets_linear + 1):
-            #for i in range(1, num_buckets+1):
-            power_unpadded = first_step + i * tmp_step
-
-            if i == num_buckets and get_config().use_contiguous_pa:
-                bucket = bmax
-            else:
-                bucket = math.ceil(power_unpadded / bstep) * bstep
-            if bucket not in buckets:
-                buckets.add(bucket)
+    #         if i == num_buckets and get_config().use_contiguous_pa:
+    #             bucket = bmax
+    #         else:
+    #             bucket = math.ceil(power_unpadded / bstep) * bstep
+    #         if bucket not in buckets:
+    #             buckets.add(bucket)
     if add_zero_or_one_bucket:
         buckets.add(bmin_origin)
     sorted_buckets = list(sorted(buckets))
