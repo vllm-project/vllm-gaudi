@@ -463,7 +463,7 @@ def generate_buckets(bs_range,
         for bs, ctx in buckets_2d:
             is_max_ctx = ctx == max_ctx
             for query in query_range:
-                if is_prompt and is_max_ctx and max_model_len >= 8192: # only for long ctx
+                if is_prompt and is_max_ctx and max_model_len >= 8192:  # only for long ctx
                     bs, query, edge_ctx = get_max_bucket_per_query(bs, query)
                     if edge_ctx >= 0:
                         ctx = edge_ctx
