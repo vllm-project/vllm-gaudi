@@ -1,5 +1,6 @@
 from typing import Union
 import os
+
 import torch
 from torch.nn.parameter import Parameter
 from vllm.model_executor.layers.linear import RowParallelLinear
@@ -7,9 +8,7 @@ from vllm.distributed import (
     split_tensor_along_last_dim,
     tensor_model_parallel_all_reduce,
 )
-import logging
-
-logger = logging.getLogger(__name__)
+from vllm.distributed.parallel_state import get_tp_group
 
 @RowParallelLinear.register_oot
 class HPURowParallelLinear(RowParallelLinear):
@@ -23,13 +22,21 @@ class HPURowParallelLinear(RowParallelLinear):
         """Initialize HPURowParallelLinear with chunking support.
         
         The number of chunks can be configured via the VLLM_ROW_PARALLEL_CHUNKS
-        environment variable. Default is 4 chunks.
+        environment variable. Default is 1 chunk (disabled).
+        
+        The token threshold for enabling chunking can be configured via
+        VLLM_ROW_PARALLEL_CHUNK_THRESHOLD. Default is 8192 tokens.
         """
         super().__init__(*args, **kwargs)
         # Check for chunking configuration via environment variable
-        self.num_chunks = int(os.environ.get("VLLM_ROW_PARALLEL_CHUNKS", "4"))
-        logger.info(f"HPURowParallelLinear initialized with num_chunks={self.num_chunks}, "
-                   f"tp_size={self.tp_size}, reduce_results={self.reduce_results}")
+        self.num_chunks = int(os.environ.get("VLLM_ROW_PARALLEL_CHUNKS", "1"))
+        if self.num_chunks < 1:
+            raise ValueError(f"VLLM_ROW_PARALLEL_CHUNKS must be >= 1, got {self.num_chunks}")
+
+        # Check for chunk threshold configuration
+        self.chunk_threshold = int(os.environ.get("VLLM_ROW_PARALLEL_CHUNK_THRESHOLD", "8192"))
+        if self.chunk_threshold < 1:
+            raise ValueError(f"VLLM_ROW_PARALLEL_CHUNK_THRESHOLD must be >= 1, got {self.chunk_threshold}")
 
     def forward_oot(
         self,
@@ -43,9 +50,6 @@ class HPURowParallelLinear(RowParallelLinear):
         Returns:
             Output tensor, or tuple of (output, bias) if skip_bias_add is True
         """
-        logger.info(f"HPURowParallelLinear.forward_oot called with input shape={input_.shape}, "
-                   f"num_chunks={self.num_chunks}, tp_size={self.tp_size}, "
-                   f"reduce_results={self.reduce_results}")
         
         if self.input_is_parallel:
             input_parallel = input_
@@ -57,46 +61,60 @@ class HPURowParallelLinear(RowParallelLinear):
 
         assert self.quant_method is not None
         
-        # Log the shape and chunking decision criteria
+        # Determine total tokens for chunking decision
         input_shape = input_parallel.shape
+        # For 3D input [batch, seq, hidden], total_tokens = batch * seq
+        # For 2D input [tokens, hidden], total_tokens = tokens
+        if input_parallel.ndim == 3:
+            batch_size, seq_len, _ = input_parallel.shape
+            total_tokens = batch_size * seq_len
+        else:
+            total_tokens = input_shape[0]
+        
         # Check if we should use chunking
-        # For 2D input [tokens, hidden], check if tokens > 1
-        # For 3D input [batch, seq, hidden], check if seq > 1
+        # Don't chunk for inputs below threshold as there's no overlap benefit
         should_chunk = (self.num_chunks > 1 and 
                        self.reduce_results and 
-                       self.tp_size > 1)
-        
-        # Additional check: for 2D input, shape is [tokens, hidden], check tokens
-        # For 3D input, shape is [batch, seq, hidden], check seq
-        if should_chunk and len(input_shape) >= 2:
-            if len(input_shape) == 2:
-                should_chunk = input_shape[0] > 1  # tokens dimension
-            else:  # 3D
-                should_chunk = input_shape[1] > 1  # sequence dimension
-        else:
-            should_chunk = False
-            
-        logger.info(f"Chunking decision: num_chunks={self.num_chunks}, "
-                   f"reduce_results={self.reduce_results}, tp_size={self.tp_size}, "
-                   f"input_shape={input_shape}, should_chunk={should_chunk}")
+                       self.tp_size > 1 and
+                       total_tokens >= self.chunk_threshold)
         
         # Chunked computation for overlapping compute and communication
         if should_chunk:
-            logger.info(f"Using chunked computation with {self.num_chunks} chunks")
             torch._dynamo.graph_break()
             
             # Determine if input is 3D [batch, seq, hidden] or 2D [batch*seq, hidden]
             is_3d = input_parallel.ndim == 3
             
             if is_3d:
-                # Input is [batch, seq, hidden], chunk along sequence dimension
+                # Input is [batch, seq, hidden]
+                # For multi-token sequences (prompts): chunk along sequence dimension
+                # For single-token batches (decodes): chunk along batch dimension
                 batch_size, seq_len, hidden_dim = input_parallel.shape
-                chunk_dim = 1  # sequence dimension
-                total_tokens = seq_len
+                if seq_len > 1:
+                    # Chunk along sequence dimension for prompts
+                    chunk_dim = 1
+                    total_tokens = seq_len
+                else:
+                    # Chunk along batch dimension for batched decodes
+                    chunk_dim = 0
+                    total_tokens = batch_size
+                output = torch.empty(
+                    batch_size,
+                    seq_len,
+                    self.output_size_per_partition, 
+                    dtype=input_parallel.dtype,
+                    device=input_parallel.device
+                )
             else:
                 # Input is [batch*seq, hidden], chunk along batch dimension
                 total_tokens, hidden_dim = input_parallel.shape
                 chunk_dim = 0
+                output = torch.empty(
+                    total_tokens, 
+                    self.output_size_per_partition, 
+                    dtype=input_parallel.dtype,
+                    device=input_parallel.device
+                )
             
             chunk_size = (total_tokens + self.num_chunks - 1) // self.num_chunks
             
@@ -117,18 +135,22 @@ class HPURowParallelLinear(RowParallelLinear):
                 
                 # Slice input along the appropriate dimension
                 if is_3d:
-                    input_chunk = input_parallel[:, start_idx:end_idx, :]
+                    if chunk_dim == 1:
+                        # Chunking along sequence dimension
+                        input_chunk = input_parallel[:, start_idx:end_idx, :]
+                    else:
+                        # Chunking along batch dimension
+                        input_chunk = input_parallel[start_idx:end_idx, :, :]
                 else:
                     input_chunk = input_parallel[start_idx:end_idx]
                 
-                # Compute on chunk (bias only on first chunk for rank 0)
-                bias_ = self.bias if (i == 0 and self.tp_rank == 0 and not self.skip_bias_add) else None
-                output_chunk = self.quant_method.apply(self, input_chunk, bias_)
+                # Compute on chunk (no bias - will be added after all-reduce)
+                output_chunk = self.quant_method.apply(self, input_chunk, bias=None)
                 torch._dynamo.graph_break()
                 
                 # Start async all-reduce for this chunk
                 handle = torch.distributed.all_reduce(
-                    output_chunk, group=torch.distributed.group.WORLD, async_op=True
+                    output_chunk, group=get_tp_group().device_group, async_op=True
                 )
                 
                 # Store chunk, handle, and range info
@@ -142,31 +164,23 @@ class HPURowParallelLinear(RowParallelLinear):
             
             torch._dynamo.graph_break()
             
-            # Pre-allocate output buffer matching input shape
-            if is_3d:
-                output = torch.empty(
-                    batch_size,
-                    seq_len,
-                    self.output_size_per_partition, 
-                    dtype=input_parallel.dtype,
-                    device=input_parallel.device
-                )
-            else:
-                output = torch.empty(
-                    total_tokens, 
-                    self.output_size_per_partition, 
-                    dtype=input_parallel.dtype,
-                    device=input_parallel.device
-                )
-            
             # Copy all chunks to output
             for chunk, (start_idx, end_idx) in zip(output_chunks, chunk_ranges):
                 if is_3d:
-                    output[:, start_idx:end_idx, :] = chunk
+                    if chunk_dim == 1:
+                        # Chunked along sequence dimension
+                        output[:, start_idx:end_idx, :] = chunk
+                    else:
+                        # Chunked along batch dimension
+                        output[start_idx:end_idx, :, :] = chunk
                 else:
                     output[start_idx:end_idx] = chunk
             
             torch._dynamo.graph_break()
+            
+            # Apply bias after all-reduce (only on rank 0 if not skip_bias_add)
+            if self.bias is not None and self.tp_rank == 0 and not self.skip_bias_add:
+                output = output + self.bias
         else:
             # Original single-shot computation
             bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
@@ -183,6 +197,3 @@ class HPURowParallelLinear(RowParallelLinear):
             return output
         return output, output_bias
 
-
-# Log registration
-logger.info("HPURowParallelLinear registered as OOT custom op for RowParallelLinear")
