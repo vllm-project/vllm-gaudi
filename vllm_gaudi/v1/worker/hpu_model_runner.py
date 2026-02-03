@@ -5341,8 +5341,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 is_spec_decode=bool(self.vllm_config.speculative_config),
                 logitsprocs=self.input_batch.logitsprocs,
                 is_pooling_model=self.is_pooling_model,
-                num_speculative_tokens=(self.vllm_config.speculative_config.num_speculative_tokens
-                                        if self.vllm_config.speculative_config else 0),
             )
 
         self.initialize_attn_backend(kv_cache_config)

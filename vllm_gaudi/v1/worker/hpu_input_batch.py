@@ -77,7 +77,6 @@ class InputBatch:
         logitsprocs: Optional[LogitsProcessors] = None,
         is_spec_decode: bool = False,
         is_pooling_model: bool = False,
-        num_speculative_tokens: int = 0,
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
@@ -115,16 +114,13 @@ class InputBatch:
             self.num_computed_tokens_cpu_tensor.numpy()
 
         # Block table.
-        self.block_table = MultiGroupBlockTable(
-            max_num_reqs=max_num_reqs,
-            max_model_len=max_model_len,
-            max_num_batched_tokens=max_num_batched_tokens,
-            pin_memory=pin_memory,
-            device=device,
-            block_sizes=block_sizes,
-            kernel_block_sizes=kernel_block_sizes,
-            num_speculative_tokens=num_speculative_tokens,
-        )
+        self.block_table = MultiGroupBlockTable(max_num_reqs=max_num_reqs,
+                                                max_model_len=max_model_len,
+                                                max_num_batched_tokens=max_num_batched_tokens,
+                                                pin_memory=pin_memory,
+                                                device=device,
+                                                block_sizes=block_sizes,
+                                                kernel_block_sizes=kernel_block_sizes)
 
         # Sampling-related.
         self.temperature = torch.empty((max_num_reqs, ), dtype=torch.float32, device=device)
