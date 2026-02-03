@@ -5151,7 +5151,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.shutdown_inc()
 
     @torch.inference_mode()
-    def profile_run(self) -> None:
+    def profile_run(self, initialize_only=False) -> None:
+        if initialize_only:
+            return
         if any(map(lambda v: isinstance(v, MambaSpec), list(self.get_kv_cache_spec().values()))):
             # dummy preparation is not working for hybrid models
             return
