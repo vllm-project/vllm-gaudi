@@ -779,7 +779,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.mamba_chunk_size = self.model_config.get_mamba_chunk_size() if self.num_mamba_layers > 0 else 0
         self.use_hybrid_cache = os.getenv('VLLM_USE_HYBRID_CACHE', 'false').strip().lower() in ("1", "true")
         self.use_naive_mamba_cache_sharing = os.getenv('VLLM_USE_NAIVE_MAMBA_CACHE_SHARING',
-                                                       'false').strip().lower() in ("1", "true")
+                                                       'true').strip().lower() in ("1", "true")
 
         # Lazy initialization
         # self.model: nn.Module  # set after load_model
