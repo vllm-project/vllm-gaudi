@@ -13,7 +13,8 @@ import torch
 import vllm_gaudi.extension.kernels as kernels
 import vllm_gaudi.extension.ops as ops
 from vllm_gaudi.extension.runtime import get_config
-from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, ModuleFusedSDPA, Softmax, VLLMFP8KVCache, VLLMKVCache)
+from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, B2BMatmul, ModuleFusedSDPA, Softmax, VLLMFP8KVCache,
+                                        VLLMKVCache)
 
 from vllm.v1.attention.backend import (AttentionBackend, AttentionImpl, AttentionLayer, AttentionMetadata,
                                        AttentionType)
@@ -232,9 +233,9 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         self.softmax = Softmax()
         self.matmul_av = Matmul() if not self.enable_fp8_attn \
             else FP8Matmul()
-        self.batch2block_matmul = Matmul() if not self.enable_fp8_attn \
+        self.batch2block_matmul = B2BMatmul() if not self.enable_fp8_attn \
             else FP8Matmul()
-        self.block2batch_matmul = Matmul() if not self.enable_fp8_attn \
+        self.block2batch_matmul = B2BMatmul() if not self.enable_fp8_attn \
             else FP8Matmul()
         self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn \
             else VLLMFP8KVCache()
@@ -456,9 +457,9 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         self.softmax = Softmax()
         self.matmul_av = Matmul() if not self.enable_fp8_attn \
             else FP8Matmul()
-        self.batch2block_matmul = Matmul() if not self.enable_fp8_attn \
+        self.batch2block_matmul = B2BMatmul() if not self.enable_fp8_attn \
             else FP8Matmul()
-        self.block2batch_matmul = Matmul() if not self.enable_fp8_attn \
+        self.block2batch_matmul = B2BMatmul() if not self.enable_fp8_attn \
             else FP8Matmul()
         self.k_cache = VLLMKVCache() if not self.enable_fp8_attn \
             else VLLMFP8KVCache()
