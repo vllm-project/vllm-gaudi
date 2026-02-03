@@ -45,6 +45,7 @@ The following configurations have been validated to function with IntelÂ® GaudiÂ
 | [Qwen/Qwen3-VL-235B-A22B-Instruct-FP8](https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Instruct-FP8)     | 4    |  FP8    | Gaudi 3|
 | [Qwen/Qwen3-VL-235B-A22B-Thinking](https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Thinking)     | 8    |  BF16    | Gaudi 3|
 | [Qwen/Qwen3-VL-235B-A22B-Thinking-FP8](https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Thinking-FP8)     | 4    |  FP8    | Gaudi 3|
+| [ibm-granite/granite-4.0-h-small](https://huggingface.co/ibm-granite/granite-4.0-h-small)     | 1    |  BF16    | Gaudi 3|
 
 Validation of the following configurations is currently in progress:
 
