@@ -319,7 +319,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         if is_prefill:
             return self._forward_prefill(q, latent_vec_k, k_cache, attn_metadata)
         else:
-            return self._forward_decode(decode_ql_nope, q_pe, k_cache, attn_metadata)
+            return self.forward_mqa(decode_ql_nope, q_pe, k_cache, attn_metadata)
 
     def _forward_prefill(  # type: ignore
             self, q: torch.Tensor, latent_vec_k: torch.Tensor, k_cache: torch.Tensor,
@@ -382,7 +382,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
 
         return output.reshape(-1, self.num_heads * v.shape[-1])
 
-    def _forward_decode(  # type: ignore
+    def forward_mqa(  # type: ignore
             self, q_nope: torch.Tensor, q_pe: torch.Tensor, k_cache: torch.Tensor,
             attn_metadata: HPUAttentionMetadata) -> torch.Tensor:
         query = torch.cat([q_nope, q_pe], dim=-1)
@@ -1228,7 +1228,7 @@ class HPUUnifiedMLAImpl(MLACommonImpl[HPUUnifiedAttentionMetadata], torch.nn.Mod
     def is_mla(cls) -> bool:
         return True
 
-    def _forward_decode(self, *args, **kwargs) -> torch.Tensor:
+    def forward_mqa(self, *args, **kwargs) -> torch.Tensor:
         raise NotImplementedError("Use forward method for HPUUnifiedMLAImpl")
 
     def _forward_prefill(self, *args, **kwargs) -> torch.Tensor:
