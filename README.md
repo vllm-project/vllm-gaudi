@@ -14,7 +14,7 @@ vLLM Hardware Plugin for Intel® Gaudi®
 
 ---
 *Latest News* 🔥
-
+- [2026/02] Version 0.14.1 is now available, built on [vLLM 0.14.1](https://github.com/vllm-project/vllm/releases/tag/v0.14.1) and fully compatible with [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html). It introduces support for Granite 4.0h and Qwen 3 VL models.
 - [2026/01] Version 0.13.0 is now available, built on [vLLM 0.13.0](https://github.com/vllm-project/vllm/releases/tag/v0.13.0) and fully compatible with [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html). It introduces experimental dynamic quantization for MatMul and KV‑cache operations to improve performance and also supports additional models.
 - [2025/11] The 0.11.2 release introduces the production-ready version of the vLLM Hardware Plugin for Intel® Gaudi® v1.22.2. The plugin is an alternative to the [vLLM fork](https://github.com/HabanaAI/vllm-fork), which reaches end of life with this release and will be deprecated in v1.24.0, remaining functional only for legacy use cases. We strongly encourage all fork users to begin planning their migration to the plugin. For more information about this release, see the [Release Notes](docs/release_notes.md).
 - [2025/06] We introduced an early developer preview of the vLLM Hardware Plugin for Intel® Gaudi®, which is not yet intended for general use.
