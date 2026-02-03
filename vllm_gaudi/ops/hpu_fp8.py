@@ -176,6 +176,12 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         if self.block_quant:
             layer = hpu_ops.fp8_block_moe_prepare_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
         else:
+            if self.quant_config.activation_scheme == "static":
+                if (layer.w13_input_scale is None or layer.w2_input_scale is None):
+                    raise ValueError("QuantConfig has static quantization, but found "
+                                     "activation scales are None.")
+                layer.w13_input_scale = torch.nn.Parameter(layer.w13_input_scale.max(), requires_grad=False)
+                layer.w2_input_scale = torch.nn.Parameter(layer.w2_input_scale.max(), requires_grad=False)
             layer = hpu_ops.fp8_channel_moe_prepare_weights(layer)
 
     def apply_monolithic(
