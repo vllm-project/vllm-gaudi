@@ -15,6 +15,34 @@ from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.utils import has_quant_config
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
 
+from vllm.model_executor.layers.quantization.kernels import scaled_mm
+from vllm.platforms import PlatformEnum
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.pytorch import (
+    PerTensorTorchFP8ScaledMMLinearKernel,
+    ChannelWiseTorchFP8ScaledMMLinearKernel,
+)
+
+
+class HPUPerTensorTorchFP8ScaledMMLinearKernel(PerTensorTorchFP8ScaledMMLinearKernel):
+
+    @classmethod
+    def is_supported(cls, compute_capability: int | None = None) -> tuple[bool, str | None]:
+        return True, None
+
+
+class HPUChannelWiseTorchFP8ScaledMMLinearKernel(ChannelWiseTorchFP8ScaledMMLinearKernel):
+
+    @classmethod
+    def is_supported(cls, compute_capability: int | None = None) -> tuple[bool, str | None]:
+        return True, None
+
+
+if PlatformEnum.OOT not in scaled_mm._POSSIBLE_FP8_KERNELS:
+    scaled_mm._POSSIBLE_FP8_KERNELS[PlatformEnum.OOT] = [
+        HPUPerTensorTorchFP8ScaledMMLinearKernel,
+        HPUChannelWiseTorchFP8ScaledMMLinearKernel,
+    ]
+
 
 class Fp8LinearMethod(OrigFp8LinearMethod):
 
