@@ -787,6 +787,9 @@ class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
         layer.impl.fused_scaled_dot_product_attention.scale_q = q_scale.detach()
         layer.impl.fused_scaled_dot_product_attention.scale_k = kv_scale.detach()
         layer.impl.fused_scaled_dot_product_attention.scale_v = kv_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.d_scale_q = 1 / q_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.d_scale_k = 1 / kv_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.d_scale_v = 1 / kv_scale.detach()
 
         # Note: The following steps are important to avoid compiling each decoding layer into a different gc recipe
         # Step 1: Remove deprecated scale attributes

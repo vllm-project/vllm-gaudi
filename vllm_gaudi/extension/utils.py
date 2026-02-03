@@ -180,6 +180,9 @@ class ModuleFP8FusedSDPA(torch.nn.Module):
         self.scale_q = torch.tensor(1.0)
         self.scale_k = torch.tensor(1.0)
         self.scale_v = torch.tensor(1.0)
+        self.d_scale_q = torch.tensor(1.0)
+        self.d_scale_k = torch.tensor(1.0)
+        self.d_scale_v = torch.tensor(1.0)
 
     def quant_input(self, x, scale):
         return torch.ops.hpu.cast_to_fp8_v2(x, scale, False, False, torch.float8_e4m3fn)[0]
@@ -216,9 +219,9 @@ class ModuleFP8FusedSDPA(torch.nn.Module):
             is_causal=is_causal,
             scale=scale,
             softmax_mode=softmax_mode,
-            d_scale_q=1 / self.scale_q,
-            d_scale_k=1 / self.scale_k,
-            d_scale_v=1 / self.scale_v,
+            d_scale_q=self.d_scale_q,
+            d_scale_k=self.d_scale_k,
+            d_scale_v=self.d_scale_v,
             q_scale_s=self.scale_amax,
             # q_scale_o=1 / 1.0,
             d_scale_s=self.descale_amax,
