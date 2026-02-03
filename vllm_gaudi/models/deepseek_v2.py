@@ -9,7 +9,7 @@ def _get_hpu_llama_4_scaling(original_max_position_embeddings: int, scaling_beta
     scaling = scaling[..., None, None]
 
     # Squeeze dimension of scaling factor to match expected shape on HPU
-    return scaling.squeeze(dim=0)
+    return scaling.reshape(-1, *scaling.shape[-2:])
 
 
 deepseek_v2._get_llama_4_scaling = _get_hpu_llama_4_scaling
