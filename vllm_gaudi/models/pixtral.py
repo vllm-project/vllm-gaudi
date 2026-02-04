@@ -103,8 +103,6 @@ class HPUAttention(Attention):
         k = k.reshape(batch, patches, self.n_heads, self.head_dim)
         v = v.reshape(batch, patches, self.n_heads, self.head_dim)
 
-        qk = torch.cat([q, k], dim=0)
-
         q, k = apply_hpu_rotary_emb_vit(q, k, cos_sin_cache=cos_sin_cache)
 
         q = q.transpose(1, 2)
