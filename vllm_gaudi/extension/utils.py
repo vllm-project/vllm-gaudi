@@ -30,6 +30,19 @@ class Matmul(torch.nn.Module):
         return torch.matmul(x, y, **kwargs)
 
 
+class B2BMatmul(Matmul):
+    """Specialized alias for batch2block and block2batch matmul operations.
+    
+    This class remains functionally identical to ``Matmul`` but is used to
+    semantically mark B2B-related matmuls. This enables the system to apply the
+    fix that uses the B2B output measurements as the input measurements during
+    calibration, avoiding corrupted scales from the KV‑cache.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+
 class Softmax(torch.nn.Module):
 
     def __init__(self):
@@ -85,7 +98,7 @@ class VLLMFP8KVCache(VLLMKVCache):
         qinput = self.quant_input(input)
         return super().forward(qinput, *args, **kwargs)
 
-    def fetch_from_cache(self, quant_cache, blocks, permutations=None):
+    def fetch_from_cache(self, quant_cache, blocks, permutations=None, **kwargs):
         if permutations:
             output_cache = super().fetch_from_cache(quant_cache, blocks, permutations)
             for i in range(len(output_cache)):
