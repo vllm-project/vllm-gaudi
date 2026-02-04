@@ -5,7 +5,6 @@ import torch
 from vllm_gaudi import envs
 from torch.nn.parameter import Parameter
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 
 from vllm.model_executor.layers.quantization import fp8
 from vllm.model_executor.layers.quantization.fp8 import (Fp8LinearMethod as OrigFp8LinearMethod, Fp8MoEMethod,
@@ -15,6 +14,34 @@ from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel, VllmM
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.utils import has_quant_config
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
+
+from vllm.model_executor.layers.quantization.kernels import scaled_mm
+from vllm.platforms import PlatformEnum
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.pytorch import (
+    PerTensorTorchFP8ScaledMMLinearKernel,
+    ChannelWiseTorchFP8ScaledMMLinearKernel,
+)
+
+
+class HPUPerTensorTorchFP8ScaledMMLinearKernel(PerTensorTorchFP8ScaledMMLinearKernel):
+
+    @classmethod
+    def is_supported(cls, compute_capability: int | None = None) -> tuple[bool, str | None]:
+        return True, None
+
+
+class HPUChannelWiseTorchFP8ScaledMMLinearKernel(ChannelWiseTorchFP8ScaledMMLinearKernel):
+
+    @classmethod
+    def is_supported(cls, compute_capability: int | None = None) -> tuple[bool, str | None]:
+        return True, None
+
+
+if PlatformEnum.OOT not in scaled_mm._POSSIBLE_FP8_KERNELS:
+    scaled_mm._POSSIBLE_FP8_KERNELS[PlatformEnum.OOT] = [
+        HPUPerTensorTorchFP8ScaledMMLinearKernel,
+        HPUChannelWiseTorchFP8ScaledMMLinearKernel,
+    ]
 
 
 class Fp8LinearMethod(OrigFp8LinearMethod):
@@ -110,6 +137,10 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
 
         self.use_dispatch_fn = get_config().use_dispatch_fn
 
+    @property
+    def is_monolithic(self) -> bool:
+        return True
+
     def create_weights(self, *args, **kwargs) -> None:
         if hpu_ops.is_hpu_gaudi2:
             kwargs['weight_loader'] = hpu_ops.gaudi_weight_wrapper(kwargs.get('weight_loader'))
@@ -147,10 +178,9 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         else:
             layer = hpu_ops.fp8_channel_moe_prepare_weights(layer)
 
-    def apply(
+    def apply_monolithic(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         **kwargs,
@@ -171,14 +201,15 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
             topk_weights = topk_weights.to(x.dtype)
 
         if layer.dp_size > 1:
+            dp_metadata = get_hpu_dp_metadata()
             if not (has_quant_config(layer.vllm_config.model_config) and self.use_dispatch_fn):
-                hidden_states_across_dp = get_hpu_dp_metadata().hidden_states_across_dp
+                hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
                 x = dispatch_tensor(x, hidden_states_across_dp, layer.is_sequence_parallel)
 
-            topk_ids_across_dp = get_hpu_dp_metadata().topk_ids_across_dp
+            topk_ids_across_dp = dp_metadata.topk_ids_across_dp if dp_metadata is not None else None
             topk_ids = dispatch_tensor(topk_ids, topk_ids_across_dp, layer.is_sequence_parallel)
 
-            topk_weights_across_dp = get_hpu_dp_metadata().topk_weights_across_dp
+            topk_weights_across_dp = dp_metadata.topk_weights_across_dp if dp_metadata is not None else None
             topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, layer.is_sequence_parallel)
 
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])

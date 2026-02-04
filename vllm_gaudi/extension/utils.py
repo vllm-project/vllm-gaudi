@@ -30,6 +30,19 @@ class Matmul(torch.nn.Module):
         return torch.matmul(x, y, **kwargs)
 
 
+class B2BMatmul(Matmul):
+    """Specialized alias for batch2block and block2batch matmul operations.
+    
+    This class remains functionally identical to ``Matmul`` but is used to
+    semantically mark B2B-related matmuls. This enables the system to apply the
+    fix that uses the B2B output measurements as the input measurements during
+    calibration, avoiding corrupted scales from the KV‑cache.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+
 class Softmax(torch.nn.Module):
 
     def __init__(self):
@@ -53,7 +66,7 @@ class VLLMKVCache(torch.nn.Module):
         # is_v_cache is used in INC FP8 dynamic quantization to identify V cache
         self.is_v_cache = is_v_cache
 
-    def forward(self, input, cache, slot_mapping, scales=None, **kwargs):
+    def forward(self, input, cache, slot_mapping, scales=None, block_size=None, is_prompt=False, **kwargs):
         # In cross-attention kv cache forward inputs are None in decode
         # We don't want to store them in the cache in such case
         if input is not None:
@@ -85,7 +98,7 @@ class VLLMFP8KVCache(VLLMKVCache):
         qinput = self.quant_input(input)
         return super().forward(qinput, *args, **kwargs)
 
-    def fetch_from_cache(self, quant_cache, blocks, permutations=None):
+    def fetch_from_cache(self, quant_cache, blocks, permutations=None, **kwargs):
         if permutations:
             output_cache = super().fetch_from_cache(quant_cache, blocks, permutations)
             for i in range(len(output_cache)):

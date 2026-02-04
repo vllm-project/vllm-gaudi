@@ -27,7 +27,7 @@ from vllm.distributed.kv_transfer import (
 )
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.utils.torch_utils import (STR_DTYPE_TO_TORCH_DTYPE, set_random_seed)
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec)
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec, MambaSpec)
 from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerOutput)
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.utils import is_fake_hpu
@@ -179,23 +179,67 @@ class HPUWorker(WorkerBase):
         for layer_name, layer_spec in kv_cache_spec.items():
             if isinstance(layer_spec, FullAttentionSpec):
                 dtype = layer_spec.dtype
+                if dtype == torch.float8_e4m3fn and os.environ.get('QUANT_CONFIG', None) is not None and \
+                    os.environ.get('VLLM_DYNAMIC_KV_QUANT', None) is not None and not self.model_config.use_mla:
+                    create_dynamic_scales = True
+                else:
+                    create_dynamic_scales = False
 
-                # Use an empty tensor instead of `None`` to force Dynamo to pass
-                # it by reference, rather by specializing on the value ``None``.
-                hpu_k_cache = torch.tensor([], dtype=dtype, device='hpu')
-                hpu_v_cache = torch.tensor([], dtype=dtype, device='hpu')
-                hpu_k_scales = torch.tensor([], dtype=dtype, device='hpu')
-                hpu_v_scales = torch.tensor([], dtype=dtype, device='hpu')
+                # Create dummy KV cache tensors with proper shapes for profiling
+                num_blocks = 1  # Use single block for profiling
+                block_size = layer_spec.block_size
+                num_kv_heads = layer_spec.num_kv_heads
+                head_size = layer_spec.head_size
+
+                kv_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(num_blocks, block_size, num_kv_heads,
+                                                                                   head_size)
+                kv_scales_shape = kv_cache_shape[:-1] + (1, )
+
+                hpu_k_cache = torch.zeros(kv_cache_shape, dtype=dtype, device='hpu')
+                hpu_v_cache = None if self.model_config.use_mla else torch.zeros(
+                    kv_cache_shape, dtype=dtype, device='hpu')
+
+                hpu_k_scales = torch.ones(kv_scales_shape, dtype=torch.bfloat16,
+                                          device='hpu') if create_dynamic_scales else None
+                if create_dynamic_scales:
+                    hpu_v_scales = (torch.ones(kv_scales_shape, dtype=torch.bfloat16, device='hpu'),
+                                    torch.ones([num_blocks, num_kv_heads, head_size],
+                                               dtype=torch.bfloat16,
+                                               device='hpu'))
+                else:
+                    hpu_v_scales = None
 
                 kv_caches[layer_name] = (hpu_k_cache, hpu_v_cache, hpu_k_scales, hpu_v_scales)
 
                 single_kv_block_size_bytes += layer_spec.page_size_bytes
 
+            elif isinstance(layer_spec, MambaSpec):
+                dtype0 = layer_spec.dtypes[0]
+                dtype1 = layer_spec.dtypes[1]
+
+                # Use an empty tensor instead of `None`` to force Dynamo to pass
+                # it by reference, rather by specializing on the value ``None``.
+                hpu_ssm_cache = torch.tensor([], dtype=dtype0, device='hpu')
+                hpu_conv_cache = torch.tensor([], dtype=dtype1, device='hpu')
+                hpu_ssm_scales = torch.tensor([], dtype=dtype0, device='hpu')
+                hpu_conv_scales = torch.tensor([], dtype=dtype1, device='hpu')
+
+                kv_caches[layer_name] = (hpu_ssm_cache, hpu_conv_cache, hpu_ssm_scales, hpu_conv_scales)
+
+                single_kv_block_size_bytes += layer_spec.page_size_bytes
             else:
                 raise NotImplementedError
 
         runner_kv_caches: list[torch.Tensor] = []
         bind_kv_cache(kv_caches, self.vllm_config.compilation_config.static_forward_context, runner_kv_caches)
+
+        if self.model_runner.unified_attn:
+            # Create unified attention persistent context for profiling
+            from vllm_gaudi.extension.unified_batch import UnifiedBatchPersistentContext
+            self.model_runner.unified_attn_persistent_ctx = UnifiedBatchPersistentContext(
+                self.model_runner.max_num_batched_tokens, 0, 0, self.model_runner.block_size, dtype,
+                self.model_runner.profiler)
+
         if is_fake_hpu():
             fake_hpu_cache_alloc = 4 * 2**30  # take 4 GiB flat on fake hpu
             return fake_hpu_cache_alloc
@@ -229,7 +273,15 @@ class HPUWorker(WorkerBase):
                "reserved for usable KV cache")
 
         logger.info(msg)
+
+        # Clear the dummy KV cache to free up memory
+        kv_caches = {}
+        forward_context = self.vllm_config.compilation_config.static_forward_context
+        for layer_name in forward_context:
+            forward_context[layer_name].kv_cache = None
+        runner_kv_caches = []
         gc.collect()
+
         return cache_size_bytes - dummy_block_headroom
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
@@ -255,9 +307,8 @@ class HPUWorker(WorkerBase):
         self.compile_or_warm_up_model()
 
     def compile_or_warm_up_model(self) -> None:
-        # Don't run the warmup if in eager or if the model is already warmed up
-        if not self.model_config.enforce_eager \
-            and not getattr(self.model_runner, 'graphed_buckets', None):
+        # Don't run the warmup if the model is already warmed up
+        if not getattr(self.model_runner, 'graphed_buckets', None):
             self.model_runner.warmup_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
@@ -372,7 +423,7 @@ class HPUWorker(WorkerBase):
     def wake_up(self, tags: list[str] | None = None) -> None:
         """Wake up the worker from sleep mode.
         It can move the model back to HPU and/or reinitialize KV cache.
-        
+
         Args:
             tags: Optional list of tags (kept for interface compatibility)
         """

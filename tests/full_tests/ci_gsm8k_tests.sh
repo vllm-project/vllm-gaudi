@@ -99,14 +99,14 @@ run_qwen3_compressed_tensor_dynamic_scaling_test() {
 # QWEN3 FP8 + MOE compressed tensor + dynamic scaling
 run_qwen3_moe_compressed_tensor_dynamic_scaling_test() {
     echo "➡️ Testing Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 + moe + compressed-tensor + dynamic scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 --trust-remote-code
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 --trust-remote-code --max-model-len 131072
     echo "✅ Test with Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 + moe + compressed-tensor + dynamic scaling successful."
 }
 
 # QWEN3 FP8 + MOE compressed tensor + static scaling (weight per-tensor, activation per-tensor)
 run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_test() {
     echo "▒~^▒▒~O Testing Intel/Qwen3-30B-A3B-FP8-Test-Only + moe + compressed-tensor + static scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
+    #HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
     echo "▒~\~E Test with Intel/Qwen3-30B-A3B-FP8-Test-Only + moe + compressed-tensor + static scaling successful."
 }
 
@@ -122,6 +122,13 @@ run_llama3_per_tensor_scaling_test() {
     echo "➡️ Testing RedHatAI/Meta-Llama-3-8B-Instruct-FP8 + per tensor scaling..."
     HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Meta-Llama-3-8B-Instruct-FP8 --trust-remote-code
     echo "✅ Test with RedHatAI/Meta-Llama-3-8B-Instruct-FP8 + per tensor scaling successful."
+}
+
+# nvidia/Llama-3.1-8B-Instruct-FP8 Per-tensor F8 static scales
+run_llama3_modelopt_per_tensor_scaling_test() {
+    echo "➡️ Testing nvidia/Llama-3.1-8B-Instruct-FP8 + per tensor scaling..."
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model nvidia/Llama-3.1-8B-Instruct-FP8 --trust-remote-code --kv_cache_dtype fp8_inc
+    echo "✅ Test with nvidia/Llama-3.1-8B-Instruct-FP8 + per tensor scaling successful."
 }
 
 
@@ -265,6 +272,14 @@ run_qwen2_5_vl_unified_attn_test() {
     echo "✅ Test multimodal-support + unified attention with qwen2.5-vl-7b passed."
 }
 
+# Multimodal-support with qwen3-vl
+run_qwen3_vl_test() {
+    echo "➡️ Testing Qwen3-VL-32B..."
+    VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=0 \
+    python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen3-vl-32b.yaml"
+    echo "✅ Test with multimodal-support with qwen3-vl-32b passed."
+}
+
 # Spec decode with ngram
 run_spec_decode_ngram_test() {
     echo "➡️ Testing Spec-decode with ngram..."
@@ -275,19 +290,17 @@ run_spec_decode_ngram_test() {
 
 # Spec decode with eagle3
 run_spec_decode_eagle3_test() {
-    #echo "➡️ Testing Spec-decode with eagle3..."
-    #VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.70 --osl 2048
-    #VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --accuracy_rate 0.65
-    # Test cases are disabled because of #31998
+    echo "➡️ Testing Spec-decode with eagle3..."
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.70 --osl 2048
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --accuracy_rate 0.65
     echo "✅ Test with spec decode with eagle3 passed."
 }
 
 # Spec decode with eagle3 and num_speculative_tokens = 2
 run_spec_decode_eagle3_num_spec_2_test() {
-    #echo "➡️ Testing Spec-decode with eagle3 and num_speculative_tokens = 2..."
-    #VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.59 --osl 2048 --num_spec_tokens 2
-    #VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --accuracy_rate 0.59 --num_spec_tokens 2
-    # Test cases are disabled because of #31998
+    echo "➡️ Testing Spec-decode with eagle3 and num_speculative_tokens = 2..."
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.59 --osl 2048 --num_spec_tokens 2
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --accuracy_rate 0.59 --num_spec_tokens 2
     echo "✅ Test with spec decode with eagle3 and num_speculative_tokens = 2 passed."
 }
 
@@ -300,9 +313,8 @@ run_UA_spec_decode_ngram_test() {
 
 # Spec decode with eagle3 with UA
 run_UA_spec_decode_eagle3_test() {
-    #echo "➡️ Testing Spec-decode with eagle3..."
-    #VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.50 --osl 1024
-    # Test case is disabled because of #31998
+    echo "➡️ Testing Spec-decode with eagle3..."
+    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.50 --osl 1024
     echo "✅ Test with spec decode with eagle3 passed."
 }
 
