@@ -1486,9 +1486,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         Returns:
             The model type string if available, None otherwise.
         """
-        if (self.vllm_config is not None 
-            and self.vllm_config.model_config is not None
-            and self.vllm_config.model_config.hf_config is not None):
+        if (self.vllm_config is not None and self.vllm_config.model_config is not None
+                and self.vllm_config.model_config.hf_config is not None):
+
             return self.vllm_config.model_config.hf_config.model_type
         return None
 
