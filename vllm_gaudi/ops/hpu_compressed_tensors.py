@@ -798,6 +798,37 @@ class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
 
 class HPUCompressedTensorsConfig(CompressedTensorsConfig):
 
+    def __init__(
+        self,
+        target_scheme_map: dict[str, Any],
+        ignore: list[str],
+        quant_format: str,
+        sparsity_scheme_map,  #: dict[str, SparsityCompressionConfig],
+        sparsity_ignore_list: list[str],
+        kv_cache_scheme: dict[str, Any] | None = None,
+        config: dict[str, Any] | None = None,
+        transform_config: dict[str, Any] | None = None,
+        total_num_heads: int | None = None,
+        total_num_kv_heads: int | None = None,
+    ):
+        super().__init__(
+            target_scheme_map,
+            ignore,
+            quant_format,
+            sparsity_scheme_map,
+            sparsity_ignore_list,
+            kv_cache_scheme,
+            config,
+            transform_config,
+            total_num_heads,
+            total_num_kv_heads,
+        )
+        # Fix https://github.com/vllm-project/vllm/pull/30141
+        # LLMC override the `kv_cache_dtype` to 'fp8', while HPU uses 'fp8_inc'.
+        if getattr(self, "kv_cache_scheme", None) is not None:
+            self.kv_cache_dtype = "fp8_inc"
+            self.kv_cache_scheme = None
+
     def get_quant_method(
         self,
         layer: torch.nn.Module,
