@@ -138,7 +138,6 @@ test_model() {
     http_code=$(echo "$response" | grep "HTTP_CODE:" | cut -d':' -f2)
     response=$(echo "$response" | sed '/HTTP_CODE:/d')
 
-
     if command -v jq > /dev/null 2>&1; then
         response=$(echo "$response" | jq -r '.choices[0].message.content' 2>/dev/null)
     fi
