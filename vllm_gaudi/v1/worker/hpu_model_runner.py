@@ -2185,7 +2185,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             )
 
         if self.interleaved_sliding_window:
-            sliding_block_size = (self.sliding_window // self.block_size) + 1
+            sliding_block_size = (self.sliding_window // self.block_size)
+            vllm_config = self.vllm_config
+            if vllm_config is not None and vllm_config.model_config is not None \
+            and vllm_config.model_config.hf_config is not None:
+                if vllm_config.model_config.hf_config.model_type in ["gpt_oss"]:
+                    sliding_block_size += 1
+            self.model_type = vllm_config.model_config.hf_config.model_type
             window_block_tables = [block_table[-sliding_block_size:] for block_table in block_tables_list]
             window_block_list, window_block_groups, window_block_usage = \
                 self.get_habana_paged_attn_buffers(
