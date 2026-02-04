@@ -13,7 +13,8 @@ import torch
 import vllm_gaudi.extension.kernels as kernels
 import vllm_gaudi.extension.ops as ops
 from vllm_gaudi.extension.runtime import get_config
-from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, ModuleFusedSDPA, Softmax, VLLMFP8KVCache, VLLMKVCache)
+from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, B2BMatmul, ModuleFusedSDPA, Softmax, VLLMFP8KVCache,
+                                        VLLMKVCache)
 
 from vllm.v1.attention.backend import (AttentionBackend, AttentionImpl, AttentionLayer, AttentionMetadata,
                                        AttentionType)
@@ -148,6 +149,7 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
     block_size: int
+    prep_initial_states: bool
     slot_mapping: torch.Tensor
     attn_bias: Optional[torch.Tensor]
     seq_lens_tensor: Optional[torch.Tensor]
@@ -175,6 +177,9 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     chunked_block_list: Optional[torch.Tensor] = None
     chunked_block_groups: Optional[torch.Tensor] = None
     chunked_block_usage: Optional[torch.Tensor] = None
+    has_initial_states_p: Optional[torch.Tensor] = None
+    last_chunk_indices_p: Optional[torch.Tensor] = None
+    state_indices_tensor: Optional[torch.Tensor] = None  # shape: [batch,]
 
 
 @dataclass
@@ -232,9 +237,9 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         self.softmax = Softmax()
         self.matmul_av = Matmul() if not self.enable_fp8_attn \
             else FP8Matmul()
-        self.batch2block_matmul = Matmul() if not self.enable_fp8_attn \
+        self.batch2block_matmul = B2BMatmul() if not self.enable_fp8_attn \
             else FP8Matmul()
-        self.block2batch_matmul = Matmul() if not self.enable_fp8_attn \
+        self.block2batch_matmul = B2BMatmul() if not self.enable_fp8_attn \
             else FP8Matmul()
         self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn \
             else VLLMFP8KVCache()
@@ -246,6 +251,9 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         assert self.prefill_impl != 'fsdpa_impl' or alibi_slopes is None, \
             'Prefill with FusedSDPA not supported with alibi slopes!'
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
+        # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
+        self.is_aiter_triton_fp4_bmm_enabled = (rocm_aiter_ops.is_fp4bmm_enabled()
+                                                and self.kv_b_proj.weight.dtype == torch.bfloat16)
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
@@ -453,9 +461,9 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         self.softmax = Softmax()
         self.matmul_av = Matmul() if not self.enable_fp8_attn \
             else FP8Matmul()
-        self.batch2block_matmul = Matmul() if not self.enable_fp8_attn \
+        self.batch2block_matmul = B2BMatmul() if not self.enable_fp8_attn \
             else FP8Matmul()
-        self.block2batch_matmul = Matmul() if not self.enable_fp8_attn \
+        self.block2batch_matmul = B2BMatmul() if not self.enable_fp8_attn \
             else FP8Matmul()
         self.k_cache = VLLMKVCache() if not self.enable_fp8_attn \
             else VLLMFP8KVCache()
@@ -1083,6 +1091,7 @@ class HPUUnifiedMLAImpl(MLACommonImpl[HPUUnifiedAttentionMetadata], torch.nn.Mod
         self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn \
             else VLLMFP8KVCache()
         self.is_aiter_triton_fp8_bmm_enabled = False
+        self.is_aiter_triton_fp4_bmm_enabled = False
 
     def forward(
         self,
