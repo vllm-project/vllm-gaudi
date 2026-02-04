@@ -121,7 +121,8 @@ except ImportError:
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
-hpu_buffer: list[list[torch.Tensor]] = []
+# hpu_buffer: list[list[torch.Tensor]] = []
+hpu_buffer = None
 HPU_TORCH_DTYPE_TO_STR_DTYPE = {
     torch.float32: "float32",
     torch.bfloat16: "bfloat16",
@@ -5108,6 +5109,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if self.vllm_config.kv_transfer_config.kv_buffer_device == "cpu":
                 get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
             global hpu_buffer
+            use_hpu_buffer = True
+            logger.info("#### YSY - use global hpu_buffer: %s", use_hpu_buffer)
+            if use_hpu_buffer: # This is after profile
+                if hpu_buffer is None: #YSY
+                    _, num_kv_heads, head_size = kv_cache_shape
+                    shape =[len(kv_caches), 2, 5781, 128, num_kv_heads, head_size]
+                    hpu_buffer = torch.empty(shape, dtype=kv_cache_spec.dtype, device=self.device)
+
         if self.unified_attn:
             with HabanaMemoryProfiler() as m:
                 from vllm_gaudi.extension.unified_batch import UnifiedBatchPersistentContext

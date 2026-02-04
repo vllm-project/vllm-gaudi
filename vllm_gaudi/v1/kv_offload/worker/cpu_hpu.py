@@ -23,6 +23,9 @@ from vllm.v1.kv_offload.abstract import LoadStoreSpec
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.worker.cpu_gpu import (SingleDirectionOffloadingHandler, CpuGpuOffloadingHandlers)
 
+
+import vllm_gaudi.v1.worker.hpu_model_runner as hpu_runner
+
 logger = init_logger(__name__)
 
 
@@ -35,7 +38,7 @@ class Transfer:
     num_bytes: int
 
 
-is_hetero = os.getenv('PT_HPU_ENABLE_RESTORE_KV_LAYOUT', '0') == '1'
+is_hetero = os.getenv('VLLM_HPU_HETERO_KV_LAYOUT', '0') == '1'
 block_factor = int(os.getenv('PT_HPU_BLOCK_SIZE_FACTOR', '1'))
 
 
@@ -66,44 +69,21 @@ def swap_blocks(
 
     key_cache = src_kv_caches[0]
     value_cache = src_kv_caches[1]
+    logger.info("#### YSY - swap_blocks key_cache %s, value_cache %s, dst_kv_caches %s", key_cache.shape, value_cache.shape, dst_kv_caches[0].shape)
+    logger.info("#### YSY - src_block_ids %s, dst_block_ids %s", src_block_ids, dst_block_ids)
 
-    if is_hetero:  # Not verified yet
-        assert direction == "h2d", "hetero only supports h2d for now"
-        n_kv_heads, head_dim = key_cache.shape[-2:]
-        remote_block_size = block_size // block_factor
-        # block_factor, n_kv_heads, remote_block_size, head_dim = 8, 8, 16, 128
-        if len(src_block_ids) == src_block_ids[-1] - src_block_ids[0] + 1:  # simple check if the indices are contiguous
-            block_idx = src_block_ids[0]
-            num_blocks = len(src_block_ids)
-            dst_kv_caches[0][block_idx * block_size:(num_blocks + block_idx) *
-                             block_size] = key_cache[block_idx * block_size:(num_blocks + block_idx) *
-                                                     block_size].reshape(num_blocks * block_factor, n_kv_heads,
-                                                                         remote_block_size,
-                                                                         head_dim).permute(0, 2, 1,
-                                                                                           3).contiguous().reshape(
-                                                                                               num_blocks * block_size,
-                                                                                               n_kv_heads, head_dim)
-            dst_kv_caches[1][block_idx * block_size:(num_blocks + block_idx) *
-                             block_size] = value_cache[block_idx *
-                                                       block_size:(num_blocks + block_idx) * block_size].reshape(
-                                                           num_blocks * block_factor, n_kv_heads, remote_block_size,
-                                                           head_dim).permute(0, 2, 1, 3).contiguous().reshape(
-                                                               num_blocks * block_size, n_kv_heads, head_dim)
+    # hpu->cpu
+    #### YSY - swap_blocks key_cache torch.Size([5781, 128, 8, 128]), value_cache torch.Size([5781, 128, 8, 128]), dst_kv_caches torch.Size([64, 128, 8, 128])
+    #### YSY - src_block_ids tensor([1], device='hpu:0'), dst_block_ids tensor([0])
 
-        for block_idx in src_block_ids:
-            dst_kv_caches[0][block_idx * block_size:(1 + block_idx) *
-                             block_size] = key_cache[block_idx * block_size:(1 + block_idx) * block_size].reshape(
-                                 block_factor, n_kv_heads, remote_block_size,
-                                 head_dim).permute(0, 2, 1, 3).contiguous().reshape(block_size, n_kv_heads,
-                                                                                    head_dim).to("hpu")
-            dst_kv_caches[1][block_idx * block_size:(1 + block_idx) *
-                             block_size] = value_cache[block_idx * block_size:(1 + block_idx) * block_size].reshape(
-                                 block_factor, n_kv_heads, remote_block_size,
-                                 head_dim).permute(0, 2, 1, 3).contiguous().reshape(block_size, n_kv_heads,
-                                                                                    head_dim).to("hpu")
-    else:
-        dst_kv_caches[0].index_put_((dst_block_ids, ), key_cache.index_select(0, src_block_ids).to(target_device))
-        dst_kv_caches[1].index_put_((dst_block_ids, ), value_cache.index_select(0, src_block_ids).to(target_device))
+    # cpu->hpu
+    #### YSY - swap_blocks key_cache torch.Size([64, 128, 8, 128]), value_cache torch.Size([64, 128, 8, 128]), dst_kv_caches torch.Size([5781, 128, 8, 128])
+    #### YSY - src_block_ids tensor([0]), dst_block_ids tensor([5], device='hpu:0')
+
+    dst_kv_caches[0].index_put_((dst_block_ids, ), key_cache.index_select(0, src_block_ids).to(target_device))
+    dst_kv_caches[1].index_put_((dst_block_ids, ), value_cache.index_select(0, src_block_ids).to(target_device))
+    # hpu_buffer[i][0]=key_cache.index_select_(0,  src_slot_mapping)
+    # hpu_buffer[i][1]=value_cache.index_select_(0,  src_slot_mapping)
 
     torch.hpu.synchronize()
 
@@ -193,15 +173,24 @@ def SingleDirectionOffloadingHandler_init_(
 
 
 def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
+    # 3. load global buffer to cpu
+    if self.gpu_to_cpu and hpu_runner.hpu_buffer is not None:
+        self.src_tensors = hpu_runner.hpu_buffer
+    logger.info("#### YSY - transfer_async self.src_tensors: %s, dst: %s", self.src_tensors[0].shape, self.dst_tensors[0].shape)
+    #### YSY - transfer_async self.src_tensors: torch.Size([2, 5781, 128, 8, 128]), dst: torch.Size([2, 64, 128, 8, 128])
     src_spec, dst_spec = transfer_spec
     assert isinstance(src_spec, BlockIDsLoadStoreSpec)
     assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
 
     src_blocks = src_spec.block_ids
     dst_blocks = dst_spec.block_ids
+    logger.info("#### YSY - src_blocks: %s, dst_blocks: %s", src_spec.block_ids, dst_spec.block_ids)
+    #### YSY - src_blocks: [1], dst_blocks: [0]
     assert src_blocks.ndim == 1
     assert dst_blocks.ndim == 1
 
+    logger.info("#### YSY - src_blocks.size:%d, s_b_s_f:%d, dst_blocks.size:%d, d_b_s_f:%d", src_blocks.size, self.src_block_size_factor, dst_blocks.size, self.dst_block_size_factor)
+    #### YSY - src_blocks.size:1, s_b_s_f:1, dst_blocks.size:1, d_b_s_f:1
     src_sub_block_count = src_blocks.size * self.src_block_size_factor
     dst_sub_block_count = dst_blocks.size * self.dst_block_size_factor
     src_sub_blocks_to_skip = -dst_blocks.size % self.src_block_size_factor
@@ -209,6 +198,8 @@ def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
     assert dst_sub_block_count == src_sub_block_count - src_sub_blocks_to_skip
 
     src_to_dst = np.empty((dst_sub_block_count, 2), dtype=np.int64)
+    logger.info("#### YSY - src_to_dst: %s", src_to_dst.shape)
+    #### YSY - src_blocks: [1], dst_blocks: [0]
     expand_block_ids(
         src_blocks,
         self.src_block_size_factor,
@@ -233,9 +224,9 @@ def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
     with torch.hpu.stream(stream):
         start_event.record(stream)
         for src_tensor, dst_tensor, block_size_in_bytes in zip(
-                self.src_tensors,
-                self.dst_tensors,
-                self.block_size_in_bytes,
+            self.src_tensors,
+            self.dst_tensors,
+            self.block_size_in_bytes,
         ):
             swap_blocks(src_tensor, dst_tensor, src_to_dst_tensor, \
                         "d2h" if self.src_tensors[0].device.type == "hpu" else "h2d")
@@ -377,3 +368,8 @@ CPUOffloadingSpec.get_handlers = get_handlers
 SingleDirectionOffloadingHandler.__init__ = SingleDirectionOffloadingHandler_init_
 SingleDirectionOffloadingHandler.transfer_async = transfer_async
 CpuGpuOffloadingHandlers.__init__ = CpuGpuOffloadingHandlers_init_
+
+
+# 1. save to global Buffer
+# 2. do nixl conversion
+# 3. from offloading, load global buffer to cpu

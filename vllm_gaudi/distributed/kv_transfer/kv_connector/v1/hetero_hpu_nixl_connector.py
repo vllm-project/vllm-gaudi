@@ -39,16 +39,18 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     TpKVTopology,
     get_current_attn_backend,
     yield_req_data,
+    _make_src_and_dst_indices
 )
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 
-from typing import Any
+from typing import Any, Literal
 from nixl._api import nixl_agent as NixlWrapper
 from nixl._api import nixl_agent_config
 
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.request import Request
 
+import vllm_gaudi.v1.worker.hpu_model_runner as hpu_runner
 
 def kv_postprocess_blksize_on_save(cache, indices, target_block_size):
     """
@@ -91,6 +93,7 @@ def kv_postprocess_layout_and_blksize_on_save(cache, indices, target_block_size)
     blocks_to_update = cache.index_select(0, indices)
     n_blocks, block_size, n_kv_heads, head_size = blocks_to_update.shape
     ratio = block_size // target_block_size
+    # logger.info("### YSY - layout_and_blksize_on_save blocks_to_update: %s, %d", blocks_to_update.shape, ratio)
     blocks_processed = (
         blocks_to_update
         # 1. Split the block dimension: (N, 4, 4, H, D)
@@ -104,7 +107,9 @@ def kv_postprocess_layout_and_blksize_on_save(cache, indices, target_block_size)
     expanded_indices = (indices.unsqueeze(1) * ratio + torch.arange(ratio, device=indices.device)).flatten()
     cache_physical = cache
     cache_resized_view = cache_physical.view(-1, target_block_size, n_kv_heads, head_size)
+    # logger.info("### YSY - cache_physical: %s, cache_resized_view: %s", cache_physical.shape, cache_resized_view.shape)
     cache_resized_view.index_copy_(0, expanded_indices, blocks_processed)
+    # logger.info("### YSY - cache_resized_view: %s", cache_resized_view.shape)
 
 
 def kv_postprocess_layout_on_save(cache, indices):
@@ -161,9 +166,91 @@ def get_mapped_blocks(block_ids, block_size_ratio, num_blocks):
     return ret
 
 
+def copy_kv_blocks_to_global_buffer(
+    src_kv_caches: dict[str, torch.Tensor], #self.device_kv_caches
+    dst_kv_caches: dict[str, torch.Tensor], #hpu_buffer
+    src_block_ids: list[int],
+    dst_block_ids: list[int],
+    direction: Literal["h2d", "d2h", "d2d"],
+) -> None:
+
+    """Copy kv blocks between different buffers."""
+    if src_kv_caches is None or dst_kv_caches is None or \
+       not src_block_ids or not dst_block_ids or \
+       len(src_block_ids) != len(dst_block_ids):
+        return
+    assert len(src_block_ids) == len(dst_block_ids)
+
+    # (Pdb) src_kv_caches['model.layers.29.self_attn.attn'].shape
+    # torch.Size([2, 5781, 128, 8, 128])
+    # (Pdb) dst_kv_caches.shape
+    # torch.Size([32, 2, 8192, 128, 8, 128])
+
+    src_device = next(iter(src_kv_caches.values()))[0].device
+    dst_device = dst_kv_caches.device
+
+    src_slot_mapping, dst_slot_mapping = _make_src_and_dst_indices(
+        src_block_ids=src_block_ids,
+        dst_block_ids=dst_block_ids,
+        src_device=src_device,
+        dst_device=dst_device)
+    logger.info("#### YSY - src_slot_mapping: %s, dst_slot_mapping: %s", src_slot_mapping, dst_slot_mapping)
+    # tensor([1, 2], device='hpu:0'), tensor([1, 2], device='hpu:0')
+
+    start = time.perf_counter()
+    target_device = dst_device.type
+
+    i = 0
+    for layer_name in src_kv_caches:
+        logger.info("#### YSY - layer_name: %s", layer_name)
+        key_cache = src_kv_caches[layer_name][0] #torch.Size([5781, 128, 8, 128])
+        value_cache = src_kv_caches[layer_name][1] #torch.Size([5781, 128, 8, 128])
+
+        if direction == "d2d":
+            # dst_kv_caches[i][0].shape : torch.Size([8192, 128, 8, 128])
+            # dst_kv_caches[i][0]=key_cache.index_select(0,  src_slot_mapping) #torch.Size([2, 128, 8, 128])
+            # dst_kv_caches[i][1]=value_cache.index_select(0,  src_slot_mapping)
+            dst_kv_caches[i][0].index_put((dst_slot_mapping,), key_cache.index_select(0, src_slot_mapping))
+            dst_kv_caches[i][1].index_put((dst_slot_mapping,), value_cache.index_select(0, src_slot_mapping))
+        # else:
+        #     dst_kv_caches[layer_name][0].index_put_((dst_slot_mapping,), key_cache.index_select(0, src_slot_mapping).to(target_device))
+        #     dst_kv_caches[layer_name][1].index_put_((dst_slot_mapping,), value_cache.index_select(0, src_slot_mapping).to(target_device))
+        i = i+1
+
+    torch.hpu.synchronize()
+    # logger.info(f"copy_kv_blocks: copy takes {time.perf_counter() - start}|{direction=}|{len(src_block_ids)=}|{len(dst_block_ids)=}| {len(src_kv_caches)=} | ")
+
+
+def save_kv_to_global(self, metadata: NixlConnectorMetadata):
+    """Post-process the kv caches after receiving from remote.
+
+    This includes permuting the layout if needed and handling
+    block size mismatches.
+    """
+    logger.info("#### YSY - save_kv_to_global")
+    block_ids_to_permute = []
+    for _, meta in metadata.reqs_to_save.items():
+        meta.local_physical_block_ids = self._logical_to_kernel_block_ids(meta.local_block_ids)
+        block_ids_to_permute.append(meta.local_physical_block_ids)
+    logger.info("### YSY - save_kv_to_global len(block_ids_to_permute): %d", len(block_ids_to_permute))
+    for block_ids in block_ids_to_permute:
+        copy_kv_blocks_to_global_buffer(
+            self.device_kv_caches,
+            hpu_runner.hpu_buffer,
+            meta.local_physical_block_ids,
+            meta.local_physical_block_ids,
+            "d2d")
+
+
 def wait_for_save(self):
     assert self.connector_worker is not None
     assert isinstance(self._connector_metadata, NixlConnectorMetadata)
+    logger.info("#### YSY - Nixl wait_for_save")
+    logger.info("#### YSY - %s %s %s", self.connector_worker.use_host_buffer, self.connector_worker.copy_blocks, self.connector_worker.postprocess_kv_caches_on_save)
+    # 1. Save to global buffer 
+    if hpu_runner.hpu_buffer is not None:
+        self.connector_worker.save_kv_to_global(self._connector_metadata)
+    # 2. NIXL conversion
     if self.connector_worker.use_host_buffer and self.connector_worker.copy_blocks:
         self.connector_worker.save_kv_to_host(self._connector_metadata)
     elif self.connector_worker.postprocess_kv_caches_on_save:
@@ -220,7 +307,7 @@ def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str):
 
 def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
     params = request.kv_transfer_params
-    logger.debug(
+    logger.info(
         "NIXLConnector update_state_after_alloc: "
         "num_external_tokens=%s, kv_transfer_params=%s",
         num_external_tokens,
@@ -343,7 +430,7 @@ def request_finished(
     from vllm.v1.request import RequestStatus
 
     params = request.kv_transfer_params
-    logger.debug(
+    logger.info(
         "NIXLConnector request_finished(%s), request_status=%s, "
         "kv_transfer_params=%s",
         request.request_id,
@@ -382,7 +469,7 @@ def request_finished(
 
     if delay_free_blocks:
         # Prefill request on remote. It will be read from D upon completion
-        logger.debug(
+        logger.info(
             "NIXLConnector request_finished(%s) waiting for %d seconds "
             "for remote decode to fetch blocks",
             request.request_id,
@@ -395,7 +482,7 @@ def request_finished(
     if block_size_ratio > 1:
         num_blocks = math.ceil((request.num_tokens - 1) / self.block_size_on_save)
         block_ids_on_save = get_mapped_blocks(np.asarray(block_ids), block_size_ratio, num_blocks)
-        logger.debug(
+        logger.info(
             "request.num_tokens is %s, block_ids is %s, block_ids_on_save is %s",
             request.num_tokens,
             block_ids,
@@ -562,8 +649,8 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
     self.backend_name = backend.get_name()
     self.kv_cache_layout = get_kv_cache_layout()
     self.host_buffer_kv_cache_layout = self.kv_cache_layout
-    logger.debug("Detected attention backend %s", self.backend_name)
-    logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
+    logger.info("Detected attention backend %s", self.backend_name)
+    logger.info("Detected kv cache layout %s", self.kv_cache_layout)
 
     self.compat_hash = compute_nixl_compatibility_hash(self.vllm_config, self.backend_name)
     self.enforce_compat_hash = self.kv_transfer_config.get_from_extra_config("enforce_handshake_compat", True)
@@ -683,7 +770,7 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
             self.device_id = max(cache.get_device(), 0)
             caches_data.append((base_addr, curr_tensor_size_bytes, self.device_id, ""))
 
-    logger.debug("Different block lengths collected: %s", set(self.block_len_per_layer))
+    logger.info("Different block lengths collected: %s", set(self.block_len_per_layer))
     assert len(self.block_len_per_layer) == len(seen_base_addresses)
     assert self.num_blocks != 0
 
@@ -692,9 +779,9 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
     self.num_layers = len(xfer_buffers.keys())
 
     descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
-    logger.debug("Registering descs: %s", caches_data)
+    logger.info("Registering descs: %s", caches_data)
     self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
-    logger.debug("Done registering descs")
+    logger.info("Done registering descs")
     self._registered_descs.append(descs)
 
     self.device_kv_caches = kv_caches
@@ -735,7 +822,7 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
             is_local_attention = no_rope_layers[layer_idx] != 0
             block_window = chunk_block_size if is_local_attention else None
             self.block_window_per_layer.append(block_window)
-        logger.debug(
+        logger.info(
             "Llama 4 block window per layer mapping: %s",
             self.block_window_per_layer,
         )
@@ -797,7 +884,7 @@ def register_local_xfer_handler(
                 # Register addresses for V cache (K registered first).
                 v_addr = addr + kv_block_len
                 blocks_data.append((v_addr, kv_block_len, self.device_id))
-    logger.debug(
+    logger.info(
         "Created %s blocks for src engine %s and rank %s on device id %s",
         len(blocks_data),
         self.engine_id,
@@ -816,6 +903,7 @@ def kv_caches_postprocess(self, metadata: NixlConnectorMetadata):
     This includes permuting the layout if needed and handling
     block size mismatches.
     """
+    logger.info("#### YSY - kv_caches_postprocess")
     block_ids_to_permute = []
     for _, meta in metadata.reqs_to_save.items():
         meta.local_physical_block_ids = self._logical_to_kernel_block_ids(meta.local_block_ids)
@@ -835,13 +923,15 @@ def post_process_device_kv_on_save(self, block_ids: list[int]):
     if len(block_ids) == 0:
         return
     target_block_size = self.block_size_on_save
-    split_k_and_v = self.kv_topo.split_k_and_v
+    split_k_and_v = self.kv_topo.split_k_and_v #true
     sample_cache = list(self.device_kv_caches.values())[0][0]
     indices = torch.tensor(block_ids, device=sample_cache.device)
 
     for _, cache_or_caches in self.device_kv_caches.items():
         cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
         for cache in cache_list:
+            # cache.shape torch.Size([5781, 128, 8, 128]), indices tensor([1, 2], device='hpu:0'), target_block_size 16
+            logger.info("#### YSY - nixl post_process cache: cache.shape %s, indices %s, target_block_size %d", cache.shape, indices, target_block_size)
             if (self.kv_cache_layout_on_save != self.kv_cache_layout and self.block_size_on_save != self.block_size):
                 kv_postprocess_layout_and_blksize_on_save(cache, indices, target_block_size)
             elif self.kv_cache_layout_on_save != self.kv_cache_layout:
@@ -1009,3 +1099,4 @@ NixlConnectorWorker.register_local_xfer_handler = register_local_xfer_handler
 NixlConnectorWorker.kv_caches_postprocess = kv_caches_postprocess
 NixlConnectorWorker.post_process_device_kv_on_save = post_process_device_kv_on_save
 NixlConnectorWorker._read_blocks = _read_blocks
+NixlConnectorWorker.save_kv_to_global = save_kv_to_global
