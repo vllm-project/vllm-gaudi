@@ -95,9 +95,9 @@ class HPUWorker(WorkerBase):
 
     def init_profiler(self):
         """Initialize the profiler."""
-        logger.warning("VLLM_TORCH_PROFILER_DIR is deprecated!")
         torch_profiler_dir = os.getenv('VLLM_TORCH_PROFILER_DIR')
         if torch_profiler_dir:
+            logger.warning("VLLM_TORCH_PROFILER_DIR is deprecated!")
             torch_profiler_trace_dir = torch_profiler_dir
             logger.info("Profiling enabled. Traces will be saved to: %s", torch_profiler_trace_dir)
             if os.getenv('VLLM_PROFILER_ENABLED') == 'full':
