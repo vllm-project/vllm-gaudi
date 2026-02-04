@@ -197,3 +197,4 @@ class HPURowParallelLinear(RowParallelLinear):
             return output
         return output, output_bias
 
+RowParallelLinear.forward = HPURowParallelLinear.forward_oot
