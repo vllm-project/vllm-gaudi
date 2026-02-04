@@ -38,7 +38,7 @@ class HPURowParallelLinear(RowParallelLinear):
         if self.chunk_threshold < 1:
             raise ValueError(f"VLLM_ROW_PARALLEL_CHUNK_THRESHOLD must be >= 1, got {self.chunk_threshold}")
 
-    def forward_oot(
+    def forward(
         self,
         input_,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Parameter]]:
@@ -196,5 +196,3 @@ class HPURowParallelLinear(RowParallelLinear):
         if not self.return_bias:
             return output
         return output, output_bias
-
-RowParallelLinear.forward = HPURowParallelLinear.forward_oot
