@@ -802,7 +802,6 @@ class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
 class HPUCompressedTensorsKVCacheMethodForAttention(_HPUCompressedTensorsKVCacheMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # breakpoint()
         """Process KV cache scales for cross-platform FP8 quantization compatibility."""
         super().process_weights_after_loading(layer)
         # The `k_scale` and `v_scale` are loaded from checkpoint without any adjustment.
@@ -811,9 +810,7 @@ class HPUCompressedTensorsKVCacheMethodForAttention(_HPUCompressedTensorsKVCache
         max_k = layer._k_scale * fp8_max_original
         max_v = layer._v_scale * fp8_max_original
         max_q = layer._q_scale * fp8_max_original
-        # max_kv = max(max_k, max_v)
         fp8_max_cur_platform = 240.0 if hpu_ops.is_hpu_gaudi2 else 448.0
-        # kv_scale = fp8_max_cur_platform / max_kv
         k_scale = fp8_max_cur_platform / max_k
         v_scale = fp8_max_cur_platform / max_v
         q_scale = fp8_max_cur_platform / max_q
