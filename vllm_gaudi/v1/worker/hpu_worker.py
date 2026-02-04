@@ -243,7 +243,7 @@ class HPUWorker(WorkerBase):
             fake_hpu_cache_alloc = 4 * 2**30  # take 4 GiB flat on fake hpu
             return fake_hpu_cache_alloc
         with HabanaMemoryProfiler() as m:
-            self.model_runner.profile_run()
+            self.model_runner.profile_run(initialize_only=True)
             torch.hpu.synchronize()
         msg = ("Model profiling run "
                f"took {m.get_summary_string()}")

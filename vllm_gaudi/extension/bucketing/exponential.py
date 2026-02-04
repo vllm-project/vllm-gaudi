@@ -46,8 +46,11 @@ class ExponentialBucketingStrategy():
         prompt_bs_bucket_cfg = [1, 2, max_num_prefill_seqs, prompt_bs_limit]
         max_prompt_seq_limit = math.ceil(math.log2(max_num_batched_tokens))
         prompt_query_bucket_cfg = [query_min, block_size, max_num_batched_tokens, max_prompt_seq_limit]
-        # Max ctx for all queries; later we generate additional buckets for max ctx per query
-        max_ctx = max(1, math.ceil((max_model_len - max_num_batched_tokens) // block_size))
+        if self.long_context:
+            # Max ctx for all queries; later we generate additional buckets for max ctx per query
+            max_ctx = max(1, math.ceil((max_model_len - max_num_batched_tokens) // block_size))
+        else:
+            max_ctx = max(1, math.ceil((max_model_len - prompt_query_bucket_cfg[0]) // block_size))
         max_prompt_ctx_limit = 2 if max_ctx == 1 else math.ceil(math.log2(max_ctx)) + 1
         prompt_ctx_bucket_cfg = [0, 1, max_ctx, max_prompt_ctx_limit]
 
@@ -141,13 +144,14 @@ def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=Fals
         bmin = bstep
     assert num_buckets > 0, "num_buckets must be a positive integer"
 
-    if long_context:
-        num_buckets_exp = math.floor(num_buckets / 2)
-        num_buckets_linear = num_buckets - num_buckets_exp
-        first_step = bmax / num_buckets  #or i.e. * 0.25
-    else:
-        num_buckets_exp = num_buckets
-        first_step = bmax
+    # TODO: verify whether smaller gap buckets are ever needed for long contexts
+    # if long_context:
+    #     num_buckets_exp = math.floor(num_buckets / 2)
+    #     num_buckets_linear = num_buckets - num_buckets_exp
+    #     first_step = bmax / num_buckets  #or i.e. * 0.25
+
+    num_buckets_exp = num_buckets
+    first_step = bmax
 
     if num_buckets_exp <= 1:
         return [bmax]
@@ -162,19 +166,20 @@ def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=Fals
             bucket = math.ceil(power_unpadded / bstep) * bstep
         buckets.add(bucket)
 
-    if long_context:
-        #tmp_step = bmax / num_buckets
-        tmp_step = (bmax - first_step) / num_buckets_linear
-        for i in range(1, num_buckets_linear + 1):
-            #for i in range(1, num_buckets+1):
-            power_unpadded = first_step + i * tmp_step
+    # TODO: verify whether smaller gap buckets are ever needed for long contexts
+    # if long_context:
+    #     #tmp_step = bmax / num_buckets
+    #     tmp_step = (bmax - first_step) / num_buckets_linear
+    #     for i in range(1, num_buckets_linear + 1):
+    #         #for i in range(1, num_buckets+1):
+    #         power_unpadded = first_step + i * tmp_step
 
-            if i == num_buckets and get_config().use_contiguous_pa:
-                bucket = bmax
-            else:
-                bucket = math.ceil(power_unpadded / bstep) * bstep
-            if bucket not in buckets:
-                buckets.add(bucket)
+    #         if i == num_buckets and get_config().use_contiguous_pa:
+    #             bucket = bmax
+    #         else:
+    #             bucket = math.ceil(power_unpadded / bstep) * bstep
+    #         if bucket not in buckets:
+    #             buckets.add(bucket)
     if add_zero_or_one_bucket:
         buckets.add(bmin_origin)
     sorted_buckets = list(sorted(buckets))
