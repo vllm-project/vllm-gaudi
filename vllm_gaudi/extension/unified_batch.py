@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import habana_frameworks.torch as htorch
 from dataclasses import dataclass
-from vllm_gaudi.extension.unified import HPUUnifiedAttentionMetadata, get_vecsize_packsize, get_last_dim_size
+from vllm_gaudi.extension.unified import HPUUnifiedAttentionMetadata, SharedBlockChunkedBiasData, get_vecsize_packsize, get_last_dim_size
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 import math
 from typing import Optional, Callable, Union
@@ -312,19 +312,28 @@ class UnifiedBatchPersistentContext:
         estimated_shared_bias_mem = (max_num_batched_tokens * max_shared_blocks * block_size *
                                      np.dtype(np_dtype).itemsize) + (max_shared_blocks * block_size * block_size *
                                                                      np.dtype(np_dtype).itemsize)
-        # NOTE(kzawora): 64GiB is an arbitrary threshold to avoid OOMs when allocating large shared bias buffers
-        shared_bias_mem_threshold = 64 * 2**30
-        self.use_persistent_shared_biases = estimated_shared_bias_mem <= shared_bias_mem_threshold
-        if self.use_persistent_shared_biases:
-            self.shared_bias = np.full((max_num_batched_tokens, max_shared_blocks, block_size),
-                                       -math.inf,
-                                       dtype=np_dtype)
-            # NOTE(kzawora): shared block bias is a weird entity - it maps block usage to each individual token in the context -
-            # so the upper bound should be max_shared_blocks*block_size (max_num_shared_tokens) by block_size
-            self.shared_block_bias = np.full((max_shared_blocks * block_size, block_size), -math.inf, dtype=np_dtype)
+
+        self.use_dense_shared_bias = get_config().unified_attn_dense_shared_bias
+        if self.use_dense_shared_bias:
+            # Dense block_usages for chunked shared attention - shape (max_qlen, max_shared_blocks)
+            # Value 0 means "masked out entirely" (will produce all -inf bias)
+            self.block_usages_dense = np.zeros((max_num_batched_tokens, max_shared_blocks), dtype=np.int32)
         else:
-            self.shared_bias = None
-            self.shared_block_bias = None
+            # NOTE(kzawora): 64GiB is an arbitrary threshold to avoid OOMs when allocating large shared bias buffers
+            shared_bias_mem_threshold = 64 * 2**30
+            self.use_persistent_shared_biases = estimated_shared_bias_mem <= shared_bias_mem_threshold
+            if self.use_persistent_shared_biases:
+                self.shared_bias = np.full((max_num_batched_tokens, max_shared_blocks, block_size),
+                                           -math.inf,
+                                           dtype=np_dtype)
+                # NOTE(kzawora): shared block bias is a weird entity - it maps block usage to each individual token in the context -
+                # so the upper bound should be max_shared_blocks*block_size (max_num_shared_tokens) by block_size
+                self.shared_block_bias = np.full((max_shared_blocks * block_size, block_size),
+                                                 -math.inf,
+                                                 dtype=np_dtype)
+            else:
+                self.shared_bias = None
+                self.shared_block_bias = None
 
         self.unique_bias = np.full((max_unique_blocks, block_size), -math.inf, dtype=np_dtype)
         self.unique_block_bias = np.full((max_unique_blocks, block_size), -math.inf, dtype=np_dtype)
@@ -334,6 +343,7 @@ class UnifiedBatchPersistentContext:
 
         self.causal_bias_generator = HPUCausalBiasGenerator()
         self.shared_bias_generator = HPUSharedBiasGenerator()
+        self.shared_bias_generator_dense = HPUSharedBiasGeneratorDense()
         self.graphed = True
         if self.graphed:
             config = get_config()
@@ -342,6 +352,8 @@ class UnifiedBatchPersistentContext:
                                                                           disable_tensor_cache=True)
                 self.shared_bias_generator = htorch.hpu.wrap_in_hpu_graph(self.shared_bias_generator,
                                                                           disable_tensor_cache=True)
+                self.shared_bias_generator_dense = htorch.hpu.wrap_in_hpu_graph(self.shared_bias_generator_dense,
+                                                                                disable_tensor_cache=True)
             elif config.bridge_mode == 'eager':
                 self.causal_bias_generator = torch.compile(self.causal_bias_generator,
                                                            backend='hpu_backend',
@@ -351,6 +363,10 @@ class UnifiedBatchPersistentContext:
                                                            backend='hpu_backend',
                                                            fullgraph=True,
                                                            dynamic=False)
+                self.shared_bias_generator_dense = torch.compile(self.shared_bias_generator_dense,
+                                                                 backend='hpu_backend',
+                                                                 fullgraph=True,
+                                                                 dynamic=False)
         self.hpu_tensor_online_padding = False
         if not self.hpu_tensor_online_padding:
             # NOTE(kzawora): Dynamic mempool caches - store largest placeholders needed for each (pad_value, dtype)
@@ -486,7 +502,7 @@ class HPUSharedBiasGenerator(HPUBiasGenerator):
     def forward(self, block_usages: torch.tensor, hpu_shared_token_idx: torch.tensor,
                 hpu_shared_block_idx: torch.tensor, block_size: torch.tensor, dtype: torch.dtype, target_qlen,
                 target_shared_blocks) -> torch.tensor:
-        """ Generate block bias based on block_usage """
+        """ Generate block bias based on block_usage (sparse scatter version) """
         block_len_range = torch.arange(1, block_size + 1, dtype=block_usages.dtype, device=block_usages.device)
         block_mask = block_len_range.unsqueeze(0) > block_usages.unsqueeze(-1)
         hpu_shared_block_bias = self.mask_to_bias_torch(block_mask, dtype=dtype)
@@ -496,6 +512,147 @@ class HPUSharedBiasGenerator(HPUBiasGenerator):
                                      device='hpu')
         hpu_shared_bias.index_put_((hpu_shared_token_idx, hpu_shared_block_idx), hpu_shared_block_bias)
         return hpu_shared_bias
+
+
+class HPUSharedBiasGeneratorDense(HPUBiasGenerator):
+    """
+    Dense version of shared bias generator - takes pre-scattered block_usages 
+    of shape (target_qlen, target_shared_blocks) instead of sparse coordinates.
+    
+    This avoids dynamic-length coordinate arrays on HPU by doing the scatter on CPU.
+    """
+
+    def forward(self, block_usages_dense: torch.tensor, block_size: int, dtype: torch.dtype) -> torch.tensor:
+        """
+        Generate block bias from dense block_usages.
+        
+        Args:
+            block_usages_dense: Shape (target_qlen, target_shared_blocks), values are block usage counts (0 = masked out)
+            block_size: Size of each block
+            dtype: Output dtype
+            
+        Returns:
+            Shape (target_qlen, target_shared_blocks, block_size) bias tensor
+        """
+        # block_usages_dense: (target_qlen, target_shared_blocks)
+        # We want: block_mask[q, b, k] = True if k >= block_usages_dense[q, b]
+        # Which means: mask out positions k where k+1 > block_usages_dense[q, b]
+        block_len_range = torch.arange(1,
+                                       block_size + 1,
+                                       dtype=block_usages_dense.dtype,
+                                       device=block_usages_dense.device)
+        # block_len_range: (block_size,)
+        # block_usages_dense.unsqueeze(-1): (target_qlen, target_shared_blocks, 1)
+        # broadcast comparison: (target_qlen, target_shared_blocks, block_size)
+        block_mask = block_len_range > block_usages_dense.unsqueeze(-1)
+        return self.mask_to_bias_torch(block_mask, dtype=dtype)
+
+
+def _prepare_shared_bias_hpu(
+    persistent_ctx: UnifiedBatchPersistentContext,
+    attn_metadata: 'HPUUnifiedAttentionMetadata',
+    shared_token_idx: np.ndarray,
+    shared_block_idx: np.ndarray,
+    shared_block_usage: np.ndarray,
+    shared_blocks: np.ndarray,
+    target_qlen: int,
+    target_shared_blocks: int,
+    query_len: int,
+    block_size: int,
+    dtype: torch.dtype,
+    np_dtype: np.dtype,
+    slot_mapping_dtype: torch.dtype,
+    use_chunked_processing: bool,
+    use_dense_bias_generation: bool,
+) -> None:
+    """
+    Prepare shared bias tensors on HPU.
+    
+    This function handles three approaches for shared bias generation:
+    1. Chunked dense: For large shared blocks, generate bias per-chunk during attention
+    2. Non-chunked dense: Scatter on CPU, broadcast on HPU (static shapes)
+    3. Sparse (legacy): Dynamic scatter on HPU with fallback to CPU in case of too many shared tokens.
+    
+    Modifies attn_metadata.shared_bias and attn_metadata.shared_bias_chunked in place.
+    """
+    if use_chunked_processing:
+        with persistent_ctx.profiler.record_event('internal', 'shared_bias_chunked_prep'):
+            # CHUNKED DENSE APPROACH:
+            # - Scatter block_usages into dense (target_qlen, target_shared_blocks) on CPU
+            # - Don't generate full bias - just pass the dense block_usages
+            # - Attention code will generate bias per chunk by slicing block_usages
+
+            # Use persistent buffer - get view of required size and zero it
+            block_usages_dense = persistent_ctx.block_usages_dense[:target_qlen, :target_shared_blocks]
+            block_usages_dense.fill(0)  # Reset to 0 (fully masked)
+
+            # Scatter: block_usages_dense[token_idx, block_idx] = block_usage value
+            block_usages_dense[shared_token_idx, shared_block_idx] = shared_block_usage
+
+            # Transfer dense tensor to HPU - shape is fully static (target_qlen, target_shared_blocks)
+            hpu_block_usages_dense = persistent_ctx.hpu_tensor(block_usages_dense, (target_qlen, target_shared_blocks),
+                                                               0, torch.int32)
+
+            # DON'T generate full bias - attention code will generate per chunk
+            attn_metadata.shared_bias = None
+            attn_metadata.shared_bias_chunked = SharedBlockChunkedBiasData(
+                block_usages=hpu_block_usages_dense,
+                num_query_tokens=target_qlen,
+                num_shared_blocks=target_shared_blocks,
+                split_chunked_graphs=get_config().unified_attn_split_graphs,
+            )
+        return
+
+    # Non-chunked paths
+    if use_dense_bias_generation:
+        with persistent_ctx.profiler.record_event('internal', 'shared_bias_dense_prep'):
+            # DENSE APPROACH: Scatter on CPU (any shape), broadcast on HPU (static shape)
+            block_usages_dense = persistent_ctx.block_usages_dense[:target_qlen, :target_shared_blocks]
+            block_usages_dense.fill(0)
+            block_usages_dense[shared_token_idx, shared_block_idx] = shared_block_usage
+
+            hpu_block_usages_dense = persistent_ctx.hpu_tensor(block_usages_dense, (target_qlen, target_shared_blocks),
+                                                               0, torch.int32)
+
+            attn_metadata.shared_bias = persistent_ctx.shared_bias_generator_dense(hpu_block_usages_dense, block_size,
+                                                                                   dtype)
+        return
+
+    # SPARSE APPROACH (legacy): Dynamic scatter on HPU with CPU fallback
+    actual_num_shared_tokens = shared_block_usage.shape[0]
+    padded_num_shared_tokens = target_shared_blocks * block_size
+
+    if padded_num_shared_tokens < actual_num_shared_tokens:
+        # Too many shared tokens - fall back to CPU generation
+        with persistent_ctx.profiler.record_event('internal', 'shared_bias_cpu_fallback'):
+            shared_block_bias = generate_bias(shared_block_usage, block_size, np_dtype, persistent_ctx.block_len_range,
+                                              persistent_ctx.shared_block_bias)
+
+            if persistent_ctx.use_persistent_shared_biases:
+                shared_bias = persistent_ctx.shared_bias[:query_len, :shared_blocks.shape[0], :block_size]
+            else:
+                shared_bias = np.full((query_len, shared_blocks.shape[0], block_size), -math.inf, dtype=np_dtype)
+
+            shared_bias.fill(-math.inf)
+            shared_bias[shared_token_idx, shared_block_idx] = shared_block_bias
+            attn_metadata.shared_bias = persistent_ctx.hpu_tensor(shared_bias,
+                                                                  (target_qlen, target_shared_blocks, block_size),
+                                                                  -math.inf, dtype)
+    else:
+        # HPU-accelerated sparse generation
+        with persistent_ctx.profiler.record_event('internal', 'shared_bias_hpu_prep'):
+            shared_tokens_shape = (padded_num_shared_tokens, )
+            hpu_shared_block_usage = persistent_ctx.hpu_tensor(shared_block_usage, shared_tokens_shape, -1,
+                                                               slot_mapping_dtype)
+            hpu_shared_token_idx = persistent_ctx.hpu_tensor(shared_token_idx, shared_tokens_shape, -1,
+                                                             slot_mapping_dtype)
+            hpu_shared_block_idx = persistent_ctx.hpu_tensor(shared_block_idx, shared_tokens_shape, -1,
+                                                             slot_mapping_dtype)
+
+            attn_metadata.shared_bias = persistent_ctx.shared_bias_generator(hpu_shared_block_usage,
+                                                                             hpu_shared_token_idx, hpu_shared_block_idx,
+                                                                             block_size, dtype, target_qlen,
+                                                                             target_shared_blocks)
 
 
 def create_unified_batch(
@@ -665,6 +822,26 @@ def create_unified_batch(
     fmin = torch.finfo(dtype).min
     feps = torch.finfo(dtype).tiny
 
+    # Determine if we should use chunked computation for shared blocks
+    # NOTE(kzawora): Chunked processing computes attention in chunks to save memory.
+    # With chunked dense generation, we only allocate (target_qlen, target_shared_blocks) for block_usages
+    # instead of the full (target_qlen, target_shared_blocks, block_size) bias tensor.
+    # Bias is generated per chunk: (target_qlen, chunk_size, block_size)
+    default_chunk_size = get_config(
+    ).unified_attn_shared_attn_chunk_size  # Process up to 64 blocks at a time for shared attention
+    use_chunked_processing = get_config().unified_attn_chunked_shared_attn and bool(
+        target_shared_blocks > default_chunk_size)  # Chunked dense processing - generates bias per chunk
+
+    # Pad target_shared_blocks to be a multiple of chunk_size for chunked processing
+    # This ensures all chunks have exactly chunk_size blocks (static shapes in the kernel)
+    if use_chunked_processing and target_shared_blocks % default_chunk_size != 0:
+        target_shared_blocks = (
+            (target_shared_blocks + default_chunk_size - 1) // default_chunk_size) * default_chunk_size
+
+    # Dense bias generation: scatter on CPU (any shape), then broadcast on HPU (static shape)
+    # This avoids dynamic-length coordinate arrays on HPU entirely
+    use_dense_bias_generation = persistent_ctx.use_dense_shared_bias
+
     with persistent_ctx.profiler.record_event('internal', 'attn_metadata_prep'):
         attn_metadata = HPUUnifiedAttentionMetadata(
             block_size=block_size,
@@ -674,9 +851,11 @@ def create_unified_batch(
                                                    target_qlen), -math.inf, dtype) if causal_bias is not None else None,
             causal_width=default_causal_width,
             shared_blocks=persistent_ctx.hpu_tensor(shared_blocks, (target_shared_blocks, ), -1, slot_mapping_dtype),
-            shared_bias=persistent_ctx.hpu_tensor(shared_bias,
-                                                  (target_qlen, target_shared_blocks,
-                                                   block_size), -math.inf, dtype) if shared_bias is not None else None,
+            # For chunked processing: still allocate full bias for now (stepping stone to verify correctness)
+            # shared_bias will be set below after HPU acceleration
+            shared_bias=None,  # Will be set below
+            shared_bias_chunked=None,  # Will be set below if chunked processing is enabled
+            shared_chunk_size=default_chunk_size if use_chunked_processing else 0,
             unique_blocks=target_unique_blocks,
             unique_block_mapping=persistent_ctx.hpu_tensor(unique_block_mapping, (target_unique_blocks, ), -1,
                                                            slot_mapping_dtype),
@@ -685,6 +864,8 @@ def create_unified_batch(
             feps=to_hpu(feps, dtype=dtype),
             inputL_hpu_tensors=dict(),
             inputM_hpu_tensors=dict(),
+            split_graphs=get_config().unified_attn_split_graphs,
+            online_merge=get_config().unified_attn_online_merge,
         )
 
     if hpu_bias_acceleration:
@@ -700,47 +881,23 @@ def create_unified_batch(
                 attn_metadata.causal_bias = persistent_ctx.causal_bias_generator(hpu_token_groups, hpu_token_positions,
                                                                                  hpu_padding_mask, dtype)
         if do_shared:
-            # NOTE(kzawora): this is kinda janky, but for a good reason - the number of shared tokens can vary significantly,
-            # and it impacts whether it's even worth running on HPU.
-            # On HPU, we need to avoid dynamic shapes == we need to pad number of shared tokens.
-            # It's currently padded to target_shared_blocks * block_size
-            # We set some simple heuristics to decide whether to run on HPU or fallback to CPU:
-            # 1. Check the number of shared tokens. If it's greater than the padded number of shared tokens, we fallback to CPU.
-            # 2. Check the padding ratio - if the padding exceeds 50% of actual size, we fallback to CPU.
-
-            actual_num_shared_tokens = shared_block_usage.shape[0]
-            padded_num_shared_tokens = target_shared_blocks * block_size
-            # NOTE(kzawora): Initially we checked for padding ratio as well, but ultimately I've found no cases in
-            # which generating mask on padded_num_shared_tokens was slower than CPU + copying to HPU
-            # in case we have too many or too little shared tokens, we fall back to cpu generation
-            if padded_num_shared_tokens < actual_num_shared_tokens:
-                with persistent_ctx.profiler.record_event('internal', 'shared_bias_cpu_fallback'):
-                    shared_block_bias = generate_bias(shared_block_usage, block_size, np_dtype,
-                                                      persistent_ctx.block_len_range, persistent_ctx.shared_block_bias)
-                    if persistent_ctx.use_persistent_shared_biases:
-                        shared_bias = persistent_ctx.shared_bias[:query_len, :shared_blocks.shape[0], :block_size]
-                    else:
-                        shared_bias = np.full((query_len, shared_blocks.shape[0], block_size),
-                                              -math.inf,
-                                              dtype=np_dtype)
-                    shared_bias.fill(-math.inf)
-                    shared_bias[shared_token_idx, shared_block_idx] = shared_block_bias
-                    attn_metadata.shared_bias = persistent_ctx.hpu_tensor(
-                        shared_bias, (target_qlen, target_shared_blocks, block_size), -math.inf, dtype)
-            else:
-                with persistent_ctx.profiler.record_event('internal', 'shared_bias_hpu_prep'):
-                    # do HPU-accelerated shared mask generation
-                    shared_tokens_shape = (padded_num_shared_tokens, )
-                    hpu_shared_block_usage = persistent_ctx.hpu_tensor(shared_block_usage, shared_tokens_shape, -1,
-                                                                       slot_mapping_dtype)
-                    hpu_shared_token_idx = persistent_ctx.hpu_tensor(shared_token_idx, shared_tokens_shape, -1,
-                                                                     slot_mapping_dtype)
-                    hpu_shared_block_idx = persistent_ctx.hpu_tensor(shared_block_idx, shared_tokens_shape, -1,
-                                                                     slot_mapping_dtype)
-                    hpu_shared_bias = persistent_ctx.shared_bias_generator(hpu_shared_block_usage, hpu_shared_token_idx,
-                                                                           hpu_shared_block_idx, block_size, dtype,
-                                                                           target_qlen, target_shared_blocks)
-                    attn_metadata.shared_bias = hpu_shared_bias
+            _prepare_shared_bias_hpu(
+                persistent_ctx=persistent_ctx,
+                attn_metadata=attn_metadata,
+                shared_token_idx=shared_token_idx,
+                shared_block_idx=shared_block_idx,
+                shared_block_usage=shared_block_usage,
+                shared_blocks=shared_blocks,
+                target_qlen=target_qlen,
+                target_shared_blocks=target_shared_blocks,
+                query_len=query_len,
+                block_size=block_size,
+                dtype=dtype,
+                np_dtype=np_dtype,
+                slot_mapping_dtype=slot_mapping_dtype,
+                use_chunked_processing=use_chunked_processing,
+                use_dense_bias_generation=use_dense_bias_generation,
+            )
 
     token_ids_device = persistent_ctx.hpu_tensor(token_ids, (target_qlen, ), -1, token_ids_dtype)
     logits_indices_device = persistent_ctx.hpu_tensor(logits_indices, (target_logits, ), -1, logits_indices_dtype)
