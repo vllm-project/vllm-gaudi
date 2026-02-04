@@ -9,8 +9,8 @@ ARG BASE_NAME=rhel9.6
 ARG PT_VERSION=2.9.0
 # can be upstream or fork
 ARG TORCH_TYPE=upstream
-ARG VLLM_GAUDI_COMMIT=main
-ARG VLLM_PROJECT_COMMIT=
+ARG VLLM_GAUDI_COMMIT=v0.14.1
+ARG VLLM_PROJECT_COMMIT=v0.14.1
 
 # ============================================================================
 # Stage 1: gaudi-base - Base system setup with Habana drivers
