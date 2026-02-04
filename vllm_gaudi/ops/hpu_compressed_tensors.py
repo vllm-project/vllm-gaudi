@@ -14,8 +14,13 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter, ModelWeig
                                            PackedvLLMParameter, RowvLLMParameter)
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
-    CompressedTensorsLinearMethod as OrigCompressedTensorsLinearMethod, CompressedTensorsConfig,
-    CompressedTensorsMoEMethod, CompressedTensorsKVCacheMethod)
+    CompressedTensorsLinearMethod as OrigCompressedTensorsLinearMethod)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+    CompressedTensorsConfig,
+    CompressedTensorsMoEMethod,
+    CompressedTensorsKVCacheMethod,
+    SparsityCompressionConfig,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors_moe)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (  # noqa: E501
     CompressedTensorsScheme, CompressedTensorsWNA16)
@@ -803,7 +808,7 @@ class HPUCompressedTensorsConfig(CompressedTensorsConfig):
         target_scheme_map: dict[str, Any],
         ignore: list[str],
         quant_format: str,
-        sparsity_scheme_map,  #: dict[str, SparsityCompressionConfig],
+        sparsity_scheme_map: dict[str, SparsityCompressionConfig],
         sparsity_ignore_list: list[str],
         kv_cache_scheme: dict[str, Any] | None = None,
         config: dict[str, Any] | None = None,
@@ -824,7 +829,7 @@ class HPUCompressedTensorsConfig(CompressedTensorsConfig):
             total_num_kv_heads,
         )
         # Fix https://github.com/vllm-project/vllm/pull/30141
-        # LLMC override the `kv_cache_dtype` to 'fp8', while HPU uses 'fp8_inc'.
+        # LLMC overrides the `kv_cache_dtype` to 'fp8', while HPU uses 'fp8_inc'.
         if getattr(self, "kv_cache_scheme", None) is not None:
             self.kv_cache_dtype = "fp8_inc"
             self.kv_cache_scheme = None
