@@ -82,6 +82,7 @@ def register_ops():
     import vllm_gaudi.ops.hpu_grouped_topk_router  # noqa: F401
     import vllm_gaudi.ops.hpu_layernorm  # noqa: F401
     import vllm_gaudi.ops.hpu_lora  # noqa: F401
+    import vllm_gaudi.ops.hpu_mamba_mixer2  # noqa: F401
     import vllm_gaudi.ops.hpu_rotary_embedding  # noqa: F401
     import vllm_gaudi.ops.hpu_compressed_tensors  # noqa: F401
     import vllm_gaudi.ops.hpu_fp8  # noqa: F401
