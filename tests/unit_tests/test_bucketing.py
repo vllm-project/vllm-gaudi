@@ -24,24 +24,26 @@ def test_read_bucket_settings(monkeypatch):
     monkeypatch.setenv("VLLM_PROMPT_BS_BUCKET_MIN", "1")
     monkeypatch.setenv("VLLM_PROMPT_BS_BUCKET_STEP", "16")
     monkeypatch.setenv("VLLM_PROMPT_BS_BUCKET_MAX", "64")
-    config = linear.read_bucket_settings("prompt", "bs", min=1, step=32, max=128)
-    assert config == [1, 16, 64]
+    monkeypatch.setenv("VLLM_PROMPT_BS_BUCKET_PAD_MAX", "32")
+    monkeypatch.setenv("VLLM_PROMPT_BS_BUCKET_PAD_PERCENT", "25")
+    config = linear.read_bucket_settings("prompt", "bs", min=1, step=32, max=128, pad_max=64, pad_percent=10)
+    assert config == [1, 16, 64, 32, 25]
 
 
 def test_read_bucket_settings_empty_flags():
-    config = linear.read_bucket_settings("prompt", "bs", min=1, step=32, max=128)
-    assert config == [1, 32, 128]
+    config = linear.read_bucket_settings("prompt", "bs", min=1, step=32, max=128, pad_max=64, pad_percent=10)
+    assert config == [1, 32, 128, 64, 10]
 
 
 def test_warmup_range():
-    config = (2, 64, 128)
-    result = linear.warmup_range(config)
+    config = (2, 64, 128, 64, 25)
+    result = linear.warmup_range_with_limits(config)
     assert result == [2, 4, 8, 16, 32, 64, 128]
 
 
 def test_warmup_range_with_one():
-    config = (1, 64, 128)
-    result = linear.warmup_range(config)
+    config = (1, 64, 128, 64, 25)
+    result = linear.warmup_range_with_limits(config)
     assert result == [1, 2, 4, 8, 16, 32, 64, 128]
 
 
