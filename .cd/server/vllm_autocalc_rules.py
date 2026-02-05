@@ -174,24 +174,35 @@ def calc_EST_NUM_PROMPT_GRAPHS(ctx):
     return graphs_3d
 
 
-def calc_EST_GRAPH_PROMPT_RATIO(ctx):
-    est_prompt_graph_mem = ctx['EST_NUM_PROMPT_GRAPHS'] * ctx['APPROX_MEM_PER_GRAPH_MB']
+def calc_EST_PROMPT_GRAPH_MEM(ctx):
+    if ctx['VLLM_EXPONENTIAL_BUCKETING']:
+        est_prompt_graph_mem = ctx['EST_NUM_PROMPT_GRAPHS'] * ctx['APPROX_MEM_PER_GRAPH_MB']
+    else:
+        # Graph mem is function of context size for prompt
+        est_prompt_graph_mem = ctx['EST_NUM_PROMPT_GRAPHS'] * ctx['APPROX_MEM_PER_GRAPH_MB'] * pow(
+            max(1, ctx['MAX_MODEL_LEN'] / 4352), 0.8552)
+    return est_prompt_graph_mem
+
+
+def calc_EST_DECODE_GRAPH_MEM(ctx):
     est_decode_graph_mem = ctx['NUM_DECODE_GRAPHS'] * ctx['APPROX_MEM_PER_GRAPH_MB']
+    return est_decode_graph_mem
+
+
+def calc_EST_GRAPH_PROMPT_RATIO(ctx):
+    est_prompt_graph_mem = calc_EST_PROMPT_GRAPH_MEM(ctx)
+    est_decode_graph_mem = calc_EST_DECODE_GRAPH_MEM(ctx)
     est_graph_prompt_ratio = est_prompt_graph_mem / (est_prompt_graph_mem + est_decode_graph_mem)
     return est_graph_prompt_ratio
 
 
-def calc_VLLM_GRAPH_PROMPT_RATIO(ctx):
-    return math.ceil(min(max(ctx['EST_GRAPH_PROMPT_RATIO'], 0.01), 0.99) * 100) / 100
-
-
 def calc_DECODE_GRAPH_TARGET_GB(ctx):
-    return math.ceil(ctx['NUM_DECODE_GRAPHS'] * ctx['APPROX_MEM_PER_GRAPH_MB'] / 1024 * 100) / 100
+    return math.ceil(calc_EST_DECODE_GRAPH_MEM(ctx) / 1024 * 100) / 100
 
 
 def calc_EST_GRAPH_RESERVE_MEM(ctx):
     return math.ceil(ctx['DECODE_GRAPH_TARGET_GB'] / (ctx['USABLE_MEM'] * ctx['GPU_MEM_UTILIZATION'] *
-                                                      (1 - ctx['VLLM_GRAPH_PROMPT_RATIO'])) * 100) / 100
+                                                      (1 - ctx['EST_GRAPH_PROMPT_RATIO'])) * 100) / 100
 
 
 def calc_VLLM_GRAPH_RESERVED_MEM(ctx):
@@ -263,7 +274,6 @@ PARAM_CALC_FUNCS = {
     "PROMPT_SEQ_STEP_GRAPHS": calc_PROMPT_SEQ_STEP_GRAPHS,
     "EST_NUM_PROMPT_GRAPHS": calc_EST_NUM_PROMPT_GRAPHS,
     "EST_GRAPH_PROMPT_RATIO": calc_EST_GRAPH_PROMPT_RATIO,
-    "VLLM_GRAPH_PROMPT_RATIO": calc_VLLM_GRAPH_PROMPT_RATIO,
     "DECODE_GRAPH_TARGET_GB": calc_DECODE_GRAPH_TARGET_GB,
     "EST_GRAPH_RESERVE_MEM": calc_EST_GRAPH_RESERVE_MEM,
     "VLLM_GRAPH_RESERVED_MEM": calc_VLLM_GRAPH_RESERVED_MEM,
