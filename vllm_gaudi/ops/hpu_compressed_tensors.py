@@ -764,7 +764,9 @@ class HPUCompressedTensorsKVCacheMethod(CompressedTensorsKVCacheMethod):
                 delattr(layer, attr_name)
                 logger.debug_once(f"Removed attribute {attr_name}.")
 
-    def process_weights_after_loading(self, layer: torch.nn.Module, submodules_to_check: list[str]) -> None:
+    def process_weights_after_loading(self,
+                                      layer: torch.nn.Module,
+                                      submodules_to_check: Optional[list[str]] = None) -> None:
         """Process KV cache scales for cross-platform FP8 quantization compatibility."""
         super().process_weights_after_loading(layer)
         # The `k_scale` and `v_scale` are loaded from checkpoint without any adjustment.
@@ -810,7 +812,9 @@ class HPUCompressedTensorsKVCacheMethod(CompressedTensorsKVCacheMethod):
 class HPUCompressedTensorsKVCacheMethodForMLA(HPUCompressedTensorsKVCacheMethod):
     SUBMODULES_TO_CHECK = ["latent_cache_k", "matmul_qk", "matmul_av"]
 
-    def process_weights_after_loading(self, layer: torch.nn.Module, submodules_to_check: list[str]) -> None:
+    def process_weights_after_loading(self,
+                                      layer: torch.nn.Module,
+                                      submodules_to_check: Optional[list[str]] = None) -> None:
         # Align KV scales for MLA attention.
         kv_scale_max = max(layer._k_scale, layer._v_scale)
         layer._k_scale.data.copy_(kv_scale_max)
