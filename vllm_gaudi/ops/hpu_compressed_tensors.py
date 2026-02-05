@@ -770,11 +770,12 @@ class HPUCompressedTensorsKVCacheMethod(CompressedTensorsKVCacheMethod):
         # The `k_scale` and `v_scale` are loaded from checkpoint without any adjustment.
         # Compute KV scales based on quantization and deployment platforms
         fp8_max_original = 448.0 if get_config().scale_adjustment else 240.0
+
         max_q = layer._q_scale * fp8_max_original
         max_k = layer._k_scale * fp8_max_original
         max_v = layer._v_scale * fp8_max_original
         max_kv = max(max_k, max_v)
-        fp8_max_cur_platform = 240.0 if hpu_ops.is_hpu_gaudi2 else 448.0
+        fp8_max_cur_platform = hpu_ops.FP8_MAX
         kv_scale = fp8_max_cur_platform / max_kv
         q_scale = fp8_max_cur_platform / max_q
         # Configure latent cache and matmul scales
