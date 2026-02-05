@@ -98,6 +98,19 @@ class HPUWorker(WorkerBase):
         self._configure_habana_visible_modules()
 
     def _configure_habana_visible_modules(self):
+        '''
+        The first avalible HPU (with minimum module ID) is assigned to the current worker if `set_device()` is not 
+        called or `set_device("hpu")` is called. This allows the auto device selection for multiple processes on the 
+        same node. While vLLM spawns multiple worker processes on the same node, each worker needs to select a 
+        different HPU device based on its local rank by calling `set_device(local_rank)`. To achieve this, the 
+        `HABANA_VISIBLE_MODULES` environment variable need to be set to include only the available modules explicitly 
+        before initializing the device.
+
+        Known limitations:
+        - There is a delay between checking the module availability and actually acquiring the device. This may lead to 
+        multiple processes selecting the same module and fail. To avoid this, ensure that no other processes are 
+        acquiring HPU devices while vLLM workers are being initialized.
+        '''
         import pyhlml
         pyhlml.hlmlInit()
         try:
