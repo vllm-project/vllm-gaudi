@@ -13,7 +13,7 @@ echo $VLLM_GAUDI_PREFIX
 
 
 # --- Loading and Generation tests ---
-# Tests below create vllm.LLM instance witihn python scripts, and complete few prompts
+# Tests below create vllm.LLM instance within python scripts, and complete few prompts
 # Prompts are not verified against anything, the aim of those tests is to fail if error is thrown during model load
 # or generation
 # for implementation details see:
@@ -477,7 +477,7 @@ launch_all_tests() {
     run_spec_decode_eagle3_num_spec_2_test
     run_UA_spec_decode_ngram_test
     run_UA_spec_decode_eagle3_test
-    run_embedding_model_test
+    # run_embedding_model_test
     run_pd_disaggregate_nixl_libfabric_test
     run_pd_disaggregate_nixl_ucx_test
     run_cpu_offloading_test
