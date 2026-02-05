@@ -199,26 +199,30 @@ def test_calc_EST_NUM_PROMPT_GRAPHS(exp):
     assert rules.calc_EST_NUM_PROMPT_GRAPHS(ctx) == expected
 
 
-def test_calc_EST_GRAPH_PROMPT_RATIO():
-    ctx = {'EST_NUM_PROMPT_GRAPHS': 10, 'NUM_DECODE_GRAPHS': 30, 'APPROX_MEM_PER_GRAPH_MB': 10}
-    expected = math.ceil(10 / (10 + 30) * 100) / 100
+@pytest.mark.parametrize("exp", [True, False])
+def test_calc_EST_GRAPH_PROMPT_RATIO(exp):
+    ctx = {
+        'EST_NUM_PROMPT_GRAPHS': 10,
+        'NUM_DECODE_GRAPHS': 30,
+        'APPROX_MEM_PER_GRAPH_MB': 10,
+        'MAX_MODEL_LEN': 8448,
+        'VLLM_EXPONENTIAL_BUCKETING': exp
+    }
+
+    est_decode_graph_mem = 30 * 10
+    est_prompt_graph_mem = 10 * 10 if exp else 10 * 10 * pow(max(1, 8448 / 4352), 0.8552)
+    expected = est_prompt_graph_mem / (est_prompt_graph_mem + est_decode_graph_mem)
     assert rules.calc_EST_GRAPH_PROMPT_RATIO(ctx) == expected
 
 
-def test_calc_VLLM_GRAPH_PROMPT_RATIO():
-    ctx = {'EST_GRAPH_PROMPT_RATIO': 0.5}
-    expected = math.ceil(min(max(0.5, 0.1), 0.9) * 10) / 10
-    assert rules.calc_VLLM_GRAPH_PROMPT_RATIO(ctx) == expected
-
-
 def test_calc_DECODE_GRAPH_TARGET_GB():
-    ctx = {'NUM_DECODE_GRAPHS': 10, 'APPROX_MEM_PER_GRAPH_MB': 512}
-    expected = math.ceil(10 * 512 / 1024 * 10) / 10
+    ctx = {'NUM_DECODE_GRAPHS': 50, 'APPROX_MEM_PER_GRAPH_MB': 12}
+    expected = math.ceil(50 * 12 / 1024 * 100) / 100
     assert rules.calc_DECODE_GRAPH_TARGET_GB(ctx) == expected
 
 
 def test_calc_EST_GRAPH_RESERVE_MEM():
-    ctx = {'DECODE_GRAPH_TARGET_GB': 5, 'USABLE_MEM': 10, 'GPU_MEM_UTILIZATION': 0.8, 'VLLM_GRAPH_PROMPT_RATIO': 0.2}
+    ctx = {'DECODE_GRAPH_TARGET_GB': 5, 'USABLE_MEM': 10, 'GPU_MEM_UTILIZATION': 0.8, 'EST_GRAPH_PROMPT_RATIO': 0.2}
     expected = math.ceil(5 / (10 * 0.8 * (1 - 0.2)) * 100) / 100
     assert rules.calc_EST_GRAPH_RESERVE_MEM(ctx) == expected
 
