@@ -20,6 +20,9 @@ from vllm.v1.worker.block_table import MultiGroupBlockTable
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder, LogitsProcessors)
 
 from vllm_gaudi.utils import async_h2d_copy, async_h2d_update
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 _SAMPLING_EPS = 1e-5
 
