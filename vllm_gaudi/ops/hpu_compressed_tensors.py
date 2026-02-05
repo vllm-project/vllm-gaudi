@@ -810,7 +810,7 @@ class HPUCompressedTensorsKVCacheMethod(CompressedTensorsKVCacheMethod):
 class HPUCompressedTensorsKVCacheMethodForMLA(HPUCompressedTensorsKVCacheMethod):
     SUBMODULES_TO_CHECK = ["latent_cache_k", "matmul_qk", "matmul_av"]
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module, submodules_to_check: list[str]) -> None:
         # Align KV scales for MLA attention.
         kv_scale_max = max(layer._k_scale, layer._v_scale)
         layer._k_scale.data.copy_(kv_scale_max)
