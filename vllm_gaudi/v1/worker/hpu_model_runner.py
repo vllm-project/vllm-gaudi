@@ -1477,10 +1477,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_decodes += 1
         return num_decodes
 
-    def _is_prompt(self, i: int, scheduler_output: "SchedulerOutput") -> bool:
-        req_id = self.input_batch.req_ids[i]
-        num_computed_tokens = int(self.input_batch.num_computed_tokens_cpu[i])
-        num_prompt_tokens = int(self.input_batch.num_prompt_tokens[i])
+    def _is_prompt(self, req_idx: int, scheduler_output: "SchedulerOutput") -> bool:
+        req_id = self.input_batch.req_ids[req_idx]
+        num_computed_tokens = int(self.input_batch.num_computed_tokens_cpu[req_idx])
+        num_prompt_tokens = int(self.input_batch.num_prompt_tokens[req_idx])
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens.get(req_id)
         spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens.get(req_id)
 
