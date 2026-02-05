@@ -22,7 +22,7 @@ def main():
         max_model_len=1024,
         max_num_batched_tokens=1024,
         gpu_memory_utilization=0.9,
-        num_gpu_blocks_override=8,
+        num_gpu_blocks_override=8,  # to trigger preemption
         disable_log_stats=False,
     )
     # Generate texts from the prompts.
