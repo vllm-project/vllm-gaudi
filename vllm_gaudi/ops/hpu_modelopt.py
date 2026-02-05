@@ -13,7 +13,7 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.model_executor.layers.quantization import modelopt
 from vllm.model_executor.layers.quantization.modelopt import ModelOptFp8Config
 from torch.nn.parameter import Parameter
