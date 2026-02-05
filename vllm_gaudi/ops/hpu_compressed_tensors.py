@@ -247,6 +247,10 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
         torch.hpu.synchronize()
 
     @property
+    def topk_indices_dtype(self) -> torch.dtype | None:
+        return None
+
+    @property
     def is_monolithic(self) -> bool:
         return True
 
