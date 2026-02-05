@@ -15,6 +15,24 @@ from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.utils import has_quant_config
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
 
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+
+
+def select_fp8_moe_backend_(
+    config: FusedMoEConfig,
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
+    allow_vllm_cutlass: bool = False,
+) -> tuple[Fp8MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute] | None]:
+    """
+    Select the primary FP8 MoE backend
+    Note: Shape-specific fallbacks may still occur at runtime.
+    """
+    return Fp8MoeBackend.NONE, None
+
 
 class Fp8LinearMethod(OrigFp8LinearMethod):
 
@@ -199,3 +217,4 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
 
 fp8.Fp8LinearMethod = Fp8LinearMethod
 fp8.Fp8MoEMethod = HPUFp8MoEMethod
+fp8.select_fp8_moe_backend = select_fp8_moe_backend_
