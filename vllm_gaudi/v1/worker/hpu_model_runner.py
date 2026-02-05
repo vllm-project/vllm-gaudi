@@ -122,7 +122,7 @@ except ImportError:
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
 # hpu_buffer: list[list[torch.Tensor]] = []
-hpu_buffer = None
+hpu_buffer = []
 HPU_TORCH_DTYPE_TO_STR_DTYPE = {
     torch.float32: "float32",
     torch.bfloat16: "bfloat16",
@@ -5109,12 +5109,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if self.vllm_config.kv_transfer_config.kv_buffer_device == "cpu":
                 get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
             global hpu_buffer
-            use_hpu_buffer = True
+            use_hpu_buffer = True if os.getenv('VLLM_HPU_HETERO_KV_LAYOUT', 'false').lower() == 'true' else False
             logger.info("#### YSY - use global hpu_buffer: %s", use_hpu_buffer)
             if use_hpu_buffer: # This is after profile
-                if hpu_buffer is None: #YSY
+                if not hpu_buffer: #YSY
+                    max_slots = 8192
                     _, num_kv_heads, head_size = kv_cache_shape
-                    shape =[len(kv_caches), 2, 5781, 128, num_kv_heads, head_size]
+                    shape =[len(kv_caches), 2, max_slots, num_kv_heads, head_size]
                     hpu_buffer = torch.empty(shape, dtype=kv_cache_spec.dtype, device=self.device)
 
         if self.unified_attn:
