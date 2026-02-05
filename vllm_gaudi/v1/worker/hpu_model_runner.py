@@ -4322,12 +4322,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             dummy_logits = self.model.compute_logits(dummy_hidden_states)
 
             # Create dummy requests for this specific configuration
-            # batch_size is always >= 1 since we skip batch_size=0
             dummy_req_ids = [f"warmup_req_{batch_size}_{i}" for i in range(batch_size)]
 
             # Get TP-rank specific vocab range to use correct token IDs during warmup
             # This ensures each TP rank compiles with tokens in its vocab range,
-            # matching runtime behavior (fixes graph 0078 recompilation issue)
+            # matching runtime behavior.
             from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
             tp_rank = get_tensor_model_parallel_rank()
             tp_size = get_tensor_model_parallel_world_size()
