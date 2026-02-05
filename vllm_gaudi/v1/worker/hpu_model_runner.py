@@ -4355,7 +4355,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # Clear previous sampling state
                 self.input_batch.top_p_reqs = set()
                 self.input_batch.top_k_reqs = set()
-                
+
                 for i, req_id in enumerate(dummy_req_ids):
                     self.requests[req_id].sampling_params = SamplingParams(
                         temperature=temp,
