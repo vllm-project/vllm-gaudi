@@ -770,20 +770,29 @@ class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
         # The `k_scale` and `v_scale` are loaded from checkpoint without any adjustment.
         # Compute KV scales based on quantization and deployment platforms
         fp8_max_original = 448.0 if get_config().scale_adjustment else 240.0
+        max_q = layer._q_scale * fp8_max_original
         max_k = layer._k_scale * fp8_max_original
         max_v = layer._v_scale * fp8_max_original
         max_kv = max(max_k, max_v)
         fp8_max_cur_platform = 240.0 if hpu_ops.is_hpu_gaudi2 else 448.0
         kv_scale = fp8_max_cur_platform / max_kv
+        q_scale = fp8_max_cur_platform / max_q
         # Configure latent cache and matmul scales
         layer.impl.latent_cache_k.input_scale = kv_scale
         layer.impl.latent_cache_k.output_scale = 1.0 / kv_scale
-        # TODO(yiliu30): Support loading q_scale from checkpoint
-        layer.impl.matmul_qk.scale_input = 1.0
+        layer.impl.matmul_qk.scale_input = q_scale
         layer.impl.matmul_qk.scale_other = kv_scale
         # For `a` in a@v, as `a` is the output of softmax, its max value is 1.0
         layer.impl.matmul_av.scale_input = 1.0
         layer.impl.matmul_av.scale_other = kv_scale
+
+        # Configure fp8 fused sdpa scales
+        layer.impl.fused_scaled_dot_product_attention.scale_q = q_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.scale_k = kv_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.scale_v = kv_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.d_scale_q = 1 / q_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.d_scale_k = 1 / kv_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.d_scale_v = 1 / kv_scale.detach()
 
         # Note: The following steps are important to avoid compiling each decoding layer into a different gc recipe
         # Step 1: Remove deprecated scale attributes

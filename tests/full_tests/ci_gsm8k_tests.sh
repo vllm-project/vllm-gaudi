@@ -82,11 +82,20 @@ run_dsv2_blockfp8_static_scaling_fp8kv_test() {
     echo "✅ Test with Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 KV successful."
 }
 
+# QWEN3 + FP8 Attn(FP8 QGA test)
 # The lazy mode works on 1.24.0-272
 run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test() {
     echo "➡️ Testing Qwen3-8B + static scaling + FP8 Attn..."
     PT_HPU_LAZY_MODE=0 HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model INC4AI/Qwen3-8B-FP8_STATIC-FP8-Attn-LLMC-Test-Only --trust-remote-code --kv_cache_dtype fp8_inc
     echo "✅ Test with Qwen3-8B + static scaling + FP8 Attn successful."
+}
+
+# DS + blockfp8 + static scaling + FP8 QKV
+# The lazy mode works on 1.24.0-272
+run_dsv2_blockfp8_static_scaling_fp8qkv_test() {
+    echo "➡️ Testing Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 QKV..."
+    PT_HPU_LAZY_MODE=0 HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/DeepSeek-V2-Lite-Chat-BF16-FP8-STATIC-FP8-QKV-TEST-ONLY --trust-remote-code --kv_cache_dtype fp8_inc
+    echo "✅ Test with Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 QKV successful."
 }
 
 # QWEN3 + blockfp8 + dynamic scaling
