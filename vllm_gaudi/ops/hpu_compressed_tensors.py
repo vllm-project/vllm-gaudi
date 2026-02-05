@@ -799,7 +799,6 @@ class HPUCompressedTensorsKVCacheMethod(CompressedTensorsKVCacheMethod):
         self._remove_attrs(layer, attrs_lst=self.OLD_SCALE_ATTRS)
 
         # Step 2: Convert scales in submodules to nn.Parameter to avoid compiling each layer into different gc recipe
-        # submodules_to_check = ["latent_cache_k", "matmul_qk", "matmul_av"]
         submodules_to_check = submodules_to_check or self.SUBMODULES_TO_CHECK
         for submodule_name in submodules_to_check:
             submodule = getattr(layer.impl, submodule_name, None)
