@@ -4780,7 +4780,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             free_encoder_mm_hashes=[],
         )
         self.execute_model(sched_output, warmup_mode=True)
-        self.sample_tokens(None)
         self.execute_model(cleanup, warmup_mode=True)
 
     def _generate_unified_profiling(self, unified_cfgs):
