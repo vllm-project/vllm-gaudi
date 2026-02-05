@@ -4289,7 +4289,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         """
         # Choose batch sizes for warmup based on bucketing
         # Note: We skip batch_size=0 because you can't sample from empty logits
-        test_batch_sizes = list(dict.fromkeys([1] + [bucket[0] for bucket in self.bucketing_manager.decode_buckets if bucket[0] > 0]))
+        test_batch_sizes = list(
+            dict.fromkeys([1] + [bucket[0] for bucket in self.bucketing_manager.decode_buckets if bucket[0] > 0]))
 
         # Test different sampling configurations
         sampling_configs = [
@@ -4366,8 +4367,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         self.input_batch.greedy_reqs.add(req_id)
                     else:  # Random sampling
                         self.input_batch.random_reqs.add(req_id)
-                    
-                    # IMPORTANT: Also update top_p_reqs and top_k_reqs 
+
+                    # IMPORTANT: Also update top_p_reqs and top_k_reqs
                     # to ensure correct sampling path is taken
                     if top_p < 1.0:
                         self.input_batch.top_p_reqs.add(req_id)
