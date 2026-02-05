@@ -156,8 +156,6 @@ class HPUWorker(WorkerBase):
                         selected_modules_str = ",".join(map(str, sorted(selected_modules)))
                         os.environ["HABANA_VISIBLE_MODULES"] = selected_modules_str
                         logger.warning("Using selected available modules: %s", selected_modules_str)
-        except Exception as e:
-            raise e
         finally:
             pyhlml.hlmlShutdown()
 
