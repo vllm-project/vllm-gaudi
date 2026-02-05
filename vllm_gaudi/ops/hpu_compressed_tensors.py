@@ -746,7 +746,10 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         return output.view(*input_shape)
 
 
-class _HPUCompressedTensorsKVCacheMethodBase(CompressedTensorsKVCacheMethod):
+class HPUCompressedTensorsKVCacheMethod(CompressedTensorsKVCacheMethod):
+    SUBMODULES_TO_CHECK = ["k_cache", "v_cache", "matmul_qk", "matmul_av"]
+    OLD_SCALE_ATTRS = ["_k_scale", "_v_scale", "_q_scale", "_k_scale_float", "_v_scale_float", "_q_scale_float"]
+    SCALE_ATTRS = ["input_scale", "output_scale", "scale_input", "scale_other"]
 
     def _convert_all_scale_to_nn_param(self, module: torch.nn.Module, scale_attrs: list[str]) -> None:
         for scale_attr in scale_attrs:
@@ -759,12 +762,9 @@ class _HPUCompressedTensorsKVCacheMethodBase(CompressedTensorsKVCacheMethod):
         for attr_name in attrs_lst:
             if hasattr(layer, attr_name):
                 delattr(layer, attr_name)
-                logger.debug_once(f"Removed attribute {attr_name} from layer {layer}")
+                logger.debug_once(f"Removed attribute {attr_name}.")
 
-
-class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module, submodules_to_check: list[str]) -> None:
         """Process KV cache scales for cross-platform FP8 quantization compatibility."""
         super().process_weights_after_loading(layer)
         # The `k_scale` and `v_scale` are loaded from checkpoint without any adjustment.
@@ -796,57 +796,26 @@ class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
 
         # Note: The following steps are important to avoid compiling each decoding layer into a different gc recipe
         # Step 1: Remove deprecated scale attributes
-        old_scale_attrs = ["_k_scale", "_v_scale", "_q_scale", "_k_scale_float", "_v_scale_float", "_q_scale_float"]
-        self._remove_attrs(layer, attrs_lst=old_scale_attrs)
+        self._remove_attrs(layer, attrs_lst=self.OLD_SCALE_ATTRS)
 
         # Step 2: Convert scales in submodules to nn.Parameter to avoid compiling each layer into different gc recipe
-        submodules_to_check = ["latent_cache_k", "matmul_qk", "matmul_av"]
-        scale_attrs = ["input_scale", "output_scale", "scale_input", "scale_other"]
+        # submodules_to_check = ["latent_cache_k", "matmul_qk", "matmul_av"]
+        submodules_to_check = submodules_to_check or self.SUBMODULES_TO_CHECK
         for submodule_name in submodules_to_check:
             submodule = getattr(layer.impl, submodule_name, None)
             if submodule is not None:
-                self._convert_all_scale_to_nn_param(submodule, scale_attrs=scale_attrs)
+                self._convert_all_scale_to_nn_param(submodule, scale_attrs=self.SCALE_ATTRS)
 
 
-class HPUCompressedTensorsKVCacheMethodForAttention(_HPUCompressedTensorsKVCacheMethodBase):
+class HPUCompressedTensorsKVCacheMethodForMLA(HPUCompressedTensorsKVCacheMethod):
+    SUBMODULES_TO_CHECK = ["latent_cache_k", "matmul_qk", "matmul_av"]
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """Process KV cache scales for cross-platform FP8 quantization compatibility."""
-        super().process_weights_after_loading(layer)
-        # The `k_scale` and `v_scale` are loaded from checkpoint without any adjustment.
-        # Compute KV scales based on quantization and deployment platforms
-        fp8_max_original = 448.0 if get_config().scale_adjustment else 240.0
-        max_k = layer._k_scale * fp8_max_original
-        max_v = layer._v_scale * fp8_max_original
-        max_q = layer._q_scale * fp8_max_original
-        fp8_max_cur_platform = 240.0 if hpu_ops.is_hpu_gaudi2 else 448.0
-        k_scale = fp8_max_cur_platform / max_k
-        v_scale = fp8_max_cur_platform / max_v
-        q_scale = fp8_max_cur_platform / max_q
-        # Configure kv cache and matmul scales
-        layer.impl.k_cache.input_scale = k_scale
-        layer.impl.k_cache.output_scale = 1.0 / k_scale
-        layer.impl.v_cache.input_scale = v_scale
-        layer.impl.v_cache.output_scale = 1.0 / v_scale
-
-        layer.impl.matmul_qk.scale_input = q_scale
-        layer.impl.matmul_qk.scale_other = k_scale
-        # For `a` in a@v, as `a` is the output of softmax, its max value is 1.0
-        layer.impl.matmul_av.scale_input = 1.0
-        layer.impl.matmul_av.scale_other = v_scale
-
-        # Note: The following steps are important to avoid compiling each decoding layer into a different gc recipe
-        # Step 1: Remove deprecated scale attributes
-        old_scale_attrs = ["_k_scale", "_v_scale", "_q_scale", "_k_scale_float", "_v_scale_float", "_q_scale_float"]
-        self._remove_attrs(layer, attrs_lst=old_scale_attrs)
-
-        # Step 2: Convert scales in submodules to nn.Parameter to avoid compiling each layer into different gc recipe
-        submodules_to_check = ["k_cache", "v_cache", "matmul_qk", "matmul_av"]
-        scale_attrs = ["input_scale", "output_scale", "scale_input", "scale_other"]
-        for submodule_name in submodules_to_check:
-            submodule = getattr(layer.impl, submodule_name, None)
-            if submodule is not None:
-                self._convert_all_scale_to_nn_param(submodule, scale_attrs=scale_attrs)
+        # Align KV scales for MLA attention.
+        kv_scale_max = max(layer._k_scale, layer._v_scale)
+        layer._k_scale.data.copy_(kv_scale_max)
+        layer._v_scale.data.copy_(kv_scale_max)
+        super().process_weights_after_loading(layer, submodules_to_check=self.SUBMODULES_TO_CHECK)
 
 
 class HPUCompressedTensorsConfig(CompressedTensorsConfig):
@@ -860,7 +829,7 @@ class HPUCompressedTensorsConfig(CompressedTensorsConfig):
         if isinstance(layer, MLAAttention):
             return HPUCompressedTensorsKVCacheMethodForMLA(self)
         elif isinstance(layer, Attention):
-            return HPUCompressedTensorsKVCacheMethodForAttention(self)
+            return HPUCompressedTensorsKVCacheMethod(self)
         else:
             return super().get_quant_method(layer, prefix)
 
