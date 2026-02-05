@@ -829,7 +829,6 @@ class HPUCompressedTensorsKVCacheMethodForAttention(_HPUCompressedTensorsKVCache
         layer.impl.v_cache.input_scale = v_scale
         layer.impl.v_cache.output_scale = 1.0 / v_scale
 
-        # TODO(yiliu30): Support loading q_scale from checkpoint
         layer.impl.matmul_qk.scale_input = q_scale
         layer.impl.matmul_qk.scale_other = k_scale
         # For `a` in a@v, as `a` is the output of softmax, its max value is 1.0
