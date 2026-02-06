@@ -14,6 +14,7 @@ services:
       - ./server/server_user.env
     volumes:
       # LOCAL_PATH specifies the absolute path on the host to be mounted as /mnt/hf_cache inside the container.
+      # Example usage: LOCAL_PATH=/home/user/hf_cache <...>
       # Expected format: absolute path. Defaults to /mnt/hf_cache if not set.
       - ${LOCAL_PATH:-/mnt/hf_cache}:/mnt/hf_cache
     ports:
