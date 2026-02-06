@@ -1,7 +1,6 @@
 from collections.abc import Callable
 import torch
 from torch import Tensor
-from vllm.model_executor.models.interfaces import SupportsMultiModal
 
 
 def _embed_text_input_ids(
@@ -38,4 +37,4 @@ def _embed_text_input_ids(
     return embed_input_ids(input_ids)
 
 
-SupportsMultiModal._embed_text_input_ids = _embed_text_input_ids
+#SupportsMultiModal._embed_text_input_ids = _embed_text_input_ids
