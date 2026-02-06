@@ -380,7 +380,6 @@ def patch_llama4_get_attn_scale(model):
             continue
 
         attn = layer.self_attn
-        orig = attn._get_attn_scale
 
         def _get_attn_scale_for_hpu(self, positions):
             if self.qk_norm is not None:
