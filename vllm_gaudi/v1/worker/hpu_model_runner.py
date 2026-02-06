@@ -3,7 +3,7 @@ import collections
 import contextlib
 from copy import deepcopy
 import functools
-from functools import partial
+from functools import partial, wraps
 import itertools
 import math
 import os
@@ -43,6 +43,7 @@ from vllm.model_executor.layers.attention import MLAAttention
 from vllm.v1.attention.selector import get_attn_backend
 
 from vllm.config import (VllmConfig, get_layers_from_vllm_config, update_config)
+from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -672,6 +673,57 @@ def get_dp_padding(num_tokens: int, dp_size: int, dp_rank: int) -> int:
 
     max_tokens_across_dp_cpu = torch.max(num_tokens_tensor).item()
     return max_tokens_across_dp_cpu - num_tokens
+
+
+def with_thread_limits():
+    """
+    Decorator to temporarily set OMP_NUM_THREADS and PyTorch threads,
+    and restore them after the function call.
+    
+    Args:
+        div_omp: divide CPU cores by this for OMP_NUM_THREADS
+        div_torch: divide CPU cores by this for torch.set_num_threads
+    """
+
+    def decorator(func):
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            world_size = 1
+            if torch.distributed.is_initialized():
+                world_size = torch.distributed.get_world_size()
+            world_size = min(world_size, 8)
+
+            div_omp = world_size
+            div_torch = world_size
+
+            # Save original settings
+            old_omp = os.environ.get("OMP_NUM_THREADS", None)
+            old_torch = torch.get_num_threads()
+            import psutil
+            num_cores = len(psutil.Process().cpu_affinity() or [0])
+
+            # Set new limits
+            os.environ["OMP_NUM_THREADS"] = str(max(1, num_cores // div_omp))
+            torch.set_num_threads(max(1, num_cores // div_torch))
+            logger.warning_once(
+                "Setting OMP_NUM_THREADS to %s and torch.set_num_threads to %s "
+                "for %s available CPU cores and world size %s", os.environ["OMP_NUM_THREADS"], torch.get_num_threads(),
+                num_cores, world_size)
+            try:
+                # Call the actual function
+                return func(*args, **kwargs)
+            finally:
+                # Restore original settings
+                if old_omp is None:
+                    os.environ.pop("OMP_NUM_THREADS", None)
+                else:
+                    os.environ["OMP_NUM_THREADS"] = old_omp
+                torch.set_num_threads(old_torch)
+
+        return wrapper
+
+    return decorator
 
 
 class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
@@ -3977,6 +4029,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         return model_runner_output
 
+    @with_thread_limits()
     def load_model(self) -> None:
         import habana_frameworks.torch.core as htcore
         if self._is_quant_with_inc() or self.model_config.quantization == 'fp8':
@@ -4287,7 +4340,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         Warmup the sampler with different temperature, top-p, and top-k values.
         """
         # Choose batch sizes for warmup based on bucketing
-        test_batch_sizes = list(dict.fromkeys([0, 1] + [bucket[0] for bucket in self.bucketing_manager.decode_buckets]))
+        # Note: We skip batch_size=0 because you can't sample from empty logits
+        test_batch_sizes = list(
+            dict.fromkeys([1] + [bucket[0] for bucket in self.bucketing_manager.decode_buckets if bucket[0] > 0]))
 
         # Test different sampling configurations
         sampling_configs = [
@@ -4321,12 +4376,23 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             dummy_logits = self.model.compute_logits(dummy_hidden_states)
 
             # Create dummy requests for this specific configuration
-            dummy_req_ids = [f"warmup_req_{batch_size}_{i}" for i in range(max(1, batch_size))]
+            dummy_req_ids = [f"warmup_req_{batch_size}_{i}" for i in range(batch_size)]
+
+            # Get TP-rank specific vocab range to use correct token IDs during warmup
+            # This ensures each TP rank compiles with tokens in its vocab range,
+            # matching runtime behavior.
+            tp_rank = get_tensor_model_parallel_rank()
+            tp_size = get_tensor_model_parallel_world_size()
+            vocab_size = self.input_batch.vocab_size
+            per_partition_vocab_size = vocab_size // tp_size
+            vocab_start = tp_rank * per_partition_vocab_size
+            # Use token IDs from this TP rank's vocab range
+            dummy_prompt_tokens = list(range(vocab_start, vocab_start + min(10, per_partition_vocab_size)))
 
             for i, req_id in enumerate(dummy_req_ids):
                 self.requests[req_id] = CachedRequestState(
                     req_id=req_id,
-                    prompt_token_ids=list(range(10)),  # Dummy prompt
+                    prompt_token_ids=dummy_prompt_tokens,  # TP-rank specific tokens
                     mm_features=[],
                     sampling_params=SamplingParams(),
                     pooling_params=None,
@@ -4338,7 +4404,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self.input_batch.req_id_to_index[req_id] = i
 
             for temp, top_p, top_k, batch_changed in sampling_configs:
-                # Add dummy requests to cache with consistent sampling params
+                # Clear previous sampling state
+                self.input_batch.top_p_reqs = set()
+                self.input_batch.top_k_reqs = set()
+
                 for i, req_id in enumerate(dummy_req_ids):
                     self.requests[req_id].sampling_params = SamplingParams(
                         temperature=temp,
@@ -4350,6 +4419,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         self.input_batch.greedy_reqs.add(req_id)
                     else:  # Random sampling
                         self.input_batch.random_reqs.add(req_id)
+
+                    # IMPORTANT: Also update top_p_reqs and top_k_reqs
+                    # to ensure correct sampling path is taken
+                    if top_p < 1.0:
+                        self.input_batch.top_p_reqs.add(req_id)
+                        self.input_batch.top_p_cpu[i] = top_p
+                    if 0 < top_k < self.input_batch.vocab_size:
+                        self.input_batch.top_k_reqs.add(req_id)
+                        self.input_batch.top_k_cpu[i] = top_k
+                    else:
+                        self.input_batch.top_k_cpu[i] = self.input_batch.vocab_size
 
                 self.input_batch.req_output_token_ids = [
                     item[1] for item in self._generate_req_id_output_token_ids_lst(dummy_req_ids, pad_to=batch_size)
