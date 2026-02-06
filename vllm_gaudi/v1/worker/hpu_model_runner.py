@@ -89,8 +89,7 @@ from vllm.model_executor.models.interfaces import (supports_eagle3, supports_tra
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.transformers_utils.config import is_interleaved
-from vllm.v1.worker.utils import (AttentionGroup, gather_mm_placeholders, sanity_check_mm_encoder_outputs,
-                                  scatter_mm_placeholders)
+from vllm.v1.worker.utils import (AttentionGroup, sanity_check_mm_encoder_outputs)
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -1363,7 +1362,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     # source: vllm/v1/worker/gpu_model_runner.py
     def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput", req_ids: list[str]):
         # Batch the multi-modal inputs.
-        mm_kwargs = list[MultiModalKwargsItem]()
+        mm_kwargs = list[tuple[str, MultiModalKwargsItem]]()
         # List of tuple (mm_hash, pos_info)
         mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
         for req_id in req_ids:
@@ -1373,7 +1372,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 mm_hash = mm_feature.identifier
                 if mm_hash in self.encoder_cache:
                     continue
-                mm_kwargs.append(mm_feature.data)
+                mm_kwargs.append((mm_feature.modality, mm_feature.data))
                 mm_hashes_pos.append((mm_hash, mm_feature.mm_position))
 
         if not mm_kwargs:
@@ -1424,14 +1423,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 mm_hashes_pos,
                 encoder_outputs,
         ):
-            if req_id not in self.encoder_cache:
-                self.encoder_cache[req_id] = {}
+            is_embed = pos_info.is_embed
+            if is_embed is not None:
+                is_embed = is_embed.to(device=output.device)
 
-            self.encoder_cache[mm_hash] = scatter_mm_placeholders(
-                output,
-                is_embed=pos_info.is_embed.to(
-                    device=output.device) if pos_info.is_embed is not None else pos_info.is_embed,
-            )
+            if is_embed is None:
+                scattered_output = output
+            else:
+                placeholders = output.new_full(
+                    (is_embed.shape[0], output.shape[-1]),
+                    fill_value=torch.nan,
+                )
+                placeholders[is_embed] = output
+                scattered_output = placeholders
+
+            self.encoder_cache[mm_hash] = scattered_output
 
     # modified from: vllm/v1/worker/gpu_model_runner.py
     def _gather_mm_embeddings(
@@ -1482,10 +1488,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
 
-                mm_embeds_item = gather_mm_placeholders(
-                    encoder_output[start_idx:end_idx],
-                    is_embed=is_embed,
-                )
+                sliced_output = encoder_output[start_idx:end_idx]
+                mm_embeds_item = sliced_output if is_embed is None else sliced_output[is_embed]
+
                 req_start_pos = req_start_idx + start_pos - num_computed_tokens
                 is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
                     = True
