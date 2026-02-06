@@ -6,7 +6,14 @@ ARG ARTIFACTORY_URL="vault.habana.ai"
 ARG SYNAPSE_VERSION=1.23.0
 ARG SYNAPSE_REVISION=695
 ARG BASE_NAME=rhel9.6
+ARG OS_VERSION=9.6
+ARG OS_STRING=rhel96
 ARG PT_VERSION=2.9.0
+ARG PT_MODULES_REPO_NAME=gaudi-pt-modules
+# for internal use - to support a different package name for RHEL 9.4 with Python 3.12
+ARG PT_PACKAGE_NAME_NON_DEFAULT_PYTHON_SUBSTRING=
+ARG PYPI_INDEX_URL="https://pypi.org/simple/"
+ARG HABANA_RPM_REPO_PATH="rhel/9/${OS_VERSION}"
 # can be upstream or fork
 ARG TORCH_TYPE=upstream
 ARG VLLM_GAUDI_COMMIT=main
@@ -15,14 +22,17 @@ ARG VLLM_PROJECT_COMMIT=
 # ============================================================================
 # Stage 1: gaudi-base - Base system setup with Habana drivers
 # ============================================================================
-FROM registry.access.redhat.com/ubi9/ubi:9.6 AS gaudi-base
+FROM registry.access.redhat.com/ubi9/ubi:${OS_VERSION} AS gaudi-base
 
 # Re-declare global ARGs to use them in this stage
 ARG ARTIFACTORY_URL
 ARG SYNAPSE_VERSION
 ARG SYNAPSE_REVISION
-ARG BASE_NAME
+ARG OS_VERSION
+ARG OS_STRING
 ARG PT_VERSION
+ARG PYPI_INDEX_URL
+ARG HABANA_RPM_REPO_PATH
 ARG TORCH_TYPE
 
 # Labels for RHEL certification
@@ -32,7 +42,7 @@ LABEL vendor="Habanalabs Ltd." \
 # Environment variables - Habana-specific paths and configurations
 ENV TORCH_TYPE=${TORCH_TYPE} \
     PT_VERSION=${PT_VERSION} \
-    OS_STRING="rhel96" \
+    OS_STRING="${OS_STRING}" \
     VLLM_TARGET_DEVICE="hpu" \
     GC_KERNEL_PATH=/usr/lib/habanalabs/libtpc_kernels.so \
     HABANA_LOGS=/var/log/habana_logs/ \
@@ -45,7 +55,8 @@ COPY LICENSE /licenses/
 # System setup - Remove FIPS provider and add EPEL
 RUN dnf install -y python3-dnf-plugin-versionlock && \
     dnf versionlock add redhat-release* && \
-    rpm -e --nodeps openssl-fips-provider-so && \
+    # '|| true' is added to support RHEL 9.4 in which openssl-fips-provider-so is not installed
+    rpm -e --nodeps openssl-fips-provider-so || true && \
     dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \
     dnf clean all
 
@@ -56,7 +67,7 @@ RUN printf "[BaseOS]\\nname=CentOS Linux 9 - BaseOS\\nbaseurl=https://mirror.str
 
 # Install system dependencies
 RUN dnf install -y \
-    wget git jq \
+    wget git jq libomp \
     # Image processing dependencies (needed for pillow-simd -> habana-media-loader)
     zlib-devel libjpeg-devel \
     # Python development
@@ -76,7 +87,7 @@ RUN pip install setuptools==79.0.1 wheel setuptools_scm && \
     pip install --upgrade Jinja2 protobuf urllib3 requests
 
 # Setup Habana repository and install Habana packages
-RUN printf "[habanalabs]\\nname=Habana RH9 Linux repo\\nbaseurl=https://${ARTIFACTORY_URL}/artifactory/rhel/9/9.6\\ngpgkey=https://${ARTIFACTORY_URL}/artifactory/rhel/9/9.6/repodata/repomd.xml.key\\ngpgcheck=1\\n" > /etc/yum.repos.d/habanalabs.repo && \
+RUN printf "[habanalabs]\\nname=Habana RH9 Linux repo\\nbaseurl=https://${ARTIFACTORY_URL}/artifactory/${HABANA_RPM_REPO_PATH}\\ngpgkey=https://${ARTIFACTORY_URL}/artifactory/${HABANA_RPM_REPO_PATH}/repodata/repomd.xml.key\\ngpgcheck=1\\n" > /etc/yum.repos.d/habanalabs.repo && \
     echo "=== Content of habanalabs.repo ===" && \
     cat /etc/yum.repos.d/habanalabs.repo && \
     echo "=== End of habanalabs.repo ===" && \
@@ -95,7 +106,7 @@ RUN printf "[habanalabs]\\nname=Habana RH9 Linux repo\\nbaseurl=https://${ARTIFA
     rm -f /etc/yum.repos.d/habanalabs.repo
 
 # Install Habana media loader and configure Python path
-RUN pip install habana-media-loader=="${SYNAPSE_VERSION}"."${SYNAPSE_REVISION}" && \
+RUN pip install habana-media-loader=="${SYNAPSE_VERSION}"."${SYNAPSE_REVISION}" --extra-index-url ${PYPI_INDEX_URL} && \
     echo "/usr/lib/habanalabs" > $(python3 -c "import sysconfig; print(sysconfig.get_path('platlib'))")/habanalabs-graph.pth
 
 # ============================================================================
@@ -105,23 +116,27 @@ FROM gaudi-base AS gaudi-pytorch
 
 # Re-declare global ARGs needed in this stage
 ARG ARTIFACTORY_URL
+ARG OS_STRING
 ARG PT_VERSION
+ARG PT_MODULES_REPO_NAME
+ARG PT_PACKAGE_NAME_NON_DEFAULT_PYTHON_SUBSTRING
+ARG PYPI_INDEX_URL
 ARG SYNAPSE_VERSION
 ARG SYNAPSE_REVISION
 ARG TORCH_TYPE
 
 # Environment variables inherited from base, OS_STRING needed for PyTorch install
-ENV OS_STRING="rhel96"
+ENV OS_STRING="${OS_STRING}"
 
 # Use installer script from Habana to install Pytorch
-RUN PT_PACKAGE_NAME="pytorch_modules-v${PT_VERSION}_${SYNAPSE_VERSION}_${SYNAPSE_REVISION}.tgz" && \
-    PT_ARTIFACT_PATH="https://${ARTIFACTORY_URL}/artifactory/gaudi-pt-modules/${SYNAPSE_VERSION}/${SYNAPSE_REVISION}/pytorch/${OS_STRING}" && \
+RUN PT_PACKAGE_NAME="pytorch_modules${PT_PACKAGE_NAME_NON_DEFAULT_PYTHON_SUBSTRING}-v${PT_VERSION}_${SYNAPSE_VERSION}_${SYNAPSE_REVISION}.tgz" && \
+    PT_ARTIFACT_PATH="https://${ARTIFACTORY_URL}/artifactory/${PT_MODULES_REPO_NAME}/${SYNAPSE_VERSION}/${SYNAPSE_REVISION}/pytorch/${OS_STRING}" && \
     TMP_PATH=$(mktemp --directory) && \
     wget --no-verbose "${PT_ARTIFACT_PATH}/${PT_PACKAGE_NAME}" && \
     tar -zxf "${PT_PACKAGE_NAME}" -C "${TMP_PATH}" && \
     cd "${TMP_PATH}" && \
     export SKIP_INSTALL_DEPENDENCIES=1 && \
-    ./install.sh $SYNAPSE_VERSION $SYNAPSE_REVISION $TORCH_TYPE && \
+    PYTHON_INDEX_URL="--extra-index-url ${PYPI_INDEX_URL}" ./install.sh $SYNAPSE_VERSION $SYNAPSE_REVISION $TORCH_TYPE && \
     cd / && \
     rm -rf "${TMP_PATH}" "${PT_PACKAGE_NAME}"
 
