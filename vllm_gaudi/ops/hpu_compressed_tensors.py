@@ -769,6 +769,12 @@ class HPUCompressedTensorsKVCacheMethod(CompressedTensorsKVCacheMethod):
                 delattr(layer, attr_name)
                 logger.debug_once(f"Removed attribute {attr_name}.")
 
+    def _update_kv_cache_scales(self, layer: torch.nn.Module, k_scale: torch.Tensor, v_scale: torch.Tensor) -> None:
+        layer.impl.k_cache.input_scale = k_scale
+        layer.impl.k_cache.output_scale = 1.0 / k_scale
+        layer.impl.v_cache.input_scale = v_scale
+        layer.impl.v_cache.output_scale = 1.0 / v_scale
+
     def process_weights_after_loading(self,
                                       layer: torch.nn.Module,
                                       submodules_to_check: Optional[list[str]] = None) -> None:
@@ -781,26 +787,24 @@ class HPUCompressedTensorsKVCacheMethod(CompressedTensorsKVCacheMethod):
         max_q = layer._q_scale * fp8_max_original
         max_k = layer._k_scale * fp8_max_original
         max_v = layer._v_scale * fp8_max_original
-        max_kv = max(max_k, max_v)
         fp8_max_cur_platform = hpu_ops.FP8_MAX
-        kv_scale = fp8_max_cur_platform / max_kv
+        k_scale = fp8_max_cur_platform / max_k
+        v_scale = fp8_max_cur_platform / max_v
         q_scale = fp8_max_cur_platform / max_q
-        # Configure latent cache and matmul scales
-        layer.impl.latent_cache_k.input_scale = kv_scale
-        layer.impl.latent_cache_k.output_scale = 1.0 / kv_scale
+        self._update_kv_cache_scales(layer, k_scale=k_scale, v_scale=v_scale)
         layer.impl.matmul_qk.scale_input = q_scale
-        layer.impl.matmul_qk.scale_other = kv_scale
+        layer.impl.matmul_qk.scale_other = k_scale
         # For `a` in a@v, as `a` is the output of softmax, its max value is 1.0
         layer.impl.matmul_av.scale_input = 1.0
-        layer.impl.matmul_av.scale_other = kv_scale
+        layer.impl.matmul_av.scale_other = v_scale
 
         # Configure fp8 fused sdpa scales
         layer.impl.fused_scaled_dot_product_attention.scale_q = q_scale.detach()
-        layer.impl.fused_scaled_dot_product_attention.scale_k = kv_scale.detach()
-        layer.impl.fused_scaled_dot_product_attention.scale_v = kv_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.scale_k = k_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.scale_v = v_scale.detach()
         layer.impl.fused_scaled_dot_product_attention.d_scale_q = 1 / q_scale.detach()
-        layer.impl.fused_scaled_dot_product_attention.d_scale_k = 1 / kv_scale.detach()
-        layer.impl.fused_scaled_dot_product_attention.d_scale_v = 1 / kv_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.d_scale_k = 1 / k_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.d_scale_v = 1 / v_scale.detach()
 
         # Note: The following steps are important to avoid compiling each decoding layer into a different gc recipe
         # Step 1: Remove deprecated scale attributes
@@ -816,6 +820,11 @@ class HPUCompressedTensorsKVCacheMethod(CompressedTensorsKVCacheMethod):
 
 class HPUCompressedTensorsKVCacheMethodForMLA(HPUCompressedTensorsKVCacheMethod):
     SUBMODULES_TO_CHECK = ["latent_cache_k", "matmul_qk", "matmul_av"]
+
+    def _update_kv_cache_scales(self, layer: torch.nn.Module, k_scale: torch.Tensor, v_scale: torch.Tensor) -> None:
+        # Configure latent cache and matmul scales
+        layer.impl.latent_cache_k.input_scale = k_scale
+        layer.impl.latent_cache_k.output_scale = 1.0 / k_scale
 
     def process_weights_after_loading(self,
                                       layer: torch.nn.Module,
