@@ -14,8 +14,13 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter, ModelWeig
                                            PackedvLLMParameter, RowvLLMParameter)
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
-    CompressedTensorsLinearMethod as OrigCompressedTensorsLinearMethod, CompressedTensorsConfig,
-    CompressedTensorsMoEMethod, CompressedTensorsKVCacheMethod)
+    CompressedTensorsLinearMethod as OrigCompressedTensorsLinearMethod)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+    CompressedTensorsConfig,
+    CompressedTensorsMoEMethod,
+    CompressedTensorsKVCacheMethod,
+    SparsityCompressionConfig,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors_moe)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (  # noqa: E501
     CompressedTensorsScheme, CompressedTensorsWNA16)
@@ -767,20 +772,29 @@ class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
         # The `k_scale` and `v_scale` are loaded from checkpoint without any adjustment.
         # Compute KV scales based on quantization and deployment platforms
         fp8_max_original = 448.0 if get_config().scale_adjustment else 240.0
+        max_q = layer._q_scale * fp8_max_original
         max_k = layer._k_scale * fp8_max_original
         max_v = layer._v_scale * fp8_max_original
         max_kv = max(max_k, max_v)
         fp8_max_cur_platform = 240.0 if hpu_ops.is_hpu_gaudi2 else 448.0
         kv_scale = fp8_max_cur_platform / max_kv
+        q_scale = fp8_max_cur_platform / max_q
         # Configure latent cache and matmul scales
         layer.impl.latent_cache_k.input_scale = kv_scale
         layer.impl.latent_cache_k.output_scale = 1.0 / kv_scale
-        # TODO(yiliu30): Support loading q_scale from checkpoint
-        layer.impl.matmul_qk.scale_input = 1.0
+        layer.impl.matmul_qk.scale_input = q_scale
         layer.impl.matmul_qk.scale_other = kv_scale
         # For `a` in a@v, as `a` is the output of softmax, its max value is 1.0
         layer.impl.matmul_av.scale_input = 1.0
         layer.impl.matmul_av.scale_other = kv_scale
+
+        # Configure fp8 fused sdpa scales
+        layer.impl.fused_scaled_dot_product_attention.scale_q = q_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.scale_k = kv_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.scale_v = kv_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.d_scale_q = 1 / q_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.d_scale_k = 1 / kv_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.d_scale_v = 1 / kv_scale.detach()
 
         # Note: The following steps are important to avoid compiling each decoding layer into a different gc recipe
         # Step 1: Remove deprecated scale attributes
@@ -797,6 +811,37 @@ class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
 
 
 class HPUCompressedTensorsConfig(CompressedTensorsConfig):
+
+    def __init__(
+        self,
+        target_scheme_map: dict[str, Any],
+        ignore: list[str],
+        quant_format: str,
+        sparsity_scheme_map: dict[str, SparsityCompressionConfig],
+        sparsity_ignore_list: list[str],
+        kv_cache_scheme: dict[str, Any] | None = None,
+        config: dict[str, Any] | None = None,
+        transform_config: dict[str, Any] | None = None,
+        total_num_heads: int | None = None,
+        total_num_kv_heads: int | None = None,
+    ):
+        super().__init__(
+            target_scheme_map,
+            ignore,
+            quant_format,
+            sparsity_scheme_map,
+            sparsity_ignore_list,
+            kv_cache_scheme,
+            config,
+            transform_config,
+            total_num_heads,
+            total_num_kv_heads,
+        )
+        # Fix https://github.com/vllm-project/vllm/pull/30141
+        # LLMC overrides the `kv_cache_dtype` to 'fp8', while HPU uses 'fp8_inc'.
+        if getattr(self, "kv_cache_scheme", None) is not None:
+            self.kv_cache_dtype = "fp8_inc"
+            self.kv_cache_scheme = None
 
     def get_quant_method(
         self,
