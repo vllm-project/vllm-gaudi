@@ -61,12 +61,27 @@ def get_experimental_flags():
     return to_dict(flags)
 
 
+def unified_attn_dev_flags():
+    flags = [
+        Value('unified_attn_dense_shared_bias', True),
+        Value('unified_attn_chunked_shared_attn', True),
+        Value('unified_attn_online_merge', True),
+        Value('unified_attn_shared_attn_chunk_size', 64),
+        Value('unified_attn_split_graphs', Enabled('unified_attn_online_merge')),
+        Value(
+            'unified_attn_softmax_fa2',
+            All(VersionRange(">=1.24.0.279"), Enabled('unified_attn'), Kernel(softmax_fa2), Hardware('gaudi3'),
+                Not(Enabled('unified_attn_chunked_shared_attn')))),
+    ]
+    return flags
+
+
 def get_features():
     supported_attn_impls = ['flex_impl', 'fsdpa_impl', 'naive_impl']
     bucketing_strategies = ['exponential_bucketing', 'linear_bucketing']
     features = [
         Value('fp32_alibi_biases', True, env_var='VLLM_ALIBI_USE_FLOAT32_BIASES'),
-        Value('fp32_softmax', ModelType('qwen2')),
+        Value('fp32_softmax', Any(ModelType('qwen2'), All(ModelType('qwen2_5_vl'), Not(Enabled('unified_attn'))))),
         Value(
             'fused_block_softmax_adjustment',
             All(VersionRange(">=1.22.0.494"), Hardware('gaudi3'), Kernel(block_softmax_adjustment),
@@ -90,12 +105,11 @@ def get_features():
         Value('dynamic_shapes_compilation', True, env_var='VLLM_T_COMPILE_DYNAMIC_SHAPES', env_var_type=boolean),
         Value('fullgraph_compilation', False, env_var='VLLM_T_COMPILE_FULLGRAPH', env_var_type=boolean),
         Value('unified_attn', False),
-        Value('unified_attn_softmax_fa2',
-              All(VersionRange(">=1.24.0.279"), Enabled('unified_attn'), Kernel(softmax_fa2), Hardware('gaudi3'))),
+        *unified_attn_dev_flags(),
         Value('scale_adjustment', True, env_var='VLLM_SCALE_ADJUSTMENT', env_var_type=boolean),
         Value('flatten_input', Any(ModelType('qwen3_moe'), ModelType('granitemoe'), ModelType('glm4_moe'))),
         Value('unified_attn_shared_cache_ratio',
-              0.8,
+              1,
               env_var='VLLM_UNIFIED_ATTENTION_SHARED_CACHE_RATIO',
               env_var_type=float),
         Value('high_level_profiler_enabled', False, env_var='VLLM_PROFILER_ENABLED', env_var_type=boolean),
