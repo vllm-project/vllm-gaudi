@@ -3,7 +3,7 @@ import collections
 import contextlib
 from copy import deepcopy
 import functools
-from functools import partial
+from functools import partial, wraps
 import itertools
 import math
 import os
@@ -43,6 +43,7 @@ from vllm.model_executor.layers.attention import MLAAttention
 from vllm.v1.attention.selector import get_attn_backend
 
 from vllm.config import (VllmConfig, get_layers_from_vllm_config, update_config)
+from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -677,6 +678,57 @@ def get_dp_padding(num_tokens: int, dp_size: int, dp_rank: int) -> int:
     return max_tokens_across_dp_cpu - num_tokens
 
 
+def with_thread_limits():
+    """
+    Decorator to temporarily set OMP_NUM_THREADS and PyTorch threads,
+    and restore them after the function call.
+    
+    Args:
+        div_omp: divide CPU cores by this for OMP_NUM_THREADS
+        div_torch: divide CPU cores by this for torch.set_num_threads
+    """
+
+    def decorator(func):
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            world_size = 1
+            if torch.distributed.is_initialized():
+                world_size = torch.distributed.get_world_size()
+            world_size = min(world_size, 8)
+
+            div_omp = world_size
+            div_torch = world_size
+
+            # Save original settings
+            old_omp = os.environ.get("OMP_NUM_THREADS", None)
+            old_torch = torch.get_num_threads()
+            import psutil
+            num_cores = len(psutil.Process().cpu_affinity() or [0])
+
+            # Set new limits
+            os.environ["OMP_NUM_THREADS"] = str(max(1, num_cores // div_omp))
+            torch.set_num_threads(max(1, num_cores // div_torch))
+            logger.warning_once(
+                "Setting OMP_NUM_THREADS to %s and torch.set_num_threads to %s "
+                "for %s available CPU cores and world size %s", os.environ["OMP_NUM_THREADS"], torch.get_num_threads(),
+                num_cores, world_size)
+            try:
+                # Call the actual function
+                return func(*args, **kwargs)
+            finally:
+                # Restore original settings
+                if old_omp is None:
+                    os.environ.pop("OMP_NUM_THREADS", None)
+                else:
+                    os.environ["OMP_NUM_THREADS"] = old_omp
+                torch.set_num_threads(old_torch)
+
+        return wrapper
+
+    return decorator
+
+
 class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     def __init__(
@@ -907,7 +959,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.profiler = HabanaHighLevelProfiler()
         self.profiler_counter_helper = HabanaProfilerCounterHelper()
 
-        self.defragmenter = OnlineDefragmenter()
         self.debug_fwd = init_debug_logger('fwd')
 
         self.get_dp_padding = partial(get_dp_padding,
@@ -922,6 +973,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         assert not (self.unified_attn and not self.use_contiguous_pa), 'Unified attn requires contiguous_pa!'
         assert not (self.unified_attn and not self.use_merged_prefill), 'Unified attn requires merged_prefill!'
+
+    def _resolve_block(self, block_id):
+        if not getattr(self, 'defragmenter', None):
+            return block_id
+
+        return self.defragmenter.resolve(block_id)
+
+    def _resolve_all_blocks(self, block_table_list: list[list[int]]) -> list[list[int]]:
+        if not getattr(self, 'defragmenter', None):
+            return [[self._resolve_block(b) for b in bl] for bl in block_table_list]
+
+        return self.defragmenter.resolve_all(block_table_list)
 
     def _make_buffer(self, *size: Union[int, torch.SymInt], dtype: torch.dtype, numpy: bool = True) -> CpuGpuBuffer:
         return CpuGpuBuffer(*size, dtype=dtype, device=self.device, pin_memory=self.pin_memory, with_numpy=numpy)
@@ -1829,7 +1892,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                   self.block_size) // self.block_size
             blocks = block_table_cpu_tensor[batch_idx, :num_blocks].tolist()
             if not warmup:
-                blocks = [self.defragmenter.resolve(b) for b in blocks]
+                blocks = [self._resolve_block(b) for b in blocks]
             #NOTE(kzawora): In non-preemption scenario,
             # self.input_batch.num_prompt_tokens[batch_idx] == self.input_batch.num_tokens[batch_idx].
             # In preemption scenario num_tokens will also include the tokens emitted before preemption
@@ -2305,7 +2368,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # to compute this.
         block_number = torch.ones((padded_batch_size, num_tokens), dtype=torch.int32) * self._PAD_BLOCK_ID
         block_number[:num_decodes] = torch.gather(input=block_table_cpu_tensor, dim=1, index=(index // self.block_size))
-        block_number.apply_(self.defragmenter.resolve)
+        block_number.apply_(self._resolve_block)
 
         block_offsets = padded_index % self.block_size
         slot_mapping = block_number * self.block_size + block_offsets
@@ -2346,7 +2409,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         logits_indices[:num_decodes] = query_start_loc_cpu[1:num_decodes + 1] - 1
 
         positions_device = async_h2d_copy(positions, device=self.device)
-        block_tables_list = self.defragmenter.resolve_all(block_tables_list)
+        block_tables_list = self._resolve_all_blocks(block_tables_list)
 
         # CONTEXT_LENS [batch_size]
         block_list, block_groups, block_usage = \
@@ -2687,7 +2750,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         ]
         block_table = [block_table_cpu_tensor[i, :nb].tolist() for i, nb in enumerate(num_blocks)]
         if not warmup_mode:
-            block_table = self.defragmenter.resolve_all(block_table)
+            block_table = self._resolve_all_blocks(block_table)
         token_ids = [[token_ids_cpu[i, ctx_len]] for i, ctx_len in enumerate(context_lens)]
 
         batch_data = create_unified_batch(
@@ -3247,16 +3310,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     @torch.inference_mode()
     def run_defragmenter(self, scheduler_output: "SchedulerOutput", warmup_mode: bool = False):
-        if self.defragmenter.enabled and self.kv_caches and not warmup_mode:
-            new = {req.req_id: flatten(req.block_ids) for req in scheduler_output.scheduled_new_reqs if req.block_ids}
-            #TODO: Add support for preempted blocks
-            cached = {
-                req_id: flatten(new_block_ids)
-                for req_id, new_block_ids in zip(scheduler_output.scheduled_cached_reqs.req_ids,
-                                                 scheduler_output.scheduled_cached_reqs.new_block_ids) if new_block_ids
-            }
-            self.defragmenter.update_state(new | cached, scheduler_output.finished_req_ids)
-            self.defragmenter.defragment()
+        if not (getattr(self, 'defragmenter', None) and self.defragmenter.enabled and self.kv_caches
+                and not warmup_mode):
+            return
+
+        new = {req.req_id: flatten(req.block_ids) for req in scheduler_output.scheduled_new_reqs if req.block_ids}
+        #TODO: Add support for preempted blocks
+        cached = {
+            req_id: flatten(new_block_ids)
+            for req_id, new_block_ids in zip(scheduler_output.scheduled_cached_reqs.req_ids,
+                                             scheduler_output.scheduled_cached_reqs.new_block_ids) if new_block_ids
+        }
+        self.defragmenter.update_state(new | cached, scheduler_output.finished_req_ids)
+        self.defragmenter.defragment()
 
     def prepare_unified_batch(self, scheduler_output):
         num_reqs = len(self.input_batch.req_ids)
@@ -3271,8 +3337,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         all_token_ids = self.input_batch.token_ids_cpu_tensor[:num_reqs, :max_seq]
         # TODO: check if it's safe to always slice on first dim
         block_table = self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs, :max_blocks].clone().to(torch.int64)
-        if self.defragmenter.enabled:
-            block_table.apply_(self.defragmenter.resolve)
+        if getattr(self, 'defragmenter', None) and self.defragmenter.enabled:
+            block_table.apply_(self._resolve_block)
         input_ids_hpu = None
         num_decodes = 0
         decode_index = None
@@ -3980,6 +4046,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         return model_runner_output
 
+    @with_thread_limits()
     def load_model(self) -> None:
         import habana_frameworks.torch.core as htcore
         if self._is_quant_with_inc() or self.model_config.quantization == 'fp8':
@@ -4290,7 +4357,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         Warmup the sampler with different temperature, top-p, and top-k values.
         """
         # Choose batch sizes for warmup based on bucketing
-        test_batch_sizes = list(dict.fromkeys([0, 1] + [bucket[0] for bucket in self.bucketing_manager.decode_buckets]))
+        # Note: We skip batch_size=0 because you can't sample from empty logits
+        test_batch_sizes = list(
+            dict.fromkeys([1] + [bucket[0] for bucket in self.bucketing_manager.decode_buckets if bucket[0] > 0]))
 
         # Test different sampling configurations
         sampling_configs = [
@@ -4324,12 +4393,23 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             dummy_logits = self.model.compute_logits(dummy_hidden_states)
 
             # Create dummy requests for this specific configuration
-            dummy_req_ids = [f"warmup_req_{batch_size}_{i}" for i in range(max(1, batch_size))]
+            dummy_req_ids = [f"warmup_req_{batch_size}_{i}" for i in range(batch_size)]
+
+            # Get TP-rank specific vocab range to use correct token IDs during warmup
+            # This ensures each TP rank compiles with tokens in its vocab range,
+            # matching runtime behavior.
+            tp_rank = get_tensor_model_parallel_rank()
+            tp_size = get_tensor_model_parallel_world_size()
+            vocab_size = self.input_batch.vocab_size
+            per_partition_vocab_size = vocab_size // tp_size
+            vocab_start = tp_rank * per_partition_vocab_size
+            # Use token IDs from this TP rank's vocab range
+            dummy_prompt_tokens = list(range(vocab_start, vocab_start + min(10, per_partition_vocab_size)))
 
             for i, req_id in enumerate(dummy_req_ids):
                 self.requests[req_id] = CachedRequestState(
                     req_id=req_id,
-                    prompt_token_ids=list(range(10)),  # Dummy prompt
+                    prompt_token_ids=dummy_prompt_tokens,  # TP-rank specific tokens
                     mm_features=[],
                     sampling_params=SamplingParams(),
                     pooling_params=None,
@@ -4341,7 +4421,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self.input_batch.req_id_to_index[req_id] = i
 
             for temp, top_p, top_k, batch_changed in sampling_configs:
-                # Add dummy requests to cache with consistent sampling params
+                # Clear previous sampling state
+                self.input_batch.top_p_reqs = set()
+                self.input_batch.top_k_reqs = set()
+
                 for i, req_id in enumerate(dummy_req_ids):
                     self.requests[req_id].sampling_params = SamplingParams(
                         temperature=temp,
@@ -4353,6 +4436,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         self.input_batch.greedy_reqs.add(req_id)
                     else:  # Random sampling
                         self.input_batch.random_reqs.add(req_id)
+
+                    # IMPORTANT: Also update top_p_reqs and top_k_reqs
+                    # to ensure correct sampling path is taken
+                    if top_p < 1.0:
+                        self.input_batch.top_p_reqs.add(req_id)
+                        self.input_batch.top_p_cpu[i] = top_p
+                    if 0 < top_k < self.input_batch.vocab_size:
+                        self.input_batch.top_k_reqs.add(req_id)
+                        self.input_batch.top_k_cpu[i] = top_k
+                    else:
+                        self.input_batch.top_k_cpu[i] = self.input_batch.vocab_size
 
                 self.input_batch.req_output_token_ids = [
                     item[1] for item in self._generate_req_id_output_token_ids_lst(dummy_req_ids, pad_to=batch_size)
@@ -4377,47 +4471,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         torch.hpu.synchronize()
 
         logger.info("Sampler warmup completed successfully")
-
-    def warmup_defragmenter(self):
-        """Warm up defragmentation swap graphs for different thresholds.
-
-        We execute a minimal swap (1 pair) which will be padded internally to the
-        requested threshold size. Thresholds chosen to mirror potential production
-        values: 8, 16, 32, 64, 128, 256, 512.
-        """
-        # If defragmenter is disabled or cache utils not prepared, skip.
-        if not getattr(self.defragmenter, 'enabled', False):
-            return
-        if self.defragmenter.cache_utils is None:
-            return
-
-        thresholds = self.defragmenter.to_swap_pad_thresholds
-
-        logger.info("Warming up defragmenter with thresholds: %s", thresholds)
-
-        # Use simple valid block ids present in caches (assume at least 2 blocks allocated when kv caches created)
-        # We only need distinct ids for a swap. They will be scaled by block_size inside swap.
-        # If for some reason only 1 block exists, skip warmup gracefully.
-        try:
-            k_cache = self.defragmenter.cache_utils.kv_caches[0][0]
-            num_blocks_available = k_cache.shape[0] // self.block_size
-        except Exception:
-            num_blocks_available = 0
-        if num_blocks_available < 2:
-            logger.warning("Skipping defragmenter warmup, insufficient blocks (%s)", num_blocks_available)
-            return
-
-        # Minimal pair to trigger a swap path
-        to_swap = [(1, 0)]
-
-        for th in thresholds:
-            self.defragmenter.cache_utils.swap(to_swap, th)
-
-        # If the number of swaps was odd, do one more to make it even and return to original state.
-        if len(thresholds) % 2 == 1:
-            self.defragmenter.cache_utils.swap(to_swap, thresholds[0])
-
-        logger.info("Defragmenter warmup completed successfully")
 
     def warmup_graphs(self, buckets, is_prompt, kv_caches, starting_mem=0, total_batch_seq=0.001):
         total_mem = starting_mem
@@ -5031,7 +5084,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                   self.vllm_config.model_config.logits_processors),
                 )
 
-        self.defragmenter.initialize(self.kv_caches, self.block_size)
+        self.defragmenter = OnlineDefragmenter(self.kv_caches, self.block_size)
         # Profiling
         if self.unified_attn:
             self._maybe_profile_unified_attn()
@@ -5090,7 +5143,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     self.warmup_pooler()
                 else:
                     self.warmup_sampler()
-                    self.warmup_defragmenter()
+                    self.defragmenter.warmup()
 
                 # TODO(kzawora): align_workers
                 if self.unified_attn:
@@ -5124,8 +5177,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # NOTE(kzawora): This is a nasty workaround - for whatever cache_utils-related reason,
         # reusing defragmenter used in warmup causes accuracy drops, which is why we re-create
         # and re-initialize it.
-        self.defragmenter = OnlineDefragmenter()
-        self.defragmenter.initialize(self.kv_caches, self.block_size)
+        self.defragmenter = OnlineDefragmenter(self.kv_caches, self.block_size)
 
     def shutdown_inc(self, suppress=suppress, finalize_calibration=finalize_calibration):
         global shutdown_inc_called
