@@ -25,7 +25,7 @@ def register_model():
 
     from vllm_gaudi.models.hunyuan_v1 import HpuHunYuanMoEV1ForCausalLM  # noqa: F401
     ModelRegistry.register_model("HunYuanMoEV1ForCausalLM", "vllm_gaudi.models.hunyuan_v1:HpuHunYuanMoEV1ForCausalLM")
-    
+
     from vllm_gaudi.models.pixtral import HPUPixtralForConditionalGeneration  # noqa: F401
     ModelRegistry.register_model("PixtralForConditionalGeneration",
                                  "vllm_gaudi.models.pixtral:HPUPixtralForConditionalGeneration")
