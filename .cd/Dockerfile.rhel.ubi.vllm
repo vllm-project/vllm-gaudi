@@ -126,7 +126,7 @@ RUN PT_PACKAGE_NAME="pytorch_modules-v${PT_VERSION}_${SYNAPSE_VERSION}_${SYNAPSE
     rm -rf "${TMP_PATH}" "${PT_PACKAGE_NAME}"
 
 # System update
-RUN dnf -y update --best --allowerasing --skip-broken && \
+RUN dnf -y update --nobest --allowerasing --skip-broken && \
     dnf clean all
 
 WORKDIR /workspace
