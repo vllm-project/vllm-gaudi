@@ -28,7 +28,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
 
-from vllm.config import MultiModalConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from vllm.model_executor.models.utils import (maybe_prefix, cast_overflow_tensors)
@@ -135,7 +135,6 @@ class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
         num_heads: int,
         projection_size: int,
         quant_config: Optional[QuantizationConfig] = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__(
@@ -143,7 +142,6 @@ class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
             num_heads=num_heads,
             projection_size=projection_size,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=prefix,
         )
 
@@ -156,6 +154,7 @@ class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
             rotary_pos_emb_cos: torch.Tensor,
             rotary_pos_emb_sin: torch.Tensor,
             attn_mask: Optional[torch.Tensor] = None,  # Only used for HPU
+            max_seqlen: Optional[int] = None,  # Only used for Flash Attention
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -205,7 +204,6 @@ class HPUQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
         norm_layer: Callable[[int], nn.Module] | None = None,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__(
@@ -215,7 +213,6 @@ class HPUQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
             act_fn=act_fn,
             norm_layer=norm_layer,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=prefix,
         )
         self.attn = HPUQwen2_5_VisionAttention(
@@ -223,7 +220,6 @@ class HPUQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
             num_heads=num_heads,
             projection_size=dim,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=maybe_prefix(prefix, "attn."),
         )
 
@@ -237,11 +233,13 @@ class HPUQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
             seqlens: Optional[list[int]] = None,  # Only used for xFormers
             attn_mask: Optional[torch.Tensor] = None,  # Only used for HPU
     ) -> torch.Tensor:
+        mask_to_use = attn_mask if attn_mask is not None else cu_seqlens
+
         x = x + self.attn(self.norm1(x),
                           cu_seqlens=cu_seqlens,
                           rotary_pos_emb_cos=rotary_pos_emb_cos,
                           rotary_pos_emb_sin=rotary_pos_emb_sin,
-                          attn_mask=attn_mask)
+                          attn_mask=mask_to_use)
 
         x = x + self.mlp(self.norm2(x))
         return x
@@ -265,14 +263,12 @@ class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
         vision_config: Qwen2_5_VLVisionConfig,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__(
             vision_config=vision_config,
             norm_eps=norm_eps,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=prefix,
         )
 
@@ -289,7 +285,6 @@ class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
                     act_fn=get_act_and_mul_fn(vision_config.hidden_act),
                     norm_layer=norm_layer,
                     quant_config=quant_config,
-                    multimodal_config=multimodal_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
                 ) for layer_idx in range(depth)
             ])
