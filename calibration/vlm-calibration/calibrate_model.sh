@@ -4,7 +4,8 @@
 ###############################################################################
 
 set -e
-cd "$(dirname "$0")"
+pushd "$(dirname "$0")" > /dev/null
+trap 'popd > /dev/null' EXIT
 
 ALLOWED_DEVICES=("g2" "g3")
 
@@ -68,8 +69,6 @@ extract_last_folder_name() {
 
 cleanup_tmp
 
-# jump to the script directory
-cd "$(dirname "$0")"
 echo "downloading requirements..."
 pip install -r requirements.txt 
 
@@ -89,7 +88,7 @@ while getopts "m:b:l:t:d:h:o:g:e:" OPT; do
             BATCH_SIZE="$OPTARG"
             ;;
         o )
-            FP8_DIR=$(realpath "$OPTARG")
+            FP8_DIR=$(realpath -m "$OPTARG")
             ;;
         l )
             LIMIT="$OPTARG"
