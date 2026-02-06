@@ -6,7 +6,6 @@ on:
     branches: 
       - main
       - releases/**
-      - pre-releases/**
 
   # Allow manual triggering for testing purposes
   workflow_dispatch: {}
@@ -110,9 +109,10 @@ jobs:
   # --- NEW JOB ---
   # This job runs first on the self-hosted pool, picks a runner,
   # and outputs its name so all other jobs can target it.
+  # If PR title contains [FIX_FOR_VLLM_LATEST], it uses the hourly-ci runner pool.
   discover_runner:
     needs: gatekeeper
-    runs-on: pr-ci
+    runs-on: ${{ contains(github.event.pull_request.title, '[FIX_FOR_VLLM_LATEST]') && 'hourly-ci' || 'pr-ci' }}
     outputs:
       runner_name: ${{ steps.get_name.outputs.name }}
     steps:
@@ -298,7 +298,7 @@ jobs:
             --build-arg VLLM_COMMIT_ARG=${{ env.TEST_VLLM_COMMIT }} \
             -t hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
             -f - . <<EOF
-          FROM vault.habana.ai/gaudi-docker/1.22.2/ubuntu24.04/habanalabs/pytorch-installer-2.7.1:latest
+          FROM vault.habana.ai/gaudi-docker/1.23.0/ubuntu24.04/habanalabs/pytorch-installer-2.9.0:latest
 
           ARG VLLM_COMMIT_ARG
 

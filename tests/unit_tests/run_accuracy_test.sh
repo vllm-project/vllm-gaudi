@@ -29,10 +29,15 @@ export PT_HPU_LAZY_MODE=1
 NIXL_BUFFER_DEVICE=${NIXL_BUFFER_DEVICE:-"cpu"}
 VLLM_NIXL_BACKEND=${VLLM_NIXL_BACKEND:-"UCX"}
 
+export VLLM_NIXL_DEVICE_TO_DEVICE=true
+UCX_TLS="tcp"
 if [ "$VLLM_NIXL_BACKEND" == "UCX" ]; then
-  export VLLM_NIXL_DEVICE_TO_DEVICE=false
-else
-  export VLLM_NIXL_DEVICE_TO_DEVICE=true
+  export UCX_MEMTYPE_CACHE=0
+  if [ "$NIXL_BUFFER_DEVICE" == "hpu" ]; then
+    UCX_TLS="gaudi_gdr,ib,rc,ud"
+  else
+    export VLLM_NIXL_DEVICE_TO_DEVICE=false
+  fi
 fi
 
 # Number of prefill and decode instances to create
@@ -42,8 +47,7 @@ PREFILLER_TP_SIZE=${PREFILLER_TP_SIZE:-1}
 DECODER_TP_SIZE=${DECODER_TP_SIZE:-2}
 
 # Find the git repository root directory
-#GIT_ROOT=$(git rev-parse --show-toplevel)
-GIT_ROOT="/home/vllm-nixl/vllm"
+GIT_ROOT=$(git rev-parse --show-toplevel)
 
 #SMI_BIN=$(which nvidia-smi || which rocm-smi)
 
@@ -116,7 +120,7 @@ run_tests_for_model() {
     echo "Starting prefill instance $i on GPU $GPU_ID, port $PORT"
 
     # Build the command with or without model-specific args
-    BASE_CMD="RANK=0 UCX_TLS=tcp VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
+    BASE_CMD="RANK=0 UCX_TLS=$UCX_TLS VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
     --max_num_batched_tokens 8192 \
@@ -149,7 +153,7 @@ run_tests_for_model() {
     echo "Starting decode instance $i on GPU $GPU_ID, port $PORT"
 
     # Build the command with or without model-specific args
-    BASE_CMD="RANK=1 UCX_TLS=tcp VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
+    BASE_CMD="RANK=1 UCX_TLS=$UCX_TLS VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
     --max_num_batched_tokens 8192 \

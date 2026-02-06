@@ -29,13 +29,14 @@ The following table lists the available variables:
 | `VLLM_DECODE_BS_BUCKET_STEP`    | Sets the batch size step for decode operations, impacting how decode batches are grouped. |
 | `VLLM_PROMPT_BS_BUCKET_STEP`    | Adjusts the batch size step for prompt processing.                                        |
 | `VLLM_PROMPT_SEQ_BUCKET_STEP`   | Controls the step size for prompt sequence allocation.                                    |
+| `EXTRA_ARGS`                    | Additional vLLM serve args for the server bringup e.g., " --served-model-name model_name" |
 
 Set the preferred variable when running the vLLM server using Docker Compose, as presented in the following example:
 
 ```bash
 MODEL="Qwen/Qwen2.5-14B-Instruct" \
 HF_TOKEN="<your huggingface token>" \
-DOCKER_IMAGE="vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/vllm-installer-{{ PT_VERSION }}:latest" \
+DOCKER_IMAGE="vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/vllm-plugin-{{ PT_VERSION }}:latest" \
 TENSOR_PARALLEL_SIZE=1 \
 MAX_MODEL_LEN=2048 \
 docker compose up
@@ -53,13 +54,14 @@ The following table lists the available variables:
 | `OUTPUT_TOK`  | Number of output tokens to generate per prompt.    |
 | `CON_REQ`     | Number of concurrent requests during benchmarking. |
 | `NUM_PROMPTS` | Total number of prompts to use in the benchmark.   |
+| `EXTRA_BENCH_ARGS`| Additional vLLM bench args e.g., " --tokenizer-mode hf"|
 
 Set the preferred variable when running the vLLM server using Docker Compose, as presented in the following example:
 
 ```bash
 MODEL="Qwen/Qwen2.5-14B-Instruct" \
 HF_TOKEN="<your huggingface token>" \
-DOCKER_IMAGE="vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/vllm-installer-{{ PT_VERSION }}:latest" \
+DOCKER_IMAGE="vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/vllm-plugin-{{ PT_VERSION }}:latest" \
 INPUT_TOK=128 \
 OUTPUT_TOK=128 \
 CON_REQ=16 \
@@ -76,7 +78,7 @@ This configuration allows you to launch the vLLM server and benchmark together. 
 ```bash
 MODEL="Qwen/Qwen2.5-14B-Instruct" \
 HF_TOKEN="<your huggingface token>" \
-DOCKER_IMAGE="vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/vllm-installer-{{ PT_VERSION }}:latest" \
+DOCKER_IMAGE="vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/vllm-plugin-{{ PT_VERSION }}:latest" \
 TENSOR_PARALLEL_SIZE=1 \
 MAX_MODEL_LEN=2048 \
 INPUT_TOK=128 \

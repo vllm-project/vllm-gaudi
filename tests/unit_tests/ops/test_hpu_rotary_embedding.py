@@ -125,6 +125,7 @@ def run_rotary_embedding_test(native_rotary_data: RotaryData, oot_rotary_data: R
 @pytest.mark.parametrize("base", BASES)
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 def test_rotary_embedding(
+    default_vllm_config: None,
     seq_length: int,
     hidden_size: int,
     head_size: int,
@@ -154,6 +155,7 @@ def test_rotary_embedding(
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("scaling_factors", SCALING_FACTORS_WITH_LIST)
 def test_linear_scaling_rotary_embedding(
+    default_vllm_config: None,
     seq_length: int,
     hidden_size: int,
     head_size: int,
@@ -185,6 +187,7 @@ def test_linear_scaling_rotary_embedding(
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("scaling_factor", SCALING_FACTORS)
 def test_dynamic_ntk_scaling_rotary_embedding(
+    default_vllm_config: None,
     seq_length: int,
     hidden_size: int,
     head_size: int,
@@ -216,6 +219,7 @@ def test_dynamic_ntk_scaling_rotary_embedding(
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("scaling_factor", SCALING_FACTORS)
 def test_yarn_scaling_rotary_embedding(
+    default_vllm_config: None,
     seq_length: int,
     hidden_size: int,
     head_size: int,
@@ -246,6 +250,7 @@ def test_yarn_scaling_rotary_embedding(
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("scaling_factor", SCALING_FACTORS)
 def test_deepseek_scaling_rotary_embedding(
+    default_vllm_config: None,
     seq_length: int,
     hidden_size: int,
     head_size: int,
@@ -276,6 +281,7 @@ def test_deepseek_scaling_rotary_embedding(
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("scaling_factor", SCALING_FACTORS)
 def test_llama3_rotary_embedding(
+    default_vllm_config: None,
     seq_length: int,
     hidden_size: int,
     head_size: int,
@@ -310,6 +316,7 @@ def test_llama3_rotary_embedding(
 @pytest.mark.parametrize("base", BASES)
 @pytest.mark.parametrize("is_neox_style", [True])
 def test_phi3_long_rope_scaled_rotary_embedding(
+    default_vllm_config: None,
     seq_length: int,
     hidden_size: int,
     head_size: int,
@@ -341,6 +348,7 @@ def test_phi3_long_rope_scaled_rotary_embedding(
 @pytest.mark.parametrize("base", BASES)
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 def test_Llama4_vision_rotary_embedding(
+    default_vllm_config: None,
     seq_length: int,
     hidden_size: int,
     head_size: int,
@@ -369,6 +377,7 @@ def test_Llama4_vision_rotary_embedding(
 @pytest.mark.parametrize("base", BASES)
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 def test_m_rotary_embedding(
+    default_vllm_config: None,
     seq_length: int,
     hidden_size: int,
     head_size: int,

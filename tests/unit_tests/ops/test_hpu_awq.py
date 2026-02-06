@@ -9,7 +9,7 @@ from vllm_gaudi.utils import HPUCompileConfig
 from safetensors import safe_open
 
 
-def test_awq_linear_method(dist_init):
+def test_awq_linear_method(default_vllm_config: None, dist_init):
     config = {"bits": 4, "group_size": 128, "zero_point": True}
     oot_quant_config = AWQHPUConfig.from_config(config)
 

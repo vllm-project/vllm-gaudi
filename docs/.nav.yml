@@ -22,7 +22,7 @@ nav:
       - configuration/quantization/auto_awq.md
       - configuration/quantization/gptqmodel.md
     - configuration/performance_tuning.md
-    - configuration/pipeline_parallelism.md
+    # - configuration/pipeline_parallelism.md
     - Warm-up:
       - configuration/warm-up/warm-up.md
       - configuration/warm-up/sampler_warm-up.md

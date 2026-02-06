@@ -9,7 +9,7 @@ from typing import Optional
 
 import torch
 from vllm_gaudi.extension import cache_ops, ops
-from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
+from vllm.v1.attention.backend import AttentionMetadataBuilder
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
@@ -56,7 +56,7 @@ class HPUPagedAttention:
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """CPU attention supports decoder and encoder-only attention."""
-        from vllm.attention.backends.abstract import AttentionType
+        from vllm.v1.attention.backend import AttentionType
 
         return attn_type in (
             AttentionType.DECODER,
@@ -98,8 +98,8 @@ class HPUPagedAttention:
 
     @staticmethod
     def swap_blocks(
-        src_kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-        dst_kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        src_kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        dst_kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
         src_to_dsts: torch.Tensor,
     ) -> None:
         src_key_cache = src_kv_cache[0]
@@ -117,7 +117,8 @@ class HPUPagedAttention:
         if src_key_scales is not None:
             cache_ops.swap_blocks(src_key_scales, dst_key_scales, src_to_dsts)
         if src_value_scales is not None:
-            cache_ops.swap_blocks(src_value_scales, dst_value_scales, src_to_dsts)
+            cache_ops.swap_blocks(src_value_scales[0], dst_value_scales[0], src_to_dsts)
+            cache_ops.swap_blocks(src_value_scales[1], dst_value_scales[1], src_to_dsts)
 
     @staticmethod
     def copy_blocks(

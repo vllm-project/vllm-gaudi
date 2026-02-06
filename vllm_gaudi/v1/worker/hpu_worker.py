@@ -18,7 +18,7 @@ from vllm_gaudi.extension.profiler import (HabanaMemoryProfiler, format_bytes, s
 from vllm_gaudi.extension.runtime import get_config
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import (ensure_model_parallel_initialized, init_distributed_environment)
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
@@ -26,9 +26,8 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.model_executor import set_random_seed
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec)
+from vllm.utils.torch_utils import (STR_DTYPE_TO_TORCH_DTYPE, set_random_seed)
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec, MambaSpec)
 from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerOutput)
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.utils import is_fake_hpu
@@ -76,6 +75,7 @@ class HPUWorker(WorkerBase):
 
         self.local_rank = local_rank
         self.rank = rank
+        self.parallel_config.rank = rank
         self.distributed_init_method = distributed_init_method
         self.is_driver_worker = is_driver_worker
 
@@ -83,11 +83,6 @@ class HPUWorker(WorkerBase):
             self.cache_dtype = self.model_config.dtype
         else:
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
-
-        if self.model_config.trust_remote_code:
-            # note: lazy import to avoid importing torch before initializing
-            from vllm.utils.import_utils import init_cached_hf_modules
-            init_cached_hf_modules()
 
         self.gc_track_recompiles = get_config().track_graph_compilation and not get_config().high_level_profiler_enabled
         self.step = 0
@@ -157,7 +152,8 @@ class HPUWorker(WorkerBase):
         return self.model_runner.get_model()
 
     def load_model(self) -> None:
-        self.model_runner.load_model()
+        with set_current_vllm_config(self.vllm_config):
+            self.model_runner.load_model()
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -183,23 +179,67 @@ class HPUWorker(WorkerBase):
         for layer_name, layer_spec in kv_cache_spec.items():
             if isinstance(layer_spec, FullAttentionSpec):
                 dtype = layer_spec.dtype
+                if dtype == torch.float8_e4m3fn and os.environ.get('QUANT_CONFIG', None) is not None and \
+                    os.environ.get('VLLM_DYNAMIC_KV_QUANT', None) is not None and not self.model_config.use_mla:
+                    create_dynamic_scales = True
+                else:
+                    create_dynamic_scales = False
 
-                # Use an empty tensor instead of `None`` to force Dynamo to pass
-                # it by reference, rather by specializing on the value ``None``.
-                hpu_k_cache = torch.tensor([], dtype=dtype, device='hpu')
-                hpu_v_cache = torch.tensor([], dtype=dtype, device='hpu')
-                hpu_k_scales = torch.tensor([], dtype=dtype, device='hpu')
-                hpu_v_scales = torch.tensor([], dtype=dtype, device='hpu')
+                # Create dummy KV cache tensors with proper shapes for profiling
+                num_blocks = 1  # Use single block for profiling
+                block_size = layer_spec.block_size
+                num_kv_heads = layer_spec.num_kv_heads
+                head_size = layer_spec.head_size
+
+                kv_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(num_blocks, block_size, num_kv_heads,
+                                                                                   head_size)
+                kv_scales_shape = kv_cache_shape[:-1] + (1, )
+
+                hpu_k_cache = torch.zeros(kv_cache_shape, dtype=dtype, device='hpu')
+                hpu_v_cache = None if self.model_config.use_mla else torch.zeros(
+                    kv_cache_shape, dtype=dtype, device='hpu')
+
+                hpu_k_scales = torch.ones(kv_scales_shape, dtype=torch.bfloat16,
+                                          device='hpu') if create_dynamic_scales else None
+                if create_dynamic_scales:
+                    hpu_v_scales = (torch.ones(kv_scales_shape, dtype=torch.bfloat16, device='hpu'),
+                                    torch.ones([num_blocks, num_kv_heads, head_size],
+                                               dtype=torch.bfloat16,
+                                               device='hpu'))
+                else:
+                    hpu_v_scales = None
 
                 kv_caches[layer_name] = (hpu_k_cache, hpu_v_cache, hpu_k_scales, hpu_v_scales)
 
                 single_kv_block_size_bytes += layer_spec.page_size_bytes
 
+            elif isinstance(layer_spec, MambaSpec):
+                dtype0 = layer_spec.dtypes[0]
+                dtype1 = layer_spec.dtypes[1]
+
+                # Use an empty tensor instead of `None`` to force Dynamo to pass
+                # it by reference, rather by specializing on the value ``None``.
+                hpu_ssm_cache = torch.tensor([], dtype=dtype0, device='hpu')
+                hpu_conv_cache = torch.tensor([], dtype=dtype1, device='hpu')
+                hpu_ssm_scales = torch.tensor([], dtype=dtype0, device='hpu')
+                hpu_conv_scales = torch.tensor([], dtype=dtype1, device='hpu')
+
+                kv_caches[layer_name] = (hpu_ssm_cache, hpu_conv_cache, hpu_ssm_scales, hpu_conv_scales)
+
+                single_kv_block_size_bytes += layer_spec.page_size_bytes
             else:
                 raise NotImplementedError
 
         runner_kv_caches: list[torch.Tensor] = []
         bind_kv_cache(kv_caches, self.vllm_config.compilation_config.static_forward_context, runner_kv_caches)
+
+        if self.model_runner.unified_attn:
+            # Create unified attention persistent context for profiling
+            from vllm_gaudi.extension.unified_batch import UnifiedBatchPersistentContext
+            self.model_runner.unified_attn_persistent_ctx = UnifiedBatchPersistentContext(
+                self.model_runner.max_num_batched_tokens, 0, 0, self.model_runner.block_size, dtype,
+                self.model_runner.profiler)
+
         if is_fake_hpu():
             fake_hpu_cache_alloc = 4 * 2**30  # take 4 GiB flat on fake hpu
             return fake_hpu_cache_alloc
@@ -233,7 +273,15 @@ class HPUWorker(WorkerBase):
                "reserved for usable KV cache")
 
         logger.info(msg)
+
+        # Clear the dummy KV cache to free up memory
+        kv_caches = {}
+        forward_context = self.vllm_config.compilation_config.static_forward_context
+        for layer_name in forward_context:
+            forward_context[layer_name].kv_cache = None
+        runner_kv_caches = []
         gc.collect()
+
         return cache_size_bytes - dummy_block_headroom
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
@@ -259,9 +307,8 @@ class HPUWorker(WorkerBase):
         self.compile_or_warm_up_model()
 
     def compile_or_warm_up_model(self) -> None:
-        # Don't run the warmup if in eager or if the model is already warmed up
-        if not self.model_config.enforce_eager \
-            and not getattr(self.model_runner, 'graphed_buckets', None):
+        # Don't run the warmup if the model is already warmed up
+        if not getattr(self.model_runner, 'graphed_buckets', None):
             self.model_runner.warmup_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
@@ -376,7 +423,7 @@ class HPUWorker(WorkerBase):
     def wake_up(self, tags: list[str] | None = None) -> None:
         """Wake up the worker from sleep mode.
         It can move the model back to HPU and/or reinitialize KV cache.
-        
+
         Args:
             tags: Optional list of tags (kept for interface compatibility)
         """
@@ -428,7 +475,6 @@ def init_worker_distributed_environment(
     parallel_config = vllm_config.parallel_config
     """Initialize the distributed environment."""
     init_distributed_environment(parallel_config.world_size, rank, distributed_init_method, local_rank, backend='hccl')
-    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size, parallel_config.pipeline_parallel_size)
 
     dummy_tensor_hpu = torch.ones(1).to('hpu')
     torch.distributed.all_reduce(dummy_tensor_hpu)
