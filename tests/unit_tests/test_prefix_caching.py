@@ -5,20 +5,15 @@ import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
 
 from vllm.sampling_params import SamplingParams
-from vllm.attention import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData, CachedRequestData
-from vllm.config import (VllmConfig, ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig)
+from vllm.config import (VllmConfig, ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig, set_current_vllm_config)
 
 DEVICE = current_platform.device_type
 
 
 def get_vllm_config():
-    scheduler_config = SchedulerConfig(
-        max_num_seqs=10,
-        max_num_batched_tokens=512,
-        max_model_len=512,
-    )
     model_config = ModelConfig(
         model="facebook/opt-125m",
         task="generate",
@@ -27,6 +22,12 @@ def get_vllm_config():
         trust_remote_code=True,
         dtype="bfloat16",
         seed=42,
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=10,
+        max_num_batched_tokens=512,
+        max_model_len=512,
+        is_encoder_decoder=model_config.is_encoder_decoder,
     )
     cache_config = CacheConfig(
         block_size=128,
@@ -47,13 +48,14 @@ def get_vllm_config():
 @pytest.fixture
 def model_runner():
     vllm_config = get_vllm_config()
-    model_config = vllm_config.model_config
-    num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
-    head_size = model_config.get_head_size()
-    environment.set_vllm_config(vllm_config)
-    vllm_config.compilation_config.static_forward_context = {"layer.0": Attention(num_heads, head_size, 0.1)}
-    runner = HPUModelRunner(vllm_config, DEVICE)
-    return runner
+    with set_current_vllm_config(vllm_config):
+        model_config = vllm_config.model_config
+        num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
+        head_size = model_config.get_head_size()
+        environment.set_vllm_config(vllm_config)
+        vllm_config.compilation_config.static_forward_context = {"layer.0": Attention(num_heads, head_size, 0.1)}
+        runner = HPUModelRunner(vllm_config, DEVICE)
+        yield runner
 
 
 def make_new_request(req_id, prompt_token_ids, num_computed_tokens=0):

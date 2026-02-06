@@ -12,8 +12,9 @@ from vllm.platforms import Platform, PlatformEnum
 from vllm_gaudi.extension.runtime import get_config
 
 if TYPE_CHECKING:
+    from vllm.v1.attention.selector import AttentionSelectorConfig
     from vllm.config import ModelConfig, VllmConfig
-    from vllm.attention.backends.registry import AttentionBackendEnum
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
 else:
     ModelConfig = None
     VllmConfig = None
@@ -35,7 +36,7 @@ class HpuPlatform(Platform):
     dispatch_key: str = "HPU"
     ray_device_key: str = "HPU"
     device_control_env_var: str = "HABANA_VISIBLE_MODULES"
-    supported_quantization: list[str] = ["compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu"]
+    supported_quantization: list[str] = ["compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu", "modelopt"]
     simple_compile_backend = "hpu_backend"
     additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
 
@@ -43,26 +44,24 @@ class HpuPlatform(Platform):
     def get_attn_backend_cls(
         cls,
         selected_backend: "AttentionBackendEnum",
-        head_size: int,
-        dtype: torch.dtype,
-        kv_cache_dtype: Optional[str],
-        block_size: int,
-        use_mla: bool,
-        has_sink: bool,
-        use_sparse: bool,
-        attn_type: str | None = None,
+        attn_selector_config: "AttentionSelectorConfig",
     ) -> str:
-        if use_sparse:
+        if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on HPU.")
-        if use_mla:
-            logger.info("Using HPUAttentionMLA backend.")
-            return ("vllm_gaudi.attention.backends.hpu_attn."
-                    "HPUMLAAttentionBackend")
         elif get_config().unified_attn:
+            if attn_selector_config.use_mla:
+                logger.info("Using HPUUnifiedMLA backend.")
+                return ("vllm_gaudi.attention.backends.hpu_attn."
+                        "HPUUnifiedMLABackend")
             logger.info("Using UnifiedAttention backend.")
             return ("vllm_gaudi.attention.backends."
                     "hpu_attn.HPUUnifiedAttentionBackend")
         else:
+            if attn_selector_config.use_mla:
+                logger.info("Using HPUAttentionMLA backend.")
+                return ("vllm_gaudi.attention.backends.hpu_attn."
+                        "HPUMLAAttentionBackend")
+
             logger.info("Using HPUAttentionV1 backend.")
             return ("vllm_gaudi.v1.attention.backends."
                     "hpu_attn.HPUAttentionBackendV1")
@@ -81,6 +80,24 @@ class HpuPlatform(Platform):
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         return cls.device_name
+
+    @classmethod
+    def get_device_total_memory(cls, device_id: int = 0) -> int:
+        """Get the total memory of a device in bytes."""
+        # NOTE: This is a workaround.
+        # The correct implementation of the method in this place should look as follows:
+        # total_hpu_memory = torch.hpu.mem_get_info()[1]
+        # A value of 0 is returned to preserve the current logic in
+        # vllm/vllm/engine/arg_utils.py → get_batch_defaults() →
+        # default_max_num_batched_tokens, in order to avoid the
+        # error in hpu_perf_test, while also preventing a
+        # NotImplementedError in test_defaults_with_usage_context.
+        logger.warning("This is a workaround! Please check the NOTE "
+                       "in the get_device_total_memory definition.")
+
+        total_hpu_memory = 0
+
+        return total_hpu_memory
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
@@ -136,6 +153,11 @@ class HpuPlatform(Platform):
         # Disable multi-stream for shared experts as no Stream on CPU
         os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
+        # NOTE: vLLM has default enabled async scheduling with speculative decoding is on.
+        # However, for HPU, speculative decoding is not supported with async scheduling.
+        vllm_config.scheduler_config.async_scheduling = \
+            vllm_config.scheduler_config.async_scheduling and vllm_config.speculative_config is None
+
     @classmethod
     def is_pin_memory_available(cls):
         logger.warning("Pin memory is not supported on HPU.")
@@ -144,6 +166,10 @@ class HpuPlatform(Platform):
     @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm_gaudi.lora.punica_wrapper.punica_hpu.PunicaWrapperHPU"
+
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        return True
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
@@ -168,6 +194,9 @@ class HpuPlatform(Platform):
             return "VRAM"
         else:
             return "DRAM"
+
+    def is_sleep_mode_available(cls) -> bool:
+        return True
 
     @classmethod
     def set_torch_compile(cls) -> None:
@@ -225,12 +254,23 @@ class HpuPlatform(Platform):
         dst_block_indices: torch.Tensor,
     ) -> None:
         """Copy blocks from src_cache to dst_cache on HPU."""
+        # WA: https://github.com/pytorch/pytorch/issues/169656
+        original_src_dtype = src_cache.dtype
+        view_as_uint = original_src_dtype in [torch.float8_e4m3fn, torch.float8_e5m2]
+        if view_as_uint:
+            src_cache = src_cache.view(torch.uint8)
         if isinstance(dst_cache, tuple):
             _src_cache = src_cache[:, src_block_indices]
-            for i in range(len(dst_cache)):
-                dst_cache[i].index_copy_(0, dst_block_indices, _src_cache[i].to(dst_cache[i].device))
+            _src_cache = _src_cache.to(dst_cache[0].device)
+            dst_cache[0].index_copy_(0, dst_block_indices,
+                                     _src_cache[0].view(original_src_dtype) if view_as_uint else _src_cache[0])
+            dst_cache[1].index_copy_(0, dst_block_indices,
+                                     _src_cache[1].view(original_src_dtype) if view_as_uint else _src_cache[1])
         else:
-            dst_cache.index_copy_(0, dst_block_indices, src_cache[src_block_indices].to(dst_cache.device))
+            indexed_cache = src_cache[src_block_indices]
+            if view_as_uint:
+                indexed_cache = indexed_cache.view(original_src_dtype)
+            dst_cache.index_copy_(0, dst_block_indices, indexed_cache.to(dst_cache.device))
         torch.hpu.synchronize()
 
     @classmethod
