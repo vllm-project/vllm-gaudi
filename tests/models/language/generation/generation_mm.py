@@ -3,8 +3,9 @@ from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.multimodal.image import convert_image_mode
+from vllm.multimodal.utils import encode_image_url, encode_video_url
 from dataclasses import asdict
-from typing import Union
+from typing import Union, Any
 from PIL import Image
 from dataclasses import dataclass
 import yaml
@@ -42,29 +43,29 @@ class PROMPT_DATA:
                     num_prompts: int = 1,
                     skip_vision_data=False):
         if modality == "image":
-            pholder = "<start_of_image>" if "gemma" in model_name.lower() else "<|image_pad|>"
+            data = encode_image_url(self._data[modality](media_source))
         elif modality == "video":
-            pholder = "<video>" if "gemma" in model_name.lower() else "<|video_pad|>"
+            data = encode_video_url(self._data[modality](media_source))
         else:
-            raise ValueError(f"Unsupported modality: {modality}."
-                             " Supported modality: [image, video]")
+            raise ValueError(f"Unsupported modality: {modality}. Supported: [image, video]")
+
+        modality_type = f"{modality}_url"
         questions = self._questions[modality]
-        prompts = [("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-                    f"<|im_start|>user\n<|vision_start|>{pholder}<|vision_end|>"
-                    f"{question}<|im_end|>\n"
-                    "<|im_start|>assistant\n") for question in questions]
 
-        data = self._data[modality](media_source)
-        inputs = [{
-            "prompt": prompts[i % len(prompts)],
-            "multi_modal_data": {
-                modality: data
-            },
-        } if not skip_vision_data else {
-            "prompt": questions[i % len(questions)],
-        } for i in range(num_prompts)]
+        prompts = []
 
-        return inputs
+        for i in range(num_prompts):
+            question = questions[i % len(questions)]
+
+            # Build the message content list
+            content = [{"type": "text", "text": question}]
+            if not skip_vision_data:
+                vision_data: dict[str, Any] = {"type": modality_type, modality_type: {"url": data}}
+                content.append(vision_data)
+
+            prompts.append([{"role": "user", "content": content}])
+
+        return prompts
 
 
 def run_model(model_name: str, inputs: Union[dict, list[dict]], modality: str, **extra_engine_args):
@@ -94,7 +95,7 @@ def run_model(model_name: str, inputs: Union[dict, list[dict]], modality: str, *
     engine_args = asdict(engine_args)
     llm = LLM(**engine_args)
 
-    outputs = llm.generate(
+    outputs = llm.chat(
         inputs,
         sampling_params=sampling_params,
         use_tqdm=False,  # Disable tqdm for CI tests
