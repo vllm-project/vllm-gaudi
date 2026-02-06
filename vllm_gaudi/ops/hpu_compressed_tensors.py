@@ -822,7 +822,7 @@ class HPUCompressedTensorsKVCacheMethodForMLA(HPUCompressedTensorsKVCacheMethod)
     SUBMODULES_TO_CHECK = ["latent_cache_k", "matmul_qk", "matmul_av"]
 
     def _update_kv_cache_scales(self, layer: torch.nn.Module, k_scale: torch.Tensor, v_scale: torch.Tensor) -> None:
-        # Configure latent cache and matmul scales
+        # Configure latent cache scales
         layer.impl.latent_cache_k.input_scale = k_scale
         layer.impl.latent_cache_k.output_scale = 1.0 / k_scale
 
