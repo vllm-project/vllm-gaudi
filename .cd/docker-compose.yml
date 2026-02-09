@@ -64,11 +64,6 @@ services:
     env_file:
       - ./benchmark/benchmark_user.env
     volumes:
-<<<<<<< HEAD
       - /tmp:/root/scripts/logs
       - /tmp:/local
-=======
-      - ${PWD}/logs:/root/scripts/logs
-      - ${PWD}:/local
->>>>>>> 3579c63 (Option to dry run with docker run cmd, save log files, create multiple vLLM services)
     command: ["benchmark", "--config-file", "${VLLM_BENCHMARK_CONFIG_FILE}", "--config-name", "${VLLM_BENCHMARK_CONFIG_NAME}"]
