@@ -181,7 +181,6 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
                     raise ValueError("QuantConfig has static quantization, but found "
                                      "activation scales are None.")
                 layer.w13_input_scale = torch.nn.Parameter(layer.w13_input_scale.max(), requires_grad=False)
-                layer.w2_input_scale = torch.nn.Parameter(layer.w2_input_scale.max(), requires_grad=False)
             layer = hpu_ops.fp8_channel_moe_prepare_weights(layer)
 
     def apply_monolithic(
