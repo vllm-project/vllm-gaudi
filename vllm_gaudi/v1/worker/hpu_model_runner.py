@@ -46,7 +46,6 @@ from vllm.v1.attention.selector import get_attn_backend
 from vllm.config import (VllmConfig, get_layers_from_vllm_config, update_config)
 from vllm.config.multimodal import ImageDummyOptions, VideoDummyOptions
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
-from vllm.config import (VllmConfig, update_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase

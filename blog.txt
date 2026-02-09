@@ -1,1 +1,0 @@
-./client_q3_36.sh: line 2: --random-mm-limit-mm-per-prompt: command not found
