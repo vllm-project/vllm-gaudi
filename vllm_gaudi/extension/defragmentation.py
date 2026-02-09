@@ -216,8 +216,8 @@ class OnlineDefragmenter:
         requested threshold size. Thresholds chosen to mirror potential production
         values: 8, 16, 32, 64, 128, 256, 512.
         """
-        # If defragmenter is disabled or cache utils not prepared, skip.
-        if not (self.enabled and self.cache_utils):
+        # If defragmenter is disabled skip.
+        if not self.enabled:
             return
 
         # Use simple valid block ids present in caches (assume at least 2 blocks allocated when kv caches created)
