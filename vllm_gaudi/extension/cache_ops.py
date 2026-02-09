@@ -32,7 +32,7 @@ def copy_blocks(key_caches, value_caches, key_scales, value_scales, block_mappin
     src = block_mapping[0]
     dst = block_mapping[1]
 
-    # Gather from src, then scatter to dst (read once, write once - no overlap)
+    # Gather all src blocks before writing any dst blocks to avoid read-after-write hazards
     for key_cache, value_cache, k_scales, v_scales in itertools.zip_longest(key_caches, value_caches, key_scales,
                                                                             value_scales):
         k_values = key_cache.index_select(0, src)
