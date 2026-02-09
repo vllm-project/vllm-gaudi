@@ -27,7 +27,7 @@ from vllm.distributed.kv_transfer import (
 )
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.utils.torch_utils import (STR_DTYPE_TO_TORCH_DTYPE, set_random_seed)
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec)
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec, MambaSpec)
 from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerOutput)
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.utils import is_fake_hpu
@@ -213,6 +213,20 @@ class HPUWorker(WorkerBase):
 
                 single_kv_block_size_bytes += layer_spec.page_size_bytes
 
+            elif isinstance(layer_spec, MambaSpec):
+                dtype0 = layer_spec.dtypes[0]
+                dtype1 = layer_spec.dtypes[1]
+
+                # Use an empty tensor instead of `None`` to force Dynamo to pass
+                # it by reference, rather by specializing on the value ``None``.
+                hpu_ssm_cache = torch.tensor([], dtype=dtype0, device='hpu')
+                hpu_conv_cache = torch.tensor([], dtype=dtype1, device='hpu')
+                hpu_ssm_scales = torch.tensor([], dtype=dtype0, device='hpu')
+                hpu_conv_scales = torch.tensor([], dtype=dtype1, device='hpu')
+
+                kv_caches[layer_name] = (hpu_ssm_cache, hpu_conv_cache, hpu_ssm_scales, hpu_conv_scales)
+
+                single_kv_block_size_bytes += layer_spec.page_size_bytes
             else:
                 raise NotImplementedError
 
@@ -276,6 +290,13 @@ class HPUWorker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
+
+        # Init kv cache connector here, because it requires
+        # `kv_cache_config`.
+        # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
+        # because `initialize_kv_cache` will inject kv cache groups not
+        # related to kv cache connector (e.g. kv cache sharing layers).
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
         with HabanaMemoryProfiler() as m:
             self.kv_cache_config = kv_cache_config
@@ -466,8 +487,6 @@ def init_worker_distributed_environment(
     torch.distributed.all_reduce(dummy_tensor_hpu)
     assert dummy_tensor_hpu.item() == parallel_config.world_size * parallel_config.data_parallel_size
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size, parallel_config.pipeline_parallel_size)
-
-    ensure_kv_transfer_initialized(vllm_config)
 
 
 @contextmanager
