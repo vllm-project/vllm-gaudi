@@ -109,7 +109,9 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm_gaudi.extension.ops import LoraMask as LoraMask
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiKVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import OffloadingConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.v1.core.sched.output import GrammarOutput
 
@@ -383,11 +385,14 @@ def patch_llama4_get_attn_scale(model):
             continue
 
         attn = layer.self_attn
-        orig = attn._get_attn_scale
 
-        def _get_attn_scale_for_hpu(self, positions, _orig=orig):
-            positions = positions.flatten()
-            return _orig(positions)
+        def _get_attn_scale_for_hpu(self, positions):
+            if self.qk_norm is not None:
+                positions = positions.flatten()
+            floor = torch.floor((positions + 1.0) / self.floor_scale)
+            attn_scale = torch.log(floor + 1.0) * self.attn_scale + 1.0
+
+            return attn_scale.unsqueeze(-1)
 
         attn._get_attn_scale = types.MethodType(_get_attn_scale_for_hpu, attn)
 
@@ -414,10 +419,24 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
                 layer.mamba.cache_group_idx = group_idx
 
 
-def apply_model_specific_patches(model):
-    """The function applies model-specific monkey patches."""
+def maybe_set_chunked_attention_layers(model_runner):
+    if hasattr(model_runner.model.config, 'text_config') and \
+        hasattr(model_runner.model.config.text_config, 'attention_chunk_size') and \
+        model_runner.model.config.text_config.attention_chunk_size:
+        model_runner.model_has_chunked_attention = True
+        try:
+            for layer in model_runner.model.language_model.model.layers:
+                if "ChunkedLocalAttention" in layer.self_attn.attn.get_attn_backend().__name__:
+                    layer.self_attn.attn.impl.is_chunked_attention = True
+        except Exception:
+            # add explicit warning
+            pass
 
-    patch_llama4_get_attn_scale(model)
+
+def apply_model_specific_patches(model_runner):
+    """The function applies model-specific monkey patches."""
+    maybe_set_chunked_attention_layers(model_runner)
+    patch_llama4_get_attn_scale(model_runner.model)
 
 
 class HpuKVConnectorModelRunnerMixin(KVConnectorModelRunnerMixin):
@@ -944,7 +963,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             logger.info("Bucketing is OFF.")
 
         self._PAD_SLOT_ID = -1
-        self._PAD_BLOCK_ID = 0
+        self._PAD_BLOCK_ID = -1
         self._dummy_num_blocks = 0
 
         if self.vllm_config.parallel_config.data_parallel_size > 1 and htorch.utils.internal.is_lazy(
@@ -959,6 +978,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.profiler = HabanaHighLevelProfiler()
         self.profiler_counter_helper = HabanaProfilerCounterHelper()
 
+        self.defragmenter = OnlineDefragmenter()
         self.debug_fwd = init_debug_logger('fwd')
 
         self.get_dp_padding = partial(get_dp_padding,
@@ -973,18 +993,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         assert not (self.unified_attn and not self.use_contiguous_pa), 'Unified attn requires contiguous_pa!'
         assert not (self.unified_attn and not self.use_merged_prefill), 'Unified attn requires merged_prefill!'
-
-    def _resolve_block(self, block_id):
-        if not getattr(self, 'defragmenter', None):
-            return block_id
-
-        return self.defragmenter.resolve(block_id)
-
-    def _resolve_all_blocks(self, block_table_list: list[list[int]]) -> list[list[int]]:
-        if not getattr(self, 'defragmenter', None):
-            return [[self._resolve_block(b) for b in bl] for bl in block_table_list]
-
-        return self.defragmenter.resolve_all(block_table_list)
 
     def _make_buffer(self, *size: Union[int, torch.SymInt], dtype: torch.dtype, numpy: bool = True) -> CpuGpuBuffer:
         return CpuGpuBuffer(*size, dtype=dtype, device=self.device, pin_memory=self.pin_memory, with_numpy=numpy)
@@ -1572,18 +1580,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             num_decodes += 1
         return num_decodes
 
-    def maybe_set_chunked_attention_layers(self, model):
-        if hasattr(model.config, 'text_config') and \
-           hasattr(model.config.text_config, 'attention_chunk_size') and \
-           model.config.text_config.attention_chunk_size:
-            self.model_has_chunked_attention = True
-            try:
-                for layer in model.language_model.model.layers:
-                    if "ChunkedLocalAttention" in layer.self_attn.attn.get_attn_backend().__name__:
-                        layer.self_attn.attn.impl.is_chunked_attention = True
-            except Exception:
-                pass
-
     def _get_prompts_and_decodes(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1595,6 +1591,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         #TODO: remove later
 
         requests_type = {}
+        requests = None
         if scheduler_output.kv_connector_metadata:
             if isinstance(scheduler_output.kv_connector_metadata, NixlConnectorMetadata):
                 for req in scheduler_output.kv_connector_metadata.reqs_to_save:
@@ -1603,10 +1600,30 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     requests_type[req] = 'decode'
                 requests = scheduler_output.kv_connector_metadata.reqs_to_save | \
                             scheduler_output.kv_connector_metadata.reqs_to_recv
+            elif isinstance(scheduler_output.kv_connector_metadata, OffloadingConnectorMetadata):
+                for req in scheduler_output.kv_connector_metadata.reqs_to_store:
+                    requests_type[req] = 'prefill'
+                for req in scheduler_output.kv_connector_metadata.reqs_to_load:
+                    requests_type[req] = 'decode'
+                requests = scheduler_output.kv_connector_metadata.reqs_to_store | \
+                            scheduler_output.kv_connector_metadata.reqs_to_load
+            elif isinstance(scheduler_output.kv_connector_metadata, MultiKVConnectorMetadata):
+                for i, metadata in enumerate(scheduler_output.kv_connector_metadata.metadata):
+                    if isinstance(metadata, NixlConnectorMetadata) and (metadata.reqs_to_save or metadata.reqs_to_recv):
+                        for req in metadata.reqs_to_save:
+                            requests_type[req] = 'prefill'
+                        for req in metadata.reqs_to_recv:
+                            requests_type[req] = 'decode'
+                        requests = metadata.reqs_to_save | metadata.reqs_to_recv
+                    elif isinstance(metadata, OffloadingConnectorMetadata) and (metadata.reqs_to_store
+                                                                                or metadata.reqs_to_load):
+                        for req in metadata.reqs_to_store:
+                            requests_type[req] = 'prefill'
+                        for req in metadata.reqs_to_load:
+                            requests_type[req] = 'decode'
+                        requests = metadata.reqs_to_store | metadata.reqs_to_load
             else:
                 requests = scheduler_output.kv_connector_metadata.requests
-        else:
-            requests = None
 
         # Traverse decodes first
         decode_req_ids = []
@@ -1899,7 +1916,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                   self.block_size) // self.block_size
             blocks = block_table_cpu_tensor[batch_idx, :num_blocks].tolist()
             if not warmup:
-                blocks = [self._resolve_block(b) for b in blocks]
+                blocks = [self.defragmenter.resolve(b) for b in blocks]
             #NOTE(kzawora): In non-preemption scenario,
             # self.input_batch.num_prompt_tokens[batch_idx] == self.input_batch.num_tokens[batch_idx].
             # In preemption scenario num_tokens will also include the tokens emitted before preemption
@@ -2011,8 +2028,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             token_positions = align_and_pad(token_positions, (target_bs, target_seq), itertools.repeat(-1))
         token_slots = align_and_pad(token_slots, (target_bs, target_seq), itertools.repeat(-1))
         token_groups = align_and_pad(token_groups, (target_bs, target_seq), itertools.repeat(-1))
-        # use 0 for padding to avoid dynamic scale calculation issues
-        context_blocks = align_and_pad(context_blocks, (target_bs, target_blocks), itertools.repeat(0))
+        context_blocks = align_and_pad(context_blocks, (target_bs, target_blocks), itertools.repeat(-1))
         context_groups = align_and_pad(context_groups, (target_bs, target_blocks), itertools.repeat(-1))
 
         # TODO: cycle through dummy slots and blocks
@@ -2375,7 +2391,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # to compute this.
         block_number = torch.ones((padded_batch_size, num_tokens), dtype=torch.int32) * self._PAD_BLOCK_ID
         block_number[:num_decodes] = torch.gather(input=block_table_cpu_tensor, dim=1, index=(index // self.block_size))
-        block_number.apply_(self._resolve_block)
+        block_number.apply_(self.defragmenter.resolve)
 
         block_offsets = padded_index % self.block_size
         slot_mapping = block_number * self.block_size + block_offsets
@@ -2416,7 +2432,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         logits_indices[:num_decodes] = query_start_loc_cpu[1:num_decodes + 1] - 1
 
         positions_device = async_h2d_copy(positions, device=self.device)
-        block_tables_list = self._resolve_all_blocks(block_tables_list)
+        block_tables_list = self.defragmenter.resolve_all(block_tables_list)
 
         # CONTEXT_LENS [batch_size]
         block_list, block_groups, block_usage = \
@@ -2757,7 +2773,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         ]
         block_table = [block_table_cpu_tensor[i, :nb].tolist() for i, nb in enumerate(num_blocks)]
         if not warmup_mode:
-            block_table = self._resolve_all_blocks(block_table)
+            block_table = self.defragmenter.resolve_all(block_table)
         token_ids = [[token_ids_cpu[i, ctx_len]] for i, ctx_len in enumerate(context_lens)]
 
         batch_data = create_unified_batch(
@@ -3317,19 +3333,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     @torch.inference_mode()
     def run_defragmenter(self, scheduler_output: "SchedulerOutput", warmup_mode: bool = False):
-        if not (getattr(self, 'defragmenter', None) and self.defragmenter.enabled and self.kv_caches
-                and not warmup_mode):
-            return
-
-        new = {req.req_id: flatten(req.block_ids) for req in scheduler_output.scheduled_new_reqs if req.block_ids}
-        #TODO: Add support for preempted blocks
-        cached = {
-            req_id: flatten(new_block_ids)
-            for req_id, new_block_ids in zip(scheduler_output.scheduled_cached_reqs.req_ids,
-                                             scheduler_output.scheduled_cached_reqs.new_block_ids) if new_block_ids
-        }
-        self.defragmenter.update_state(new | cached, scheduler_output.finished_req_ids)
-        self.defragmenter.defragment()
+        if self.defragmenter.enabled and self.kv_caches and not warmup_mode:
+            new = {req.req_id: flatten(req.block_ids) for req in scheduler_output.scheduled_new_reqs if req.block_ids}
+            #TODO: Add support for preempted blocks
+            cached = {
+                req_id: flatten(new_block_ids)
+                for req_id, new_block_ids in zip(scheduler_output.scheduled_cached_reqs.req_ids,
+                                                 scheduler_output.scheduled_cached_reqs.new_block_ids) if new_block_ids
+            }
+            self.defragmenter.update_state(new | cached, scheduler_output.finished_req_ids)
+            self.defragmenter.defragment()
 
     def prepare_unified_batch(self, scheduler_output):
         num_reqs = len(self.input_batch.req_ids)
@@ -3344,8 +3357,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         all_token_ids = self.input_batch.token_ids_cpu_tensor[:num_reqs, :max_seq]
         # TODO: check if it's safe to always slice on first dim
         block_table = self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs, :max_blocks].clone().to(torch.int64)
-        if getattr(self, 'defragmenter', None) and self.defragmenter.enabled:
-            block_table.apply_(self._resolve_block)
+        if self.defragmenter.enabled:
+            block_table.apply_(self.defragmenter.resolve)
         input_ids_hpu = None
         num_decodes = 0
         decode_index = None
@@ -4091,8 +4104,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.model = self.model.to("hpu")
             htcore.mark_step()
 
-        apply_model_specific_patches(self.model)
-        self.maybe_set_chunked_attention_layers(self.model)
+        apply_model_specific_patches(self)
         hidden_layer_markstep_interval = int(os.getenv('VLLM_CONFIG_HIDDEN_LAYERS', '1'))
         model_config = getattr(self.model, "config", None)
         modify_model_layers(self.model,
@@ -4479,6 +4491,47 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         torch.hpu.synchronize()
 
         logger.info("Sampler warmup completed successfully")
+
+    def warmup_defragmenter(self):
+        """Warm up defragmentation swap graphs for different thresholds.
+
+        We execute a minimal swap (1 pair) which will be padded internally to the
+        requested threshold size. Thresholds chosen to mirror potential production
+        values: 8, 16, 32, 64, 128, 256, 512.
+        """
+        # If defragmenter is disabled or cache utils not prepared, skip.
+        if not getattr(self.defragmenter, 'enabled', False):
+            return
+        if self.defragmenter.cache_utils is None:
+            return
+
+        thresholds = self.defragmenter.to_swap_pad_thresholds
+
+        logger.info("Warming up defragmenter with thresholds: %s", thresholds)
+
+        # Use simple valid block ids present in caches (assume at least 2 blocks allocated when kv caches created)
+        # We only need distinct ids for a swap. They will be scaled by block_size inside swap.
+        # If for some reason only 1 block exists, skip warmup gracefully.
+        try:
+            k_cache = self.defragmenter.cache_utils.kv_caches[0][0]
+            num_blocks_available = k_cache.shape[0] // self.block_size
+        except Exception:
+            num_blocks_available = 0
+        if num_blocks_available < 2:
+            logger.warning("Skipping defragmenter warmup, insufficient blocks (%s)", num_blocks_available)
+            return
+
+        # Minimal pair to trigger a swap path
+        to_swap = [(1, 0)]
+
+        for th in thresholds:
+            self.defragmenter.cache_utils.swap(to_swap, th)
+
+        # If the number of swaps was odd, do one more to make it even and return to original state.
+        if len(thresholds) % 2 == 1:
+            self.defragmenter.cache_utils.swap(to_swap, thresholds[0])
+
+        logger.info("Defragmenter warmup completed successfully")
 
     def warmup_graphs(self, buckets, is_prompt, kv_caches, starting_mem=0, total_batch_seq=0.001):
         total_mem = starting_mem
@@ -5094,7 +5147,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                   self.vllm_config.model_config.logits_processors),
                 )
 
-        self.defragmenter = OnlineDefragmenter(self.kv_caches, self.block_size)
+        self.defragmenter.initialize(self.kv_caches, self.block_size)
         # Profiling
         if self.unified_attn:
             self._maybe_profile_unified_attn()
@@ -5153,7 +5206,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     self.warmup_pooler()
                 else:
                     self.warmup_sampler()
-                    self.defragmenter.warmup()
+                    self.warmup_defragmenter()
 
                 # TODO(kzawora): align_workers
                 if self.unified_attn:
@@ -5187,7 +5240,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # NOTE(kzawora): This is a nasty workaround - for whatever cache_utils-related reason,
         # reusing defragmenter used in warmup causes accuracy drops, which is why we re-create
         # and re-initialize it.
-        self.defragmenter = OnlineDefragmenter(self.kv_caches, self.block_size)
+        self.defragmenter = OnlineDefragmenter()
+        self.defragmenter.initialize(self.kv_caches, self.block_size)
 
     def shutdown_inc(self, suppress=suppress, finalize_calibration=finalize_calibration):
         global shutdown_inc_called
@@ -5583,8 +5637,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.enable_bucketing:
             self.bucketing_manager.num_hpu_blocks = num_blocks
 
-        self._PAD_BLOCK_ID = 0
-        self._PAD_SLOT_ID = -1
+        self._PAD_BLOCK_ID = num_blocks
+        self._PAD_SLOT_ID = num_blocks * self.block_size
         self._dummy_num_blocks = num_blocks
 
         if has_kv_transfer_group():
