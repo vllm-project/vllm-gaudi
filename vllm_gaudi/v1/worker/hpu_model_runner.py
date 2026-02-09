@@ -942,6 +942,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         self._PAD_SLOT_ID = -1
         self._PAD_BLOCK_ID = -1
+        self._MAMBA_PAD_BLOCK_ID = -1
         self._dummy_num_blocks = 0
 
         if self.vllm_config.parallel_config.data_parallel_size > 1 and htorch.utils.internal.is_lazy(
@@ -2105,12 +2106,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
                 if num_prefill_reqs < target_bs:
                     padding = torch.full((target_bs - num_prefill_reqs, ),
-                                         self._PAD_BLOCK_ID,
+                                         self._MAMBA_PAD_BLOCK_ID,
                                          dtype=torch.int32,
                                          device='cpu')
                     state_indices_cpu = torch.cat([state_indices_cpu, padding])
 
-                state_indices_cpu[state_indices_cpu == self._PAD_BLOCK_ID] = -1
                 all_state_indices_cpu.append(state_indices_cpu)
 
             all_state_indices_cpu = torch.stack(all_state_indices_cpu, dim=0)  # Shape: [num_groups, target_bs]
@@ -2443,12 +2443,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 state_indices_cpu = block_table_cpu_tensor[:num_decodes, 0].clone()
                 if num_decodes < padded_batch_size:
                     padding = torch.full((padded_batch_size - num_decodes, ),
-                                         self._PAD_BLOCK_ID,
+                                         self._MAMBA_PAD_BLOCK_ID,
                                          dtype=torch.int32,
                                          device='cpu')
                     state_indices_cpu = torch.cat([state_indices_cpu, padding])
 
-                state_indices_cpu[state_indices_cpu == self._PAD_BLOCK_ID] = -1
                 all_state_indices_cpu.append(state_indices_cpu)
 
             all_state_indices_cpu = torch.stack(all_state_indices_cpu, dim=0)  # Shape: [num_groups, target_bs]
@@ -5571,6 +5570,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         self._PAD_BLOCK_ID = num_blocks
         self._PAD_SLOT_ID = num_blocks * self.block_size
+        self._MAMBA_PAD_BLOCK_ID = -1
         self._dummy_num_blocks = num_blocks
 
         if has_kv_transfer_group():
