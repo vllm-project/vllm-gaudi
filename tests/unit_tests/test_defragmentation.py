@@ -36,8 +36,7 @@ def mock_debug_logger():
 @pytest.fixture
 def defragmenter(mock_config, mock_debug_logger):
     """Create OnlineDefragmenter instance"""
-    kv_caches = ((torch.empty(0, device='meta'), torch.empty(0, device='meta')), )
-    return OnlineDefragmenter(kv_caches, block_size=0)
+    return OnlineDefragmenter()
 
 
 class TestOnlineDefragmenter:
@@ -175,9 +174,7 @@ class TestOnlineDefragmenter:
     def test_defragment_disabled(self, mock_config, mock_debug_logger):
         """Test defragmentation when disabled"""
         mock_config.defrag = False
-
-        kv_caches = ((torch.empty(0, device='meta'), torch.empty(0, device='meta')), )
-        defrag = OnlineDefragmenter(kv_caches, 0)
+        defrag = OnlineDefragmenter()
 
         defrag.use_block(100)
         defrag.defragment()
@@ -201,11 +198,11 @@ class TestOnlineDefragmenter:
 
         max_before = max(defragmenter.used_blocks.keys())
         defragmenter._extend_mapping_table(max_before)
-        defragmenter._swap = MagicMock()
+        defragmenter.cache_utils = MagicMock()
         defragmenter.defragment()
 
         # Should not trigger defragmentation
-        defragmenter._swap.assert_not_called()
+        defragmenter.cache_utils.swap.assert_not_called()
         assert max(defragmenter.used_blocks.keys()) == max_before
 
     def test_defragment_triggers(self, defragmenter):
@@ -217,13 +214,13 @@ class TestOnlineDefragmenter:
             defragmenter.use_block(i)
 
         defragmenter._extend_mapping_table(102)
-        defragmenter._swap = MagicMock()
+        defragmenter.cache_utils = MagicMock()
 
         defragmenter.defragment()
 
         # Should call swap with high blocks moved to low positions
-        defragmenter._swap.assert_called_once()
-        args = defragmenter._swap.call_args[0]
+        defragmenter.cache_utils.swap.assert_called_once()
+        args = defragmenter.cache_utils.swap.call_args[0]
         to_swap = args[0]
         threshold = args[1]
 
@@ -243,7 +240,7 @@ class TestOnlineDefragmenter:
         defragmenter.use_block(100)
 
         defragmenter._extend_mapping_table(100)
-        defragmenter._swap = MagicMock()
+        defragmenter.cache_utils = MagicMock()
 
         defragmenter.defragment()
 
@@ -251,62 +248,11 @@ class TestOnlineDefragmenter:
         # Used blocks (descending): 100, 2
         # Pair (100, 1): valid swap
         # Pair (2, 3): 3 > 2, so break
-        args = defragmenter._swap.call_args[0]
+        args = defragmenter.cache_utils.swap.call_args[0]
         to_swap = args[0]
 
         assert len(to_swap) == 1
         assert to_swap[0] == (100, 1)
-
-    def test_swap_execution(self):
-        """Test swap method execution flow on HPU"""
-        import habana_frameworks.torch as htorch
-
-        num_blocks = 100
-        block_size = 16
-        num_heads = 8
-        head_dim = 64
-        num_layers = 2
-        DEVICE = 'hpu'
-
-        kv_caches = []
-        for _ in range(num_layers):
-            k_cache = torch.randn(num_blocks * block_size, num_heads, head_dim, device=DEVICE)
-            v_cache = torch.randn(num_blocks * block_size, num_heads, head_dim, device=DEVICE)
-            kv_caches.append((k_cache, v_cache))
-
-        defragmenter = OnlineDefragmenter(kv_caches, block_size=block_size)
-
-        to_swap = [(10, 5), (20, 6)]
-        threshold = 8
-
-        # Store original values to verify swap
-        orig_k_10 = kv_caches[0][0][10 * block_size:(10 + 1) * block_size].clone()
-        orig_k_5 = kv_caches[0][0][5 * block_size:(5 + 1) * block_size].clone()
-
-        defragmenter._swap(to_swap, threshold)
-        htorch.core.mark_step()
-
-        # Verify blocks were swapped
-        swapped_k_10 = kv_caches[0][0][10 * block_size:(10 + 1) * block_size]
-        swapped_k_5 = kv_caches[0][0][5 * block_size:(5 + 1) * block_size]
-
-        assert torch.allclose(swapped_k_10, orig_k_5)
-        assert torch.allclose(swapped_k_5, orig_k_10)
-
-    @patch('vllm_gaudi.extension.defragmentation.htorch')
-    def test_swap_mla_single_call(self, mock_htorch):
-        """Test MLA swap only calls forward once (no value cache)"""
-        mla_caches = [(torch.randn(100, 8, 64), None), (torch.randn(100, 8, 64), None)]
-        defragmenter = OnlineDefragmenter(mla_caches, block_size=16)
-
-        to_swap = [(10, 5)]
-        threshold = 8
-
-        with patch.object(defragmenter.cache_utils, 'forward') as mock_forward:
-            defragmenter._swap(to_swap, threshold)
-
-            # Should only be called once for keys (no values)
-            assert mock_forward.call_count == 1
 
 
 class TestCacheSwapUtils:
@@ -332,7 +278,73 @@ class TestCacheSwapUtils:
     def swap_utils(self, mock_kv_caches):
         """Create CacheSwapUtils instance"""
         with patch('vllm_gaudi.extension.defragmentation.htorch'):
-            return CacheSwapUtils(16, 'hpu')
+            return CacheSwapUtils(mock_kv_caches, block_size=16)
+
+    def test_cache_swap_utils_init(self, swap_utils):
+        """Test CacheSwapUtils initialization"""
+        assert swap_utils.block_size == 16
+        assert len(swap_utils.kv_caches) == 2
+        assert swap_utils.block_slots.shape == (16, )
+        assert swap_utils.is_mla is False
+
+    def test_cache_swap_utils_mla_detection(self):
+        """Test MLA (multi-layer attention) detection"""
+        # Create MLA-style caches (no value cache)
+        mla_caches = [(torch.randn(100, 8, 64), None), (torch.randn(100, 8, 64), None)]
+
+        with patch('vllm_gaudi.extension.defragmentation.htorch'):
+            utils = CacheSwapUtils(tuple(mla_caches), block_size=16)
+            assert utils.is_mla is True
+
+    def test_swap_execution(self):
+        """Test swap method execution flow on HPU"""
+        import habana_frameworks.torch as htorch
+
+        num_blocks = 100
+        block_size = 16
+        num_heads = 8
+        head_dim = 64
+        num_layers = 2
+
+        kv_caches = []
+        for _ in range(num_layers):
+            k_cache = torch.randn(num_blocks * block_size, num_heads, head_dim, device='hpu')
+            v_cache = torch.randn(num_blocks * block_size, num_heads, head_dim, device='hpu')
+            kv_caches.append((k_cache, v_cache))
+
+        swap_utils = CacheSwapUtils(tuple(kv_caches), block_size=16)
+
+        to_swap = [(10, 5), (20, 6)]
+        threshold = 8
+
+        # Store original values to verify swap
+        orig_k_10 = kv_caches[0][0][10 * block_size:(10 + 1) * block_size].clone()
+        orig_k_5 = kv_caches[0][0][5 * block_size:(5 + 1) * block_size].clone()
+
+        swap_utils.swap(to_swap, threshold)
+        htorch.core.mark_step()
+
+        # Verify blocks were swapped
+        swapped_k_10 = kv_caches[0][0][10 * block_size:(10 + 1) * block_size]
+        swapped_k_5 = kv_caches[0][0][5 * block_size:(5 + 1) * block_size]
+
+        assert torch.allclose(swapped_k_10, orig_k_5)
+        assert torch.allclose(swapped_k_5, orig_k_10)
+
+    @patch('vllm_gaudi.extension.defragmentation.htorch')
+    def test_swap_mla_single_call(self, mock_htorch):
+        """Test MLA swap only calls forward once (no value cache)"""
+        mla_caches = [(torch.randn(100, 8, 64), None), (torch.randn(100, 8, 64), None)]
+        utils = CacheSwapUtils(tuple(mla_caches), block_size=16)
+
+        to_swap = [(10, 5)]
+        threshold = 8
+
+        with patch.object(utils, 'forward') as mock_forward:
+            utils.swap(to_swap, threshold)
+
+            # Should only be called once for keys (no values)
+            assert mock_forward.call_count == 1
 
 
 class TestDefragmentationIntegration:
@@ -341,24 +353,16 @@ class TestDefragmentationIntegration:
     @pytest.fixture
     def setup_defragmenter(self, mock_config, mock_debug_logger):
         """Setup defragmenter with mock caches"""
+        defrag = OnlineDefragmenter()
 
         # Create simple mock caches
         kv_caches = [(torch.zeros(1600, 8, 64), torch.zeros(1600, 8, 64)),
                      (torch.zeros(1600, 8, 64), torch.zeros(1600, 8, 64))]
 
         with patch('vllm_gaudi.extension.defragmentation.htorch'):
-            defrag = OnlineDefragmenter(tuple(kv_caches), block_size=16)
+            defrag.initialize(tuple(kv_caches), block_size=16)
 
         return defrag
-
-    def test_cache_swap_utils_mla_detection(self):
-        """Test MLA (multi-layer attention) detection"""
-        # Create MLA-style caches (no value cache)
-        mla_caches = [(torch.randn(100, 8, 64), None), (torch.randn(100, 8, 64), None)]
-
-        with patch('vllm_gaudi.extension.defragmentation.htorch'):
-            utils = OnlineDefragmenter(tuple(mla_caches), block_size=16)
-            assert utils.is_mla is True
 
     def test_full_lifecycle(self, setup_defragmenter):
         """Test complete request lifecycle with defragmentation"""
@@ -381,7 +385,7 @@ class TestDefragmentationIntegration:
         defrag.update_state({'req_3': [100, 101, 102]}, [])
 
         # Trigger defragmentation
-        with patch.object(defrag, '_swap'):
+        with patch.object(defrag.cache_utils, 'swap'):
             defrag.defragment()
 
     def test_mapping_persistence(self, setup_defragmenter):
@@ -394,7 +398,7 @@ class TestDefragmentationIntegration:
 
         defrag._extend_mapping_table(100)
 
-        with patch.object(defrag, '_swap'):
+        with patch.object(defrag.cache_utils, 'swap'):
             defrag.defragment()
 
         # Verify mappings exist
