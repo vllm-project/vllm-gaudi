@@ -433,6 +433,7 @@ FUNCTION_TO_RUN=${1:-launch_all_tests}
 if declare -f "$FUNCTION_TO_RUN" > /dev/null
 then
   # If the function exists, call it.
+  hl-smi
   "$FUNCTION_TO_RUN"
 else
   # If the function doesn't exist, show an error and the usage guide.
