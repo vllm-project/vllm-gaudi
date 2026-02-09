@@ -353,10 +353,40 @@ run_pd_disaggregate_nixl_libfabric_test() {
 }
 
 run_pd_disaggregate_nixl_ucx_test() {
-    echo "➡️ Testing PD disaggregate through NIXL UCX."
+    echo "➡ Testing PD disaggregate through NIXL UCX."
     WHEELS_CACHE_HOME=/workspace/hf_cache/wheels_cache_ucx python "${VLLM_GAUDI_PREFIX}/install_nixl.py"
     cd ${VLLM_GAUDI_PREFIX}/tests/unit_tests; DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=UCX bash run_accuracy_test.sh
     echo "✅ PD disaggregate through NIXL UCX."
+}
+
+# run pd lmcache store and retrieve test
+run_pd_lmcache_store_retrieve_test() {
+    echo "➡ Testing LMCache PD test for store and retrieve"
+    git clone https://github.com/LMCache/LMCache.git /tmp/LMCache
+    cd /tmp/LMCache
+    git fetch origin pull/1066/head
+    git checkout FETCH_HEAD
+    NO_CUDA_EXT=1 BUILD_WITH_HPU=1 pip install -e .
+    cd /workspace/vllm-gaudi/examples/lmcache
+    python kv_cache_sharing_lmcache_v1.py
+    echo "✅ LMCache PD 1x test for store and retrieve"
+    python kv_cache_sharing_lmcache_v1_tp2.py
+    echo "✅ LMCache PD 2x test for store and retrieve"
+}
+
+# run pd lmcache disaggregated test
+run_pd_lmcache_disaggregated_test() {
+    echo "➡ Testing LMCache disaggregated test"
+    git clone https://github.com/LMCache/LMCache.git /tmp/LMCache
+    cd /tmp/LMCache
+    git fetch origin pull/1066/head
+    git checkout FETCH_HEAD
+    NO_CUDA_EXT=1 BUILD_WITH_HPU=1 pip install -e .
+    cd /workspace/vllm-gaudi/examples/lmcache/disagg_prefill_lmcache_v1
+    bash disagg_example_gaudi_lm.sh
+    echo "✅ LMCache disaggregated test"
+    bash disagg_example_gaudi_lm_tp2.sh
+    echo "✅ LMCache disaggregated test 2x"
 }
 
 # sleep mode
