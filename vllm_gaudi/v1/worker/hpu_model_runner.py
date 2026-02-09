@@ -107,7 +107,9 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm_gaudi.extension.ops import LoraMask as LoraMask
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiKVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import OffloadingConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.v1.core.sched.output import GrammarOutput
 
@@ -134,7 +136,8 @@ except ImportError:
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
-hpu_buffer: list[list[torch.Tensor]] = []
+# hpu_buffer: list[list[torch.Tensor]] = []
+hpu_buffer = []
 HPU_TORCH_DTYPE_TO_STR_DTYPE = {
     torch.float32: "float32",
     torch.bfloat16: "bfloat16",
@@ -1585,6 +1588,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         #TODO: remove later
 
         requests_type = {}
+        requests = None
         if scheduler_output.kv_connector_metadata:
             if isinstance(scheduler_output.kv_connector_metadata, NixlConnectorMetadata):
                 for req in scheduler_output.kv_connector_metadata.reqs_to_save:
@@ -1593,10 +1597,30 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     requests_type[req] = 'decode'
                 requests = scheduler_output.kv_connector_metadata.reqs_to_save | \
                             scheduler_output.kv_connector_metadata.reqs_to_recv
+            elif isinstance(scheduler_output.kv_connector_metadata, OffloadingConnectorMetadata):
+                for req in scheduler_output.kv_connector_metadata.reqs_to_store:
+                    requests_type[req] = 'prefill'
+                for req in scheduler_output.kv_connector_metadata.reqs_to_load:
+                    requests_type[req] = 'decode'
+                requests = scheduler_output.kv_connector_metadata.reqs_to_store | \
+                            scheduler_output.kv_connector_metadata.reqs_to_load
+            elif isinstance(scheduler_output.kv_connector_metadata, MultiKVConnectorMetadata):
+                for i, metadata in enumerate(scheduler_output.kv_connector_metadata.metadata):
+                    if isinstance(metadata, NixlConnectorMetadata) and (metadata.reqs_to_save or metadata.reqs_to_recv):
+                        for req in metadata.reqs_to_save:
+                            requests_type[req] = 'prefill'
+                        for req in metadata.reqs_to_recv:
+                            requests_type[req] = 'decode'
+                        requests = metadata.reqs_to_save | metadata.reqs_to_recv
+                    elif isinstance(metadata, OffloadingConnectorMetadata) and (metadata.reqs_to_store
+                                                                                or metadata.reqs_to_load):
+                        for req in metadata.reqs_to_store:
+                            requests_type[req] = 'prefill'
+                        for req in metadata.reqs_to_load:
+                            requests_type[req] = 'decode'
+                        requests = metadata.reqs_to_store | metadata.reqs_to_load
             else:
                 requests = scheduler_output.kv_connector_metadata.requests
-        else:
-            requests = None
 
         # Traverse decodes first
         decode_req_ids = []
@@ -5578,6 +5602,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if self.vllm_config.kv_transfer_config.kv_buffer_device == "cpu":
                 get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
             global hpu_buffer
+            use_hpu_buffer = True if os.getenv('VLLM_HPU_HETERO_KV_LAYOUT', 'false').lower() == 'true' else False
+            logger.info("#### YSY - use global hpu_buffer: %s", use_hpu_buffer)
+            if use_hpu_buffer: # This is after profile
+                if not hpu_buffer: #YSY
+                    max_slots = 8192
+                    _, num_kv_heads, head_size = kv_cache_shape
+                    shape =[len(kv_caches), 2, max_slots, num_kv_heads, head_size]
+                    hpu_buffer = torch.empty(shape, dtype=kv_cache_spec.dtype, device=self.device)
+
         if self.unified_attn:
             with HabanaMemoryProfiler() as m:
                 from vllm_gaudi.extension.unified_batch import UnifiedBatchPersistentContext
