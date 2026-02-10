@@ -9,6 +9,8 @@ from typing import List, Set, Tuple
 from vllm_gaudi.extension.logger import logger as logger
 from vllm_gaudi.extension.runtime import get_config
 
+LONG_CTX_THRESHOLD = 8192
+
 
 class ExponentialBucketingStrategy():
     long_context: bool = False
@@ -39,7 +41,7 @@ class ExponentialBucketingStrategy():
         else:
             query_min = block_size
         use_merged_prefill = get_config().merged_prefill
-        self.long_context = max_model_len >= 8192
+        self.long_context = max_model_len >= LONG_CTX_THRESHOLD
 
         # cfgs shape: [min, step, max, limit]
         prompt_bs_limit = math.ceil(math.log2(max_num_prefill_seqs)) + 1

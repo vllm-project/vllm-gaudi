@@ -10,6 +10,7 @@ from typing import List, Tuple
 from vllm_gaudi.extension.logger import logger as logger
 from vllm_gaudi.extension.runtime import get_config
 
+LONG_CTX_THRESHOLD = 8192
 
 def calc_fallback_value(n: int, base_step: int):
     """ Calculate next bucket for yet unbucketized value"""
@@ -467,7 +468,7 @@ def generate_buckets(bs_range,
         for bs, ctx in buckets_2d:
             is_max_ctx = ctx == max_ctx
             for query in query_range:
-                if is_prompt and is_max_ctx and max_model_len >= 8192:  # only for long ctx
+                if is_prompt and is_max_ctx and max_model_len >= LONG_CTX_THRESHOLD:  # only for long ctx
                     bs, query, edge_ctx = get_max_bucket_per_query(bs, query)
                     if is_ctx_allowed(edge_ctx):
                         ctx = edge_ctx
