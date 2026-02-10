@@ -3,6 +3,7 @@ import itertools
 import pytest
 
 from vllm_gaudi.extension.utils import align_and_pad
+from vllm_gaudi.utils import getattr_nested, setattr_nested
 
 
 @pytest.fixture
@@ -74,3 +75,112 @@ class TestAlignAndPad:
         assert out_materialized[-1] == expected_last
         for row in out_materialized:
             assert len(row) == target_len
+
+
+# ---------------------------------------------------------------------------
+# Helpers for nested-attr tests
+# ---------------------------------------------------------------------------
+
+
+class _Inner:
+    """Leaf object used in nested attribute tests."""
+
+    def __init__(self, value=None):
+        self.value = value
+
+
+class _Middle:
+    """Intermediate object used in nested attribute tests."""
+
+    def __init__(self):
+        self.inner = _Inner(42)
+
+
+class _Root:
+    """Top-level object used in nested attribute tests."""
+
+    def __init__(self):
+        self.middle = _Middle()
+        self.flat = "flat_value"
+
+
+# ---------------------------------------------------------------------------
+# getattr_nested
+# ---------------------------------------------------------------------------
+
+
+class TestGetattrNested:
+
+    def test_single_level(self):
+        root = _Root()
+        assert getattr_nested(root, "flat") == "flat_value"
+
+    def test_two_levels(self):
+        root = _Root()
+        assert getattr_nested(root, "middle.inner") is root.middle.inner
+
+    def test_three_levels(self):
+        root = _Root()
+        assert getattr_nested(root, "middle.inner.value") == 42
+
+    def test_missing_attr_raises(self):
+        root = _Root()
+        with pytest.raises(AttributeError):
+            getattr_nested(root, "no_such_attr")
+
+    def test_missing_nested_attr_raises(self):
+        root = _Root()
+        with pytest.raises(AttributeError):
+            getattr_nested(root, "middle.no_such_attr")
+
+    def test_missing_attr_with_default(self):
+        root = _Root()
+        assert getattr_nested(root, "no_such_attr", None) is None
+
+    def test_missing_nested_attr_with_default(self):
+        root = _Root()
+        assert getattr_nested(root, "middle.inner.missing", "fallback") == "fallback"
+
+    def test_default_can_be_any_value(self):
+        root = _Root()
+        sentinel = object()
+        assert getattr_nested(root, "x.y.z", sentinel) is sentinel
+
+    def test_too_many_defaults_raises_type_error(self):
+        root = _Root()
+        with pytest.raises(TypeError):
+            getattr_nested(root, "flat", 1, 2)
+
+
+# ---------------------------------------------------------------------------
+# setattr_nested
+# ---------------------------------------------------------------------------
+
+
+class TestSetattrNested:
+
+    def test_single_level(self):
+        root = _Root()
+        setattr_nested(root, "flat", "new_value")
+        assert root.flat == "new_value"
+
+    def test_two_levels(self):
+        root = _Root()
+        new_inner = _Inner(99)
+        setattr_nested(root, "middle.inner", new_inner)
+        assert root.middle.inner is new_inner
+
+    def test_three_levels(self):
+        root = _Root()
+        setattr_nested(root, "middle.inner.value", 100)
+        assert root.middle.inner.value == 100
+
+    def test_creates_new_leaf_attr(self):
+        root = _Root()
+        setattr_nested(root, "middle.inner.new_field", "hello")
+        assert root.middle.inner.new_field == "hello"
+
+    def test_missing_intermediate_raises(self):
+        root = _Root()
+        with pytest.raises(AttributeError):
+            setattr_nested(root, "no_such.attr.value", 1)

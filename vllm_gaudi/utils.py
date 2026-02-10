@@ -79,6 +79,59 @@ def async_h2d_update(source: torch.Tensor, dest: torch.Tensor, indices: list[int
     dest[indices] = source[indices].to(device, non_blocking=True)
 
 
+def getattr_nested(obj: Any, name: str, *default: Any) -> Any:
+    """Like built-in getattr but supports dot-separated nested attributes.
+
+    Examples:
+        getattr_nested(obj, 'a.b.c')  is equivalent to  obj.a.b.c
+        getattr_nested(obj, 'a.b', None)  returns None when any
+            intermediate or final attribute is missing.
+
+    Args:
+        obj: Root object.
+        name: Dot-separated attribute path.
+        *default: Optional default returned when the attribute is missing.
+            At most one default value may be provided (same contract as
+            built-in ``getattr``).
+
+    Raises:
+        TypeError: If more than one default value is provided.
+        AttributeError: If the attribute is missing and no default was given.
+    """
+    if len(default) > 1:
+        raise TypeError(f"getattr_nested expected at most 3 arguments, got {2 + len(default)}")
+    parts = name.split(".")
+    try:
+        for part in parts:
+            obj = getattr(obj, part)
+        return obj
+    except AttributeError:
+        if default:
+            return default[0]
+        raise
+
+
+def setattr_nested(obj: Any, name: str, value: Any) -> None:
+    """Like built-in setattr but supports dot-separated nested attributes.
+
+    Examples:
+        setattr_nested(obj, 'a.b.c', val)  is equivalent to  obj.a.b.c = val
+
+    Args:
+        obj: Root object.
+        name: Dot-separated attribute path.  All parts except the last
+            must already exist as attributes.
+        value: Value to assign to the final attribute.
+
+    Raises:
+        AttributeError: If any intermediate attribute does not exist.
+    """
+    parts = name.split(".")
+    for part in parts[:-1]:
+        obj = getattr(obj, part)
+    setattr(obj, parts[-1], value)
+
+
 def make_ndarray_with_pad_align(
     x: list[list[T]],
     pad: T,
