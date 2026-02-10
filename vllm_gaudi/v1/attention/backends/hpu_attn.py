@@ -52,6 +52,9 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
     query_start_loc: Optional[torch.Tensor] = None
     query_start_loc_p: Optional[torch.Tensor] = None
     padding_mask_flat: Optional[torch.Tensor] = None
+    blocks_caching_range: Optional[torch.Tensor] = None
+    mamba_chunks_to_block_mapping: Optional[torch.Tensor] = None
+    seqlens_offsets_for_blocks: Optional[torch.Tensor] = None
 
     def seq_len(self):
         return self.slot_mapping.size(-1)
@@ -72,9 +75,13 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                               prep_initial_states=None,
                               has_initial_states_p=None,
                               last_chunk_indices_p=None,
-                              state_indices_tensor=None,
+                              load_indices_tensor=None,
+                              store_indices_tensor=None,
                               query_start_loc=None,
-                              padding_mask_flat=None):
+                              padding_mask_flat=None,
+                              blocks_caching_range=None,
+                              mamba_chunks_to_block_mapping=None,
+                              seqlens_offsets_for_blocks=None):
         return cls(is_prompt=True,
                    block_list=block_list,
                    block_mapping=None,
@@ -90,10 +97,14 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    prep_initial_states=prep_initial_states,
                    has_initial_states_p=has_initial_states_p,
                    last_chunk_indices_p=last_chunk_indices_p,
-                   state_indices_tensor=state_indices_tensor,
+                   load_indices_tensor=load_indices_tensor,
+                   store_indices_tensor=store_indices_tensor,
                    query_start_loc=query_start_loc,
                    query_start_loc_p=query_start_loc,
-                   padding_mask_flat=padding_mask_flat)
+                   padding_mask_flat=padding_mask_flat,
+                   blocks_caching_range=blocks_caching_range,
+                   mamba_chunks_to_block_mapping=mamba_chunks_to_block_mapping,
+                   seqlens_offsets_for_blocks=seqlens_offsets_for_blocks)
 
     @classmethod
     def make_decode_metadata(cls,
@@ -109,7 +120,8 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                              chunked_block_list,
                              chunked_block_usage,
                              chunked_block_groups,
-                             state_indices_tensor=None,
+                             load_indices_tensor=None,
+                             store_indices_tensor=None,
                              query_start_loc=None,
                              seq_lens_tensor=None):
         return cls(is_prompt=False,
@@ -131,6 +143,7 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    slot_mapping=slot_mapping,
                    block_size=block_size,
                    prep_initial_states=None,
-                   state_indices_tensor=state_indices_tensor,
+                   load_indices_tensor=load_indices_tensor,
+                   store_indices_tensor=store_indices_tensor,
                    query_start_loc=query_start_loc,
                    query_start_loc_p=query_start_loc)

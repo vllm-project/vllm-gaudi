@@ -328,22 +328,27 @@ class HPUMambaMixer2(MambaMixer2):
         )
 
         forward_context = get_forward_context()
-        # attn_metadata contains metadata necessary for the mamba2 triton
-        # kernels to operate in continuous batching and in chunked prefill
-        # modes; they are computed at top-level model forward since they
-        # stay the same and reused for all mamba layers in the same iteration
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
 
         assert self.cache_config is not None
-        mamba_block_size = self.cache_config.mamba_block_size
-        assert not self.cache_config.enable_prefix_caching
+        enable_prefix_caching = self.cache_config.enable_prefix_caching
         if attn_metadata is not None:
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
             # conv_state = (..., dim, width-1) yet contiguous along 'dim'
             conv_state = self_kv_cache[0].transpose(-1, -2)
             ssm_state = self_kv_cache[1]
 
-            state_indices_tensor = attn_metadata.state_indices_tensor[self.cache_group_idx]
+            load_indices_tensor = attn_metadata.load_indices_tensor[self.cache_group_idx]
+            store_indices_tensor = attn_metadata.store_indices_tensor[self.cache_group_idx]
+            if enable_prefix_caching:
+                blocks_caching_range = attn_metadata.blocks_caching_range[self.cache_group_idx]
+                mamba_chunks_to_block_mapping = attn_metadata.mamba_chunks_to_block_mapping[self.cache_group_idx]
+                seqlens_offsets_for_blocks = attn_metadata.seqlens_offsets_for_blocks
+            else:
+                blocks_caching_range = None
+                mamba_chunks_to_block_mapping = None
+                seqlens_offsets_for_blocks = None
+
             has_initial_states_p = attn_metadata.has_initial_states_p
             prep_initial_states = attn_metadata.prep_initial_states
             # is below sufficient to get chunk_size or does it need to passed via metadata
@@ -362,28 +367,10 @@ class HPUMambaMixer2(MambaMixer2):
         has_prefill = attn_metadata.is_prompt
         has_decode = not attn_metadata.is_prompt
 
-        block_idx_last_computed_token = None
-        block_idx_last_scheduled_token = None
-        block_idx_first_scheduled_token_p = None
-        num_computed_tokens_p = None
-
         # Process prefill requests
         if has_prefill:
-            # 2. Convolution sequence transformation
-            # - It will read the initial states for every sequence,
-            #   that has "has_initial_states_p" == True,
-            #   from "cache_indices", using "state_indices_tensor".
-            # - It updates the "conv_state" cache in positions pointed
-            #   to by "state_indices_tensor".
-            #   In particular, it will always write the state at the
-            #   sequence end.
-            #   In addition, "block_idx_first_scheduled_token_p" and
-            #   "block_idx_last_computed_token"
-            #   are provided (which are pointers into
-            #   "state_indices_tensor"), it will write additional cache
-            #   states aligned at "block_size_to_align".
             assert padding_mask_flat is not None
-            x = hidden_states_B_C.transpose(0, 1)  # this is the form that causal-conv see
+            x = hidden_states_B_C.transpose(0, 1)
             hidden_states_B_C = hidden_states_B_C * padding_mask_flat
             dt = dt * padding_mask_flat
 
@@ -394,12 +381,10 @@ class HPUMambaMixer2(MambaMixer2):
                 activation=self.activation,
                 conv_states=conv_state,
                 has_initial_state=has_initial_states_p,
-                cache_indices=state_indices_tensor,
-                block_idx_first_scheduled_token=block_idx_first_scheduled_token_p,
-                block_idx_last_scheduled_token=block_idx_last_scheduled_token,
-                initial_state_idx=block_idx_last_computed_token,
-                num_computed_tokens=num_computed_tokens_p,
-                block_size_to_align=mamba_block_size,
+                load_cache_indices=load_indices_tensor,
+                store_cache_indices=store_indices_tensor,
+                blocks_caching_range=blocks_caching_range,
+                seqlens_offsets_for_blocks=seqlens_offsets_for_blocks,
                 metadata=attn_metadata,
                 query_start_loc=query_start_loc_p,
                 is_prompt=True,
@@ -411,10 +396,9 @@ class HPUMambaMixer2(MambaMixer2):
             # 3. State Space Model sequence transformation
             initial_states = None
             if has_initial_states_p is not None and prep_initial_states:
-                kernel_ssm_indices = state_indices_tensor
                 initial_states = torch.where(
                     has_initial_states_p[:, None, None, None],
-                    ssm_state[kernel_ssm_indices],
+                    ssm_state[load_indices_tensor],
                     0,
                 )
 
@@ -436,10 +420,13 @@ class HPUMambaMixer2(MambaMixer2):
                 dt_limit=(0.0, float("inf")),
                 out=output.view(output.shape[0], -1, self.head_dim),
                 state_dtype=ssm_state.dtype,
-            )[last_chunk_indices_p]
+            )
             output = output * padding_mask_flat.view(output.shape[0], 1)
 
-            ssm_state[state_indices_tensor] = varlen_states
+            if enable_prefix_caching:
+                ssm_state[mamba_chunks_to_block_mapping] = varlen_states
+            else:
+                ssm_state[store_indices_tensor] = varlen_states[last_chunk_indices_p]
 
         # Process decode requests
         if has_decode:
@@ -450,9 +437,9 @@ class HPUMambaMixer2(MambaMixer2):
                 self.conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=state_indices_tensor,
-                block_idx_last_scheduled_token=block_idx_last_computed_token,
-                initial_state_idx=block_idx_last_computed_token,
+                load_cache_indices=load_indices_tensor,
+                store_cache_indices=store_indices_tensor,
+                initial_state_idx=None,
                 query_start_loc=query_start_loc_p,
             )
 
@@ -485,7 +472,7 @@ class HPUMambaMixer2(MambaMixer2):
                 z=None,
                 dt_bias=dt_bias,
                 dt_softplus=True,
-                state_batch_indices=state_indices_tensor,
-                dst_state_batch_indices=state_indices_tensor,
+                state_batch_indices=load_indices_tensor,
+                dst_state_batch_indices=store_indices_tensor,
                 out=output.view(output.shape[0], -1, self.head_dim),
             )
