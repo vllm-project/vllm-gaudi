@@ -855,14 +855,8 @@ class HPUMLAAttention(MLAAttention):
             # Convert from (N, B, L) to (B, N, L)
             decode_ql_nope = decode_ql_nope.transpose(0, 1)
 
-        slot_mapping = attn_metadata.slot_mapping.flatten() if attn_metadata.slot_mapping is not None else None
-
         latent_vec_k = torch.concat((k_c_normed, k_pe.view(*k_c_normed.shape[:-1], self.qk_rope_head_dim)), dim=-1)
         latent_vec_k = latent_vec_k.view(-1, self.qk_rope_head_dim + self.kv_lora_rank)
-
-        # write the latent and rope to kv cache
-        if kv_cache is not None and len(kv_cache) >= 2:
-            self.latent_cache_k(latent_vec_k, kv_cache[0], slot_mapping)
 
         if is_prefill:
             output = self.impl.forward_mha(q, latent_vec_k, kv_cache, attn_metadata)
