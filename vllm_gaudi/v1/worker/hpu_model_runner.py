@@ -1551,6 +1551,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         return bool(req_id in self.input_batch.req_type and \
             self.input_batch.req_type[req_id] == "decode")
 
+    def _get_model_type(self) -> Optional[str]:
+        """
+        Safely extract the model type from vllm_config.
+        
+        Returns:
+            The model type string if available, None otherwise.
+        """
+        if (self.vllm_config is not None and self.vllm_config.model_config is not None
+                and self.vllm_config.model_config.hf_config is not None):
+
+            return self.vllm_config.model_config.hf_config.model_type
+        return None
+
     def _get_num_decodes(self) -> int:
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
@@ -2434,6 +2447,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         if self.interleaved_sliding_window:
             sliding_block_size = (self.sliding_window // self.block_size)
+
+            # Adjust sliding block size for specific model types
+            model_type = self._get_model_type()
+            if model_type is not None and model_type in ["gpt_oss"]:
+                sliding_block_size += 1
+
             window_block_tables = [block_table[-sliding_block_size:] for block_table in block_tables_list]
             window_block_list, window_block_groups, window_block_usage = \
                 self.get_habana_paged_attn_buffers(
@@ -5248,10 +5267,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.shutdown_inc()
 
     @torch.inference_mode()
-    def profile_run(self) -> None:
+    def profile_run(self, initialize_only=False) -> None:
+        if initialize_only:
+            return
+
         if any(map(lambda v: isinstance(v, MambaSpec), list(self.get_kv_cache_spec().values()))):
             # dummy preparation is not working for hybrid models
             return
+
         # Skip profile run on decode instances
         if (self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_consumer):
             return
