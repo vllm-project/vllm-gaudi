@@ -3,7 +3,6 @@ from vllm.model_executor.models.registry import ModelRegistry
 
 def register_model():
     from vllm_gaudi.models.gemma3_mm import HpuGemma3ForConditionalGeneration  # noqa: F401
-
     ModelRegistry.register_model(
         "Gemma3ForConditionalGeneration",  # Original architecture identifier in vLLM
         "vllm_gaudi.models.gemma3_mm:HpuGemma3ForConditionalGeneration")
@@ -15,3 +14,10 @@ def register_model():
     from vllm_gaudi.models.qwen3_vl import HpuQwen3_VLForConditionalGeneration  # noqa: F401
     ModelRegistry.register_model("Qwen3VLForConditionalGeneration",
                                  "vllm_gaudi.models.qwen3_vl:HpuQwen3_VLForConditionalGeneration")
+
+    from vllm_gaudi.models.hunyuan_v1 import HpuHunYuanDenseV1ForCausalLM  # noqa: F401
+    ModelRegistry.register_model("HunYuanDenseV1ForCausalLM",
+                                 "vllm_gaudi.models.hunyuan_v1:HpuHunYuanDenseV1ForCausalLM")
+
+    from vllm_gaudi.models.hunyuan_v1 import HpuHunYuanMoEV1ForCausalLM  # noqa: F401
+    ModelRegistry.register_model("HunYuanMoEV1ForCausalLM", "vllm_gaudi.models.hunyuan_v1:HpuHunYuanMoEV1ForCausalLM")
