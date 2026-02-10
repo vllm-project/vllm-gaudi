@@ -904,7 +904,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.seen_configs: set = set()
         self.max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_graph_capture_tokens = self.vllm_config.compilation_config.max_cudagraph_capture_size if \
-            self.vllm_config.compilation_config.max_cudagraph_capture_size is not None else self.max_num_batched_tokens
+            self.vllm_config.compilation_config.max_cudagraph_capture_size is not None \
+            else min(self.max_num_batched_tokens, 2048)
         self.use_prefix_caching = (self.vllm_config.cache_config.enable_prefix_caching)
         self.bucketing_manager = HPUBucketingManager()
         max_num_prefill_seqs = self.max_num_seqs if self.use_merged_prefill \
