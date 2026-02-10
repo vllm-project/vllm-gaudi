@@ -94,60 +94,6 @@ class HPUWorker(WorkerBase):
         self.kv_cache_sleeping = False
         self.kv_cache_config = None
 
-        # Select available Habana modules before initializing the device.
-        self._configure_habana_visible_modules()
-
-    def _configure_habana_visible_modules(self):
-        import pyhlml
-        pyhlml.hlmlInit()
-        try:
-            available_module_ids = []
-            device_count = torch.hpu.device_count()
-            if device_count < 1:
-                raise RuntimeError("No Habana devices found.")
-            for i in range(device_count):
-                try:
-                    device = pyhlml.hlmlDeviceGetHandleByIndex(i)
-                    utility = pyhlml.hlmlDeviceGetUtilizationRates(device)
-                    if utility.aip == 0 and utility.memory == 0:
-                        module_id = pyhlml.hlmlDeviceGetModuleID(device)
-                        available_module_ids.append(module_id)
-                except Exception:
-                    continue
-            if len(available_module_ids) < 1:
-                raise RuntimeError("No available Habana modules found. All modules are currently in use.")
-            env_visible_modules = os.getenv("HABANA_VISIBLE_MODULES")
-            if env_visible_modules is None:
-                if len(available_module_ids) < self.parallel_config.world_size:
-                    raise RuntimeError(
-                        f"Not enough available modules for world_size={self.parallel_config.world_size}.")
-                available_modules_str = ",".join(map(str, sorted(available_module_ids)))
-                logger.info("HABANA_VISIBLE_MODULES is not set, using all available modules: %s", available_modules_str)
-                os.environ["HABANA_VISIBLE_MODULES"] = available_modules_str
-            else:
-                if not all(c.isdigit() for c in env_visible_modules.split(",")):
-                    raise RuntimeError(f"Invalid HABANA_VISIBLE_MODULES={env_visible_modules}. "
-                                       "It should be a comma-separated list of integers.")
-                env_module_ids = list(map(int, env_visible_modules.split(",")))
-                if any(module_id < 0 or module_id >= device_count for module_id in env_module_ids):
-                    raise RuntimeError(f"Invalid HABANA_VISIBLE_MODULES={env_visible_modules}. "
-                                       f"Module IDs should be between 0 and {device_count - 1}.")
-                if any(env_module_id not in available_module_ids for env_module_id in env_module_ids):
-                    logger.warning("Some device for HABANA_VISIBLE_MODULES=%s are not available.", env_visible_modules)
-                    selected_modules = [x for x in env_module_ids if x in available_module_ids]
-                    if len(selected_modules) < self.parallel_config.world_size:
-                        raise RuntimeError(
-                            f"Not enough available modules for world_size={self.parallel_config.world_size}. "
-                            "Set HABANA_VISIBLE_MODULES to include more available modules and try again.")
-                    else:
-                        selected_modules_str = ",".join(map(str, sorted(selected_modules)))
-                        os.environ["HABANA_VISIBLE_MODULES"] = selected_modules_str
-                        logger.warning("Using selected available modules: %s", selected_modules_str)
-        except Exception as e:
-            raise e
-        finally:
-            pyhlml.hlmlShutdown()
-
     def init_profiler(self):
         """Initialize the profiler."""
         if envs.VLLM_TORCH_PROFILER_DIR:
@@ -188,10 +134,7 @@ class HPUWorker(WorkerBase):
         self.profiler.stop()
 
     def init_device(self):
-        # Set the device for this worker.
         self.device = torch.device("hpu")
-        torch.hpu.set_device(self.local_rank)
-
         # Initialize the distributed environment.
         init_worker_distributed_environment(self.vllm_config, self.rank, self.distributed_init_method, self.local_rank)
         # Set random seed.
@@ -347,6 +290,13 @@ class HPUWorker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
+
+        # Init kv cache connector here, because it requires
+        # `kv_cache_config`.
+        # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
+        # because `initialize_kv_cache` will inject kv cache groups not
+        # related to kv cache connector (e.g. kv cache sharing layers).
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
         with HabanaMemoryProfiler() as m:
             self.kv_cache_config = kv_cache_config
@@ -514,8 +464,8 @@ class HPUWorker(WorkerBase):
             else:
                 with HabanaMemoryProfiler() as m:
                     self.model_runner.initialize_kv_cache(self.kv_cache_config)
-                    self.model_runner.defragmenter = OnlineDefragmenter(self.model_runner.kv_caches,
-                                                                        self.model_runner.block_size)
+                    self.model_runner.defragmenter = OnlineDefragmenter()
+                    self.model_runner.defragmenter.initialize(self.model_runner.kv_caches, self.model_runner.block_size)
                     gc.collect()
                     torch.hpu.synchronize()
                 msg = f"Waking up KV cache, reinitializing it took {m.get_summary_string()}"
@@ -537,8 +487,6 @@ def init_worker_distributed_environment(
     torch.distributed.all_reduce(dummy_tensor_hpu)
     assert dummy_tensor_hpu.item() == parallel_config.world_size * parallel_config.data_parallel_size
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size, parallel_config.pipeline_parallel_size)
-
-    ensure_kv_transfer_initialized(vllm_config)
 
 
 @contextmanager
