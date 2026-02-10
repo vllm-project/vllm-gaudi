@@ -12,6 +12,7 @@ from vllm_gaudi.extension.runtime import get_config
 
 LONG_CTX_THRESHOLD = 8192
 
+
 def calc_fallback_value(n: int, base_step: int):
     """ Calculate next bucket for yet unbucketized value"""
     if n <= 1:
