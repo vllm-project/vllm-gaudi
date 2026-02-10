@@ -43,7 +43,7 @@ vllm bench serve \
   --random-input-len 6300 \
   --random-output-len 380 \
   --random-mm-base-items-per-request 20 \
-  --random-mm-bucket-config "{(480, 720, 1): 1.0}" \
+  --random-mm-bucket-config "{(480, 864, 1): 1.0}" \
   --random-mm-num-mm-items-range-ratio 0.0 \
   --max-concurrency 16 \
   --percentile-metrics ttft,tpot,itl,e2el \
