@@ -82,6 +82,14 @@ run_dsv2_blockfp8_static_scaling_fp8kv_test() {
     echo "✅ Test with Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 KV successful."
 }
 
+# QWEN3 + FP8 Attn(FP8 QGA test)
+# The lazy mode works on 1.24.0-272
+run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test() {
+    echo "➡️ Testing Qwen3-8B + static scaling + FP8 Attn..."
+    PT_HPU_LAZY_MODE=0 HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model INC4AI/Qwen3-8B-FP8_STATIC-FP8-Attn-LLMC-Test-Only --trust-remote-code --kv_cache_dtype fp8_inc
+    echo "✅ Test with Qwen3-8B + static scaling + FP8 Attn successful."
+}
+
 # DS + blockfp8 + static scaling + FP8 QKV
 # The lazy mode works on 1.24.0-272
 run_dsv2_blockfp8_static_scaling_fp8qkv_test() {
@@ -351,6 +359,21 @@ run_pd_disaggregate_nixl_ucx_test() {
     echo "✅ PD disaggregate through NIXL UCX."
 }
 
+# CPU Offloading connector
+run_cpu_offloading_test() {
+    echo "➡️ Testing CPU offlading."
+    VLLM_SKIP_WARMUP=True VLLM_USE_V1=1 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/unit_tests/kv_offload/test_cpu_offloading.py"
+    echo "✅ Test CPU offlading passed."
+}
+
+run_offloading_connector_test() {
+    echo "➡️ Testing OffloadingConnector."
+    VLLM_SKIP_WARMUP=True VLLM_USE_V1=1 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/unit_tests/kv_offload/test_offloading_connector.py"
+    echo "✅ Test OffloadingConnector passed."
+}
+
 # sleep mode
 run_sleep_mode_test() {
     echo "Testing basic model with sleep mode / wake up functionality"
@@ -398,6 +421,8 @@ launch_all_tests() {
     run_spec_decode_eagle3_test
     run_spec_decode_eagle3_num_spec_2_test
     run_llama3_70b_inc_dynamic_quant_test
+    run_cpu_offloading_test
+    run_offloading_connector_test
     run_sleep_mode_test
     #run_embedding_model_test
     echo "🎉 All test suites passed successfully!"
