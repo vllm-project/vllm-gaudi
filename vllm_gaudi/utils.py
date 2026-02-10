@@ -3,6 +3,8 @@ import os
 from vllm.config import ModelConfig
 from vllm.utils.torch_utils import make_tensor_with_pad, TORCH_DTYPE_TO_NUMPY_DTYPE
 from vllm_gaudi.extension.runtime import get_config
+import vllm.v1.core.sched.async_scheduler as _async_sched_module
+from vllm_gaudi.v1.core.sched.hpu_async_scheduler import HPUAsyncScheduler
 from typing import (Any, Optional, TypeVar, Union)
 import torch
 import numpy as np
@@ -174,3 +176,6 @@ class HPUCompileConfig:
             return {'backend': 'hpu_backend', 'fullgraph': self.fullgraph, 'options': {"force_static_compile": True}}
         else:
             return {'backend': 'hpu_backend', 'fullgraph': self.fullgraph, 'dynamic': False}
+
+
+_async_sched_module.AsyncScheduler = HPUAsyncScheduler
