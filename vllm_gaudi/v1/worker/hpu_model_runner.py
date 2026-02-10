@@ -4310,10 +4310,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if mlp is not None:
                     block_gate = getattr(mlp, 'gate', None)
                     experts = getattr(mlp, 'experts', None)
-                    if (block_gate is not None
-                            and experts is not None
-                            and getattr(experts, '_gate', None)
-                            is block_gate):
+                    if (block_gate is not None and experts is not None
+                            and getattr(experts, '_gate', None) is block_gate):
                         experts._gate = None
 
     def _sync_shared_moe_gates(self):
@@ -4334,9 +4332,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 continue
             block_gate = getattr(mlp, 'gate', None)
             experts = getattr(mlp, 'experts', None)
-            if (block_gate is not None
-                    and experts is not None
-                    and hasattr(experts, '_gate')):
+            if (block_gate is not None and experts is not None and hasattr(experts, '_gate')):
                 experts._gate = block_gate
 
     def _inc_preprocess(self):
