@@ -18,18 +18,12 @@ services:
     env_file:
       - ./server/server_user.env
     volumes:
-<<<<<<< HEAD
       # LOCAL_PATH specifies the absolute path on the host to be mounted as /mnt/hf_cache inside the container.
       # Example usage: LOCAL_PATH=/home/user/hf_cache <...>
       # Expected format: absolute path. Defaults to /mnt/hf_cache if not set.
       - ${LOCAL_PATH:-/mnt/hf_cache}:/mnt/hf_cache
       - /tmp:/root/scripts/logs
       - /tmp:/local
-=======
-      - /mnt/hf_cache:/mnt/hf_cache
-      - ${PWD}/logs:/root/scripts/logs
-      - ${PWD}:/local
->>>>>>> 3579c63 (Option to dry run with docker run cmd, save log files, create multiple vLLM services)
     ports:
       - ${HOST_PORT}:8000
     cap_add:
