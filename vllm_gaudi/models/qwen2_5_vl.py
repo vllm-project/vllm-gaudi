@@ -1,4 +1,3 @@
-import math
 import os
 from functools import partial
 from typing import Optional, Callable, Union
@@ -34,6 +33,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.model_executor.models.utils import (maybe_prefix, cast_overflow_tensors)
 
 from vllm.multimodal.inputs import MultiModalFieldConfig
+from vllm_gaudi.extension.runtime import get_config
 
 import habana_frameworks.torch.core as htcore
 from habana_frameworks.torch.hpex.kernels import FusedSDPA
@@ -72,28 +72,30 @@ class HPU_Attention:
             in ['true', '1'] else 'None'
 
     @classmethod
-    def forward(cls, q, k, v, mask, q_block_size=64):
+    def forward(cls, q, k, v, mask, cu_seqlens, qwen2_5_vl, q_block_size=64):
         """
         Support long sequence at prompt phase
         """
         q_len = q.size(-2)
-        if q_len <= 65536:  # need to investigate this crosspoint
-            return FusedSDPA.apply(q, k, v, mask, 0.0, False, None, cls.softmax_mode)
-
-        assert q_len % q_block_size == 0
-        q_tiles = (q_len // q_block_size) if (q_len % q_block_size == 0) else math.ceil(q_len / q_block_size)
-        attn_output = torch.zeros_like(q)
-
-        for i in range(q_tiles):
-            s, e = i * q_block_size, (i + 1) * q_block_size
-            row_q = q[:, :, s:e, :]
-            row_mask = mask[:, :, s:e, :]
-            attn_output[:, :, s:e, :] = FusedSDPA.apply(row_q, k, v, row_mask, 0.0, False, None, cls.softmax_mode)
-            # TODO: markstep after a couple of iterations
-            # need to experiment the optimal number.
-            if i % 75 == 0:
-                htcore.mark_step()
-        return attn_output
+        if qwen2_5_vl:
+            if q_len < 65536:
+                return FusedSDPA.apply(q, k, v, mask, 0.0, False, None, cls.softmax_mode)
+            else:
+                return AttentionLongSequence.forward(q, k, v, mask, q_block_size, cls.softmax_mode)
+        else:
+            lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+            if len(lens) == 1:
+                return FusedSDPA.apply(q, k, v, None, 0.0, False, None, cls.softmax_mode)
+            else:
+                q_chunks = torch.split(q, lens, dim=2)
+                k_chunks = torch.split(k, lens, dim=2)
+                v_chunks = torch.split(v, lens, dim=2)
+                outputs = []
+                for q_i, k_i, v_i in zip(q_chunks, k_chunks, v_chunks):
+                    output_i = FusedSDPA.apply(q_i, k_i, v_i, None, 0.0, False, None, cls.softmax_mode)
+                    outputs.append(output_i)
+                context_layer = torch.cat(outputs, dim=2)
+                return context_layer
 
 
 def create_block_diagonal_attention_mask(indices):
@@ -146,6 +148,8 @@ class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
         )
 
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
+        model_type = get_config().model_type
+        self.qwen2_5_vl = 'qwen2_5_vl' in model_type.lower()
 
     def forward(
             self,
@@ -185,11 +189,9 @@ class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
 
         # performs full attention using the previous computed mask
         q1, k1, v1 = (rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
-        output = HPU_Attention.forward(q1, k1, v1, attn_mask)
+        output = HPU_Attention.forward(q1, k1, v1, attn_mask, cu_seqlens, self.qwen2_5_vl)
         context_layer = rearrange(output, "b h s d -> b s h d ")
-
         context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
-
         output, _ = self.proj(context_layer)
         return output
 
@@ -233,13 +235,11 @@ class HPUQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
             seqlens: Optional[list[int]] = None,  # Only used for xFormers
             attn_mask: Optional[torch.Tensor] = None,  # Only used for HPU
     ) -> torch.Tensor:
-        mask_to_use = attn_mask if attn_mask is not None else cu_seqlens
-
         x = x + self.attn(self.norm1(x),
                           cu_seqlens=cu_seqlens,
                           rotary_pos_emb_cos=rotary_pos_emb_cos,
                           rotary_pos_emb_sin=rotary_pos_emb_sin,
-                          attn_mask=mask_to_use)
+                          attn_mask=attn_mask)
 
         x = x + self.mlp(self.norm2(x))
         return x
@@ -356,7 +356,8 @@ class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
         )
 
     def forward(self, hidden_states: torch.Tensor, rotary_pos_emb_cos: torch.Tensor, rotary_pos_emb_sin: torch.Tensor,
-                padding_attn_mask_window: torch.Tensor, padding_attn_mask_full: torch.Tensor) -> torch.Tensor:
+                padding_attn_mask_window: torch.Tensor, padding_attn_mask_full: torch.Tensor,
+                cu_seqlens: torch.Tensor) -> torch.Tensor:
         hidden_states = hidden_states.unsqueeze(1)
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
@@ -366,9 +367,10 @@ class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
 
             hidden_states = blk(
                 hidden_states,
-                cu_seqlens=padding_attn_mask_now,
+                cu_seqlens=cu_seqlens,
                 rotary_pos_emb_cos=rotary_pos_emb_cos,
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
+                attn_mask=padding_attn_mask_now,
             )
 
         # For Qwen2.5-VL-3B, float16 will overflow at last block
@@ -436,7 +438,8 @@ class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
                                          rotary_pos_emb_cos=rot_pos_emb_cos,
                                          rotary_pos_emb_sin=rot_pos_emb_sin,
                                          padding_attn_mask_window=padding_attn_mask_window,
-                                         padding_attn_mask_full=padding_attn_mask_full)
+                                         padding_attn_mask_full=padding_attn_mask_full,
+                                         cu_seqlens=cu_seqlens)
             htcore.mark_step()
 
             # remove padding

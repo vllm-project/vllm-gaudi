@@ -19,6 +19,10 @@ def register_model():
     ModelRegistry.register_model("Ernie4_5_VLMoeForConditionalGeneration",
                                  "vllm_gaudi.models.ernie45_vl:HpuErnie4_5_VLMoeForConditionalGeneration")
 
+    from vllm_gaudi.models.qwen3_vl_moe import HpuQwen3_VLMoeForConditionalGeneration  # noqa: F401
+    ModelRegistry.register_model("Qwen3VLMoeForConditionalGeneration",
+                                 "vllm_gaudi.models.qwen3_vl_moe:HpuQwen3_VLMoeForConditionalGeneration")
+
     from vllm_gaudi.models.hunyuan_v1 import HpuHunYuanDenseV1ForCausalLM  # noqa: F401
     ModelRegistry.register_model("HunYuanDenseV1ForCausalLM",
                                  "vllm_gaudi.models.hunyuan_v1:HpuHunYuanDenseV1ForCausalLM")
