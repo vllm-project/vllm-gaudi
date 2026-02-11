@@ -4339,6 +4339,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             experts = getattr(mlp, 'experts', None)
             if (block_gate is not None and experts is not None and id(experts) in self._detached_moe_gates):
                 experts._gate = block_gate
+                self._detached_moe_gates.remove(id(experts))
 
     def _inc_preprocess(self):
         _apply_inc_patch()
