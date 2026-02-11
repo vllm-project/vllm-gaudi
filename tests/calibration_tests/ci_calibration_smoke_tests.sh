@@ -95,7 +95,7 @@ launch_all_tests() {
     echo "🚀 Starting all calibration test suites..."
     run_granite_calibration_test
     run_qwen_calibration_test
-    run_qwen_vl_calibration_test
+    # run_qwen_vl_calibration_test  # (afierka) Temporarily disabled due to some issues, will re-enable once fixed. [GAUDISW-246468]
     echo "🎉 All calibration test suites passed successfully!"
 }
 

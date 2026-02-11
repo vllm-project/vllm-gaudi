@@ -4,6 +4,7 @@ This example shows how to use vLLM for running offline inference with
 multi-image input on vision language models for text generation,
 using the chat template defined by the model.
 """
+import os
 
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -11,6 +12,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from lm_eval import tasks, evaluator
 from lm_eval.models.vllm_vlms import VLLM_VLM
 
+os.environ["VLLM_SKIP_WARMUP"] = "true"
 IMAGE_LIMIT = 1
 
 
@@ -61,6 +63,7 @@ def run_generate(args):
             "pretrained": args.model_path,
             "enforce_eager": args.enforce_eager,
             "max_model_len": args.max_model_len,
+            "enable_expert_parallel": args.expert_parallel,
         },
     }
     lm = VLLM_VLM(**lm_instance_cfg["vllm_kwargs"], **lm_instance_cfg["lm_eval_kwargs"])
@@ -87,6 +90,7 @@ if __name__ == "__main__":
                                     'vision language models that support multi-image input for text '
                                     'generation')
     parser.add_argument('--model-path', '-p', type=str, default="", help='Huggingface model path')
+    parser.add_argument('--expert-parallel', action='store_true', help='Whether to use expert parallel')
     parser = AsyncEngineArgs.add_cli_args(parser)
 
     args = parser.parse_args()

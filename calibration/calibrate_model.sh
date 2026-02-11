@@ -95,7 +95,7 @@ MULTI_NODE_SETUP=false
 USE_EP=""
 ENFORCE_EAGER=false
 
-while getopts "m:b:l:t:d:h:o:r:ue" OPT; do
+while getopts "m:b:l:t:d:h:o:r:u:e" OPT; do
     case ${OPT} in
         m )
             MODEL_PATH="$OPTARG"

@@ -21,7 +21,8 @@ usage() {
     echo "  -b    - batch size to run the measurements at (default: 32)"
     echo "  -l    - limit number of samples in calibration dataset"
     echo "  -t    - tensor parallel size to run at (default: 1); NOTE: if t > 8 then we need a multi-node setup"
-    echo "  -g    - groups of cards we want to unify. Card indices seperated by commas and groups seperated by double dash '--', e.g. 0,1--2,3--4,5--6,7 card 0 measurement will be unified with card 1 measurement and so on."
+    echo "  -r    - rank of unified measurements, it should be smaller than original rank number and should be a factor of the original rank number"
+    echo "  -u    - unify measurement results based on expert parallelism rules (default: False), expert parallelism unification rule is unique, card 1 expert measurement will be extended to card 0 if unified to x from 2x cards number"
     echo "  -e    - Turn on or off eager mode, default: off"
     echo
 }
@@ -76,7 +77,9 @@ EXTRA_FLAGS=""
 BATCH_SIZE=32
 TP_SIZE=1
 eager_mode="off"
-while getopts "m:b:l:t:d:h:o:g:e:" OPT; do
+RANK=""
+USE_EP=""
+while getopts "m:b:l:t:d:h:o:r:u:e" OPT; do
     case ${OPT} in
         m )
             MODEL_PATH="$OPTARG"
@@ -96,8 +99,11 @@ while getopts "m:b:l:t:d:h:o:g:e:" OPT; do
         t )
             TP_SIZE="$OPTARG"
             ;;
-        g )
-            CARD_GROUPS="$OPTARG"
+        r )
+            RANK="$OPTARG"
+            ;;        
+        u )
+            USE_EP="--use_expert_paral"
             ;;
         h )
             usage
@@ -144,6 +150,10 @@ if [[ $eager_mode == "on" ]]; then
     EXTRA_FLAGS+="--enforce-eager "
 fi
 
+if [[ -n $USE_EP ]]; then
+    EXTRA_FLAGS+="--expert-parallel "
+fi
+
 # Store the provided MODEL_PATH name in a variable
 MODEL_NAME=$(extract_last_folder_name "$MODEL_PATH")
 
@@ -177,7 +187,7 @@ export QUANT_CONFIG=$FP8_DIR/$MODEL_NAME/maxabs_measure_$DEVICE_TYPE.json
 # quantization='None'
 # kv_cache_dtype='auto'
 quantization='inc'
-kv_cache_dtype='auto'
+kv_cache_dtype='auto'  # (afierka) TODO: we want to switch to fp8_inc for kv cache as well, but it causes instability for some models, need to investigate further
 
 python3 vision_lm_eval.py \
     --max-model-len $max_model_len \
@@ -207,11 +217,11 @@ echo "Step 3/3 done"
 
 
 
-if [[ -n $CARD_GROUPS ]]; then
+if [[ -n $RANK ]]; then
     echo ""
     echo "Unify scales"
     QUANT_DIR=$FP8_DIR/$MODEL_NAME/$DEVICE_TYPE/
-    python3 ../step-5-unify_measurements.py -g "$CARD_GROUPS" -m $QUANT_DIR -o $QUANT_DIR || (echo "Error in step 5" && exit 1)
+    python3 ../step-5-unify_measurements.py -r "$RANK" -m $QUANT_DIR -o $QUANT_DIR $USE_EP || (echo "Error in step 5" && exit 1)
     echo "Unify scales done"
 fi
 cleanup_tmp
