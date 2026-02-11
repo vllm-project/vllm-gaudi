@@ -38,10 +38,12 @@ def test_unquantized_fused_moe_method(default_vllm_config: None, dist_init):
         ref_output = f.get_tensor("ref_output")
 
     # Execute layer
-    mock_ctx = MagicMock(spec=["dp_metadata"])
+    mock_ctx = MagicMock(spec=["dp_metadata", "all_moe_layers", "no_compile_layers"])
     mock_ctx.dp_metadata = None
+    mock_ctx.all_moe_layers = None
+    mock_ctx.no_compile_layers = {oot_op.layer_name: oot_op}
     with override_forward_context(mock_ctx):
-        out = oot_op.forward_impl(hidden_states, router_logits)
+        out = oot_op.forward_native(hidden_states, router_logits)
 
     # Check correctness
     torch.testing.assert_close(ref_output, out, atol=1e-4, rtol=1e-4)

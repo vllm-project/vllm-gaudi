@@ -92,7 +92,6 @@ from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.transformers_utils.config import is_interleaved
 from vllm.v1.worker.utils import (AttentionGroup, sanity_check_mm_encoder_outputs)
-from vllm.v1.worker.utils import (AttentionGroup, sanity_check_mm_encoder_outputs)
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -1468,7 +1467,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         req_start_idx = 0
         for req_id in req_ids:
-            mm_embeds_req: list[torch.Tensor] = []
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             req_state = self.requests[req_id]
             num_computed_tokens = \
