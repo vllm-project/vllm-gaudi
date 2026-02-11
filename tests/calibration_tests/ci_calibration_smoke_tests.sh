@@ -29,7 +29,7 @@ cleanup_calibration_output() {
 # Simple smoke calibration test using granite model
 run_granite_calibration_test() {
     echo "➡️ Testing calibration procedure on ibm-granite/granite-3.3-2b-instruct..."
-    # cleanup_calibration_output
+    cleanup_calibration_output
 
     PT_HPU_LAZY_MODE=1 "${VLLM_GAUDI_PREFIX}/calibration/calibrate_model.sh" \
         -m ibm-granite/granite-3.3-2b-instruct \
