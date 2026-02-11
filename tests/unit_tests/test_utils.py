@@ -178,7 +178,7 @@ class TestSetattrNested:
     def test_creates_new_leaf_attr(self):
         root = _Root()
         setattr_nested(root, "middle.inner.new_field", "hello")
-        assert root.middle.inner.new_field == "hello"
+        assert root.middle.inner.new_field == "hello"  # type: ignore[attr-defined]
 
     def test_missing_intermediate_raises(self):
         root = _Root()
