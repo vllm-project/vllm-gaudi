@@ -25,3 +25,5 @@ def register_model():
 
     from vllm_gaudi.models.hunyuan_v1 import HpuHunYuanMoEV1ForCausalLM  # noqa: F401
     ModelRegistry.register_model("HunYuanMoEV1ForCausalLM", "vllm_gaudi.models.hunyuan_v1:HpuHunYuanMoEV1ForCausalLM")
+    
+    import vllm_gaudi.models.deepseek_v2  # noqa: F401
