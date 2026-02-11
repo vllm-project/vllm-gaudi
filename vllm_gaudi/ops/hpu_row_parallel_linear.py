@@ -1,5 +1,4 @@
 from typing import Union
-import os
 
 import torch
 from torch.nn.parameter import Parameter
@@ -9,6 +8,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.distributed.parallel_state import get_tp_group
+from vllm_gaudi.extension.runtime import get_config
 
 @RowParallelLinear.register_oot
 class HPURowParallelLinear(RowParallelLinear):
@@ -21,22 +21,22 @@ class HPURowParallelLinear(RowParallelLinear):
     def __init__(self, *args, **kwargs):
         """Initialize HPURowParallelLinear with chunking support.
         
-        The number of chunks can be configured via the VLLM_ROW_PARALLEL_CHUNKS
-        environment variable. Default is 1 chunk (disabled).
+        The number of chunks can be configured via the row_parallel_chunks
+        feature flag (env var VLLM_ROW_PARALLEL_CHUNKS). Default is 1 (disabled).
         
-        The token threshold for enabling chunking can be configured via
-        VLLM_ROW_PARALLEL_CHUNK_THRESHOLD. Default is 8192 tokens.
+        The token threshold for enabling chunking can be configured via the
+        row_parallel_chunk_threshold feature flag (env var
+        VLLM_ROW_PARALLEL_CHUNK_THRESHOLD). Default is 8192 tokens.
         """
         super().__init__(*args, **kwargs)
-        # Check for chunking configuration via environment variable
-        self.num_chunks = int(os.environ.get("VLLM_ROW_PARALLEL_CHUNKS", "1"))
+        config = get_config()
+        self.num_chunks = config.row_parallel_chunks
         if self.num_chunks < 1:
-            raise ValueError(f"VLLM_ROW_PARALLEL_CHUNKS must be >= 1, got {self.num_chunks}")
+            raise ValueError(f"row_parallel_chunks must be >= 1, got {self.num_chunks}")
 
-        # Check for chunk threshold configuration
-        self.chunk_threshold = int(os.environ.get("VLLM_ROW_PARALLEL_CHUNK_THRESHOLD", "8192"))
+        self.chunk_threshold = config.row_parallel_chunk_threshold
         if self.chunk_threshold < 1:
-            raise ValueError(f"VLLM_ROW_PARALLEL_CHUNK_THRESHOLD must be >= 1, got {self.chunk_threshold}")
+            raise ValueError(f"row_parallel_chunk_threshold must be >= 1, got {self.chunk_threshold}")
 
     def forward(
         self,
