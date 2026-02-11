@@ -160,8 +160,8 @@ def test_calc_PROMPT_BS_STEP_GRAPHS(exp):
 @pytest.mark.parametrize("exp", [True, False])
 def test_calc_PROMPT_SEQ_RAMP_GRAPHS(exp):
     ctx = {
-        'VLLM_PROMPT_SEQ_BUCKET_STEP': 16,
-        'VLLM_PROMPT_SEQ_BUCKET_MIN': 2,
+        'VLLM_PROMPT_QUERY_BUCKET_STEP': 16,
+        'VLLM_PROMPT_QUERY_BUCKET_MIN': 2,
         'MAX_NUM_BATCHED_TOKENS': 32,
         'VLLM_EXPONENTIAL_BUCKETING': exp
     }
@@ -174,7 +174,7 @@ def test_calc_PROMPT_SEQ_STEP_GRAPHS(exp):
     ctx = {
         'MAX_NUM_BATCHED_TOKENS': 32,
         'MAX_MODEL_LEN': 64,
-        'VLLM_PROMPT_SEQ_BUCKET_STEP': 8,
+        'VLLM_PROMPT_QUERY_BUCKET_STEP': 8,
         'VLLM_EXPONENTIAL_BUCKETING': exp
     }
     expected = 0 if exp else int(1 + (32 - 8) / 8)
@@ -190,7 +190,7 @@ def test_calc_EST_NUM_PROMPT_GRAPHS(exp):
         'PROMPT_SEQ_STEP_GRAPHS': 5 if not exp else 0,
         'MAX_NUM_BATCHED_TOKENS': 2048,
         'MAX_MODEL_LEN': 4352,
-        'VLLM_PROMPT_SEQ_BUCKET_MIN': 128,
+        'VLLM_PROMPT_QUERY_BUCKET_MIN': 128,
         'VLLM_PROMPT_CTX_BUCKET_STEP': 1,
         'BLOCK_SIZE': 128,
         'VLLM_EXPONENTIAL_BUCKETING': exp
@@ -243,8 +243,3 @@ def test_calc_VLLM_DECODE_BLOCK_BUCKET_MAX():
     ctx = {'MAX_NUM_SEQS': 16, 'MAX_MODEL_LEN': 128}
     expected = max(128, math.ceil((16 * 128) / 128))
     assert rules.calc_VLLM_DECODE_BLOCK_BUCKET_MAX(ctx) == expected
-
-
-def test_calc_VLLM_PROMPT_SEQ_BUCKET_MAX():
-    ctx = {'MAX_MODEL_LEN': 4096}
-    assert rules.calc_VLLM_PROMPT_SEQ_BUCKET_MAX(ctx) == 4096

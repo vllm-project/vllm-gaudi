@@ -145,15 +145,16 @@ def calc_PROMPT_SEQ_RAMP_GRAPHS(ctx):
     if ctx['VLLM_EXPONENTIAL_BUCKETING']:
         return 1 + math.ceil(math.log(ctx['MAX_NUM_BATCHED_TOKENS'], 2))
     else:
-        return 1 + int(math.log(ctx['VLLM_PROMPT_SEQ_BUCKET_STEP'] / ctx['VLLM_PROMPT_SEQ_BUCKET_MIN'], 2))
+        return 1 + int(math.log(ctx['VLLM_PROMPT_QUERY_BUCKET_STEP'] / ctx['VLLM_PROMPT_QUERY_BUCKET_MIN'], 2))
 
 
 def calc_PROMPT_SEQ_STEP_GRAPHS(ctx):
     if ctx['VLLM_EXPONENTIAL_BUCKETING']:
         return 0
     else:
-        return int(1 + (min(ctx['MAX_NUM_BATCHED_TOKENS'], ctx['MAX_MODEL_LEN']) - ctx['VLLM_PROMPT_SEQ_BUCKET_STEP']) /
-                   ctx['VLLM_PROMPT_SEQ_BUCKET_STEP'])
+        return int(1 +
+                   (min(ctx['MAX_NUM_BATCHED_TOKENS'], ctx['MAX_MODEL_LEN']) - ctx['VLLM_PROMPT_QUERY_BUCKET_STEP']) /
+                   ctx['VLLM_PROMPT_QUERY_BUCKET_STEP'])
 
 
 def calc_EST_NUM_PROMPT_GRAPHS(ctx):
@@ -162,7 +163,7 @@ def calc_EST_NUM_PROMPT_GRAPHS(ctx):
     graphs_2d = prompt_bs_graphs * prompt_seq_graphs
     if prompt_bs_graphs > 1:
         graphs_2d = graphs_2d / 2
-    ctx_blocks_max = max(1, (ctx['MAX_MODEL_LEN'] - ctx['VLLM_PROMPT_SEQ_BUCKET_MIN']) / ctx['BLOCK_SIZE'])
+    ctx_blocks_max = max(1, (ctx['MAX_MODEL_LEN'] - ctx['VLLM_PROMPT_QUERY_BUCKET_MIN']) / ctx['BLOCK_SIZE'])
     ctx_blocks_min = max(1, (ctx['MAX_MODEL_LEN'] - ctx['MAX_NUM_BATCHED_TOKENS']) / ctx['BLOCK_SIZE'])
     if ctx['VLLM_EXPONENTIAL_BUCKETING']:
         ctx_block_graphs_max = max(1, math.ceil(math.log(ctx_blocks_max, 2)))
@@ -240,10 +241,6 @@ def calc_VLLM_DECODE_BLOCK_BUCKET_MAX(ctx):
     return max(128, math.ceil((ctx['MAX_NUM_SEQS'] * ctx['MAX_MODEL_LEN']) / 128))
 
 
-def calc_VLLM_PROMPT_SEQ_BUCKET_MAX(ctx):
-    return ctx['MAX_MODEL_LEN']
-
-
 # Map parameter names to calculation functions
 PARAM_CALC_FUNCS = {
     "VLLM_PROMPT_BS_BUCKET_MAX": calc_VLLM_PROMPT_BS_BUCKET_MAX,
@@ -280,5 +277,4 @@ PARAM_CALC_FUNCS = {
     "KV_CACHE_MEM": calc_KV_CACHE_MEM,
     "MAX_NUM_SEQS": calc_MAX_NUM_SEQS,
     "VLLM_DECODE_BLOCK_BUCKET_MAX": calc_VLLM_DECODE_BLOCK_BUCKET_MAX,
-    "VLLM_PROMPT_SEQ_BUCKET_MAX": calc_VLLM_PROMPT_SEQ_BUCKET_MAX,
 }
