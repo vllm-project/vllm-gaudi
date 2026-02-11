@@ -4313,6 +4313,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     if (block_gate is not None and experts is not None
                             and getattr(experts, '_gate', None) is block_gate):
                         experts._gate = None
+                        self._detached_moe_gates.add(id(experts))
 
     def _sync_shared_moe_gates(self):
         """Re-sync SharedFusedMoE._gate after INC conversion.
@@ -4322,6 +4323,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         the SharedFusedMoE._gate reference so that the overlapped
         execution path inside FusedMoE.forward_impl() also uses the
         patched gate.
+
+        Only experts whose _gate was explicitly detached by
+        _remove_duplicate_submodules are restored; experts whose
+        _gate was originally None are left unchanged.
         """
         model = self.get_model()
         if not hasattr(model, "model"):
@@ -4332,11 +4337,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 continue
             block_gate = getattr(mlp, 'gate', None)
             experts = getattr(mlp, 'experts', None)
-            if (block_gate is not None and experts is not None and hasattr(experts, '_gate')):
+            if (block_gate is not None and experts is not None and id(experts) in self._detached_moe_gates):
                 experts._gate = block_gate
 
     def _inc_preprocess(self):
         _apply_inc_patch()
+        self._detached_moe_gates: set[int] = set()
         self._remove_duplicate_submodules()
 
     def log_graph_warmup_summary(self, buckets, is_prompt, total_mem):
