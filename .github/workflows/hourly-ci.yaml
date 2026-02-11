@@ -313,5 +313,5 @@ jobs:
     steps:
       - name: Remove Docker image to free up space
         run: |
-          echo "Cleaning up Docker images related to this PR..."
+          echo "Cleaning up Docker images created by this workflow run..."
           docker rmi -f hpu-plugin-v1-test-env-hourly-ci || true
