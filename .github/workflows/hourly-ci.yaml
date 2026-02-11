@@ -159,21 +159,19 @@ jobs:
       - name: Discover test functions
         id: set-matrix
         run: |
-          # This command robustly discovers all functions in the script that match the 'run_*'
-          # naming convention, excluding the main 'run_all_tests' function itself.
-          # The final list is formatted into a JSON array required for the matrix strategy.
-          TEST_FUNCTIONS=$( grep '^run_' ./tests/full_tests/ci_gsm8k_tests.sh | \
-                      awk '{print $1}' | \
-                      sed 's/()//' | \
-                      jq -R . | jq -s -c . )
+          # Use the script's built-in discover_matrix to generate a 2D matrix
+          # of {test_function, mode} objects. Each test declares its supported
+          # execution modes (lazy, eager, or both) via EAGER_ONLY_TESTS / LAZY_ONLY_TESTS
+          # arrays in ci_gsm8k_tests.sh. Tests supporting both modes appear twice.
+          MATRIX=$(bash ./tests/full_tests/ci_gsm8k_tests.sh discover_matrix)
 
-          echo "Discovered test matrix: $TEST_FUNCTIONS"
+          echo "Discovered test matrix: $MATRIX"
           # Fail the job if no tests were found.
-          if [ "$TEST_FUNCTIONS" = "[]" ]; then
+          if [ "$MATRIX" = "[]" ]; then
             echo "::error::No test functions were discovered. Failing the workflow."
             exit 1
           fi
-          echo "matrix=$TEST_FUNCTIONS" >> "$GITHUB_OUTPUT"
+          echo "matrix={\"include\":${MATRIX}}" >> "$GITHUB_OUTPUT"
 
   # JOB 5: (UPDATED)
   e2e:
@@ -184,23 +182,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The list of test functions is dynamically populated from the output of the 'discover_tests' job.
-        test_function: ${{ fromJson(needs.discover_tests.outputs.matrix) }}
+        # 2D matrix of {test_function, mode} objects dynamically populated from discover_tests.
+        # Each test runs in its compatible mode(s): lazy (PT_HPU_LAZY_MODE=1), eager (PT_HPU_LAZY_MODE=0), or both.
+        ${{ fromJson(needs.discover_tests.outputs.matrix) }}
 
     steps:
-      - name: Run test suite - ${{ matrix.test_function }}
+      - name: Run test suite - ${{ matrix.test_function }} (${{ matrix.mode }})
         run: |
           EXITCODE=1
-          CONTAINER_NAME="hpu-plugin-test-${{ matrix.test_function }}-${{ github.run_id }}"
+          CONTAINER_NAME="hpu-plugin-test-${{ matrix.test_function }}-${{ matrix.mode }}-${{ github.run_id }}"
           # Ensure the container is removed upon exit, regardless of success or failure.
           remove_docker_containers() { docker rm -f $CONTAINER_NAME || true; }
           trap 'remove_docker_containers; exit $EXITCODE;' EXIT
           remove_docker_containers
 
-          echo "Running HPU plugin test: ${{ matrix.test_function }}"
+          # Map mode name to PT_HPU_LAZY_MODE value: lazy=1, eager=0
+          MODE_VALUE=$([[ "${{ matrix.mode }}" == "lazy" ]] && echo "1" || echo "0")
+
+          echo "Running HPU plugin test: ${{ matrix.test_function }} (mode=${{ matrix.mode }}, PT_HPU_LAZY_MODE=${MODE_VALUE})"
           docker run --rm --runtime=habana --name=$CONTAINER_NAME --network=host \
             --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
+            -e PT_HPU_LAZY_MODE=${MODE_VALUE} \
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \

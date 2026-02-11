@@ -8,36 +8,105 @@ set -e
 # Defines the path to the vllm-gaudi directory.
 # All test functions will use this variable.
 VLLM_GAUDI_PREFIX=${VLLM_GAUDI_PREFIX:-"vllm-gaudi"}
-echo $VLLM_GAUDI_PREFIX
+
+# --- Execution Mode ---
+# PT_HPU_LAZY_MODE controls the HPU execution mode:
+#   1 = lazy mode (graph-based compilation)
+#   0 = eager mode (immediate execution, default)
+#
+# The mode is inherited from the environment. If not set, defaults to eager (0).
+# CI wrappers and workflows set this variable before invoking the script.
+export PT_HPU_LAZY_MODE="${PT_HPU_LAZY_MODE:-0}"
+
+# --- Mode-Specific Test Declarations ---
+# By default, all tests run in BOTH lazy and eager modes.
+# Tests that can ONLY run in a specific mode must be listed in the
+# corresponding associative array below.
+#
+# When adding a new test:
+#   - If it works in both modes: no action needed (default behavior).
+#   - If it only works in eager: add it to EAGER_ONLY_TESTS.
+#   - If it only works in lazy:  add it to LAZY_ONLY_TESTS.
+declare -A EAGER_ONLY_TESTS=(
+    ["run_dsv2_blockfp8_static_scaling_fp8kv_test"]=1
+    ["run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test"]=1
+    ["run_dsv2_blockfp8_static_scaling_fp8qkv_test"]=1
+    ["run_qwen3_vl_test"]=1
+    ["run_llama3_70b_inc_dynamic_quant_test"]=1
+    ["run_sleep_mode_test"]=1
+)
+
+declare -A LAZY_ONLY_TESTS=(
+    # Currently none. Available for future use if a test only works in lazy mode.
+)
+
+# --- Mode Utility Functions ---
+
+# Returns the current execution mode as a human-readable string.
+get_current_mode() {
+    if [[ "${PT_HPU_LAZY_MODE}" == "1" ]]; then
+        echo "lazy"
+    else
+        echo "eager"
+    fi
+}
+
+# Returns the required mode for a given test function: "eager", "lazy", or "both".
+get_test_required_mode() {
+    local test_name="$1"
+    if [[ -n "${EAGER_ONLY_TESTS[$test_name]+_}" ]]; then
+        echo "eager"
+    elif [[ -n "${LAZY_ONLY_TESTS[$test_name]+_}" ]]; then
+        echo "lazy"
+    else
+        echo "both"
+    fi
+}
+
+# Returns 0 (true) if the test is compatible with the current execution mode.
+is_test_compatible() {
+    local test_name="$1"
+    local current_mode required_mode
+    current_mode=$(get_current_mode)
+    required_mode=$(get_test_required_mode "$test_name")
+    [[ "$required_mode" == "both" ]] || [[ "$required_mode" == "$current_mode" ]]
+}
+
+# Print execution mode info only when running tests (not during discovery).
+# The entry point at the bottom of this script handles this.
+_print_mode_info() {
+    echo "Execution mode: $(get_current_mode) (PT_HPU_LAZY_MODE=${PT_HPU_LAZY_MODE})"
+    echo "VLLM_GAUDI_PREFIX: ${VLLM_GAUDI_PREFIX}"
+}
 
 # Gemma3 with image input
 run_gemma3_test() {
     echo "➡️ Testing gemma-3-4b-it..."
-    VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
     echo "✅ Test with multimodal-support with gemma-3-4b-it passed."
     echo "➡️ Testing gemma-3-4b-it with multiple images(applying sliding_window)..."
-    VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm_multi.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-27b-it.yaml"
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm_multi.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-27b-it.yaml"
     echo "✅ Test with multimodal-support with multiple images gemma-3-27b-it passed."
 }
 
 # Basic model test
 run_basic_model_test() {
     echo "➡️ Testing basic model with vllm-hpu plugin v1..."
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model facebook/opt-125m
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model facebook/opt-125m
     echo "✅ Test with basic model passed."
 }
 
 # Tensor parallel size 2
 run_tp2_test() {
     echo "➡️ Testing tensor parallel size 2 with vllm-hpu plugin v1..."
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model facebook/opt-125m --tensor-parallel-size 2
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model facebook/opt-125m --tensor-parallel-size 2
     echo "✅ Test with tensor parallel size 2 passed."
 }
 
 # MLA and MoE test
 run_mla_moe_test() {
     echo "➡️ Testing MLA and MoE with vllm-hpu plugin v1..."
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code
     echo "✅ Test with deepseek v2 lite passed."
 }
 
@@ -45,7 +114,7 @@ run_mla_moe_test() {
 run_granite_inc_test() {
     echo "➡️ Testing granite-8b + inc with vllm-hpu plugin v1..."
     QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_unit_scale_quant.json" \
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model ibm-granite/granite-3.3-2b-instruct --trust-remote-code --quantization inc --kv_cache_dtype fp8_inc
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model ibm-granite/granite-3.3-2b-instruct --trust-remote-code --quantization inc --kv_cache_dtype fp8_inc
     echo "✅ Test with granite + inc passed."
 }
 
@@ -53,7 +122,7 @@ run_granite_inc_test() {
 run_deepseek_v2_inc_test() {
     echo "➡️ Testing deepseek_v2 + inc with vllm-hpu plugin v1..."
     QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_unit_scale_quant.json" \
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --kv_cache_dtype fp8_inc
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --kv_cache_dtype fp8_inc
     echo "✅ Test with deepseek_v2 + inc passed."
 }
 
@@ -61,7 +130,7 @@ run_deepseek_v2_inc_test() {
 run_deepseek_v2_inc_dynamic_tp2_test() {
     echo "➡️ Testing deepseek_v2 + inc dynamic quantization + tp2..."
     QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_dynamic_quant.json" \
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --tensor-parallel-size 2
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --tensor-parallel-size 2
     echo "✅ Test with deepseek_v2 + inc dynamic quantization + tp2 successful."
 }
 
@@ -69,7 +138,7 @@ run_deepseek_v2_inc_dynamic_tp2_test() {
 run_qwen3_inc_dynamic_test() {
     echo "➡️ Testing Qwen3-8B-FP8 + inc requant FP8 model + dynamic quant..."
     QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_dynamic_quant.json" VLLM_HPU_FORCE_CHANNEL_FP8=false \
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 \
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true \
     python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Qwen/Qwen3-8B-FP8 --trust-remote-code
     echo "✅ Test with Qwen3-8B-FP8 + inc requant FP8 model + dynamic quant passed."
 }
@@ -78,7 +147,7 @@ run_qwen3_inc_dynamic_test() {
 # The lazy mode works on 1.24.0-272
 run_dsv2_blockfp8_static_scaling_fp8kv_test() {
     echo "➡️ Testing Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 KV..."
-    PT_HPU_LAZY_MODE=0 HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model INC4AI/DeepSeek-V2-Lite-Chat-BF16-FP8-STATIC-FP8-KV-TEST-ONLY --trust-remote-code
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model INC4AI/DeepSeek-V2-Lite-Chat-BF16-FP8-STATIC-FP8-KV-TEST-ONLY --trust-remote-code
     echo "✅ Test with Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 KV successful."
 }
 
@@ -86,7 +155,7 @@ run_dsv2_blockfp8_static_scaling_fp8kv_test() {
 # The lazy mode works on 1.24.0-272
 run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test() {
     echo "➡️ Testing Qwen3-8B + static scaling + FP8 Attn..."
-    PT_HPU_LAZY_MODE=0 HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model INC4AI/Qwen3-8B-FP8_STATIC-FP8-Attn-LLMC-Test-Only --trust-remote-code --kv_cache_dtype fp8_inc
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model INC4AI/Qwen3-8B-FP8_STATIC-FP8-Attn-LLMC-Test-Only --trust-remote-code --kv_cache_dtype fp8_inc
     echo "✅ Test with Qwen3-8B + static scaling + FP8 Attn successful."
 }
 
@@ -94,28 +163,28 @@ run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test() {
 # The lazy mode works on 1.24.0-272
 run_dsv2_blockfp8_static_scaling_fp8qkv_test() {
     echo "➡️ Testing Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 QKV..."
-    PT_HPU_LAZY_MODE=0 HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/DeepSeek-V2-Lite-Chat-BF16-FP8-STATIC-FP8-QKV-TEST-ONLY --trust-remote-code --kv_cache_dtype fp8_inc
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/DeepSeek-V2-Lite-Chat-BF16-FP8-STATIC-FP8-QKV-TEST-ONLY --trust-remote-code --kv_cache_dtype fp8_inc
     echo "✅ Test with Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 QKV successful."
 }
 
 # QWEN3 + blockfp8 + dynamic scaling
 run_qwen3_blockfp8_dynamic_scaling_test() {
     echo "➡️ Testing Qwen3-8B-FP8 + blockfp8 + dynamic scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Qwen/Qwen3-8B-FP8 --trust-remote-code
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Qwen/Qwen3-8B-FP8 --trust-remote-code
     echo "✅ Test with Qwen3-8B-FP8 + blockfp8 + dynamic scaling successful."
 }
 
 # QWEN3 compressed tensor + dynamic scaling
 run_qwen3_compressed_tensor_dynamic_scaling_test() {
     echo "➡️ Testing Qwen3-8B-FP8-dynamic + compressed-tensor + dynamic scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Qwen3-8B-FP8-dynamic --trust-remote-code
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Qwen3-8B-FP8-dynamic --trust-remote-code
     echo "✅ Test with Qwen3-8B-FP8-dynamic + compressed-tensor + dynamic scaling successful."
 }
 
 # QWEN3 FP8 + MOE compressed tensor + dynamic scaling
 run_qwen3_moe_compressed_tensor_dynamic_scaling_test() {
     echo "➡️ Testing Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 + moe + compressed-tensor + dynamic scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 --trust-remote-code --max-model-len 131072
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 --trust-remote-code --max-model-len 131072
     echo "✅ Test with Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 + moe + compressed-tensor + dynamic scaling successful."
 }
 
@@ -129,21 +198,21 @@ run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_test() {
 # QWEN3 FP8 + MOE compressed tensor + static scaling (weight per-channel, activation per-tensor)
 run_qwen3_moe_compressed_tensor_static_scaling_test() {
     echo "▒~^▒▒~O Testing Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + moe + compressed-tensor + static scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Static-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Static-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
     echo "▒~\~E Test with Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + moe + compressed-tensor + static scaling successful."
 }
 
 # RedHatAI/Meta-Llama-3-8B-Instruct-FP8 Per-tensor F8 static scales
 run_llama3_per_tensor_scaling_test() {
     echo "➡️ Testing RedHatAI/Meta-Llama-3-8B-Instruct-FP8 + per tensor scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Meta-Llama-3-8B-Instruct-FP8 --trust-remote-code
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Meta-Llama-3-8B-Instruct-FP8 --trust-remote-code
     echo "✅ Test with RedHatAI/Meta-Llama-3-8B-Instruct-FP8 + per tensor scaling successful."
 }
 
 # nvidia/Llama-3.1-8B-Instruct-FP8 Per-tensor F8 static scales
 run_llama3_modelopt_per_tensor_scaling_test() {
     echo "➡️ Testing nvidia/Llama-3.1-8B-Instruct-FP8 + per tensor scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model nvidia/Llama-3.1-8B-Instruct-FP8 --trust-remote-code --kv_cache_dtype fp8_inc
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model nvidia/Llama-3.1-8B-Instruct-FP8 --trust-remote-code --kv_cache_dtype fp8_inc
     echo "✅ Test with nvidia/Llama-3.1-8B-Instruct-FP8 + per tensor scaling successful."
 }
 
@@ -152,7 +221,7 @@ run_llama3_modelopt_per_tensor_scaling_test() {
 # quantization test must run after calibration test as it is using files generated by calibration test.
 run_granite_inc_calibration_and_quantization_test() {
     echo "Testing inc calibration on granite"
-    QUANT_CONFIG=${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_measure.json VLLM_CONTIGUOUS_PA=False HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 \
+    QUANT_CONFIG=${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_measure.json VLLM_CONTIGUOUS_PA=False HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=True \
     python -u ${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py --model ibm-granite/granite-3.3-2b-instruct --trust-remote-code --quantization inc
     if [ $? -ne 0 ]; then
         echo "Error: Test failed for inc calibration on granite" >&2
@@ -161,7 +230,7 @@ run_granite_inc_calibration_and_quantization_test() {
     echo "Test with inc calibration on granite passed"
 
     echo "Testing inc quantization with hw aligned scales on granite"
-    QUANT_CONFIG=${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_maxabs_hw_quant.json VLLM_CONTIGUOUS_PA=False HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 \
+    QUANT_CONFIG=${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_maxabs_hw_quant.json VLLM_CONTIGUOUS_PA=False HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=True \
     python -u ${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py --model ibm-granite/granite-3.3-2b-instruct --trust-remote-code --quantization inc --kv_cache_dtype fp8_inc
     if [ $? -ne 0 ]; then
         echo "Error: Test failed for inc quantization with hw aligned scales on granite" >&2
@@ -173,36 +242,36 @@ run_granite_inc_calibration_and_quantization_test() {
 # Structured output
 run_structured_output_test() {
     echo "➡️ Testing structured output..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/structured_outputs.py"
-    HABANA_VISIBLE_DEVICES=all VLLM_MERGED_PREFILL=True VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/structured_outputs.py"
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/structured_outputs.py"
+    HABANA_VISIBLE_DEVICES=all VLLM_MERGED_PREFILL=True VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/structured_outputs.py"
     echo "✅ Test with structured outputs passed."
 }
 
 # AWQ test
 run_awq_test() {
     echo "➡️ Testing awq inference with vllm-hpu plugin v1..."
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model TheBloke/Llama-2-7B-Chat-AWQ --dtype bfloat16 --quantization awq_hpu
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model TheBloke/Llama-2-7B-Chat-AWQ --dtype bfloat16 --quantization awq_hpu
     echo "✅ Test with awq passed."
 }
 
 # GPTQ test
 run_gptq_test() {
     echo "➡️ Testing gptq inference with vllm-hpu plugin v1..."
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model TheBloke/Llama-2-7B-Chat-GPTQ --dtype bfloat16 --quantization gptq_hpu
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model TheBloke/Llama-2-7B-Chat-GPTQ --dtype bfloat16 --quantization gptq_hpu
     echo "✅ Test with gptq passed."
 }
 
 # Compressed w4a16 channelwise
 run_compressed_w4a16_channelwise_test() {
     echo "➡️ Testing compressed w4a16 (channelwise) inference..."
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model nm-testing/tinyllama-oneshot-w4a16-channel-v2 --dtype bfloat16
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model nm-testing/tinyllama-oneshot-w4a16-channel-v2 --dtype bfloat16
     echo "✅ Test with compressed w4a16 (channelwise) passed."
 }
 
 # Compressed w4a16 MoE with g_idx
 run_compressed_w4a16_moe_gidx_test() {
     echo "➡️ Testing compressed w4a16 MoE with g_idx inference..."
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model nm-testing/test-w4a16-mixtral-actorder-group --dtype bfloat16
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model nm-testing/test-w4a16-mixtral-actorder-group --dtype bfloat16
     echo "✅ Test with compressed w4a16 MoE with g_idx passed."
 }
 
@@ -210,7 +279,7 @@ run_compressed_w4a16_moe_gidx_test() {
 run_llama3_70b_inc_dynamic_quant_test() {
     echo "➡️ Testing Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode ..."
     QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_maxabs_dynamic_quant.json" \
-    HABANA_VISIBLE_DEVICES=all RUNTIME_SCALE_PATCHING=0 VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 \
+    HABANA_VISIBLE_DEVICES=all RUNTIME_SCALE_PATCHING=0 VLLM_SKIP_WARMUP=true \
     python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic --max-model-len 2048
     echo "✅ Test with Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode passed."
 }
@@ -218,7 +287,7 @@ run_llama3_70b_inc_dynamic_quant_test() {
 # GSM8K on granite-8b
 run_gsm8k_granite_test() {
     echo "➡️ Testing GSM8K on granite-8b..."
-    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 \
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/granite-8b.yaml"
     echo "✅ Test with granite-8b passed."
 }
@@ -226,7 +295,7 @@ run_gsm8k_granite_test() {
 # GSM8K on granite-8b (unified attn)
 run_gsm8k_granite_test_unified_attn() {
     echo "➡️ Testing GSM8K on granite-8b with unified attention..."
-    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 \
+    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/granite-8b.yaml"
     echo "✅ Test with granite-8b unified attention passed."
 }
@@ -234,7 +303,7 @@ run_gsm8k_granite_test_unified_attn() {
 # GSM8K on granite-8b with async scheduling
 run_gsm8k_granite_async_test() {
     echo "➡️ Testing GSM8K on granite-8b with async scheduling..."
-    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 ASYNC_SCHEDULING=1 \
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True ASYNC_SCHEDULING=1 \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/granite-8b.yaml"
     echo "✅ Test with granite-8b + async_scheduling passed."
 }
@@ -242,7 +311,7 @@ run_gsm8k_granite_async_test() {
 # GSM8K on granite-8b (unified attn + async scheduling)
 run_gsm8k_granite_test_unified_attn_async() {
     echo "➡️ Testing GSM8K on granite-8b with unified attention + async scheduling..."
-    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 ASYNC_SCHEDULING=1 \
+    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True VLLM_USE_V1=1 ASYNC_SCHEDULING=1 \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/granite-8b.yaml"
     echo "✅ Test with granite-8b unified attention + async scheduling passed."
 }
@@ -250,7 +319,7 @@ run_gsm8k_granite_test_unified_attn_async() {
 # GSM8K on deepseek v2 lite
 run_gsm8k_deepseek_test() {
     echo "➡️ Testing GSM8K on deepseek v2 lite..."
-    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 \
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml"
     echo "✅ GSM8K Test with deepseek v2 lite passed."
 }
@@ -259,7 +328,7 @@ run_gsm8k_deepseek_test() {
 # GSM8K on deepseek v2 lite + unified attn
 run_gsm8k_deepseek_unified_mla_test() {
     echo "➡️ Testing GSM8K on deepseek v2 lite + Unified MLA..."
-    VLLM_UNIFIED_ATTN=true VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 \
+    VLLM_UNIFIED_ATTN=true VLLM_SKIP_WARMUP=True \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml"
     echo "✅ GSM8K Test with deepseek v2 lite + Unified MLA passed."
 }
@@ -267,7 +336,7 @@ run_gsm8k_deepseek_unified_mla_test() {
 # GSM8K on QWEN3-30B-A3B
 run_gsm8k_qwen3_30b_test() {
     echo "➡️ Testing GSM8K on QWEN3-30B-A3B..."
-    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 TP_SIZE=2 \
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True TP_SIZE=2 \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/Qwen3-30B-A3B.yaml"
     echo "✅ Test with QWEN3-30B-A3B passed."
 }
@@ -275,7 +344,7 @@ run_gsm8k_qwen3_30b_test() {
 # Multimodal-support with qwen2.5-vl
 run_qwen2_5_vl_test() {
     echo "➡️ Testing Qwen2.5-VL-7B..."
-    VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 \
+    VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False \
     python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen2.5-vl-7b.yaml"
     echo "✅ Test with multimodal-support with qwen2.5-vl-7b passed."
 }
@@ -283,7 +352,7 @@ run_qwen2_5_vl_test() {
 # Multimodal-support + unified attention with qwen2.5-vl
 run_qwen2_5_vl_unified_attn_test() {
     echo "➡️ Testing Qwen2.5-VL-7B with unified attention..."
-    VLLM_SKIP_WARMUP=true VLLM_UNIFIED_ATTN=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
+    VLLM_SKIP_WARMUP=true VLLM_UNIFIED_ATTN=True VLLM_USE_V1=1 \
     python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen2.5-vl-7b.yaml"
     echo "✅ Test multimodal-support + unified attention with qwen2.5-vl-7b passed."
 }
@@ -291,7 +360,7 @@ run_qwen2_5_vl_unified_attn_test() {
 # Multimodal-support with qwen3-vl
 run_qwen3_vl_test() {
     echo "➡️ Testing Qwen3-VL-32B..."
-    VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=0 \
+    VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False \
     python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen3-vl-32b.yaml"
     echo "✅ Test with multimodal-support with qwen3-vl-32b passed."
 }
@@ -299,45 +368,45 @@ run_qwen3_vl_test() {
 # Spec decode with ngram
 run_spec_decode_ngram_test() {
     echo "➡️ Testing Spec-decode with ngram..."
-    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --assert_accept_rate 0.25 --osl 1024
-    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --accuracy_rate 0.75
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --assert_accept_rate 0.25 --osl 1024
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --accuracy_rate 0.75
     echo "✅ Test with spec decode with ngram passed."
 }
 
 # Spec decode with eagle3
 run_spec_decode_eagle3_test() {
     echo "➡️ Testing Spec-decode with eagle3..."
-    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.70 --osl 2048
-    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --accuracy_rate 0.65
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.70 --osl 2048
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --accuracy_rate 0.65
     echo "✅ Test with spec decode with eagle3 passed."
 }
 
 # Spec decode with eagle3 and num_speculative_tokens = 2
 run_spec_decode_eagle3_num_spec_2_test() {
     echo "➡️ Testing Spec-decode with eagle3 and num_speculative_tokens = 2..."
-    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.59 --osl 2048 --num_spec_tokens 2
-    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --accuracy_rate 0.59 --num_spec_tokens 2
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.59 --osl 2048 --num_spec_tokens 2
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --accuracy_rate 0.59 --num_spec_tokens 2
     echo "✅ Test with spec decode with eagle3 and num_speculative_tokens = 2 passed."
 }
 
 # Spec decode with ngram with UA
 run_UA_spec_decode_ngram_test() {
     echo "➡️ Testing Spec-decode with ngram..."
-    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --assert_accept_rate 0.25 --osl 512
+    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --assert_accept_rate 0.25 --osl 512
     echo "✅ Test with spec decode with ngram passed."
 }
 
 # Spec decode with eagle3 with UA
 run_UA_spec_decode_eagle3_test() {
     echo "➡️ Testing Spec-decode with eagle3..."
-    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.50 --osl 1024
+    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.50 --osl 1024
     echo "✅ Test with spec decode with eagle3 passed."
 }
 
 # Embedding-model-support for v1
 run_embedding_model_test() {
    echo "➡️ Testing Embedding-model-support for v1..."
-   HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=false PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/pooling.py" --model intfloat/e5-mistral-7b-instruct --trust-remote-code
+   HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=false python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/pooling.py" --model intfloat/e5-mistral-7b-instruct --trust-remote-code
    echo "✅ Embedding-model-support for v1 successful."
 }
 
@@ -377,7 +446,7 @@ run_offloading_connector_test() {
 # sleep mode
 run_sleep_mode_test() {
     echo "Testing basic model with sleep mode / wake up functionality"
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 VLLM_ENABLE_V1_MULTIPROCESSING=0 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/sleep_mode.py" --model facebook/opt-125m
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true VLLM_ENABLE_V1_MULTIPROCESSING=0 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/sleep_mode.py" --model facebook/opt-125m
     echo "✅ Test with sleep mode passed."
 }
 
@@ -385,76 +454,152 @@ run_sleep_mode_test() {
 
 # --- Utility Functions ---
 
-# Function to run all tests sequentially
+# Function to run all tests sequentially, respecting mode compatibility.
+# Tests incompatible with the current mode are automatically skipped.
 launch_all_tests() {
-    echo "🚀 Starting all test suites..."
-    run_gemma3_test
-    run_basic_model_test
-    run_tp2_test
-    run_mla_moe_test
-    run_granite_inc_test
-    run_granite_inc_calibration_and_quantization_test
-    run_deepseek_v2_inc_test
-    run_deepseek_v2_inc_dynamic_tp2_test
-    run_qwen3_inc_dynamic_test
-    run_qwen3_blockfp8_dynamic_scaling_test
-    run_qwen3_compressed_tensor_dynamic_scaling_test
-    run_qwen3_moe_compressed_tensor_dynamic_scaling_test
-    run_qwen3_moe_compressed_tensor_static_scaling_test
-    run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_test
-    run_llama3_per_tensor_scaling_test
-    run_structured_output_test
-    run_awq_test
-    run_gptq_test
-    run_compressed_w4a16_channelwise_test
-    run_compressed_w4a16_moe_gidx_test
-    run_gsm8k_granite_test
-    run_gsm8k_granite_test_unified_attn
-    run_gsm8k_granite_async_test
-    run_gsm8k_granite_test_unified_attn_async
-    run_gsm8k_deepseek_test
-    run_gsm8k_deepseek_unified_mla_test
-    run_gsm8k_qwen3_30b_test
-    run_qwen2_5_vl_test
-    run_qwen2_5_vl_unified_attn_test
-    run_spec_decode_ngram_test
-    run_spec_decode_eagle3_test
-    run_spec_decode_eagle3_num_spec_2_test
-    run_llama3_70b_inc_dynamic_quant_test
-    run_cpu_offloading_test
-    run_offloading_connector_test
-    run_sleep_mode_test
-    #run_embedding_model_test
-    echo "🎉 All test suites passed successfully!"
+    local current_mode
+    current_mode=$(get_current_mode)
+    echo "🚀 Starting all test suites in ${current_mode} mode (PT_HPU_LAZY_MODE=${PT_HPU_LAZY_MODE})..."
+
+    local all_tests=(
+        run_gemma3_test
+        run_basic_model_test
+        run_tp2_test
+        run_mla_moe_test
+        run_granite_inc_test
+        run_granite_inc_calibration_and_quantization_test
+        run_deepseek_v2_inc_test
+        run_deepseek_v2_inc_dynamic_tp2_test
+        run_qwen3_inc_dynamic_test
+        run_dsv2_blockfp8_static_scaling_fp8kv_test
+        run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test
+        run_dsv2_blockfp8_static_scaling_fp8qkv_test
+        run_qwen3_blockfp8_dynamic_scaling_test
+        run_qwen3_compressed_tensor_dynamic_scaling_test
+        run_qwen3_moe_compressed_tensor_dynamic_scaling_test
+        run_qwen3_moe_compressed_tensor_static_scaling_test
+        run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_test
+        run_llama3_per_tensor_scaling_test
+        run_llama3_modelopt_per_tensor_scaling_test
+        run_structured_output_test
+        run_awq_test
+        run_gptq_test
+        run_compressed_w4a16_channelwise_test
+        run_compressed_w4a16_moe_gidx_test
+        run_llama3_70b_inc_dynamic_quant_test
+        run_gsm8k_granite_test
+        run_gsm8k_granite_test_unified_attn
+        run_gsm8k_granite_async_test
+        run_gsm8k_granite_test_unified_attn_async
+        run_gsm8k_deepseek_test
+        run_gsm8k_deepseek_unified_mla_test
+        run_gsm8k_qwen3_30b_test
+        run_qwen2_5_vl_test
+        run_qwen2_5_vl_unified_attn_test
+        run_qwen3_vl_test
+        run_spec_decode_ngram_test
+        run_spec_decode_eagle3_test
+        run_spec_decode_eagle3_num_spec_2_test
+        run_UA_spec_decode_ngram_test
+        run_UA_spec_decode_eagle3_test
+        run_cpu_offloading_test
+        run_offloading_connector_test
+        run_sleep_mode_test
+        #run_embedding_model_test
+    )
+
+    local skipped=0
+    local executed=0
+    for func in "${all_tests[@]}"; do
+        # Skip commented-out tests
+        [[ "$func" == \#* ]] && continue
+
+        if is_test_compatible "$func"; then
+            echo "▶ Running ${func} [$(get_test_required_mode "$func") mode test]..."
+            "$func"
+            ((executed++))
+        else
+            echo "⏭ Skipping ${func} (requires $(get_test_required_mode "$func"), current: ${current_mode})"
+            ((skipped++))
+        fi
+    done
+
+    echo "🎉 Finished! Executed: ${executed}, Skipped (mode mismatch): ${skipped}"
 }
 
+# --- CI Discovery ---
+# Outputs a JSON array of {test_function, mode} objects for GitHub Actions matrix.
+# Each test is emitted for every mode it supports.
+# Usage: ci_gsm8k_tests.sh discover_matrix
+discover_matrix() {
+    local script_path="${BASH_SOURCE[0]}"
+    local json="["
+    local first=true
+
+    while IFS= read -r func; do
+        local required_mode
+        required_mode=$(get_test_required_mode "$func")
+
+        local modes=()
+        case "$required_mode" in
+            eager) modes=("eager") ;;
+            lazy)  modes=("lazy") ;;
+            both)  modes=("lazy" "eager") ;;
+        esac
+
+        for mode in "${modes[@]}"; do
+            if ! $first; then json+=","; fi
+            json+="{\"test_function\":\"${func}\",\"mode\":\"${mode}\"}"
+            first=false
+        done
+    done < <(grep '^run_' "$script_path" | awk '{print $1}' | sed 's/()//')
+
+    json+="]"
+    echo "$json"
+}
 
 # A simple usage function to guide the user
 usage() {
-  echo "Usage: $0 [function_name]"
-  echo "If no function_name is provided, all tests will be run."
-  echo ""
-  echo "Available functions:"
-  # This command lists all functions in this script that start with 'run_'
-  declare -F | awk '{print "  - " $3}' | grep --color=never "run_"
+    echo "Usage: $0 [function_name|discover_matrix|launch_all_tests]"
+    echo ""
+    echo "Commands:"
+    echo "  <no argument>       Run all tests compatible with the current mode."
+    echo "  <function_name>     Run a single test function (mode compatibility is checked)."
+    echo "  discover_matrix     Output a JSON matrix of {test_function, mode} for CI."
+    echo "  launch_all_tests    Run all compatible tests sequentially."
+    echo ""
+    echo "Environment:"
+    echo "  PT_HPU_LAZY_MODE    Execution mode: 1=lazy, 0=eager (default: 0)"
+    echo ""
+    echo "Available test functions:"
+    declare -F | awk '{print "  - " $3}' | grep --color=never "run_"
 }
 
 
 # --- Script Entry Point ---
 
-# Default to 'run_all_tests' if no function name is provided as an argument.
-# The ${1:-run_all_tests} syntax means "use $1 if it exists, otherwise use 'run_all_tests'".
+# Default to 'launch_all_tests' if no function name is provided as an argument.
 FUNCTION_TO_RUN=${1:-launch_all_tests}
 
 # Check if the provided argument corresponds to a declared function in this script.
-if declare -f "$FUNCTION_TO_RUN" > /dev/null
-then
-  # If the function exists, call it.
-  "$FUNCTION_TO_RUN"
+if declare -f "$FUNCTION_TO_RUN" > /dev/null; then
+    # For run_* and launch_all_tests, print mode info before execution.
+    if [[ "$FUNCTION_TO_RUN" == run_* ]] || [[ "$FUNCTION_TO_RUN" == launch_all_tests ]]; then
+        _print_mode_info
+    fi
+
+    # For run_* functions, validate mode compatibility before execution.
+    if [[ "$FUNCTION_TO_RUN" == run_* ]]; then
+        if ! is_test_compatible "$FUNCTION_TO_RUN"; then
+            echo "⏭ Skipping ${FUNCTION_TO_RUN}: requires $(get_test_required_mode "$FUNCTION_TO_RUN") mode, but current mode is $(get_current_mode)."
+            echo "Set PT_HPU_LAZY_MODE appropriately and retry."
+            exit 0
+        fi
+    fi
+    "$FUNCTION_TO_RUN"
 else
-  # If the function doesn't exist, show an error and the usage guide.
-  echo "❌ Error: Function '${FUNCTION_TO_RUN}' is not defined."
-  echo ""
-  usage
-  exit 1
+    echo "❌ Error: Function '${FUNCTION_TO_RUN}' is not defined."
+    echo ""
+    usage
+    exit 1
 fi

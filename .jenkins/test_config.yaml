@@ -1,4 +1,6 @@
 # test_config.yaml
+# PT_HPU_LAZY_MODE is set per-step to control execution mode:
+#   1 = lazy mode, 0 = eager mode (default if not set)
 stages:
   - name: smoke_tests
     steps:
@@ -36,11 +38,12 @@ stages:
       - name: gsm8k_medium_g3_tp1
         flavor: g3
         command: >-
-          export PT_HPU_LAZY_MODE=1 &&  cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-medium.txt -t 1
+          export PT_HPU_LAZY_MODE=1 &&
+          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-medium.txt -t 1
       - name: gsm8k_medium_g3_tp2
         flavor: g3.s
         command: >-
-          export PT_HPU_LAZY_MODE=1 && 
+          export PT_HPU_LAZY_MODE=1 &&
           cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-medium.txt -t 2
       # Chendi: Failed on G2 due to Qwen3-30B might be too large
       # - name: gsm8k_medium_g2_tp1
@@ -51,17 +54,17 @@ stages:
       - name: gsm8k_medium_g2_tp2
         flavor: g2.s
         command: >-
-          export PT_HPU_LAZY_MODE=1 && 
+          export PT_HPU_LAZY_MODE=1 &&
           cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-medium.txt -t 2
       - name: gsm8k_large_g3_tp2
         flavor: g3.s
         command: >-
-          export PT_HPU_LAZY_MODE=1 && 
+          export PT_HPU_LAZY_MODE=1 &&
           cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-large.txt -t 2
       - name: gsm8k_large_g2_tp4
         flavor: g2.m
         command: >-
-          export PT_HPU_LAZY_MODE=1 && 
+          export PT_HPU_LAZY_MODE=1 &&
           cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-large.txt -t 4
       # Chendi: comment firstly since this one takes longest time and might fail on resource
       # - name: gsm8k_huge_g3_tp8
@@ -72,34 +75,32 @@ stages:
       - name: gsm8k_small_g3_tp1_fp8
         flavor: g3
         command: >-
-          cd .jenkins/lm-eval-harness && 
-          PT_HPU_LAZY_MODE=1 
+          export PT_HPU_LAZY_MODE=1 &&
+          cd .jenkins/lm-eval-harness &&
           bash run-tests.sh -c configs/models-fp8-g3-tp1.txt -t 1
       - name: gsm8k_small_g3_tp2_fp8
         flavor: g3.s
         command: >-
-          cd .jenkins/lm-eval-harness && 
-          PT_HPU_LAZY_MODE=1 
+          export PT_HPU_LAZY_MODE=1 &&
+          cd .jenkins/lm-eval-harness &&
           bash run-tests.sh -c configs/models-fp8.txt -t 2
       - name: gsm8k_small_g3_tp1_fp8_unified_attn
         flavor: g3
         command: >-
-          cd .jenkins/lm-eval-harness && 
-          PT_HPU_LAZY_MODE=1 
-          VLLM_UNIFIED_ATTN=true 
+          export PT_HPU_LAZY_MODE=1 && export VLLM_UNIFIED_ATTN=true &&
+          cd .jenkins/lm-eval-harness &&
           bash run-tests.sh -c configs/models-fp8-g3-tp1.txt -t 1
       - name: gsm8k_small_g3_tp2_fp8_unified_attn
         flavor: g3.s
         command: >-
-          cd .jenkins/lm-eval-harness && 
-          PT_HPU_LAZY_MODE=1 
-          VLLM_UNIFIED_ATTN=true 
+          export PT_HPU_LAZY_MODE=1 && export VLLM_UNIFIED_ATTN=true &&
+          cd .jenkins/lm-eval-harness &&
           bash run-tests.sh -c configs/models-fp8.txt -t 2
       - name: gsm8k_fp8_llama4_scout_g3_tp2_compressed_tensor
         flavor: g3.s
         command: >-
-          cd .jenkins/lm-eval-harness && 
-          VLLM_WEIGHT_LOAD_FORCE_SYNC=1 VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 
+          export PT_HPU_LAZY_MODE=1 && export VLLM_WEIGHT_LOAD_FORCE_SYNC=1 && export VLLM_CONTIGUOUS_PA=False &&
+          cd .jenkins/lm-eval-harness &&
           bash run-tests.sh -c configs/models-fp8-compressedtensor.txt -t 2
       # Chendi: crash on model weight loading, need to fix
       # - name: gsm8k_fp8_qwen3_30B_g3_tp1_block_scale_dynamic
@@ -118,6 +119,6 @@ stages:
       - name: multimodal_llama4_scout_g3_tp2_ep
         flavor: g3.s
         command: >-
-          cd .jenkins/vision && 
-          PT_HPU_LAZY_MODE=1 VLLM_WEIGHT_LOAD_FORCE_SYNC=1 
+          export PT_HPU_LAZY_MODE=1 && export VLLM_WEIGHT_LOAD_FORCE_SYNC=1 &&
+          cd .jenkins/vision &&
           bash run-tests.sh -c configs/models-llama4-scout.txt -t 2
