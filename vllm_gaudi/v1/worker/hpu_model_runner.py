@@ -4541,6 +4541,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
             # Cleanup after batch has been warmed up
             self.input_batch.req_id_to_index = {}
+            self.input_batch.top_p_reqs = set()
+            self.input_batch.top_k_reqs = set()
             self.requests = {}
 
         # Final synchronization to ensure all operations are completed
