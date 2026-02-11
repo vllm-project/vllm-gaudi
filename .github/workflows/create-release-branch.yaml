@@ -438,3 +438,14 @@ jobs:
           content-filepath: ./report.md
           # Optional: Add labels to the issue
           labels: release-report, automated
+
+  cleanup_docker_image:
+    name: Cleanup Docker Image
+    if: always()
+    needs: [run_unit_tests, e2e, run_data_parallel_test, run_pd_disaggregate_test, run_hpu_perf_tests]
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    steps:
+      - name: Remove Docker image to free up space
+        run: |
+          echo "Cleaning up Docker images related to this PR..."
+          docker rmi -f hpu-plugin-v1-${{ needs.prepare-release-branch.outputs.tag_name }} || true
