@@ -973,7 +973,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.max_num_batched_tokens = \
             self.scheduler_config.max_num_batched_tokens
         self.use_prefix_caching = (self.vllm_config.cache_config.enable_prefix_caching)
-        self.fake_prefix_caching = True
         self.bucketing_manager = HPUBucketingManager()
         max_num_prefill_seqs = self.max_num_seqs if self.use_merged_prefill \
                                else self.max_prefill_batch_size
@@ -2159,8 +2158,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         logits_indices = pad_list(logits_indices, round_up(len(logits_indices), self.logits_rounding),
                                   itertools.repeat(-1))
 
-        #logger.info(f"A {query_lens=} {context_lens=}")
-        #print(f"B {query_lens=} {context_lens=}")
         if self.num_mamba_layers > 0:
             # COMPUTE query_start_loc (similar to GPU)
             # This is a cumulative sum of query lengths
@@ -2231,7 +2228,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 )
 
             req_indices = [self.input_batch.req_id_to_index[req_id] for req_id in contents.req_ids]
-            if self.fake_prefix_caching:
+            if self.use_prefix_caching:
                 load_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_computed_token_cpu, target_bs)
                 store_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_scheduled_token_cpu, target_bs)
             else:
@@ -2239,9 +2236,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 load_state_indices_cpu = store_state_indices_cpu = \
                     self.prepare_mamba_state_idxs(req_indices, zeros, target_bs)
 
-            #print(f"p {load_state_indices_cpu=} {store_state_indices_cpu=}")
-
-            if self.fake_prefix_caching:
+            if self.use_prefix_caching:
                 assert len(contents.req_ids) == 1
                 assert mamba_block_size % self.mamba_chunk_size == 0
                 assert context_lens[0] % self.mamba_chunk_size == 0
@@ -2310,7 +2305,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             padding_mask_flat = async_h2d_copy(padding_mask_flat_cpu, device=self.device)
             query_start_loc_p = async_h2d_copy(query_start_loc_p_cpu, dtype=torch.int32)
 
-            if self.fake_prefix_caching:
+            if self.use_prefix_caching:
                 blocks_caching_range = async_h2d_copy(all_blocks_caching_ranges_cpu, device=self.device)
                 mamba_chunks_to_block_mapping = async_h2d_copy(all_mamba_chunks_to_block_mappings_cpu, device=self.device)
                 seqlens_offsets_for_blocks = async_h2d_copy(seqlens_offsets_for_blocks_cpu, device=self.device)
@@ -2454,8 +2449,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                   context_lens,
                                   block_table_cpu_tensor,
                                   scheduler_output=None) -> DecodeInputData:
-
-        #print(f"{num_scheduled_tokens=} {context_lens=}")
 
         # NOTE(kzawora): the +1 is what causes this entire thing to work,
         # as in the paged attention, we don't fetch just the context from cache,
@@ -2642,15 +2635,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 )
 
             req_indices = list(range(num_decodes))
-            if self.fake_prefix_caching:
+            if self.use_prefix_caching:
                 load_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_computed_token_cpu, padded_batch_size)
                 store_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_scheduled_token_cpu, padded_batch_size)
             else:
                 zeros = [0] * len(req_indices)
                 load_state_indices_cpu = store_state_indices_cpu = \
                     self.prepare_mamba_state_idxs(req_indices, zeros, padded_batch_size)
-
-            #print(f"p {load_state_indices_cpu=} {store_state_indices_cpu=}")
 
             seq_lens_cpu = torch.tensor(num_tokens_per_req, dtype=torch.int32, device='cpu', pin_memory=self.pin_memory)
 
