@@ -308,7 +308,7 @@ jobs:
   cleanup_docker_image:
     name: Cleanup Docker Image
     if: always()
-    needs: [run_unit_tests, e2e, run_data_parallel_test, run_pd_disaggregate_test]
+    needs: [discover_runner, run_unit_tests, e2e, run_data_parallel_test, run_pd_disaggregate_test]
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Remove Docker image to free up space
