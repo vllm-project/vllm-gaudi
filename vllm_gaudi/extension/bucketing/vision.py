@@ -23,7 +23,15 @@ MULTIMODAL_CONFIG = {
         'is_batch_based': False,
         # patches per image
         'buckets': [196, 256, 441, 480, 576, 900, 1156]
-    }
+    },
+    'pixtral': {
+        'is_batch_based': False,
+        'buckets': [512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 131076]
+    },
+    'mistral3': {
+        'is_batch_based': False,
+        'buckets': [512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 131076]
+    },
 }
 
 
