@@ -27,5 +27,4 @@ def register_model():
     ModelRegistry.register_model("HunYuanMoEV1ForCausalLM", "vllm_gaudi.models.hunyuan_v1:HpuHunYuanMoEV1ForCausalLM")
 
     from vllm_gaudi.models.minimax_m2 import HpuMiniMaxM2ForCausalLM  # noqa: F401
-    ModelRegistry.register_model("MiniMaxM2ForCausalLM",
-                                 "vllm_gaudi.models.minimax_m2:HpuMiniMaxM2ForCausalLM")
+    ModelRegistry.register_model("MiniMaxM2ForCausalLM", "vllm_gaudi.models.minimax_m2:HpuMiniMaxM2ForCausalLM")
