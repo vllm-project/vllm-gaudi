@@ -103,7 +103,7 @@ run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test() {
 
 # DS + blockfp8 + static scaling + FP8 QKV
 # The lazy mode works on 1.24.0-272
-run_dsv2_blockfp8_static_scaling_fp8qkv_test() {
+run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test() {
     echo "➡️ Testing Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 QKV..."
     PT_HPU_LAZY_MODE=0 HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/DeepSeek-V2-Lite-Chat-BF16-FP8-STATIC-FP8-QKV-TEST-ONLY --trust-remote-code --kv_cache_dtype fp8_inc
     echo "✅ Test with Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 QKV successful."
@@ -447,6 +447,7 @@ launch_all_tests() {
     run_qwen3_inc_dynamic_load_generate_test
     run_dsv2_blockfp8_static_scaling_fp8kv_load_generate_test
     run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test
+    run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test
     run_qwen3_blockfp8_dynamic_scaling_load_generate_test
     run_qwen3_compressed_tensor_dynamic_scaling_load_generate_test
     run_qwen3_moe_compressed_tensor_dynamic_scaling_load_generate_test
@@ -477,7 +478,7 @@ launch_all_tests() {
     run_spec_decode_eagle3_num_spec_2_test
     run_UA_spec_decode_ngram_test
     run_UA_spec_decode_eagle3_test
-    # run_embedding_model_test
+    run_embedding_model_test
     run_pd_disaggregate_nixl_libfabric_test
     run_pd_disaggregate_nixl_ucx_test
     run_cpu_offloading_test
