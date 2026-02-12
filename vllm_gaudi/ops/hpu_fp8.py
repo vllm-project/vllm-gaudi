@@ -18,6 +18,12 @@ from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_t
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+from vllm.model_executor.layers.quantization.kernels import scaled_mm
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.pytorch import (
+    PerTensorTorchFP8ScaledMMLinearKernel,
+    ChannelWiseTorchFP8ScaledMMLinearKernel,
+)
+from vllm.platforms import PlatformEnum
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 
 
@@ -32,6 +38,27 @@ def select_fp8_moe_backend_(
     Note: Shape-specific fallbacks may still occur at runtime.
     """
     return Fp8MoeBackend.NONE, None
+
+
+class HPUPerTensorTorchFP8ScaledMMLinearKernel(PerTensorTorchFP8ScaledMMLinearKernel):
+
+    @classmethod
+    def is_supported(cls, compute_capability: int | None = None) -> tuple[bool, str | None]:
+        return True, None
+
+
+class HPUChannelWiseTorchFP8ScaledMMLinearKernel(ChannelWiseTorchFP8ScaledMMLinearKernel):
+
+    @classmethod
+    def is_supported(cls, compute_capability: int | None = None) -> tuple[bool, str | None]:
+        return True, None
+
+
+if PlatformEnum.OOT not in scaled_mm._POSSIBLE_FP8_KERNELS:
+    scaled_mm._POSSIBLE_FP8_KERNELS[PlatformEnum.OOT] = [
+        HPUPerTensorTorchFP8ScaledMMLinearKernel,
+        HPUChannelWiseTorchFP8ScaledMMLinearKernel,
+    ]
 
 
 class Fp8LinearMethod(OrigFp8LinearMethod):
