@@ -26,8 +26,21 @@ class Matmul(torch.nn.Module):
     def __init__(self):
         super(Matmul, self).__init__()
 
-    def forward(self, x, y):
-        return torch.matmul(x, y)
+    def forward(self, x, y, **kwargs):
+        return torch.matmul(x, y, **kwargs)
+
+
+class B2BMatmul(Matmul):
+    """Specialized alias for batch2block and block2batch matmul operations.
+    
+    This class remains functionally identical to ``Matmul`` but is used to
+    semantically mark B2B-related matmuls. This enables the system to apply the
+    fix that uses the B2B output measurements as the input measurements during
+    calibration, avoiding corrupted scales from the KV‑cache.
+    """
+
+    def __init__(self):
+        super().__init__()
 
 
 class Softmax(torch.nn.Module):
@@ -39,20 +52,28 @@ class Softmax(torch.nn.Module):
         return torch.softmax(x, dim)
 
 
+def get_kv_fetch_extra_args(**kwargs):
+    if not get_config().per_token_kv_scaling_support:
+        kwargs.pop('scales', None)
+    return kwargs
+
+
 class VLLMKVCache(torch.nn.Module):
 
-    def __init__(self):
-        super(VLLMKVCache, self).__init__()
+    def __init__(self, is_v_cache: bool = False):
+        super().__init__()
         self.use_contiguous_pa = get_config().use_contiguous_pa
+        # is_v_cache is used in INC FP8 dynamic quantization to identify V cache
+        self.is_v_cache = is_v_cache
 
-    def forward(self, input, cache, slot_mapping):
+    def forward(self, input, cache, slot_mapping, scales=None, block_size=None, is_prompt=False, **kwargs):
         # In cross-attention kv cache forward inputs are None in decode
         # We don't want to store them in the cache in such case
         if input is not None:
             cache.index_copy_(0, slot_mapping, input)
         return cache
 
-    def fetch_from_cache(self, cache, blocks):
+    def fetch_from_cache(self, cache, blocks, scales=None, **kwargs):
         if self.use_contiguous_pa:
             return cache[:blocks.size(0)]
         else:
@@ -62,7 +83,7 @@ class VLLMKVCache(torch.nn.Module):
 class VLLMFP8KVCache(VLLMKVCache):
 
     def __init__(self, input_scale=1.0):
-        super(VLLMKVCache, self).__init__()
+        super().__init__()
         self.use_contiguous_pa = get_config().use_contiguous_pa
         self.input_scale = input_scale
         self.output_scale = 1.0 / self.input_scale
@@ -77,7 +98,7 @@ class VLLMFP8KVCache(VLLMKVCache):
         qinput = self.quant_input(input)
         return super().forward(qinput, *args, **kwargs)
 
-    def fetch_from_cache(self, quant_cache, blocks, permutations=None):
+    def fetch_from_cache(self, quant_cache, blocks, permutations=None, **kwargs):
         if permutations:
             output_cache = super().fetch_from_cache(quant_cache, blocks, permutations)
             for i in range(len(output_cache)):
@@ -115,7 +136,7 @@ class FP8Matmul(torch.nn.Module):
             accumulate=False,
         )
 
-    def forward(self, input, other):
+    def forward(self, input, other, **kwargs):
         qinput = self.quant_input(input, self.scale_input)
         qother = self.quant_input(other, self.scale_other)
         output = self.matmul_fp8(
@@ -148,20 +169,84 @@ class ModuleFusedSDPA(torch.nn.Module):
         recompute_mode,
         valid_sequence_lengths,
         padding_side="left",
+        window_size=None,
+        sinks=None,
     ):
-        return self._hpu_kernel_fsdpa.apply(
-            query,
-            key,
-            value,
-            attn_mask,
-            dropout_p,
-            is_causal,
-            scale,
-            softmax_mode,
-            recompute_mode,
-            valid_sequence_lengths,
-            padding_side,
+        if window_size is not None:
+            return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode,
+                                                recompute_mode, valid_sequence_lengths, padding_side, False, False,
+                                                window_size, sinks)
+        else:
+            return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode,
+                                                recompute_mode, valid_sequence_lengths, padding_side, False, False,
+                                                (-1, -1), sinks)
+
+
+class ModuleFP8FusedSDPA(torch.nn.Module):
+
+    def __init__(self, fusedSDPA):
+        super().__init__()
+        assert fusedSDPA is not None, f'FP8 fusedSDPA kernel is None'
+        self.fp8_fused_sdpa = fusedSDPA
+
+        # set the descale_amax and scale_amax 1.0 temporarily
+        self.descale_amax = torch.tensor(1.0)
+        self.scale_amax = torch.tensor(1.0)
+        self.scale_q = torch.tensor(1.0)
+        self.scale_k = torch.tensor(1.0)
+        self.scale_v = torch.tensor(1.0)
+        self.d_scale_q = torch.tensor(1.0)
+        self.d_scale_k = torch.tensor(1.0)
+        self.d_scale_v = torch.tensor(1.0)
+
+    def quant_input(self, x, scale):
+        return torch.ops.hpu.cast_to_fp8_v2(x, scale, False, False, torch.float8_e4m3fn)[0]
+
+    def dequant_output(self, output, scale):
+        return torch.ops.hpu.cast_from_fp8(output, scale, torch.bfloat16)
+
+    def forward(
+        self,
+        query,
+        key,
+        value,
+        attn_mask,
+        dropout_p,
+        is_causal,
+        scale,
+        softmax_mode,
+        recompute_mode,
+        valid_sequence_lengths,
+        padding_side="left",
+        window_size=None,
+    ):
+
+        qinput = self.quant_input(query, self.scale_q)
+        kinput = self.quant_input(key, self.scale_k)
+        vinput = self.quant_input(value, self.scale_v)
+
+        results = self.fp8_fused_sdpa(
+            qinput,
+            kinput,
+            vinput,
+            attn_mask=attn_mask,
+            dropout_p=dropout_p,
+            is_causal=is_causal,
+            scale=scale,
+            softmax_mode=softmax_mode,
+            d_scale_q=self.d_scale_q,
+            d_scale_k=self.d_scale_k,
+            d_scale_v=self.d_scale_v,
+            q_scale_s=self.scale_amax,
+            # q_scale_o=1 / 1.0,
+            d_scale_s=self.descale_amax,
+            is_amax_s=False,
+            valid_seq_len=valid_sequence_lengths,
+            seq_padding_type=padding_side,
         )
+
+        output = results[0]
+        return output
 
 
 def pad_list(input, target_len, val_generator):
@@ -169,6 +254,17 @@ def pad_list(input, target_len, val_generator):
     if padding > 0:
         input.extend(itertools.islice(val_generator, padding))
     return input
+
+
+def align_and_pad(data, bucketing, padding_gen):
+    bs = len(data)
+    target_bs, target_len = bucketing
+    if target_bs == 1 and bs > 1:
+        data = [list(itertools.chain(*data))]
+    data = [pad_list(x, target_len, padding_gen) for x in data]
+    padding = itertools.islice(padding_gen, target_len)
+    data = pad_list(data, target_bs, itertools.tee(padding, target_bs - len(data)))
+    return data
 
 
 def with_default(value: Optional[Any], default: Any) -> Any:

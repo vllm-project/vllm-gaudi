@@ -7,11 +7,11 @@ import habana_frameworks.torch  # noqa: F401
 from habana_frameworks.torch.utils.internal import is_lazy
 from vllm.model_executor.model_loader import get_model
 
-from vllm.attention import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig, SchedulerConfig, VllmConfig, set_current_vllm_config)
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
-from vllm.utils import GiB_bytes
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_utils import (estimate_max_model_len, get_kv_cache_configs)
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData, SchedulerOutput)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor)
@@ -52,6 +52,7 @@ def initialize_kv_cache(runner: HPUModelRunner):
         pin_memory=runner.pin_memory,
         vocab_size=runner.model_config.get_vocab_size(),
         block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
+        kernel_block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
     )
 
 
@@ -59,11 +60,6 @@ def initialize_kv_cache(runner: HPUModelRunner):
 
 
 def get_vllm_config():
-    scheduler_config = SchedulerConfig(
-        max_num_seqs=10,
-        max_num_batched_tokens=512,
-        max_model_len=512,
-    )
     model_config = ModelConfig(
         model="facebook/opt-125m",
         task="generate",
@@ -72,6 +68,12 @@ def get_vllm_config():
         trust_remote_code=True,
         dtype="bfloat16",
         seed=42,
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=10,
+        max_num_batched_tokens=512,
+        max_model_len=512,
+        is_encoder_decoder=model_config.is_encoder_decoder,
     )
     cache_config = CacheConfig(
         block_size=BLOCK_SIZE,
@@ -92,15 +94,16 @@ def get_vllm_config():
 @pytest.fixture
 def model_runner():
     vllm_config = get_vllm_config()
-    model_config = vllm_config.model_config
-    num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
-    head_size = model_config.get_head_size()
-    # We need to update the environment before creating Attention
-    environment.set_vllm_config(vllm_config)
-    vllm_config.compilation_config.static_forward_context["layer.0"] = Attention(num_heads, head_size, 0.1)
-    runner = HPUModelRunner(vllm_config, DEVICE)
-    initialize_kv_cache(runner)
-    return runner
+    with set_current_vllm_config(vllm_config):
+        model_config = vllm_config.model_config
+        num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
+        head_size = model_config.get_head_size()
+        # We need to update the environment before creating Attention
+        environment.set_vllm_config(vllm_config)
+        vllm_config.compilation_config.static_forward_context["layer.0"] = Attention(num_heads, head_size, 0.1)
+        runner = HPUModelRunner(vllm_config, DEVICE)
+        initialize_kv_cache(runner)
+        yield runner
 
 
 def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
@@ -132,8 +135,6 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
-        grammar_bitmask=None,
     )
 
 
@@ -194,8 +195,6 @@ def test_update_states_request_finished(model_runner, dist_init):
         num_common_prefix_blocks=0,
         finished_req_ids={req_id},
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
-        grammar_bitmask=None,
     )
 
     metadata_before = model_runner.input_batch.sampling_metadata
@@ -226,8 +225,6 @@ def test_update_states_request_resumed(model_runner, dist_init):
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
-        grammar_bitmask=None,
     )
 
     model_runner._update_states(scheduler_output)
@@ -237,11 +234,12 @@ def test_update_states_request_resumed(model_runner, dist_init):
     # resume req
     cached_req_data = CachedRequestData(
         req_ids=[req_id],
-        resumed_from_preemption=[False],
+        resumed_req_ids={req_id},
         new_token_ids=[[]],
-        new_block_ids=([[0]], ),
+        new_block_ids=[([0], )],
         num_computed_tokens=[0],
         num_output_tokens=[0],
+        all_token_ids={},
     )
 
     scheduler_output = SchedulerOutput(
@@ -254,8 +252,6 @@ def test_update_states_request_resumed(model_runner, dist_init):
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
-        grammar_bitmask=None,
     )
 
     metadata_before = model_runner.input_batch.sampling_metadata
@@ -333,8 +329,6 @@ def test_update_states_no_changes(model_runner, dist_init):
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
-        grammar_bitmask=None,
     )
 
     metadata_before = model_runner.input_batch.sampling_metadata
@@ -370,8 +364,6 @@ def test_update_states_request_unscheduled(model_runner, dist_init):
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids={},
-        grammar_bitmask=None,
     )
 
     metadata_before = model_runner._update_states(scheduler_output)
@@ -398,8 +390,7 @@ def test_reload_weights_before_load_model(model_runner):
         model_runner.reload_weights()
 
 
-@pytest.mark.xfail(reason="KV sharing doesn't currently work on HPU")
-def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
+def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(default_vllm_config: None):
     torch.set_default_dtype(torch.bfloat16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -426,8 +417,7 @@ def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
         assert fwd_context is not None
 
 
-@pytest.mark.xfail(reason="KV sharing doesn't currently work on HPU")
-def test_init_kv_cache_with_kv_sharing_target_layer_not_exist():
+def test_init_kv_cache_with_kv_sharing_target_layer_not_exist(default_vllm_config: None):
     torch.set_default_dtype(torch.bfloat16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -456,8 +446,7 @@ def test_init_kv_cache_with_kv_sharing_target_layer_not_exist():
         assert fwd_context is not None
 
 
-@pytest.mark.xfail(reason="KV sharing doesn't currently work on HPU")
-def test_init_kv_cache_with_kv_sharing_target_same_as_current():
+def test_init_kv_cache_with_kv_sharing_target_same_as_current(default_vllm_config: None):
     torch.set_default_dtype(torch.bfloat16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -484,7 +473,7 @@ def test_init_kv_cache_with_kv_sharing_target_same_as_current():
         assert fwd_context is not None
 
 
-def test_init_kv_cache_without_kv_sharing():
+def test_init_kv_cache_without_kv_sharing(default_vllm_config: None):
     torch.set_default_dtype(torch.bfloat16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -552,8 +541,7 @@ def test_init_kv_cache_without_kv_sharing():
     assert kv_cache_config.kv_cache_groups[0].layer_names[1] == layer_1
 
 
-@pytest.mark.xfail(reason="KV sharing doesn't currently work on HPU")
-def test_init_kv_cache_with_kv_sharing_valid():
+def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config: None):
     torch.set_default_dtype(torch.bfloat16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -588,10 +576,11 @@ def test_init_kv_cache_with_kv_sharing_valid():
     assert runner.shared_kv_cache_layers[layer_1] == layer_0
 
     available_memory = 20 * GiB_bytes
-    # page size for layer 0's kv_cache_spec is 32KB
+    # page size for layer 0's kv_cache_spec is 256KB
     # with KV sharing, we can allocate (available_mem//page_size//1) blocks
     # which is twice as many as without KV sharing
-    num_expected_blocks = 655360  # 20GB / 32KB
+    page_size = 128 * 8 * 64 * 2 * 2  # 128 for block_size, 2 for K+V, 2 for bfloat16
+    num_expected_blocks = available_memory / page_size  # 20GB / 256KB
     kv_cache_config = get_kv_cache_configs(vllm_config, [kv_cache_spec], [available_memory])[0]
     assert kv_cache_config.num_blocks == num_expected_blocks
     assert len(kv_cache_config.kv_cache_tensors) == 1
@@ -625,7 +614,7 @@ def test_init_kv_cache_with_kv_sharing_valid():
 
 
 @pytest.mark.skipif(is_lazy(), reason="Test skipped because lazy mode is enabled.")
-def test_model_torch_regional_compilation(dist_init, model_runner):
+def test_model_torch_regional_compilation(default_vllm_config: None, dist_init, model_runner):
     from vllm_gaudi.utils import HPUCompileConfig
     from vllm.model_executor.models.opt import OPTDecoderLayer
     from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding  # noqa

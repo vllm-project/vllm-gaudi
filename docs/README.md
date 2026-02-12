@@ -1,4 +1,6 @@
-# Welcome to vLLM x Intel Gaudi
+---
+title: Overview
+---
 
 <figure markdown="span" style="display: flex; justify-content: center; align-items: center; gap: 10px; margin: auto;">
   <img src="./assets/logos/vllm-logo-text-light.png" alt="vLLM" style="width: 30%; margin: 0;"> x
@@ -15,11 +17,30 @@
 <a class="github-button" href="https://github.com/vllm-project/vllm-gaudi/fork" data-show-count="true" data-icon="octicon-repo-forked" data-size="large" aria-label="Fork">Fork</a>
 </p>
 
-vLLM Gaudi plugin (vllm-gaudi) integrates Intel Gaudi accelerators with vLLM to optimize large language model inference.
+The vLLM Hardware Plugin for Intel® Gaudi® is a community-driven integration layer that enables efficient, high-performance large language model (LLM) inference on Intel® Gaudi® AI accelerators.
 
-This plugin follows the [[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162) and [[RFC]: Enhancing vLLM Plugin Architecture](https://github.com/vllm-project/vllm/issues/19161) principles, providing a modular interface for Intel Gaudi hardware.
+The vLLM Hardware Plugin for Intel® Gaudi® connects the [vLLM serving engine](https://docs.vllm.ai/) with [Intel® Gaudi®](https://docs.habana.ai/) hardware, offering optimized inference capabilities for enterprise-scale LLM workloads. It is developed and maintained by the Intel® Gaudi® team and follows the [hardware pluggable RFC](https://github.com/vllm-project/vllm/issues/11162) and [vLLM plugin architecture RFC](https://github.com/vllm-project/vllm/issues/19161) for modular integration.
 
-Learn more:
+## Advantages
 
-📚 [Intel Gaudi Documentation](https://docs.habana.ai/en/v1.21.1/index.html)  
-🚀 [vLLM Plugin System Overview](https://docs.vllm.ai/en/latest/design/plugin_system.html)
+The vLLM Hardware Plugin for Intel® Gaudi® offers the following key benefits:
+
+- **Optimization for Intel® Gaudi®**: Supports advanced features, such as the bucketing mechanism, Floating Point 8-bit (FP8) quantization, and custom graph caching for fast warm-up and efficient memory use.
+- **Scalability and efficiency**: Designed to maximize throughput and minimize latency for large-scale deployments, making it ideal for production-grade LLM inference.
+- **Community support**: Actively maintained on [GitHub](https://github.com/vllm-project/vllm-gaudi) by contributions from the Intel® Gaudi® team and the broader vLLM ecosystem.
+
+## Getting Started
+
+To get started with vLLM Hardware Plugin for Intel® Gaudi®:
+
+- [ ] Set up your environment using the [quickstart](getting_started/quickstart/quickstart.md) guide and use the plugin locally or in your containerized environment.
+- [ ] Run inference using supported models, such as Llama 3.1, Mixtral, or DeepSeek.
+- [ ] Explore advanced features, such as FP8 quantization, recipe caching, and expert parallelism.
+- [ ] Join the community by contributing to the [vLLM-Gaudi](https://github.com/vllm-project/vllm-gaudi) GitHub repository.
+
+## Reference
+
+For more information, see:
+
+- [Intel® Gaudi® Documentation](https://docs.habana.ai/en/latest/index.html)  
+- [vLLM Plugin System Overview](https://docs.vllm.ai/en/latest/design/plugin_system.html)

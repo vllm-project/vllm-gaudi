@@ -9,12 +9,15 @@ from typing import List, Set, Tuple
 from vllm_gaudi.extension.logger import logger as logger
 from vllm_gaudi.extension.runtime import get_config
 
+LONG_CTX_THRESHOLD = 8192
+
 
 class ExponentialBucketingStrategy():
+    long_context: bool = False
 
     def check_for_user_flags(self, phase):
         dim = ['bs', 'seq'] if phase == 'prompt' else ['bs', 'block']
-        params = ['min', 'step', 'max', 'limit']
+        params = ['min', 'step', 'max']
         env_vars = [f'VLLM_{phase}_{dim}_BUCKET_{p}'.upper() for dim in dim for p in params]
         user_flags = []
         for e in env_vars:
@@ -30,17 +33,27 @@ class ExponentialBucketingStrategy():
 
     def get_prompt_cfgs(self, max_num_prefill_seqs, block_size, max_num_batched_tokens, max_model_len):
         self.check_for_user_flags('prompt')
+        if getattr(get_config(), 'VLLM_PROMPT_QUERY_BUCKET_MIN') == 1:
+            query_min = 1
+            logger().warning(
+                f"It's only recommended to use VLLM_PROMPT_QUERY_BUCKET_MIN=1 on the decode instance under P/D disaggregation scenario."
+            )
+        else:
+            query_min = block_size
         use_merged_prefill = get_config().merged_prefill
-        prefix_caching = get_config().prefix_caching
-        max_prompt_seq = max_model_len
+        self.long_context = max_model_len >= LONG_CTX_THRESHOLD
 
         # cfgs shape: [min, step, max, limit]
         prompt_bs_limit = math.ceil(math.log2(max_num_prefill_seqs)) + 1
         prompt_bs_bucket_cfg = [1, 2, max_num_prefill_seqs, prompt_bs_limit]
-        max_prompt_seq_limit = math.ceil(math.log2(max_prompt_seq)) + 1
-        prompt_query_bucket_cfg = [block_size, block_size, max_prompt_seq, max_prompt_seq_limit]
-        max_ctx = math.ceil((max_model_len - prompt_query_bucket_cfg[0]) // block_size)
-        max_prompt_ctx_limit = math.ceil(math.log2(max_ctx)) + 1
+        max_prompt_seq_limit = math.ceil(math.log2(max_num_batched_tokens))
+        prompt_query_bucket_cfg = [query_min, block_size, max_num_batched_tokens, max_prompt_seq_limit]
+        if self.long_context:
+            # Max ctx for all queries; later we generate additional buckets for max ctx per query
+            max_ctx = max(1, math.ceil((max_model_len - max_num_batched_tokens) // block_size))
+        else:
+            max_ctx = max(1, math.ceil((max_model_len - prompt_query_bucket_cfg[0]) // block_size))
+        max_prompt_ctx_limit = 2 if max_ctx == 1 else math.ceil(math.log2(max_ctx)) + 1
         prompt_ctx_bucket_cfg = [0, 1, max_ctx, max_prompt_ctx_limit]
 
         if use_merged_prefill:
@@ -78,8 +91,9 @@ class ExponentialBucketingStrategy():
         decode_bs_bucket_cfg = [1, 2, max_num_seqs, decode_bs_limit]
         decode_query_bucket_cfg = [1, 1, 1, 1]
         max_decode_block_limit = math.ceil(math.log2(max_blocks)) + 1
+        max_factor = int(max_blocks * max_num_seqs // 4)
         max_decode_blocks = max_blocks if use_contiguous_pa else \
-                            min((max_model_len // block_size * max_num_seqs), max_blocks)
+                            min((max_model_len // block_size * max_num_seqs), max_factor)
         decode_block_bucket_cfg = [1, max_num_seqs, max_decode_blocks, max_decode_block_limit]
 
         msg = ("Decode bucket config (min, step, max_warmup, limit) "
@@ -90,7 +104,7 @@ class ExponentialBucketingStrategy():
         return decode_bs_bucket_cfg, decode_query_bucket_cfg, decode_block_bucket_cfg
 
     def get_range(self, cfg):
-        range_for_cfg = warmup_range_with_limit(cfg)
+        range_for_cfg = warmup_range_with_limit(cfg, self.long_context)
         return sorted(range_for_cfg)
 
 
@@ -126,22 +140,19 @@ def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=Fals
     """ # noqa: E501
 
     bmin, bstep, bmax, num_buckets = config
-    add_zero_bucket = bmin == 0
-    if add_zero_bucket:
+    add_zero_or_one_bucket = bmin in [0, 1]
+    if add_zero_or_one_bucket:
+        bmin_origin = bmin
         bmin = bstep
-    linear_buckets = set(np.arange(bmin, bmax + 1, step=bstep))
     assert num_buckets > 0, "num_buckets must be a positive integer"
-    if num_buckets == 1:
-        return [bmax]
-    buckets: Set[Tuple[int, int]] = set()
 
-    if long_context:
-        num_buckets_exp = math.floor(num_buckets / 2)
-        num_buckets_linear = num_buckets - num_buckets_exp
-        first_step = bmax / num_buckets  #or i.e. * 0.25
-    else:
-        num_buckets_exp = num_buckets
-        first_step = bmax
+    num_buckets_exp = num_buckets
+    first_step = bmax
+
+    if num_buckets_exp <= 1:
+        return [bmax]
+
+    buckets: Set[Tuple[int, int]] = set()
 
     for i in range(num_buckets_exp):
         power_unpadded = bmin * np.float_power(first_step / bmin, (1. / float(num_buckets_exp - 1)) * i)
@@ -151,31 +162,9 @@ def warmup_range_with_limit(config: Tuple[int, int, int, int], long_context=Fals
             bucket = math.ceil(power_unpadded / bstep) * bstep
         buckets.add(bucket)
 
-    if long_context:
-        #tmp_step = bmax / num_buckets
-        tmp_step = (bmax - first_step) / num_buckets_linear
-        for i in range(1, num_buckets_linear + 1):
-            #for i in range(1, num_buckets+1):
-            power_unpadded = first_step + i * tmp_step
-
-            if i == num_buckets and get_config().use_contiguous_pa:
-                bucket = bmax
-            else:
-                bucket = math.ceil(power_unpadded / bstep) * bstep
-            '''if fill and bucket in buckets:
-                available_buckets = linear_buckets.difference(buckets)
-                if len(available_buckets) == 0:
-                    break  # there are no more unique buckets, let's exit now
-                new_bucket = min(available_buckets,
-                             key=lambda x: abs(x - power_unpadded))
-                if new_bucket not in buckets:
-                    buckets.add(new_bucket)
-            else:
-                if bucket not in buckets:
-                    buckets.add(bucket)
-            '''
-            if bucket not in buckets:
-                buckets.add(bucket)
-    if add_zero_bucket:
-        buckets.add(0)
-    return list(sorted(buckets))
+    if add_zero_or_one_bucket:
+        buckets.add(bmin_origin)
+    sorted_buckets = list(sorted(buckets))
+    if sorted_buckets and sorted_buckets[-1] > bmax:
+        sorted_buckets[-1] = bmax
+    return sorted_buckets

@@ -168,7 +168,6 @@ class GPTQHPULinearMethod:
 
         group_size = self.quant_config.group_size if self.quant_config.group_size != -1 else input_size
         scale_and_zero_size = input_size // group_size
-        scale_and_zero_input_dim = None
 
         qweight = PackedvLLMParameter(data=torch.empty(
             input_size_per_partition // self.quant_config.pack_factor,
@@ -205,20 +204,12 @@ class GPTQHPULinearMethod:
             ),
             "weight_loader": weight_loader
         }
-        if scale_and_zero_input_dim is None:
-            scales = ChannelQuantScaleParameter(output_dim=1, **weight_scale_args)
-            qzeros = PackedColumnParameter(output_dim=1,
-                                           packed_dim=1,
-                                           packed_factor=self.quant_config.pack_factor,
-                                           **qzeros_args)
 
-        else:
-            scales = GroupQuantScaleParameter(output_dim=1, input_dim=0, **weight_scale_args)
-            qzeros = PackedvLLMParameter(input_dim=0,
-                                         output_dim=1,
-                                         packed_dim=1,
-                                         packed_factor=self.quant_config.pack_factor,
-                                         **qzeros_args)
+        scales = ChannelQuantScaleParameter(output_dim=1, **weight_scale_args)
+        qzeros = PackedColumnParameter(output_dim=1,
+                                       packed_dim=1,
+                                       packed_factor=self.quant_config.pack_factor,
+                                       **qzeros_args)
 
         qzeros.pack_factor = self.quant_config.pack_factor
 

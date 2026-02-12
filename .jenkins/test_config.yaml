@@ -81,6 +81,20 @@ stages:
           cd .jenkins/lm-eval-harness && 
           PT_HPU_LAZY_MODE=1 
           bash run-tests.sh -c configs/models-fp8.txt -t 2
+      - name: gsm8k_small_g3_tp1_fp8_unified_attn
+        flavor: g3
+        command: >-
+          cd .jenkins/lm-eval-harness && 
+          PT_HPU_LAZY_MODE=1 
+          VLLM_UNIFIED_ATTN=true 
+          bash run-tests.sh -c configs/models-fp8-g3-tp1.txt -t 1
+      - name: gsm8k_small_g3_tp2_fp8_unified_attn
+        flavor: g3.s
+        command: >-
+          cd .jenkins/lm-eval-harness && 
+          PT_HPU_LAZY_MODE=1 
+          VLLM_UNIFIED_ATTN=true 
+          bash run-tests.sh -c configs/models-fp8.txt -t 2
       - name: gsm8k_fp8_llama4_scout_g3_tp2_compressed_tensor
         flavor: g3.s
         command: >-

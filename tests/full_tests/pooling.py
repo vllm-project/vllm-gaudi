@@ -3,7 +3,7 @@
 
 import os
 from vllm import LLM, EngineArgs
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 PROMPTS = [
     "Hello, my name is",
@@ -22,7 +22,7 @@ def create_parser():
     parser.set_defaults(
         model="intfloat/e5-mistral-7b-instruct",
         runner="pooling",
-        enforce_eager=True,
+        enforce_eager=False,
     )
     return parser
 

@@ -33,6 +33,7 @@ qwen25_14b_instruct:
 
 qwen25_32b_instruct:
   MODEL: Qwen/Qwen2.5-32B-Instruct
+  CONCURRENT_REQ: 8
 
 qwen25_72b_instruct:
   MODEL: Qwen/Qwen2.5-72B-Instruct
@@ -40,11 +41,14 @@ qwen25_72b_instruct:
 qwen25_7b_instruct:
   MODEL: Qwen/Qwen2.5-7B-Instruct
 
+Qwen/Qwen3-0.6B:
+  MODEL: Qwen/Qwen3-0.6B
+
 granite_8b_code_instruct_4k:
   MODEL: ibm-granite/granite-8b-code-instruct-4k
 
 granite_20b_code_instruct_8k:
   MODEL: ibm-granite/granite-20b-code-instruct-8k
    
-
-
+bielik_4.5b_v3_instruct:
+  MODEL: speakleash/Bielik-4.5B-v3.0-Instruct
