@@ -272,7 +272,13 @@ run_llama3_70b_inc_dynamic_quant_test() {
 # If the score is below the threshold, the test will fail. For implementation details see:
 #   tests/models/language/generation/test_common.py
 
-# GSM8K on granite-8b
+# --- LM-eval tests ---
+# Tests below score models on lmeval tasks, usually gsm8k
+# Final scores are verified against thresholds specified in .yaml config files in tests/full_tests_model_cards/*
+# If the score is below the threshold, the test will fail. For implementation details see:
+#   tests/models/language/generation/test_common.py
+
+# GSM8K on granite-4.0-h
 run_gsm8k_granite_4_test() {
     echo "➡️ Testing GSM8K on granite-4-h..."
     VLLM_EXPONENTIAL_BUCKETING=false \
