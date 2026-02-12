@@ -64,9 +64,16 @@ def calc_GPU_MEM_UTILIZATION(ctx):
     return math.floor(ctx['GPU_MEMORY_UTIL_TEMP'] * 100) / 100
 
 
+def calc_HEAD_DIM(ctx):
+    if not ctx['HEAD_DIM'] or math.isnan(ctx['HEAD_DIM']):
+        return ctx['HIDDEN_SIZE'] / ctx['NUM_ATTENTION_HEADS']
+    else:
+        return ctx['HEAD_DIM']
+
+
 def calc_KV_CACHE_PER_SEQ(ctx):
-    return ((2 * ctx['MAX_MODEL_LEN'] * ctx['NUM_HIDDEN_LAYERS'] * ctx['HIDDEN_SIZE'] * ctx['NUM_KEY_VALUE_HEADS'] *
-             ctx['CACHE_DTYPE_BYTES']) / ctx['NUM_ATTENTION_HEADS']) / (1024 * 1024 * 1024)
+    return (2 * ctx['MAX_MODEL_LEN'] * ctx['NUM_HIDDEN_LAYERS'] * calc_HEAD_DIM(ctx) * ctx['NUM_KEY_VALUE_HEADS'] *
+            ctx['CACHE_DTYPE_BYTES']) / (1024 * 1024 * 1024)
 
 
 def calc_EST_MAX_NUM_SEQS(ctx):
