@@ -296,6 +296,14 @@ run_qwen3_vl_test() {
     echo "✅ Test with multimodal-support with qwen3-vl-32b passed."
 }
 
+# Multimodal-support with mistral-small-3
+run_mistral3_test() {
+    echo "➡️ Testing Mistral-Small-3.1-24B..."
+    VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 \
+    python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/mistral3-small.yaml"
+    echo "✅ Test with multimodal-support with Mistral-Small-3.1-24B passed."
+}
+
 # Spec decode with ngram
 run_spec_decode_ngram_test() {
     echo "➡️ Testing Spec-decode with ngram..."
@@ -417,6 +425,7 @@ launch_all_tests() {
     run_gsm8k_qwen3_30b_test
     run_qwen2_5_vl_test
     run_qwen2_5_vl_unified_attn_test
+    run_mistral3_test
     run_spec_decode_ngram_test
     run_spec_decode_eagle3_test
     run_spec_decode_eagle3_num_spec_2_test
