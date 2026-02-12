@@ -74,6 +74,8 @@ Follow these steps to run the vLLM server or launch benchmarks on Gaudi using Do
     | Qwen/Qwen2.5-14B-Instruct                 | 1                     |
     | Qwen/Qwen2.5-32B-Instruct                 | 1                     |
     | Qwen/Qwen2.5-72B-Instruct                 | 4                     |
+    | Qwen/Qwen3-0.6B                           | 1                     |
+    | Qwen/Qwen3-30B-A3B-Instruct-2507          | 1                     |
     | ibm-granite/granite-8b-code-instruct-4k   | 1                     |
     | ibm-granite/granite-20b-code-instruct-8k  | 1                     |
 
