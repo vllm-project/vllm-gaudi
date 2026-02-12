@@ -64,7 +64,7 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_map_leaves
-from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy)
+from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy, getattr_nested, setattr_nested)
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
 from vllm.v1.attention.backends.utils import create_fast_prefill_custom_backend
 from vllm.v1.kv_cache_interface import (
@@ -4136,7 +4136,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         """
         compiled_methods = ['metadata_processor.process_metadata', '_rotary_prepare_cos_sin']
         for method_name in compiled_methods:
-            method = getattr(self.model, method_name, None)
+            method = getattr_nested(self.model, method_name, None)
             if method is not None:
                 self._compile_region(self.model, method_name, method)
 
@@ -4162,7 +4162,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     def _compile_region(self, model, name, module):
         module = self._compile(module)
-        setattr(model, name, module)
+        setattr_nested(model, name, module)
 
     def _compile(self, module):
         return torch.compile(module, **self.compile_config.get_compile_args())
