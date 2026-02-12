@@ -11,15 +11,11 @@ Run with:
     pytest tests/unit_tests/ops/test_hpu_row_parallel_linear.py -v
 """
 
-import contextlib
-
 import pytest
 import torch
 from unittest.mock import MagicMock, patch
 
-from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import RowParallelLinear
-from vllm_gaudi.ops.hpu_row_parallel_linear import HPURowParallelLinear
 
 # Default test dimensions (small for speed)
 INPUT_SIZE = 256
@@ -38,30 +34,20 @@ def _mock_config(num_chunks=1, chunk_threshold=8192):
     return cfg
 
 
-@contextlib.contextmanager
-def _temporary_oot_registry():
-    """Temporarily replace CustomOp.op_registry_oot and restore on exit."""
-    saved = CustomOp.op_registry_oot
-    CustomOp.op_registry_oot = {}
-    try:
-        yield
-    finally:
-        CustomOp.op_registry_oot = saved
-
-
 def _create_layer(num_chunks=1, chunk_threshold=8192, input_size=INPUT_SIZE, output_size=OUTPUT_SIZE, bias=False):
     """Create an HPURowParallelLinear with the given chunk settings.
 
     Mocks ``get_config()`` so the layer picks up the desired
     ``num_chunks`` and ``chunk_threshold`` without touching the
     global singleton.
+
+    HPURowParallelLinear is already registered via
+    ``@RowParallelLinear.register_oot`` at import time, so
+    ``RowParallelLinear(...)`` transparently returns an
+    ``HPURowParallelLinear`` instance.
     """
     mock_cfg = _mock_config(num_chunks, chunk_threshold)
-    with (
-            patch("vllm_gaudi.ops.hpu_row_parallel_linear.get_config", return_value=mock_cfg),
-            _temporary_oot_registry(),
-    ):
-        CustomOp.op_registry_oot[RowParallelLinear.__name__] = HPURowParallelLinear
+    with patch("vllm_gaudi.ops.hpu_row_parallel_linear.get_config", return_value=mock_cfg):
         layer = RowParallelLinear(
             input_size=input_size,
             output_size=output_size,
