@@ -37,8 +37,9 @@ def launch_lm_eval(eval_config: dict):
     if kv_cache_dtype is not None:
         model_args['kv_cache_dtype'] = kv_cache_dtype
 
-    if eval_config.get('gpu_memory_utilization') is not None:
-        model_args['gpu_memory_utilization'] = eval_config.get('gpu_memory_utilization')
+    gpu_memory_utilization = eval_config.get('gpu_memory_utilization')
+    if gpu_memory_utilization is not None:
+        model_args['gpu_memory_utilization'] = gpu_memory_utilization
 
     if eval_config.get("inc"):
         assert os.environ.get('QUANT_CONFIG', None), "must set QUANT_CONFIG environment variable for using INC"
