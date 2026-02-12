@@ -69,7 +69,8 @@ def test_calc_KV_CACHE_PER_SEQ():
         'HIDDEN_SIZE': 4,
         'NUM_KEY_VALUE_HEADS': 2,
         'CACHE_DTYPE_BYTES': 2,
-        'NUM_ATTENTION_HEADS': 2
+        'NUM_ATTENTION_HEADS': 2,
+        'HEAD_DIM': math.nan
     }
     expected = ((2 * 128 * 2 * 4 * 2 * 2) / 2) / (1024 * 1024 * 1024)
     assert rules.calc_KV_CACHE_PER_SEQ(ctx) == expected
