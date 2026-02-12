@@ -25,10 +25,10 @@ from vllm_gaudi.ops.hpu_row_parallel_linear import HPURowParallelLinear
 INPUT_SIZE = 256
 OUTPUT_SIZE = 128
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _mock_config(num_chunks=1, chunk_threshold=8192):
     """Create a mock runtime config object."""
@@ -49,9 +49,7 @@ def _temporary_oot_registry():
         CustomOp.op_registry_oot = saved
 
 
-def _create_layer(num_chunks=1, chunk_threshold=8192,
-                  input_size=INPUT_SIZE, output_size=OUTPUT_SIZE,
-                  bias=False):
+def _create_layer(num_chunks=1, chunk_threshold=8192, input_size=INPUT_SIZE, output_size=OUTPUT_SIZE, bias=False):
     """Create an HPURowParallelLinear with the given chunk settings.
 
     Mocks ``get_config()`` so the layer picks up the desired
@@ -59,22 +57,22 @@ def _create_layer(num_chunks=1, chunk_threshold=8192,
     global singleton.
     """
     mock_cfg = _mock_config(num_chunks, chunk_threshold)
-    with patch("vllm_gaudi.ops.hpu_row_parallel_linear.get_config",
-               return_value=mock_cfg):
-        with _temporary_oot_registry():
-            CustomOp.op_registry_oot[RowParallelLinear.__name__] = \
-                HPURowParallelLinear
-            layer = RowParallelLinear(
-                input_size=input_size,
-                output_size=output_size,
-                bias=bias,
-                input_is_parallel=True,
-                skip_bias_add=False,
-                params_dtype=torch.bfloat16,
-                reduce_results=True,
-                quant_config=None,
-                return_bias=False,
-            )
+    with (
+            patch("vllm_gaudi.ops.hpu_row_parallel_linear.get_config", return_value=mock_cfg),
+            _temporary_oot_registry(),
+    ):
+        CustomOp.op_registry_oot[RowParallelLinear.__name__] = HPURowParallelLinear
+        layer = RowParallelLinear(
+            input_size=input_size,
+            output_size=output_size,
+            bias=bias,
+            input_is_parallel=True,
+            skip_bias_add=False,
+            params_dtype=torch.bfloat16,
+            reduce_results=True,
+            quant_config=None,
+            return_bias=False,
+        )
     # Weights are allocated with torch.empty() (uninitialized).
     # On HPU this can leave NaN values in memory, which makes
     # bit-exact comparisons fail (NaN != NaN by IEEE 754).
@@ -123,8 +121,8 @@ def _chunked_output(layer, input_tensor, num_chunks=4):
     saved_tp = layer.tp_size
 
     layer.num_chunks = num_chunks
-    layer.chunk_threshold = 1       # ensure threshold is met
-    layer.tp_size = 2               # must be >1 to trigger chunking
+    layer.chunk_threshold = 1  # ensure threshold is met
+    layer.tp_size = 2  # must be >1 to trigger chunking
 
     with torch.no_grad():
         out = layer(input_tensor)

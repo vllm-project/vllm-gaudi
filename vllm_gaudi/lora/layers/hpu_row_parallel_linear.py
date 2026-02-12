@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 """HPU-specific LoRA layer for RowParallelLinear.
 
 This module registers HPU-aware LoRA wrappers that can handle 
@@ -21,8 +20,6 @@ from vllm.lora.layers.utils import (
 )
 from vllm.lora import utils as lora_utils
 from vllm.model_executor.layers.linear import RowParallelLinear
-
-from vllm_gaudi.ops.hpu_row_parallel_linear import HPURowParallelLinear
 
 
 class HPURowParallelLinearWithLoRA(RowParallelLinearWithLoRA):
@@ -66,7 +63,7 @@ def register_hpu_lora_layers():
     # Remove the upstream classes first (they use strict type check)
     lora_utils._all_lora_classes.discard(RowParallelLinearWithLoRA)
     lora_utils._all_lora_classes.discard(RowParallelLinearWithShardedLoRA)
-    
+
     # Add HPU-aware classes
     lora_utils._all_lora_classes.add(HPURowParallelLinearWithLoRA)
     lora_utils._all_lora_classes.add(HPURowParallelLinearWithShardedLoRA)

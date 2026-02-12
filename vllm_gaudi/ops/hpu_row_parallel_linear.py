@@ -10,6 +10,7 @@ from vllm.distributed import (
 from vllm.distributed.parallel_state import get_tp_group
 from vllm_gaudi.extension.runtime import get_config
 
+
 @RowParallelLinear.register_oot
 class HPURowParallelLinear(RowParallelLinear):
     """HPU-optimized RowParallelLinear implementation.
@@ -50,17 +51,15 @@ class HPURowParallelLinear(RowParallelLinear):
         Returns:
             Output tensor, or tuple of (output, bias) if skip_bias_add is True
         """
-        
+
         if self.input_is_parallel:
             input_parallel = input_
         else:
-            splitted_input = split_tensor_along_last_dim(
-                input_, num_partitions=self.tp_size
-            )
+            splitted_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
             input_parallel = splitted_input[self.tp_rank].contiguous()
 
         assert self.quant_method is not None
-        
+
         # Determine total tokens for chunking decision
         input_shape = input_parallel.shape
         # For 3D input [batch, seq, hidden], total_tokens = batch * seq
@@ -70,21 +69,19 @@ class HPURowParallelLinear(RowParallelLinear):
             total_tokens = batch_size * seq_len
         else:
             total_tokens = input_shape[0]
-        
+
         # Check if we should use chunking
         # Don't chunk for inputs below threshold as there's no overlap benefit
-        should_chunk = (self.num_chunks > 1 and 
-                       self.reduce_results and 
-                       self.tp_size > 1 and
-                       total_tokens >= self.chunk_threshold)
-        
+        should_chunk = (self.num_chunks > 1 and self.reduce_results and self.tp_size > 1
+                        and total_tokens >= self.chunk_threshold)
+
         # Chunked computation for overlapping compute and communication
         if should_chunk:
             torch._dynamo.graph_break()
-            
+
             # Determine if input is 3D [batch, seq, hidden] or 2D [batch*seq, hidden]
             is_3d = input_parallel.ndim == 3
-            
+
             if is_3d:
                 # Input is [batch, seq, hidden]
                 # For multi-token sequences (prompts): chunk along sequence dimension
@@ -98,41 +95,37 @@ class HPURowParallelLinear(RowParallelLinear):
                     # Chunk along batch dimension for batched decodes
                     chunk_dim = 0
                     total_tokens = batch_size
-                output = torch.empty(
-                    batch_size,
-                    seq_len,
-                    self.output_size_per_partition, 
-                    dtype=input_parallel.dtype,
-                    device=input_parallel.device
-                )
+                output = torch.empty(batch_size,
+                                     seq_len,
+                                     self.output_size_per_partition,
+                                     dtype=input_parallel.dtype,
+                                     device=input_parallel.device)
             else:
                 # Input is [batch*seq, hidden], chunk along batch dimension
                 total_tokens, hidden_dim = input_parallel.shape
                 chunk_dim = 0
-                output = torch.empty(
-                    total_tokens, 
-                    self.output_size_per_partition, 
-                    dtype=input_parallel.dtype,
-                    device=input_parallel.device
-                )
-            
+                output = torch.empty(total_tokens,
+                                     self.output_size_per_partition,
+                                     dtype=input_parallel.dtype,
+                                     device=input_parallel.device)
+
             chunk_size = (total_tokens + self.num_chunks - 1) // self.num_chunks
-            
+
             # Lists to store chunks and handles
             output_chunks = []
             handles = []
             chunk_ranges = []
-            
+
             # Phase 1: Compute all chunks and start all-reduces
             for i in range(self.num_chunks):
                 torch._dynamo.graph_break()
                 start_idx = i * chunk_size
                 end_idx = min((i + 1) * chunk_size, total_tokens)
-                
+
                 # Skip empty chunks
                 if start_idx >= end_idx:
                     continue
-                
+
                 # Slice input along the appropriate dimension
                 if is_3d:
                     if chunk_dim == 1:
@@ -143,27 +136,25 @@ class HPURowParallelLinear(RowParallelLinear):
                         input_chunk = input_parallel[start_idx:end_idx, :, :]
                 else:
                     input_chunk = input_parallel[start_idx:end_idx]
-                
+
                 # Compute on chunk (no bias - will be added after all-reduce)
                 output_chunk = self.quant_method.apply(self, input_chunk, bias=None)
                 torch._dynamo.graph_break()
-                
+
                 # Start async all-reduce for this chunk
-                handle = torch.distributed.all_reduce(
-                    output_chunk, group=get_tp_group().device_group, async_op=True
-                )
-                
+                handle = torch.distributed.all_reduce(output_chunk, group=get_tp_group().device_group, async_op=True)
+
                 # Store chunk, handle, and range info
                 output_chunks.append(output_chunk)
                 handles.append(handle)
                 chunk_ranges.append((start_idx, end_idx))
-            
+
             # Phase 2: Wait for all handles and combine outputs
             for handle in handles:
                 handle.wait()
-            
+
             torch._dynamo.graph_break()
-            
+
             # Copy all chunks to output
             for chunk, (start_idx, end_idx) in zip(output_chunks, chunk_ranges):
                 if is_3d:
@@ -175,9 +166,9 @@ class HPURowParallelLinear(RowParallelLinear):
                         output[start_idx:end_idx, :, :] = chunk
                 else:
                     output[start_idx:end_idx] = chunk
-            
+
             torch._dynamo.graph_break()
-            
+
             # Apply bias after all-reduce (only on rank 0 if not skip_bias_add)
             if self.bias is not None and self.tp_rank == 0 and not self.skip_bias_add:
                 output = output + self.bias
