@@ -4,6 +4,7 @@
 # Global build arguments - declared before first FROM to be available in all stages
 ARG ARTIFACTORY_URL="vault.habana.ai"
 ARG SYNAPSE_VERSION=1.23.0
+# Use an exact revision (e.g. 695) or "latest" to auto-detect the newest available revision.
 ARG SYNAPSE_REVISION=695
 ARG BASE_NAME=rhel9.6
 ARG OS_VERSION=9.6
@@ -83,8 +84,8 @@ RUN alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2 && \
     ln -s /usr/bin/python3 /usr/bin/python
 
 # Install base Python packages
-RUN pip install setuptools==79.0.1 wheel setuptools_scm && \
-    pip install --upgrade Jinja2 protobuf urllib3 requests
+RUN pip install --no-cache-dir setuptools==79.0.1 wheel setuptools_scm && \
+    pip install --no-cache-dir --upgrade Jinja2 protobuf urllib3 requests
 
 # Setup Habana repository and install Habana packages
 RUN printf "[habanalabs]\\nname=Habana RH9 Linux repo\\nbaseurl=https://${ARTIFACTORY_URL}/artifactory/${HABANA_RPM_REPO_PATH}\\ngpgkey=https://${ARTIFACTORY_URL}/artifactory/${HABANA_RPM_REPO_PATH}/repodata/repomd.xml.key\\ngpgcheck=1\\n" > /etc/yum.repos.d/habanalabs.repo && \
@@ -96,17 +97,30 @@ RUN printf "[habanalabs]\\nname=Habana RH9 Linux repo\\nbaseurl=https://${ARTIFA
     rpm --import "${_GPG_TEMP}/habana_pubkey" && \
     rm -rf "${_GPG_TEMP}" && \
     dnf makecache && \
+    if [ "${SYNAPSE_REVISION}" = "latest" ]; then \
+    dnf install -y \
+    habanalabs-rdma-core-"$SYNAPSE_VERSION"* \
+    habanalabs-thunk-"$SYNAPSE_VERSION"* \
+    habanalabs-firmware-tools-"$SYNAPSE_VERSION"* \
+    habanalabs-graph-"$SYNAPSE_VERSION"*; \
+    else \
     dnf install -y \
     habanalabs-rdma-core-"$SYNAPSE_VERSION"-"$SYNAPSE_REVISION"* \
     habanalabs-thunk-"$SYNAPSE_VERSION"-"$SYNAPSE_REVISION"* \
     habanalabs-firmware-tools-"$SYNAPSE_VERSION"-"$SYNAPSE_REVISION"* \
-    habanalabs-graph-"$SYNAPSE_VERSION"-"$SYNAPSE_REVISION"* && \
+    habanalabs-graph-"$SYNAPSE_VERSION"-"$SYNAPSE_REVISION"*; \
+    fi && \
+    DETECTED_SYNAPSE_REVISION=$(rpm -q --qf '%{RELEASE}\n' habanalabs-rdma-core | head -n1 | sed 's/\..*$//') && \
+    mkdir -p /etc/habanalabs && \
+    echo "${DETECTED_SYNAPSE_REVISION}" > /etc/habanalabs/synapse_revision && \
+    echo "Detected Synapse revision: ${DETECTED_SYNAPSE_REVISION}" && \
     dnf clean all && \
     chmod +t /var/log/habana_logs && \
     rm -f /etc/yum.repos.d/habanalabs.repo
 
 # Install Habana media loader and configure Python path
-RUN pip install habana-media-loader=="${SYNAPSE_VERSION}"."${SYNAPSE_REVISION}" --extra-index-url ${PYPI_INDEX_URL} && \
+RUN SYNAPSE_REVISION_RUNTIME=$(cat /etc/habanalabs/synapse_revision) && \
+    pip install --no-cache-dir habana-media-loader=="${SYNAPSE_VERSION}"."${SYNAPSE_REVISION_RUNTIME}" --extra-index-url ${PYPI_INDEX_URL} && \
     echo "/usr/lib/habanalabs" > $(python3 -c "import sysconfig; print(sysconfig.get_path('platlib'))")/habanalabs-graph.pth
 
 # ============================================================================
@@ -129,14 +143,15 @@ ARG TORCH_TYPE
 ENV OS_STRING="${OS_STRING}"
 
 # Use installer script from Habana to install Pytorch
-RUN PT_PACKAGE_NAME="pytorch_modules${PT_PACKAGE_NAME_NON_DEFAULT_PYTHON_SUBSTRING}-v${PT_VERSION}_${SYNAPSE_VERSION}_${SYNAPSE_REVISION}.tgz" && \
-    PT_ARTIFACT_PATH="https://${ARTIFACTORY_URL}/artifactory/${PT_MODULES_REPO_NAME}/${SYNAPSE_VERSION}/${SYNAPSE_REVISION}/pytorch/${OS_STRING}" && \
+RUN SYNAPSE_REVISION_RUNTIME=$(cat /etc/habanalabs/synapse_revision) && \
+    PT_PACKAGE_NAME="pytorch_modules${PT_PACKAGE_NAME_NON_DEFAULT_PYTHON_SUBSTRING}-v${PT_VERSION}_${SYNAPSE_VERSION}_${SYNAPSE_REVISION_RUNTIME}.tgz" && \
+    PT_ARTIFACT_PATH="https://${ARTIFACTORY_URL}/artifactory/${PT_MODULES_REPO_NAME}/${SYNAPSE_VERSION}/${SYNAPSE_REVISION_RUNTIME}/pytorch/${OS_STRING}" && \
     TMP_PATH=$(mktemp --directory) && \
     wget --no-verbose "${PT_ARTIFACT_PATH}/${PT_PACKAGE_NAME}" && \
     tar -zxf "${PT_PACKAGE_NAME}" -C "${TMP_PATH}" && \
     cd "${TMP_PATH}" && \
     export SKIP_INSTALL_DEPENDENCIES=1 && \
-    PYTHON_INDEX_URL="--extra-index-url ${PYPI_INDEX_URL}" ./install.sh $SYNAPSE_VERSION $SYNAPSE_REVISION $TORCH_TYPE && \
+    PYTHON_INDEX_URL="--extra-index-url ${PYPI_INDEX_URL}" ./install.sh $SYNAPSE_VERSION $SYNAPSE_REVISION_RUNTIME $TORCH_TYPE && \
     cd / && \
     rm -rf "${TMP_PATH}" "${PT_PACKAGE_NAME}"
 
@@ -188,11 +203,12 @@ RUN set -e && \
     git remote add upstream https://github.com/vllm-project/vllm.git && \
     git fetch upstream --tags && \
     git checkout ${VLLM_PROJECT_COMMIT} && \
-    pip install -r <(sed '/^torch/d' requirements/build.txt) && \
-    VLLM_TARGET_DEVICE=empty pip install --no-build-isolation . && \
+    pip install --no-cache-dir -r <(sed '/^torch/d' requirements/build.txt) && \
+    VLLM_TARGET_DEVICE=empty pip install --no-cache-dir --no-build-isolation . && \
     cd $VLLM_PATH2 && \
     git checkout ${VLLM_GAUDI_COMMIT} && \
-    VLLM_TARGET_DEVICE=hpu pip install -v . --no-build-isolation
+    VLLM_TARGET_DEVICE=hpu pip install --no-cache-dir -v . --no-build-isolation && \
+    pip check
 
 # The scripts below are used for benchmarks testing and autocalc:
 # RUN pip3 install -v -e $VLLM_PATH/tests/vllm_test_utils
