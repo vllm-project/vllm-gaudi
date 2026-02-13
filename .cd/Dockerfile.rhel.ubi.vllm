@@ -57,20 +57,19 @@ ENV TORCH_TYPE=${TORCH_TYPE} \
 COPY LICENSE /licenses/
 
 # System setup - Remove FIPS provider and add EPEL
-RUN dnf install -y python3-dnf-plugin-versionlock && \
+RUN dnf install -y --allowerasing python3-dnf-plugin-versionlock && \
     dnf versionlock add redhat-release* && \
     # '|| true' is added to support RHEL 9.4 in which openssl-fips-provider-so is not installed
     rpm -e --nodeps openssl-fips-provider-so || true && \
-    dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \
+    dnf install -y --allowerasing https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \
     dnf clean all
 
 # Add CentOS repositories for additional packages
 RUN printf "[BaseOS]\\nname=CentOS Linux 9 - BaseOS\\nbaseurl=https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os\\ngpgkey=https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official-SHA256\\ngpgcheck=1\\n" > /etc/yum.repos.d/CentOS-Linux-BaseOS.repo && \
-    printf "[centos9]\\nname=CentOS Linux 9 - AppStream\\nbaseurl=https://mirror.stream.centos.org/9-stream/AppStream/x86_64/os\\ngpgkey=https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official-SHA256\\ngpgcheck=1\\n" > /etc/yum.repos.d/CentOS-Linux-AppStream.repo && \
-    printf "[CRB]\\nname=CentOS Linux 9 - CRB\\nbaseurl=https://mirror.stream.centos.org/9-stream/CRB/x86_64/os\\ngpgkey=https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official-SHA256\\ngpgcheck=1\\n" > /etc/yum.repos.d/CentOS-Linux-CRB.repo
+    printf "[centos9]\\nname=CentOS Linux 9 - AppStream\\nbaseurl=https://mirror.stream.centos.org/9-stream/AppStream/x86_64/os\\ngpgkey=https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official-SHA256\\ngpgcheck=1\\n" > /etc/yum.repos.d/CentOS-Linux-AppStream.repo
 
 # Install system dependencies
-RUN dnf install -y \
+RUN dnf install -y --allowerasing \
     wget git jq libomp \
     # Image processing dependencies (needed for pillow-simd -> habana-media-loader)
     zlib-devel libjpeg-devel \
@@ -181,7 +180,7 @@ ENV BASE_NAME=${BASE_NAME} \
     VLLM_PATH2=/workspace/vllm-gaudi
 
 # Install additional system dependencies
-RUN dnf update -y --nobest && \
+RUN dnf update -y --nobest --allowerasing --skip-broken && \
     dnf install -y gettext jq git --allowerasing && \
     ln -sf /usr/bin/python3 /usr/bin/python && \
     dnf clean all
@@ -239,3 +238,4 @@ COPY LICENSE /licenses/vllm.md
 
 USER 2000
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+
