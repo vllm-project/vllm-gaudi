@@ -1,5 +1,6 @@
 from vllm.config import VllmConfig
-from vllm.model_executor.models.dots_ocr import (DotsOCRForCausalLM, Qwen2VLMultiModalProcessor, DotsOCRProcessingInfo, DotsOCRDummyInputsBuilder)
+from vllm.model_executor.models.dots_ocr import (DotsOCRForCausalLM, DotsOCRProcessingInfo, DotsOCRDummyInputsBuilder)
+from vllm.model_executor.models.qwen2_vl import Qwen2VLMultiModalProcessor
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 
