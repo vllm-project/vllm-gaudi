@@ -505,3 +505,14 @@ jobs:
             ### ✅ CI Passed
             All checks passed successfully against the following vllm commit:
             **`${{ needs.pre_merge_hpu_test_build.outputs.target_commit }}`**
+
+  cleanup_docker_image:
+    name: Cleanup Docker Image
+    if: always()
+    needs: [discover_runner, hpu_unit_tests, hpu_pd_tests, hpu_perf_tests, hpu_dp_tests, e2e]
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    steps:
+      - name: Remove Docker image to free up space
+        run: |
+          echo "Cleaning up Docker images created by this workflow run..."
+          docker rmi -f hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} || true
