@@ -11,11 +11,16 @@ from compressed_tensors.quantization import (QuantizationArgs, QuantizationStrat
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import convert_to_channelwise, all_close_1d
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter, ModelWeightParameter, PerTensorScaleParameter,
                                            BasevLLMParameter, GroupQuantScaleParameter, PackedColumnParameter,
-                                           PackedvLLMParameter, RowvLLMParameter)
+                                           PackedvLLMParameter, RowvLLMParameter, BlockQuantScaleParameter)
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
-    CompressedTensorsLinearMethod as OrigCompressedTensorsLinearMethod, CompressedTensorsConfig,
-    CompressedTensorsMoEMethod, CompressedTensorsKVCacheMethod)
+    CompressedTensorsLinearMethod as OrigCompressedTensorsLinearMethod)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+    CompressedTensorsConfig,
+    CompressedTensorsMoEMethod,
+    CompressedTensorsKVCacheMethod,
+    SparsityCompressionConfig,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors_moe)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (  # noqa: E501
     CompressedTensorsScheme, CompressedTensorsWNA16)
@@ -26,19 +31,23 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsW8A8Fp8MoEMethod, CompressedTensorsWNA16MarlinMoEMethod)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision import (MPLinearKernel, MPLinearLayerConfig)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (pack_quantized_values_into_int32,
-                                                                       unpack_quantized_values_into_int32)
+                                                                       unpack_quantized_values_into_int32, GroupShape)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import validate_fp8_block_shape
+
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (marlin_repeat_scales_on_all_ranks)
 from vllm.model_executor.utils import set_weight_attrs
 import vllm_gaudi.extension.ops as hpu_ops
+from vllm_gaudi import envs
 from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
-from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel, VllmMixtureOfExpertsOpWNA16)
+from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8, VllmMixtureOfExpertsOpFP8PerChannel,
+                                      VllmMixtureOfExpertsOpWNA16)
 from vllm_gaudi.extension.runtime import get_config
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase, )
 import vllm.model_executor.model_loader.weight_utils as vllm_weight_utils
 
 logger = init_logger(__name__)
-SUPPORTED_STRATEGIES = [QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR]
+SUPPORTED_STRATEGIES = [QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR, QuantizationStrategy.BLOCK]
 
 
 @CustomOp.register_oot(name='CompressedTensorsLinearMethod')
@@ -73,7 +82,11 @@ class HPUCompressedTensorsLinearMethod(OrigCompressedTensorsLinearMethod):
             raise ValueError("A scheme must be defined for each layer")
         scheme_classname = scheme.__class__.__name__
         if (scheme_classname in ("CompressedTensorsW8A8Fp8", "CompressedTensorsW8A16Fp8")):
-            hpu_scheme = HPUCompressedTensorsW8A8Fp8(scheme.strategy, scheme.is_static_input_scheme)
+            scheme_dict = self.quantization_config.get_scheme_dict(layer, layer.prefix)
+            weight_quant = None
+            if scheme_dict:
+                weight_quant = scheme_dict.get("weights")
+            hpu_scheme = HPUCompressedTensorsW8A8Fp8(scheme.strategy, scheme.is_static_input_scheme, weight_quant)
         elif (scheme_classname == "CompressedTensorsWNA16"):
             matched_target = find_matched_target(layer_name=layer.prefix,
                                                  module=layer,
@@ -96,16 +109,34 @@ class HPUCompressedTensorsLinearMethod(OrigCompressedTensorsLinearMethod):
         if layer.scheme.strategy == QuantizationStrategy.CHANNEL:  # weights were quantized per-channel
             dequant_weight = layer.weight.to(layer.weight_scale.dtype) * layer.weight_scale.squeeze()
             return dequant_weight.to(torch.bfloat16).t()
+        elif layer.scheme.strategy == QuantizationStrategy.BLOCK:
+            if hasattr(layer, "updated_fp8_weight") and layer.updated_fp8_weight:
+                return layer.weight
+            dequant_weight = hpu_ops.dequant_block_fp8_weight_naive(
+                layer.weight.t(),
+                layer.weight_scale.data,
+                layer.weight_block_size,
+                original_M=layer.orig_M,
+                original_N=layer.orig_N,
+                do_unpad=True,
+            )
+            return dequant_weight.to(torch.bfloat16)
         else:
-            raise NotImplementedError("Implemented per-channel dequantization only")
+            raise NotImplementedError("Dequant implemented per-channel and per-block dequantization only")
 
 
 @CustomOp.register_oot(name='CompressedTensorsW8A8Fp8')
 class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
-    def __init__(self, strategy: str, is_static_input_scheme: bool):
+    def __init__(self, strategy: str, is_static_input_scheme: bool, weight_quant: QuantizationArgs):
         self.strategy = strategy
         self.is_static_input_scheme = is_static_input_scheme
+        self.weight_quant = weight_quant
+        self.weight_block_size = self.weight_quant.block_structure if weight_quant is not None else None
+        if self.weight_block_size is not None:
+            self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
+        else:
+            self.act_q_group_shape = (GroupShape.PER_TENSOR if is_static_input_scheme else GroupShape.PER_TOKEN)
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -117,11 +148,12 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         if layer.scheme.strategy == QuantizationStrategy.TENSOR:
             ws_channelwise = convert_to_channelwise(layer.weight_scale, layer.logical_widths)
             layer.weight_scale = torch.nn.Parameter(ws_channelwise, requires_grad=False)
+        elif layer.scheme.strategy == QuantizationStrategy.BLOCK:
+            layer = hpu_ops.fp8_block_linear_postprocess_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
         else:
             # required by torch.compile to be torch.nn.Parameter
             layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data, requires_grad=False)
 
-        # Weights must be transposed for marlin
         layer.weight = torch.nn.Parameter(layer.weight.t(), requires_grad=False)
 
         # see the reference: https://github.com/vllm-project/vllm/blob/v0.11.2/vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_w8a8_fp8.py#L169-L173
@@ -174,6 +206,30 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         elif layer.scheme.strategy == QuantizationStrategy.TENSOR:
             weight_scale = PerTensorScaleParameter(data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
                                                    weight_loader=weight_loader)
+        elif self.strategy == QuantizationStrategy.BLOCK:
+            assert self.weight_block_size is not None
+            layer.weight_block_size = self.weight_block_size
+            # Validate block quantization shapes
+            validate_fp8_block_shape(
+                layer,
+                input_size,
+                output_size,
+                input_size_per_partition,
+                output_partition_sizes,
+                self.weight_block_size,
+            )
+            block_n, block_k = self.weight_block_size[0], self.weight_block_size[1]
+            output_size_per_partition = sum(output_partition_sizes)
+            weight_scale = BlockQuantScaleParameter(
+                data=torch.empty(
+                    (output_size_per_partition + block_n - 1) // block_n,
+                    (input_size_per_partition + block_k - 1) // block_k,
+                    dtype=torch.float32,
+                ),
+                input_dim=1,
+                output_dim=0,
+                weight_loader=weight_loader,
+            )
         else:
             raise ValueError(f"Unsupported weight strategy={layer.scheme.strategy}, "
                              f"supported strategies are {SUPPORTED_STRATEGIES}")
@@ -263,12 +319,23 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
         ep_shift = layer.ep_rank * num_experts
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
-        layer.moe_op = VllmMixtureOfExpertsOpFP8PerChannel(
-            layer.global_num_experts,
-            num_experts,
-            experts_min,
-            experts_max,
-        )
+
+        if self.block_quant and not envs.VLLM_HPU_FORCE_CHANNEL_FP8:
+            layer.moe_op = VllmMixtureOfExpertsOpFP8(
+                layer.global_num_experts,
+                num_experts,
+                experts_min,
+                experts_max,
+                dispatch_fn=None,
+            )
+        else:
+            layer.moe_op = VllmMixtureOfExpertsOpFP8PerChannel(
+                layer.global_num_experts,
+                num_experts,
+                experts_min,
+                experts_max,
+                dispatch_fn=None,
+            )
 
         if self.static_input_scales:
             assert self.input_quant.strategy == QuantizationStrategy.TENSOR
@@ -302,7 +369,11 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
             w2_weight_scale_channel[:, :, 0] = layer.w2_weight_scale.reshape(-1, 1)
             layer.w2_weight_scale = torch.nn.Parameter(w2_weight_scale_channel, requires_grad=False)
 
-        layer = hpu_ops.fp8_channel_moe_prepare_weights(layer)
+        if self.block_quant:
+            assert layer.weight_block_size is not None
+            layer = hpu_ops.fp8_block_moe_prepare_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
+        else:
+            layer = hpu_ops.fp8_channel_moe_prepare_weights(layer)
         return
 
     def apply_monolithic(
@@ -746,7 +817,10 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         return output.view(*input_shape)
 
 
-class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
+class HPUCompressedTensorsKVCacheMethod(CompressedTensorsKVCacheMethod):
+    SUBMODULES_TO_CHECK = ["k_cache", "v_cache", "matmul_qk", "matmul_av"]
+    OLD_SCALE_ATTRS = ["_k_scale", "_v_scale", "_q_scale", "_k_scale_float", "_v_scale_float", "_q_scale_float"]
+    SCALE_ATTRS = ["input_scale", "output_scale", "scale_input", "scale_other"]
 
     def _convert_all_scale_to_nn_param(self, module: torch.nn.Module, scale_attrs: list[str]) -> None:
         for scale_attr in scale_attrs:
@@ -759,53 +833,118 @@ class HPUCompressedTensorsKVCacheMethodForMLA(CompressedTensorsKVCacheMethod):
         for attr_name in attrs_lst:
             if hasattr(layer, attr_name):
                 delattr(layer, attr_name)
-                logger.debug_once(f"Removed attribute {attr_name} from layer {layer}")
+                logger.debug_once(f"Removed attribute {attr_name}.")
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def _update_kv_cache_scales(self, layer: torch.nn.Module, k_scale: torch.Tensor, v_scale: torch.Tensor) -> None:
+        layer.impl.k_cache.input_scale = k_scale
+        layer.impl.k_cache.output_scale = 1.0 / k_scale
+        layer.impl.v_cache.input_scale = v_scale
+        layer.impl.v_cache.output_scale = 1.0 / v_scale
+
+    def process_weights_after_loading(self,
+                                      layer: torch.nn.Module,
+                                      submodules_to_check: Optional[list[str]] = None) -> None:
         """Process KV cache scales for cross-platform FP8 quantization compatibility."""
         super().process_weights_after_loading(layer)
         # The `k_scale` and `v_scale` are loaded from checkpoint without any adjustment.
         # Compute KV scales based on quantization and deployment platforms
         fp8_max_original = 448.0 if get_config().scale_adjustment else 240.0
+
+        max_q = layer._q_scale * fp8_max_original
         max_k = layer._k_scale * fp8_max_original
         max_v = layer._v_scale * fp8_max_original
-        max_kv = max(max_k, max_v)
-        fp8_max_cur_platform = 240.0 if hpu_ops.is_hpu_gaudi2 else 448.0
-        kv_scale = fp8_max_cur_platform / max_kv
-        # Configure latent cache and matmul scales
-        layer.impl.latent_cache_k.input_scale = kv_scale
-        layer.impl.latent_cache_k.output_scale = 1.0 / kv_scale
-        # TODO(yiliu30): Support loading q_scale from checkpoint
-        layer.impl.matmul_qk.scale_input = 1.0
-        layer.impl.matmul_qk.scale_other = kv_scale
+        fp8_max_cur_platform = hpu_ops.FP8_MAX
+        k_scale = fp8_max_cur_platform / max_k
+        v_scale = fp8_max_cur_platform / max_v
+        q_scale = fp8_max_cur_platform / max_q
+        self._update_kv_cache_scales(layer, k_scale=k_scale, v_scale=v_scale)
+        layer.impl.matmul_qk.scale_input = q_scale
+        layer.impl.matmul_qk.scale_other = k_scale
         # For `a` in a@v, as `a` is the output of softmax, its max value is 1.0
         layer.impl.matmul_av.scale_input = 1.0
-        layer.impl.matmul_av.scale_other = kv_scale
+        layer.impl.matmul_av.scale_other = v_scale
+
+        # Configure fp8 fused sdpa scales
+        layer.impl.fused_scaled_dot_product_attention.scale_q = q_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.scale_k = k_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.scale_v = v_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.d_scale_q = 1 / q_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.d_scale_k = 1 / k_scale.detach()
+        layer.impl.fused_scaled_dot_product_attention.d_scale_v = 1 / v_scale.detach()
 
         # Note: The following steps are important to avoid compiling each decoding layer into a different gc recipe
         # Step 1: Remove deprecated scale attributes
-        old_scale_attrs = ["_k_scale", "_v_scale", "_q_scale", "_k_scale_float", "_v_scale_float", "_q_scale_float"]
-        self._remove_attrs(layer, attrs_lst=old_scale_attrs)
+        self._remove_attrs(layer, attrs_lst=self.OLD_SCALE_ATTRS)
 
         # Step 2: Convert scales in submodules to nn.Parameter to avoid compiling each layer into different gc recipe
-        submodules_to_check = ["latent_cache_k", "matmul_qk", "matmul_av"]
-        scale_attrs = ["input_scale", "output_scale", "scale_input", "scale_other"]
+        submodules_to_check = submodules_to_check or self.SUBMODULES_TO_CHECK
         for submodule_name in submodules_to_check:
             submodule = getattr(layer.impl, submodule_name, None)
             if submodule is not None:
-                self._convert_all_scale_to_nn_param(submodule, scale_attrs=scale_attrs)
+                self._convert_all_scale_to_nn_param(submodule, scale_attrs=self.SCALE_ATTRS)
+
+
+class HPUCompressedTensorsKVCacheMethodForMLA(HPUCompressedTensorsKVCacheMethod):
+    SUBMODULES_TO_CHECK = ["latent_cache_k", "matmul_qk", "matmul_av"]
+
+    def _update_kv_cache_scales(self, layer: torch.nn.Module, k_scale: torch.Tensor, v_scale: torch.Tensor) -> None:
+        # Configure latent cache scales
+        layer.impl.latent_cache_k.input_scale = k_scale
+        layer.impl.latent_cache_k.output_scale = 1.0 / k_scale
+
+    def process_weights_after_loading(self,
+                                      layer: torch.nn.Module,
+                                      submodules_to_check: Optional[list[str]] = None) -> None:
+        # Align KV scales for MLA attention.
+        kv_scale_max = max(layer._k_scale, layer._v_scale)
+        layer._k_scale.data.copy_(kv_scale_max)
+        layer._v_scale.data.copy_(kv_scale_max)
+        super().process_weights_after_loading(layer, submodules_to_check=self.SUBMODULES_TO_CHECK)
 
 
 class HPUCompressedTensorsConfig(CompressedTensorsConfig):
+
+    def __init__(
+        self,
+        target_scheme_map: dict[str, Any],
+        ignore: list[str],
+        quant_format: str,
+        sparsity_scheme_map: dict[str, SparsityCompressionConfig],
+        sparsity_ignore_list: list[str],
+        kv_cache_scheme: dict[str, Any] | None = None,
+        config: dict[str, Any] | None = None,
+        transform_config: dict[str, Any] | None = None,
+        total_num_heads: int | None = None,
+        total_num_kv_heads: int | None = None,
+    ):
+        super().__init__(
+            target_scheme_map,
+            ignore,
+            quant_format,
+            sparsity_scheme_map,
+            sparsity_ignore_list,
+            kv_cache_scheme,
+            config,
+            transform_config,
+            total_num_heads,
+            total_num_kv_heads,
+        )
+        # Fix https://github.com/vllm-project/vllm/pull/30141
+        # LLMC overrides the `kv_cache_dtype` to 'fp8', while HPU uses 'fp8_inc'.
+        if getattr(self, "kv_cache_scheme", None) is not None:
+            self.kv_cache_dtype = "fp8_inc"
+            self.kv_cache_scheme = None
 
     def get_quant_method(
         self,
         layer: torch.nn.Module,
         prefix: str,
     ) -> Optional["QuantizeMethodBase"]:
-        from vllm.model_executor.layers.attention import MLAAttention
+        from vllm.model_executor.layers.attention import MLAAttention, Attention
         if isinstance(layer, MLAAttention):
             return HPUCompressedTensorsKVCacheMethodForMLA(self)
+        elif isinstance(layer, Attention):
+            return HPUCompressedTensorsKVCacheMethod(self)
         else:
             return super().get_quant_method(layer, prefix)
 

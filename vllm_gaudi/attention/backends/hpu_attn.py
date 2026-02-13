@@ -13,8 +13,8 @@ import torch
 import vllm_gaudi.extension.kernels as kernels
 import vllm_gaudi.extension.ops as ops
 from vllm_gaudi.extension.runtime import get_config
-from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, B2BMatmul, ModuleFusedSDPA, Softmax, VLLMFP8KVCache,
-                                        VLLMKVCache)
+from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, B2BMatmul, ModuleFusedSDPA, ModuleFP8FusedSDPA, Softmax,
+                                        VLLMFP8KVCache, VLLMKVCache)
 
 from vllm.v1.attention.backend import (AttentionBackend, AttentionImpl, AttentionLayer, AttentionMetadata,
                                        AttentionType)
@@ -209,6 +209,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         qk_head_dim: int,
         v_head_dim: int,
         kv_b_proj: ColumnParallelLinear,
+        sinks: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> None:
         torch.nn.Module.__init__(self)
@@ -246,6 +247,14 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         HPUFusedSDPA = kernels.fsdpa()
         self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
             else ModuleFusedSDPA(HPUFusedSDPA)
+
+        try:
+            from habana_frameworks.torch.hpex.kernels import fp8_fused_sdpa
+            if self.enable_fp8_attn:
+                self.fused_scaled_dot_product_attention = ModuleFP8FusedSDPA(fp8_fused_sdpa)
+        except ImportError:
+            pass
+
         self.use_merged_prefill = get_config().merged_prefill
         self.prefill_impl = get_config().prompt_attn_impl
         assert self.prefill_impl != 'fsdpa_impl' or alibi_slopes is None, \
@@ -266,6 +275,11 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "TritonMLAImpl")
+        self.sinks = sinks
+        if sinks is not None:
+            assert sinks.shape[0] == num_heads, ("Sinks must have the same number of heads as the number of "
+                                                 f"heads in the layer. Sinks shape: {sinks.shape}, "
+                                                 f"num_heads: {num_heads}.")
 
     def forward(
         self,
@@ -442,6 +456,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
+        sinks: Optional[torch.Tensor] = None,
     ) -> None:
         super(AttentionImpl, self).__init__()
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
@@ -508,6 +523,11 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             raise NotImplementedError("Encoder self-attention "
                                       "is not implemented for "
                                       "HPUAttentionImpl")
+        self.sinks = sinks
+        if sinks is not None:
+            assert sinks.shape[0] == num_heads, ("Sinks must have the same number of heads as the number of "
+                                                 f"heads in the layer. Sinks shape: {sinks.shape}, "
+                                                 f"num_heads: {num_heads}.")
 
         self.is_chunked_attention = False
 
@@ -552,7 +572,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         if self.attn_type == AttentionType.ENCODER_DECODER:
             return self.forward_encoder_decoder(
                 query=query,
@@ -590,6 +609,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         if kv_cache is not None and isinstance(kv_cache, tuple):
             key_cache, value_cache, k_scales, v_scales = \
                 HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
+            if key.dtype == torch.float32 and key.dtype != key_cache.dtype:
+                key = key.to(key_cache.dtype)
+            if key.dtype == torch.float32 and value.dtype != value_cache.dtype:
+                value = value.to(value_cache.dtype)
+            if query.dtype != key.dtype:
+                query = query.to(key.dtype)
             if self.kv_sharing_target_layer_name is None:
                 # Reshape the input keys and values and store them in the cache.
                 # If kv_cache is not provided, the new key and value tensors are
@@ -728,6 +753,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             'key_cache': key_cache,
             'value_cache': value_cache,
             'block_size': block_size,
+            "sinks": self.sinks,
             'k_scales': k_scales,
             'v_scales': v_scales,
         }
