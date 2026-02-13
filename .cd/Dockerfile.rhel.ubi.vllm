@@ -5,6 +5,7 @@
 ARG ARTIFACTORY_URL="vault.habana.ai"
 ARG SYNAPSE_VERSION=1.23.0
 # Use an exact revision (e.g. 695) or "latest" to auto-detect the newest available revision.
+# If you do not want metadata to show "latest", pass an exact SYNAPSE_REVISION.
 ARG SYNAPSE_REVISION=695
 ARG BASE_NAME=rhel9.6
 ARG OS_VERSION=9.6
@@ -36,7 +37,9 @@ ARG PYPI_INDEX_URL
 ARG HABANA_RPM_REPO_PATH
 ARG TORCH_TYPE
 
-# Labels for RHEL certification
+# Labels for RHEL certification.
+# Note: when SYNAPSE_REVISION=latest, this metadata intentionally records "latest"
+# (the requested input), not the detected numeric revision.
 LABEL vendor="Habanalabs Ltd." \
     release="${SYNAPSE_VERSION}-${SYNAPSE_REVISION}"
 
