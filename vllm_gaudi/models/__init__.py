@@ -33,7 +33,7 @@ def register_model():
     from vllm_gaudi.models.pixtral import HPUPixtralForConditionalGeneration  # noqa: F401
     ModelRegistry.register_model("PixtralForConditionalGeneration",
                                  "vllm_gaudi.models.pixtral:HPUPixtralForConditionalGeneration")
-    
+
     from vllm_gaudi.models.dots_ocr import HpuDotsOCRForCausalLM  # noqa: F401
     ModelRegistry.register_model("DotsOCRForCausalLM", "vllm_gaudi.models.dots_ocr:HpuDotsOCRForCausalLM")
 
