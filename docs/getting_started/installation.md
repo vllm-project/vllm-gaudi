@@ -7,10 +7,10 @@ title: Installation
 There are three ways to run vLLM Hardware Plugin for Intel® Gaudi®:
 
 - **Using Docker Compose**: The easiest method that requires no image building and is supported only in 1.22 and later releases on Ubuntu. For more information and detailed instructions, see the [Quick Start](quickstart/quickstart.md) guide.
-- **Using a Dockerfile**: Allows building a container with the Intel® Gaudi® software suite using the provided Dockerfile. This options is supported only on Ubuntu.
-- **Building from source**: Allows installing and running vLLM directly on your Intel® Gaudi® machine by building from source. It's supported as a standard installation and an enhanced setup with NIXL.
+- **Using a Dockerfile**: Allows building a container with the Intel Gaudi software suite using the provided Dockerfiles, either Ubuntu-based or UBI-based.
+- **Building from source**: Allows installing and running vLLM directly on your Intel Gaudi machine by building from source. It's supported as a standard installation and an enhanced setup with NIXL.
 
-This guide explains how to run vLLM Hardware Plugin for Intel® Gaudi® from source and using a Dockerfile.
+This guide explains how to run vLLM Hardware Plugin for Intel Gaudi from source and using a Dockerfile.
 
 ## Requirements
 
@@ -24,11 +24,20 @@ Additionally, ensure that the Gaudi execution environment is properly set up. If
 it is not, complete the setup by using the [Gaudi Installation
 Guide](https://docs.habana.ai/en/latest/Installation_Guide/index.html) instructions.
 
-## Running vLLM Hardware Plugin for Intel® Gaudi® Using Dockerfile
+## Running vLLM Hardware Plugin for Intel Gaudi Using Dockerfile
 
 ## --8<-- [start:docker_quickstart]
 
-Use the following commands to set up the container with the latest Intel® Gaudi® software suite release using the Dockerfile.
+vLLM Hardware Plugin for Intel Gaudi provides two Dockerfile options:
+
+- **Ubuntu-based Dockerfile**: A setup for Ubuntu systems.
+- **UBI-based Dockerfile**: A setup for Red Hat Enterprise Linux (RHEL) Universal Base Image (UBI) 9 environments.
+
+Choose the option that matches your deployment environment and requirements.
+
+### Ubuntu-based Dockerfile
+
+Use the following commands to set up the container with the latest Intel Gaudi software suite release using the Ubuntu-based Dockerfile.
 
     $ docker build -f .cd/Dockerfile.ubuntu.pytorch.vllm -t vllm-hpu-env  .
     $ docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --entrypoint='' --rm vllm-hpu-env
@@ -42,11 +51,45 @@ Use the following commands to set up the container with the latest Intel® Gaudi
 To achieve the best performance on HPU, please follow the methods outlined in the
 [Optimizing Training Platform Guide](https://docs.habana.ai/en/latest/PyTorch/Model_Optimization_PyTorch/Optimization_in_Training_Platform.html).
 
+### UBI-based Dockerfile
+
+The UBI-based Dockerfile is designed for RHEL UBI 9 environments and provides extensive customization through build arguments.
+
+To build with default settings, run the following command from the repository root:
+
+    $ docker build -f .cd/Dockerfile.rhel.ubi.vllm -t vllm-gaudi:ubi .
+
+The Dockerfile supports the following build arguments:
+
+| Build argument | Default value | Description |
+|----------------|---------------|-------------|
+| `ARTIFACTORY_URL` | `vault.habana.ai` | Intel Gaudi software repository URL. |
+| `SYNAPSE_VERSION` | `1.22.2` | Intel Gaudi software suite version. |
+| `SYNAPSE_REVISION` | `32` | Specific revision of the software suite. |
+| `BASE_NAME` | `rhel9.6` | Base RHEL UBI image version. |
+| `PT_VERSION` | `2.7.1` | PyTorch version. |
+| `TORCH_TYPE` | `upstream` | PyTorch distribution type. |
+| `VLLM_GAUDI_COMMIT` | `main` | vLLM Hardware Plugin for Intel Gaudi commit or branch. |
+| `VLLM_PROJECT_COMMIT` | empty | Specific vLLM project commit. |
+
+To override build arguments, use the `--build-arg` flag, as in this example:
+
+        $ docker build -f .cd/Dockerfile.rhel.ubi.vllm -t vllm-gaudi:ubi \
+                --build-arg SYNAPSE_VERSION=1.22.2 \
+                --build-arg SYNAPSE_REVISION=32 \
+                --build-arg PT_VERSION=2.7.1 \
+                --build-arg TORCH_TYPE=upstream \
+                --build-arg VLLM_GAUDI_COMMIT=main \
+                --build-arg VLLM_PROJECT_COMMIT= \
+                .
+
+The UBI Dockerfile includes commented lines to install additional Python packages and copy scripts from `.cd/templates`, `.cd/entrypoints`, `.cd/server`, and `.cd/benchmark` into `/root/scripts/`. If you need these packages in your workflow, uncomment the relevant lines in `.cd/Dockerfile.rhel.ubi.vllm` and adjust the container `ENTRYPOINT`.
+
 ## --8<-- [end:docker_quickstart]
 
-## Building vLLM Hardware Plugin for Intel® Gaudi® from Source
+## Building vLLM Hardware Plugin for Intel Gaudi from Source
 
-There are two ways to install vLLM Hardware Plugin for Intel® Gaudi® from source: a standard installation for typical usage, and an enhanced setup with NIXL for optimized performance with large-scale or distributed inference.
+There are two ways to install vLLM Hardware Plugin for Intel Gaudi from source: a standard installation for typical usage, and an enhanced setup with NIXL for optimized performance with large-scale or distributed inference.
 
 ### Standard Plugin Deployment
 
@@ -59,14 +102,14 @@ There are two ways to install vLLM Hardware Plugin for Intel® Gaudi® from sour
   
     For more information about verification, see [System Verification and Final Tests](https://docs.habana.ai/en/latest/Installation_Guide/System_Verification_and_Final_Tests.html).
 
-2. Run the latest Docker image from the Intel® Gaudi® vault as in the following code sample. Make sure to provide your versions of vLLM Hardware Plugin for Intel® Gaudi®, operating system, and PyTorch. Ensure that these versions are supported, according to the [Support Matrix](https://docs.habana.ai/en/latest/Support_Matrix/Support_Matrix.html).
+2. Run the latest Docker image from the Intel Gaudi vault as in the following code sample. Make sure to provide your versions of vLLM Hardware Plugin for Intel Gaudi, operating system, and PyTorch. Ensure that these versions are supported, according to the [Support Matrix](https://docs.habana.ai/en/latest/Support_Matrix/Support_Matrix.html).
   
         docker pull vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/pytorch-installer-{{ PT_VERSION }}:latest
         docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --ipc=host vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/pytorch-installer-{{ PT_VERSION }}:latest
   
     For more information, see the [Intel Gaudi documentation](https://docs.habana.ai/en/latest/Installation_Guide/Bare_Metal_Fresh_OS.html#pull-prebuilt-containers).
   
-3. Get the last verified vLLM commit. While vLLM Hardware Plugin for Intel® Gaudi® follows the latest vLLM commits, upstream API updates may introduce compatibility issues. The saved commit has been thoroughly validated.
+3. Get the last verified vLLM commit. While vLLM Hardware Plugin for Intel Gaudi follows the latest vLLM commits, upstream API updates may introduce compatibility issues. The saved commit has been thoroughly validated.
   
         git clone https://github.com/vllm-project/vllm-gaudi
         cd vllm-gaudi
@@ -83,7 +126,7 @@ There are two ways to install vLLM Hardware Plugin for Intel® Gaudi® from sour
         VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
         cd ..
   
-5. Install vLLM Hardware Plugin for Intel® Gaudi® from source.
+5. Install vLLM Hardware Plugin for Intel Gaudi from source.
   
         cd vllm-gaudi
         pip install -e .
@@ -103,9 +146,9 @@ Verify that the Intel Gaudi software was correctly installed.
   
     For more information about verification, see [System Verification and Final Tests](https://docs.habana.ai/en/latest/Installation_Guide/System_Verification_and_Final_Tests.html).
 
-#### Docker file deployment
+#### Dockerfile deployment
 
-To Install vLLM Hardware Plugin for Intel® Gaudi® and NIXL using a Docker file:
+To install vLLM Hardware Plugin for Intel Gaudi and NIXL using a Dockerfile:
   
         git clone https://github.com/vllm-project/vllm-gaudi
         docker build -t ubuntu.pytorch.vllm.nixl.latest \
@@ -118,7 +161,7 @@ To Install vLLM Hardware Plugin for Intel® Gaudi® and NIXL using a Docker file
   
 #### Building Plugin with NIXL using sources
 
-1. Get the last verified vLLM commit. While vLLM Hardware Plugin for Intel® Gaudi® follows the latest vLLM commits, upstream API updates may introduce compatibility issues. The saved commit has been thoroughly validated
+1. Get the last verified vLLM commit. While vLLM Hardware Plugin for Intel Gaudi follows the latest vLLM commits, upstream API updates may introduce compatibility issues. The saved commit has been thoroughly validated
   
         git clone https://github.com/vllm-project/vllm-gaudi
         cd vllm-gaudi
@@ -134,7 +177,7 @@ To Install vLLM Hardware Plugin for Intel® Gaudi® and NIXL using a Docker file
         VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
         cd ..
 
-3. Install vLLM Hardware Plugin for Intel® Gaudi® from source.
+3. Install vLLM Hardware Plugin for Intel Gaudi from source.
 
         cd vllm-gaudi
         pip install -e .
