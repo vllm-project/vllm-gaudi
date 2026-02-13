@@ -1,0 +1,15 @@
+{
+    "mode": "QUANTIZE",
+    "observer": "maxabs",
+    "scale_format": "CONST",
+    "scale_method": "maxabs_pcs_pow2",
+    "dynamic_quantization": true,
+    "blocklist": {
+        "types": [
+            "Matmul",
+            "KVCache",
+            "VLLMKVCache"
+        ]
+    },
+    "dump_stats_path": ""
+}
