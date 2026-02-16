@@ -228,7 +228,7 @@ jobs:
       - name: Discover test functions
         id: set-matrix
         run: |
-          TEST_FUNCTIONS=$( grep '^run_' ./tests/full_tests/ci_gsm8k_tests.sh | \
+          TEST_FUNCTIONS=$( grep '^run_' ./tests/full_tests/ci_e2e_discoverable_tests.sh | \
                       awk '{print $1}' | \
                       sed 's/()//' | \
                       jq -R . | jq -s -c . )
@@ -267,7 +267,7 @@ jobs:
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-${{ needs.prepare-release-branch.outputs.tag_name }} \
-            /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_gsm8k_tests.sh" "${{ matrix.test_function }}"
+            /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_e2e_discoverable_tests.sh" "${{ matrix.test_function }}"
 
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
@@ -353,7 +353,7 @@ jobs:
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-${{ needs.prepare-release-branch.outputs.tag_name }} \
             /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_perf_tests.sh"
-          
+
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
 
@@ -377,17 +377,17 @@ jobs:
         run: |
           # Start with a clean report file and add the header
           echo "## Test Summary for Branch: ${{ needs.prepare-release-branch.outputs.branch_name }}" > report.md
-          
+
           # Append the link to the workflow run using a command group
           {
             echo ""
             echo "See the full workflow run [here](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
             echo ""
           } >> report.md
-          
+
           FAILED_TESTS=""
           FAILED_COUNT=0
-          
+
           # This function now appends its result directly to the report file
           check_status() {
             JOB_NAME=$1
@@ -400,13 +400,13 @@ jobs:
               FAILED_COUNT=$((FAILED_COUNT+1))
             fi
           }
-          
+
           check_status "Unit Tests" "${{ needs.run_unit_tests.result }}"
           check_status "End-to-End Tests" "${{ needs.e2e.result }}"
           check_status "Data Parallel Test" "${{ needs.run_data_parallel_test.result }}"
           check_status "PD Disaggregate Test" "${{ needs.run_pd_disaggregate_test.result }}"
           check_status "Performance Tests" "${{ needs.run_hpu_perf_tests.result }}"
-          
+
           # Append the final summary section to the report file using a command group
           {
             echo ""
@@ -427,7 +427,7 @@ jobs:
           } >> report.md
 
           echo "Tested Branch: ${{ needs.prepare-release-branch.outputs.branch_name }}" >> report.md
-          
+
           echo "SUBJECT=$SUBJECT" >> "$GITHUB_ENV"
 
       - name: "Create GitHub Issue with Summary"
@@ -438,3 +438,14 @@ jobs:
           content-filepath: ./report.md
           # Optional: Add labels to the issue
           labels: release-report, automated
+
+  cleanup_docker_image:
+    name: Cleanup Docker Image
+    if: always()
+    needs: [discover_runner, prepare-release-branch, run_unit_tests, e2e, run_data_parallel_test, run_pd_disaggregate_test, run_hpu_perf_tests]
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    steps:
+      - name: Remove Docker image to free up space
+        run: |
+          echo "Cleaning up Docker images related to this release workflow run..."
+          docker rmi -f hpu-plugin-v1-${{ needs.prepare-release-branch.outputs.tag_name }} || true
