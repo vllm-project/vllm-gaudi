@@ -17,6 +17,7 @@ import vllm.model_executor.layers.quantization as vllm_quant
 import habana_frameworks.torch.utils.experimental as htexp
 import types
 from vllm.model_executor.layers.fused_moe import FusedMoeWeightScaleSupported
+from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization import get_quantization_config as vllm_get_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
@@ -935,20 +936,23 @@ def fp8_perchannel_linear_postprocess_weights(layer):
 
 
 def fp8_block_linear_postprocess_weights(layer, force_channel_fp8=False):
-    weight, orig_M, orig_N = pad_block_fp8_weight_naive(layer.weight.data, layer.weight_scale_inv.data,
-                                                        layer.quant_config.weight_block_size)
+    weight_scale_name = "weight_scale" if hasattr(layer, "weight_scale") else "weight_scale_inv"
+    weight_scale_inv = getattr(layer, weight_scale_name).data
+    weight_block_size = layer.weight_block_size if hasattr(
+        layer, 'weight_block_size') else layer.quant_config.weight_block_size
+    weight, orig_M, orig_N = pad_block_fp8_weight_naive(layer.weight.data, weight_scale_inv, weight_block_size)
     if force_channel_fp8:
         # convert to channel-wise fp8
         weight, weight_scale_inv = dynamic_quant(
             dequant_block_fp8_weight_naive(weight,
-                                           layer.weight_scale_inv.data,
-                                           layer.quant_config.weight_block_size,
+                                           weight_scale_inv.data,
+                                           weight_block_size,
                                            original_M=orig_M,
                                            original_N=orig_N,
                                            do_unpad=True))
         weight_scale_inv = weight_scale_inv.squeeze(-1)
         layer.weight.data.copy_(weight)
-        layer.weight_scale_inv = torch.nn.Parameter(weight_scale_inv, requires_grad=False)
+        replace_parameter(layer, weight_scale_name, torch.nn.Parameter(weight_scale_inv, requires_grad=False))
         htorch.core.mark_step()
         return layer
     else:
@@ -965,30 +969,35 @@ def fp8_block_linear_postprocess_weights(layer, force_channel_fp8=False):
 
 
 def fp8_block_moe_prepare_weights(layer, force_channel_fp8=False):
+    w13_weight_scale_name = "w13_weight_scale" if hasattr(layer, "w13_weight_scale") else "w13_weight_scale_inv"
+    w2_weight_scale_name = "w2_weight_scale" if hasattr(layer, "w2_weight_scale") else "w2_weight_scale_inv"
+    w13_weight_scale_param = getattr(layer, w13_weight_scale_name)
+    w2_weight_scale_param = getattr(layer, w2_weight_scale_name)
+    weight_block_size = layer.weight_block_size if hasattr(
+        layer, 'weight_block_size') else layer.quant_config.weight_block_size
+
     if force_channel_fp8:
         # convert to channel-wise fp8
         w13_weight, w13_weight_scale_inv = dynamic_quant(
-            dequant_block_fp8_weight_naive(layer.w13_weight.data, layer.w13_weight_scale_inv.data,
-                                           layer.quant_config.weight_block_size))
+            dequant_block_fp8_weight_naive(layer.w13_weight.data, w13_weight_scale_param.data, weight_block_size))
         w2_weight, w2_weight_scale_inv = dynamic_quant(
-            dequant_block_fp8_weight_naive(layer.w2_weight.data, layer.w2_weight_scale_inv.data,
-                                           layer.quant_config.weight_block_size))
+            dequant_block_fp8_weight_naive(layer.w2_weight.data, w2_weight_scale_param.data, weight_block_size))
         w13_weight_scale_inv, w2_weight_scale_inv \
             = w13_weight_scale_inv.squeeze(-1), w2_weight_scale_inv.squeeze(-1)
         layer.w13_weight.data.copy_(w13_weight)
         layer.w2_weight.data.copy_(w2_weight)
-        layer.w13_weight_scale_inv = torch.nn.Parameter(w13_weight_scale_inv, requires_grad=False)
-        layer.w2_weight_scale_inv = torch.nn.Parameter(w2_weight_scale_inv, requires_grad=False)
+        replace_parameter(layer, w13_weight_scale_name, torch.nn.Parameter(w13_weight_scale_inv, requires_grad=False))
+        replace_parameter(layer, w2_weight_scale_name, torch.nn.Parameter(w2_weight_scale_inv, requires_grad=False))
         return fp8_channel_moe_prepare_weights(layer)
 
     for index in range(layer.moe_op.num_experts):
         layer.moe_op.w13_list[index].set_weight(layer.w13_weight[index])
-        layer.moe_op.w13_list[index].set_scale_inv_fp8(layer.w13_weight_scale_inv[index])
-        layer.moe_op.w13_list[index].set_weight_block_size(layer.quant_config.weight_block_size)
+        layer.moe_op.w13_list[index].set_scale_inv_fp8(w13_weight_scale_param[index])
+        layer.moe_op.w13_list[index].set_weight_block_size(weight_block_size)
 
         layer.moe_op.w2_list[index].set_weight(layer.w2_weight[index])
-        layer.moe_op.w2_list[index].set_scale_inv_fp8(layer.w2_weight_scale_inv[index])
-        layer.moe_op.w2_list[index].set_weight_block_size(layer.quant_config.weight_block_size)
+        layer.moe_op.w2_list[index].set_scale_inv_fp8(w2_weight_scale_param[index])
+        layer.moe_op.w2_list[index].set_weight_block_size(weight_block_size)
     htorch.core.mark_step()
     return layer
 
@@ -1018,6 +1027,18 @@ def fp8_channel_moe_prepare_weights(layer):
                                           dtype=torch.bfloat16,
                                           device=layer.w2_weight[index].device)
             layer.moe_op.w2_list[index].set_scale_inv_fp8(weight_scale_inv)
+
+        if len(layer.moe_op.w2_list[index].scale_inv_fp8.shape) == 0 and len(
+                layer.moe_op.w13_list[index].scale_inv_fp8.shape) == 1:
+            layer.moe_op.w2_list[index].set_scale_inv_fp8(layer.moe_op.w2_list[index].scale_inv_fp8.repeat(
+                layer.w2_weight.shape[1]).flatten().clone())
+            '''
+                When weight scale is per tensor quantized, w1 and w3 are combined so the shape of their weight scales become [2],
+                but MoE requires [2 * out_channels], so it has to be reshaped as [2, 1],
+                and repeated to [2, out_channels] and then flattened to [2 * out_channels].
+                '''
+            layer.moe_op.w13_list[index].set_scale_inv_fp8(layer.moe_op.w13_list[index].scale_inv_fp8.reshape(
+                2, 1).repeat(1, layer.w13_weight.shape[1] // 2).flatten().clone())
 
     if hasattr(layer, "w13_input_scale"):
         layer.moe_op.w13_input_scale = layer.w13_input_scale
