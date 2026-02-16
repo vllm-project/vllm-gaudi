@@ -700,8 +700,9 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
         'slot_mapping', 'is_prompt', 'block_size', 'block_groups', 'window_block_list', 'window_block_mapping',
         'window_block_usage', 'window_block_groups', 'window_attn_bias', 'chunked_block_mapping', 'chunked_attn_bias',
         'chunked_block_list', 'chunked_block_usage', 'chunked_block_groups', 'prep_initial_states',
-        'has_initial_states_p', 'last_chunk_indices_p', 'load_indices_tensor', 'store_indices_tensor', 'query_start_loc', 'query_start_loc_p',
-        'padding_mask_flat'
+        'has_initial_states_p', 'last_chunk_indices_p', 'load_indices_tensor', 'store_indices_tensor',
+        'query_start_loc', 'query_start_loc_p',
+        'padding_mask_flat', 'blocks_caching_range', 'mamba_chunks_to_block_mapping', 'seqlens_offsets_for_blocks'
     ])
     return attention_metadata
 

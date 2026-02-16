@@ -340,7 +340,7 @@ class HPUMambaMixer2(MambaMixer2):
 
             load_indices_tensor = attn_metadata.load_indices_tensor[self.cache_group_idx]
             store_indices_tensor = attn_metadata.store_indices_tensor[self.cache_group_idx]
-            if enable_prefix_caching:
+            if enable_prefix_caching and attn_metadata.is_prompt:
                 blocks_caching_range = attn_metadata.blocks_caching_range[self.cache_group_idx]
                 mamba_chunks_to_block_mapping = attn_metadata.mamba_chunks_to_block_mapping[self.cache_group_idx]
                 seqlens_offsets_for_blocks = attn_metadata.seqlens_offsets_for_blocks
@@ -350,7 +350,6 @@ class HPUMambaMixer2(MambaMixer2):
                 seqlens_offsets_for_blocks = None
 
             has_initial_states_p = attn_metadata.has_initial_states_p
-            prep_initial_states = attn_metadata.prep_initial_states
             # is below sufficient to get chunk_size or does it need to passed via metadata
             assert self.model_config is not None
             chunk_size = self.model_config.get_mamba_chunk_size()
@@ -394,13 +393,11 @@ class HPUMambaMixer2(MambaMixer2):
             hidden_states_p, B_p, C_p = self.split_hidden_states_B_C_fn(hidden_states_B_C)
 
             # 3. State Space Model sequence transformation
-            initial_states = None
-            if has_initial_states_p is not None and prep_initial_states:
-                initial_states = torch.where(
-                    has_initial_states_p[:, None, None, None],
-                    ssm_state[load_indices_tensor],
-                    0,
-                )
+            initial_states = torch.where(
+                has_initial_states_p[:, None, None, None],
+                ssm_state[load_indices_tensor],
+                0,
+            )
 
             # NOTE: final output is an in-place update of out tensor
             varlen_states = hpu_mamba_chunk_scan_combined_varlen(

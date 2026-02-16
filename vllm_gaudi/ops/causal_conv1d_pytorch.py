@@ -131,6 +131,7 @@ def hpu_causal_conv1d_fn(
     conv_states: torch.Tensor | None,
     query_start_loc: torch.Tensor,
     load_cache_indices: torch.Tensor | None = None,
+    enable_prefix_caching: bool = False,
     store_cache_indices: torch.Tensor | None = None,
     blocks_caching_range: torch.Tensor | None = None,
     seqlens_offsets_for_blocks: torch.Tensor | None = None,
@@ -194,7 +195,8 @@ def hpu_causal_conv1d_fn(
     init_state = init_state.squeeze()
 
     # Prepare input for convolution
-    if blocks_caching_range is not None and seqlens_offsets_for_blocks is not None:
+    seq_input = torch.cat([init_state, seq_x], dim=1)
+    if enable_prefix_caching:
         offset = torch.arange(state_len, device=x.device)  # [state_len]
         indices = seqlens_offsets_for_blocks.unsqueeze(1) + offset  # [N, state_len]
 
@@ -205,7 +207,6 @@ def hpu_causal_conv1d_fn(
         # Scatter all updates at once
         conv_states[blocks_caching_range, :, -state_len:] = new_states
     else:
-        seq_input = torch.cat([init_state, seq_x], dim=1)
         end = qsl[-1]
         idx = torch.arange(state_len, device=x.device) + end
         new_state = seq_input.index_select(dim=1, index=idx)
