@@ -255,6 +255,12 @@ jobs:
             echo "✅ Flag '[FIX_FOR_VLLM_LATEST]' found in title."
             echo "Setting target to 'main'."
             FINAL_TARGET="vllm-upstream/main"
+          elif [[ "$PR_TITLE" == *"[FIX_FOR_VLLM_CUSTOM"* ]]; then
+            echo "[FIX_FOR_VLLM_CUSTOM]' found in title."
+            PRE_FINAL_TARGET=$(echo "$PR_TITLE" | cut -d '=' -f 2)
+            echo "Setting target to ${PRE_FINAL_TARGET}"
+            FINAL_TARGET=$(echo "$PRE_FINAL_TARGET" | cut -d ']' -f 1)
+            echo "Setting target to ${FINAL_TARGET}"
           elif [ -z "$FINAL_TARGET" ]; then
             # This is the corrected check for a missing commit hash
             echo "⚠️ Stable commit was not found. Defaulting target to 'main'."
@@ -505,3 +511,14 @@ jobs:
             ### ✅ CI Passed
             All checks passed successfully against the following vllm commit:
             **`${{ needs.pre_merge_hpu_test_build.outputs.target_commit }}`**
+
+  cleanup_docker_image:
+    name: Cleanup Docker Image
+    if: always()
+    needs: [discover_runner, hpu_unit_tests, hpu_pd_tests, hpu_perf_tests, hpu_dp_tests, e2e]
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    steps:
+      - name: Remove Docker image to free up space
+        run: |
+          echo "Cleaning up Docker images created by this workflow run..."
+          docker rmi -f hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} || true
