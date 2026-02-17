@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-import vllm.attention.layer as layer
+import vllm.model_executor.layers.attention.attention as layer
 from vllm.forward_context import ForwardContext, get_forward_context
 
 if not hasattr(layer.Attention, "_vllm_gaudi_original_forward"):
