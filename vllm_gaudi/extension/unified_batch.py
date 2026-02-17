@@ -835,20 +835,26 @@ def create_unified_batch(
     # This adds some overhead but is necessary — without it the loop unrolls into a single
     # graph and all chunks' attention matrices coexist, using MORE memory than non-chunked.
     #
-    # Adaptive chunk_size: the dominant memory consumer per chunk is the attention score matrix:
-    #   num_query_heads × target_qlen × (chunk_size × block_size) × element_size
+    # Adaptive chunk_size: the dominant memory consumer per chunk is the attention score matrix
+    # plus softmax intermediates (exp, sum, max) which roughly double the cost:
+    #   ~2 × num_query_heads × target_qlen × (chunk_size × block_size) × element_size
     # We pick the largest chunk_size such that this fits within a per-chunk memory budget.
     configured_chunk_size = get_config(
     ).unified_attn_shared_attn_chunk_size  # Configured max blocks per chunk
     element_size = 2  # bf16
     num_query_heads = persistent_ctx.num_query_heads
-    # Memory budget per chunk: ~4 GiB (leaves room for KV fetches, softmax intermediates, merge, etc.)
-    per_chunk_memory_budget = 4 * 2**30
+    # Memory budget per chunk: ~2 GiB (accounts for attn scores + softmax intermediates + KV fetches)
+    per_chunk_memory_budget = 2 * 2**30
     if num_query_heads > 0 and target_qlen > 0:
         # max_chunk_size = budget / (num_query_heads * target_qlen * block_size * element_size)
         max_chunk_by_memory = per_chunk_memory_budget // (num_query_heads * target_qlen * block_size * element_size)
         max_chunk_by_memory = max(1, max_chunk_by_memory)  # At least 1 block per chunk
         default_chunk_size = min(configured_chunk_size, max_chunk_by_memory)
+        if default_chunk_size < configured_chunk_size:
+            logger.info("Adaptive chunked shared attention: chunk_size reduced from %d to %d "
+                        "(query_len=%d, num_heads=%d, block_size=%d, budget=%.1f GiB)",
+                        configured_chunk_size, default_chunk_size, target_qlen, num_query_heads,
+                        block_size, per_chunk_memory_budget / 2**30)
     else:
         default_chunk_size = configured_chunk_size
     use_chunked_processing = get_config().unified_attn_chunked_shared_attn and bool(
