@@ -557,10 +557,14 @@ def _partial_attn_shared_chunked(
     accumulated_attn = None
     global_max = None
     global_sum = None
-    split_graphs = chunked_data.split_chunked_graphs
     for chunk_idx in range(num_chunks):
-        if split_graphs:
-            htorch.core.mark_step()
+        # NOTE: mark_step is unconditional here — chunked processing REQUIRES graph
+        # boundaries between chunks so the HPU can execute and free each chunk's
+        # intermediates (attention scores, KV fetches) before the next chunk starts.
+        # Without this, the loop is unrolled into a single graph and all chunks'
+        # attention score tensors (num_heads × tokens × chunk_kv_len) coexist
+        # simultaneously, using MORE memory than the non-chunked path.
+        htorch.core.mark_step()
         chunk_start = chunk_idx * chunk_size
         chunk_end = min(chunk_start + chunk_size, num_blocks)
         actual_chunk_len = chunk_end - chunk_start
@@ -631,8 +635,7 @@ def _partial_attn_shared_chunked(
 
             global_max = new_max
 
-        if split_graphs:
-            htorch.core.mark_step()
+        htorch.core.mark_step()
 
     if accumulated_attn is None:
         return (None, None, None)
