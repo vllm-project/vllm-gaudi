@@ -295,7 +295,10 @@ class DynamicPlaceholderMempool:
 
 class UnifiedBatchPersistentContext:
 
-    def __init__(self, max_num_batched_tokens, max_shared_blocks, max_unique_blocks, block_size, dtype, profiler):
+    def __init__(self, max_num_batched_tokens, max_shared_blocks, max_unique_blocks, block_size, dtype, profiler,
+                 num_query_heads: int = 0):
+        self.num_query_heads = num_query_heads
+        self.block_size = block_size
         # Convert torch dtype to numpy dtype
         if hasattr(dtype, 'numpy_dtype'):
             np_dtype = dtype.numpy_dtype
@@ -831,8 +834,23 @@ def create_unified_batch(
     # so the HPU can execute and free each chunk's intermediates before the next starts.
     # This adds some overhead but is necessary — without it the loop unrolls into a single
     # graph and all chunks' attention matrices coexist, using MORE memory than non-chunked.
-    default_chunk_size = get_config(
-    ).unified_attn_shared_attn_chunk_size  # Process up to 64 blocks at a time for shared attention
+    #
+    # Adaptive chunk_size: the dominant memory consumer per chunk is the attention score matrix:
+    #   num_query_heads × target_qlen × (chunk_size × block_size) × element_size
+    # We pick the largest chunk_size such that this fits within a per-chunk memory budget.
+    configured_chunk_size = get_config(
+    ).unified_attn_shared_attn_chunk_size  # Configured max blocks per chunk
+    element_size = 2  # bf16
+    num_query_heads = persistent_ctx.num_query_heads
+    # Memory budget per chunk: ~4 GiB (leaves room for KV fetches, softmax intermediates, merge, etc.)
+    per_chunk_memory_budget = 4 * 2**30
+    if num_query_heads > 0 and target_qlen > 0:
+        # max_chunk_size = budget / (num_query_heads * target_qlen * block_size * element_size)
+        max_chunk_by_memory = per_chunk_memory_budget // (num_query_heads * target_qlen * block_size * element_size)
+        max_chunk_by_memory = max(1, max_chunk_by_memory)  # At least 1 block per chunk
+        default_chunk_size = min(configured_chunk_size, max_chunk_by_memory)
+    else:
+        default_chunk_size = configured_chunk_size
     use_chunked_processing = get_config().unified_attn_chunked_shared_attn and bool(
         target_shared_blocks > default_chunk_size)  # Chunked dense processing - generates bias per chunk
 

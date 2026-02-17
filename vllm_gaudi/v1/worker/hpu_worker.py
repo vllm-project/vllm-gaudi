@@ -238,7 +238,8 @@ class HPUWorker(WorkerBase):
             from vllm_gaudi.extension.unified_batch import UnifiedBatchPersistentContext
             self.model_runner.unified_attn_persistent_ctx = UnifiedBatchPersistentContext(
                 self.model_runner.max_num_batched_tokens, 0, 0, self.model_runner.block_size, dtype,
-                self.model_runner.profiler)
+                self.model_runner.profiler,
+                num_query_heads=self.model_runner.num_query_heads)
 
         if is_fake_hpu():
             fake_hpu_cache_alloc = 4 * 2**30  # take 4 GiB flat on fake hpu
