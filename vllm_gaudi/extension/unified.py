@@ -541,6 +541,17 @@ def _partial_attn_shared_chunked(
         chunk_bias_buffer = torch.empty((num_query_tokens, chunk_size, block_size),
                                         dtype=dtype,
                                         device=chunked_data.block_usages.device)
+        # Pre-allocate chunk_mask buffer - reused each iteration to avoid new bool tensor per chunk
+        chunk_mask_buffer = torch.empty((num_query_tokens, chunk_size, block_size),
+                                        dtype=torch.bool,
+                                        device=chunked_data.block_usages.device)
+
+    # Pre-compute query_t once (loop-invariant) to avoid duplicate tensors in HPU graph
+    if is_mla:
+        num_heads = query.size(1)
+        query_t = query.transpose(0, 1).unsqueeze(1)
+    else:
+        query_t = query.transpose(0, 1).unflatten(0, (kv_heads, -1))
 
     # Accumulators for online softmax-style merging
     accumulated_attn = None
@@ -563,10 +574,11 @@ def _partial_attn_shared_chunked(
             # Slice to get (num_query_tokens, actual_chunk_len) for this chunk
             chunk_block_usages = chunked_data.block_usages[:, chunk_start:chunk_end]
 
-            # Generate chunk bias using dense broadcast into pre-allocated buffer
+            # Generate chunk bias using dense broadcast into pre-allocated buffers
             # chunk_block_usages.unsqueeze(-1): (num_query_tokens, actual_chunk_len, 1)
             # broadcast comparison: (num_query_tokens, actual_chunk_len, block_size)
-            chunk_mask = block_len_range > chunk_block_usages.unsqueeze(-1)
+            chunk_mask = chunk_mask_buffer[:, :actual_chunk_len, :]
+            torch.gt(block_len_range, chunk_block_usages.unsqueeze(-1), out=chunk_mask)
 
             # Use view of pre-allocated buffer for actual chunk size
             chunk_bias = chunk_bias_buffer[:, :actual_chunk_len, :]
@@ -579,12 +591,9 @@ def _partial_attn_shared_chunked(
         # Fetch KV for this chunk
         if is_mla:
             latent_kv = cache_utils.fetch_shared(chunk_blocks)
-            num_heads = query.size(1)
-            query_t = query.transpose(0, 1).unsqueeze(1)
             key = latent_kv.unsqueeze(0).unsqueeze(0).expand(num_heads, 1, -1, -1)
             value = latent_kv.unsqueeze(0).unsqueeze(0).expand(num_heads, 1, -1, -1)
         else:
-            query_t = query.transpose(0, 1).unflatten(0, (kv_heads, -1))
             key, value = cache_utils.fetch_shared(chunk_blocks)
 
         # Flatten bias for attention: [1, query_len, chunk_len * block_size]
