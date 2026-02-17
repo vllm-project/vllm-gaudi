@@ -827,10 +827,19 @@ def create_unified_batch(
     # With chunked dense generation, we only allocate (target_qlen, target_shared_blocks) for block_usages
     # instead of the full (target_qlen, target_shared_blocks, block_size) bias tensor.
     # Bias is generated per chunk: (target_qlen, chunk_size, block_size)
+    # IMPORTANT: Chunked processing requires mark_step() between chunks (graph boundaries)
+    # which adds overhead. Only use it when the full bias tensor is large enough to justify
+    # the performance cost. The threshold is: full_bias > chunk_size * chunk_bias, i.e.
+    # target_shared_blocks > chunk_size^2 — meaning we need at least chunk_size chunks
+    # before the memory savings outweigh the graph-splitting overhead.
     default_chunk_size = get_config(
     ).unified_attn_shared_attn_chunk_size  # Process up to 64 blocks at a time for shared attention
+    # NOTE: Use a higher threshold (2 * chunk_size) to avoid chunking when only 2 chunks would be needed.
+    # With 2 chunks + mark_step overhead, memory savings are marginal but performance cost is real.
+    # Chunking pays off when there are enough chunks that the full bias tensor is significantly larger.
+    chunked_threshold = default_chunk_size * 2
     use_chunked_processing = get_config().unified_attn_chunked_shared_attn and bool(
-        target_shared_blocks > default_chunk_size)  # Chunked dense processing - generates bias per chunk
+        target_shared_blocks > chunked_threshold)  # Chunked dense processing - generates bias per chunk
 
     # Pad target_shared_blocks to be a multiple of chunk_size for chunked processing
     # This ensures all chunks have exactly chunk_size blocks (static shapes in the kernel)
