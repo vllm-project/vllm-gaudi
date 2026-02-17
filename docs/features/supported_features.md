@@ -30,7 +30,7 @@ This document summarizes the features currently supported by the vLLM Hardware P
 | Guided decode   | Supports a guided decoding backend for generating structured outputs.   | [Documentation](https://docs.vllm.ai/en/latest/features/structured_outputs.html)  |
 | Exponential bucketing | Supports exponential bucketing spacing instead of linear spacing, automating the configuration of the bucketing mechanism. This feature is enabled by default and can be disabled via `VLLM_EXPONENTIAL_BUCKETING=false` environment variable.   | N/A |
 | Data Parallel support | Replicates model weights across multiple instances or GPUs to process independent request batches. | [Documentation](https://docs.vllm.ai/en/stable/serving/data_parallel_deployment.html), [Example](https://docs.vllm.ai/en/latest/examples/offline_inference/data_parallel.html)  |
-| Row-Parallel Chunking | Overlaps computation with communication in RowParallelLinear layers by splitting input into chunks and launching async all-reduce operations. Improves throughput for tensor-parallel inference with large batch sizes. Configured via `VLLM_ROW_PARALLEL_CHUNKS` and `VLLM_ROW_PARALLEL_CHUNK_THRESHOLD` environment variables. | [Documentation](row_parallel_chunking.md) |
+| Row-Parallel Chunking | Overlaps computation with communication in RowParallelLinear layers by splitting input into chunks and launching async all-reduce operations. Improves throughput for tensor-parallel inference with long prefills. Configured via `VLLM_ROW_PARALLEL_CHUNKS` and `VLLM_ROW_PARALLEL_CHUNK_THRESHOLD` environment variables. | [Documentation](row_parallel_chunking.md) |
 
 ## Experimental Features
 

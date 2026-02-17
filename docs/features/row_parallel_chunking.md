@@ -114,36 +114,31 @@ The table below shows the **speedup ratio** (chunked time / baseline time, where
 
 ### Key Takeaways
 
-1. **More chunks are needed for smaller inputs.** For low token counts, the all-reduce communication is short relative to compute, so finer chunking is required to achieve overlap. However, very small inputs (below the threshold) suffer from chunking overhead — this is why the threshold exists.
+1. **Sweet spot shifts with TP size and seq_len.** There is no single setting that will benefit all benchmarks so depending on the TP size and seq_len user should experiment which setting benefits him the most. Good starting point is 2 chunks and 4k threshold.
 
-2. **Higher TP sizes benefit more.** With more TP ranks, all-reduce communication cost grows, making compute–communication overlap increasingly valuable. At TP=8, even 2 chunks provide noticeable speedup for most token counts.
-
-3. **Diminishing returns with too many chunks.** Excessively fine chunking introduces overhead from graph breaks, kernel launch latency, and reduced per-chunk compute efficiency. The optimal chunk count depends on both TP size and typical token count.
-
-4. **Sweet spot shifts with TP size.** For TP=2, around 16–32 chunks works well for large batches. For TP=4, 8–16 chunks is a good starting point. For TP=8, even 2–8 chunks delivers strong gains.
+2. **Diminishing returns with too many chunks.** Excessively fine chunking introduces overhead from graph breaks, kernel launch latency, and reduced per-chunk compute efficiency. The optimal chunk count depends on both TP size and typical token count.
 
 ## Recommended Settings
 
 | TP Size | Recommended Chunks | Notes |
 |:-------:|:------------------:|-------|
 | 1       | 1 (disabled)       | No all-reduce needed, chunking adds overhead only |
-| 2       | 8–16               | Beneficial for token counts ≥ 8192 |
-| 4       | 4–8                | Beneficial for token counts ≥ 4096 |
-| 8       | 2–8                | Beneficial for most token counts ≥ 1024 |
+| 2       | 2-64               | Beneficial for token counts ≥ 4096 |
+| 4       | 2-16               | Beneficial for token counts ≥ 8192 |
+| 8       | 2-8                | Beneficial for token counts ≥ 16384 |
 
-> **Note:** These recommendations are based on isolated layer benchmarks. In end-to-end inference, the optimal configuration may differ depending on the model architecture, sequence lengths, and workload mix. It is recommended to benchmark with your specific setup.
+> **Note:** These recommendations are based on isolated layer benchmarks using llama 3.3 70b. In end-to-end inference, the optimal configuration may differ depending on the model architecture, sequence lengths, and workload mix. It is recommended to benchmark with your specific setup.
 
 ## When to Use This Feature
 
 **Use when:**
 - Running with tensor parallelism (`TP > 1`)
 - Serving workloads with large batch sizes or long prefill sequences
-- The all-reduce communication is a significant fraction of the layer execution time
+- The all-reduce communication is a significant fraction of the prefill time
 
 **Do not use when:**
 - Running without tensor parallelism (`TP = 1`) — there is no all-reduce to overlap
 - Serving only very short sequences with small batches — chunking overhead outweighs the benefit
-- Using `enforce_eager` mode — the feature inserts `torch._dynamo.graph_break()` calls, which are only relevant when using `torch.compile`
 
 ## Implementation Details
 
