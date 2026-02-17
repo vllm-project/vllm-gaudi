@@ -73,6 +73,8 @@ RUN dnf install -y --allowerasing \
     wget git jq libomp \
     # Image processing dependencies (needed for pillow-simd -> habana-media-loader)
     zlib-devel libjpeg-devel \
+    # habanalabs-thunk dependency
+    libfdt-devel \
     # Python development
     python3-devel python3.12 python3.12-devel python3.12-pip \
     # NUMA support
