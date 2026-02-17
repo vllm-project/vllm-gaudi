@@ -385,7 +385,7 @@ def _partial_attn_shared_core(query: torch.tensor,
 
     attn = torch.matmul(query, key.transpose(-1, -2))
     attn = attn.flatten(0, 1)
-    attn = attn + bias
+    attn.add_(bias)  # In-place: bias is read-only, avoids a full copy of the attention matrix
 
     # TODO: remove dtype check once full support is added for fp8 in unified attention
     if get_config().unified_attn_softmax_fa2 and attn.dtype == torch.bfloat16:
@@ -397,7 +397,7 @@ def _partial_attn_shared_core(query: torch.tensor,
         local_sum = convert_cl_aligned_tensor(local_sum, list(attn.shape[:-1]))
     else:
         local_max = torch.maximum(attn.amax(-1), fmin)
-        attn = torch.exp(attn - local_max.unsqueeze(-1))
+        attn.sub_(local_max.unsqueeze(-1)).exp_()  # In-place: avoids a full copy of the attention matrix
         local_sum = attn.sum(-1)
 
     attn = torch.matmul(attn.unflatten(0, (kv_heads if not is_mla else num_heads, -1)), value).flatten(0, 1)
