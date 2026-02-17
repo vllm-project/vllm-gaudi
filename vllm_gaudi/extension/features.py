@@ -64,7 +64,7 @@ def get_experimental_flags():
 def unified_attn_dev_flags():
     flags = [
         Value('unified_attn_dense_shared_bias', True),
-        Value('unified_attn_chunked_shared_attn', False),
+        Value('unified_attn_chunked_shared_attn', True),
         Value('unified_attn_online_merge', True),
         Value('unified_attn_shared_attn_chunk_size', 64),
         Value('unified_attn_split_graphs', Enabled('unified_attn_online_merge')),
