@@ -35,3 +35,4 @@ def register_model():
                                  "vllm_gaudi.models.pixtral:HPUPixtralForConditionalGeneration")
 
     import vllm_gaudi.models.deepseek_v2  # noqa: F401
+    import vllm_gaudi.models.gptoss_mxfp4  # noqa: F401
