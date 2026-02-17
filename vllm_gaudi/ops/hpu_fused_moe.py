@@ -129,8 +129,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
             w2_bias = torch.nn.Parameter(
                 torch.zeros(num_experts, hidden_size, dtype=params_dtype),
-                requires_grad=False,
-                )
+                requires_grad=False)
             layer.register_parameter("w2_bias", w2_bias)
             set_weight_attrs(w2_bias, extra_weight_attrs)
         else:
@@ -165,15 +164,14 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                     dtype=params_dtype),
                 requires_grad=False,
             )
-            layer.register_parameter("w2_weight", w2_weight)
-            set_weight_attrs(w2_weight, extra_weight_attrs)
-            if self.moe.has_bias:
-                w2_bias = torch.nn.Parameter(
-                    torch.zeros(num_experts, hidden_size, dtype=params_dtype),
-                    requires_grad=False,
-                )
-                layer.register_parameter("w2_bias", w2_bias)
-                set_weight_attrs(w2_bias, extra_weight_attrs)
+
+            w2_bias = torch.nn.Parameter(torch.zeros(
+                    num_experts,
+                    hidden_size,
+                    dtype=params_dtype),
+                    requires_grad=False,)
+            layer.register_parameter("w2_bias", w2_bias)
+            set_weight_attrs(w2_bias, extra_weight_attrs)
 
     def apply_monolithic(
         self,
