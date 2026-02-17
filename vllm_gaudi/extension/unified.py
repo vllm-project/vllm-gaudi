@@ -612,15 +612,23 @@ def _partial_attn_shared_chunked(
             global_sum = chunk_sum
         else:
             # Merge with existing - use flash-attention style rescaling
+            # In-place ops to avoid large intermediate tensors in the HPU graph
             new_max = torch.maximum(global_max, chunk_max)
 
-            # Rescale factors
+            # Rescale factors (small tensors: tokens x num_heads)
             old_scale = torch.exp(global_max - new_max)
             new_scale = torch.exp(chunk_max - new_max)
 
-            # Rescale accumulated values and sums
-            accumulated_attn = accumulated_attn * old_scale.unsqueeze(-1) + chunk_attn * new_scale.unsqueeze(-1)
-            global_sum = global_sum * old_scale + chunk_sum * new_scale
+            # Rescale and merge in-place to avoid 3 large temporaries per step
+            # chunk_attn/chunk_sum are not needed after merge, safe to modify
+            accumulated_attn.mul_(old_scale.unsqueeze(-1))
+            chunk_attn.mul_(new_scale.unsqueeze(-1))
+            accumulated_attn.add_(chunk_attn)
+
+            global_sum.mul_(old_scale)
+            chunk_sum.mul_(new_scale)
+            global_sum.add_(chunk_sum)
+
             global_max = new_max
 
         if split_graphs:
