@@ -135,8 +135,8 @@ def convert_moe_packed_tensors(
 
 def _load_weights_mxfp4_dequantize_hpu(
     self,
-    ep_rank_start: int,
     ep_rank_end: int,
+    ep_rank_start: int,
     heads_per_rank: int,
     head_start: int,
     weights: Iterable[tuple[str, torch.Tensor]],
