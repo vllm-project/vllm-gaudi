@@ -411,6 +411,23 @@ def _partial_attn_shared_core(query: torch.tensor,
     return attn.transpose(0, 1), local_max.transpose(0, 1), local_sum.transpose(0, 1)
 
 
+# Fraction of free device memory to use as the Q-chunk budget.
+# The attention matrix is: num_heads × q_chunk × kv_len × element_size.
+# Using a fraction of free memory adapts automatically to any hardware config.
+_Q_CHUNK_FREE_MEM_FRACTION = 0.25
+
+
+def _get_q_chunk_budget() -> int:
+    """Return the memory budget (bytes) for a single Q-chunk's attention matrix.
+
+    Uses a fraction of the currently-free device memory so the threshold
+    adapts automatically — large cards get big chunks (fast), small cards
+    get small chunks (safe).
+    """
+    free_bytes, _ = torch.hpu.mem_get_info()
+    return int(free_bytes * _Q_CHUNK_FREE_MEM_FRACTION)
+
+
 def partial_attn_shared(query: torch.tensor,
                         blocks: torch.tensor,
                         bias: Optional[torch.tensor],
@@ -425,43 +442,46 @@ def partial_attn_shared(query: torch.tensor,
     """Partial attention where all shared blocks are compared with whole query.
     
     Supports two modes:
-    1. Full bias mode (default): bias tensor is provided, process all blocks at once
-    2. Chunked mode: chunk_size > 0, process blocks in chunks
-       - If bias is provided, slice from it
-       - If bias is None but chunked_data is provided, generate bias per chunk from dense block_usages
+    1. Full mode (default): process all blocks and query tokens at once
+    2. Q-chunked mode: when the attention matrix is too large, chunk along the query
+       dimension. Each Q-tile sees ALL shared KV, so softmax is computed correctly
+       within each tile and results are simply concatenated (no online merge needed).
     
     Args:
         query: Query tensor [tokens, num_heads, head_dim]
         blocks: Shared block indices [num_shared_blocks]
-        bias: Pre-computed bias tensor [query_len, num_blocks, block_size]. Can be None for chunked generation.
+        bias: Pre-computed bias tensor [query_len, num_blocks, block_size].
         fmin: Minimum float value for softmax stability
         inputL_hpu_tensors: Cache for softmax input tensors
         inputM_hpu_tensors: Cache for softmax input tensors
         cache_utils: Cache utilities for fetching KV
-        dtype: Output dtype for bias generation
+        dtype: Output dtype
         w_uv: Optional MLA projection matrix [num_heads, latent_dim, v_head_dim]
-        chunked_data: Metadata for chunked processing (contains dense block_usages)
-        chunk_size: Number of blocks per chunk (0 = full mode, >0 = chunked mode)
+        chunked_data: (legacy, unused) Metadata for KV-chunked processing
+        chunk_size: (legacy, unused) Number of blocks per KV chunk
     
     Returns:
         Tuple of (unnormalized_weighted_V, local_max, local_sum)
     """
-    # Determine mode
-    use_chunked = chunk_size > 0 and chunked_data is not None
+    if bias is None or blocks is None:
+        return (None, None, None)
 
-    if not use_chunked:
-        # Full bias mode - original implementation
-        if bias is None:
-            return (None, None, None)
-        return _partial_attn_shared_full(query, blocks, bias, fmin, inputL_hpu_tensors, inputM_hpu_tensors, cache_utils,
-                                         w_uv)
+    # Check if we need Q-chunking based on estimated attention matrix size
+    num_query_tokens = query.size(0)
+    num_heads = query.size(1)
+    kv_len = blocks.size(0) * cache_utils.block_size
+    element_size = 2  # bf16
+    attn_matrix_bytes = num_heads * num_query_tokens * kv_len * element_size
+    budget = _get_q_chunk_budget()
+
+    if attn_matrix_bytes <= budget:
+        # Small enough — process everything at once
+        return _partial_attn_shared_full(query, blocks, bias, fmin, inputL_hpu_tensors, inputM_hpu_tensors,
+                                         cache_utils, w_uv)
     else:
-        # Chunked mode - process blocks in chunks
-        # bias can be None for chunked generation (will generate from chunked_data.block_usages per chunk)
-        if blocks is None:
-            return (None, None, None)
-        return _partial_attn_shared_chunked(query, blocks, bias, chunked_data, chunk_size, fmin, inputL_hpu_tensors,
-                                            inputM_hpu_tensors, cache_utils, dtype, w_uv)
+        # Attention matrix too large — chunk along query dimension
+        return _partial_attn_shared_q_chunked(query, blocks, bias, fmin, inputL_hpu_tensors, inputM_hpu_tensors,
+                                              cache_utils, w_uv)
 
 
 def _partial_attn_shared_full(query: torch.tensor,
@@ -495,152 +515,87 @@ def _partial_attn_shared_full(query: torch.tensor,
                                      kv_heads, is_mla, w_uv)
 
 
-def _partial_attn_shared_chunked(
+def _partial_attn_shared_q_chunked(
         query: torch.tensor,
         blocks: torch.tensor,
-        bias: Optional[torch.tensor],
-        chunked_data: SharedBlockChunkedBiasData,
-        chunk_size: int,
+        bias: torch.tensor,
         fmin: torch.tensor,
         inputL_hpu_tensors: Dict[tuple, torch.Tensor],
         inputM_hpu_tensors: Dict[tuple, torch.Tensor],
         cache_utils: CacheUtils,
-        dtype: torch.dtype,
         w_uv: Optional[torch.tensor] = None) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
-    """Chunked implementation of partial_attn_shared with per-chunk bias generation.
+    """Q-chunked implementation of partial_attn_shared.
     
-    Generates bias per chunk from dense block_usages to save memory.
-    Avoids materializing the full (query_len, num_blocks, block_size) bias tensor.
+    Chunks along the QUERY dimension instead of the KV dimension.
+    Each Q-tile sees ALL shared KV blocks, so softmax is fully correct within each tile.
+    Results are simply concatenated along Q — no online softmax merge needed.
     
-    Strategy:
-    1. Process blocks in chunks of chunk_size
-    2. For each chunk, slice block_usages and generate chunk bias on-the-fly
-    3. Compute attention for the chunk using _partial_attn_shared_core
-    4. Merge chunk results using flash-attention style online softmax
+    Advantages over KV-chunking:
+    - No online merge overhead (no rescaling, no exp)
+    - KV fetched once (not per chunk)
+    - Simpler, fewer intermediates per iteration
+    - Bias per tile is tiny (q_tile × all_blocks × block_size)
     """
-    num_blocks = chunked_data.num_shared_blocks
-    block_size = cache_utils.block_size
-    num_query_tokens = chunked_data.num_query_tokens
+    num_query_tokens = query.size(0)
+    num_heads = query.size(1)
+    kv_len = blocks.size(0) * cache_utils.block_size
+    element_size = 2  # bf16
 
     is_mla = w_uv is not None
     kv_heads = 1 if is_mla else cache_utils.kv_heads
 
-    # Calculate number of chunks
-    num_chunks = math.ceil(num_blocks / chunk_size)
+    # Compute Q chunk size so each tile's attention matrix fits in budget
+    budget = _get_q_chunk_budget()
+    q_chunk_size = max(1, budget // (num_heads * kv_len * element_size))
+    q_chunk_size = min(q_chunk_size, num_query_tokens)
+    num_q_chunks = math.ceil(num_query_tokens / q_chunk_size)
 
-    # Check if we have pre-computed bias or need to generate per-chunk
-    generate_bias_per_chunk = (bias is None)
-
-    # Pre-allocate reusable tensors outside the loop (avoid allocations per iteration)
-    if generate_bias_per_chunk:
-        block_len_range = torch.arange(1,
-                                       block_size + 1,
-                                       dtype=chunked_data.block_usages.dtype,
-                                       device=chunked_data.block_usages.device)
-        # Pre-allocate chunk_bias buffer - will be overwritten each iteration
-        chunk_bias_buffer = torch.empty((num_query_tokens, chunk_size, block_size),
-                                        dtype=dtype,
-                                        device=chunked_data.block_usages.device)
-        # Pre-allocate chunk_mask buffer - reused each iteration to avoid new bool tensor per chunk
-        chunk_mask_buffer = torch.empty((num_query_tokens, chunk_size, block_size),
-                                        dtype=torch.bool,
-                                        device=chunked_data.block_usages.device)
-
-    # Pre-compute query_t once (loop-invariant) to avoid duplicate tensors in HPU graph
+    # Fetch KV once for ALL shared blocks (small: kv_heads × kv_len × head_dim)
     if is_mla:
-        num_heads = query.size(1)
-        query_t = query.transpose(0, 1).unsqueeze(1)
+        latent_kv = cache_utils.fetch_shared(blocks)
+        key = latent_kv.unsqueeze(0).unsqueeze(0).expand(num_heads, 1, -1, -1)
+        value = latent_kv.unsqueeze(0).unsqueeze(0).expand(num_heads, 1, -1, -1)
     else:
-        query_t = query.transpose(0, 1).unflatten(0, (kv_heads, -1))
+        key, value = cache_utils.fetch_shared(blocks)
 
-    # Accumulators for online softmax-style merging
-    accumulated_attn = None
-    global_max = None
-    global_sum = None
-    for chunk_idx in range(num_chunks):
-        # NOTE: mark_step is unconditional here — chunked processing REQUIRES graph
-        # boundaries between chunks so the HPU can execute and free each chunk's
-        # intermediates (attention scores, KV fetches) before the next chunk starts.
-        # Without this, the loop is unrolled into a single graph and all chunks'
-        # attention score tensors (num_heads × tokens × chunk_kv_len) coexist
-        # simultaneously, using MORE memory than the non-chunked path.
+    results_attn = []
+    results_max = []
+    results_sum = []
+
+    for q_idx in range(num_q_chunks):
         htorch.core.mark_step()
-        chunk_start = chunk_idx * chunk_size
-        chunk_end = min(chunk_start + chunk_size, num_blocks)
-        actual_chunk_len = chunk_end - chunk_start
 
-        # Slice blocks for this chunk
-        chunk_blocks = blocks[chunk_start:chunk_end]
+        q_start = q_idx * q_chunk_size
+        q_end = min(q_start + q_chunk_size, num_query_tokens)
 
-        if generate_bias_per_chunk:
-            # Generate bias for this chunk from dense block_usages
-            # chunked_data.block_usages is (num_query_tokens, num_shared_blocks)
-            # Slice to get (num_query_tokens, actual_chunk_len) for this chunk
-            chunk_block_usages = chunked_data.block_usages[:, chunk_start:chunk_end]
+        # Slice query and bias for this Q tile
+        q_tile = query[q_start:q_end]  # (q_tile_size, num_heads, head_dim)
+        bias_tile = bias[q_start:q_end, :, :]  # (q_tile_size, num_blocks, block_size) — small!
 
-            # Generate chunk bias using dense broadcast into pre-allocated buffers
-            # chunk_block_usages.unsqueeze(-1): (num_query_tokens, actual_chunk_len, 1)
-            # broadcast comparison: (num_query_tokens, actual_chunk_len, block_size)
-            chunk_mask = chunk_mask_buffer[:, :actual_chunk_len, :]
-            torch.gt(block_len_range, chunk_block_usages.unsqueeze(-1), out=chunk_mask)
-
-            # Use view of pre-allocated buffer for actual chunk size
-            chunk_bias = chunk_bias_buffer[:, :actual_chunk_len, :]
-            chunk_bias.zero_()
-            chunk_bias.masked_fill_(chunk_mask, -math.inf)
-        else:
-            # Pre-computed: slice from full bias tensor
-            chunk_bias = bias[:, chunk_start:chunk_end, :]
-
-        # Fetch KV for this chunk
+        # Prepare query for matmul
         if is_mla:
-            latent_kv = cache_utils.fetch_shared(chunk_blocks)
-            key = latent_kv.unsqueeze(0).unsqueeze(0).expand(num_heads, 1, -1, -1)
-            value = latent_kv.unsqueeze(0).unsqueeze(0).expand(num_heads, 1, -1, -1)
+            q_tile_t = q_tile.transpose(0, 1).unsqueeze(1)
         else:
-            key, value = cache_utils.fetch_shared(chunk_blocks)
+            q_tile_t = q_tile.transpose(0, 1).unflatten(0, (kv_heads, -1))
 
-        # Flatten bias for attention: [1, query_len, chunk_len * block_size]
-        chunk_bias_flat = chunk_bias.flatten(-2, -1).unsqueeze(0)
+        bias_flat = bias_tile.flatten(-2, -1).unsqueeze(0)
 
-        # Compute attention for this chunk
-        chunk_attn, chunk_max, chunk_sum = _partial_attn_shared_core(query_t, key, value, chunk_bias_flat, fmin,
-                                                                     inputL_hpu_tensors, inputM_hpu_tensors, kv_heads,
-                                                                     is_mla, w_uv)
+        # Compute attention for this Q tile over ALL shared KV
+        # Softmax is complete and correct (sees full KV range)
+        tile_attn, tile_max, tile_sum = _partial_attn_shared_core(
+            q_tile_t, key, value, bias_flat, fmin,
+            inputL_hpu_tensors, inputM_hpu_tensors, kv_heads, is_mla, w_uv)
 
-        # Online merge: combine this chunk with accumulated results
-        if accumulated_attn is None:
-            # First chunk - just store
-            accumulated_attn = chunk_attn
-            global_max = chunk_max
-            global_sum = chunk_sum
-        else:
-            # Merge with existing - use flash-attention style rescaling
-            # In-place ops to avoid large intermediate tensors in the HPU graph
-            new_max = torch.maximum(global_max, chunk_max)
-
-            # Rescale factors (small tensors: tokens x num_heads)
-            old_scale = torch.exp(global_max - new_max)
-            new_scale = torch.exp(chunk_max - new_max)
-
-            # Rescale and merge in-place to avoid 3 large temporaries per step
-            # chunk_attn/chunk_sum are not needed after merge, safe to modify
-            accumulated_attn.mul_(old_scale.unsqueeze(-1))
-            chunk_attn.mul_(new_scale.unsqueeze(-1))
-            accumulated_attn.add_(chunk_attn)
-
-            global_sum.mul_(old_scale)
-            chunk_sum.mul_(new_scale)
-            global_sum.add_(chunk_sum)
-
-            global_max = new_max
+        results_attn.append(tile_attn)
+        results_max.append(tile_max)
+        results_sum.append(tile_sum)
 
         htorch.core.mark_step()
 
-    if accumulated_attn is None:
-        return (None, None, None)
-
-    return accumulated_attn, global_max, global_sum
+    # Concatenate along Q dimension — no rescaling needed!
+    return (torch.cat(results_attn, dim=0),
+            torch.cat(results_max, dim=0),
+            torch.cat(results_sum, dim=0))
 
 
 def partial_attn_unique(query: torch.tensor,
