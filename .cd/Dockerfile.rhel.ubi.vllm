@@ -167,7 +167,7 @@ WORKDIR /workspace
 # ============================================================================
 # Stage 3: vllm-final - Install vLLM and configure runtime
 # ============================================================================
-FROM gaudi-pytorch as vllm-openai
+FROM gaudi-pytorch AS vllm-openai
 
 # Re-declare global ARGs needed in this stage
 ARG VLLM_GAUDI_COMMIT
