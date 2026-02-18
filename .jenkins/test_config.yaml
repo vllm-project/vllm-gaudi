@@ -2,8 +2,8 @@
 stages:
   - name: smoke_tests
     steps:
-      - name: unit_tests_g2
-        flavor: g2
+      - name: unit_tests_g3
+        flavor: g3
         command: >-
           pip install pytest-timeout &&
           HABANA_VISIBLE_DEVICES=all pytest -vvv --timeout=300 --durations=10 --durations-min=1.0 tests/unit_tests
