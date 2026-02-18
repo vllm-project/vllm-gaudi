@@ -67,7 +67,8 @@ RUN dnf -y update && \
 
 # Add CentOS repositories for additional packages
 RUN printf "[BaseOS]\\nname=CentOS Linux 9 - BaseOS\\nbaseurl=https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os\\ngpgkey=https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official-SHA256\\ngpgcheck=1\\n" > /etc/yum.repos.d/CentOS-Linux-BaseOS.repo && \
-    printf "[centos9]\\nname=CentOS Linux 9 - AppStream\\nbaseurl=https://mirror.stream.centos.org/9-stream/AppStream/x86_64/os\\ngpgkey=https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official-SHA256\\ngpgcheck=1\\n" > /etc/yum.repos.d/CentOS-Linux-AppStream.repo
+    printf "[centos9]\\nname=CentOS Linux 9 - AppStream\\nbaseurl=https://mirror.stream.centos.org/9-stream/AppStream/x86_64/os\\ngpgkey=https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official-SHA256\\ngpgcheck=1\\n" > /etc/yum.repos.d/CentOS-Linux-AppStream.repo && \
+    printf "[CRB]\\nname=CentOS Linux 9 - CRB\\nbaseurl=https://mirror.stream.centos.org/9-stream/CRB/x86_64/os\\ngpgkey=https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official-SHA256\\ngpgcheck=1\\n" > /etc/yum.repos.d/CentOS-Linux-CRB.repo
 
 # Install system dependencies
 RUN dnf install -y --allowerasing \
