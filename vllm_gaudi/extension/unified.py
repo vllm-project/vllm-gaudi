@@ -417,12 +417,17 @@ def _partial_attn_shared_core(query: torch.tensor,
 _Q_CHUNK_FREE_MEM_FRACTION = 0.25
 
 
+@torch._dynamo.disable
 def _get_q_chunk_budget() -> int:
     """Return the memory budget (bytes) for a single Q-chunk's attention matrix.
 
     Uses a fraction of the currently-free device memory so the threshold
     adapts automatically — large cards get big chunks (fast), small cards
     get small chunks (safe).
+
+    Decorated with @torch._dynamo.disable because torch.hpu.mem_get_info()
+    cannot be symbolically traced.  The decorator causes a graph break at
+    the call site, runs the function eagerly, and returns a concrete int.
     """
     free_bytes, _ = torch.hpu.mem_get_info()
     return int(free_bytes * _Q_CHUNK_FREE_MEM_FRACTION)
