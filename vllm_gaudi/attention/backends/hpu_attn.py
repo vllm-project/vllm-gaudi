@@ -18,8 +18,7 @@ from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, B2BMatmul, ModuleFuse
 
 from vllm.v1.attention.backend import (AttentionBackend, AttentionImpl, AttentionLayer, AttentionMetadata,
                                        AttentionType)
-from vllm.model_executor.layers.attention.mla_attention import (MLACommonImpl, MLAAttention)
-from vllm.model_executor.layers.attention import mla_attention
+from vllm.model_executor.layers.attention.mla_attention import (MLACommonImpl)
 from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention, HPUPagedAttentionMetadata,
                                                      HPUPagedAttentionMetadataBuilder)
 
@@ -820,73 +819,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                                                                    v_scales))
         # Reshape the output tensor.
         return output.view(batch_size, -1, hidden_size)
-
-
-class HPUMLAAttention(MLAAttention):
-
-    def __init__(self):
-        super(MLAAttention, self).__init__()
-        self.latent_cache_k = VLLMKVCache()
-
-    def forward_impl(
-        self,
-        q: torch.Tensor,
-        k_c_normed: torch.Tensor,  # key in unified attn
-        k_pe: torch.Tensor,  # value in unified attn
-        kv_cache: torch.Tensor,
-        attn_metadata: "HPUUnifiedAttentionMetadata",
-        output: torch.Tensor | None = None,
-        output_scale: torch.Tensor | None = None,
-        output_block_scale: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if output is not None:
-            raise NotImplementedError("output is not yet supported for MLAImplBase")
-        self.latent_cache_k = VLLMKVCache()
-
-        is_prefill = attn_metadata.is_prompt
-
-        if not is_prefill:
-            # decode
-            q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-            # Convert from (B, N, P) to (N, B, P)
-            q_nope = q_nope.transpose(0, 1)
-            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-            decode_ql_nope = torch.bmm(q_nope, self.W_UK_T)
-            # Convert from (N, B, L) to (B, N, L)
-            decode_ql_nope = decode_ql_nope.transpose(0, 1)
-
-        latent_vec_k = torch.concat((k_c_normed, k_pe.view(*k_c_normed.shape[:-1], self.qk_rope_head_dim)), dim=-1)
-        latent_vec_k = latent_vec_k.view(-1, self.qk_rope_head_dim + self.kv_lora_rank)
-
-        if is_prefill:
-            output = self.impl.forward_mha(q, latent_vec_k, kv_cache, attn_metadata)
-            return output
-        else:
-            output = self.impl.forward_mqa(decode_ql_nope, q_pe, kv_cache, attn_metadata)
-            output = self._v_up_proj(output)
-            return output
-            # NOTE(Xinyu): Make the loaded weight contiguous to avoid the transpose
-
-    # during each graph execution
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
-        super(MLAAttention, self).process_weights_after_loading(act_dtype)
-        self.W_UV: torch.Tensor = self.W_UV.contiguous()
-        self.W_UK_T: torch.Tensor = self.W_UK_T.contiguous()
-
-    # NOTE(Chendi): PR25184 using output buffer as default, which can't be used in HPU Graph,
-    # so we override and always return a new tensor
-    def _v_up_proj(self, x):
-        # Convert from (B, N, L) to (N, B, L)
-        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
-        # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
-        x = torch.bmm(x, self.W_UV)
-        # Convert from (N, B, V) to (B, N * V)
-        x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
-        return x
-
-
-mla_attention.MLAAttention.forward_impl = HPUMLAAttention.forward_impl
-mla_attention.MLAAttention._v_up_proj = HPUMLAAttention._v_up_proj
 
 
 def _make_prompt_alibi_bias(
