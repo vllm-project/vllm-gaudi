@@ -67,5 +67,5 @@ We welcome and value any contributions and collaborations.
 ## Contact Us
 
 <!-- --8<-- [start:contact-us] -->
-- For technical questions and feature requests, please use GitHub [Issues](https://github.com/vllm-project/vllm-gaudi/issues).
+- For technical questions and feature requests, please don't use GitHub [Issues](https://github.com/vllm-project/vllm-gaudi/issues).
 <!-- --8<-- [end:contact-us] -->
