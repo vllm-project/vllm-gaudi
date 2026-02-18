@@ -417,6 +417,23 @@ def _partial_attn_shared_core(query: torch.tensor,
 _Q_CHUNK_FREE_MEM_FRACTION = 0.25
 
 
+@torch._dynamo.disable
+def _get_q_chunk_budget() -> int:
+    """Return the memory budget (bytes) for a single Q-chunk's attention matrix.
+
+    Uses a fraction of the currently-free device memory so the threshold
+    adapts automatically — large cards get big chunks (fast), small cards
+    get small chunks (safe).
+
+    Decorated with @torch._dynamo.disable because torch.hpu.mem_get_info()
+    cannot be symbolically traced.  The decorator causes a graph break at
+    the call site, runs the function eagerly, and returns a concrete int.
+    """
+    free_bytes, _ = torch.hpu.mem_get_info()
+    return int(free_bytes * _Q_CHUNK_FREE_MEM_FRACTION)
+
+
+@torch._dynamo.disable
 def partial_attn_shared(query: torch.tensor,
                         blocks: torch.tensor,
                         bias: Optional[torch.tensor],
@@ -431,13 +448,10 @@ def partial_attn_shared(query: torch.tensor,
     """Partial attention where all shared blocks are compared with whole query.
     
     Supports two modes:
-    1. Full mode (chunk_size == 0): process all blocks and query tokens at once
-    2. Q-chunked mode (chunk_size > 0): chunk along the query dimension with the
-       given chunk size. Each Q-tile sees ALL shared KV, so softmax is computed
-       correctly within each tile and results are simply concatenated.
-    
-    The chunk_size decision is made during batch preparation (eager Python) so
-    this function remains fully compilable by torch.dynamo.
+    1. Full mode (default): process all blocks and query tokens at once
+    2. Q-chunked mode: when the attention matrix is too large, chunk along the query
+       dimension. Each Q-tile sees ALL shared KV, so softmax is computed correctly
+       within each tile and results are simply concatenated (no online merge needed).
     
     Args:
         query: Query tensor [tokens, num_heads, head_dim]
@@ -450,7 +464,7 @@ def partial_attn_shared(query: torch.tensor,
         dtype: Output dtype
         w_uv: Optional MLA projection matrix [num_heads, latent_dim, v_head_dim]
         chunked_data: (legacy, unused) Metadata for KV-chunked processing
-        chunk_size: Q-chunk size computed during batch prep (0 = full, >0 = Q-chunked)
+        chunk_size: (legacy, unused) Number of blocks per KV chunk
     
     Returns:
         Tuple of (unnormalized_weighted_V, local_max, local_sum)
@@ -458,14 +472,22 @@ def partial_attn_shared(query: torch.tensor,
     if bias is None or blocks is None:
         return (None, None, None)
 
-    if chunk_size <= 0:
-        # Full path: process everything at once (compiled)
+    # Check if we need Q-chunking based on estimated attention matrix size
+    num_query_tokens = query.size(0)
+    num_heads = query.size(1)
+    kv_len = blocks.size(0) * cache_utils.block_size
+    element_size = 2  # bf16
+    attn_matrix_bytes = num_heads * num_query_tokens * kv_len * element_size
+    budget = _get_q_chunk_budget()
+
+    if attn_matrix_bytes <= budget:
+        # Small enough — process everything at once
         return _partial_attn_shared_full(query, blocks, bias, fmin, inputL_hpu_tensors, inputM_hpu_tensors,
                                          cache_utils, w_uv)
     else:
-        # Q-chunked path: chunk along query dimension
+        # Attention matrix too large — chunk along query dimension
         return _partial_attn_shared_q_chunked(query, blocks, bias, fmin, inputL_hpu_tensors, inputM_hpu_tensors,
-                                              cache_utils, w_uv, chunk_size)
+                                              cache_utils, w_uv, budget)
 
 
 def _partial_attn_shared_full(query: torch.tensor,
@@ -515,10 +537,6 @@ def _partial_attn_shared_q_chunked(
     Each Q-tile sees ALL shared KV blocks, so softmax is fully correct within each tile.
     Results are simply concatenated along Q — no online softmax merge needed.
     
-    Args:
-        budget: Pre-computed Q-chunk size (number of query tokens per tile).
-                Computed during batch preparation.
-    
     Advantages over KV-chunking:
     - No online merge overhead (no rescaling, no exp)
     - KV fetched once (not per chunk)
@@ -533,9 +551,10 @@ def _partial_attn_shared_q_chunked(
     is_mla = w_uv is not None
     kv_heads = 1 if is_mla else cache_utils.kv_heads
 
-    # Compute Q chunk size from pre-computed budget (q_chunk_size passed from batch prep).
-    # No memory queries here — budget is already a concrete int.
-    q_chunk_size = budget
+    # Compute Q chunk size so each tile's attention matrix fits in budget
+    # budget is passed in as a concrete int from partial_attn_shared to avoid
+    # calling _get_q_chunk_budget() inside the torch.dynamo-traced region.
+    q_chunk_size = max(1, budget // (num_heads * kv_len * element_size))
     q_chunk_size = min(q_chunk_size, num_query_tokens)
     num_q_chunks = math.ceil(num_query_tokens / q_chunk_size)
 

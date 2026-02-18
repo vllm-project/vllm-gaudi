@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import habana_frameworks.torch as htorch
 from dataclasses import dataclass
-from vllm_gaudi.extension.unified import HPUUnifiedAttentionMetadata, SharedBlockChunkedBiasData, get_vecsize_packsize, get_last_dim_size, _Q_CHUNK_FREE_MEM_FRACTION
+from vllm_gaudi.extension.unified import HPUUnifiedAttentionMetadata, SharedBlockChunkedBiasData, get_vecsize_packsize, get_last_dim_size
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 import math
 from typing import Optional, Callable, Union
@@ -798,21 +798,12 @@ def create_unified_batch(
     fmin = torch.finfo(dtype).min
     feps = torch.finfo(dtype).tiny
 
-    # NOTE(kzawora): Q-chunked shared attention: decide chunk size here (eager Python)
-    # so the attention path remains fully compilable by torch.dynamo.
+    # NOTE(kzawora): Q-chunked shared attention handles memory at attention time by
+    # chunking along the query dimension when the attention matrix is too large.
     # The full bias tensor (target_qlen × target_shared_blocks × block_size) is always
-    # generated — it's comparatively small. The expensive attention matrix
-    # (num_heads × query_len × kv_len) is what gets chunked at compute time.
-    q_chunk_size = 0  # 0 = full (non-chunked) path
-    if persistent_ctx.num_query_heads > 0 and target_shared_blocks > 0:
-        num_heads = persistent_ctx.num_query_heads
-        kv_len = target_shared_blocks * block_size
-        element_size = 2  # bf16
-        attn_matrix_bytes = num_heads * target_qlen * kv_len * element_size
-        free_bytes, _ = torch.hpu.mem_get_info()
-        budget = int(free_bytes * _Q_CHUNK_FREE_MEM_FRACTION)
-        if attn_matrix_bytes > budget:
-            q_chunk_size = max(1, budget // (num_heads * kv_len * element_size))
+    # generated — it's comparatively small (~hundreds of MBs). The expensive attention
+    # matrix (num_heads × query_len × kv_len) is what gets chunked at compute time.
+    # No KV-chunk padding or chunk_size computation is needed here.
 
     # Dense bias generation: scatter on CPU (any shape), then broadcast on HPU (static shape)
     # This avoids dynamic-length coordinate arrays on HPU entirely
@@ -831,7 +822,7 @@ def create_unified_batch(
             # shared_bias will be set below after HPU acceleration
             shared_bias=None,  # Will be set below
             shared_bias_chunked=None,  # Legacy: unused with Q-chunked approach
-            shared_chunk_size=q_chunk_size,  # Q-chunk size (0 = full, >0 = Q-chunked)
+            shared_chunk_size=0,  # Legacy: unused with Q-chunked approach
             unique_blocks=target_unique_blocks,
             unique_block_mapping=persistent_ctx.hpu_tensor(unique_block_mapping, (target_unique_blocks, ), -1,
                                                            slot_mapping_dtype),
