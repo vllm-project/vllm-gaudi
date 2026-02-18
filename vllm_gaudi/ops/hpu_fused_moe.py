@@ -67,9 +67,13 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
         else:
             import torch.nn.functional as F
-            topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
-            topk_weights, topk_ids = torch.topk(topk_weights, layer.top_k, dim=-1)
-            topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+            if self.model_type == "gpt_oss":
+                topk_weights, topk_ids = torch.topk(router_logits, layer.top_k, dim=-1)
+                topk_weights = F.softmax(topk_weights, dim=-1, dtype=torch.float32)
+            else:
+                topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
+                topk_weights, topk_ids = torch.topk(topk_weights, layer.top_k, dim=-1)
+                topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
             topk_weights = topk_weights.to(x.dtype)
 
         if not layer.use_grouped_topk:
