@@ -5,7 +5,7 @@ title: Row-Parallel Chunking
 
 ## Overview
 
-Row-Parallel Chunking is an optimization for tensor-parallel inference on Intel® Gaudi® that overlaps computation with communication in `RowParallelLinear` layers. In standard tensor-parallel inference, each `RowParallelLinear` layer performs a matrix multiplication followed by a blocking all-reduce across all TP ranks. With Row-Parallel Chunking, the input is split into smaller chunks along the token dimension and each chunk's all-reduce is launched asynchronously while the next chunk's matrix multiplication proceeds on the HPU. This compute–communication overlap can significantly improve throughput for large batch sizes.
+Row-Parallel Chunking is an optimization method for tensor-parallel inference on Intel® Gaudi® that overlaps computation with communication in `RowParallelLinear` layers. In standard tensor-parallel inference, each `RowParallelLinear` layer performs a matrix multiplication followed by a blocking all-reduce across all TP ranks.
 
 ## How It Works
 
