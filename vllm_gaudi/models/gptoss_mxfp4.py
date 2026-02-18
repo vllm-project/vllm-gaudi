@@ -64,7 +64,7 @@ def convert_moe_packed_tensors(
     scales,
     *,
     dtype: torch.dtype = torch.bfloat16,
-    rows_per_chunk: int = 32768 * 1024,  # TODO these values are not here by mistake ;)
+    rows_per_chunk: int = 32768 * 1024,  # Large default chosen to process many rows per kernel launch and reduce overhead; lower this if you need to limit peak memory usage.
 ) -> torch.Tensor:
     """
     Convert the mxfp4 weights again, dequantizing and makes them compatible with the forward
@@ -90,12 +90,6 @@ def convert_moe_packed_tensors(
         -4.0,
         -6.0,
     ]
-
-
-    # Check if blocks and scales are on CPU, and move to GPU if so
-    if not blocks.is_cuda and torch.cuda.is_available():
-        blocks = blocks.cuda()
-        scales = scales.cuda()
 
     scales = scales.to(torch.int32) - 127  # TODO that's because 128=2**7
 
@@ -275,53 +269,35 @@ def _load_weights_mxfp4_dequantize_hpu(
     return loaded_params
 
 def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-        ]
+    stacked_params_mapping = [
+        # (param_name, shard_name, shard_id)
+        (".qkv_proj", ".q_proj", "q"),
+        (".qkv_proj", ".k_proj", "k"),
+        (".qkv_proj", ".v_proj", "v"),
+    ]
 
-        tp_rank = get_tensor_model_parallel_rank()
-        tp_size = get_tensor_model_parallel_world_size()
+    tp_rank = get_tensor_model_parallel_rank()
+    tp_size = get_tensor_model_parallel_world_size()
 
-        # Attention heads per rank
-        heads_per_rank = self.config.num_attention_heads // tp_size
-        head_start = tp_rank * heads_per_rank
+    # Attention heads per rank
+    heads_per_rank = self.config.num_attention_heads // tp_size
+    head_start = tp_rank * heads_per_rank
 
-        ep_size = get_ep_group().world_size
-        ep_rank = get_ep_group().rank
-        num_experts = self.config.num_local_experts
-        experts_per_rank = num_experts // ep_size
-        ep_rank_start = ep_rank * experts_per_rank
-        ep_rank_end = (ep_rank + 1) * experts_per_rank
+    ep_size = get_ep_group().world_size
+    ep_rank = get_ep_group().rank
+    num_experts = self.config.num_local_experts
+    experts_per_rank = num_experts // ep_size
+    ep_rank_start = ep_rank * experts_per_rank
+    ep_rank_end = (ep_rank + 1) * experts_per_rank
 
-        quant_method = (
-            self.config.quantization_config["quant_method"]
-            if hasattr(self.config, "quantization_config")
-            else None
-        )
-        if quant_method == "mxfp4":
-            if current_platform.device_name == "hpu":
-                return self._load_weights_mxfp4_dequantize_hpu(
-                    ep_rank_end,
-                    ep_rank_start,
-                    heads_per_rank,
-                    head_start,
-                    weights,
-                    stacked_params_mapping,
-                )
-            else:
-                return self._load_weights_mxfp4(
-                    ep_rank_end,
-                    ep_rank_start,
-                    heads_per_rank,
-                    head_start,
-                    weights,
-                    stacked_params_mapping,
-                )
-        else:
-            return self._load_weights_other(
+    quant_method = (
+        self.config.quantization_config["quant_method"]
+        if hasattr(self.config, "quantization_config")
+        else None
+    )
+    if quant_method == "mxfp4":
+        if current_platform.device_name == "hpu":
+            return self._load_weights_mxfp4_dequantize_hpu(
                 ep_rank_end,
                 ep_rank_start,
                 heads_per_rank,
@@ -329,6 +305,24 @@ def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
                 weights,
                 stacked_params_mapping,
             )
+        else:
+            return self._load_weights_mxfp4(
+                ep_rank_end,
+                ep_rank_start,
+                heads_per_rank,
+                head_start,
+                weights,
+                stacked_params_mapping,
+            )
+    else:
+        return self._load_weights_other(
+            ep_rank_end,
+            ep_rank_start,
+            heads_per_rank,
+            head_start,
+            weights,
+            stacked_params_mapping,
+        )
 
 ModelArchConfigConvertorBase._normalize_quantization_config = _normalize_quantization_config
 GptOssModel.load_weights = load_weights
