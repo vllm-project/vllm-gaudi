@@ -481,7 +481,7 @@ def partial_attn_shared(query: torch.tensor,
     else:
         # Attention matrix too large — chunk along query dimension
         return _partial_attn_shared_q_chunked(query, blocks, bias, fmin, inputL_hpu_tensors, inputM_hpu_tensors,
-                                              cache_utils, w_uv)
+                                              cache_utils, w_uv, budget)
 
 
 def _partial_attn_shared_full(query: torch.tensor,
@@ -523,7 +523,8 @@ def _partial_attn_shared_q_chunked(
         inputL_hpu_tensors: Dict[tuple, torch.Tensor],
         inputM_hpu_tensors: Dict[tuple, torch.Tensor],
         cache_utils: CacheUtils,
-        w_uv: Optional[torch.tensor] = None) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
+        w_uv: Optional[torch.tensor] = None,
+        budget: int = 0) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
     """Q-chunked implementation of partial_attn_shared.
     
     Chunks along the QUERY dimension instead of the KV dimension.
@@ -545,7 +546,8 @@ def _partial_attn_shared_q_chunked(
     kv_heads = 1 if is_mla else cache_utils.kv_heads
 
     # Compute Q chunk size so each tile's attention matrix fits in budget
-    budget = _get_q_chunk_budget()
+    # budget is passed in as a concrete int from partial_attn_shared to avoid
+    # calling _get_q_chunk_budget() inside the torch.dynamo-traced region.
     q_chunk_size = max(1, budget // (num_heads * kv_len * element_size))
     q_chunk_size = min(q_chunk_size, num_query_tokens)
     num_q_chunks = math.ceil(num_query_tokens / q_chunk_size)
