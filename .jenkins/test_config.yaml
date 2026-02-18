@@ -2,25 +2,11 @@
 stages:
   - name: smoke_tests
     steps:
-      - name: gsm8k_small_g3_tp1
-        flavor: g3
-        command: >-
-          export PT_HPU_LAZY_MODE=1 &&  cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 1
-      - name: gsm8k_small_g3_tp2
-        flavor: g3.s
-        command: >-
-          export PT_HPU_LAZY_MODE=1 && 
-          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 2
-      - name: gsm8k_small_g2_tp1
+      - name: unit_tests_g2
         flavor: g2
         command: >-
-          export PT_HPU_LAZY_MODE=1 && 
-          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 1
-      - name: gsm8k_small_g2_tp2
-        flavor: g2.s
-        command: >-
-          export PT_HPU_LAZY_MODE=1 && 
-          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 2
+          pip install pytest-timeout &&
+          HABANA_VISIBLE_DEVICES=all pytest -vvv --timeout=300 --durations=10 --durations-min=1.0 tests/unit_tests
   - name: full_test_suite
     steps:
       - name: gsm8k_small_g3_tp1_apc
