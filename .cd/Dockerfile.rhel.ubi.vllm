@@ -57,7 +57,8 @@ ENV TORCH_TYPE=${TORCH_TYPE} \
 COPY LICENSE /licenses/
 
 # System setup - Remove FIPS provider and add EPEL
-RUN dnf install -y --allowerasing python3-dnf-plugin-versionlock && \
+RUN dnf -y update && \
+    dnf install -y --allowerasing python3-dnf-plugin-versionlock && \
     dnf versionlock add redhat-release* && \
     # '|| true' is added to support RHEL 9.4 in which openssl-fips-provider-so is not installed
     rpm -e --nodeps openssl-fips-provider-so || true && \
@@ -72,7 +73,7 @@ RUN printf "[BaseOS]\\nname=CentOS Linux 9 - BaseOS\\nbaseurl=https://mirror.str
 RUN dnf install -y --allowerasing \
     wget git jq libomp \
     # Image processing dependencies (needed for pillow-simd -> habana-media-loader)
-    zlib-devel libjpeg-devel \
+    zlib-devel libjpeg-turbo-devel \
     # habanalabs-thunk dependency
     libfdt-devel \
     # Python development
@@ -157,10 +158,7 @@ RUN SYNAPSE_REVISION_RUNTIME=$(cat /etc/habanalabs/synapse_revision) && \
     export SKIP_INSTALL_DEPENDENCIES=1 && \
     PYTHON_INDEX_URL="--extra-index-url ${PYPI_INDEX_URL}" ./install.sh $SYNAPSE_VERSION $SYNAPSE_REVISION_RUNTIME $TORCH_TYPE && \
     cd / && \
-    rm -rf "${TMP_PATH}" "${PT_PACKAGE_NAME}"
-
-# System update
-RUN dnf -y update --nobest --allowerasing --skip-broken && \
+    rm -rf "${TMP_PATH}" "${PT_PACKAGE_NAME}" && \
     dnf clean all
 
 WORKDIR /workspace
@@ -182,10 +180,9 @@ ENV BASE_NAME=${BASE_NAME} \
     VLLM_PATH2=/workspace/vllm-gaudi
 
 # Install additional system dependencies
-RUN dnf update -y --nobest --allowerasing --skip-broken && \
-    dnf install -y gettext jq git --allowerasing && \
-    ln -sf /usr/bin/python3 /usr/bin/python && \
-    dnf clean all
+RUN dnf install -y gettext jq git --allowerasing && \
+    dnf clean all && \
+    ln -sf /usr/bin/python3 /usr/bin/python
 
 WORKDIR /root
 
