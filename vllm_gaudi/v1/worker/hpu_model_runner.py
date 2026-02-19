@@ -4660,22 +4660,64 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         idx = 0
         num_candidates = len(buckets)
         captured_all = True
+        skipped_buckets = []
         developer_settings = get_config().VLLM_DEVELOPER_MODE
         phase = 'Prompt' if is_prompt else 'Decode'
         desc = f'{phase} warmup processing: '
+
+        # Compute minimum free device memory threshold.
+        # self.mem_margin is the non-usable margin computed by hpu_worker
+        # (free_mem * (1 - gpu_memory_utilization), typically ~12.5 GiB).
+        # We must keep free memory above this margin plus a safety buffer
+        # to account for peak memory during graph compilation, which can
+        # temporarily exceed the final graph size. Without this check,
+        # large bucket compilations can trigger fatal Gaudi device OOM
+        # errors that are unrecoverable and crash the entire process.
+        SAFETY_BUFFER_GIB = 2.0
+        if self.mem_margin is not None:
+            min_free_mem_bytes = int(self.mem_margin + SAFETY_BUFFER_GIB * 1024**3)
+        else:
+            # Fallback: conservative fixed threshold
+            min_free_mem_bytes = int(14 * 1024**3)
+
+        logger.info("%s warmup: minimum free memory threshold: %.2f GiB "
+                    "(mem_margin=%.2f GiB + safety=%.1f GiB)", phase, min_free_mem_bytes / (1024**3),
+                    (self.mem_margin or 0) / (1024**3), SAFETY_BUFFER_GIB)
+
         with tqdm(total=num_candidates, desc=desc, unit="item") as pbar:
-            for idx, (batch_size, seq_len, num_blocks) in enumerate(reversed(buckets)):
+            for idx, (batch_size, seq_len, num_blocks) in enumerate(buckets):
                 if seq_len > self.max_num_tokens:
                     continue
-                # Graph memory usage is proportional to seq dimension in a batch
+                # Graph memory usage is proportional to seq dimension
                 if is_prompt:
-                    batch_seq = batch_size * seq_len * num_blocks if num_blocks else batch_size * seq_len
+                    batch_seq = batch_size * seq_len * num_blocks \
+                        if num_blocks else batch_size * seq_len
                 else:
                     batch_seq = batch_size
 
                 graphed_bucket = (batch_size, seq_len, num_blocks, is_prompt)
                 if graphed_bucket in self.graphed_buckets:
                     continue
+
+                # Check available device memory before attempting
+                # warmup. This prevents fatal device OOM errors that
+                # crash the Gaudi device and require a full restart.
+                try:
+                    free_mem, _ = torch.hpu.mem_get_info()
+                except Exception:
+                    free_mem = 0
+
+                if free_mem < min_free_mem_bytes:
+                    # Don't add to graphed_buckets so runtime knows
+                    # this bucket needs on-demand compilation
+                    captured_all = False
+                    skipped_buckets.append((batch_size, seq_len, num_blocks))
+                    pbar.set_postfix_str(f"{idx}/{num_candidates} [skip: "
+                                         f"{free_mem / (1024**3):.1f} GiB < "
+                                         f"{min_free_mem_bytes / (1024**3):.1f} GiB]")
+                    pbar.update(1)
+                    continue
+
                 self.graphed_buckets.add(graphed_bucket)
                 if developer_settings:
                     self.log_warmup(phase, idx, num_candidates, batch_size, seq_len, num_blocks)
@@ -4693,6 +4735,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
                 pbar.set_postfix_str(f"{idx}/{num_candidates}")
                 pbar.update(1)
+
+        if skipped_buckets:
+            logger.warning(
+                "Skipped %d/%d %s buckets during warmup due to "
+                "insufficient device memory (free < %.1f GiB). "
+                "These buckets will be compiled on first use. "
+                "Consider reducing --max-model-len or increasing "
+                "VLLM_GRAPH_RESERVED_MEM (current default: 0.1). "
+                "Skipped buckets: %s", len(skipped_buckets), num_candidates, phase, min_free_mem_bytes / (1024**3),
+                skipped_buckets)
 
         return total_mem, total_batch_seq, captured_all
 
