@@ -143,7 +143,7 @@ stages:
         flavor: g3
         command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_embedding_model_test
       - name: e2e_cpu_offloading
-        flavor: g2 # test timed for g2
+        flavor: g3
         command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_cpu_offloading_test
       - name: e2e_offloading_connector
         flavor: g3
@@ -167,9 +167,9 @@ stages:
       - name: e2e_qwen3_vl_load_generate
         flavor: g3.s
         command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_vl_load_generate_test
-      - name: pd_nixl_libfabric_g3s
-        flavor: g3.s
+      - name: pd_nixl_libfabric
+        flavor: g2.s
         command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_pd_disaggregate_nixl_libfabric_test
-      - name: pd_nixl_ucx_e2e_g3s
-        flavor: g3.s
+      - name: pd_nixl_ucx_e2e
+        flavor: g2.s
         command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_pd_disaggregate_nixl_ucx_test
