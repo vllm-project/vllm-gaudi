@@ -16,35 +16,50 @@ from vllm.multimodal.inputs import (
 )
 
 
-def _dummy_items_from_tensors(tensors: NestedTensors, modalitity: str = "image"):
+def _dummy_items_from_tensors(tensors: NestedTensors, modality: str = "image"):
     """
-    Creates MultiModalKwargsItems from a dict of modality to tensor.
+    Creates MultiModalKwargsItems from a list of tensors.
     """
-    elems = [
-        MultiModalFieldElem(modality=modalitity, key="key", data=t, field=MultiModalBatchedField()) for t in tensors
+    items = [
+        MultiModalKwargsItem({"key": MultiModalFieldElem(data=t, field=MultiModalBatchedField())}) for t in tensors
     ]
-    items = [MultiModalKwargsItem({"key": elem}) for elem in elems]
-    mm_items = MultiModalKwargsItems.from_seq(items)
+    mm_items = MultiModalKwargsItems({modality: items})
     return mm_items
 
 
 def _dummy_items_from_tensor_modalities(modality_tensor_dict: NestedTensors):
-    elems = [
-        MultiModalFieldElem(modality=modality, key="key", data=t, field=MultiModalBatchedField())
-        for modality, tensors in modality_tensor_dict.items() for t in tensors
-    ]
-    items = [MultiModalKwargsItem({"key": elem}) for elem in elems]
-    mm_items = MultiModalKwargsItems.from_seq(items)
+    """
+    Creates MultiModalKwargsItems from a dict of modality to list of tensors.
+    """
+    items_by_modality = {}
+    for modality, tensors in modality_tensor_dict.items():
+        items = [
+            MultiModalKwargsItem({"key": MultiModalFieldElem(data=t, field=MultiModalBatchedField())}) for t in tensors
+        ]
+        items_by_modality[modality] = items
+    mm_items = MultiModalKwargsItems(items_by_modality)
     return mm_items
 
 
-def _dummy_items_from_tensor_keys(key_tensor_dict: NestedTensors, modality: str = "image"):
-    elems = [
-        MultiModalFieldElem(modality=modality, key=key, data=t, field=MultiModalBatchedField())
-        for key, tensors in key_tensor_dict.items() for t in tensors
-    ]
-    items = [MultiModalKwargsItem({elem.key: elem}) for elem in elems]
-    mm_items = MultiModalKwargsItems.from_seq(items)
+def _dummy_items_from_tensor_keys(key_tensor_dict: dict[str, list], modality: str = "image"):
+    """
+    Creates MultiModalKwargsItems from a dict of key names to list of tensors.
+    Creates items where each position combines tensors from all keys at that index.
+    For example: {"key1": [t1, t2], "key2": [t3, t4]} creates:
+      - Item 0: {key1: t1, key2: t3}
+      - Item 1: {key1: t2, key2: t4}
+    """
+    # Get the number of items (should be same length for all keys)
+    num_items = len(next(iter(key_tensor_dict.values())))
+
+    items = []
+    for i in range(num_items):
+        item_dict = {}
+        for key, tensors in key_tensor_dict.items():
+            item_dict[key] = MultiModalFieldElem(data=tensors[i], field=MultiModalBatchedField())
+        items.append(MultiModalKwargsItem(item_dict))
+
+    mm_items = MultiModalKwargsItems({modality: items})
     return mm_items
 
 
@@ -58,19 +73,13 @@ def assert_nested_tensors_equal_hpu(expected: NestedTensors, actual: NestedTenso
             assert_nested_tensors_equal_hpu(expected_item, actual_item)
 
 
-def assert_multimodal_kwargs_items_equal_hpu(expected_elems: MultiModalKwargsItem, actual: dict[str, NestedTensors]):
+def assert_multimodal_kwargs_items_equal_hpu(expected: dict[str, NestedTensors], actual: dict[str, NestedTensors]):
     """HPU-aware assertion for multimodal input equality."""
 
-    assert set(expected_elems.keys()) == set(actual.keys())
+    assert set(expected.keys()) == set(actual.keys())
 
-    for key in expected_elems:
-        if isinstance(expected_elems[key], list):
-            assert len(expected_elems[key]) == len(actual[key])
-            for expected_item, actual_item in zip(expected_elems[key], actual[key]):
-                assert_nested_tensors_equal_hpu(expected_item, actual_item)
-            continue
-
-        assert_nested_tensors_equal_hpu(expected_elems[key], actual[key].data)
+    for key in expected:
+        assert_nested_tensors_equal_hpu(expected[key], actual[key])
 
 
 @pytest.mark.parametrize(
@@ -200,7 +209,7 @@ def test_hpu_device_mismatch_handling(tensor_shapes):
         result = dummy_kwargs_items.get_data()
         expected = {"key": [hpu_tensor, cpu_tensor]}
         # If successful, verify structure
-        assert_multimodal_kwargs_items_equal_hpu(result, expected)
+        assert_multimodal_kwargs_items_equal_hpu(expected, result)
     except (RuntimeError, ValueError) as e:
         # Expected behavior for device mismatch
         assert "device" in str(e).lower() or "hpu" in str(e).lower()
@@ -240,19 +249,29 @@ def test_hpu_tensor_batching_sizes(tensor_size, batch_count):
 
 
 def test_hpu_multiple_modalities():
-    """Test MultiModalKwargsItems key handling."""
+    """Test MultiModalKwargsItems handling of multiple modalities with different keys."""
     device = "hpu"
 
-    # Test multiple modalities
+    # Test multiple modalities - each should have its own key
+    # This simulates a realistic scenario where different modalities
+    # produce different output keys (e.g., pixel_values for images, audio_features for audio)
     image_tensor = torch.rand([3, 224, 224], device=device, dtype=torch.bfloat16)
     audio_tensor = torch.rand([1000], device=device, dtype=torch.bfloat16)
 
-    batch_data = {"image": [image_tensor], "audio": [audio_tensor]}
+    # Create items with different keys for different modalities
+    image_items = [
+        MultiModalKwargsItem({"pixel_values": MultiModalFieldElem(data=image_tensor, field=MultiModalBatchedField())})
+    ]
+    audio_items = [
+        MultiModalKwargsItem({"audio_features": MultiModalFieldElem(data=audio_tensor, field=MultiModalBatchedField())})
+    ]
 
-    dummy_kwargs_items: MultiModalKwargsItems = _dummy_items_from_tensor_modalities(batch_data)
+    dummy_kwargs_items = MultiModalKwargsItems({"image": image_items, "audio": audio_items})
+
     result = dummy_kwargs_items.get_data()
 
-    expected = {"key": [image_tensor, audio_tensor]}
+    # Each modality should have its own key in the output
+    expected = {"pixel_values": image_tensor.unsqueeze(0), "audio_features": audio_tensor.unsqueeze(0)}
 
     assert_multimodal_kwargs_items_equal_hpu(expected, result)
 
