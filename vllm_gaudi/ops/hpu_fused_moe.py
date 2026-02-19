@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from functools import partial
 from typing import Union
 
@@ -27,6 +28,10 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             self.model_type = vllm_config.model_config.hf_config.model_type
             if vllm_config.model_config.hf_config.quantization_config is not None:
                 self.is_mxfp4 = vllm_config.model_config.hf_config.quantization_config.get("quant_method") == "mxfp4"
+
+    def _select_monolithic(self) -> Callable:
+        """Overriding base method"""
+        return self.apply_monolithic
 
     @property
     def is_monolithic(self) -> bool:
