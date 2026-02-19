@@ -47,7 +47,17 @@ class HpuPlatform(Platform):
         attn_selector_config: "AttentionSelectorConfig",
     ) -> str:
         if attn_selector_config.use_sparse:
-            raise NotImplementedError("Sparse Attention is not supported on HPU.")
+            # DeepSeek V3.2 uses sparse attention on top of MLA
+            # Return unified MLA backend, sparse logic handled in custom attention class
+            logger.info("[HPU] Sparse attention detected - using unified backend")
+            if attn_selector_config.use_mla:
+                logger.info("[HPU] Using HPUUnifiedMLABackend for sparse+MLA attention")
+                return ("vllm_gaudi.attention.backends.hpu_attn."
+                        "HPUUnifiedMLABackend")
+            else:
+                logger.info("[HPU] Using HPUUnifiedAttentionBackend for sparse attention")
+                return ("vllm_gaudi.attention.backends."
+                        "hpu_attn.HPUUnifiedAttentionBackend")
         elif get_config().unified_attn:
             if attn_selector_config.use_mla:
                 logger.info("Using HPUUnifiedMLA backend.")

@@ -31,3 +31,10 @@ def register_model():
                                  "vllm_gaudi.models.pixtral:HPUPixtralForConditionalGeneration")
 
     import vllm_gaudi.models.deepseek_v2  # noqa: F401
+
+    # DeepSeek V3 with HPU-optimized sparse attention (V3.2)
+    from vllm_gaudi.models.hpu_deepseek_v3 import HpuDeepseekV3ForCausalLM  # noqa: F401
+    ModelRegistry.register_model(
+        "DeepseekV3ForCausalLM",  # Standard architecture name
+        "vllm_gaudi.models.hpu_deepseek_v3:HpuDeepseekV3ForCausalLM"
+    )

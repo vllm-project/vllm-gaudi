@@ -52,6 +52,8 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
     query_start_loc: Optional[torch.Tensor] = None
     query_start_loc_p: Optional[torch.Tensor] = None
     padding_mask_flat: Optional[torch.Tensor] = None
+    online_merge: bool = False
+    split_graphs: bool = False
 
     def seq_len(self):
         return self.slot_mapping.size(-1)
