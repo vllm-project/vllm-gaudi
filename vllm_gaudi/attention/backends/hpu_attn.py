@@ -179,7 +179,8 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     chunked_block_usage: Optional[torch.Tensor] = None
     has_initial_states_p: Optional[torch.Tensor] = None
     last_chunk_indices_p: Optional[torch.Tensor] = None
-    state_indices_tensor: Optional[torch.Tensor] = None  # shape: [batch,]
+    load_indices_tensor: Optional[torch.Tensor] = None  # shape: [batch,]
+    store_indices_tensor: Optional[torch.Tensor] = None  # shape: [batch,]
 
 
 @dataclass
