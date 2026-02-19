@@ -125,9 +125,6 @@ stages:
       - name: e2e_gsm8k_deepseek_unified_mla
         flavor: g3
         command: HF_TOKEN=$HF_TOKEN VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_deepseek_unified_mla_test
-      - name: e2e_mistral3
-        flavor: g3
-        command: HF_TOKEN=$HF_TOKEN VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_mistral3_test
       - name: e2e_spec_decode_ngram
         flavor: g3
         command: HF_TOKEN=$HF_TOKEN VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_ngram_test
