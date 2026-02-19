@@ -389,20 +389,18 @@ class UnifiedBatchPersistentContext:
             return self.__hpu_tensor_internal(tensor, shape, pad_value, dtype)
 
     def get_np_placeholder(self, shape: tuple, pad_value: Union[int, float], dtype: np.dtype) -> np.ndarray:
-        """ Get or create cached numpy placeholder.
-        Returns a view into cached storage. Caller MUST overwrite the
-        relevant region before use. We skip .copy() since the caller
-        always fills in real data and the padded region is initialized
-        with pad_value from the cached placeholder. """
+        """ Get or create cached numpy placeholder - returns COPY to avoid batch contamination """
         key = (shape, pad_value, dtype)
         try:
             placeholder = self.np_placeholder_cache[key]
-            return placeholder
+            with self.profiler.record_event('internal', 'copy_placeholder'):
+                out = placeholder.copy()
+            return out
         except KeyError:
             with self.profiler.record_event('internal', 'create_new_placeholder'):
                 placeholder = np.full(shape, pad_value, dtype=dtype)
                 self.np_placeholder_cache[key] = placeholder
-                return placeholder
+                return placeholder.copy()
 
     def get_torch_placeholder(self, shape: tuple, pad_value: Union[int, float], dtype: torch.dtype) -> torch.Tensor:
         """ Get or create cached torch placeholder - returns REFERENCE (will be overwritten by caller) """
@@ -463,12 +461,11 @@ class UnifiedBatchPersistentContext:
             needs_conversion = (src_dtype != dtype)
             if not self.use_hpu_tensor_mempool:
                 with self.profiler.record_event('internal', 'to_hpu_no_mempool'):
+                    torch_hpu_tensor = torch_cpu_tensor.to(device='hpu', non_blocking=True)
                     if needs_conversion:
-                        # Single .to() call with both device and dtype avoids
-                        # an extra HPU-to-HPU copy that happens with two
-                        # separate .to() calls
-                        return torch_cpu_tensor.to(device='hpu', dtype=dtype, non_blocking=True)
-                    return torch_cpu_tensor.to(device='hpu', non_blocking=True)
+                        with self.profiler.record_event('internal', 'dtype_conversion'):
+                            return torch_hpu_tensor.to(dtype, non_blocking=True)
+                    return torch_hpu_tensor
 
             if needs_conversion:
                 # Dtype conversion needed - can't reuse placeholder, allocate new
@@ -665,22 +662,20 @@ def create_unified_batch(
     with persistent_ctx.profiler.record_event('internal', 'torch2numpy'):
         all_token_ids = all_token_ids.numpy()
         num_computed_tokens = num_computed_tokens.numpy()
-        num_scheduled_tokens_np = num_scheduled_tokens.numpy()
+        num_scheduled_tokens = num_scheduled_tokens.numpy()
         num_prompt_tokens = num_prompt_tokens.numpy()
         block_table = block_table.numpy()
+        num_scheduled_tokens = num_scheduled_tokens.tolist()
         # NOTE(Chendi): In spec decode case, we will return -1 as dummy draft token
         # while we need to exclude them when counting num_scheduled_tokens
         if scheduled_spec_decode_tokens is not None:
-            num_scheduled_tokens_list = num_scheduled_tokens_np.tolist()
             for idx, req_id in enumerate(req_ids):
                 spec_tokens = scheduled_spec_decode_tokens.get(req_id, None)
                 if spec_tokens is None:
                     continue
-                num_spec_tokens = sum(1 for i in spec_tokens if i != -1)
-                num_scheduled_tokens_list[idx] = num_spec_tokens + 1
-            num_scheduled_tokens = np.asarray(num_scheduled_tokens_list, dtype=np.int32)
-        else:
-            num_scheduled_tokens = num_scheduled_tokens_np
+                num_spec_tokens = len([i for i in spec_tokens if i != -1])
+                num_scheduled_tokens[idx] = num_spec_tokens + 1
+        num_scheduled_tokens = np.asarray(num_scheduled_tokens, dtype=np.int32)
 
     # Convert torch dtype to numpy dtype for internal operations
     if hasattr(dtype, 'numpy_dtype'):
@@ -836,7 +831,7 @@ def create_unified_batch(
             feps=to_hpu(feps, dtype=dtype),
             inputL_hpu_tensors=dict(),
             inputM_hpu_tensors=dict(),
-            split_graphs=get_config().unified_attn_split_graphs,
+            split_graphs=get_config().unified_attn_split_graphs and contains_prompts,
             online_merge=get_config().unified_attn_online_merge,
         )
 

@@ -715,12 +715,7 @@ def unified_attn(query: torch.tensor, key: torch.tensor, value: torch.tensor, ke
     cache_utils = CacheUtils(key_cache, value_cache, metadata.block_size)
 
     use_online_merge = metadata.online_merge
-    # Skip graph splits for decode-only batches (only unique path active)
-    # since the extra mark_step() calls prevent operator fusion without benefit
-    has_causal = metadata.causal_bias is not None
-    has_shared = metadata.shared_blocks is not None and metadata.shared_bias is not None
-    decode_only = not has_causal and not has_shared
-    split_graphs = metadata.split_graphs and not decode_only
+    split_graphs = metadata.split_graphs
 
     if use_online_merge:
         # Online merge: compute and merge incrementally to avoid large intermediate buffers

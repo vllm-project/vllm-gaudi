@@ -3426,18 +3426,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         max_blocks = (max_seq + self.block_size - 1) // self.block_size
         all_token_ids = self.input_batch.token_ids_cpu_tensor[:num_reqs, :max_seq]
         # TODO: check if it's safe to always slice on first dim
-        block_table_raw = self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs, :max_blocks]
-        if self.defragmenter.enabled and len(self.defragmenter.fwd_mapping_table) > 0:
-            # Vectorized defrag resolve: use numpy fancy indexing instead of
-            # element-wise Python apply_ which is extremely slow for large tables
-            fwd_table = np.array(self.defragmenter.fwd_mapping_table, dtype=np.int64)
-            bt_np = block_table_raw.numpy().astype(np.int64)
-            # Clamp values to valid range for the mapping table
-            valid_mask = bt_np < len(fwd_table)
-            resolved = np.where(valid_mask, fwd_table[np.clip(bt_np, 0, len(fwd_table) - 1)], bt_np)
-            block_table = torch.from_numpy(resolved).to(torch.int64)
-        else:
-            block_table = block_table_raw.to(torch.int64)
+        block_table = self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs, :max_blocks].clone().to(torch.int64)
+        if self.defragmenter.enabled:
+            block_table.apply_(self.defragmenter.resolve)
         input_ids_hpu = None
         num_decodes = 0
         decode_index = None
