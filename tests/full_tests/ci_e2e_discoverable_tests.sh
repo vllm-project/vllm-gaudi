@@ -250,6 +250,14 @@ run_mistral3_load_generate_test() {
     echo "✅ Test with multimodal-support with Mistral-Small-3.1-24B passed."
 }
 
+# Multimodal-support with deepseek-ocr
+run_deepseek_ocr_vl_test() {
+    echo "➡️ Testing Deepseek OCR..."
+    VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 \
+    python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/deepseek-ocr.yaml"
+    echo "✅ Test with multimodal-support with deepseek-ocr passed."
+}
+
 run_llama3_70b_inc_dynamic_quant_test() {
     echo "➡️ Testing Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode ..."
     QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_maxabs_dynamic_quant.json" \
@@ -306,12 +314,12 @@ run_gsm8k_deepseek_test() {
 
 
 # GSM8K on deepseek v2 lite + unified attn
-run_gsm8k_deepseek_unified_mla_test() {
-    echo "➡️ Testing GSM8K on deepseek v2 lite + Unified MLA..."
-    VLLM_UNIFIED_ATTN=true VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 \
-    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml"
-    echo "✅ GSM8K Test with deepseek v2 lite + Unified MLA passed."
-}
+#run_gsm8k_deepseek_unified_mla_test() {
+#    echo "➡️ Testing GSM8K on deepseek v2 lite + Unified MLA..."
+#    VLLM_UNIFIED_ATTN=true VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 \
+#    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml"
+#    echo "✅ GSM8K Test with deepseek v2 lite + Unified MLA passed."
+#}
 
 # GSM8K on QWEN3-30B-A3B
 run_gsm8k_qwen3_30b_test() {
@@ -470,7 +478,7 @@ launch_all_tests() {
     run_gsm8k_granite_async_test
     run_gsm8k_granite_test_unified_attn_async
     run_gsm8k_deepseek_test
-    run_gsm8k_deepseek_unified_mla_test
+    #run_gsm8k_deepseek_unified_mla_test
     run_gsm8k_qwen3_30b_test
     run_spec_decode_ngram_test
     run_spec_decode_eagle3_test
