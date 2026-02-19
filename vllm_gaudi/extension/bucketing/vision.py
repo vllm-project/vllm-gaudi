@@ -28,6 +28,10 @@ MULTIMODAL_CONFIG = {
         # patches per image
         'buckets': [196, 256, 441, 480, 576, 900, 1156]
     },
+    'ernie4_5_moe_vl': {
+        'is_batch_based': False,
+        'buckets': [1600, 3136, 4096, 6400, 7744, 9216, 12544]
+    },
     'pixtral': {
         'is_batch_based': False,
         'buckets': [512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 131076]
