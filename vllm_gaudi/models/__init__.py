@@ -42,3 +42,6 @@ def register_model():
 
     import vllm_gaudi.models.deepseek_v2  # noqa: F401
     import vllm_gaudi.models.gptoss_mxfp4  # noqa: F401
+
+    from vllm_gaudi.models.deepseek_ocr import HpuDeepseekOCRForCausalLM  # noqa: F401
+    ModelRegistry.register_model("DeepseekOCRForCausalLM", "vllm_gaudi.models.deepseek_ocr:HpuDeepseekOCRForCausalLM")
