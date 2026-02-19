@@ -55,6 +55,8 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
     blocks_caching_range: Optional[torch.Tensor] = None
     mamba_chunks_to_block_mapping: Optional[torch.Tensor] = None
     seqlens_offsets_for_blocks: Optional[torch.Tensor] = None
+    online_merge: bool = False
+    split_graphs: bool = False
 
     def seq_len(self):
         return self.slot_mapping.size(-1)

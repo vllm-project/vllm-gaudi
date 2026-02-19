@@ -505,7 +505,9 @@ def generate_unified_buckets(query_range, shared_ctx_range, unique_ctx_range, bs
         elif query <= bs:
             # non causal query = current bs
             if shared_ctx > 0 or unique_ctx > 0:
-                if shared_ctx == 0 or (math.ceil(shared_ctx * block_size // (query // 2)) <= max_model_len):
+                # Guard against division by zero when query=1 (query // 2 = 0)
+                query_divisor = max(query // 2, 1)
+                if shared_ctx == 0 or (math.ceil(shared_ctx * block_size // query_divisor) <= max_model_len):
                     if shared_ctx > 0 or query <= unique_ctx:
                         buckets.add((query, shared_ctx, unique_ctx, causal))
 

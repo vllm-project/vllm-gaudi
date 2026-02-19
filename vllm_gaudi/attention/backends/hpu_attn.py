@@ -1194,8 +1194,10 @@ class HPUUnifiedMLAImpl(MLACommonImpl[HPUUnifiedAttentionMetadata], torch.nn.Mod
 
     @staticmethod
     def get_supported_head_sizes() -> list[int]:
-        # head_size = kv_lora_rank + qk_rope_head_dim (e.g., 512 + 64 = 576)
-        return [576]
+        # head_size = kv_lora_rank + qk_rope_head_dim
+        # Real DeepSeek V3: 512 + 64 = 576
+        # Mini test model: 128 + 64 = 192
+        return [192, 576]
 
     @classmethod
     def is_mla(cls) -> bool:

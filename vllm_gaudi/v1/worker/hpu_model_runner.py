@@ -147,7 +147,8 @@ HPU_TORCH_DTYPE_TO_STR_DTYPE = {
     torch.float32: "float32",
     torch.bfloat16: "bfloat16",
     torch.float16: "float16",
-    torch.float8_e4m3fn: "fp8_e4m3"
+    torch.float8_e4m3fn: "fp8_e4m3",
+    torch.uint8: "fp8"  # FP8 quantization uses uint8 storage
 }
 
 shutdown_inc_called = False
@@ -755,7 +756,7 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
         'chunked_block_list', 'chunked_block_usage', 'chunked_block_groups', 'prep_initial_states',
         'has_initial_states_p', 'last_chunk_indices_p', 'load_indices_tensor', 'store_indices_tensor',
         'query_start_loc', 'query_start_loc_p', 'padding_mask_flat', 'blocks_caching_range',
-        'mamba_chunks_to_block_mapping', 'seqlens_offsets_for_blocks'
+        'mamba_chunks_to_block_mapping', 'seqlens_offsets_for_blocks', 'online_merge', 'split_graphs'
     ])
     return attention_metadata
 

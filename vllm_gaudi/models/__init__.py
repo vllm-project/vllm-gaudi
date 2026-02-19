@@ -47,3 +47,10 @@ def register_model():
     ModelRegistry.register_model("DeepseekOCRForCausalLM", "vllm_gaudi.models.deepseek_ocr:HpuDeepseekOCRForCausalLM")
 
     import vllm_gaudi.models.gptoss_mxfp4  # noqa: F401
+
+    # DeepSeek V3 with HPU-optimized sparse attention (V3.2)
+    from vllm_gaudi.models.hpu_deepseek_v3 import HpuDeepseekV3ForCausalLM  # noqa: F401
+    ModelRegistry.register_model(
+        "DeepseekV3ForCausalLM",  # Standard architecture name
+        "vllm_gaudi.models.hpu_deepseek_v3:HpuDeepseekV3ForCausalLM"
+    )
