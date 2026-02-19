@@ -34,6 +34,11 @@ def register_ops():
     import vllm_gaudi.ops.hpu_awq  # noqa: F401
     import vllm_gaudi.ops.hpu_conv  # noqa: F401
     import vllm_gaudi.ops.hpu_mm_encoder_attention  # noqa: F401
+    import vllm_gaudi.ops.hpu_row_parallel_linear  # noqa: F401
+
+    # Register HPU LoRA layers that handle HPURowParallelLinear
+    from vllm_gaudi.lora.layers.hpu_row_parallel_linear import register_hpu_lora_layers
+    register_hpu_lora_layers()
 
 
 def register_models():
