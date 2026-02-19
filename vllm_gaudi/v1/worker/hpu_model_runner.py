@@ -3426,9 +3426,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         max_blocks = (max_seq + self.block_size - 1) // self.block_size
         all_token_ids = self.input_batch.token_ids_cpu_tensor[:num_reqs, :max_seq]
         # TODO: check if it's safe to always slice on first dim
-        block_table = self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs, :max_blocks].clone().to(torch.int64)
-        if self.defragmenter.enabled:
-            block_table.apply_(self.defragmenter.resolve)
+        block_table_raw = self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs, :max_blocks]
+        if self.defragmenter.enabled and len(self.defragmenter.fwd_mapping_table) > 0:
+            # Vectorized defrag resolve: use numpy fancy indexing instead of
+            # element-wise Python apply_ which is extremely slow for large tables
+            fwd_table = np.array(self.defragmenter.fwd_mapping_table, dtype=np.int64)
+            bt_np = block_table_raw.numpy().astype(np.int64)
+            # Clamp values to valid range for the mapping table
+            valid_mask = bt_np < len(fwd_table)
+            resolved = np.where(valid_mask, fwd_table[np.clip(bt_np, 0, len(fwd_table) - 1)], bt_np)
+            block_table = torch.from_numpy(resolved).to(torch.int64)
+        else:
+            block_table = block_table_raw.to(torch.int64)
         input_ids_hpu = None
         num_decodes = 0
         decode_index = None
@@ -5779,7 +5788,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 max_num_shared_blocks = math.ceil(num_blocks * get_config().unified_attn_shared_cache_ratio)
                 self.unified_attn_persistent_ctx = UnifiedBatchPersistentContext(self.max_num_batched_tokens,
                                                                                  max_num_shared_blocks, num_blocks,
-                                                                                 self.block_size, dtype, self.profiler)
+                                                                                 self.block_size, dtype, self.profiler,
+                                                                                 num_query_heads=self.num_query_heads)
             logger.info("Allocating unified persistent batch took %.4f GB of host memory",
                         m.consumed_host_memory / float(2**30))
         # TODO: check if this one is needed; for now seems that not
