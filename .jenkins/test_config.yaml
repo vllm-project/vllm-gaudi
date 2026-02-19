@@ -24,10 +24,9 @@ stages:
       - name: pd_nixl_ucx_g3m
         flavor: g3.m
         command: >-
-          pip install lm-eval[api] &&
           cd tests/unit_tests &&
-          python ../../install_nixl.py &&
-          HF_TOKEN=$HF_TOKEN DECODER_TP_SIZE=2 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=UCX bash run_accuracy_test.sh
+          HF_TOKEN=$HF_TOKEN WHEELS_CACHE_HOME=/mnt/weka/data/pytorch/wheels_cache/nixl_ucx
+          NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=UCX bash run_accuracy_test.sh
       # --- e2e tests: 1-card (g3) ---
       - name: e2e_gemma3_load_generate
         flavor: g3
@@ -168,9 +167,18 @@ stages:
       - name: e2e_qwen3_vl_load_generate
         flavor: g3.s
         command: HF_TOKEN=$HF_TOKEN VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_vl_load_generate_test
-      - name: e2e_pd_disaggregate_nixl_libfabric
+      - name: pd_nixl_libfabric_g3s
         flavor: g3.s
-        command: HF_TOKEN=$HF_TOKEN VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_pd_disaggregate_nixl_libfabric_test
-      - name: e2e_pd_disaggregate_nixl_ucx
+        command: >-
+          git clone https://github.com/intel-staging/nixl.git -b v0.6.0_OFI &&
+          cp -r nixl /tmp/nixl_source &&
+          cd nixl && WHEELS_CACHE_HOME=/mnt/weka/data/pytorch/wheels_cache/nixl_ofi python install_nixl.py && cd .. &&
+          rm -rf nixl &&
+          cd tests/unit_tests &&
+          HF_TOKEN=$HF_TOKEN DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=OFI bash run_accuracy_test.sh
+      - name: pd_nixl_ucx_e2e_g3s
         flavor: g3.s
-        command: HF_TOKEN=$HF_TOKEN VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_pd_disaggregate_nixl_ucx_test
+        command: >-
+          WHEELS_CACHE_HOME=/mnt/weka/data/pytorch/wheels_cache/nixl_ucx python install_nixl.py &&
+          cd tests/unit_tests &&
+          HF_TOKEN=$HF_TOKEN DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=UCX bash run_accuracy_test.sh
