@@ -130,12 +130,11 @@ run_qwen3_moe_compressed_tensor_dynamic_scaling_load_generate_test() {
     echo "✅ Test with Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 + moe + compressed-tensor + dynamic scaling successful."
 }
 
-# # QWEN3 FP8 + MOE compressed tensor + static scaling (weight per-tensor, activation per-tensor)
-# run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_load_generate_test() {
-#     echo "➡️ Testing Intel/Qwen3-30B-A3B-FP8-Test-Only + moe + compressed-tensor + static scaling..."
-#     #HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
-#     echo "✅ Test with Intel/Qwen3-30B-A3B-FP8-Test-Only + moe + compressed-tensor + static scaling successful."
-# }
+run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_load_generate_test() {
+    echo "➡️ Testing Intel/Qwen3-30B-A3B-FP8-Test-Only + moe + compressed-tensor + static scaling..."
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
+    echo "✅ Test with Intel/Qwen3-30B-A3B-FP8-Test-Only + moe + compressed-tensor + static scaling successful."
+}
 
 # QWEN3 FP8 + MOE compressed tensor + static scaling (weight per-channel, activation per-tensor)
 run_qwen3_moe_compressed_tensor_static_scaling_load_generate_test() {
@@ -249,6 +248,14 @@ run_mistral3_load_generate_test() {
     VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 \
     python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/mistral3-small.yaml"
     echo "✅ Test with multimodal-support with Mistral-Small-3.1-24B passed."
+}
+
+# Multimodal-support with deepseek-ocr
+run_deepseek_ocr_vl_test() {
+    echo "➡️ Testing Deepseek OCR..."
+    VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 \
+    python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/deepseek-ocr.yaml"
+    echo "✅ Test with multimodal-support with deepseek-ocr passed."
 }
 
 run_llama3_70b_inc_dynamic_quant_test() {
