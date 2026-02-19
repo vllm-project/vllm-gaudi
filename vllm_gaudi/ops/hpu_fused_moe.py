@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from functools import partial
 from typing import Union
 
@@ -25,6 +26,10 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             and vllm_config.model_config.hf_config is not None:
             self.model_type = vllm_config.model_config.hf_config.model_type
 
+    def _select_monolithic(self) -> Callable:
+        """Overriding base method"""
+        return self.apply_monolithic
+
     @property
     def is_monolithic(self) -> bool:
         return True
@@ -38,7 +43,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
 
-        if layer.dp_size > 1 and self.use_dispatch_fn:
+        if layer.moe_parallel_config.dp_size > 1 and self.use_dispatch_fn:
             dispatch_fn = partial(dispatch_hidden_states, is_sequence_parallel=layer.is_sequence_parallel)
         else:
             dispatch_fn = None
@@ -80,7 +85,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids = topk_ids.to(torch.int64)
             topk_weights = topk_weights.to(x.dtype)
 
-        if layer.dp_size > 1:
+        if layer.moe_parallel_config.dp_size > 1:
             dp_metadata = get_hpu_dp_metadata()
             if not (has_quant_config(layer.vllm_config.model_config) and self.use_dispatch_fn):
                 hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
@@ -102,7 +107,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             permuted_weights=True,
             activation=layer.activation,
         )
-        if layer.dp_size > 1:
+        if layer.moe_parallel_config.dp_size > 1:
             return output.view(*(output.size(0), *input_shape[1:]))
         else:
             return output.view(*input_shape)
@@ -133,7 +138,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids = topk_ids.to(torch.int64)
             topk_weights = topk_weights.to(x.dtype)
 
-        if layer.dp_size > 1:
+        if layer.moe_parallel_config.dp_size > 1:
             dp_metadata = get_hpu_dp_metadata()
             if not (has_quant_config(layer.vllm_config.model_config) and self.use_dispatch_fn):
                 hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
@@ -164,7 +169,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             permuted_weights=True,
             activation=layer.activation,
         )
-        if layer.dp_size > 1:
+        if layer.moe_parallel_config.dp_size > 1:
             return output.view(*(output.size(0), *input_shape[1:]))
         else:
             return output.view(*input_shape)
@@ -191,10 +196,10 @@ def patched_fused_moe_forward(
                                                 mode='constant',
                                                 value=0.0)
 
-    use_direct_implementation = self.dp_size == 1
+    use_direct_implementation = self.moe_parallel_config.dp_size == 1
     if self.shared_experts is None:
         if use_direct_implementation:
-            fused_output = self.forward_impl(hidden_states, router_logits)
+            fused_output = self.runner.forward(hidden_states, router_logits)
             assert not isinstance(fused_output, tuple)
             return reduce_output(self, fused_output)[..., :og_hidden_states]
         else:
@@ -203,7 +208,7 @@ def patched_fused_moe_forward(
         return fused_output[..., :og_hidden_states]
     else:
         if use_direct_implementation:
-            shared_output, fused_output = self.forward_impl(hidden_states, router_logits)
+            shared_output, fused_output = self.runner.forward(hidden_states, router_logits)
             reduce_output(self, shared_output)[..., :og_hidden_states],
             reduce_output(self, fused_output)[..., :og_hidden_states],
         else:
