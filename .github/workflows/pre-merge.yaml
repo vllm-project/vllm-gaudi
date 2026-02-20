@@ -373,7 +373,7 @@ jobs:
             --build-arg VLLM_COMMIT_ARG=${{ env.TEST_VLLM_COMMIT }} \
             -t hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }} \
             -f - . <<EOF
-          FROM vault.habana.ai/gaudi-docker/1.23.0/ubuntu24.04/habanalabs/vllm-plugin-upstream-2.9.0-0.14.1:latest
+          FROM vault.habana.ai/gaudi-docker/1.23.0/ubuntu24.04/habanalabs/pytorch-upstream-installer-2.9.0:latest
 
           ARG VLLM_COMMIT_ARG
 
