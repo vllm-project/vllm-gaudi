@@ -4,7 +4,8 @@
 ###############################################################################
 
 set -e
-cd "$(dirname "$0")"
+pushd "$(dirname "$0")" > /dev/null
+trap 'popd > /dev/null' EXIT
 
 ALLOWED_DEVICES=("g2" "g3")
 
@@ -94,7 +95,7 @@ MULTI_NODE_SETUP=false
 USE_EP=""
 ENFORCE_EAGER=false
 
-while getopts "m:b:l:t:d:h:o:r:ue" OPT; do
+while getopts "m:b:l:t:d:h:o:r:u:e" OPT; do
     case ${OPT} in
         m )
             MODEL_PATH="$OPTARG"
@@ -106,7 +107,7 @@ while getopts "m:b:l:t:d:h:o:r:ue" OPT; do
             BATCH_SIZE="$OPTARG"
             ;;
         o )
-            FP8_DIR=$(realpath "$OPTARG")
+            FP8_DIR=$(realpath -m "$OPTARG")
             ;;
         l )
             LIMIT="$OPTARG"
