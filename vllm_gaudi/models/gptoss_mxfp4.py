@@ -91,7 +91,10 @@ def convert_moe_packed_tensors(
         -6.0,
     ]
 
-    scales = scales.to(torch.int32) - 127  # TODO that's because 128=2**7
+    # MxFP4 stores the scale as an unsigned 8-bit exponent with a bias of 127
+    # (i.e. values 0–255 represent exponents in the range -127…128). Subtract 127
+    # to recover the signed exponent that torch.ldexp expects.
+    scales = scales.to(torch.int32) - 127
 
     assert blocks.shape[:-1] == scales.shape, f"{blocks.shape[:-1]=} does not match {scales.shape=}"
 
