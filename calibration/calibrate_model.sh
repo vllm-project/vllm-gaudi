@@ -144,17 +144,16 @@ fi
 MODEL_NAME=$(extract_last_folder_name "$MODEL_PATH")
 model_name_lower=$(echo "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')
 
-echo "Step 0 - detecting used device type [g2, g3]"
-DEVICE_TYPE=$(python3 step-0-detect-device.py) || (echo "Detecting device process failed" && exit 1)
-DEVICE_TYPE="g$DEVICE_TYPE"
-echo "Detected device type: $DEVICE_TYPE"
-echo "Step 0 done"
-
+echo "Step 0 - detecting used device type ${ALLOWED_DEVICES[*]}"
+python3 step-0-detect-device.py > /dev/null  || DEVICE_TYPE=$?
+DEVICE_TYPE="g${DEVICE_TYPE}"
 # Check if the provided device type is valid
 if [[ ! " ${ALLOWED_DEVICES[*]} " =~ " $DEVICE_TYPE " ]]; then
     echo "Invalid device type: $DEVICE_TYPE. Allowed devices: ${ALLOWED_DEVICES[*]}"
     exit 1
 fi
+echo "Detected device type: $DEVICE_TYPE"
+echo "Step 0 done"
 
 if [[ $TP_SIZE -gt 8 ]]; then
     MULTI_NODE_SETUP=true

@@ -11,6 +11,10 @@ MULTIMODAL_CONFIG = {
     },
 
     # Pixel-based models
+    'ovis': {
+        'is_batch_based': False,
+        'buckets': [1600, 3136, 4096, 6400]
+    },
     'ovis2.5': {
         'is_batch_based': False,
         'buckets': [784, 1600, 3136, 4096, 6400, 7744, 9216, 12544]
@@ -23,7 +27,19 @@ MULTIMODAL_CONFIG = {
         'is_batch_based': False,
         # patches per image
         'buckets': [196, 256, 441, 480, 576, 900, 1156]
-    }
+    },
+    'pixtral': {
+        'is_batch_based': False,
+        'buckets': [512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 131076]
+    },
+    'mistral3': {
+        'is_batch_based': False,
+        'buckets': [512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 131076]
+    },
+    'deepseek_ocr': {
+        'is_batch_based': False,
+        'buckets': [1600, 2048, 3072, 6144, 8192, 131076]
+    },
 }
 
 

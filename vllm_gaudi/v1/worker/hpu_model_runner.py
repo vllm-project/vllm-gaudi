@@ -65,7 +65,7 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_map_leaves
-from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy)
+from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy, getattr_nested, setattr_nested)
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
 from vllm.v1.attention.backends.utils import create_fast_prefill_custom_backend
 from vllm.v1.kv_cache_interface import (
@@ -1374,7 +1374,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     # source: vllm/v1/worker/gpu_model_runner.py
     def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput", req_ids: list[str]):
         # Batch the multi-modal inputs.
-        mm_kwargs = list[MultiModalKwargsItem]()
+        mm_kwargs = list[tuple[str, MultiModalKwargsItem]]()
         # List of tuple (mm_hash, pos_info)
         mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
         for req_id in req_ids:
@@ -1384,7 +1384,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 mm_hash = mm_feature.identifier
                 if mm_hash in self.encoder_cache:
                     continue
-                mm_kwargs.append(mm_feature.data)
+                mm_kwargs.append((mm_feature.modality, mm_feature.data))
                 mm_hashes_pos.append((mm_hash, mm_feature.mm_position))
 
         if not mm_kwargs:
@@ -1435,10 +1435,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 mm_hashes_pos,
                 encoder_outputs,
         ):
-            if req_id not in self.encoder_cache:
-                self.encoder_cache[req_id] = {}
+            is_embed = pos_info.is_embed
+            if is_embed is not None:
+                is_embed = is_embed.to(device=output.device)
 
-            self.encoder_cache[mm_hash] = output
+            if is_embed is None:
+                scattered_output = output
+            else:
+                placeholders = output.new_full(
+                    (is_embed.shape[0], output.shape[-1]),
+                    fill_value=torch.nan,
+                )
+                placeholders[is_embed] = output
+                scattered_output = placeholders
+
+            self.encoder_cache[mm_hash] = scattered_output
 
     # modified from: vllm/v1/worker/gpu_model_runner.py
     def _gather_mm_embeddings(
@@ -1456,7 +1467,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         req_start_idx = 0
         for req_id in req_ids:
-            mm_embeds_req: list[torch.Tensor] = []
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             req_state = self.requests[req_id]
             num_computed_tokens = \
@@ -1498,11 +1508,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 else:
                     mm_embeds_item = encoder_output[start_idx:end_idx]
 
+                sliced_output = encoder_output[start_idx:end_idx]
+                mm_embeds_item = sliced_output if is_embed is None else sliced_output[is_embed]
+
                 req_start_pos = req_start_idx + start_pos - num_computed_tokens
-                is_mm_embed[req_start_pos + start_idx:req_start_pos +
-                            end_idx] = (True if is_embed is None else is_embed)
-                mm_embeds_req.append(mm_embeds_item)
-            mm_embeds.extend(mm_embeds_req)
+                is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
+                    = True
+
+                # Only whole mm items are processed
+                mm_embeds.append(mm_embeds_item)
             req_start_idx += num_scheduled_tokens
 
         # Convert bool tensor to index tensor for merge embedding statically if optimized mm
@@ -4151,6 +4165,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 else:
                     raise ValueError("Unknown quantization config mode,"
                                      "please validate quantization config file")
+                self._sync_shared_moe_gates()
                 if not disable_mark_scales_as_const:
                     htcore.hpu_initialize(self.model, mark_only_scales_as_const=True)
             self.inc_initialized_successfully = True
@@ -4229,7 +4244,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         """
         compiled_methods = ['metadata_processor.process_metadata', '_rotary_prepare_cos_sin']
         for method_name in compiled_methods:
-            method = getattr(self.model, method_name, None)
+            method = getattr_nested(self.model, method_name, None)
             if method is not None:
                 self._compile_region(self.model, method_name, method)
 
@@ -4255,7 +4270,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     def _compile_region(self, model, name, module):
         module = self._compile(module)
-        setattr(model, name, module)
+        setattr_nested(model, name, module)
 
     def _compile(self, module):
         return torch.compile(module, **self.compile_config.get_compile_args())
@@ -4292,8 +4307,57 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             if hasattr(mla_attn, m) and hasattr(mla_impl, m):
                                 delattr(mla_attn, m)
 
+                # Remove duplicate gate from SharedFusedMoE.
+                # Models like Qwen3MoE, DeepSeek-V2, etc. pass the
+                # same gate module to SharedFusedMoE(gate=self.gate).
+                # INC's generate_model_info() builds a module->parent
+                # dict via named_children(); for shared modules the
+                # last-seen parent wins. This causes INC to patch the
+                # gate only inside SharedFusedMoE (experts._gate),
+                # leaving the block-level reference (mlp.gate) as an
+                # unpatched module with a corrupted fp8 weight.
+                # Detaching _gate here ensures INC patches the gate
+                # only at the block level. _sync_shared_moe_gates()
+                # must be called after INC conversion to restore the
+                # reference.
+                mlp = getattr(layer, 'mlp', None)
+                if mlp is not None:
+                    block_gate = getattr(mlp, 'gate', None)
+                    experts = getattr(mlp, 'experts', None)
+                    if (block_gate is not None and experts is not None
+                            and getattr(experts, '_gate', None) is block_gate):
+                        experts._gate = None
+                        self._detached_moe_gates.add(id(experts))
+
+    def _sync_shared_moe_gates(self):
+        """Re-sync SharedFusedMoE._gate after INC conversion.
+
+        After INC converts/patches the model, the block-level gate
+        (e.g. mlp.gate) is properly patched. This method restores
+        the SharedFusedMoE._gate reference so that the overlapped
+        execution path inside FusedMoE.forward_impl() also uses the
+        patched gate.
+
+        Only experts whose _gate was explicitly detached by
+        _remove_duplicate_submodules are restored; experts whose
+        _gate was originally None are left unchanged.
+        """
+        model = self.get_model()
+        if not hasattr(model, "model"):
+            return
+        for layer in model.model.layers:
+            mlp = getattr(layer, 'mlp', None)
+            if mlp is None:
+                continue
+            block_gate = getattr(mlp, 'gate', None)
+            experts = getattr(mlp, 'experts', None)
+            if (block_gate is not None and experts is not None and id(experts) in self._detached_moe_gates):
+                experts._gate = block_gate
+                self._detached_moe_gates.remove(id(experts))
+
     def _inc_preprocess(self):
         _apply_inc_patch()
+        self._detached_moe_gates: set[int] = set()
         self._remove_duplicate_submodules()
 
     def log_graph_warmup_summary(self, buckets, is_prompt, total_mem):
@@ -4541,6 +4605,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
             # Cleanup after batch has been warmed up
             self.input_batch.req_id_to_index = {}
+            self.input_batch.top_p_reqs = set()
+            self.input_batch.top_k_reqs = set()
             self.requests = {}
 
         # Final synchronization to ensure all operations are completed

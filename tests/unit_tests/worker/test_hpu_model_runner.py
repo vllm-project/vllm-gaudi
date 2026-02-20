@@ -62,7 +62,6 @@ def initialize_kv_cache(runner: HPUModelRunner):
 def get_vllm_config():
     model_config = ModelConfig(
         model="facebook/opt-125m",
-        task="generate",
         tokenizer="facebook/opt-125m",
         tokenizer_mode="auto",
         trust_remote_code=True,
@@ -395,6 +394,7 @@ def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(default_vllm_c
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     error_msg = f"{layer_1} must come before the current layer"
+    environment.set_vllm_config(get_vllm_config())
     with pytest.raises(ValueError, match=error_msg):
         fwd_context = {
             # initialization below will fail because target layer is invalid;
@@ -423,6 +423,7 @@ def test_init_kv_cache_with_kv_sharing_target_layer_not_exist(default_vllm_confi
     layer_1 = "model.layers.1.self_attn.attn"
     invalid_layer = "model.layers.0.cross_attn.attn"
     error_msg = f"{invalid_layer} is not a valid Attention layer in the model"
+    environment.set_vllm_config(get_vllm_config())
     with pytest.raises(ValueError, match=error_msg):
         fwd_context = {
             layer_0:
@@ -451,6 +452,7 @@ def test_init_kv_cache_with_kv_sharing_target_same_as_current(default_vllm_confi
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     error_msg = f"{layer_1} cannot be the same as the current layer"
+    environment.set_vllm_config(get_vllm_config())
     with pytest.raises(ValueError, match=error_msg):
         fwd_context = {
             # initialization below will fail because target layer is invalid;
@@ -478,6 +480,7 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config: None):
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     vllm_config = get_vllm_config()
+    environment.set_vllm_config(vllm_config)
     with set_current_vllm_config(vllm_config):
         fwd_context = {
             layer_0: Attention(
@@ -546,6 +549,7 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config: None):
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     vllm_config = get_vllm_config()
+    environment.set_vllm_config(vllm_config)
     with set_current_vllm_config(vllm_config):
         fwd_context = {
             layer_0:

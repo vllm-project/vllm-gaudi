@@ -158,18 +158,16 @@ fi
 MODEL_NAME=$(extract_last_folder_name "$MODEL_PATH")
 
 echo ""
-echo "Step 1/3 - detecting used device type [g2, g3]"
-DEVICE_TYPE=$(python3 ../step-0-detect-device.py) || (echo "Detecting device process failed" && exit 1)
+echo "Step 1/3 - detecting used device type ${ALLOWED_DEVICES[*]}"
+python3 step-0-detect-device.py > /dev/null  || DEVICE_TYPE=$?
 DEVICE_TYPE="g$DEVICE_TYPE"
-echo "Detected device type: $DEVICE_TYPE"
-echo "Step 1 done"
-
 # Check if the provided device type is valid
 if [[ ! " ${ALLOWED_DEVICES[*]} " =~ " $DEVICE_TYPE " ]]; then
     echo "Invalid device type: $DEVICE_TYPE. Allowed devices: ${ALLOWED_DEVICES[*]}"
     exit 1
 fi
-
+echo "Detected device type: $DEVICE_TYPE"
+echo "Step 1 done"
 
 create_measure_config $FP8_DIR $MODEL_NAME $DEVICE_TYPE
 create_quant_config $FP8_DIR $MODEL_NAME $DEVICE_TYPE

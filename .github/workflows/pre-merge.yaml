@@ -1,11 +1,15 @@
-name: Basic HPU test suite 
+name: Basic HPU test suite
 
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
-    branches: 
+    branches:
       - main
       - releases/**
+
+  # Trigger workflow for merge queue
+  merge_group:
+    types: [checks_requested]
 
   # Allow manual triggering for testing purposes
   workflow_dispatch: {}
@@ -15,12 +19,23 @@ permissions:
   # This line allows it to read the status of checks like DCO
   checks: read
 
-concurrency: 
+concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  retrieve_head_sha:
+    runs-on: ubuntu-latest
+    outputs:
+      head_sha: ${{ steps.set_sha.outputs.head_sha }}
+    steps:
+      - name: Set Head SHA Output
+        id: set_sha
+        run: |
+          echo "head_sha=${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}" >> "$GITHUB_OUTPUT"
+
   gatekeeper:
+    needs: retrieve_head_sha
     runs-on: ubuntu-latest
     permissions:
       # Required to read the status of checks and PR details
@@ -37,7 +52,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
           clean: true # Ensure a clean workspace before checkout
           fetch-depth: 0
 
@@ -47,6 +62,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          if [[ "${{ github.event_name }}" == "merge_group" ]]; then
+            echo "Merge group event detected. Skipping gatekeeper checks."
+            echo "run_ci=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           BLOCKING_REASON=""
 
           # --- New check to see if the PR is behind the base branch ---
@@ -54,7 +75,7 @@ jobs:
           # Fetch just the latest commit from the base branch for comparison
           git fetch origin ${{ github.event.pull_request.base.ref }} --depth=1
           behind_count=$(git rev-list --count HEAD..origin/${{ github.event.pull_request.base.ref }})
-          
+
           if_pr_is_behind="false"
           if [[ $behind_count -gt 0 ]]; then
             echo "PR is behind by ${behind_count} commit(s)."
@@ -89,8 +110,8 @@ jobs:
       - name: Post comment if CI is blocked
         # This ensures that even if commenting fails, the next step will run
         continue-on-error: true
-        # Only run this step if the check failed
-        if: steps.check_conditions.outputs.run_ci == 'false'
+        # Only run this step if the check failed and we're in a pull_request_target event
+        if: github.event_name == 'pull_request_target' && steps.check_conditions.outputs.run_ci == 'false'
         uses: peter-evans/create-or-update-comment@v4
         with:
           issue-number: ${{ github.event.pull_request.number }}
@@ -101,7 +122,7 @@ jobs:
             > ${{ steps.check_conditions.outputs.reason }}
 
       - name: Fail the job to block downstream CI
-        if: steps.check_conditions.outputs.run_ci == 'false'
+        if: github.event_name == 'pull_request_target' && steps.check_conditions.outputs.run_ci == 'false'
         run: |
           echo "Failing this job to prevent the main CI from running."
           exit 1
@@ -124,7 +145,7 @@ jobs:
 
   discover_tests:
     # --- UPDATED: Add discover_runner dependency ---
-    needs: discover_runner
+    needs: [discover_runner, retrieve_head_sha]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     outputs:
@@ -133,7 +154,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
           clean: true # Ensure a clean workspace before checkout
       - name: Discover test functions
         id: set-matrix
@@ -141,7 +162,7 @@ jobs:
           # This command robustly discovers all functions in the script that match the 'run_*'
           # naming convention, excluding the main 'run_all_tests' function itself.
           # The final list is formatted into a JSON array required for the matrix strategy.
-          TEST_FUNCTIONS=$( grep '^run_' ./tests/full_tests/ci_gsm8k_tests.sh | \
+          TEST_FUNCTIONS=$( grep '^run_' ./tests/full_tests/ci_e2e_discoverable_tests.sh | \
                       awk '{print $1}' | \
                       sed 's/()//' | \
                       jq -R . | jq -s -c . )
@@ -154,15 +175,65 @@ jobs:
           fi
           echo "matrix=$TEST_FUNCTIONS" >> "$GITHUB_OUTPUT"
 
+  retrieve_pr_info:
+    needs: [gatekeeper, retrieve_head_sha]
+    runs-on: ubuntu-latest
+    outputs:
+      pr_number: ${{ steps.get_pr_info.outputs.pr_number }}
+      pr_title: ${{ steps.get_pr_info.outputs.pr_title }}
+      pr_labels: ${{ steps.get_pr_info.outputs.pr_labels }}
+      pr_base_ref: ${{ steps.get_pr_info.outputs.pr_base_ref }}
+      skip_gaudi_tests: ${{ steps.get_pr_info.outputs.skip_gaudi_tests }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
+          clean: true # Ensure a clean workspace before checkout
+
+      - name: Retrieve source Pull Request information
+        id: get_pr_info
+        uses: ./.github/actions/get-pr-details
+        with:
+          event_name: ${{ github.event_name }}
+          pr_number: ${{ github.event.pull_request.number }}
+          merge_group_head_ref: ${{ github.event.merge_group.head_ref }}
+
+      - name: Validate PR info was retrieved
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Treat these as required for the rest of the workflow
+          PR_NUMBER='${{ steps.get_pr_info.outputs.pr_number }}'
+          PR_TITLE='${{ steps.get_pr_info.outputs.pr_title }}'
+          PR_BASE_REF='${{ steps.get_pr_info.outputs.pr_base_ref }}'
+
+          if [[ -z "$PR_NUMBER" || -z "$PR_TITLE" || -z "$PR_BASE_REF" ]]; then
+            echo "::error::retrieve_pr_info failed: missing required outputs from get-pr-details."
+            echo "pr_number='$PR_NUMBER'"
+            echo "pr_title='$PR_TITLE'"
+            echo "pr_base_ref='$PR_BASE_REF'"
+            exit 1
+          fi
+
+      - name: Display retrieved PR information
+        run: |
+          echo "PR Number: ${{ steps.get_pr_info.outputs.pr_number }}"
+          echo "PR Title: ${{ steps.get_pr_info.outputs.pr_title }}"
+          echo "PR Labels: ${{ steps.get_pr_info.outputs.pr_labels }}"
+          echo "PR Base Ref: ${{ steps.get_pr_info.outputs.pr_base_ref }}"
+          echo "Skip Gaudi Tests: ${{ steps.get_pr_info.outputs.skip_gaudi_tests }}"
+
   pre-commit:
     # This job runs in parallel with the build job
-    needs: gatekeeper
+    needs: [gatekeeper, retrieve_head_sha]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
           clean: true # Ensure a clean workspace before checkout
 
       - name: Setup Python
@@ -181,10 +252,9 @@ jobs:
           extra_args: --all-files --hook-stage manual
 
   pre_merge_hpu_test_build:
-    if: >
-        !contains(github.event.pull_request.labels.*.name, 'skip-gaudi-tests')
     # --- UPDATED: Add discover_runner dependency ---
-    needs: [pre-commit, discover_tests, discover_runner]
+    needs: [pre-commit, discover_tests, discover_runner, retrieve_pr_info, retrieve_head_sha]
+    if: needs.retrieve_pr_info.outputs.skip_gaudi_tests != 'true'
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     permissions:
@@ -196,7 +266,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           # Fetch full history for accurate commit comparison
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
           clean: true # Ensure a clean workspace before checkout
       - name: Read Stable Commit from Target Branch
         id: read_stable_commit
@@ -221,27 +291,26 @@ jobs:
           if [ -z "$COMMIT_HASH" ]; then
             TARGET_BRANCH="vllm/last-good-commit-for-vllm-gaudi"
             echo "➡️ Fallback: Attempting to read '$TARGET_FILE' from branch '$TARGET_BRANCH'..."
-            
+
             git fetch origin "$TARGET_BRANCH" --no-tags --depth=1 || true
-            
+
             # Read file from the remote branch; suppress errors if not found
             COMMIT_HASH=$(git show "origin/$TARGET_BRANCH:$TARGET_FILE" 2>/dev/null) || COMMIT_HASH=""
             COMMIT_HASH=$(echo "$COMMIT_HASH" | tr -d '[:space:]')
-            
+
             if [ -n "$COMMIT_HASH" ]; then
               echo "✅ Found stable commit in fallback branch: $COMMIT_HASH"
             else
               echo "::error:: Fallback failed. Could not find a valid commit hash in either location."
             fi
           fi
-          
+
           # 3. Export the final result
           echo "VLLM_STABLE_COMMIT=$COMMIT_HASH" >> "$GITHUB_ENV"
       - name: Determine Target Commit Based on PR Title
         id: determine_commit
-        # ⬇️ 1. Add this 'env' block to safely import the title
         env:
-          PR_TITLE_ENV: ${{ github.event.pull_request.title }}
+          PR_TITLE_ENV: ${{ needs.retrieve_pr_info.outputs.pr_title }}
         run: |
           # Default to the stable commit from the previous step
           FINAL_TARGET="${VLLM_STABLE_COMMIT}"
@@ -249,12 +318,18 @@ jobs:
           PR_TITLE="$PR_TITLE_ENV"
 
           echo "Pull Request Title: \"${PR_TITLE}\""
-          
+
           # Check if the title contains the special flag
           if [[ "$PR_TITLE" == *"[FIX_FOR_VLLM_LATEST]"* ]]; then
             echo "✅ Flag '[FIX_FOR_VLLM_LATEST]' found in title."
             echo "Setting target to 'main'."
             FINAL_TARGET="vllm-upstream/main"
+          elif [[ "$PR_TITLE" == *"[FIX_FOR_VLLM_CUSTOM"* ]]; then
+            echo "[FIX_FOR_VLLM_CUSTOM]' found in title."
+            PRE_FINAL_TARGET=$(echo "$PR_TITLE" | cut -d '=' -f 2)
+            echo "Setting target to ${PRE_FINAL_TARGET}"
+            FINAL_TARGET=$(echo "$PRE_FINAL_TARGET" | cut -d ']' -f 1)
+            echo "Setting target to ${FINAL_TARGET}"
           elif [ -z "$FINAL_TARGET" ]; then
             # This is the corrected check for a missing commit hash
             echo "⚠️ Stable commit was not found. Defaulting target to 'main'."
@@ -262,7 +337,7 @@ jobs:
           else
             echo "Using stable commit: ${FINAL_TARGET}"
           fi
-          
+
           # Export the result to an environment variable for subsequent steps
           echo "TARGET_COMMIT=${FINAL_TARGET}" >> "$GITHUB_ENV"
           echo "commit_ref=${FINAL_TARGET}" >> "$GITHUB_OUTPUT"
@@ -284,7 +359,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           # Fetch full history for accurate commit comparison
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
           clean: true # Ensure a clean workspace before checkout
 
       - name: Setup Docker environment and build image
@@ -296,7 +371,7 @@ jobs:
           docker build \
             --no-cache \
             --build-arg VLLM_COMMIT_ARG=${{ env.TEST_VLLM_COMMIT }} \
-            -t hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
+            -t hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }} \
             -f - . <<EOF
           FROM vault.habana.ai/gaudi-docker/1.23.0/ubuntu24.04/habanalabs/pytorch-installer-2.9.0:latest
 
@@ -339,50 +414,50 @@ jobs:
 
   hpu_unit_tests:
     # --- UPDATED: Add discover_runner dependency ---
-    needs: [pre_merge_hpu_test_build, discover_runner]
+    needs: [pre_merge_hpu_test_build, discover_runner, retrieve_head_sha]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Run pytest in tests/unit_tests
         run: |
           EXITCODE=1
-          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-unit-tests-${{ github.event.pull_request.head.sha }} || true; }
+          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-unit-tests-${{ needs.retrieve_head_sha.outputs.head_sha }} || true; }
           trap 'remove_docker_containers; exit $EXITCODE;' EXIT
           remove_docker_containers
 
           echo "Running HPU plugin v1 unit tests"
-          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-unit-tests-${{ github.event.pull_request.head.sha }} --network=host \
+          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-unit-tests-${{ needs.retrieve_head_sha.outputs.head_sha }} --network=host \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
-            hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
+            hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }} \
             /bin/bash -c "pytest -vvv --timeout=300 --durations=10 --durations-min=1.0 /workspace/vllm-gaudi/tests/unit_tests"
-          
+
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
   hpu_pd_tests:
     # --- UPDATED: Add discover_runner dependency ---
-    needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_runner]
+    needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_runner, retrieve_head_sha]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Run test scripts
         run: |
           EXITCODE=1
-          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-pd-tests-${{ github.event.pull_request.head.sha }} || true; }
+          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-pd-tests-${{ needs.retrieve_head_sha.outputs.head_sha }} || true; }
           trap 'remove_docker_containers; exit $EXITCODE;' EXIT
           remove_docker_containers
 
           echo "Running HPU plugin v1 nixl pd tests"
-          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-pd-tests-${{ github.event.pull_request.head.sha }} --network=host \
+          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-pd-tests-${{ needs.retrieve_head_sha.outputs.head_sha }} --network=host \
             --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
             -v /mnt/wheels_cache:/tmp/wheels_cache \
-            hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
+            hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }} \
             /bin/bash -c "
                 pip install lm-eval[api] &&
                 cd /workspace/vllm-gaudi/tests/unit_tests &&
@@ -393,44 +468,44 @@ jobs:
           echo "Test script exited with code: $EXITCODE"
   hpu_perf_tests:
     # --- UPDATED: Add discover_runner dependency ---
-    needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_runner]
+    needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_runner, retrieve_head_sha]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Run test scripts
         run: |
           EXITCODE=1
-          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-perf-tests-${{ github.event.pull_request.head.sha }} || true; }
+          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-perf-tests-${{ needs.retrieve_head_sha.outputs.head_sha }} || true; }
           trap 'remove_docker_containers; exit $EXITCODE;' EXIT
           remove_docker_containers
 
           echo "Running HPU plugin v1 perf tests"
-          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-perf-tests-${{ github.event.pull_request.head.sha }} --network=host \
+          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-perf-tests-${{ needs.retrieve_head_sha.outputs.head_sha }} --network=host \
             --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -e HF_HOME=/workspace/hf_cache \
             -v /mnt/hf_cache:/workspace/hf_cache \
-            hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
+            hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }} \
             /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_perf_tests.sh"
-          
+
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
   hpu_dp_tests:
     # --- UPDATED: Add discover_runner dependency ---
-    needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_runner]
+    needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_runner, retrieve_head_sha]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Run test scripts
         run: |
           EXITCODE=1
-          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-dp-tests-${{ github.event.pull_request.head.sha }} || true; }
+          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-dp-tests-${{ needs.retrieve_head_sha.outputs.head_sha }} || true; }
           trap 'remove_docker_containers; exit $EXITCODE;' EXIT
           remove_docker_containers
 
           echo "Running HPU plugin v1 dp tests"
-          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-dp-tests-${{ github.event.pull_request.head.sha }} --network=host \
+          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-dp-tests-${{ needs.retrieve_head_sha.outputs.head_sha }} --network=host \
             --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
@@ -438,14 +513,14 @@ jobs:
             -e PT_HPU_LAZY_MODE=1 \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
-            hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
+            hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }} \
             /bin/bash -c "python -u /workspace/vllm-gaudi/examples/data_parallel.py --dp-size 2 --tp-size 2"
 
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
   e2e:
     # --- UPDATED: Add discover_runner dependency ---
-    needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_tests, discover_runner]
+    needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_tests, discover_runner, retrieve_head_sha]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     strategy:
@@ -458,7 +533,7 @@ jobs:
       - name: Run test suite - ${{ matrix.test_function }}
         run: |
           EXITCODE=1
-          CONTAINER_NAME="hpu-plugin-test-e2e-${{ github.event.pull_request.head.sha }}-${{ matrix.test_function }}"
+          CONTAINER_NAME="hpu-plugin-test-e2e-${{ needs.retrieve_head_sha.outputs.head_sha }}-${{ matrix.test_function }}"
           # Ensure the container is removed upon exit, regardless of success or failure.
           remove_docker_containers() { docker rm -f $CONTAINER_NAME || true; }
           trap 'remove_docker_containers; exit $EXITCODE;' EXIT
@@ -471,12 +546,12 @@ jobs:
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
-            hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} \
-            /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_gsm8k_tests.sh" "${{ matrix.test_function }}"
+             hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }} \
+            /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_e2e_discoverable_tests.sh" "${{ matrix.test_function }}"
 
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
-  
+
   pre_merge_hpu_test:
     # --- UPDATED: Add discover_runner dependency ---
     needs: [hpu_unit_tests, e2e, hpu_perf_tests, discover_runner]
@@ -485,7 +560,7 @@ jobs:
     # This job is required to pass for pre-merge CI. By itself it does nothing, and will only pass if all jobs specified in "needs" list pass.
     steps:
       - name: Succeeded if all previous jobs passed
-        run: echo "All previous jobs passed." 
+        run: echo "All previous jobs passed."
   # This is a new job, at the same level as hpu-test-suite
   post-comment:
     name: Post PR Comment
@@ -497,7 +572,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Post Comment on Success
-        if: needs.pre_merge_hpu_test.result == 'success'
+        if: github.event_name != 'merge_group' && needs.pre_merge_hpu_test.result == 'success'
         uses: peter-evans/create-or-update-comment@v4
         with:
           issue-number: ${{ github.event.pull_request.number }}
@@ -505,3 +580,14 @@ jobs:
             ### ✅ CI Passed
             All checks passed successfully against the following vllm commit:
             **`${{ needs.pre_merge_hpu_test_build.outputs.target_commit }}`**
+
+  cleanup_docker_image:
+    name: Cleanup Docker Image
+    if: always()
+    needs: [discover_runner, hpu_unit_tests, hpu_pd_tests, hpu_perf_tests, hpu_dp_tests, e2e]
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    steps:
+      - name: Remove Docker image to free up space
+        run: |
+          echo "Cleaning up Docker images created by this workflow run..."
+          docker rmi -f hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} || true
