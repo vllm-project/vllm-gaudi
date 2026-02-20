@@ -23,10 +23,12 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         torch.hpu.synchronize()
         vllm_config = get_current_vllm_config()
         self.model_type = None
+        self.is_mxfp4 = False
         if vllm_config is not None and vllm_config.model_config is not None \
             and vllm_config.model_config.hf_config is not None:
             self.model_type = vllm_config.model_config.hf_config.model_type
-            if vllm_config.model_config.hf_config.quantization_config is not None:
+            if hasattr(vllm_config.model_config.hf_config, "quantization_config") and \
+               vllm_config.model_config.hf_config.quantization_config is not None:
                 self.is_mxfp4 = vllm_config.model_config.hf_config.quantization_config.get("quant_method") == "mxfp4"
 
     def _select_monolithic(self) -> Callable:
