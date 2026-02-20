@@ -25,6 +25,8 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if vllm_config is not None and vllm_config.model_config is not None \
             and vllm_config.model_config.hf_config is not None:
             self.model_type = vllm_config.model_config.hf_config.model_type
+            if vllm_config.model_config.hf_config.quantization_config is not None:
+                self.is_mxfp4 = vllm_config.model_config.hf_config.quantization_config.get("quant_method") == "mxfp4"
 
     @property
     def is_monolithic(self) -> bool:
@@ -58,7 +60,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
-        if self.model_type in ["gpt_oss"]:
+        if self.model_type in ["gpt_oss"] and self.is_mxfp4:
             from vllm.utils.math_utils import round_up
             # Fused gate_up_proj (column parallel)
             w13_weight = torch.nn.Parameter(
