@@ -33,3 +33,16 @@ vllm serve \
   --max-num-batched-tokens 9216 \
   --trust-remote-code 2>&1 | tee granite-guardian-3.2-5b_server.txt
 
+vllm bench serve \
+  --model ibm-granite/granite-guardian-3.2-5b \
+  --dataset-name custom \
+  --dataset-path /tmp/aegis-benchmark.jsonl \
+  --base-url http://localhost:8080 \
+  --num-prompts 40 \
+  --max-concurrency 4 \
+  --request-rate inf \
+  --save-result \
+  --save-detailed \
+  --percentile-metrics ttft,tpot,itl,e2el \
+  --metric-percentiles 50,90,95,99 \
+  --skip-chat-template 2>&1 | tee granite-guardian-3.2-5b_benchmark.txt

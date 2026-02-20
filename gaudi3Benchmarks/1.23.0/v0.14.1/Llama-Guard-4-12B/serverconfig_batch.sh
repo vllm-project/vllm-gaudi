@@ -29,4 +29,16 @@ vllm serve  meta-llama/Llama-Guard-4-12B \
     --no-enable-prefix-caching \
     --trust_remote_code 2>&1 | tee Llama-Guard-4-12B_serverlog.txt
 
-
+vllm bench serve \
+  --model meta-llama/Llama-Guard-4-12B \
+  --dataset-name custom \
+  --dataset-path /tmp/aegis-benchmark.jsonl \
+  --base-url http://localhost:8080 \
+  --num-prompts 40 \
+  --max-concurrency 4 \
+  --request-rate inf \
+  --save-result \
+  --save-detailed \
+  --percentile-metrics ttft,tpot,itl,e2el \
+  --metric-percentiles 50,90,95,99 \
+  --skip-chat-template 2>&1 | tee Llama-Guard-4-12B_benchmark.txt
