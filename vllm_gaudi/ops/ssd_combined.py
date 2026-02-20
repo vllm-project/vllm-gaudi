@@ -85,17 +85,15 @@ def _mamba_chunk_scan_combined_fwd(
 
     nchunks = seqlen // chunk_size
     nheads_ngroups_ratio = nheads // ngroups
-    dt_t = dt.transpose(0, 1)              # (nchunks, nheads, chunk_size)
+    dt_t = dt.transpose(0, 1)  # (nchunks, nheads, chunk_size)
     dA_cumsum_t = dA_cumsum.transpose(0, 1)  # (nchunks, nheads, chunk_size)
     x_chunked = x.view(nchunks, chunk_size, nheads, headdim)
-    B_expanded = B.view(nchunks, chunk_size, ngroups, 1, dstate).expand(
-        -1, -1, -1, nheads_ngroups_ratio, -1
-    ).reshape(nchunks, chunk_size, nheads, dstate)
+    B_expanded = B.view(nchunks, chunk_size, ngroups, 1, dstate).expand(-1, -1, -1, nheads_ngroups_ratio,
+                                                                        -1).reshape(nchunks, chunk_size, nheads, dstate)
 
     # 2. Compute the state for each intra-chunk
     # (right term of low-rank factorization of off-diagonal blocks; B terms)
-    states = new_chunk_state(B_expanded, x_chunked, dt_t, dA_cumsum_t,
-                             states_in_fp32=True)
+    states = new_chunk_state(B_expanded, x_chunked, dt_t, dA_cumsum_t, states_in_fp32=True)
 
     # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
     # (middle term of factorization of off-diag blocks; A terms)
