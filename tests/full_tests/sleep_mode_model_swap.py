@@ -10,14 +10,16 @@ Tests the full model swap flow using vLLM Sleep Mode Level 1:
 
 Requires:
   VLLM_ENABLE_V1_MULTIPROCESSING=0
-  VLLM_SKIP_WARMUP=true
-  --enforce-eager
 
 Usage:
-  VLLM_ENABLE_V1_MULTIPROCESSING=0 VLLM_SKIP_WARMUP=true \
+  VLLM_ENABLE_V1_MULTIPROCESSING=0 \
   python tests/full_tests/sleep_mode_model_swap.py \
     --model-a meta-llama/Llama-3.2-1B-Instruct \
     --model-b Qwen/Qwen2.5-0.5B-Instruct
+
+  # With eager mode (skip torch.compile):
+  VLLM_ENABLE_V1_MULTIPROCESSING=0 VLLM_SKIP_WARMUP=true \
+  python tests/full_tests/sleep_mode_model_swap.py --enforce-eager
 """
 
 import argparse
@@ -184,8 +186,8 @@ def main():
                         help="Second model to load (swap target)")
     parser.add_argument("--enforce-eager",
                         action="store_true",
-                        default=True,
-                        help="Enforce eager mode (required for sleep mode)")
+                        default=False,
+                        help="Enforce eager mode (disables torch.compile)")
     args = parser.parse_args()
 
     # Validate environment
