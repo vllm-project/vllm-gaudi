@@ -33,6 +33,10 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         """Overriding base method"""
         return self.apply_monolithic
 
+    def _select_monolithic(self) -> Callable:
+        """Overriding base method"""
+        return self.apply_monolithic
+
     @property
     def is_monolithic(self) -> bool:
         return True
