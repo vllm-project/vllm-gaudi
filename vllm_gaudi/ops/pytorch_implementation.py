@@ -3,6 +3,7 @@
 import torch
 import torch.nn.functional as F
 
+
 def new_chunk_cumsum(dt, A, chunk_size, dt_bias=None, dt_softplus=False, dt_limit=(0.0, float("inf"))):
     """
     Arguments:
@@ -87,23 +88,21 @@ def new_chunk_scan(cb, x_chunked, dt_t, dA_cumsum_t, C, states, output, D=None, 
     nchunks, ngroups, chunk_size, _ = cb.shape
     seqlen = nchunks * chunk_size
     _, _, dstate = C.shape
+    _, _, nheads, hdim = x_chunked.shape
     assert nheads % ngroups == 0
     nheads_ngroups_ratio = nheads // ngroups
     mm_dtype = x_chunked.dtype
 
     x_chunked = x_chunked.transpose(1, 2)
-    C = (C.view(nchunks, chunk_size, ngroups, 1,
-                dstate).expand(nchunks, chunk_size, ngroups, nheads_ngroups_ratio,
-                               dstate).reshape(nchunks, chunk_size, nheads, dstate).transpose(1, 2))
+    C = (C.view(nchunks, chunk_size, ngroups, 1, dstate).expand(nchunks, chunk_size, ngroups, nheads_ngroups_ratio,
+                                                                dstate).reshape(nchunks, chunk_size, nheads,
+                                                                                dstate).transpose(1, 2))
 
     cb = (cb.view(nchunks, ngroups, 1, chunk_size,
-                          chunk_size).expand(nchunks, ngroups, nheads_ngroups_ratio, chunk_size,
-                                             chunk_size).reshape(nchunks, nheads, chunk_size, chunk_size))
+                  chunk_size).expand(nchunks, ngroups, nheads_ngroups_ratio, chunk_size,
+                                     chunk_size).reshape(nchunks, nheads, chunk_size, chunk_size))
     states = states.float()
-    if initial_states is not None:
-        init = initial_states.float()
-    else:
-        init = torch.zeros_like(states[:1])
+    init = torch.zeros_like(states[:1]) if initial_states is None else initial_states.float()
     prev_states = torch.cat([init, states[:-1]], dim=0)
     if D is not None:
         D = D.float()
@@ -136,6 +135,14 @@ def new_ssd_state_passing(states, dA_cumsum, initial_states=None, out_dtype=None
         out_dtype: Optional dtype
     Return:
         output: Tensor - (nchunks, nheads, hdim)
+
+    Note:
+        This implementation uses a parallel prefix-sum approach via a full
+        (nheads, nchunks+1, nchunks+1) decay matrix and batched matmul,
+        trading O(nchunks^2) memory for O(1) sequential depth (fully parallel).
+        This is intentional for performancel. For extremely large nchunks,
+        memory usage may become significant; in such cases, consider chunking
+        the sequence into smaller segments and processing sequentially.
     """
     nchunks, nheads, hdim = states.shape
 
@@ -156,18 +163,18 @@ def new_ssd_state_passing(states, dA_cumsum, initial_states=None, out_dtype=None
     # Build the (nchunks+1) x (nchunks+1) decay matrix via segment sums.
     # Prepend 0 for the initial-state position so the decay from
     # position 0 to itself is exp(0) = 1.
-    dA_padded = F.pad(dA_last, (1, 0))          # (nheads, nchunks+1)
-    cumsum = torch.cumsum(dA_padded, dim=-1)     # (nheads, nchunks+1)
+    dA_padded = F.pad(dA_last, (1, 0))  # (nheads, nchunks+1)
+    cumsum = torch.cumsum(dA_padded, dim=-1)  # (nheads, nchunks+1)
 
     # segsum[h, i, j] = cumsum[h, i] - cumsum[h, j]
     #   i >= j (causal):  values <= 0  →  exp ∈ (0, 1]
     #   i <  j (acausal): values >  0  →  exp >  1
     segsum = cumsum.unsqueeze(-1) - cumsum.unsqueeze(-2)  # (nheads, n, n)
-    decay = torch.tril(torch.exp(segsum))        # (nheads, n, n)
+    decay = torch.tril(torch.exp(segsum))  # (nheads, n, n)
 
     # Parallel matmul replaces the sequential loop:
     #   new_states[h, i, :] = Σ_j  decay[h, i, j] · all_states[j, h, :]
-    all_states_t = all_states.permute(1, 0, 2)   # (nheads, nchunks+1, hdim)
+    all_states_t = all_states.permute(1, 0, 2)  # (nheads, nchunks+1, hdim)
     new_states = torch.bmm(decay, all_states_t)  # (nheads, nchunks+1, hdim)
 
     # Positions 1..nchunks are the states after each chunk
