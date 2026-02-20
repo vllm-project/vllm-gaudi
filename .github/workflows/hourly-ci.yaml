@@ -89,7 +89,7 @@ jobs:
         run: |
           echo "Attempting to build Docker image..."
           docker build --no-cache -t hpu-plugin-v1-test-env-hourly-ci -f - . <<EOF
-          FROM vault.habana.ai/gaudi-docker/1.23.0/ubuntu24.04/habanalabs/pytorch-installer-2.9.0:latest
+          FROM vault.habana.ai/gaudi-docker/1.23.0/ubuntu24.04/habanalabs/vllm-plugin-upstream-2.9.0-0.14.1:latest
 
           COPY ./ /workspace/vllm-gaudi
           WORKDIR /workspace
@@ -230,7 +230,6 @@ jobs:
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e VLLM_SKIP_WARMUP=true \
-            -e PT_HPU_LAZY_MODE=1 \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-hourly-ci \
