@@ -175,6 +175,32 @@ jobs:
           fi
           echo "matrix=$TEST_FUNCTIONS" >> "$GITHUB_OUTPUT"
 
+  discover_calibration_tests:
+    needs: [discover_runner, retrieve_head_sha]
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
+          clean: true
+      - name: Discover calibration test functions
+        id: set-matrix
+        run: |
+          TEST_FUNCTIONS=$( grep '^run_' ./tests/calibration_tests/ci_calibration_smoke_tests.sh | \
+                      awk '{print $1}' | \
+                      sed 's/()//' | \
+                      jq -R . | jq -s -c . )
+
+          echo "Discovered calibration test matrix: $TEST_FUNCTIONS"
+          if [ "$TEST_FUNCTIONS" = "[]" ]; then
+            echo "::error::No calibration test functions were discovered. Failing the workflow."
+            exit 1
+          fi
+          echo "matrix=$TEST_FUNCTIONS" >> "$GITHUB_OUTPUT"
+
   retrieve_pr_info:
     needs: [gatekeeper, retrieve_head_sha]
     runs-on: ubuntu-latest
@@ -253,7 +279,7 @@ jobs:
 
   pre_merge_hpu_test_build:
     # --- UPDATED: Add discover_runner dependency ---
-    needs: [pre-commit, discover_tests, discover_runner, retrieve_pr_info, retrieve_head_sha]
+    needs: [pre-commit, discover_tests, discover_calibration_tests, discover_runner, retrieve_pr_info, retrieve_head_sha]
     if: needs.retrieve_pr_info.outputs.skip_gaudi_tests != 'true'
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
@@ -552,9 +578,40 @@ jobs:
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
 
+  calibration_tests:
+    needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_calibration_tests, discover_runner, retrieve_head_sha]
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        test_function: ${{ fromJson(needs.discover_calibration_tests.outputs.matrix) }}
+
+    steps:
+      - name: Run calibration test - ${{ matrix.test_function }}
+        run: |
+          EXITCODE=1
+          CONTAINER_NAME="hpu-plugin-test-calibration-${{ needs.retrieve_head_sha.outputs.head_sha }}-${{ matrix.test_function }}"
+          remove_docker_containers() { docker rm -f $CONTAINER_NAME || true; }
+          trap 'remove_docker_containers; exit $EXITCODE;' EXIT
+          remove_docker_containers
+
+          echo "Running HPU calibration test: ${{ matrix.test_function }}"
+          docker run --rm --runtime=habana --name=$CONTAINER_NAME --network=host \
+            --privileged \
+            -e HABANA_VISIBLE_DEVICES=all \
+            -e HF_HOME=/workspace/hf_cache \
+            -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
+            -e VLLM_GAUDI_PREFIX=/workspace/vllm-gaudi \
+            -v /mnt/hf_cache:/workspace/hf_cache \
+             hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }} \
+            /bin/bash "/workspace/vllm-gaudi/tests/calibration_tests/ci_calibration_smoke_tests.sh" "${{ matrix.test_function }}"
+
+          EXITCODE=$?
+          echo "Test script exited with code: $EXITCODE"
+
   pre_merge_hpu_test:
     # --- UPDATED: Add discover_runner dependency ---
-    needs: [hpu_unit_tests, e2e, hpu_perf_tests, discover_runner]
+    needs: [hpu_unit_tests, e2e, hpu_perf_tests, calibration_tests, discover_runner]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     # This job is required to pass for pre-merge CI. By itself it does nothing, and will only pass if all jobs specified in "needs" list pass.
@@ -584,7 +641,7 @@ jobs:
   cleanup_docker_image:
     name: Cleanup Docker Image
     if: always()
-    needs: [discover_runner, hpu_unit_tests, hpu_pd_tests, hpu_perf_tests, hpu_dp_tests, e2e]
+    needs: [discover_runner, hpu_unit_tests, hpu_pd_tests, hpu_perf_tests, hpu_dp_tests, e2e, calibration_tests]
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Remove Docker image to free up space
