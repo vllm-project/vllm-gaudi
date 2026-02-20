@@ -35,10 +35,10 @@ def test_build_context(monkeypatch, minimal_config):
 
 def test_overwrite_params(monkeypatch, minimal_config):
     monkeypatch.setenv("MODEL", "TEST_MODEL")
-    monkeypatch.setenv("PT_HPU_LAZY_MODE", "1")
+    monkeypatch.setenv("PT_HPU_LAZY_MODE", "0")
     vg = VarsGenerator(**minimal_config)
     vg.overwrite_params()
-    assert vg.context["PT_HPU_LAZY_MODE"] == 1
+    assert vg.context["PT_HPU_LAZY_MODE"] == 0
 
 
 def test_context(monkeypatch, minimal_config):
