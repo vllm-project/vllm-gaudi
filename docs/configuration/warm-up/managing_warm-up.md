@@ -52,7 +52,7 @@ VLLM_DECODE_BS_BUCKET_STEP=128 \
 VLLM_DECODE_BS_BUCKET_MAX=128 \
 VLLM_PROMPT_SEQ_BUCKET_MAX=1024 \
 VLLM_DECODE_BLOCK_BUCKET_MAX=1024 \
-PT_HPU_WEIGHT_SHARING=0 PT_HPU_MAX_COMPOUND_OP_SIZE=30 PT_HPU_LAZY_MODE=1 PT_HPU_ENABLE_LAZY_COLLECTIVES=true vllm serve meta-llama/Llama-3.1-8B-instruct -tp 1 --weights-load-device cpu --max-model-len 8192
+PT_HPU_WEIGHT_SHARING=0 PT_HPU_MAX_COMPOUND_OP_SIZE=30 PT_HPU_ENABLE_LAZY_COLLECTIVES=true vllm serve meta-llama/Llama-3.1-8B-instruct -tp 1 --weights-load-device cpu --max-model-len 8192
 ```
 
 This results in the following:

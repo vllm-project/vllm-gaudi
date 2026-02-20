@@ -26,7 +26,7 @@ Before you start, familiarize with [notes and recommendations](calibration.md#no
     # OR
     ./calibrate_model.sh -m facebook/opt-125m -d dataset-processed.pkl -o inc/
     # OR Calibrate DeepSeek models with dataset NeelNanda/pile-10k
-    PT_HPU_LAZY_MODE=1 ./calibrate_model.sh -m deepseek-ai/DeepSeek-R1  -d NeelNanda/pile-10k -o inc/ -t 8
+    ./calibrate_model.sh -m deepseek-ai/DeepSeek-R1  -d NeelNanda/pile-10k -o inc/ -t 8
     ```
 
     Where:
