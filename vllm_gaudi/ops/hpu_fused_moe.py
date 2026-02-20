@@ -7,7 +7,6 @@ import vllm
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.fused_moe.router.custom_routing_router import (
     CustomRoutingRouter, )
@@ -280,7 +279,7 @@ def create_fused_moe_router(
     # grouped topk + fused topk bias parameters
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
-    # custom routing paramaters
+    # custom routing parameters
     custom_routing_function: Callable | None = None,
     # eplb parameters
     enable_eplb: bool = False,
@@ -302,7 +301,6 @@ def create_fused_moe_router(
         global_num_experts: Total number of experts in the model
         renormalize: Whether to renormalize the routing weights
         indices_type_getter: Function to get the desired indices dtype
-        routing_method_type: Optional explicit routing method type
 
     Grouped topk arguments:
         use_grouped_topk: Whether to use grouped top-k routing
@@ -356,15 +354,6 @@ def create_fused_moe_router(
             indices_type_getter=indices_type_getter,
         )
         return grouped_topk_router
-        if (grouped_topk_router.routing_method_type != RoutingMethodType.Unspecified or num_expert_group > 1
-                or topk_group > 1):
-            return grouped_topk_router
-
-        # If routing_method for GroupedTopKRouter is Unspecified and there is only
-        # one group, fallback to standard top-k routing
-        use_grouped_topk = False
-        num_expert_group = None
-        topk_group = None
 
     if custom_routing_function is not None:
         return CustomRoutingRouter(
