@@ -13,14 +13,12 @@ class HpuQwen3_VLMoeForConditionalGeneration(Qwen3VLMoeForConditionalGeneration)
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         quant_config = getattr(self, "quant_config", None)
-        multimodal_config = getattr(vllm_config.model_config, "multimodal_config", None)
 
         if hasattr(self, "visual") and self.visual is not None:
             self.visual = HPUQwen3_VisionTransformer(
                 self.config.vision_config,
                 norm_eps=getattr(self.config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
