@@ -84,6 +84,10 @@ class HPUWorker(WorkerBase):
         else:
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
 
+        if self.model_config.trust_remote_code:
+            # note: lazy import to avoid importing torch before initializing
+            from vllm.utils.import_utils import init_cached_hf_modules
+            init_cached_hf_modules()
         self.gc_track_recompiles = get_config().track_graph_compilation and not get_config().high_level_profiler_enabled
         self.step = 0
         self.profile_steps = get_config().VLLM_PROFILE_STEPS
@@ -302,12 +306,13 @@ class HPUWorker(WorkerBase):
             self.kv_cache_config = kv_cache_config
             self.model_runner.initialize_kv_cache(kv_cache_config)
             torch.hpu.synchronize()
-        msg = (f"Usable num_blocks: {kv_cache_config.num_blocks}, "
-               f"actual allocated num_blocks: "
-               f"{self.model_runner.kv_caches[0][0].shape[0]} "
-               f"(_PAD_BLOCK_ID={self.model_runner._PAD_BLOCK_ID}, "
-               f"_PAD_SLOT_ID={self.model_runner._PAD_SLOT_ID})")
-        logger.info(msg)
+        if len(self.model_runner.kv_caches) > 0:
+            msg = (f"Usable num_blocks: {kv_cache_config.num_blocks}, "
+                f"actual allocated num_blocks: "
+                f"{self.model_runner.kv_caches[0][0].shape[0]} "
+                f"(_PAD_BLOCK_ID={self.model_runner._PAD_BLOCK_ID}, "
+                f"_PAD_SLOT_ID={self.model_runner._PAD_SLOT_ID})")
+            logger.info(msg)
         msg = ("Initializing cache engine "
                f"took {m.get_summary_string()}")
         logger.info(msg)
