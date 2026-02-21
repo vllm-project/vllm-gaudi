@@ -49,12 +49,22 @@ class HpuPlatform(Platform):
     ) -> str:
         if attn_selector_config.use_sparse:
             # DeepSeek V3.2 uses sparse attention on top of MLA
-            # Return unified MLA backend, sparse logic handled in custom attention class
-            logger.info("[HPU] Sparse attention detected - using unified backend")
+            # Sparse selection logic is handled in the custom attention class before
+            # calling the backend, so the backend just sees the already-selected tokens.
+            logger.info("[HPU] Sparse attention detected")
             if attn_selector_config.use_mla:
-                logger.info("[HPU] Using HPUUnifiedMLABackend for sparse+MLA attention")
-                return ("vllm_gaudi.attention.backends.hpu_attn."
-                        "HPUUnifiedMLABackend")
+                if get_config().unified_attn:
+                    logger.info("[HPU] Using HPUUnifiedMLABackend for sparse+MLA attention (unified mode)")
+                    return ("vllm_gaudi.attention.backends.hpu_attn."
+                            "HPUUnifiedMLABackend")
+                else:
+                    # Chunked prefill (VLLM_UNIFIED_ATTN not set): model runner produces
+                    # TrimmedAttentionMetadata which lacks causal_bias/shared_blocks/unique_blocks
+                    # required by HPUUnifiedMLAImpl.  HPUMLAImpl uses attn_bias/block_list
+                    # which are present in TrimmedAttentionMetadata.
+                    logger.info("[HPU] Using HPUMLAAttentionBackend for sparse+MLA attention (chunked prefill mode)")
+                    return ("vllm_gaudi.attention.backends.hpu_attn."
+                            "HPUMLAAttentionBackend")
             else:
                 logger.info("[HPU] Using HPUUnifiedAttentionBackend for sparse attention")
                 return ("vllm_gaudi.attention.backends."
