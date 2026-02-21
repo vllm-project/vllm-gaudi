@@ -172,14 +172,14 @@ class ModuleFusedSDPA(torch.nn.Module):
         window_size=None,
         sinks=None,
     ):
-        if window_size is not None:
-            return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode,
-                                                recompute_mode, valid_sequence_lengths, padding_side, False, False,
-                                                window_size, sinks)
-        else:
-            return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode,
-                                                recompute_mode, valid_sequence_lengths, padding_side, False, False,
-                                                (-1, -1), sinks)
+        ws = window_size if window_size is not None else (-1, -1)
+        base_args = [
+            query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode,
+            recompute_mode, valid_sequence_lengths, padding_side, False, False, ws
+        ]
+        if sinks is not None:
+            base_args.append(sinks)
+        return self._hpu_kernel_fsdpa.apply(*base_args)
 
 
 class ModuleFP8FusedSDPA(torch.nn.Module):

@@ -362,12 +362,33 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         else:
             v_padded = v
 
-        output = ops.prompt_attention(impl=self.prefill_impl,
+        # For cross-chunk attention (context-carrying chunks), FusedSDPA falls back to
+        # is_causal=False + valid_seq_lengths=None when attn_bias is present (see
+        # _fsdpa_prompt_attention TODO comment). Its behaviour with rectangular Q/KV
+        # (q_len < kv_len) under this config is undefined/untested, so we force
+        # naive_impl here to guarantee correctness via direct attn_bias application.
+        #
+        # Fix D: For the first chunk (no cached context), pass attn_bias=None so that
+        # _fsdpa_prompt_attention uses the original working path: is_causal=True +
+        # valid_seq_lengths.  When Fix B provides an attn_bias here and is_causal=True,
+        # _fsdpa_prompt_attention overrides to is_causal=False+valid_seq_lengths=None,
+        # changing the attention semantics from the tested 8K baseline.
+        has_context = attn_metadata.block_list is not None
+        impl = 'naive_impl' if has_context else self.prefill_impl
+        attn_bias_arg = attn_metadata.attn_bias if has_context else None
+        init_logger.warning(
+            "[HPUMLAImpl] _forward_prefill: has_context=%s impl=%s "
+            "q=%s k=%s attn_bias_arg=%s block_list=%s",
+            has_context, impl, tuple(q.shape), tuple(k.shape),
+            tuple(attn_bias_arg.shape) if attn_bias_arg is not None else None,
+            attn_metadata.block_list.shape if attn_metadata.block_list is not None else None,
+        )
+        output = ops.prompt_attention(impl=impl,
                                       query=q,
                                       key=k,
                                       value=v_padded,
                                       is_causal=True,
-                                      attn_bias=attn_metadata.attn_bias,
+                                      attn_bias=attn_bias_arg,
                                       position_bias=None,
                                       valid_seq_lengths=attn_metadata.seq_lens_tensor,
                                       scale=self.scale,

@@ -2101,12 +2101,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             else:
                 cur_offset += len(token_ids[0])
 
-        attn_bias = None
-        if self.use_merged_prefill:
-            attn_bias = self._make_attn_bias(context_groups, token_groups)
-            attn_bias = attn_bias.to('hpu', non_blocking=True)
-        else:
-            attn_bias = None
+        attn_bias = self._make_attn_bias(context_groups, token_groups)
+        attn_bias = attn_bias.to('hpu', non_blocking=True)
 
         logits_indices = pad_list(logits_indices, round_up(len(logits_indices), self.logits_rounding),
                                   itertools.repeat(-1))
