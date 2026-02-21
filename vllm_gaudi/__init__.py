@@ -40,5 +40,7 @@ def register_ops():
 
 def register_models():
     import vllm_gaudi.models.interfaces  # noqa: F401
+    import vllm_gaudi.models.bert
+    import vllm_gaudi.models.roberta
     from .models import register_model
     register_model()
