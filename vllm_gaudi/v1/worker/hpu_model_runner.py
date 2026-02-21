@@ -3387,7 +3387,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu
         num_reqs = self.input_batch.num_reqs
-        token_type_ids_list = []
 
         # Collect token ids and scheduled lengths
         for idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
@@ -3398,18 +3397,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             pooling_params = scheduled_req.pooling_params
             ids = None
             if pooling_params:
-                assert pooling_params.task is not None, ("You did not set `task` in the API")
+                assert pooling_params.task is not None, ("You did not set pooling_params.task in the API")
 
                 if (pooling_params.extra_kwargs is not None
                         and (token_types := pooling_params.extra_kwargs.get("compressed_token_type_ids")) is not None):
                     ids = (torch.arange(seq_num_scheduled) >= token_types).int()
-                    token_type_ids_list.append(ids)
 
             prefix = num_computed_tokens_cpu[idx]
             absolute_positions = prefix + np.arange(seq_num_scheduled, dtype=np.int64)
             position_ids = torch.from_numpy(absolute_positions)
 
-            #padding
+            # padding
             num_context_blocks = [0]
             target_bs, target_seq, target_blocks = \
                 self._get_prompt_bucketing_fn()([seq_num_scheduled], num_context_blocks)
@@ -3793,7 +3791,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         return attn_metadata
 
     def _encode_token_type_ids(self, input_ids: torch.Tensor, token_type_ids: torch.Tensor) -> None:
-        input_ids[:token_type_ids.shape[0]].bitwise_or_(token_type_ids << TOKEN_TYPE_SHIFT)  ##20ms
+        input_ids[:token_type_ids.shape[0]].bitwise_or_(token_type_ids << TOKEN_TYPE_SHIFT)
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
@@ -5744,7 +5742,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         self.initialize_attn_backend(kv_cache_config)
         if self.is_encoder_only_attn:
-            kernel_block_sizes = []
+            kernel_block_sizes: list[int] = []
             self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
 
         kv_caches: dict[str, torch.Tensor] = {}
@@ -5903,7 +5901,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
-            # layer_names.update(group.layer_names)
             for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
