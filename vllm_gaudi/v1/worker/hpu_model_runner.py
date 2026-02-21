@@ -5905,14 +5905,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 layer_names.add(layer_name)
-        if len(kv_caches.keys()) > 0:
+        if len(kv_caches.keys()) > 0 or len(layer_names) > 0:
             assert layer_names == set(kv_caches.keys()), "Some layers are not correctly initialized"
         # Set up cross-layer KV cache sharing
         if self.shared_kv_cache_layers:
             logger.info("[KV sharing] Setting up tensor sharing for %s layers", len(self.shared_kv_cache_layers))
             for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
                 kv_caches[layer_name] = kv_caches[target_layer_name]
-        if len(kv_caches.keys()) > 0:
+        if len(kv_caches.keys()) > 0 or len(layer_names) > 0:
             assert layer_names == set(kv_caches.keys()), "Some layers are not correctly initialized"
         bind_kv_cache(kv_caches, self.vllm_config.compilation_config.static_forward_context, self.kv_caches)
 
