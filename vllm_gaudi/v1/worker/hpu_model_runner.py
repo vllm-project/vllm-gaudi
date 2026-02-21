@@ -130,6 +130,7 @@ else:
 from vllm_gaudi.extension.unified_batch import UnifiedBatch
 from vllm_gaudi.extension.logger import logger as init_logger
 from vllm.model_executor.models.bert import TOKEN_TYPE_SHIFT
+
 logger = init_logger()
 
 try:
@@ -344,7 +345,7 @@ def get_target_layer_suffix_list(model_type) -> list[str]:
         "gpt_bigcode": "BigCodeBlock",
     }
 
-    return [decoder_layer_table.get(model_type, "DecoderLayer"), "EncoderLayer","BertLayer"]
+    return [decoder_layer_table.get(model_type, "DecoderLayer"), "EncoderLayer", "BertLayer"]
 
 
 def modify_model_layers(module: torch.nn.Module, suffix_list: list[str], n=1, counter=None):
@@ -573,11 +574,8 @@ class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
         if model_mm_kwargs is not None:
             kwargs.update(model_mm_kwargs)
 
-        if self.pooling_model:
-            num_real_tokens = input_ids.size(0)
-        else:
-            num_real_tokens = input_ids.size(0) * input_ids.size(1)
-
+        num_real_tokens = input_ids.size(0) if self.pooling_model \
+            else input_ids.size(0) * input_ids.size(1)
         if self.flatten_input:
             kwargs['input_ids'] = input_ids.view(-1)
         # here num_tokens and num_tokens_across_dp are dummy values which are
@@ -1015,7 +1013,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.batch_changed: bool = False
         # WA for chunked attention support
         self.model_has_chunked_attention = False
-
+        self.is_causal = False
         assert not (self.unified_attn and not self.use_contiguous_pa), 'Unified attn requires contiguous_pa!'
         assert not (self.unified_attn and not self.use_merged_prefill), 'Unified attn requires merged_prefill!'
 
@@ -3386,7 +3384,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def _prepare_inputs_for_pooling(self, scheduler_output):
         """Gather inputs, positions, slot mapping, and build attn_metadata"""
         prefillInputData_list = []
-        input_ids_list = []
+
         num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu
         num_reqs = self.input_batch.num_reqs
         token_type_ids_list = []
@@ -3396,22 +3394,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             seq_num_scheduled = scheduler_output.num_scheduled_tokens[req_id]
             scheduled_req = scheduler_output.scheduled_new_reqs[idx]
             token_ids = torch.as_tensor(scheduled_req.prompt_token_ids, dtype=torch.long).flatten()
-            input_ids_list.append(token_ids)
+
             pooling_params = scheduled_req.pooling_params
             ids = None
             if pooling_params:
-                assert (task := pooling_params.task) is not None, ("You did not set `task` in the API")
+                assert pooling_params.task is not None, ("You did not set `task` in the API")
 
-                if (
-                    pooling_params.extra_kwargs is not None
-                    and (token_types := pooling_params.extra_kwargs.get("compressed_token_type_ids"))
-                    is not None
-                ):
+                if (pooling_params.extra_kwargs is not None
+                        and (token_types := pooling_params.extra_kwargs.get("compressed_token_type_ids")) is not None):
                     ids = (torch.arange(seq_num_scheduled) >= token_types).int()
                     token_type_ids_list.append(ids)
 
             prefix = num_computed_tokens_cpu[idx]
-            absolute_positions= prefix + np.arange(seq_num_scheduled, dtype=np.int64)
+            absolute_positions = prefix + np.arange(seq_num_scheduled, dtype=np.int64)
             position_ids = torch.from_numpy(absolute_positions)
 
             #padding
@@ -3421,13 +3416,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             input_ids = pad_list(token_ids.tolist(), target_seq, itertools.repeat(-1))
             token_type_ids = None
             if ids is not None:
-               token_type_ids = pad_list(ids.tolist(), target_seq, itertools.repeat(-1))
+                token_type_ids = pad_list(ids.tolist(), target_seq, itertools.repeat(-1))
             position_ids = pad_list(position_ids.tolist(), target_seq, itertools.repeat(-1))
 
             if token_type_ids is not None:
-                input_ids = torch.tensor(input_ids,dtype = torch.int32)
-                token_type_ids = torch.tensor(token_type_ids,dtype = torch.int32)
-                self._encode_token_type_ids(input_ids,token_type_ids)
+                input_ids = torch.tensor(input_ids, dtype=torch.int32)
+                token_type_ids = torch.tensor(token_type_ids, dtype=torch.int32)
+                self._encode_token_type_ids(input_ids, token_type_ids)
             slot_mapping = torch.arange(target_seq, dtype=torch.long)
             input_ids = async_h2d_copy(input_ids, dtype=torch.long)
 
@@ -3437,7 +3432,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
             slot_mapping = async_h2d_copy(slot_mapping, dtype=torch.long)
             seq_lens_tensor = async_h2d_copy([seq_num_scheduled], dtype=torch.int32)
-            context_lens_tensor = async_h2d_copy([0],dtype=torch.int32)
+            context_lens_tensor = async_h2d_copy([0], dtype=torch.int32)
 
             attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
                 seq_lens_tensor=seq_lens_tensor,
@@ -3446,11 +3441,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 block_list=None,
                 attn_bias=None,
                 block_size=self.block_size,
-                )
+            )
             attn_metadata = trim_attn_metadata(attn_metadata)
             attn_metadata = self.set_attn_bias(attn_metadata, 1, len(input_ids), self.device, self.dtype)
-            prefillInputData_list.append([req_id,input_ids,position_ids,seq_num_scheduled,
-                                          attn_metadata, token_type_ids])
+            prefillInputData_list.append(
+                [req_id, input_ids, position_ids, seq_num_scheduled, attn_metadata, token_type_ids])
         return prefillInputData_list
 
     @torch.inference_mode()
@@ -3695,7 +3690,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # For D case, wait until kv finish load here
             return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
 
-        if self.is_pooling_model: #self.input_batch.pooling_params: # or self.is_pooling_model
+        if self.is_pooling_model:
             # 1. padding input_ids and positions 2. fill attn_metadata
             prefillInputData_list = self._prepare_inputs_for_pooling(scheduler_output)
             flattened = None
@@ -3707,7 +3702,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             htorch.core.mark_step()
             for i, prefillInputData in enumerate(prefillInputData_list):
                 (req_id, input_ids, position_ids, num_scheduled_tokens, attn_metadata,
-                token_type_ids) = prefillInputData
+                 token_type_ids) = prefillInputData
                 model_kwargs = {}
                 if token_type_ids is not None and len(token_type_ids) > 0:
                     model_kwargs["token_type_ids"] = token_type_ids
@@ -3722,12 +3717,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 htorch.core.mark_step()
                 flattened = hidden_states.view(-1, hidden_states.shape[-1])
 
-                pooling_metadata = PoolingMetadata(
-                    prompt_lens=torch.tensor([num_scheduled_tokens]),
-                    prompt_token_ids=input_ids,
-                    pooling_params=[pooling_params[req_id]],
-                    pooling_states=[pooling_states[req_id]]
-                )
+                pooling_metadata = PoolingMetadata(prompt_lens=torch.tensor([num_scheduled_tokens]),
+                                                   prompt_token_ids=input_ids,
+                                                   pooling_params=[pooling_params[req_id]],
+                                                   pooling_states=[pooling_states[req_id]])
                 num_scheduled_tokens_np = np.array([num_scheduled_tokens], dtype=np.int32)
                 seq_lens_cpu = torch.tensor([num_scheduled_tokens])
                 pooling_metadata.build_pooling_cursor(num_scheduled_tokens_np=num_scheduled_tokens_np,
@@ -3740,9 +3733,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             htorch.core.mark_step()
             pooler_output_list_cpu = [tensor.cpu() for tensor in pooler_output_list]
             pooled_output = ModelRunnerOutput(
-                req_ids = req_ids_list,
-                req_id_to_index = req_id_to_index_dict,
-                pooler_output = pooler_output_list_cpu,
+                req_ids=req_ids_list,
+                req_id_to_index=req_id_to_index_dict,
+                pooler_output=pooler_output_list_cpu,
                 sampled_token_ids=[],
                 logprobs=None,
                 prompt_logprobs_dict={},
@@ -3757,8 +3750,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     def set_attn_bias(self, attn_metadata, batch_size, seq_len, device, dtype):
         if (attn_metadata is None
-                or (self.prefill_use_fusedsdpa and self.is_causal
-                    and attn_metadata.block_list is None)
+                or (self.prefill_use_fusedsdpa and self.is_causal and attn_metadata.block_list is None)
                 or not attn_metadata.is_prompt):
             return attn_metadata
 
@@ -3772,54 +3764,36 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         query_lens_t = seq_lens_t - context_lens_t
 
         block_list = attn_metadata.block_list
-        max_context_len = (block_list.size(-1) //
-                           batch_size if block_list is not None else 0)
+        max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
         max_context_len = max_context_len * self.block_size
-        past_mask = torch.arange(0,
-                                 max_context_len,
-                                 dtype=torch.int32,
-                                 device=device)
-        past_mask = (past_mask.view(1, -1).expand(batch_size, -1).ge(
-            context_lens_t.view(-1, 1)).view(batch_size, 1, -1).expand(
-                batch_size, seq_len, -1).view(batch_size, 1, seq_len, -1))
+        past_mask = torch.arange(0, max_context_len, dtype=torch.int32, device=device)
+        past_mask = (past_mask.view(1, -1).expand(batch_size, -1).ge(context_lens_t.view(-1, 1)).view(
+            batch_size, 1, -1).expand(batch_size, seq_len, -1).view(batch_size, 1, seq_len, -1))
 
-        len_mask = (torch.arange(0, seq_len, device=device,
-                                 dtype=torch.int32).view(1, seq_len).ge(
-                                     query_lens_t.unsqueeze(-1)).view(
-                                         batch_size, 1, 1, seq_len))
+        len_mask = (torch.arange(0, seq_len, device=device, dtype=torch.int32).view(1, seq_len).ge(
+            query_lens_t.unsqueeze(-1)).view(batch_size, 1, 1, seq_len))
         if self.is_causal:
-            attn_mask = torch.triu(torch.ones(
-                (batch_size, 1, seq_len, seq_len),
-                device=device,
-                dtype=torch.bool),
+            attn_mask = torch.triu(torch.ones((batch_size, 1, seq_len, seq_len), device=device, dtype=torch.bool),
                                    diagonal=1)
         else:
-            attn_mask = torch.zeros((batch_size, 1, seq_len, seq_len),
-                                    device=device,
-                                    dtype=torch.bool)
+            attn_mask = torch.zeros((batch_size, 1, seq_len, seq_len), device=device, dtype=torch.bool)
         if self.is_pooling_model:
             len_mask_v = len_mask.view(batch_size, 1, seq_len, 1)
             mask = attn_mask.logical_or(len_mask).logical_or(len_mask_v)
-            off_value = -3E38  #small number, avoid nan and overflow
+            off_value = -3E38  # small number, avoid nan and overflow
             if dtype == torch.float16:
                 off_value = -63000  # a small value close to float16.min
         else:
-            mask = attn_mask.logical_or(
-                len_mask)  #no need for len_mask_v as decode overwrites it
+            mask = attn_mask.logical_or(len_mask)  # no need for len_mask_v as decode overwrites it
             off_value = -math.inf
 
         mask = torch.concat((past_mask, mask), dim=-1)
-        attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(
-            mask, off_value))
-        attn_metadata = custom_tuple_replace(prefill_metadata,
-                                             "TrimmedAttentionMetadata",
-                                             attn_bias=attn_bias)
+        attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(mask, off_value))
+        attn_metadata = custom_tuple_replace(prefill_metadata, "TrimmedAttentionMetadata", attn_bias=attn_bias)
         return attn_metadata
 
-    def _encode_token_type_ids(self,
-        input_ids: torch.Tensor, token_type_ids: torch.Tensor
-    ) -> None:
-        input_ids[: token_type_ids.shape[0]].bitwise_or_(token_type_ids << TOKEN_TYPE_SHIFT) ##20ms
+    def _encode_token_type_ids(self, input_ids: torch.Tensor, token_type_ids: torch.Tensor) -> None:
+        input_ids[:token_type_ids.shape[0]].bitwise_or_(token_type_ids << TOKEN_TYPE_SHIFT)  ##20ms
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
@@ -4346,7 +4320,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:
             with HabanaMemoryProfiler() as m:
                 disable_wrap = False
-                if hasattr(self.model,"attn_type") and self.model.attn_type == 'decoder':
+                if hasattr(self.model, "attn_type") and self.model.attn_type == 'decoder':
                     disable_wrap = True
                 self.model = htorch.hpu.wrap_in_hpu_graph(self.model, disable_tensor_cache=True) \
                 if htorch.utils.internal.is_lazy() and not disable_wrap  else self.model
@@ -4384,16 +4358,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.is_mm_optimized = is_mm_optimized(self.model)
 
     def set_causal_option(self, module):
-        if isinstance(module, HPUAttentionImpl) and hasattr(
-                module, 'attn_type'):
-            self.is_causal = not (
-                module.attn_type == AttentionType.ENCODER
-                or module.attn_type == AttentionType.ENCODER_ONLY
-                or module.attn_type == AttentionType.ENCODER_DECODER)
+        if isinstance(module, HPUAttentionImpl) and hasattr(module, 'attn_type'):
+            self.is_causal = not (module.attn_type == AttentionType.ENCODER or module.attn_type
+                                  == AttentionType.ENCODER_ONLY or module.attn_type == AttentionType.ENCODER_DECODER)
             return
         else:
             for child_name, child_module in module.named_children():
                 self.set_causal_option(child_module)
+
     def _maybe_compile(self, *args, **kwargs):
         """Entrypoint for a torch.compilation of the model"""
         if (not is_fake_hpu() and not htorch.utils.internal.is_lazy()
@@ -4768,9 +4740,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     self.input_batch.refresh_sampling_metadata()
 
                     _sampler_output, _sampling_metadata = self._run_sampling(batch_changed=batch_changed,
-                                                                            logits_device=dummy_logits,
-                                                                            request_ids=dummy_req_ids,
-                                                                            pad_to=dummy_logits.shape[0])
+                                                                             logits_device=dummy_logits,
+                                                                             request_ids=dummy_req_ids,
+                                                                             pad_to=dummy_logits.shape[0])
 
                     # Cleanup after sampling
                     self.input_batch.greedy_reqs = set()
@@ -4912,15 +4884,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                      for g in self.kv_cache_config.kv_cache_groups] if self.num_mamba_layers > 0 else [[block_id] *
                                                                                                        num_blocks]
         if self.is_pooling_model:
-            model = cast(VllmModelForPooling, self.get_model())            
+            model = cast(VllmModelForPooling, self.get_model())
             if hasattr(self.model_config, 'task') and self.model_config.task is not None:
                 task = self.model_config.task
             else:
-                if self.model_config.is_cross_encoder:
-                    task = "score"
-                else:
-                    task = "embed"
-
+                task = "score" if self.model_config.is_cross_encoder \
+                    else "embed"
             pooling_param = PoolingParams(task=task)
             to_update = model.pooler.get_pooling_updates(pooling_param.task)
             to_update.apply(pooling_param)
@@ -4944,7 +4913,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 mm_features=[],
                 sampling_params=sampling_params,
                 pooling_params=None,
-                block_ids=block_ids,                
+                block_ids=block_ids,
                 num_computed_tokens=num_computed_tokens,
                 lora_request=None,
             )
@@ -5995,18 +5964,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 encoder_only_attn_specs[attn_spec].append(layer_name)
                 self.runner_only_attn_layers.add(layer_name)
         if len(encoder_only_attn_specs) > 0:
-            assert len(encoder_only_attn_specs) == 1, (
-                "Only support one encoder-only attention spec now"
-            )
+            assert len(encoder_only_attn_specs) == 1, ("Only support one encoder-only attention spec now")
             spec, layer_names = encoder_only_attn_specs.popitem()
-            self.kv_cache_config.kv_cache_groups.append(
-                KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=spec)
-            )
+            self.kv_cache_config.kv_cache_groups.append(KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=spec))
             self.is_encoder_only_attn = True
 
-    def may_reinitialize_input_batch(
-        self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
-    ) -> None:
+    def may_reinitialize_input_batch(self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]) -> None:
         """
         Re-initialize the input batch if the block sizes are different from
         `[self.cache_config.block_size]`. This usually happens when there
@@ -6017,19 +5980,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             kernel_block_sizes: The kernel block sizes for each KV cache group.
         """
         block_sizes = [
-            kv_cache_group.kv_cache_spec.block_size
-            for kv_cache_group in kv_cache_config.kv_cache_groups
+            kv_cache_group.kv_cache_spec.block_size for kv_cache_group in kv_cache_config.kv_cache_groups
             if not isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec)
         ]
 
-        if block_sizes != [self.cache_config.block_size] or kernel_block_sizes != [
-            self.cache_config.block_size
-        ]:
+        if block_sizes != [self.cache_config.block_size] or kernel_block_sizes != [self.cache_config.block_size]:
             assert self.cache_config.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
-                "for more details."
-            )
+                "for more details.")
             self.input_batch = InputBatch(
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=max(self.max_model_len, self.max_encoder_len),
