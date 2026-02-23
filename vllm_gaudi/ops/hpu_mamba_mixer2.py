@@ -39,6 +39,7 @@ from vllm_gaudi.ops.causal_conv1d_pytorch import (
     hpu_causal_conv1d_fn,
     hpu_causal_conv1d_update,
 )
+from vllm_gaudi.ops.hpu_mamba_utils import hpu_mamba2_state_shape
 from vllm_gaudi.ops.ssd_combined import hpu_mamba_chunk_scan_combined_varlen
 from vllm_gaudi.ops.ops_selector import get_selective_state_update_impl
 
@@ -340,7 +341,7 @@ class HPUMambaMixer2(MambaMixer2):
         if attn_metadata is not None:
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
             # conv_state = (..., dim, width-1) yet contiguous along 'dim'
-            conv_state = self_kv_cache[0].transpose(-1, -2)
+            conv_state = self_kv_cache[0]
             ssm_state = self_kv_cache[1]
 
             state_indices_tensor = attn_metadata.state_indices_tensor[self.cache_group_idx]
@@ -489,3 +490,14 @@ class HPUMambaMixer2(MambaMixer2):
                 dst_state_batch_indices=state_indices_tensor,
                 out=output.view(output.shape[0], -1, self.head_dim),
             )
+
+    def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        return hpu_mamba2_state_shape(
+            intermediate_size=self.intermediate_size,
+            tp_world_size=get_tensor_model_parallel_world_size(),
+            n_groups=self.n_groups,
+            num_heads=self.num_heads,
+            head_dim=self.head_dim,
+            state_size=self.ssm_state_size,
+            conv_kernel=self.conv_kernel_size,
+        )
