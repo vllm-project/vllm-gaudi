@@ -436,6 +436,7 @@ class HPUMambaMixer2(MambaMixer2):
                 dt_limit=(0.0, float("inf")),
                 out=output.view(output.shape[0], -1, self.head_dim),
                 state_dtype=ssm_state.dtype,
+                padding_mask=padding_mask_flat,
             )[last_chunk_indices_p]
             output = output * padding_mask_flat.view(output.shape[0], 1)
 
