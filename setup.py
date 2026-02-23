@@ -1,5 +1,6 @@
 import logging
 import os
+
 import re
 import subprocess
 import sys
@@ -88,8 +89,9 @@ setup(
 )
 
 # Install torchaudio with --no-deps to avoid pulling CUDA torch.
-# Skipped during metadata generation (dist_info / egg_info).
-if "dist_info" not in sys.argv and "egg_info" not in sys.argv:
+# Only run during actual install/develop – skip metadata, wheel, and sdist builds.
+_PACKAGING_COMMANDS = {"dist_info", "egg_info", "bdist_wheel", "sdist", "build"}
+if not _PACKAGING_COMMANDS.intersection(sys.argv):
     try:
         import torch
     except ImportError:
