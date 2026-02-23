@@ -4,6 +4,7 @@ import re
 import subprocess
 import sys
 
+from packaging.requirements import InvalidRequirement, Requirement
 from setuptools import setup, find_packages
 from setuptools_scm import get_version
 
@@ -26,6 +27,13 @@ def get_path(*filepath) -> str:
 def get_requirements() -> list[str]:
     """Get Python package dependencies from requirements.txt."""
 
+    def _req_name(line: str) -> str:
+        """Extract normalized project name from a PEP 508 requirement line."""
+        try:
+            return Requirement(line).name.lower()
+        except InvalidRequirement:
+            return ""
+
     def _read_requirements(filename: str) -> list[str]:
         with open(get_path(filename)) as f:
             requirements = f.read().strip().split("\n")
@@ -35,6 +43,9 @@ def get_requirements() -> list[str]:
                 resolved_requirements += _read_requirements(line.split()[1])
             elif line.startswith("--"):
                 continue
+            elif _req_name(line) == "torchaudio":
+                raise RuntimeError("To ensure proper installation, torchaudio is handled in setup.py\n"
+                                   "Please remove it from requirements.txt")
             else:
                 resolved_requirements.append(line)
         return resolved_requirements
@@ -43,10 +54,6 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("requirements.txt")
     except ValueError:
         print("Failed to read requirements.txt in vllm_gaudi.")
-
-    # Exclude torchaudio from install_requires — it needs --no-deps to
-    # avoid pulling CUDA torch, which install_requires cannot express.
-    requirements = [r for r in requirements if not r.strip().startswith("torchaudio")]
 
     return requirements
 
