@@ -192,7 +192,12 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
 
 def reduce_output(self, states: torch.Tensor) -> torch.Tensor:
-    if (not self.is_sequence_parallel and not self.use_dp_chunking and self.reduce_results
+    use_dp_chunking = getattr(self, "use_dp_chunking", None)
+    if use_dp_chunking is None:
+        runner = getattr(self, "runner", None)
+        use_dp_chunking = getattr(runner, "use_dp_chunking", False)
+
+    if (not self.is_sequence_parallel and not use_dp_chunking and self.reduce_results
             and (self.tp_size > 1 or self.ep_size > 1)):
         states = self.maybe_all_reduce_tensor_model_parallel(states)
     return states
@@ -225,8 +230,9 @@ def patched_fused_moe_forward(
     else:
         if use_direct_implementation:
             shared_output, fused_output = self.runner.forward(hidden_states, router_logits)
-            reduce_output(self, shared_output)[..., :og_hidden_states],
-            reduce_output(self, fused_output)[..., :og_hidden_states],
+            shared_output = reduce_output(self, shared_output)[..., :og_hidden_states]
+            fused_output = reduce_output(self, fused_output)[..., :og_hidden_states]
+            return (shared_output, fused_output)
         else:
             shared_output, fused_output = torch.ops.vllm.moe_forward_shared(hidden_states, router_logits,
                                                                             self.layer_name)
