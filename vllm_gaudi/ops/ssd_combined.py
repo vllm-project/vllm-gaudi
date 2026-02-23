@@ -61,8 +61,30 @@ def _mamba_chunk_scan_combined_fwd(
         D = D.contiguous()
     assert cu_seqlens is not None, "Assuming varlen input - must supply cu_seqlens"
 
+    # Pad all inputs to a multiple of chunk_size so that the fixed-size
+    # chunking in the sub-kernels covers every token.  Padding positions
+    # carry zero dt / B / C / x, so they don't contribute to the SSM state.
+    padded_seqlen = ((seqlen + chunk_size - 1) // chunk_size) * chunk_size
+    if padded_seqlen != seqlen:
+        pad_len = padded_seqlen - seqlen
+        x = torch.nn.functional.pad(x, (0, 0, 0, 0, 0, pad_len))
+        dt = torch.nn.functional.pad(dt, (0, 0, 0, pad_len))
+        B = torch.nn.functional.pad(B, (0, 0, 0, 0, 0, pad_len))
+        C = torch.nn.functional.pad(C, (0, 0, 0, 0, 0, pad_len))
+        if z is not None:
+            z = torch.nn.functional.pad(z, (0, 0, 0, 0, 0, pad_len))
+        # Create padded output buffer; results will be copied back
+        out_padded = torch.zeros(
+            (padded_seqlen, nheads, headdim),
+            dtype=out.dtype, device=out.device)
+    else:
+        out_padded = out
+
     if initial_states is not None:
         assert initial_states.shape == (len(cu_seqlens) - 1, nheads, headdim, dstate)
+
+    # Use the (possibly padded) output buffer for kernel computation
+    kernel_out = out_padded
 
     # This function executes 5 sub-functions for computing mamba
     # - a good resource is the blog https://goombalab.github.io/blog/2024/mamba2-part3-algorithm/
@@ -117,11 +139,15 @@ def _mamba_chunk_scan_combined_fwd(
         dA_cumsum,
         C,
         states,
-        out,  # in-place update
+        kernel_out,  # in-place update
         D=D,
         z=z,
         initial_states=initial_states,
     )
+
+    # Copy results back to the original (unpadded) output buffer
+    if padded_seqlen != seqlen:
+        out.copy_(kernel_out[:seqlen])
 
     return states
 

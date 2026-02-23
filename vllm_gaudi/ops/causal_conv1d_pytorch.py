@@ -350,7 +350,7 @@ def hpu_causal_conv1d_fn_update(
 
     seq_input = torch.cat([init_state, x_work], dim=2)
     new_state = seq_input[:, :, -state_len:]
-    seq_out = F.conv1d(seq_input, weight_dw, bias, groups=dim)
+    seq_out = F.conv1d(seq_input, weight_dw, bias_work, groups=dim)
     seq_out = _apply_activation(seq_out, activation)
     out = seq_out
 
