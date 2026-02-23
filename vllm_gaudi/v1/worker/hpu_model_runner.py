@@ -908,7 +908,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             logger.info("Bucketing is OFF.")
 
         self._PAD_SLOT_ID = -1
-        self._PAD_BLOCK_ID = 0
+        self._PAD_BLOCK_ID = -1
         self._dummy_num_blocks = 0
 
         if self.vllm_config.parallel_config.data_parallel_size > 1 and htorch.utils.internal.is_lazy(
@@ -1991,8 +1991,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             token_positions = align_and_pad(token_positions, (target_bs, target_seq), itertools.repeat(-1))
         token_slots = align_and_pad(token_slots, (target_bs, target_seq), itertools.repeat(-1))
         token_groups = align_and_pad(token_groups, (target_bs, target_seq), itertools.repeat(-1))
-        # use 0 for padding to avoid dynamic scale calculation issues
-        context_blocks = align_and_pad(context_blocks, (target_bs, target_blocks), itertools.repeat(0))
+        context_blocks = align_and_pad(context_blocks, (target_bs, target_blocks), itertools.repeat(-1))
         context_groups = align_and_pad(context_groups, (target_bs, target_blocks), itertools.repeat(-1))
 
         # TODO: cycle through dummy slots and blocks
@@ -5577,8 +5576,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.enable_bucketing:
             self.bucketing_manager.num_hpu_blocks = num_blocks
 
-        self._PAD_BLOCK_ID = 0
-        self._PAD_SLOT_ID = -1
+        self._PAD_BLOCK_ID = num_blocks
+        self._PAD_SLOT_ID = num_blocks * self.block_size
         self._dummy_num_blocks = num_blocks
 
         if has_kv_transfer_group():
