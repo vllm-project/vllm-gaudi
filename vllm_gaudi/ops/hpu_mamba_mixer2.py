@@ -123,7 +123,11 @@ class HPUMixer2RMSNormGated(Mixer2RMSNormGated):
                 end = start + self.per_rank_hidden_size
                 x = x[..., start:end]
 
-        return self.weight * x.to(input_dtype)
+        # Multiply weight (bf16) by x (float32) in float32 (auto-promoted),
+        # then cast to input_dtype.  The original code cast x to bf16 first,
+        # losing precision before the multiply — unlike the GPU Triton kernel
+        # which keeps everything in float32 until the final store.
+        return (self.weight * x).to(input_dtype)
 
 
 # Adapted from vllm.model_executor.layers.mamba.mamba_mixer2.MambaMixer2

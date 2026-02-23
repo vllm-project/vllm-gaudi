@@ -59,10 +59,13 @@ def new_chunk_state(B, x, dt, dA_cumsum, states=None, states_in_fp32=True):
     _, ngroups, dstate = B.shape
     nheads_ngroups_ratio = nheads // ngroups
     states_dtype = torch.float32 if states_in_fp32 else B.dtype
-    x_dtype = x.dtype
     B = B.float().view(nchunks, chunk_size, ngroups, 1, dstate).expand(-1, -1, -1, nheads_ngroups_ratio,
                                                                        -1).reshape(nchunks, chunk_size, nheads, dstate)
-    x = x.view(nchunks, chunk_size, nheads, hdim)
+    # Keep x in float32 for the bmm — matches the GPU Triton kernel which
+    # loads x into float32 registers and uses float32 dot-product accumulators.
+    # The original code left x in bf16 and cast B_scaled back to bf16 via
+    # .to(x_dtype), causing the entire bmm to run in bf16 precision.
+    x = x.float().view(nchunks, chunk_size, nheads, hdim)
     dt = dt.float().permute(1, 0, 2)
     dA_cumsum = dA_cumsum.float().permute(1, 0, 2)
 
@@ -70,7 +73,7 @@ def new_chunk_state(B, x, dt, dA_cumsum, states=None, states_in_fp32=True):
     scale = torch.exp(dA_cs_last.unsqueeze(2) - dA_cumsum) * dt
     scale = scale.transpose(1, 2).unsqueeze(3)
 
-    B_scaled = (B * scale).to(x_dtype)
+    B_scaled = B * scale  # keep float32 (no cast to x_dtype)
     x_for_bmm = x.permute(0, 2, 3, 1).reshape(nchunks * nheads, hdim, chunk_size)
     B_for_bmm = B_scaled.permute(0, 2, 1, 3).reshape(nchunks * nheads, chunk_size, dstate)
     state = torch.bmm(x_for_bmm, B_for_bmm).view(nchunks, nheads, hdim, dstate).to(states_dtype)
