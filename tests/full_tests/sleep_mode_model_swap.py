@@ -174,12 +174,35 @@ def sleep_model(llm, model_name):
 
 
 def destroy_model(llm, model_name):
-    """Delete the LLM instance and return metrics."""
+    """Delete the LLM instance and reclaim memory.
+
+    The model should be in sleep state (weights on CPU).
+    We explicitly clear model parameters, delete the LLM,
+    run aggressive GC, and call malloc_trim to return freed
+    host memory to the OS.
+    """
     print(f"\n>>> Destroying model: {model_name}")
     with HabanaMemoryProfiler() as m:
         start = time.time()
+        # Explicitly release CPU weight tensors from sleep
+        try:
+            model_runner = get_model_runner(llm)
+            if model_runner and model_runner.model is not None:
+                import torch
+                for param in model_runner.model.parameters():
+                    param.data = torch.empty(0)
+        except Exception:
+            pass
         del llm
         gc.collect()
+        gc.collect()
+        # Return freed memory to OS (Linux)
+        try:
+            import ctypes
+            libc = ctypes.CDLL("libc.so.6")
+            libc.malloc_trim(0)
+        except Exception:
+            pass
         try:
             import torch
             torch.hpu.synchronize()
