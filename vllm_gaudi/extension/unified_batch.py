@@ -248,11 +248,8 @@ class DynamicPlaceholderMempool:
         """Store or upgrade the placeholder for this (pad_value, dtype) pair"""
         newkey = self._normalize_key(key)
 
-        # Flatten based on type
-        if isinstance(value, torch.Tensor):
-            flat_value = value.flatten()
-        else:
-            flat_value = value.flatten()
+        # Flatten
+        flat_value = value.flatten()
 
         current_value = self.cache.get(newkey, None)
         flat_value_bytes = self._get_nbytes(flat_value)
