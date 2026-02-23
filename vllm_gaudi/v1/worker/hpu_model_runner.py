@@ -5116,12 +5116,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # but not read from the cache
         assert dummy_mm_item is not None, "Item should not already be cached"
 
-        dummy_mm_items = [dummy_mm_item] * batch
-
-        self.model.model = cast(SupportsMultiModal, self.model.model)
-
         return next(mm_kwargs_group for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
-            dummy_mm_items,
+            [(modality, dummy_mm_item)] * batch,
             device=self.device,
             pin_memory=self.pin_memory,
             merge_by_field_config=self.model.model.merge_by_field_config,
@@ -5130,7 +5126,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def warmup_multimodal_graphs(self, buckets):
 
         phase = 'Graph/Multimodal'
-        from vllm.v1.worker.utils import MultiModalBudget
+        from vllm.multimodal.budget import MultiModalBudget
         self.mm_budget = MultiModalBudget(
             self.vllm_config,
             self.mm_registry,
