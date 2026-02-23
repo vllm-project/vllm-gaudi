@@ -1,5 +1,8 @@
 import logging
 import os
+import re
+import subprocess
+import sys
 
 from setuptools import setup, find_packages
 from setuptools_scm import get_version
@@ -40,6 +43,11 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("requirements.txt")
     except ValueError:
         print("Failed to read requirements.txt in vllm_gaudi.")
+
+    # Exclude torchaudio from install_requires — it needs --no-deps to
+    # avoid pulling CUDA torch, which install_requires cannot express.
+    requirements = [r for r in requirements if not r.strip().startswith("torchaudio")]
+
     return requirements
 
 
@@ -71,3 +79,28 @@ setup(
         ],
     },
 )
+
+# Install torchaudio with --no-deps to avoid pulling CUDA torch.
+# Skipped during metadata generation (dist_info / egg_info).
+if "dist_info" not in sys.argv and "egg_info" not in sys.argv:
+    try:
+        import torch
+    except ImportError:
+        raise RuntimeError(
+            "torch is not importable - this is needed for torchaudio installation.\n\n"
+            "********************************************************************************\n"
+            "Make sure torch is installed before installing vllm-gaudi\n"
+            "and add --no-build-isolation to pip install\n"
+            "********************************************************************************\n") from None
+    # Extract stable x.y.z from versions like 2.10.0a0+git...
+    ver = re.match(r"(\d+\.\d+\.\d+)", torch.__version__).group(1)
+    subprocess.check_call([
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--no-deps",
+        "--extra-index-url",
+        "https://download.pytorch.org/whl/cpu",
+        f"torchaudio=={ver}",
+    ])
