@@ -4332,9 +4332,22 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def _sync_shared_moe_gates(self):
         """Apply SharedFusedMoE post-INC synchronization and compatibility.
 
-        Only experts explicitly detached by _remove_duplicate_submodules()
-        are handled.
+        Synchronizes per-layer MoE state after INC conversion, including
+        router handling and compatibility flags expected by INC wrappers.
+        Detached gate tracking is used only as a cleanup aid.
         """
+
+        def _sync_moe_kernel_flags(module: torch.nn.Module):
+            moe_config = getattr(module, "moe_config", None)
+            for name in (
+                    "use_pplx_kernels",
+                    "use_deepep_ht_kernels",
+                    "use_deepep_ll_kernels",
+                    "use_mori_kernels",
+                    "use_fi_all2allv_kernels",
+            ):
+                setattr(module, name, bool(getattr(moe_config, name, False)))
+
         model = self.get_model()
         if not hasattr(model, "model"):
             return
@@ -4345,6 +4358,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             block_gate = getattr(mlp, 'gate', None)
             experts = getattr(mlp, 'experts', None)
             if block_gate is not None and experts is not None:
+                _sync_moe_kernel_flags(experts)
+                orig_mod = getattr(experts, "orig_mod", None)
+                if orig_mod is not None:
+                    _sync_moe_kernel_flags(orig_mod)
+
                 # INC may wrap MoE modules and miss new vLLM API fields.
                 # Force external router path and disable runner-internal gate.
                 experts.is_internal_router = False
