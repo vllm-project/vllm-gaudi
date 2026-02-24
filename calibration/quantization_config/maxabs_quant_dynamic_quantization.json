@@ -7,6 +7,7 @@
     "blocklist": {
         "types": [
             "Matmul",
+            "B2BMatmul",
             "KVCache",
             "VLLMKVCache"
         ]
