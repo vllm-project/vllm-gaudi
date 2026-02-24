@@ -2163,7 +2163,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # of prefix caching for mamba2 (wip). We need to take care
             # of the interaction with chunked prefill in order to
             # satisfy constraint (2).
-            
+
             chunk_size = self.model_config.get_mamba_chunk_size()
             assert chunk_size > 0
             nphysical_chunks = target_seq // chunk_size
