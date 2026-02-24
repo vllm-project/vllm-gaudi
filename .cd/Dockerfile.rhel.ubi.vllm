@@ -209,7 +209,7 @@ RUN set -e && \
     VLLM_TARGET_DEVICE=empty pip install --no-cache-dir --no-build-isolation . && \
     cd $VLLM_PATH2 && \
     git checkout ${VLLM_GAUDI_COMMIT} && \
-    VLLM_TARGET_DEVICE=hpu pip install --no-cache-dir -v . --no-build-isolation && \
+    VLLM_TARGET_DEVICE=hpu bash -c "./install.sh --no-cache-dir -v --no-build-isolation" && \
     pip check
 
 # The scripts below are used for benchmarks testing and autocalc:
