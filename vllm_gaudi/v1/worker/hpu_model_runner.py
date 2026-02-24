@@ -374,19 +374,29 @@ def is_mm_optimized(model):
 def patch_llama4_get_attn_scale(model):
 
     config = getattr(model, "config", None)
-    is_llama4 = (getattr(config, "model_type", None) == "llama4") or ("llama4" in type(model).__name__.lower())
+    if not config:
+        return
+
+    is_llama4 = (getattr(config, "model_type", "") == "llama4") or \
+                ("llama4" in type(model).__name__.lower())
     if not is_llama4:
         return
 
-    for layer in model.language_model.model.layers:
+    text_config = getattr(config, "text_config", config)
+    use_qk_norm = getattr(text_config, "use_qk_norm", False)
 
+    layers_container = getattr(model, "language_model", model)
+    internal_model = getattr(layers_container, "model", layers_container)
+    layers = getattr(internal_model, "layers", [])
+
+    for layer in layers:
         if "Llama4Attention" not in type(layer.self_attn).__name__:
             continue
 
         attn = layer.self_attn
 
         def _get_attn_scale_for_hpu(self, positions):
-            if self.qk_norm is not None:
+            if use_qk_norm:
                 positions = positions.flatten()
             floor = torch.floor((positions + 1.0) / self.floor_scale)
             attn_scale = torch.log(floor + 1.0) * self.attn_scale + 1.0
@@ -5179,10 +5189,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # but not read from the cache
         assert dummy_mm_item is not None, "Item should not already be cached"
 
-        dummy_mm_items = [dummy_mm_item] * batch
-
         return next(mm_kwargs_group for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
-            dummy_mm_items,
+            [(modality, dummy_mm_item)] * batch,
             device=self.device,
             pin_memory=self.pin_memory,
         ))
@@ -5190,7 +5198,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def warmup_multimodal_graphs(self, buckets):
 
         phase = 'Graph/Multimodal'
-        from vllm.v1.worker.utils import MultiModalBudget
+        from vllm.multimodal.budget import MultiModalBudget
         self.mm_budget = MultiModalBudget(
             self.vllm_config,
             self.mm_registry,

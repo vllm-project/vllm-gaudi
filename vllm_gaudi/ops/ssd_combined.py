@@ -9,7 +9,6 @@
 # ruff: noqa: E501
 
 import torch
-from einops import rearrange
 
 from .pytorch_implementation import (new_chunk_cumsum, new_chunk_scan, new_chunk_state, new_ssd_bmm,
                                      new_ssd_state_passing)
@@ -84,24 +83,32 @@ def _mamba_chunk_scan_combined_fwd(
         dt_limit=dt_limit,
     )
 
+    nchunks = seqlen // chunk_size
+    nheads_ngroups_ratio = nheads // ngroups
+    dt_t = dt.transpose(0, 1)  # (nchunks, nheads, chunk_size)
+    dA_cumsum_t = dA_cumsum.transpose(0, 1)  # (nchunks, nheads, chunk_size)
+    x_chunked = x.view(nchunks, chunk_size, nheads, headdim)
+    B_expanded = B.view(nchunks, chunk_size, ngroups, 1, dstate).expand(-1, -1, -1, nheads_ngroups_ratio,
+                                                                        -1).reshape(nchunks, chunk_size, nheads, dstate)
+
     # 2. Compute the state for each intra-chunk
     # (right term of low-rank factorization of off-diagonal blocks; B terms)
-    states = new_chunk_state(B, x, dt, dA_cumsum, states_in_fp32=True)
+    states = new_chunk_state(B_expanded, x_chunked, dt_t, dA_cumsum_t, states_in_fp32=True)
 
     # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
     # (middle term of factorization of off-diag blocks; A terms)
     # - for handling chunked prefill, this requires initial_states
     states = new_ssd_state_passing(
-        rearrange(states, "... p n -> ... (p n)"),
+        states.flatten(-2),
         dA_cumsum,  # (nheads, nchunks, chunk_size)
-        initial_states=rearrange(initial_states, "... p n -> ... (p n)")
+        initial_states=initial_states.flatten(-2)
         if initial_states is not None else None,  # (batch, nheads, headdim*dstate)
         out_dtype=state_dtype if state_dtype is not None else C.dtype,
     )
-    states = rearrange(states, "... (p n) -> ... p n", n=dstate)
+    states = states.view(states.shape[0], states.shape[1], -1, dstate)
 
     # 4. Compute batched matrix multiply for C_j^T B_i terms
-    CB = new_ssd_bmm(C, B, chunk_size, output_dtype=torch.float32)
+    CB = new_ssd_bmm(C, B, chunk_size, causal=True, output_dtype=torch.float32)
 
     # 5. Scan and compute the diagonal blocks, taking into
     #    account past causal states.
@@ -112,9 +119,9 @@ def _mamba_chunk_scan_combined_fwd(
     #   a chunk that is split up each time an example changes.
     new_chunk_scan(
         CB,
-        x,
-        dt,
-        dA_cumsum,
+        x_chunked,
+        dt_t,
+        dA_cumsum_t,
         C,
         states,
         out,  # in-place update
