@@ -129,7 +129,7 @@ else:
 
 from vllm_gaudi.extension.unified_batch import UnifiedBatch
 from vllm_gaudi.extension.logger import logger as init_logger
-from vllm.model_executor.models.bert import TOKEN_TYPE_SHIFT
+from vllm.model_executor.models.bert import _encode_token_type_ids
 
 logger = init_logger()
 
@@ -3425,7 +3425,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if token_type_ids is not None:
                 input_ids = torch.tensor(input_ids, dtype=torch.int32)
                 token_type_ids = torch.tensor(token_type_ids, dtype=torch.int32)
-                self._encode_token_type_ids(input_ids, token_type_ids)
+                _encode_token_type_ids(input_ids, token_type_ids)
             slot_mapping = torch.arange(target_seq, dtype=torch.long)
             input_ids = async_h2d_copy(input_ids, dtype=torch.long)
 
@@ -3794,9 +3794,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(mask, off_value))
         attn_metadata = custom_tuple_replace(prefill_metadata, "TrimmedAttentionMetadata", attn_bias=attn_bias)
         return attn_metadata
-
-    def _encode_token_type_ids(self, input_ids: torch.Tensor, token_type_ids: torch.Tensor) -> None:
-        input_ids[:token_type_ids.shape[0]].bitwise_or_(token_type_ids << TOKEN_TYPE_SHIFT)
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
@@ -5998,9 +5995,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 kernel_block_sizes=kernel_block_sizes,
                 is_spec_decode=bool(self.vllm_config.speculative_config),
                 logitsprocs=self.input_batch.logitsprocs,
-                # logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
                 is_pooling_model=self.is_pooling_model,
-                # num_speculative_tokens=self.num_spec_tokens,
             )
 
     def get_kv_caches_4D(self, kv_caches) -> dict[str, torch.Tensor]:
