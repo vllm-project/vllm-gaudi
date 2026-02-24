@@ -323,10 +323,7 @@ class HPUDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         # torch.set_default_device context set by the model loader, keeping them
         # on the same device. The resulting cache is moved to HPU later via
         # register_buffer.
-        pos_freqs = self.base ** (
-            torch.arange(0, self.rotary_dim, 2, dtype=torch.float)
-            / self.rotary_dim
-        )
+        pos_freqs = self.base**(torch.arange(0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim)
         inv_freq_extrapolation = 1.0 / pos_freqs
         inv_freq_interpolation = 1.0 / (scaling_factor * pos_freqs)
 
@@ -339,14 +336,8 @@ class HPUDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         )
         # Get n-d rotational scaling corrected for extrapolation
         inv_freq_mask = (
-            1
-            - yarn_linear_ramp_mask(low, high, self.rotary_dim // 2,
-                                    dtype=torch.float)
-        ) * self.extrapolation_factor
-        inv_freq = (
-            inv_freq_interpolation * (1 - inv_freq_mask)
-            + inv_freq_extrapolation * inv_freq_mask
-        )
+            1 - yarn_linear_ramp_mask(low, high, self.rotary_dim // 2, dtype=torch.float)) * self.extrapolation_factor
+        inv_freq = (inv_freq_interpolation * (1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask)
         return inv_freq
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
