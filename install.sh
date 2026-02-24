@@ -10,7 +10,6 @@
 #
 # Prerequisites:
 #   - torch must already be installed (HPU build)
-#   - vllm must already be installed
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
