@@ -2167,10 +2167,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             chunk_size = self.model_config.get_mamba_chunk_size()
             assert chunk_size > 0
             nphysical_chunks = target_seq // chunk_size
-            assert nphysical_chunks > 0, (
-                f"target_seq={target_seq} must be >= chunk_size={chunk_size}")
-            last_chunk_indices = [nphysical_chunks - 1
-                                 for _ in range(len(contents.req_ids))]
+            assert nphysical_chunks > 0, (f"target_seq={target_seq} must be >= chunk_size={chunk_size}")
+            last_chunk_indices = [nphysical_chunks - 1 for _ in range(len(contents.req_ids))]
 
             num_prefill_reqs = len(contents.req_ids)
             all_state_indices_cpu = []
