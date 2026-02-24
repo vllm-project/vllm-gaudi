@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Install vllm-gaudi and its dependencies for HPU environments.
 #
 # Usage:
@@ -41,7 +41,11 @@ try:
 except ImportError:
     print('Error: torch is not installed', file=sys.stderr)
     sys.exit(1)
-print(re.match(r'(\d+\.\d+\.\d+)', torch.__version__).group(1))
+match = re.match(r'(\d+\.\d+\.\d+)', torch.__version__)
+if not match:
+    print(f\"Error: unexpected torch.__version__ format: {torch.__version__!r}\", file=sys.stderr)
+    sys.exit(1)
+print(match.group(1))
 ")
 echo "*** Installing torchaudio==${TORCH_VER} (--no-deps) ***"
 python3 -m pip install --no-deps $NO_CACHE_DIR \
