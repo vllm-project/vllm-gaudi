@@ -85,7 +85,7 @@ _ALL_MODEL_SUBMODULES = {
 def _module_mocks(*, ovis_available: bool) -> dict:
     """Return sys.modules patches: all model sub-modules mocked, ovis
     either mocked (available) or None (triggers ImportError)."""
-    mocks = dict(_ALL_MODEL_SUBMODULES)
+    mocks: dict = dict(_ALL_MODEL_SUBMODULES)
     mocks["vllm_gaudi.models.ovis"] = MagicMock() if ovis_available else None
     return mocks
 
