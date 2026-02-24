@@ -490,14 +490,3 @@ class HPUMambaMixer2(MambaMixer2):
                 dst_state_batch_indices=state_indices_tensor,
                 out=output.view(output.shape[0], -1, self.head_dim),
             )
-
-    def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
-        return hpu_mamba2_state_shape(
-            intermediate_size=self.intermediate_size,
-            tp_world_size=get_tensor_model_parallel_world_size(),
-            n_groups=self.n_groups,
-            num_heads=self.num_heads,
-            head_dim=self.head_dim,
-            state_size=self.ssm_state_size,
-            conv_kernel=self.conv_kernel_size,
-        )
