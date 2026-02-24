@@ -142,9 +142,9 @@ stages:
   #     - name: e2e_embedding_model
   #       flavor: g3
   #       command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_embedding_model_test
-  #     - name: e2e_cpu_offloading
-  #       flavor: g3
-  #       command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_cpu_offloading_test
+      - name: e2e_cpu_offloading
+        flavor: g3
+        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_cpu_offloading_test
   #     - name: e2e_offloading_connector
   #       flavor: g3
   #       command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_offloading_connector_test
