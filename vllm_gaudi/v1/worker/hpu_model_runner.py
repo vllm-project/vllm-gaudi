@@ -979,10 +979,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:
             logger.info("Bucketing is OFF.")
 
-        # Generate prompt buckets for pooler runner
-        if self.is_pooling_model:
-            self.bucketing_manager.generate_prompt_buckets()
-
         self._PAD_SLOT_ID = -1
         self._PAD_BLOCK_ID = -1
         self._MAMBA_PAD_BLOCK_ID = -1
@@ -5459,7 +5455,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                            'Warmup time will be negatively impacted. '
                            'Please update Gaudi Software Suite.')
         with compile_only_mode_context() if can_use_compile_only_mode else contextlib.nullcontext():
-            if not self.model_config.enforce_eager:
+            if not self.model_config.enforce_eager and not self.is_pooling_model:
                 assert self.mem_margin is not None, \
                     ("HabanaWorker.determine_num_available_blocks needs "
                      "to be called before warming up the model.")
