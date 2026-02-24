@@ -4,7 +4,13 @@ import torch
 import torch.nn.functional as F
 
 
-def new_chunk_cumsum(dt, A, chunk_size, dt_bias=None, dt_softplus=False, dt_limit=(0.0, float("inf")), padding_mask=None):
+def new_chunk_cumsum(dt,
+                     A,
+                     chunk_size,
+                     dt_bias=None,
+                     dt_softplus=False,
+                     dt_limit=(0.0, float("inf")),
+                     padding_mask=None):
     """
     Arguments:
         dt: Tensor - (seqlen, nheads)
