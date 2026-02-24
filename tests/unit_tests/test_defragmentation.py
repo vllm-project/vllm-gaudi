@@ -410,3 +410,44 @@ class TestDefragmentationIntegration:
             resolved = defrag.resolve(block_id)
             unresolve = defrag.unresolve(resolved)
             assert unresolve == block_id
+
+    def test_finish_request_cancelled_before_blocks_allocated(self, setup_defragmenter):
+        """Test that finishing a request that was never added to req_blocks
+        does not crash (e.g. user Ctrl+C before blocks are allocated)."""
+        defrag = setup_defragmenter
+
+        # Add a normal request so there is some state
+        defrag.update_state({'req_1': [10, 11]}, [])
+        assert defrag.get_ref_count(10) == 1
+        assert defrag.get_ref_count(11) == 1
+
+        # Finish a request that was never registered (simulates Ctrl+C
+        # cancellation before blocks were allocated)
+        defrag.update_state({}, ['unknown_req'])
+
+        # The server must survive — no KeyError
+        # Existing state should be untouched
+        assert defrag.get_ref_count(10) == 1
+        assert defrag.get_ref_count(11) == 1
+        assert 'req_1' in defrag.req_blocks
+        assert 'unknown_req' not in defrag.req_blocks
+
+    def test_finish_cancelled_and_normal_requests_together(self, setup_defragmenter):
+        """Test finishing both a known and an unknown request in the same call."""
+        defrag = setup_defragmenter
+
+        defrag.update_state({'req_1': [10], 'req_2': [20]}, [])
+
+        # Finish req_1 (known) and req_ghost (never allocated) together
+        defrag.update_state({}, ['req_1', 'req_ghost'])
+
+        # req_1 should be cleaned up properly
+        assert 'req_1' not in defrag.req_blocks
+        assert defrag.get_ref_count(10) == 0
+
+        # req_2 should be unaffected
+        assert 'req_2' in defrag.req_blocks
+        assert defrag.get_ref_count(20) == 1
+
+        # req_ghost should not appear anywhere
+        assert 'req_ghost' not in defrag.req_blocks
