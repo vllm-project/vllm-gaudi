@@ -39,7 +39,6 @@ from vllm_gaudi.ops.causal_conv1d_pytorch import (
     hpu_causal_conv1d_fn,
     hpu_causal_conv1d_update,
 )
-from vllm_gaudi.ops.hpu_mamba_utils import hpu_mamba2_state_shape
 from vllm_gaudi.ops.ssd_combined import hpu_mamba_chunk_scan_combined_varlen
 from vllm_gaudi.ops.ops_selector import get_selective_state_update_impl
 
