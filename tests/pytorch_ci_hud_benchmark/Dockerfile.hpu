@@ -56,6 +56,6 @@ RUN mkdir -p $VLLM_PLUGIN_PATH && \
 
 RUN pip install datasets && \
     pip install pandas && \
-    pip install torchaudio==${PT_VERSION}
+    pip install --no-deps torchaudio==${PT_VERSION}
 
 ENTRYPOINT ["/bin/bash"]
