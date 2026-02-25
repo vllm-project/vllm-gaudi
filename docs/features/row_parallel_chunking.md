@@ -3,36 +3,34 @@ title: Row-Parallel Chunking
 ---
 [](){ #row_parallel_chunking }
 
-## Overview
-
-Row-Parallel Chunking is an optimization method for tensor-parallel inference on Intel® Gaudi® that overlaps computation with communication in `RowParallelLinear` layers. In standard tensor-parallel inference, each `RowParallelLinear` layer performs a matrix multiplication followed by a blocking all-reduce across all TP ranks.
-
-## How It Works
+Row-Parallel Chunking is an optimization method for tensor-parallel inference on Intel® Gaudi® that overlaps computation with communication in `RowParallelLinear` layers. In standard tensor-parallel inference, each `RowParallelLinear` layer performs a matrix multiplication followed by a blocking all-reduce across tensor-parallel ranks.
 
 In a standard `RowParallelLinear` forward pass, the execution is sequential:
 
-1. Compute `output = matmul(input, weight)`
-2. All-reduce `output` across TP ranks (blocking)
+1. Compute `output = matmul(input, weight)`.
+2. Perform a blocking all-reduce of `output` across tensor-parallel ranks.
 
 With chunking enabled, the forward pass becomes:
 
-1. Split the input into *N* chunks along the token dimension
+1. Split the input into *N* chunks along the token dimension.
 2. For each chunk *i*:
-   - Compute `output_i = matmul(input_i, weight)`
-   - Launch `all_reduce(output_i)` **asynchronously**
-3. Wait for all async all-reduce operations to complete
-4. Concatenate the chunk outputs
+
+   - Compute `output_i = matmul(input_i, weight)`.
+   - Launch `all_reduce(output_i)` asynchronously.
+
+3. Wait for all async all-reduce operations to complete.
+4. Concatenate the chunk outputs.
 
 This pipelining allows the all-reduce of chunk *i* to run concurrently with the matmul of chunk *i+1*, reducing idle time on both the compute engine and the network interface.
 
 ### Chunking Conditions
 
-Chunking is only applied when **all** of the following conditions are met:
+Chunking is only applied when all of the following conditions are met:
 
-- `num_chunks > 1` (chunking is configured)
-- `reduce_results` is enabled on the layer (all-reduce is needed)
-- `tp_size > 1` (running with tensor parallelism)
-- `total_tokens >= chunk_threshold` (input is large enough to benefit)
+- Chunking is configured: `num_chunks > 1`
+- All-reduce is required: `reduce_results` is enabled on the layer
+- Tensor parallelism is active: `tp_size > 1`
+- Input is sufficiently large: `total_tokens >= chunk_threshold`
 
 When any condition is not met, the layer falls back to the standard single-shot computation.
 
@@ -40,9 +38,21 @@ When any condition is not met, the layer falls back to the standard single-shot 
 
 The implementation handles both 2D `[tokens, hidden]` and 3D `[batch, seq_len, hidden]` inputs:
 
-- **3D with `seq_len > 1`** (prefill): chunks along the sequence dimension
-- **3D with `seq_len == 1`** (decode): chunks along the batch dimension
-- **2D**: chunks along the first (token) dimension
+- 3D with `seq_len > 1` (prefill): Chunks along the sequence dimension
+- 3D with `seq_len == 1` (decode): Chunks along the batch dimension
+- 2D: Chunks along the first token dimension
+
+### Recommended Usage
+
+Chunking effectiveness depends on balancing communication overlap benefits against computational overhead.
+
+We recommend this feature for:
+
+- Running with tensor parallelism (`TP > 1`)
+- Serving workloads with large batch sizes or long prefill sequences
+- Workloads where all-reduce communication is a significant fraction of the prefill time
+
+Do not use this feature for running without tensor parallelism (`TP = 1`), as there is no all-reduce to overlap. We also do not recommend it for serving only very short sequences with small batches, as chunking overhead outweighs the benefit.
 
 ## Configuration
 
@@ -50,13 +60,13 @@ The feature is controlled by two environment variables:
 
 | Environment Variable | Config Name | Default | Description |
 |---|---|---|---|
-| `VLLM_ROW_PARALLEL_CHUNKS` | `row_parallel_chunks` | `1` (disabled) | Number of chunks to split the input into. Set to a value > 1 to enable. |
-| `VLLM_ROW_PARALLEL_CHUNK_THRESHOLD` | `row_parallel_chunk_threshold` | `8192` | Minimum number of tokens required to activate chunking. Inputs below this threshold use the standard path. |
+| `VLLM_ROW_PARALLEL_CHUNKS` | `row_parallel_chunks` | `1` (disabled) | The number of chunks to split the input into. Setting the variable to a value greater than 1 enables chunking. |
+| `VLLM_ROW_PARALLEL_CHUNK_THRESHOLD` | `row_parallel_chunk_threshold` | `8192` | The minimum number of tokens required to activate chunking. Inputs below this threshold use the standard path. |
 
-### Example Usage
+The following example shows how to set these variables to enable chunking with different configurations:
 
 ```bash
-# Enable chunking with 8 chunks (default threshold of 8192 tokens)
+# Enable chunking with 8 chunks (the default threshold of 8192 tokens)
 export VLLM_ROW_PARALLEL_CHUNKS=8
 
 # Enable chunking with 16 chunks and a lower threshold
@@ -66,9 +76,12 @@ export VLLM_ROW_PARALLEL_CHUNK_THRESHOLD=4096
 
 ## Performance Characteristics
 
-The table below shows the **speedup ratio** (chunked time / baseline time, where values > 1.0 indicate speedup) for an isolated `RowParallelLinear` layer measured across different TP sizes, chunk counts, and token counts.
+The speedup ratio is the chunked time divided by the baseline time, where values higher than 1.0 indicate speedup. The following tables show the speedup ratio for an isolated `RowParallelLinear` layer measured across different tensor parallelism sizes, chunk counts, and token counts. To interpret the values, consider the following:
 
-### TP Size = 2
+- Values greater than 1.0 indicate a speedup over the non-chunked baseline, for example, 1.5 means 50% faster.
+- Values below 1.0 indicate a slowdown due to chunking overhead exceeding the overlap benefit.
+
+Tensor parallelism size equal to 2:
 
 | Tokens | 2 chunks | 4 chunks | 8 chunks | 16 chunks | 32 chunks | 64 chunks |
 |-------:|:--------:|:--------:|:--------:|:---------:|:---------:|:---------:|
@@ -81,7 +94,7 @@ The table below shows the **speedup ratio** (chunked time / baseline time, where
 | 65536  | 1.246    | 1.424    | 1.580    | 1.483     | 1.555     | 1.548     |
 | 131072 | 1.268    | 1.442    | 1.503    | 1.676     | 1.533     | 1.514     |
 
-### TP Size = 4
+Tensor parallelism size equal to 4:
 
 | Tokens | 2 chunks | 4 chunks | 8 chunks | 16 chunks | 32 chunks | 64 chunks |
 |-------:|:--------:|:--------:|:--------:|:---------:|:---------:|:---------:|
@@ -94,7 +107,7 @@ The table below shows the **speedup ratio** (chunked time / baseline time, where
 | 65536  | 1.218    | 1.310    | 1.386    | 1.528     | 1.553     | 1.195     |
 | 131072 | 1.193    | 1.387    | 1.332    | 1.353     | 1.560     | 1.545     |
 
-### TP Size = 8
+Tensor parallelism size equal to 8:
 
 | Tokens | 2 chunks | 8 chunks | 16 chunks | 32 chunks | 64 chunks |
 |-------:|:--------:|:--------:|:---------:|:---------:|:---------:|
@@ -107,41 +120,25 @@ The table below shows the **speedup ratio** (chunked time / baseline time, where
 | 65536  | 0.989    | 1.164    | 1.129     | 1.179     | 0.758     |
 | 131072 | 1.018    | 1.241    | 1.277     | 1.297     | 1.090     |
 
-### Reading the Results
+### Performance Insights
 
-- **Values > 1.0** indicate a speedup over the non-chunked baseline (e.g., 1.5 = 50% faster).
-- **Values < 1.0** indicate a slowdown due to chunking overhead exceeding the overlap benefit.
+Optimal configuration varies with tensor parallelism size and sequence length. There is no single setting that will benefit all benchmarks, so we recommend experimenting to find which configuration works best for your specific tensor parallelism size and sequence length. A good starting point is 2 chunks with a 4096-token threshold.
 
-### Key Takeaways
-
-1. **Sweet spot shifts with TP size and seq_len.** There is no single setting that will benefit all benchmarks so depending on the TP size and seq_len user should experiment which setting benefits him the most. Good starting point is 2 chunks and 4k threshold.
-
-2. **Diminishing returns with too many chunks.** Excessively fine chunking introduces overhead from graph breaks, kernel launch latency, and reduced per-chunk compute efficiency. The optimal chunk count depends on both TP size and typical token count.
+Diminishing returns with too many chunks. Excessively fine chunking introduces overhead from graph breaks, kernel launch latency, and reduced per-chunk compute efficiency. The optimal chunk count depends on both tensor parallelism size and typical token count.
 
 ## Recommended Settings
 
-| TP Size | Recommended Chunks | Notes |
-|:-------:|:------------------:|-------|
-| 1       | 1 (disabled)       | No all-reduce needed, chunking adds overhead only |
-| 2       | 2-64               | Beneficial for token counts ≥ 4096 |
-| 4       | 2-16               | Beneficial for token counts ≥ 8192 |
-| 8       | 2-8                | Beneficial for token counts ≥ 16384 |
+The following recommendations are based on isolated layer benchmarks using the Meta Llama 3.3 70B model. In end-to-end inference, the optimal configuration may differ depending on the model architecture, sequence lengths, and workload mix. We recommend benchmarking with your specific setup.
 
-> **Note:** These recommendations are based on isolated layer benchmarks using llama 3.3 70b. In end-to-end inference, the optimal configuration may differ depending on the model architecture, sequence lengths, and workload mix. It is recommended to benchmark with your specific setup.
-
-## When to Use This Feature
-
-**Use when:**
-- Running with tensor parallelism (`TP > 1`)
-- Serving workloads with large batch sizes or long prefill sequences
-- The all-reduce communication is a significant fraction of the prefill time
-
-**Do not use when:**
-- Running without tensor parallelism (`TP = 1`) — there is no all-reduce to overlap
-- Serving only very short sequences with small batches — chunking overhead outweighs the benefit
+| Tensor parallelism size | Recommended chunks | Notes                                             |
+| :---------------------: | :----------------: | ------------------------------------------------- |
+|            1            |    1 (disabled)    | No all-reduce needed; chunking adds overhead only |
+|            2            |        2-64        | Beneficial for token counts ≥ 4096                |
+|            4            |        2-16        | Beneficial for token counts ≥ 8192                |
+|            8            |        2-8         | Beneficial for token counts ≥ 16384               |
 
 ## Implementation Details
 
-The feature is implemented in `vllm_gaudi/ops/hpu_row_parallel_linear.py` as `HPURowParallelLinear`, which registers as an OOT (out-of-tree) override for vLLM's `RowParallelLinear`. The chunking logic is entirely self-contained in the `forward` method and does not modify any other part of the model or the inference pipeline.
+This feature is implemented in `vllm_gaudi/ops/hpu_row_parallel_linear.py` as `HPURowParallelLinear`, which registers as an out-of-tree (OOT) override for vLLM's `RowParallelLinear`. The chunking logic is entirely self-contained in the `forward` method and does not modify any other part of the model or the inference pipeline.
 
 Each chunk boundary introduces a `torch._dynamo.graph_break()` to ensure correct async all-reduce semantics under `torch.compile`. This means the compiled graph will be split at chunk boundaries, which is a necessary trade-off for enabling async communication.
