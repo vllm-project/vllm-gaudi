@@ -299,7 +299,20 @@ def partial_attn_causal(query: torch.tensor,
         v = value[:, :, 0:q_max, :]
         b = bias[q_min:q_max, 0:q_max]
 
-        s_attn = torch.matmul(q, k.transpose(-1, -2)) + b.unsqueeze(0).unsqueeze(0)
+        if get_config().use_output_tensor_in_matmulqk:
+            s_attn = None
+            if get_config().fp32_softmax:
+                s_attn = torch.empty(hpu_ops.matmul_shape(q, k.transpose(-1, -2)), dtype=torch.float32, device=q.device)
+            s_attn = torch.matmul(q, k.transpose(-1, -2), out=s_attn)
+            s_attn = s_attn + b.unsqueeze(0).unsqueeze(0)
+        elif get_config().fp32_softmax:
+            s_attn = torch.matmul(q, k.transpose(-1, -2))
+            s_attn = s_attn.float()
+            s_attn = s_attn + b.unsqueeze(0).unsqueeze(0).float()
+            torch._dynamo.graph_break()
+        else:
+            s_attn = torch.matmul(q, k.transpose(-1, -2)) + b.unsqueeze(0).unsqueeze(0)
+
         # TODO: remove dtype check once full support is added for fp8 in unified attention
         if get_config().unified_attn_softmax_fa2 and s_attn.dtype == torch.bfloat16:
             inputM_hpu, inputL_hpu = create_softmax_fa2_input_tensors(s_attn, fmin, inputL_hpu_tensors,
@@ -314,6 +327,7 @@ def partial_attn_causal(query: torch.tensor,
             s_attn = torch.exp(s_attn - s_max.unsqueeze(-1))
             s_sum = torch.sum(s_attn, -1)
 
+        # TODO: add downcasting attn to original dtype
         # Attention: s_attn @ v
         s_attn = torch.matmul(s_attn, v)
 
@@ -383,7 +397,19 @@ def _partial_attn_shared_core(query: torch.tensor,
     """
     num_heads = query.size(0) * query.size(1) if not is_mla else query.size(0)
 
-    attn = torch.matmul(query, key.transpose(-1, -2))
+    if get_config().use_output_tensor_in_matmulqk:
+        attn = None
+        if get_config().fp32_softmax:
+            attn = torch.empty(hpu_ops.matmul_shape(query, key.transpose(-1, -2)),
+                               dtype=torch.float32,
+                               device=query.device)
+        attn = torch.matmul(query, key.transpose(-1, -2), out=attn)
+    elif get_config().fp32_softmax:
+        attn = torch.matmul(query, key.transpose(-1, -2))
+        attn = attn.float()
+        torch._dynamo.graph_break()
+    else:
+        attn = torch.matmul(query, key.transpose(-1, -2))
     attn = attn.flatten(0, 1)
     attn = attn + bias
 
@@ -399,7 +425,7 @@ def _partial_attn_shared_core(query: torch.tensor,
         local_max = torch.maximum(attn.amax(-1), fmin)
         attn = torch.exp(attn - local_max.unsqueeze(-1))
         local_sum = attn.sum(-1)
-
+    # TODO: add downcasting attn to original dtype
     attn = torch.matmul(attn.unflatten(0, (kv_heads if not is_mla else num_heads, -1)), value).flatten(0, 1)
 
     # MLA: Extract latent part and project to full V
@@ -659,10 +685,23 @@ def partial_attn_unique(query: torch.tensor,
 
     block_mapping_2d = torch.nn.functional.one_hot(block_mapping, num_classes=batch_size).to(query.dtype)
 
-    attn = torch.matmul(query, key.transpose(-1, -2))
+    if get_config().use_output_tensor_in_matmulqk:
+        attn = None
+        if get_config().fp32_softmax:
+            attn = torch.empty(hpu_ops.matmul_shape(query, key.transpose(-1, -2)),
+                               dtype=torch.float32,
+                               device=query.device)
+        attn = torch.matmul(query, key.transpose(-1, -2), out=attn)
+    elif get_config().fp32_softmax:
+        attn = torch.matmul(query, key.transpose(-1, -2))
+        attn = attn.float()
+        torch._dynamo.graph_break()
+    else:
+        attn = torch.matmul(query, key.transpose(-1, -2))
     attn = attn + bias.unsqueeze(1).unsqueeze(1).unsqueeze(1)
     block_max = torch.maximum(attn.amax(-1), fmin)
     attn = torch.exp(attn - block_max.unsqueeze(-1))
+    # TODO: (afierka) add downcasting attn to original dtype
     block_sum = attn.sum(-1)
     attn = torch.matmul(attn, value)
 
