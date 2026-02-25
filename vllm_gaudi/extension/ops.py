@@ -320,9 +320,12 @@ def _naive_prompt_attention(query: torch.Tensor,
             htcore.mark_step()
         attn_weights.add_(position_bias)
     if attn_bias is not None:
-        if attn_weights.dtype != attn_bias.dtype:
-            attn_bias = attn_bias.to(dtype=attn_weights.dtype)
-        attn_weights.add_(attn_bias)
+        if attn_bias.dtype == torch.bool:
+            attn_weights = attn_weights.masked_fill(~attn_bias, float("-inf"))
+        else:
+            if attn_weights.dtype != attn_bias.dtype:
+                attn_bias = attn_bias.to(dtype=attn_weights.dtype)
+            attn_weights.add_(attn_bias)
     if get_config().fp32_softmax:
         attn_weights = torch.softmax(attn_weights, dim=-1)
     else:
