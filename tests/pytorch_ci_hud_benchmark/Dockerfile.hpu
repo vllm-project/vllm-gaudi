@@ -13,6 +13,7 @@ FROM ${DOCKER_URL}/${VERSION}/${BASE_NAME}/${REPO_TYPE}/pytorch-installer-${PT_V
 ARG VLLM_GAUDI_COMMIT=main
 # VLLM_COMMIT can be overridden by user, defaults to last compatible version
 ARG VLLM_COMMIT=
+ARG PT_VERSION
 
 ENV OMPI_MCA_btl_vader_single_copy_mechanism=none
 
@@ -54,6 +55,7 @@ RUN mkdir -p $VLLM_PLUGIN_PATH && \
     VLLM_TARGET_DEVICE=hpu && pip install -v $VLLM_PLUGIN_PATH --no-build-isolation
 
 RUN pip install datasets && \
-    pip install pandas
+    pip install pandas && \
+    pip install --no-deps torchaudio==${PT_VERSION}
 
 ENTRYPOINT ["/bin/bash"]
