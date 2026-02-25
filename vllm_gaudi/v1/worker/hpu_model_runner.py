@@ -4057,6 +4057,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 else:
                     raise ValueError("Unknown quantization config mode,"
                                      "please validate quantization config file")
+                self._sync_shared_moe_gates()
                 if not disable_mark_scales_as_const:
                     htcore.hpu_initialize(self.model, mark_only_scales_as_const=True)
             self.inc_initialized_successfully = True
@@ -4198,8 +4199,57 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             if hasattr(mla_attn, m) and hasattr(mla_impl, m):
                                 delattr(mla_attn, m)
 
+                # Remove duplicate gate from SharedFusedMoE.
+                # Models like Qwen3MoE, DeepSeek-V2, etc. pass the
+                # same gate module to SharedFusedMoE(gate=self.gate).
+                # INC's generate_model_info() builds a module->parent
+                # dict via named_children(); for shared modules the
+                # last-seen parent wins. This causes INC to patch the
+                # gate only inside SharedFusedMoE (experts._gate),
+                # leaving the block-level reference (mlp.gate) as an
+                # unpatched module with a corrupted fp8 weight.
+                # Detaching _gate here ensures INC patches the gate
+                # only at the block level. _sync_shared_moe_gates()
+                # must be called after INC conversion to restore the
+                # reference.
+                mlp = getattr(layer, 'mlp', None)
+                if mlp is not None:
+                    block_gate = getattr(mlp, 'gate', None)
+                    experts = getattr(mlp, 'experts', None)
+                    if (block_gate is not None and experts is not None
+                            and getattr(experts, '_gate', None) is block_gate):
+                        experts._gate = None
+                        self._detached_moe_gates.add(id(experts))
+
+    def _sync_shared_moe_gates(self):
+        """Re-sync SharedFusedMoE._gate after INC conversion.
+
+        After INC converts/patches the model, the block-level gate
+        (e.g. mlp.gate) is properly patched. This method restores
+        the SharedFusedMoE._gate reference so that the overlapped
+        execution path inside FusedMoE.forward_impl() also uses the
+        patched gate.
+
+        Only experts whose _gate was explicitly detached by
+        _remove_duplicate_submodules are restored; experts whose
+        _gate was originally None are left unchanged.
+        """
+        model = self.get_model()
+        if not hasattr(model, "model"):
+            return
+        for layer in model.model.layers:
+            mlp = getattr(layer, 'mlp', None)
+            if mlp is None:
+                continue
+            block_gate = getattr(mlp, 'gate', None)
+            experts = getattr(mlp, 'experts', None)
+            if (block_gate is not None and experts is not None and id(experts) in self._detached_moe_gates):
+                experts._gate = block_gate
+                self._detached_moe_gates.remove(id(experts))
+
     def _inc_preprocess(self):
         _apply_inc_patch()
+        self._detached_moe_gates: set[int] = set()
         self._remove_duplicate_submodules()
 
     def log_graph_warmup_summary(self, buckets, is_prompt, total_mem):
