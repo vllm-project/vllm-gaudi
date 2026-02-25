@@ -405,8 +405,13 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
     # during each graph execution
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
-        self.W_UV: torch.Tensor = self.W_UV.contiguous()
-        self.W_UK_T: torch.Tensor = self.W_UK_T.contiguous()
+        # W_UV and W_UK_T are plain tensor attributes (not nn.Parameter or
+        # register_buffer), so model.to('hpu') won't move them.  When INC
+        # CPU-first loading is active the source weights live on CPU, making
+        # these derived tensors CPU-resident too — which then causes a device
+        # mismatch at the bmm calls in forward.  Explicitly place on HPU.
+        self.W_UV: torch.Tensor = self.W_UV.contiguous().to("hpu")
+        self.W_UK_T: torch.Tensor = self.W_UK_T.contiguous().to("hpu")
 
     # NOTE(Chendi): PR25184 using output buffer as default, which can't be used in HPU Graph,
     # so we override and always return a new tensor
@@ -1220,5 +1225,10 @@ class HPUUnifiedMLAImpl(MLACommonImpl[HPUUnifiedAttentionMetadata], torch.nn.Mod
         # Parent MLACommonImpl extracts W_UV and W_UK_T from kv_b_proj weights
         # These projection matrices are used for latent ↔ full space conversions
         super().process_weights_after_loading(act_dtype)
-        self.W_UV: torch.Tensor = self.W_UV.contiguous()
-        self.W_UK_T: torch.Tensor = self.W_UK_T.contiguous()
+        # W_UV and W_UK_T are plain tensor attributes (not nn.Parameter or
+        # register_buffer), so model.to('hpu') won't move them.  When INC
+        # CPU-first loading is active the source weights live on CPU, making
+        # these derived tensors CPU-resident too — which then causes a device
+        # mismatch at the bmm calls in forward.  Explicitly place on HPU.
+        self.W_UV: torch.Tensor = self.W_UV.contiguous().to("hpu")
+        self.W_UK_T: torch.Tensor = self.W_UK_T.contiguous().to("hpu")

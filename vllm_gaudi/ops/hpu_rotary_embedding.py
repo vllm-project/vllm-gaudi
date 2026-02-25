@@ -7,10 +7,6 @@ from vllm.model_executor.layers.rotary_embedding import (RotaryEmbedding, Phi3Lo
                                                          LinearScalingRotaryEmbedding, DynamicNTKScalingRotaryEmbedding,
                                                          YaRNScalingRotaryEmbedding, DeepseekScalingRotaryEmbedding,
                                                          MRotaryEmbedding)
-from vllm.model_executor.layers.rotary_embedding.common import (
-    yarn_find_correction_range,
-    yarn_linear_ramp_mask,
-)
 from vllm.model_executor.custom_op import CustomOp
 
 
@@ -313,46 +309,6 @@ class HPUYaRNScalingRotaryEmbedding(YaRNScalingRotaryEmbedding):
 
 @DeepseekScalingRotaryEmbedding.register_oot
 class HPUDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
-
-    def _compute_inv_freq(self, scaling_factor: float) -> torch.Tensor:
-        # Override upstream to remove explicit device=current_platform.device_type.
-        # Upstream hardcodes pos_freqs to HPU, but yarn_linear_ramp_mask creates
-        # tensors on whatever the current default device is (CPU when INC
-        # quantization sets load_config.device="cpu"). This mismatch causes
-        # RuntimeError. By omitting an explicit device, all tensors follow the
-        # torch.set_default_device context set by the model loader, keeping them
-        # on the same device. The resulting cache is moved to HPU later via
-        # register_buffer.
-        pos_freqs = self.base**(torch.arange(0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim)
-        inv_freq_extrapolation = 1.0 / pos_freqs
-        inv_freq_interpolation = 1.0 / (scaling_factor * pos_freqs)
-
-        low, high = yarn_find_correction_range(
-            self.beta_fast,
-            self.beta_slow,
-            self.rotary_dim,
-            self.base,
-            self.max_position_embeddings,
-        )
-        # Get n-d rotational scaling corrected for extrapolation
-        inv_freq_mask = (
-            1 - yarn_linear_ramp_mask(low, high, self.rotary_dim // 2, dtype=torch.float)) * self.extrapolation_factor
-        inv_freq = (inv_freq_interpolation * (1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask)
-        return inv_freq
-
-    def _compute_cos_sin_cache(self) -> torch.Tensor:
-        # Override upstream to remove explicit device=current_platform.device_type
-        # for the same reason as _compute_inv_freq above.
-        inv_freq = self._compute_inv_freq(self.scaling_factor)
-        t = torch.arange(
-            self.max_position_embeddings * self.scaling_factor,
-            dtype=torch.float32,
-        )
-        freqs = torch.einsum("i,j -> ij", t, inv_freq)
-        cos = freqs.cos() * self.mscale
-        sin = freqs.sin() * self.mscale
-        cache = torch.cat((cos, sin), dim=-1)
-        return cache
 
     def prepare_cos_sin(self,
                         positions: torch.Tensor,
