@@ -2953,7 +2953,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if htorch.utils.internal.is_lazy():
             use_graphs = self._use_graphs()
             # skip HPU graphs for long prefills
-            if seq_len > 1 and \
+            if attn_metadata.is_prompt and \
                 batch_size * (seq_len + num_blocks * self.block_size) > self.max_graph_capture_tokens:
                 use_graphs = False
             additional_kwargs.update({"bypass_hpu_graphs": not use_graphs})
