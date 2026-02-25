@@ -57,7 +57,7 @@ vllm bench serve \
                 --max-concurrency $CONCURRENT_REQ \
                 --metric-percentiles 90 \
                 --temperature 0 \
-		--ignore-eos \
+                --ignore-eos \
                 --trust-remote-code \
                 --save-result \
                 --result-dir logs \
