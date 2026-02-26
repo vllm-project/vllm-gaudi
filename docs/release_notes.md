@@ -4,15 +4,15 @@ This document provides an overview of the features, changes, and fixes introduce
 
 ## 0.16.0
 
-This version is based on [vLLM 0.16.0](https://github.com/vllm-project/vllm/releases/tag/v0.16.0) with support [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
+This version is based on [vLLM 0.16.0](https://github.com/vllm-project/vllm/releases/tag/v0.16.0) with support for [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
 
 ## 0.15.1
 
-This version is based on [vLLM 0.15.1](https://github.com/vllm-project/vllm/releases/tag/v0.15.1) with support [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
+This version is based on [vLLM 0.15.1](https://github.com/vllm-project/vllm/releases/tag/v0.15.1) with support for [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
 
 ## 0.14.1
 
-This version is based on [vLLM 0.14.1](https://github.com/vllm-project/vllm/releases/tag/v0.14.1) with support [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html), and introduces support for the following models on Gaudi 3:
+This version is based on [vLLM 0.14.1](https://github.com/vllm-project/vllm/releases/tag/v0.14.1) with support for [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html), and introduces support for the following models on Gaudi 3:
 
 - [ibm-granite/granite-4.0-h-small](https://huggingface.co/ibm-granite/granite-4.0-h-small)
 - [Qwen/Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct)
