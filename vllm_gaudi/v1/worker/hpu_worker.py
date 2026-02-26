@@ -303,12 +303,13 @@ class HPUWorker(WorkerBase):
             self.kv_cache_config = kv_cache_config
             self.model_runner.initialize_kv_cache(kv_cache_config)
             torch.hpu.synchronize()
-        msg = (f"Usable num_blocks: {kv_cache_config.num_blocks}, "
-               f"actual allocated num_blocks: "
-               f"{self.model_runner.kv_caches[0][0].shape[0]} "
-               f"(_PAD_BLOCK_ID={self.model_runner._PAD_BLOCK_ID}, "
-               f"_PAD_SLOT_ID={self.model_runner._PAD_SLOT_ID})")
-        logger.info(msg)
+        if len(self.model_runner.kv_caches) > 0:
+            msg = (f"Usable num_blocks: {kv_cache_config.num_blocks}, "
+                   f"actual allocated num_blocks: "
+                   f"{self.model_runner.kv_caches[0][0].shape[0]} "
+                   f"(_PAD_BLOCK_ID={self.model_runner._PAD_BLOCK_ID}, "
+                   f"_PAD_SLOT_ID={self.model_runner._PAD_SLOT_ID})")
+            logger.info(msg)
         msg = ("Initializing cache engine "
                f"took {m.get_summary_string()}")
         logger.info(msg)
