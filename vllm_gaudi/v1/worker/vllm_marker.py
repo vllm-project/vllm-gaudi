@@ -27,8 +27,8 @@ def emit_vllm_chrome_event(msg):
         "ts": _now_us(),
         "cat": "marker",
         "args": {},
-        "pid" : 0, # TODO(jczaja):make it not hardcoded
-        "tid" : 0, # TODO(jczaja):make it not hardcoded
+        "pid": 0,  # TODO(jczaja):make it not hardcoded
+        "tid": 0,  # TODO(jczaja):make it not hardcoded
     }
     payload = json.dumps(event)
 
