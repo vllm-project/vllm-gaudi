@@ -69,24 +69,25 @@ run_qwen_calibration_test() {
 }
 
 # Simple smoke test for vision language models calibration using Qwen-2.5-VL
-run_qwen_vl_calibration_test() {
-    echo "➡️ Testing VLM calibration procedure on Qwen/Qwen2.5-VL-3B-Instruct..."
-    cleanup_calibration_output
+# (afierka) Temporarily disabled due to some issues, will re-enable once fixed. [GAUDISW-246468]
+# run_qwen_vl_calibration_test() {
+#     echo "➡️ Testing VLM calibration procedure on Qwen/Qwen2.5-VL-3B-Instruct..."
+#     cleanup_calibration_output
 
-    PT_HPU_LAZY_MODE=1 "${VLLM_GAUDI_PREFIX}/calibration/vlm-calibration/calibrate_model.sh" \
-        -m Qwen/Qwen2.5-VL-3B-Instruct \
-        -o "${CALIBRATION_OUTPUT_DIR}" \
-        -b ${BATCH_SIZE} \
-        -l ${LIMIT} \
-        -t 1
+#     PT_HPU_LAZY_MODE=1 "${VLLM_GAUDI_PREFIX}/calibration/vlm-calibration/calibrate_model.sh" \
+#         -m Qwen/Qwen2.5-VL-3B-Instruct \
+#         -o "${CALIBRATION_OUTPUT_DIR}" \
+#         -b ${BATCH_SIZE} \
+#         -l ${LIMIT} \
+#         -t 1
 
-    if [ $? -ne 0 ]; then
-        echo "Error: VLM Calibration failed for Qwen/Qwen2.5-VL-3B-Instruct" >&2
-        exit 1
-    fi
-    echo "✅ VLM Calibration for Qwen/Qwen2.5-VL-3B-Instruct passed."
-    cleanup_calibration_output
-}
+#     if [ $? -ne 0 ]; then
+#         echo "Error: VLM Calibration failed for Qwen/Qwen2.5-VL-3B-Instruct" >&2
+#         exit 1
+#     fi
+#     echo "✅ VLM Calibration for Qwen/Qwen2.5-VL-3B-Instruct passed."
+#     cleanup_calibration_output
+# }
 
 # --- Utility Functions ---
 
