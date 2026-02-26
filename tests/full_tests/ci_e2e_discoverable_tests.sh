@@ -305,6 +305,7 @@ run_llama3_70b_inc_dynamic_quant_test() {
 # GSM8K on granite-4.0-h
 run_gsm8k_granite_4_test() {
     echo "➡️ Testing GSM8K on granite-4-h..."
+    BATCH_SIZE=8 \
     VLLM_EXPONENTIAL_BUCKETING=false \
     VLLM_PROMPT_QUERY_BUCKET_MIN=256 \
     VLLM_PROMPT_QUERY_BUCKET_MAX=4096 \
@@ -316,6 +317,8 @@ run_gsm8k_granite_4_test() {
     VLLM_SKIP_WARMUP=true \
     ASYNC_SCHEDULING=true \
     ENABLE_APC=false \
+    ASYNC_SCHEDULING=true \
+    TP_SIZE=1 \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/granite-4-h-small.yaml"
     echo "✅ Test with granite-4-h passed."
 }
