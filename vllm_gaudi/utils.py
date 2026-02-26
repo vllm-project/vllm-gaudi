@@ -298,6 +298,8 @@ class HPUCompileConfig:
         Args:
             model_name: Name of the model being compiled
         """
+        if not os.getenv("TORCH_TRACE"):
+            return
         try:
             from torch._logging._internal import trace_structured
         except ImportError:
