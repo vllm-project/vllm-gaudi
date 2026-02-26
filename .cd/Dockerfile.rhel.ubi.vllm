@@ -18,8 +18,8 @@ ARG PYPI_INDEX_URL="https://pypi.org/simple/"
 ARG HABANA_RPM_REPO_PATH="rhel/9/${OS_VERSION}"
 # can be upstream or fork
 ARG TORCH_TYPE=upstream
-ARG VLLM_GAUDI_COMMIT=main
-ARG VLLM_PROJECT_COMMIT=
+ARG VLLM_GAUDI_COMMIT=v0.16.0
+ARG VLLM_PROJECT_COMMIT=v0.16.0
 
 # ============================================================================
 # Stage 1: gaudi-base - Base system setup with Habana drivers
