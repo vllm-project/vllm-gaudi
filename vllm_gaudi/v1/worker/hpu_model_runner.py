@@ -54,6 +54,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model, get_model_loader
+from vllm.platforms import current_platform
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem)
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
@@ -146,6 +147,25 @@ HPU_TORCH_DTYPE_TO_STR_DTYPE = {
 }
 
 shutdown_inc_called = False
+
+
+@contextlib.contextmanager
+def _override_platform_device_type(device_type: str):
+    """Temporarily override current_platform.device_type to match load device.
+
+    When load_config.device is set (e.g. "cpu" for INC quantization), the
+    model loader uses ``torch.set_default_device(load_device)`` so implicit
+    tensor creation goes to that device.  However, upstream vLLM code also
+    creates tensors with explicit ``device=current_platform.device_type``
+    (always "hpu").  The mix of CPU-default and HPU-explicit causes
+    RuntimeError.  This context manager aligns both paths.
+    """
+    original = current_platform.device_type
+    try:
+        current_platform.device_type = device_type
+        yield
+    finally:
+        current_platform.device_type = original
 
 
 class BucketingFailedException(Exception):
@@ -4143,7 +4163,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             htcore.hpu_inference_set_env()
         logger.info("Starting to load model %s...", self.model_config.model)
         with HabanaMemoryProfiler() as m:  # noqa: SIM117
-            self.model = get_model(vllm_config=self.vllm_config)
+            # When load_config.device differs from the platform device (e.g.
+            # "cpu" for INC quantization), upstream code that uses both
+            # torch.set_default_device (via the model loader context manager)
+            # and explicit device=current_platform.device_type creates a
+            # device mismatch. Temporarily aligning device_type with the
+            # load device makes both paths consistent, avoiding RuntimeError
+            # in modules like DeepseekScalingRotaryEmbedding.
+            load_device = self.vllm_config.load_config.device
+            ctx = _override_platform_device_type(load_device) \
+                if load_device and load_device != current_platform.device_type \
+                else contextlib.nullcontext()
+            with ctx:
+                self.model = get_model(vllm_config=self.vllm_config)
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
         self.model_memory_usage = m.consumed_device_memory
