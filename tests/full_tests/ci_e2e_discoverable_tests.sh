@@ -268,13 +268,7 @@ run_llama3_70b_inc_dynamic_quant_test() {
 
 # --- LM-eval tests ---
 # Tests below score models on lmeval tasks, usually gsm8k
-# Final scores are verified against thresholds specified in .yaml config files in tests/full_tests_model_cards/*
-# If the score is below the threshold, the test will fail. For implementation details see:
-#   tests/models/language/generation/test_common.py
-
-# --- LM-eval tests ---
-# Tests below score models on lmeval tasks, usually gsm8k
-# Final scores are verified against thresholds specified in .yaml config files in tests/full_tests_model_cards/*
+# Final scores are verified against thresholds specified in .yaml config files in tests/full_tests/model_cards/*
 # If the score is below the threshold, the test will fail. For implementation details see:
 #   tests/models/language/generation/test_common.py
 
@@ -291,7 +285,6 @@ run_gsm8k_granite_4_test() {
     VLLM_DECODE_BS_BUCKET_MAX=16 \
     VLLM_CONTIGUOUS_PA=true \
     VLLM_SKIP_WARMUP=true \
-    ASYNC_SCHEDULING=true \
     ENABLE_APC=false \
     ASYNC_SCHEDULING=true \
     TP_SIZE=1 \
