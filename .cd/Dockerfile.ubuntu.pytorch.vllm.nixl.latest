@@ -65,7 +65,7 @@ RUN \
 # --- END: COMBINED RUN COMMAND ---
 
 # Install torchaudio (CPU wheel, matching PyTorch version in base image)
-RUN pip install --no-deps --extra-index-url https://download.pytorch.org/whl/cpu torchaudio==${PT_VERSION}
+RUN pip install --no-cache-dir --no-deps --extra-index-url https://download.pytorch.org/whl/cpu torchaudio==${PT_VERSION}
 
 # Install additional Python packages
 RUN pip install datasets && \
