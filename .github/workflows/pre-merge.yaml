@@ -612,6 +612,7 @@ jobs:
   # Build-test production Dockerfiles when they are modified
   check_dockerfile_changes:
     needs: [retrieve_head_sha]
+    if: github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     outputs:
       nixl_changed: ${{ steps.check.outputs.nixl_changed }}
@@ -643,6 +644,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
+          clean: true
       - name: Build nixl Dockerfile (validation only)
         run: |
           echo "Building .cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest to verify it builds correctly..."
