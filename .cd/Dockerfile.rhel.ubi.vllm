@@ -6,20 +6,11 @@ ARG ARTIFACTORY_URL="vault.habana.ai"
 ARG SYNAPSE_VERSION=1.23.0
 # Use an exact revision (e.g. 695) or "latest" to auto-detect the newest available revision.
 # If you do not want metadata to show "latest", pass an exact SYNAPSE_REVISION.
-# Use an exact revision (e.g. 695) or "latest" to auto-detect the newest available revision.
-# If you do not want metadata to show "latest", pass an exact SYNAPSE_REVISION.
 ARG SYNAPSE_REVISION=695
 ARG BASE_NAME=rhel9.6
 ARG OS_VERSION=9.6
 ARG OS_STRING=rhel96
-ARG OS_VERSION=9.6
-ARG OS_STRING=rhel96
 ARG PT_VERSION=2.9.0
-ARG PT_MODULES_REPO_NAME=gaudi-pt-modules
-# for internal use - to support a different package name for RHEL 9.4 with Python 3.12
-ARG PT_PACKAGE_NAME_NON_DEFAULT_PYTHON_SUBSTRING=
-ARG PYPI_INDEX_URL="https://pypi.org/simple/"
-ARG HABANA_RPM_REPO_PATH="rhel/9/${OS_VERSION}"
 ARG PT_MODULES_REPO_NAME=gaudi-pt-modules
 # for internal use - to support a different package name for RHEL 9.4 with Python 3.12
 ARG PT_PACKAGE_NAME_NON_DEFAULT_PYTHON_SUBSTRING=
@@ -34,7 +25,6 @@ ARG VLLM_PROJECT_COMMIT=
 # Stage 1: gaudi-base - Base system setup with Habana drivers
 # ============================================================================
 FROM registry.access.redhat.com/ubi9/ubi:${OS_VERSION} AS gaudi-base
-FROM registry.access.redhat.com/ubi9/ubi:${OS_VERSION} AS gaudi-base
 
 # Re-declare global ARGs to use them in this stage
 ARG ARTIFACTORY_URL
@@ -42,18 +32,11 @@ ARG SYNAPSE_VERSION
 ARG SYNAPSE_REVISION
 ARG OS_VERSION
 ARG OS_STRING
-ARG OS_VERSION
-ARG OS_STRING
 ARG PT_VERSION
-ARG PYPI_INDEX_URL
-ARG HABANA_RPM_REPO_PATH
 ARG PYPI_INDEX_URL
 ARG HABANA_RPM_REPO_PATH
 ARG TORCH_TYPE
 
-# Labels for RHEL certification.
-# Note: when SYNAPSE_REVISION=latest, this metadata intentionally records "latest"
-# (the requested input), not the detected numeric revision.
 # Labels for RHEL certification.
 # Note: when SYNAPSE_REVISION=latest, this metadata intentionally records "latest"
 # (the requested input), not the detected numeric revision.
@@ -63,7 +46,6 @@ LABEL vendor="Habanalabs Ltd." \
 # Environment variables - Habana-specific paths and configurations
 ENV TORCH_TYPE=${TORCH_TYPE} \
     PT_VERSION=${PT_VERSION} \
-    OS_STRING="${OS_STRING}" \
     OS_STRING="${OS_STRING}" \
     VLLM_TARGET_DEVICE="hpu" \
     GC_KERNEL_PATH=/usr/lib/habanalabs/libtpc_kernels.so \
@@ -75,8 +57,7 @@ ENV TORCH_TYPE=${TORCH_TYPE} \
 COPY LICENSE /licenses/
 
 # System setup - Remove FIPS provider and add EPEL
-RUN dnf -y update && \
-    dnf install -y --allowerasing --allowerasing python3-dnf-plugin-versionlock && \
+RUN dnf install -y --allowerasing python3-dnf-plugin-versionlock && \
     dnf versionlock add redhat-release* && \
     dnf -y update && \
     # '|| true' is added to support RHEL 9.4 in which openssl-fips-provider-so is not installed
@@ -90,12 +71,10 @@ RUN printf "[BaseOS]\\nname=CentOS Linux 9 - BaseOS\\nbaseurl=https://mirror.str
     printf "[CRB]\\nname=CentOS Linux 9 - CRB\\nbaseurl=https://mirror.stream.centos.org/9-stream/CRB/x86_64/os\\ngpgkey=https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official-SHA256\\ngpgcheck=1\\n" > /etc/yum.repos.d/CentOS-Linux-CRB.repo
 
 # Install system dependencies
-RUN dnf install -y --allowerasing --allowerasing \
-    wget git jq libomp libomp \
+RUN dnf install -y --allowerasing \
+    wget git jq libomp \
     # Image processing dependencies (needed for pillow-simd -> habana-media-loader)
     zlib-devel libjpeg-turbo-devel \
-    # habanalabs-thunk dependency
-    libfdt-turbo-devel \
     # habanalabs-thunk dependency
     libfdt-devel \
     # Python development
@@ -111,8 +90,8 @@ RUN alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2 && \
     ln -s /usr/bin/python3 /usr/bin/python
 
 # Install base Python packages
-RUN pip install --no-cache-dir --no-cache-dir setuptools==79.0.1 wheel setuptools_scm && \
-    pip install --no-cache-dir --no-cache-dir --upgrade Jinja2 protobuf urllib3 requests
+RUN pip install --no-cache-dir setuptools==79.0.1 wheel setuptools_scm && \
+    pip install --no-cache-dir --upgrade Jinja2 protobuf urllib3 requests
 
 # Setup Habana repository and install Habana packages
 RUN printf "[habanalabs]\\nname=Habana RH9 Linux repo\\nbaseurl=https://${ARTIFACTORY_URL}/artifactory/${HABANA_RPM_REPO_PATH}\\ngpgkey=https://${ARTIFACTORY_URL}/artifactory/${HABANA_RPM_REPO_PATH}/repodata/repomd.xml.key\\ngpgcheck=1\\n" > /etc/yum.repos.d/habanalabs.repo && \
@@ -131,23 +110,11 @@ RUN printf "[habanalabs]\\nname=Habana RH9 Linux repo\\nbaseurl=https://${ARTIFA
     habanalabs-firmware-tools-"$SYNAPSE_VERSION"* \
     habanalabs-graph-"$SYNAPSE_VERSION"*; \
     else \
-    if [ "${SYNAPSE_REVISION}" = "latest" ]; then \
-    dnf install -y \
-    habanalabs-rdma-core-"$SYNAPSE_VERSION"* \
-    habanalabs-thunk-"$SYNAPSE_VERSION"* \
-    habanalabs-firmware-tools-"$SYNAPSE_VERSION"* \
-    habanalabs-graph-"$SYNAPSE_VERSION"*; \
-    else \
     dnf install -y \
     habanalabs-rdma-core-"$SYNAPSE_VERSION"-"$SYNAPSE_REVISION"* \
     habanalabs-thunk-"$SYNAPSE_VERSION"-"$SYNAPSE_REVISION"* \
     habanalabs-firmware-tools-"$SYNAPSE_VERSION"-"$SYNAPSE_REVISION"* \
     habanalabs-graph-"$SYNAPSE_VERSION"-"$SYNAPSE_REVISION"*; \
-    fi && \
-    DETECTED_SYNAPSE_REVISION=$(rpm -q --qf '%{RELEASE}\n' habanalabs-rdma-core | head -n1 | sed 's/\..*$//') && \
-    mkdir -p /etc/habanalabs && \
-    echo "${DETECTED_SYNAPSE_REVISION}" > /etc/habanalabs/synapse_revision && \
-    echo "Detected Synapse revision: ${DETECTED_SYNAPSE_REVISION}"; \
     fi && \
     DETECTED_SYNAPSE_REVISION=$(rpm -q --qf '%{RELEASE}\n' habanalabs-rdma-core | head -n1 | sed 's/\..*$//') && \
     mkdir -p /etc/habanalabs && \
@@ -158,8 +125,6 @@ RUN printf "[habanalabs]\\nname=Habana RH9 Linux repo\\nbaseurl=https://${ARTIFA
     rm -f /etc/yum.repos.d/habanalabs.repo
 
 # Install Habana media loader and configure Python path
-RUN SYNAPSE_REVISION_RUNTIME=$(cat /etc/habanalabs/synapse_revision) && \
-    pip install --no-cache-dir habana-media-loader=="${SYNAPSE_VERSION}"."${SYNAPSE_REVISION_RUNTIME}" --extra-index-url ${PYPI_INDEX_URL} && \
 RUN SYNAPSE_REVISION_RUNTIME=$(cat /etc/habanalabs/synapse_revision) && \
     pip install --no-cache-dir habana-media-loader=="${SYNAPSE_VERSION}"."${SYNAPSE_REVISION_RUNTIME}" --extra-index-url ${PYPI_INDEX_URL} && \
     echo "/usr/lib/habanalabs" > $(python3 -c "import sysconfig; print(sysconfig.get_path('platlib'))")/habanalabs-graph.pth
