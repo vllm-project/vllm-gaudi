@@ -3,11 +3,14 @@
 #
 # Build args:
 #   VLLM_COMMIT_ARG - the upstream vLLM commit to checkout and test against
+#   PT_VERSION      - PyTorch version (must match the base image)
 
-ARG BASE_IMAGE=vault.habana.ai/gaudi-docker/1.23.0/ubuntu24.04/habanalabs/pytorch-installer-2.9.0:latest
+ARG PT_VERSION=2.9.0
+ARG BASE_IMAGE=vault.habana.ai/gaudi-docker/1.23.0/ubuntu24.04/habanalabs/pytorch-installer-${PT_VERSION}:latest
 FROM ${BASE_IMAGE}
 
 ARG VLLM_COMMIT_ARG
+ARG PT_VERSION
 
 COPY ./ /workspace/vllm-gaudi
 WORKDIR /workspace
@@ -35,7 +38,7 @@ WORKDIR /workspace/vllm-gaudi
 RUN pip install -e .
 
 # Install torchaudio (CPU wheel, matching PyTorch version in base image)
-RUN pip install --no-deps --extra-index-url https://download.pytorch.org/whl/cpu torchaudio==2.9.0
+RUN pip install --no-deps --extra-index-url https://download.pytorch.org/whl/cpu torchaudio==${PT_VERSION}
 
 # Create convenience symlinks
 WORKDIR /workspace
