@@ -65,7 +65,7 @@ run_granite_inc_load_generate_test() {
 run_deepseek_v2_inc_load_generate_test() {
     echo "➡️ Testing deepseek_v2 + inc with vllm-hpu plugin v1..."
     QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_unit_scale_quant.json" \
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true RUNTIME_SCALE_PATCHING=0 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --kv_cache_dtype fp8_inc
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --kv_cache_dtype fp8_inc
     echo "✅ Test with deepseek_v2 + inc passed."
 }
 
@@ -73,7 +73,7 @@ run_deepseek_v2_inc_load_generate_test() {
 run_deepseek_v2_inc_dynamic_tp2_load_generate_test() {
     echo "➡️ Testing deepseek_v2 + inc dynamic quantization + tp2..."
     QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_dynamic_quant.json" \
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --tensor-parallel-size 2
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true RUNTIME_SCALE_PATCHING=0 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --tensor-parallel-size 2
     echo "✅ Test with deepseek_v2 + inc dynamic quantization + tp2 successful."
 }
 
