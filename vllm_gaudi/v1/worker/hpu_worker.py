@@ -142,9 +142,6 @@ class HPUWorker(WorkerBase):
                     raise RuntimeError(f"Invalid HABANA_VISIBLE_MODULES={env_visible_modules}. "
                                        "It should be a comma-separated list of integers.")
                 env_module_ids = list(map(int, env_visible_modules.split(",")))
-                if any(module_id < 0 or module_id >= device_count for module_id in env_module_ids):
-                    raise RuntimeError(f"Invalid HABANA_VISIBLE_MODULES={env_visible_modules}. "
-                                       f"Module IDs should be between 0 and {device_count - 1}.")
                 if any(env_module_id not in available_module_ids for env_module_id in env_module_ids):
                     logger.warning("Some device for HABANA_VISIBLE_MODULES=%s are not available.", env_visible_modules)
                     selected_modules = [x for x in env_module_ids if x in available_module_ids]
