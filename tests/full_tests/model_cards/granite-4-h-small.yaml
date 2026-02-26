@@ -5,12 +5,11 @@ model_card:
   limit: 500
   max_num_seqs: 10
   dtype: bfloat16
-  gpu_memory_utilization: 0.005
+  gpu_memory_utilization: 0.1
+  max_num_seqs: 8
 
 
 
 metrics:
   name: exact_match,strict-match
-  value: 0.6542
-
-
+  value: 0.68
