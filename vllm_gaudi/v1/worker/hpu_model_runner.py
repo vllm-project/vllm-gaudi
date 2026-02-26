@@ -4423,6 +4423,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     def _log_regional_compile_start(self, name: str, module, model):
         """Log regional compilation start for TORCH_TRACE/tlparse"""
+
+        if not os.getenv("TORCH_TRACE"):
+            return
         try:
             from torch._logging._internal import trace_structured
 
@@ -5495,9 +5498,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                  "encoding": "json",
                              },
                              payload_fn=lambda: json.dumps(cache_stats, indent=2))
-        except (ImportError, AttributeError, Exception) as e:
+        except (ImportError, AttributeError, Exception):
             # If we can't get cache stats, log a warning but don't fail
-            logger.warning("Could not log Dynamo cache stats: {e}")
+            logger.warning("Could not log Dynamo cache stats.")
 
     def warmup_model(self) -> None:
         if not self.enable_bucketing:
