@@ -30,7 +30,6 @@ def emit_vllm_chrome_event(msg):
         "pid": 0,  # TODO(jczaja):make it not hardcoded
         "tid": 0,  # TODO(jczaja):make it not hardcoded
     }
-    payload = json.dumps(event)
 
     from torch._logging._internal import trace_structured
 

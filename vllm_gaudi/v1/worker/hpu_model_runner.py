@@ -5497,7 +5497,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                              payload_fn=lambda: json.dumps(cache_stats, indent=2))
         except (ImportError, AttributeError, Exception) as e:
             # If we can't get cache stats, log a warning but don't fail
-            logger.warning(f"Could not log Dynamo cache stats: {e}")
+            logger.warning("Could not log Dynamo cache stats: {e}")
 
     def warmup_model(self) -> None:
         if not self.enable_bucketing:
