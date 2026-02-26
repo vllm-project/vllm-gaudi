@@ -389,8 +389,6 @@ jobs:
           clean: true # Ensure a clean workspace before checkout
 
       - name: Setup Docker environment and build image
-        # Using a multi-line string for the Dockerfile is generally fine,
-        # but consider moving it to a separate file for better readability/maintainability
         run: |
           echo "Attempting to build Docker image..."
           docker build \

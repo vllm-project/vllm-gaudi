@@ -38,6 +38,7 @@ WORKDIR /workspace/vllm-gaudi
 RUN pip install -e .
 
 # Install torchaudio (CPU wheel, matching PyTorch version in base image)
+# torchaudio is imported from upstream vLLM code
 RUN pip install --no-deps --extra-index-url https://download.pytorch.org/whl/cpu torchaudio==${PT_VERSION}
 
 # Create convenience symlinks
