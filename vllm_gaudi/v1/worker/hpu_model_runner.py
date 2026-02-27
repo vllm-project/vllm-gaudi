@@ -4475,18 +4475,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         self._detached_moe_gates.add(id(experts))
 
     def _sync_shared_moe_gates(self):
-        """Re-sync SharedFusedMoE._gate after INC conversion.
+        """Apply SharedFusedMoE post-INC synchronization and compatibility.
 
-        After INC converts/patches the model, the block-level gate
-        (e.g. mlp.gate) is properly patched. This method restores
-        the SharedFusedMoE._gate reference so that the overlapped
-        execution path inside FusedMoE.forward_impl() also uses the
-        patched gate.
-
-        Only experts whose _gate was explicitly detached by
-        _remove_duplicate_submodules are restored; experts whose
-        _gate was originally None are left unchanged.
+        Synchronizes per-layer MoE state after INC conversion, including
+        router handling and compatibility flags expected by INC wrappers.
+        Detached gate tracking is used only as a cleanup aid.
         """
+
+        def _sync_moe_kernel_flags(module: torch.nn.Module):
+            moe_config = getattr(module, "moe_config", None)
+            for name in (
+                    "use_pplx_kernels",
+                    "use_deepep_ht_kernels",
+                    "use_deepep_ll_kernels",
+                    "use_mori_kernels",
+                    "use_fi_all2allv_kernels",
+            ):
+                setattr(module, name, bool(getattr(moe_config, name, False)))
+
         model = self.get_model()
         if not hasattr(model, "model"):
             return
@@ -4496,9 +4502,23 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 continue
             block_gate = getattr(mlp, 'gate', None)
             experts = getattr(mlp, 'experts', None)
-            if (block_gate is not None and experts is not None and id(experts) in self._detached_moe_gates):
-                experts._gate = block_gate
-                self._detached_moe_gates.remove(id(experts))
+            if block_gate is not None and experts is not None:
+                _sync_moe_kernel_flags(experts)
+                orig_mod = getattr(experts, "orig_mod", None)
+                if orig_mod is not None:
+                    _sync_moe_kernel_flags(orig_mod)
+
+                # INC may wrap MoE modules and miss new vLLM API fields.
+                # Force external router path and disable runner-internal gate.
+                experts.is_internal_router = False
+                if hasattr(experts, "_gate"):
+                    experts._gate = None
+                runner = getattr(experts, "runner", None)
+                if runner is not None and hasattr(runner, "gate"):
+                    runner.gate = None
+
+                if id(experts) in self._detached_moe_gates:
+                    self._detached_moe_gates.remove(id(experts))
 
     def _inc_preprocess(self):
         _apply_inc_patch()
