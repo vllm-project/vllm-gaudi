@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import tempfile
+import inspect
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -41,6 +42,12 @@ from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
 EOS_TOKEN_ID = 50256
+
+
+def create_request_compatible_with_signature(**request_kwargs: Any) -> Request:
+    if "eos_token_id" in inspect.signature(Request).parameters:
+        request_kwargs["eos_token_id"] = EOS_TOKEN_ID
+    return Request(**request_kwargs)
 
 
 def assert_scheduler_empty(scheduler: Scheduler):
@@ -197,20 +204,21 @@ def create_request(
 
     max_tokens = 1 if do_remote_decode else max_tokens
     sampling_params = SamplingParams(max_tokens=max_tokens)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
 
     common_prefix = [1] * common_prefix_len if common_prefix_len > 0 else []
     suffix = [i * request_id for i in range(num_tokens - common_prefix_len)]
     prompt_token_ids = common_prefix + suffix
 
-    req = Request(
-        request_id=f"id-{request_id}",
-        prompt_token_ids=prompt_token_ids,
-        sampling_params=sampling_params,
-        pooling_params=None,
-        mm_features=None,
-        eos_token_id=EOS_TOKEN_ID,
-        block_hasher=get_request_block_hasher(block_size, hash_fn),
-    )
+    request_kwargs: dict[str, Any] = {
+        "request_id": f"id-{request_id}",
+        "prompt_token_ids": prompt_token_ids,
+        "sampling_params": sampling_params,
+        "pooling_params": None,
+        "mm_features": None,
+        "block_hasher": get_request_block_hasher(block_size, hash_fn),
+    }
+    req = create_request_compatible_with_signature(**request_kwargs)
     req.kv_transfer_params = kv_transfer_params
     return req
 
