@@ -75,23 +75,20 @@ jobs:
             echo "Pinning VLLM_COMMUNITY_COMMIT to commit: ${NEW_VALUE}"
           fi
 
-          # Write the new value as the first line, preserving the explanation comment block
-          COMMENT=""
+          # Write the new value as the first line, then append the rest of the file
+          # (comment block) directly — avoiding command substitution which strips
+          # trailing newlines and can subtly alter the preserved content.
           if [[ -s VLLM_COMMUNITY_COMMIT ]]; then
-            COMMENT=$(tail -n +2 VLLM_COMMUNITY_COMMIT || true)
-          fi
-
-          if [[ -n "${COMMENT}" ]]; then
-            printf '%s\n' "${NEW_VALUE}" > VLLM_COMMUNITY_COMMIT
-            printf '%s\n' "${COMMENT}" >> VLLM_COMMUNITY_COMMIT
+            { printf '%s\n' "${NEW_VALUE}"; tail -n +2 VLLM_COMMUNITY_COMMIT; } > VLLM_COMMUNITY_COMMIT.tmp
           else
-            printf '%s\n' "${NEW_VALUE}" > VLLM_COMMUNITY_COMMIT
+            printf '%s\n' "${NEW_VALUE}" > VLLM_COMMUNITY_COMMIT.tmp
           fi
+          mv VLLM_COMMUNITY_COMMIT.tmp VLLM_COMMUNITY_COMMIT
 
       # Step 5: Commit and push the changes if the file has been modified
       - name: "Commit and push changes"
         run: |
-          if [[ -z $(git status --porcelain) ]]; then
+          if git diff --quiet && git diff --cached --quiet; then
             echo "No changes to commit. The file already contains the correct value."
           else
             if [[ "${{ github.event.inputs.mode }}" == "latest" ]]; then
