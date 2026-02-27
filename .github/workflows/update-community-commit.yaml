@@ -35,8 +35,18 @@ jobs:
       # Step 1: Validate inputs
       - name: "Validate inputs"
         run: |
-          if [[ "${{ github.event.inputs.mode }}" == "pin" && -z "${{ github.event.inputs.commit_id }}" ]]; then
-            echo "ERROR: commit_id must be provided when mode is 'pin'."
+          if [[ "${{ github.event.inputs.mode }}" == "pin" ]]; then
+            commit_id="${{ github.event.inputs.commit_id }}"
+            if [[ -z "$commit_id" ]]; then
+              echo "ERROR: commit_id must be provided when mode is 'pin'."
+              exit 1
+            elif [[ ! "$commit_id" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+              echo "ERROR: commit_id must be a valid Git commit SHA (7-40 hexadecimal characters)."
+              exit 1
+            fi
+          fi
+          if [[ "${{ github.event.inputs.mode }}" == "latest" && -n "${{ github.event.inputs.commit_id }}" ]]; then
+            echo "ERROR: commit_id must be empty when mode is 'latest'."
             exit 1
           fi
 
@@ -66,8 +76,17 @@ jobs:
           fi
 
           # Write the new value as the first line, preserving the explanation comment block
-          COMMENT=$(tail -n +2 VLLM_COMMUNITY_COMMIT)
-          printf '%s\n%s\n' "${NEW_VALUE}" "${COMMENT}" > VLLM_COMMUNITY_COMMIT
+          COMMENT=""
+          if [[ -s VLLM_COMMUNITY_COMMIT ]]; then
+            COMMENT=$(tail -n +2 VLLM_COMMUNITY_COMMIT || true)
+          fi
+
+          if [[ -n "${COMMENT}" ]]; then
+            printf '%s\n' "${NEW_VALUE}" > VLLM_COMMUNITY_COMMIT
+            printf '%s\n' "${COMMENT}" >> VLLM_COMMUNITY_COMMIT
+          else
+            printf '%s\n' "${NEW_VALUE}" > VLLM_COMMUNITY_COMMIT
+          fi
 
       # Step 5: Commit and push the changes if the file has been modified
       - name: "Commit and push changes"
