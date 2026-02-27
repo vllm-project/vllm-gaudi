@@ -621,28 +621,64 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
                  bias=None,
                  dispatch_fn: Callable[[torch.Tensor], torch.Tensor] = None):
         super().__init__(global_num_experts, num_total_experts, experts_min, experts_max, bias, dispatch_fn)
+        # init list for w13(gate+up) and w2(down)
         self.w13_list = torch.nn.ModuleList([MoeMatmul() for _ in range(num_total_experts)])
         self.w2_list = torch.nn.ModuleList([MoeMatmul() for _ in range(num_total_experts)])
 
+        # per-expert views used by forward() (tuple of tensors)
+        self._cached_w13_views = None
+        self._cached_w2_views = None
+        self._cached_w13_bias_views = None
+        self._cached_w2_bias_views = None
+
+    def _cache_weight_lists(self):
+        """Build and cache weight/bias *views only* (no torch.stack / no extra allocation)."""
+        experts_range = range(self.num_experts)
+
+        self._cached_w13_views = tuple(self.w13_list[i].weight.squeeze() for i in experts_range)
+        self._cached_w2_views = tuple(self.w2_list[i].weight.squeeze() for i in experts_range)
+
+        # optional bias views (no copy)
+        if self.bias is not None:
+            self._cached_w13_bias_views = tuple(self.w13_list[i].bias.squeeze() for i in experts_range)
+            self._cached_w2_bias_views = tuple(self.w2_list[i].bias.squeeze() for i in experts_range)
+        else:
+            self._cached_w13_bias_views = None
+            self._cached_w2_bias_views = None
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys,
+                              error_msgs):
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys,
+                                      error_msgs)
+        # always rebuild packed cache after load.
+        self._cache_weight_lists()
+
+    def _apply(self, fn):
+        # called by .to(device/dtype), etc. Always rebuild packed cache.
+        ret = super()._apply(fn)
+        self._cache_weight_lists()
+        return ret
+
     def forward(self, hidden_states, expert_routing_table, router_weights, permuted_weights=True, activation="silu"):
         tokens_num, _ = hidden_states.shape
-        kwargs = self._get_extra_kwargs(tokens_num)
-        # pre-processing for custom op inputs
-        experts_range = range(self.num_experts)
-        w1_list = [self.w13_list[i].weight.squeeze() for i in experts_range]
-        w2_list = [self.w2_list[i].weight.squeeze() for i in experts_range]
+        kwargs = self._get_extra_kwargs(tokens_num) if self.bias is None else None
+
+        # if cache wasn't built by the caller (e.g., after set_weight), build once here.
+        if self._cached_w13_views is None or self._cached_w2_views is None:
+            self._cache_weight_lists()
+
+        w13_list = self._cached_w13_views
+        w2_list = self._cached_w2_views
 
         if self.moe_n_slice == 1:
             if self.bias is not None:
-                w1_bias_list = [self.w13_list[i].bias.squeeze() for i in experts_range]
-                w2_bias_list = [self.w2_list[i].bias.squeeze() for i in experts_range]
                 return torch.ops.hpu.mixture_of_experts.bias_fused_weights(hidden_states=hidden_states,
                                                                            expert_routing_table=expert_routing_table,
                                                                            router_weights=router_weights,
-                                                                           w12=w1_list,
+                                                                           w12=w13_list,
                                                                            w3=w2_list,
-                                                                           w12_bias=w1_bias_list,
-                                                                           w3_bias=w2_bias_list,
+                                                                           w12_bias=self._cached_w13_bias_views,
+                                                                           w3_bias=self._cached_w2_bias_views,
                                                                            permuted_weights=permuted_weights,
                                                                            experts_min=self.experts_min,
                                                                            experts_max=self.experts_max)
@@ -650,39 +686,48 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
                 return torch.ops.hpu.mixture_of_experts(hidden_states=hidden_states,
                                                         expert_routing_table=expert_routing_table,
                                                         router_weights=router_weights,
-                                                        w12=w1_list,
+                                                        w12=w13_list,
                                                         w3=w2_list,
                                                         permuted_weights=permuted_weights,
                                                         activation=activation,
                                                         experts_min=self.experts_min,
                                                         experts_max=self.experts_max,
                                                         **kwargs)
+
+        if self.bias is not None:
+            w13_bias_list = self._cached_w13_bias_views
+            w2_bias_list = self._cached_w2_bias_views
+
         for i in range(self.moe_n_slice):
-            w1_list_slice = w1_list[i * self.num_expert_per_group:(i + 1) * self.num_expert_per_group]
-            w2_list_slice = w2_list[i * self.num_expert_per_group:(i + 1) * self.num_expert_per_group]
-            min_expert = self.experts_min + i * self.num_expert_per_group
-            max_expert = min_expert + self.num_expert_per_group - 1
             if self.bias is not None:
-                w1_bias_list = [self.w13_list[i].bias.squeeze() for i in experts_range]
-                w2_bias_list = [self.w2_list[i].bias.squeeze() for i in experts_range]
-                w1_bias_list_slice = w1_bias_list[i * self.num_expert_per_group:(i + 1) * self.num_expert_per_group]
-                w2_bias_list_slice = w2_bias_list[i * self.num_expert_per_group:(i + 1) * self.num_expert_per_group]
+                start = i * self.num_expert_per_group
+                end = (i + 1) * self.num_expert_per_group
+                w13_bias_list_slice = w13_bias_list[start:end]
+                w2_bias_list_slice = w2_bias_list[start:end]
+
                 slice_final_hidden_states = torch.ops.hpu.mixture_of_experts.bias_fused_weights(
                     hidden_states=hidden_states,
                     expert_routing_table=expert_routing_table,
                     router_weights=router_weights,
-                    w12=w1_list,
+                    w12=w13_list,
                     w3=w2_list,
-                    w12_bias=w1_bias_list_slice,
+                    w12_bias=w13_bias_list_slice,
                     w3_bias=w2_bias_list_slice,
                     permuted_weights=permuted_weights,
                     experts_min=self.experts_min,
                     experts_max=self.experts_max)
             else:
+                start = i * self.num_expert_per_group
+                end = (i + 1) * self.num_expert_per_group
+                w13_list_slice = w13_list[start:end]
+                w2_list_slice = w2_list[start:end]
+                min_expert = self.experts_min + start
+                max_expert = min_expert + self.num_expert_per_group - 1
+
                 slice_final_hidden_states = torch.ops.hpu.mixture_of_experts(hidden_states=hidden_states,
                                                                              expert_routing_table=expert_routing_table,
                                                                              router_weights=router_weights,
-                                                                             w12=w1_list_slice,
+                                                                             w12=w13_list_slice,
                                                                              w3=w2_list_slice,
                                                                              permuted_weights=permuted_weights,
                                                                              activation=activation,
