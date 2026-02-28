@@ -376,13 +376,6 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         has_context = attn_metadata.block_list is not None
         impl = 'naive_impl' if has_context else self.prefill_impl
         attn_bias_arg = attn_metadata.attn_bias if has_context else None
-        init_logger.warning(
-            "[HPUMLAImpl] _forward_prefill: has_context=%s impl=%s "
-            "q=%s k=%s attn_bias_arg=%s block_list=%s",
-            has_context, impl, tuple(q.shape), tuple(k.shape),
-            tuple(attn_bias_arg.shape) if attn_bias_arg is not None else None,
-            attn_metadata.block_list.shape if attn_metadata.block_list is not None else None,
-        )
         output = ops.prompt_attention(impl=impl,
                                       query=q,
                                       key=k,

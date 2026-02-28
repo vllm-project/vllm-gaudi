@@ -92,6 +92,7 @@ def get_features():
         Value('naive_impl', True),
         ValueFromList('prompt_attn_impl', supported_attn_impls),
         Value('skip_warmup', False),
+        Value('targeted_warmup', False, env_var='VLLM_HPU_TARGETED_WARMUP'),
         Value('merged_prefill', Enabled('unified_attn')),
         Value('use_contiguous_pa',
               Any(Disabled('prefix_caching'), Enabled('unified_attn')),
