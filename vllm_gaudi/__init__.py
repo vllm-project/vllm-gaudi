@@ -15,13 +15,13 @@ if "torchaudio" not in sys.modules:
     except (ImportError, OSError):
         _ta = types.ModuleType("torchaudio")
         _ta.__spec__ = importlib.machinery.ModuleSpec("torchaudio", None)
-        _ta.__version__ = "0.0.0"
+        _ta.__version__ = "0.0.0"  # type: ignore[attr-defined]
         _ta_compliance = types.ModuleType("torchaudio.compliance")
         _ta_compliance.__spec__ = importlib.machinery.ModuleSpec("torchaudio.compliance", None)
         _ta_kaldi = types.ModuleType("torchaudio.compliance.kaldi")
         _ta_kaldi.__spec__ = importlib.machinery.ModuleSpec("torchaudio.compliance.kaldi", None)
-        _ta.compliance = _ta_compliance
-        _ta_compliance.kaldi = _ta_kaldi
+        _ta.compliance = _ta_compliance  # type: ignore[attr-defined]
+        _ta_compliance.kaldi = _ta_kaldi  # type: ignore[attr-defined]
         sys.modules["torchaudio"] = _ta
         sys.modules["torchaudio.compliance"] = _ta_compliance
         sys.modules["torchaudio.compliance.kaldi"] = _ta_kaldi

@@ -95,7 +95,7 @@ class HPUWorker(WorkerBase):
         self.step_debug = init_debug_logger('steps')
 
         self.device: torch.device | None = None
-        self.model_runner = None
+        self.model_runner: HPUModelRunner = None  # type: ignore[assignment]
         self.model_sleeping = False
         self.kv_cache_sleeping = False
         self.kv_cache_config = None
