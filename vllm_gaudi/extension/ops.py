@@ -59,7 +59,10 @@ def grouped_max(block_max, batch_size, block_groups):
                            dtype=block_max.dtype,
                            device=block_max.device)
     group_max = group_max.index_reduce_(0, block_groups, block_max, 'amax')
-    group_max = group_max.index_select(0, block_groups)
+    # Use direct indexing instead of index_select: index_select in captured HPU
+    # graphs is flagged as potentially inaccurate; block_groups contains -1 for
+    # padding blocks which correctly maps to the last (dummy) slot via Python indexing.
+    group_max = group_max[block_groups]
     return group_max
 
 

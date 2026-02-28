@@ -5125,6 +5125,72 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         return total_mem, total_batch_seq, captured_all
 
     def warmup_unified_graphs(self, buckets, kv_cache):
+        if get_config().targeted_warmup:
+            # Targeted warmup: compile only the configs actually needed at runtime,
+            # taken directly from the existing bucket list (no crafted values).
+            #
+            # Compilation ORDER is critical — each compile allocates a contiguous
+            # workspace, compiles the graph, then FREES the workspace.  After weights
+            # + KV-cache are loaded the remaining HPU memory is only partially
+            # contiguous.  Compiling the graph with the LARGEST workspace first
+            # guarantees it fits; subsequent smaller workspaces fit in the freed block.
+            #
+            # Config selection — minimal set, one config per (q, phase):
+            #   prefill — causal (is_causal=1), q ≥ max_model_len, s=0, smallest unique_ctx
+            #             With chunked prefill disabled the only runtime scenario is a
+            #             fresh prompt (unique_ctx=0).  The bucket list can contain up to
+            #             ~11 unique_ctx variants per q value; compiling them all wastes
+            #             memory and risks OOM.  Smallest unique_ctx (=0) is sufficient.
+            #   decode  — non-causal (is_causal=0), q ≤ max_num_seqs, s=0, smallest unique_ctx
+            #             Large unique_ctx configs allocate proportionally larger SynapseAI
+            #             workspaces.  The bucket router maps actual runtime unique_ctx to
+            #             the nearest compiled bucket, so one compile covers all cases.
+            max_model_len = self.model_config.max_model_len
+            max_num_seqs  = self.scheduler_config.max_num_seqs
+
+            # Both phases: pick ONE representative config per (q, phase) combination —
+            # the one with the SMALLEST unique_ctx present in the bucket list.
+            #
+            # Why smallest unique_ctx only:
+            #   • unique_ctx > 0 for prefill means attending over prior KV context
+            #     (only relevant for chunked prefill, which is disabled here).
+            #     With --no-enable-chunked-prefill every prefill is fresh → unique_ctx=0.
+            #   • Compiling configs with large unique_ctx allocates proportionally larger
+            #     SynapseAI workspaces and OOMs on memory-constrained setups.
+            #   • The bucket router maps actual runtime unique_ctx to the nearest compiled
+            #     bucket, so the single smallest-unique_ctx compile covers all cases.
+
+            def _one_per_q_smallest_u(candidates):
+                """Return one (q, s, u, c) per distinct q, choosing smallest u."""
+                by_q: dict = {}
+                for cfg in candidates:
+                    q = cfg[0]
+                    if q not in by_q or cfg[2] < by_q[q][2]:
+                        by_q[q] = cfg
+                return list(by_q.values())
+
+            prefill_all = [(q, s, u, c) for (q, s, u, c) in buckets
+                           if q >= max_model_len and s == 0 and c == 1]
+            prefill_cfgs = _one_per_q_smallest_u(prefill_all)
+
+            decode_all = [(q, s, u, c) for (q, s, u, c) in buckets
+                          if 0 < q <= max_num_seqs and s == 0 and c == 0]
+            decode_cfgs = _one_per_q_smallest_u(decode_all)
+
+            # Compile order: prefill first (larger workspace: max_model_len × hidden_dim),
+            # then decode (smaller workspace).  Prefill compiles while memory is still
+            # unfragmented; its workspace is freed before decode compilation begins.
+            targeted = prefill_cfgs + decode_cfgs
+
+            logger.info("Targeted warmup: %d configs selected "
+                        "(%d prefill, %d decode) from %d total buckets",
+                        len(targeted), len(prefill_cfgs), len(decode_cfgs), len(buckets))
+            for cfg in targeted:
+                if cfg not in self.graphed_buckets:
+                    self.graphed_buckets.add(cfg)
+                    self._prepare_dummy_unified_scenario(cfg)
+            return
+
         idx = 0
         num_candidates = len(buckets)
         developer_settings = get_config().VLLM_DEVELOPER_MODE
@@ -7096,6 +7162,20 @@ class HPUAttentionMetadataProcessor:
 
         if not is_fake_hpu():
             block_mapping = torch.nn.functional.one_hot(block_groups, num_classes=batch_size)
+            # On HPU, one_hot with out-of-bounds index (e.g. -1 for padding blocks)
+            # may not return all-zeros, so explicitly zero out those rows.
+            # Also remap block_groups -1 → batch_size so HPU kernels
+            # (e.g. block_softmax_adjustment) receive the correct sentinel.
+            oob_values = block_groups.lt(0)
+            block_mapping.masked_fill_(oob_values.unsqueeze(-1), 0)
+            block_groups = block_groups.masked_fill(oob_values, batch_size)
+            if is_window_block:
+                metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata", window_block_groups=block_groups)
+            elif update_for_chunked_attention:
+                metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata",
+                                                chunked_block_groups=block_groups)
+            else:
+                metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata", block_groups=block_groups)
         else:
             # Unfortunately one_hot on CPU
             # doesn't handle out of bounds classes so we need to convert
@@ -7108,6 +7188,9 @@ class HPUAttentionMetadataProcessor:
             block_groups.masked_fill_(oob_values, batch_size)
             if is_window_block:
                 metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata", window_block_groups=block_groups)
+            elif update_for_chunked_attention:
+                metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata",
+                                                chunked_block_groups=block_groups)
             else:
                 metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata", block_groups=block_groups)
         block_mapping = block_mapping.to(dtype)

@@ -77,7 +77,13 @@ class VLLMKVCache(torch.nn.Module):
         if self.use_contiguous_pa:
             return cache[:blocks.size(0)]
         else:
-            return cache.index_select(0, blocks)
+            # Clamp to valid range before indexing: blocks may contain _PAD_BLOCK_ID
+            # (= num_kv_blocks, out-of-bounds) for padding slots.  Clamping fetches
+            # the last valid block's data for padding entries; block_bias=-inf in
+            # pipelined_pa masks their contribution to zero regardless.
+            # index_select is avoided because it is flagged as having accuracy
+            # issues in captured HPU graphs.
+            return cache[blocks.clamp(0, cache.shape[0] - 1)]
 
 
 class VLLMFP8KVCache(VLLMKVCache):
