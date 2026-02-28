@@ -4,6 +4,7 @@ import contextlib
 import gc
 import os
 import queue
+import time
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Optional
 
@@ -32,13 +33,14 @@ from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.utils import is_fake_hpu
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
+from vllm.platforms import current_platform
 
 from vllm_gaudi.extension.logger import logger as init_logger
 
 logger = init_logger()
 
 if TYPE_CHECKING:
-    from vllm.v1.core.scheduler import GrammarOutput, SchedulerOutput
+    from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
 
 def setup_step_profiler(steps):
@@ -71,6 +73,9 @@ class HPUWorker(WorkerBase):
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
+        self.kv_transfer_config = vllm_config.kv_transfer_config
+        self.compilation_config = vllm_config.compilation_config
+        self.current_platform = current_platform
 
         self.local_rank = local_rank
         self.rank = rank
@@ -89,6 +94,8 @@ class HPUWorker(WorkerBase):
         self.step_profiler = setup_step_profiler(self.profile_steps)
         self.step_debug = init_debug_logger('steps')
 
+        self.device: torch.device | None = None
+        self.model_runner = None
         self.model_sleeping = False
         self.kv_cache_sleeping = False
         self.kv_cache_config = None
@@ -315,13 +322,15 @@ class HPUWorker(WorkerBase):
         logger.info(msg)
         self.compile_or_warm_up_model()
 
-    def compile_or_warm_up_model(self) -> None:
+    def compile_or_warm_up_model(self) -> float:
+        start = time.perf_counter()
         # Don't run the warmup if the model is already warmed up
         if not getattr(self.model_runner, 'graphed_buckets', None):
             self.model_runner.warmup_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
+        return time.perf_counter() - start
 
     def sample_tokens(self, grammar_output: "GrammarOutput|None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
@@ -330,7 +339,7 @@ class HPUWorker(WorkerBase):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> ModelRunnerOutput | None:
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         if self.step_debug:
             self.step_debug(f'step={self.step}')
         if self.step_profiler and self.step == self.profile_steps[0]:

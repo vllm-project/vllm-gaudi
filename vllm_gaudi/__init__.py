@@ -1,5 +1,30 @@
 import os
+import sys
+import types
+import importlib.machinery
+
 from vllm_gaudi.platform import HpuPlatform
+
+# Mock torchaudio if not available (HPU torch doesn't ship with torchaudio
+# and the upstream wheel's C extension is incompatible). Several vLLM
+# processors (e.g. FunASRProcessor) eagerly import torchaudio at module
+# level, so we inject a lightweight stub to prevent ImportError.
+if "torchaudio" not in sys.modules:
+    try:
+        import torchaudio  # noqa: F401
+    except (ImportError, OSError):
+        _ta = types.ModuleType("torchaudio")
+        _ta.__spec__ = importlib.machinery.ModuleSpec("torchaudio", None)
+        _ta.__version__ = "0.0.0"
+        _ta_compliance = types.ModuleType("torchaudio.compliance")
+        _ta_compliance.__spec__ = importlib.machinery.ModuleSpec("torchaudio.compliance", None)
+        _ta_kaldi = types.ModuleType("torchaudio.compliance.kaldi")
+        _ta_kaldi.__spec__ = importlib.machinery.ModuleSpec("torchaudio.compliance.kaldi", None)
+        _ta.compliance = _ta_compliance
+        _ta_compliance.kaldi = _ta_kaldi
+        sys.modules["torchaudio"] = _ta
+        sys.modules["torchaudio.compliance"] = _ta_compliance
+        sys.modules["torchaudio.compliance.kaldi"] = _ta_kaldi
 
 
 def register():

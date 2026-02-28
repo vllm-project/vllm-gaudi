@@ -45,6 +45,7 @@ class HpuPlatform(Platform):
         cls,
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
+        num_heads: int | None = None,
     ) -> str:
         if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on HPU.")
@@ -148,8 +149,6 @@ class HpuPlatform(Platform):
                         "compilation mode")
             compilation_config.mode = CompilationMode.NONE
 
-        print(f"========={compilation_config.custom_ops=}===========")
-
         # Disable multi-stream for shared experts as no Stream on CPU
         os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
@@ -195,7 +194,11 @@ class HpuPlatform(Platform):
         else:
             return "DRAM"
 
-    def is_sleep_mode_available(cls) -> bool:
+    def is_sleep_mode_available(self) -> bool:
+        return True
+
+    @classmethod
+    def supports_fp8(cls) -> bool:
         return True
 
     @classmethod
@@ -237,6 +240,8 @@ class HpuPlatform(Platform):
         """
         Wrap the original weight loader to make it synced.
         """
+        if not cls.use_sync_weight_loader():
+            return original_weight_loader
 
         def _synced_weight_loader(param, *args, **kwargs):
             out = original_weight_loader(param, *args, **kwargs)
