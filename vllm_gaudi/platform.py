@@ -150,6 +150,16 @@ class HpuPlatform(Platform):
 
         print(f"========={compilation_config.custom_ops=}===========")
 
+        # Force CPU loading for INC quantization to prevent OOM during weight loading.
+        # INC FP8 quantization requires weights to be loaded to CPU first, then
+        # quantized and moved to device. Without this, weights are loaded directly
+        # to HPU in BF16 which causes OOM for large models.
+        model_config = vllm_config.model_config
+        is_inc_quant = (model_config is not None and model_config.quantization == "inc") or os.getenv("QUANT_CONFIG")
+        if is_inc_quant and vllm_config.load_config is not None and vllm_config.load_config.device is None:
+            logger.info("[HPU] INC quantization detected, loading weights to CPU first")
+            vllm_config.load_config.device = "cpu"
+
         # Disable multi-stream for shared experts as no Stream on CPU
         os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
