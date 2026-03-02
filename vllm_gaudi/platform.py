@@ -210,14 +210,7 @@ class HpuPlatform(Platform):
         Raises ValueError for unsupported features with clear messages
         instead of letting them fail with cryptic assertion errors later.
         """
-        from vllm.sampling_params import SamplingParams
-        if isinstance(params, SamplingParams):
-            if params.prompt_logprobs is not None:
-                raise ValueError(
-                    "prompt_logprobs is not currently supported on HPU "
-                    "(Gaudi). Please remove the prompt_logprobs parameter "
-                    "from your request."
-                )
+        pass
 
     @classmethod
     def get_nixl_supported_devices(cls) -> dict[str, tuple[str, ...]]:
