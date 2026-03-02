@@ -151,7 +151,7 @@ def new_ssd_state_passing(states, dA_cumsum, initial_states=None, out_dtype=None
         This implementation uses a parallel prefix-sum approach via a full
         (nheads, nchunks+1, nchunks+1) decay matrix and batched matmul,
         trading O(nchunks^2) memory for O(1) sequential depth (fully parallel).
-        This is intentional for performancel. For extremely large nchunks,
+        This is intentional for performance. For extremely large nchunks,
         memory usage may become significant; in such cases, consider chunking
         the sequence into smaller segments and processing sequentially.
     """
