@@ -2298,41 +2298,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                 logits_indices=[logits_indices],
                                 logits_requests=[logits_requests])
 
-    def _form_unified_prefill_batch(self, contents):
-        if len(contents.req_ids) == 0:
-            return PrefillInputData()
-
-        token_ids = contents.token_ids
-        req_ids = contents.req_ids
-        query_lens = [len(tids) for tids in contents.token_ids]
-        prompt_lens = contents.prompt_lens
-        if self.profiler.enabled:
-            self.profiler_counter_helper.capture_prompt_seq_stats(query_lens)
-        context_lens = contents.context_lens
-
-        batch_data = create_unified_batch(
-            token_ids=token_ids,
-            block_size=self.block_size,
-            block_table=contents.blocks,
-            context_lengths=context_lens,
-            query_lengths=query_lens,
-            prompt_lengths=prompt_lens,
-            dtype=self.dtype,
-            contiguous_kv=self.use_contiguous_pa,
-            bucketing_fn=self.unified_bucketing_fn,
-            get_dp_padding_fn=self.get_dp_padding,
-        )
-
-        (token_ids_t, token_positions_t, logits_indices_t, logits_groups, attn_metadata) = batch_data
-        logits_requests = [req_ids[lg] for lg in logits_groups]
-        return PrefillInputData(request_ids=[req_ids],
-                                prompt_lens=[None],
-                                token_ids=[token_ids_t.unsqueeze(0)],
-                                attn_metadata=[attn_metadata],
-                                position_ids=[token_positions_t.unsqueeze(0)],
-                                logits_indices=[logits_indices_t],
-                                logits_requests=[logits_requests])
-
     def _create_dummy_prefill_batch_contents(self, num_prefills: int) -> list[PrefillInputData]:
         req_id = str(-1)
         context_len = 127 if has_kv_transfer_group() else 0
@@ -2369,18 +2334,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self._create_dummy_prefill_batch_contents(num_pad_across_dp)
             merge_contents(dummy_prefill_input_batches[0], *dummy_prefill_input_batches[1:])
         return all_batches[0], dummy_prefill_input_batches[0] if dummy_prefill_input_batches else None
-
-    def _prepare_unified_prefill_inputs(self,
-                                        num_prefills,
-                                        num_decodes,
-                                        num_scheduled_tokens: list[int],
-                                        warmup=False) -> tuple[PrefillInputData, None]:
-
-        all_batch_contents, _ = self._extract_prefill_batch_contents(num_prefills, num_decodes, num_scheduled_tokens,
-                                                                     warmup)
-        all_batches = [self._form_unified_prefill_batch(bc) for bc in all_batch_contents]
-        merge_contents(all_batches[0], *all_batches[1:])
-        return all_batches[0], None
 
     def _create_decode_input_data(self,
                                   num_decodes,
@@ -2855,46 +2808,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             logits_indices=logits_indices,
         )
         return logits_indices, spec_decode_metadata
-
-    def _prepare_unified_decode_inputs(self, num_decodes, num_scheduled_tokens, warmup_mode=False):
-
-        if num_decodes == 0:
-            return DecodeInputData(num_decodes=0), None
-
-        context_lens = self.input_batch.num_computed_tokens_cpu[:num_decodes]
-        query_lengths = [1] * num_decodes
-        prompt_lengths = self.input_batch.num_prompt_tokens[:num_decodes]
-        token_ids_cpu = self.input_batch.token_ids_cpu
-        block_table_cpu_tensor = self.input_batch.block_table[0].get_cpu_tensor()
-        num_blocks = [
-            math.ceil((ctx_len + q_len) / self.block_size) for ctx_len, q_len in zip(context_lens, query_lengths)
-        ]
-        block_table = [block_table_cpu_tensor[i, :nb].tolist() for i, nb in enumerate(num_blocks)]
-        if not warmup_mode:
-            block_table = self.defragmenter.resolve_all(block_table)
-        token_ids = [[token_ids_cpu[i, ctx_len]] for i, ctx_len in enumerate(context_lens)]
-
-        batch_data = create_unified_batch(
-            token_ids=token_ids,
-            block_size=self.block_size,
-            block_table=block_table,
-            context_lengths=context_lens,
-            query_lengths=[1] * num_decodes,
-            prompt_lengths=prompt_lengths,
-            dtype=self.dtype,
-            contiguous_kv=self.use_contiguous_pa,
-            bucketing_fn=self.unified_bucketing_fn,
-            get_dp_padding_fn=self.get_dp_padding,
-        )
-        (token_ids_t, token_positions_t, logits_indices_t, logits_groups, attn_metadata) = batch_data
-        decode_input_data = DecodeInputData(
-            num_decodes=num_decodes,
-            token_ids=token_ids_t.unsqueeze(-1),
-            position_ids=token_positions_t.unsqueeze(-1),
-            logits_indices=logits_indices_t,
-            attn_metadata=attn_metadata,
-        )
-        return decode_input_data, None
 
     def _prepare_input_ids(self,
                            scheduler_output: "SchedulerOutput",
@@ -4826,22 +4739,64 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         idx = 0
         num_candidates = len(buckets)
         captured_all = True
+        skipped_buckets = []
         developer_settings = get_config().VLLM_DEVELOPER_MODE
         phase = 'Prompt' if is_prompt else 'Decode'
         desc = f'{phase} warmup processing: '
+
+        # Compute minimum free device memory threshold.
+        # self.mem_margin is the non-usable margin computed by hpu_worker
+        # (free_mem * (1 - gpu_memory_utilization), typically ~12.5 GiB).
+        # We must keep free memory above this margin plus a safety buffer
+        # to account for peak memory during graph compilation, which can
+        # temporarily exceed the final graph size. Without this check,
+        # large bucket compilations can trigger fatal Gaudi device OOM
+        # errors that are unrecoverable and crash the entire process.
+        SAFETY_BUFFER_GIB = 2.0
+        if self.mem_margin is not None:
+            min_free_mem_bytes = int(self.mem_margin + SAFETY_BUFFER_GIB * 1024**3)
+        else:
+            # Fallback: conservative fixed threshold
+            min_free_mem_bytes = int(14 * 1024**3)
+
+        logger.info("%s warmup: minimum free memory threshold: %.2f GiB "
+                    "(mem_margin=%.2f GiB + safety=%.1f GiB)", phase, min_free_mem_bytes / (1024**3),
+                    (self.mem_margin or 0) / (1024**3), SAFETY_BUFFER_GIB)
+
         with tqdm(total=num_candidates, desc=desc, unit="item") as pbar:
-            for idx, (batch_size, seq_len, num_blocks) in enumerate(reversed(buckets)):
+            for idx, (batch_size, seq_len, num_blocks) in enumerate(buckets):
                 if seq_len > self.max_num_tokens:
                     continue
-                # Graph memory usage is proportional to seq dimension in a batch
+                # Graph memory usage is proportional to seq dimension
                 if is_prompt:
-                    batch_seq = batch_size * seq_len * num_blocks if num_blocks else batch_size * seq_len
+                    batch_seq = batch_size * seq_len * num_blocks \
+                        if num_blocks else batch_size * seq_len
                 else:
                     batch_seq = batch_size
 
                 graphed_bucket = (batch_size, seq_len, num_blocks, is_prompt)
                 if graphed_bucket in self.graphed_buckets:
                     continue
+
+                # Check available device memory before attempting
+                # warmup. This prevents fatal device OOM errors that
+                # crash the Gaudi device and require a full restart.
+                try:
+                    free_mem, _ = torch.hpu.mem_get_info()
+                except Exception:
+                    free_mem = 0
+
+                if free_mem < min_free_mem_bytes:
+                    # Don't add to graphed_buckets so runtime knows
+                    # this bucket needs on-demand compilation
+                    captured_all = False
+                    skipped_buckets.append((batch_size, seq_len, num_blocks))
+                    pbar.set_postfix_str(f"{idx}/{num_candidates} [skip: "
+                                         f"{free_mem / (1024**3):.1f} GiB < "
+                                         f"{min_free_mem_bytes / (1024**3):.1f} GiB]")
+                    pbar.update(1)
+                    continue
+
                 self.graphed_buckets.add(graphed_bucket)
                 if developer_settings:
                     self.log_warmup(phase, idx, num_candidates, batch_size, seq_len, num_blocks)
@@ -4859,6 +4814,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
                 pbar.set_postfix_str(f"{idx}/{num_candidates}")
                 pbar.update(1)
+
+        if skipped_buckets:
+            logger.warning(
+                "Skipped %d/%d %s buckets during warmup due to "
+                "insufficient device memory (free < %.1f GiB). "
+                "These buckets will be compiled on first use. "
+                "Consider reducing --max-model-len or increasing "
+                "VLLM_GRAPH_RESERVED_MEM (current default: 0.1). "
+                "Skipped buckets: %s", len(skipped_buckets), num_candidates, phase, min_free_mem_bytes / (1024**3),
+                skipped_buckets)
 
         return total_mem, total_batch_seq, captured_all
 
