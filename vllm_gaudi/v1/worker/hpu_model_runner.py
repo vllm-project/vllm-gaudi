@@ -3106,42 +3106,88 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     def _get_prompt_logprobs_dict(
         self,
-        hidden_states: torch.Tensor,
+        prefill_hidden_states: dict[str, torch.Tensor],
         scheduler_output: "SchedulerOutput",
     ) -> dict[str, Optional[LogprobsTensors]]:
+        """Compute prompt logprobs for prefill requests.
+
+        Args:
+            prefill_hidden_states: Dict mapping req_id to the full
+                (non-flattened) hidden states from the prefill forward pass.
+                Each tensor has shape [1, seq_len, hidden_dim] or
+                [seq_len, hidden_dim].
+            scheduler_output: The scheduler output containing
+                num_scheduled_tokens per request.
+
+        Returns:
+            Dict mapping req_id to LogprobsTensors for completed prefills.
+        """
         num_prompt_logprobs_dict = self.input_batch.num_prompt_logprobs
         if not num_prompt_logprobs_dict:
             return {}
 
+        in_progress_dict = self.input_batch.in_progress_prompt_logprobs_cpu
         prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
 
         # Since prompt logprobs are a rare feature, prioritize simple,
         # maintainable loop over optimal performance.
         completed_prefill_reqs = []
-        for i, (req_id, num_prompt_logprobs) in enumerate(num_prompt_logprobs_dict.items()):
+        for req_id, num_prompt_logprobs in num_prompt_logprobs_dict.items():
+            if req_id not in prefill_hidden_states:
+                continue
 
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
 
             # Get metadata for this request.
             request = self.requests[req_id]
+            if request.prompt_token_ids is None:
+                # Prompt logprobs is incompatible with prompt embeddings
+                continue
+
             num_prompt_tokens = len(request.prompt_token_ids)
-            prompt_token_ids = torch.tensor(request.prompt_token_ids).to(self.device, non_blocking=True)
+            prompt_token_ids = torch.tensor(
+                request.prompt_token_ids
+            ).to(self.device, non_blocking=True)
+
+            # Set up target LogprobsTensors object.
+            logprobs_tensors = in_progress_dict.get(req_id)
+            if not logprobs_tensors:
+                # Create empty logprobs CPU tensors for the entire prompt.
+                # If chunked, we'll copy in slice by slice.
+                logprobs_tensors = LogprobsTensors.empty_cpu(
+                    num_prompt_tokens - 1, num_prompt_logprobs + 1
+                )
+                in_progress_dict[req_id] = logprobs_tensors
 
             # Determine number of logits to retrieve.
-            start_tok = request.num_computed_tokens + 1
+            start_idx = request.num_computed_tokens
+            start_tok = start_idx + 1
             num_remaining_tokens = num_prompt_tokens - start_tok
-            if num_tokens < num_remaining_tokens:
+            if num_tokens <= num_remaining_tokens:
                 # This is a chunk, more tokens remain.
+                # In the == case, there are no more prompt logprobs to
+                # produce but we want to defer returning them to the next
+                # step where we have new generated tokens to return.
                 num_logits = num_tokens
             else:
                 # This is the last chunk of prompt tokens to return.
                 num_logits = num_remaining_tokens
                 completed_prefill_reqs.append(req_id)
+                prompt_logprobs_dict[req_id] = logprobs_tensors
+
+            if num_logits <= 0:
+                # This can happen for the final chunk if we prefilled
+                # exactly (num_prompt_tokens - 1) tokens for this request
+                # in the prior step.
+                continue
 
             # Get the logits corresponding to this req's prompt tokens.
-            # If this is a partial request (i.e. chunked prefill),
-            # then there is prompt logprob generated for each index.
-            prompt_hidden_states = hidden_states[i, :num_logits]
+            # HPU does one prefill at a time so the hidden states tensor
+            # has the full sequence for this request.
+            hs = prefill_hidden_states[req_id]
+            if hs.dim() == 3:
+                hs = hs.squeeze(0)  # [seq_len, hidden_dim]
+            prompt_hidden_states = hs[:num_logits]
             logits = self.model.compute_logits(prompt_hidden_states)
 
             # Get the "target" tokens for each index. For prompt at index i,
@@ -3151,22 +3197,27 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
             # Compute prompt logprobs.
             logprobs = self.sampler.compute_logprobs(logits)
-            token_ids, logprobs, ranks = self.sampler.gather_logprobs(logprobs, num_prompt_logprobs, tgt_token_ids)
+            gathered = self.sampler.gather_logprobs(
+                logprobs, num_prompt_logprobs, tgt_token_ids)
 
-            # Transfer GPU->CPU async.
-            prompt_logprobs_dict[req_id] = LogprobsTensors(
-                token_ids.to("cpu", non_blocking=True),
-                logprobs.to("cpu", non_blocking=True),
-                ranks.to("cpu", non_blocking=True),
-            )
+            # Transfer HPU->CPU async.
+            chunk_slice = slice(start_idx, start_idx + num_logits)
+            logprobs_tensors.logprob_token_ids[chunk_slice].copy_(
+                gathered.logprob_token_ids, non_blocking=True)
+            logprobs_tensors.logprobs[chunk_slice].copy_(
+                gathered.logprobs, non_blocking=True)
+            logprobs_tensors.selected_token_ranks[chunk_slice].copy_(
+                gathered.selected_token_ranks, non_blocking=True)
 
         # Remove requests that have completed prefill from the batch
         # num_prompt_logprobs_dict.
         for req_id in completed_prefill_reqs:
             del num_prompt_logprobs_dict[req_id]
+            in_progress_dict.pop(req_id, None)
 
-        # Must synchronize the non-blocking GPU->CPU transfers.
-        torch.hpu.synchronize()
+        # Must synchronize the non-blocking HPU->CPU transfers.
+        if prompt_logprobs_dict:
+            torch.hpu.synchronize()
 
         return prompt_logprobs_dict
 
@@ -3840,6 +3891,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         non_flattened_hidden_states_prefills = []
         aux_hidden_states_prefills = []
         sample_hidden_states_prefills = []
+        # Collect per-request prefill hidden states for prompt logprobs.
+        prefill_hidden_states_for_logprobs: dict[str, torch.Tensor] = {}
         decode_sampled_token_ids_device = None
         # NOTE(tianmu-li): For structured output, combine logits before
         # postprocessing. Should it be done for all requests?
@@ -3882,6 +3935,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         warmup_mode=warmup_mode)
                 htorch.core.mark_step()
                 non_flattened_hidden_states_prefills.append(non_flattened_hidden_states)
+                # Collect prefill hidden states for prompt logprobs.
+                # req_id is a list of request IDs in this prefill batch.
+                for i, rid in enumerate(req_id):
+                    if rid in self.input_batch.num_prompt_logprobs:
+                        prefill_hidden_states_for_logprobs[rid] = \
+                            non_flattened_hidden_states[i]
                 if self.use_aux_hidden_state_outputs:
                     aux_hidden_states_prefills.append(aux_hidden_states)
                 sample_hidden_states_prefills.append(sample_hidden_states)
@@ -4164,10 +4223,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         # Create output.
         all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
-        # TODO: enable prompt_logprobs by uncommenting and wiring up
-        # _get_prompt_logprobs_dict once prefill hidden states are tracked.
-        # Currently rejected at the API level via validate_request.
-        prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
+        # Compute prompt logprobs from prefill hidden states.
+        prompt_logprobs_dict = self._get_prompt_logprobs_dict(
+            prefill_hidden_states_for_logprobs, scheduler_output)
 
         # Build combined logprobs from all sampling calls.
         max_req_index = max(self.input_batch.req_id_to_index.values())
