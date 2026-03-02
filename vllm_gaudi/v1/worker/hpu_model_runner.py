@@ -736,7 +736,7 @@ def with_thread_limits():
     """
     Decorator to temporarily set OMP_NUM_THREADS and PyTorch threads,
     and restore them after the function call.
-    
+
     Args:
         div_omp: divide CPU cores by this for OMP_NUM_THREADS
         div_torch: divide CPU cores by this for torch.set_num_threads
@@ -1626,7 +1626,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def _get_model_type(self) -> Optional[str]:
         """
         Safely extract the model type from vllm_config.
-        
+
         Returns:
             The model type string if available, None otherwise.
         """
@@ -5310,7 +5310,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def warmup_multimodal_graphs(self, buckets):
 
         phase = 'Graph/Multimodal'
-        from vllm.multimodal.budget import MultiModalBudget
+        from vllm.multimodal.encoder_budget import MultiModalBudget
         self.mm_budget = MultiModalBudget(
             self.vllm_config,
             self.mm_registry,
