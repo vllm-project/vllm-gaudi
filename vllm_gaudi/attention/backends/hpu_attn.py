@@ -55,6 +55,7 @@ class HPUAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return HPUPagedAttention.get_kv_cache_shape(num_blocks, block_size, num_kv_heads, head_size)
 
@@ -74,7 +75,7 @@ class HPUAttentionBackend(AttentionBackend):
         HPUPagedAttention.copy_blocks(kv_caches, src_to_dsts)
 
 
-@register_backend(AttentionBackendEnum.CUSTOM, "HPU_MLA")
+@register_backend(AttentionBackendEnum.CUSTOM, "vllm_gaudi.attention.backends.hpu_attn.HPUMLAAttentionBackend")
 class HPUMLAAttentionBackend(HPUAttentionBackend):
 
     @staticmethod
@@ -95,11 +96,12 @@ class HPUMLAAttentionBackend(HPUAttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (num_blocks * block_size, head_size)
 
 
-@register_backend(AttentionBackendEnum.CUSTOM, "HPU_UA")
+@register_backend(AttentionBackendEnum.CUSTOM, "vllm_gaudi.attention.backends.hpu_attn.HPUUnifiedAttentionBackend")
 class HPUUnifiedAttentionBackend(HPUAttentionBackend):
 
     @staticmethod
@@ -115,7 +117,7 @@ class HPUUnifiedAttentionBackend(HPUAttentionBackend):
         return HPUUnifiedAttentionMetadata
 
 
-@register_backend(AttentionBackendEnum.CUSTOM, "HPU_UNIFIED_MLA")
+@register_backend(AttentionBackendEnum.CUSTOM, "vllm_gaudi.attention.backends.hpu_attn.HPUUnifiedMLABackend")
 class HPUUnifiedMLABackend(HPUAttentionBackend):
 
     @staticmethod
@@ -136,6 +138,7 @@ class HPUUnifiedMLABackend(HPUAttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         # MLA stores latent vectors without per-head dimension
         # Return 2D shape: [num_slots, latent_dim]
@@ -527,6 +530,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: HPUAttentionMetadata,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with PagedAttention.
 
