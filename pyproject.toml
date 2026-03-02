@@ -34,6 +34,7 @@ Homepage = "https://github.com/vllm-project/vllm-gaudi"
 
 [tool.setuptools_scm]
 # no extra settings needed, presence enables setuptools-scm
+fallback_version = "0.0.0"
 
 [tool.setuptools.packages.find]
 where = ["."]
