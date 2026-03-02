@@ -7164,18 +7164,11 @@ class HPUAttentionMetadataProcessor:
             block_mapping = torch.nn.functional.one_hot(block_groups, num_classes=batch_size)
             # On HPU, one_hot with out-of-bounds index (e.g. -1 for padding blocks)
             # may not return all-zeros, so explicitly zero out those rows.
-            # Also remap block_groups -1 → batch_size so HPU kernels
-            # (e.g. block_softmax_adjustment) receive the correct sentinel.
+            # block_groups intentionally retains -1 for padding blocks: the HPU
+            # block_softmax_adjustment kernel uses -1 as its padding sentinel and
+            # handles it correctly.  Remapping to batch_size breaks the kernel.
             oob_values = block_groups.lt(0)
             block_mapping.masked_fill_(oob_values.unsqueeze(-1), 0)
-            block_groups = block_groups.masked_fill(oob_values, batch_size)
-            if is_window_block:
-                metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata", window_block_groups=block_groups)
-            elif update_for_chunked_attention:
-                metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata",
-                                                chunked_block_groups=block_groups)
-            else:
-                metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata", block_groups=block_groups)
         else:
             # Unfortunately one_hot on CPU
             # doesn't handle out of bounds classes so we need to convert
