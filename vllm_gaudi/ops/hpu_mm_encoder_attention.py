@@ -41,16 +41,37 @@ class HpuMMEncoderAttention(MMEncoderAttention):
             HPUFusedSDPA = kernels.fsdpa()
             fsdpa_op = ModuleFusedSDPA(HPUFusedSDPA)
 
-            out = fsdpa_op(query,
-                           key,
-                           value,
-                           None,
-                           dropout_p=0.0,
-                           is_causal=False,
-                           scale=self.scale,
-                           softmax_mode="fast",
-                           recompute_mode=True,
-                           valid_sequence_lengths=None)
+            if cu_seqlens is None:
+                out = fsdpa_op(query,
+                               key,
+                               value,
+                               None,
+                               dropout_p=0.0,
+                               is_causal=False,
+                               scale=self.scale,
+                               softmax_mode="fast",
+                               recompute_mode=True,
+                               valid_sequence_lengths=None)
+            else:
+                lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+                q_chunks = torch.split(query, lens, dim=2)
+                k_chunks = torch.split(key, lens, dim=2)
+                v_chunks = torch.split(value, lens, dim=2)
+                outputs = []
+                for q_i, k_i, v_i in zip(q_chunks, k_chunks, v_chunks):
+                    output_i = fsdpa_op(q_i,
+                                        k_i,
+                                        v_i,
+                                        None,
+                                        dropout_p=0.0,
+                                        is_causal=False,
+                                        scale=self.scale,
+                                        softmax_mode="fast",
+                                        recompute_mode=True,
+                                        valid_sequence_lengths=None)
+                    outputs.append(output_i)
+                out = torch.cat(outputs, dim=2)
+                return out.transpose(1, 2)
         else:
             out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
 
