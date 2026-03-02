@@ -15,6 +15,10 @@ if TYPE_CHECKING:
     from vllm.v1.attention.selector import AttentionSelectorConfig
     from vllm.config import ModelConfig, VllmConfig
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    from vllm.inputs import PromptType, DictPrompt, TokPrompt
+    from vllm.inputs.preprocess import ProcessorInputs
+    from vllm.sampling_params import SamplingParams
+    from vllm.pooling_params import PoolingParams
 else:
     ModelConfig = None
     VllmConfig = None
@@ -193,6 +197,27 @@ class HpuPlatform(Platform):
     def supports_v1(cls, model_config: ModelConfig) -> bool:
         # V1 support on HPU is experimental
         return True
+
+    @classmethod
+    def validate_request(
+        cls,
+        prompt: "PromptType | DictPrompt | TokPrompt",
+        params: "SamplingParams | PoolingParams",
+        processed_inputs: "ProcessorInputs",
+    ) -> None:
+        """Validate request parameters for HPU platform.
+
+        Raises ValueError for unsupported features with clear messages
+        instead of letting them fail with cryptic assertion errors later.
+        """
+        from vllm.sampling_params import SamplingParams
+        if isinstance(params, SamplingParams):
+            if params.prompt_logprobs is not None:
+                raise ValueError(
+                    "prompt_logprobs is not currently supported on HPU "
+                    "(Gaudi). Please remove the prompt_logprobs parameter "
+                    "from your request."
+                )
 
     @classmethod
     def get_nixl_supported_devices(cls) -> dict[str, tuple[str, ...]]:
