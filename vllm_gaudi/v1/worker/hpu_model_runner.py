@@ -2386,7 +2386,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             padding_mask_flat = None
             query_start_loc_p = None
             blocks_caching_range = None
-            mamba_chunks_to_block_mappings = None
+            mamba_chunks_to_block_mapping = None
             seqlens_offsets_for_blocks = None
 
         query_lens = async_h2d_copy(query_lens, dtype=torch.int32)
