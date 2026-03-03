@@ -736,7 +736,7 @@ def with_thread_limits():
     """
     Decorator to temporarily set OMP_NUM_THREADS and PyTorch threads,
     and restore them after the function call.
-    
+
     Args:
         div_omp: divide CPU cores by this for OMP_NUM_THREADS
         div_torch: divide CPU cores by this for torch.set_num_threads
@@ -1626,7 +1626,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def _get_model_type(self) -> Optional[str]:
         """
         Safely extract the model type from vllm_config.
-        
+
         Returns:
             The model type string if available, None otherwise.
         """
@@ -5280,8 +5280,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.get_model().vision_bucket_manager.is_batch_based:
             batch = image_args
         else:
-            mm_options = self.model_config.get_multimodal_config().get_dummy_options(modality)
-            count = mm_options.count if mm_options and hasattr(mm_options, 'count') else count
+            mm_options = self.model_config.get_multimodal_config().get_limit_per_prompt(modality)
+            count = mm_options if mm_options else count
             batch = count
         if modality == 'image':
             mm_options = {"image": ImageDummyOptions(count=count, width=width, height=height), "video": None}
@@ -5324,13 +5324,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         is_video_warmup = (mm_config is not None and mm_config.get_limit_per_prompt("video") is not None
                            and self.mm_budget.mm_limits['video'] != 999)
         warmup_configs = {
-            "image": (0, lambda: mm_config.get_dummy_options("image")),
-            "video": (999, lambda: mm_config.get_dummy_options("video"))
+            "image": (0, lambda: mm_config.limit_per_prompt["image"]),
+            "video": (999, lambda: mm_config.limit_per_prompt["video"])
         }
         width = height = None
         warmup_lists = []
         for modality, (limit_value, get_options) in warmup_configs.items():
-            if (mm_config and mm_config.get_dummy_options(modality)
+            if (mm_config and mm_config.get_limit_per_prompt(modality)
                     and self.mm_budget.mm_limits[modality] != limit_value):
                 options = get_options()
                 width = options.width if hasattr(options, 'width') else None
@@ -5400,7 +5400,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     @torch.inference_mode()
     def _log_bucketing_config(self) -> None:
         """Log HPU bucketing configuration for TORCH_TRACE/tlparse analysis.
-        
+
         This logs the bucketing strategy and generated buckets as a JSON artifact
         that will be displayed in tlparse reports, helping debug bucketing behavior.
         """
@@ -5455,7 +5455,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     @torch.inference_mode()
     def _log_dynamo_cache_stats(self) -> None:
         """Log PyTorch Dynamo cache statistics for TORCH_TRACE/tlparse analysis.
-        
+
         This helps diagnose compilation cache issues, recompilations, and cache
         evictions that can cause performance problems during inference.
         """
