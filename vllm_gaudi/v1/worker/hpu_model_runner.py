@@ -5310,7 +5310,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def warmup_multimodal_graphs(self, buckets):
 
         phase = 'Graph/Multimodal'
-        from vllm.multimodal.budget import MultiModalBudget
+        logger.info("SHIVV DEBUG START MULTIMODAL GRAPHS DEBUG")
+        from vllm.multimodal.encoder_budget import MultiModalBudget
         self.mm_budget = MultiModalBudget(
             self.vllm_config,
             self.mm_registry,
@@ -5324,11 +5325,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         is_video_warmup = (mm_config is not None and mm_config.get_limit_per_prompt("video") is not None
                            and self.mm_budget.mm_limits['video'] != 999)
         warmup_configs = {
-            "image": (0, lambda: mm_config.limit_per_prompt["image"]),
-            "video": (999, lambda: mm_config.limit_per_prompt["video"])
+            "image": (0, lambda: mm_config.get_limit_per_prompt("image")),
+            "video": (999, lambda: mm_config.get_limit_per_prompt("video"))
         }
         width = height = None
         warmup_lists = []
+        logger.info("SHIVV DEBUG middle MULTIMODAL GRAPHS DEBUG")
         for modality, (limit_value, get_options) in warmup_configs.items():
             if (mm_config and mm_config.get_limit_per_prompt(modality)
                     and self.mm_budget.mm_limits[modality] != limit_value):
@@ -5339,10 +5341,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     warmup_lists.append((width, height))
                 break
 
+        logger.info("SHIVV DEBUG middle2 MULTIMODAL GRAPHS DEBUG")
         if not is_batch_based and len(buckets) > 0:
             patch_size = int(self.get_patch_size_from_model())
             warmup_lists = warmup_lists + \
                 vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
+        logger.info("SHIVV DEBUG middle3 MULTIMODAL GRAPHS DEBUG")
         for modality, max_items in self.mm_budget.mm_limits.items():
             if modality == 'image' and not is_image_warmup or modality == 'video' \
                 and not is_video_warmup:
@@ -5372,6 +5376,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     self.graphed_buckets.add(candidates[idx])
                 self.log_warmup_multimodal(phase, idx, len(candidates), candidates[idx] if is_batch_based else 1, 0,
                                            width, height)
+        logger.info("SHIVV DEBUG FINISHED MULTIMODAL GRAPHS DEBUG")
 
     def _maybe_profile_unified_attn(self):
         unified_cfg_str = os.environ.get('VLLM_PROFILE_UNIFIED', None)
