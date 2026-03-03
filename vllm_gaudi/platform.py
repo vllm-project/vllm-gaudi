@@ -45,7 +45,14 @@ class HpuPlatform(Platform):
         cls,
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
+        num_heads: int,  # Add this
+        **kwargs,       # Add this for future compatibility
     ) -> str:
+        if hasattr(attn_selector_config, 'kv_cache_spec') and \
+            hasattr(attn_selector_config.kv_cache_spec, '__class__') and \
+            attn_selector_config.kv_cache_spec.__class__.__name__ == 'MambaSpec':
+            logger.info("Using GDN backend for Mamba models.")
+            return "vllm_gaudi.v1.attention.backends.gdn_attn.GDNAttentionBackend"
         if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on HPU.")
         elif get_config().unified_attn:
@@ -110,6 +117,7 @@ class HpuPlatform(Platform):
         # NOTE(kzawora): default block size for Gaudi should be 128
         # smaller sizes still work, but very inefficiently
         cache_config = vllm_config.cache_config
+        logger.info(f"libin debug check update config {cache_config=}")
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 128
         if (parallel_config.distributed_executor_backend in ['mp', 'uni']

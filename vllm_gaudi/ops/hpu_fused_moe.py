@@ -59,7 +59,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
 
-        if layer.dp_size > 1 and self.use_dispatch_fn:
+        if layer.moe_parallel_config.dp_size > 1 and self.use_dispatch_fn:
             dispatch_fn = partial(dispatch_hidden_states, is_sequence_parallel=layer.is_sequence_parallel)
         else:
             dispatch_fn = None

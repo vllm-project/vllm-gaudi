@@ -433,22 +433,29 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
     if isinstance(model, HpuModelAdapter):
         model = model.model
 
-    if "GraniteMoeHybridForCausalLM" not in getattr(model.config, 'architectures', []):
+    mamba_like_arch = ["GraniteMoeHybridForCausalLM", "Qwen3_5MoeForConditionalGeneration"]
+    if not any(arch in getattr(model.config, 'architectures', []) for arch in mamba_like_arch):  
         return
-
+    mamba_like_layer = ['.mixer', '.linear_attn']
+    #import remote_pdb;remote_pdb.set_trace()
     # Iterate through all KV cache groups
     for group_idx, kv_group in enumerate(kv_cache_config.kv_cache_groups):
         # kv_group.layer_names contains strings like "model.layers.5.mixer"
         for layer_name in kv_group.layer_names:
             # Extract layer index from name (e.g., "model.layers.5.mixer" -> 5)
-            if ".mixer" in layer_name:  # Only process mamba layers
-                parts = layer_name.split('.')
-                layer_idx = int(parts[2])  # "model.layers.5.mixer" -> 5
+            if not any(pattern in layer_name for pattern in mamba_like_layer):
+                continue
+            parts = layer_name.split('.')
+            layer_idx = int(parts[-2])  # "model.layers.5.mixer" -> 5
 
-                # Access the actual layer
+            # Access the actual layer
+            if '.mixer' in layer_name:
                 layer = model.model.layers[layer_idx]
-                assert hasattr(layer, 'mamba')
                 layer.mamba.cache_group_idx = group_idx
+            elif 'linear_attn' in layer_name:
+                layer = model.language_model.model.layers[layer_idx]
+                
+            logger.info(f"libin debug set mamba kv cache group id {layer=}")
 
 
 def maybe_set_chunked_attention_layers(model_runner):
@@ -896,8 +903,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:
             self.max_encoder_len = 0
 
-        self.num_mamba_layers = self.model_config.get_num_layers_by_block_type(self.parallel_config, "mamba")
-        self.mamba_chunk_size = self.model_config.get_mamba_chunk_size() if self.num_mamba_layers > 0 else 0
+        mamba_like = ["mamba", "linear_attention"]
+        self.num_mamba_like_layers = self.model_config.get_num_layers_by_block_type(self.parallel_config, "mamba")
+        
+        self.num_mamba_like_layers = sum(  
+            self.model_config.get_num_layers_by_block_type(self.parallel_config, block_type)   
+            for block_type in mamba_like  
+        )
+        self.mamba_chunk_size = self.model_config.get_mamba_chunk_size() if self.num_mamba_like_layers > 0 else 0
         self.use_hybrid_cache = os.getenv('VLLM_USE_HYBRID_CACHE', 'false').strip().lower() in ("1", "true")
         self.use_naive_mamba_cache_sharing = os.getenv('VLLM_USE_NAIVE_MAMBA_CACHE_SHARING',
                                                        'true').strip().lower() in ("1", "true")
@@ -1041,7 +1054,129 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.is_causal = False
         assert not (self.unified_attn and not self.use_contiguous_pa), 'Unified attn requires contiguous_pa!'
         assert not (self.unified_attn and not self.use_merged_prefill), 'Unified attn requires merged_prefill!'
-
+        # Store the backend class for metadata creation  
+        self.attn_backend_cls = self.attn_backend.__class__ 
+    
+    def _create_metadata(self, is_prompt: bool, **kwargs):  
+        """  
+        Factory method to create appropriate metadata based on backend type.  
+        """  
+        # Check if using GDN backend  
+        if hasattr(self.attn_backend_cls, '__name__') and 'GDN' in self.attn_backend_cls.__name__:  
+            if is_prompt:  
+                return self._create_gdn_prefill_metadata(**kwargs)  
+            else:  
+                return self._create_gdn_decode_metadata(**kwargs)  
+          
+        # Default HPU metadata creation  
+        if is_prompt:  
+            return HPUAttentionMetadataV1.make_prefill_metadata(**kwargs)  
+        else:  
+            return HPUAttentionMetadataV1.make_decode_metadata(**kwargs)  
+      
+    def _create_gdn_prefill_metadata(self,   
+                                   seq_lens_tensor,  
+                                   context_lens_tensor,  
+                                   slot_mapping,  
+                                   block_list,  
+                                   attn_bias=None,  
+                                   **kwargs):  
+        """Create GDN metadata for prefill phase."""  
+        # Calculate GDN-specific counts  
+        num_prefills = len(seq_lens_tensor) if seq_lens_tensor is not None else 0  
+        num_prefill_tokens = seq_lens_tensor.sum().item() if seq_lens_tensor is not None else 0  
+          
+        # Check if model has mamba layers  
+        has_mamba = (hasattr(self.model, 'config') and   
+                    getattr(self.model.config, 'use_mamba', False))  
+          
+        # Create tensor fields only if needed  
+        tensor_fields = {}  
+        if has_mamba:  
+            tensor_fields.update({  
+                'has_initial_state': self._get_initial_state_tensor(),  
+                'batch_ptr': self._get_batch_ptr_tensor(),  
+                'token_chunk_offset_ptr': self._get_token_chunk_offset_ptr(),  
+            })  
+          
+        return GDNAttentionMetadata.make_gdn_prefill_metadata(  
+            num_prefills=num_prefills,  
+            num_prefill_tokens=num_prefill_tokens,  
+            num_decodes=0,  
+            num_decode_tokens=0,  
+            num_spec_decodes=0,  
+            num_spec_decode_tokens=0,  
+            num_actual_tokens=num_prefill_tokens,  
+            seq_lens_tensor=seq_lens_tensor,  
+            context_lens_tensor=context_lens_tensor,  
+            slot_mapping=slot_mapping,  
+            block_list=block_list,  
+            attn_bias=attn_bias,  
+            block_size=self.block_size,  
+            **tensor_fields  
+        )  
+      
+    def _create_gdn_decode_metadata(self,  
+                                  block_list,  
+                                  block_usage,  
+                                  block_groups,  
+                                  slot_mapping,  
+                                  window_block_list=None,  
+                                  window_block_usage=None,  
+                                  window_block_groups=None,  
+                                  **kwargs):  
+        """Create GDN metadata for decode phase."""  
+        num_decodes = len(block_usage) if block_usage is not None else 0  
+        num_decode_tokens = num_decodes  # Each decode has 1 token  
+          
+        # Check if model has mamba layers  
+        has_mamba = (hasattr(self.model, 'config') and   
+                    getattr(self.model.config, 'use_mamba', False))  
+          
+        # Create tensor fields only if needed  
+        tensor_fields = {}  
+        if has_mamba:  
+            tensor_fields.update({  
+                'has_initial_state': self._get_initial_state_tensor(),  
+                'batch_ptr': self._get_batch_ptr_tensor(),  
+                'token_chunk_offset_ptr': self._get_token_chunk_offset_ptr(),  
+            })  
+          
+        return GDNAttentionMetadata.make_gdn_decode_metadata(  
+            num_prefills=0,  
+            num_prefill_tokens=0,  
+            num_decodes=num_decodes,  
+            num_decode_tokens=num_decode_tokens,  
+            num_spec_decodes=0,  
+            num_spec_decode_tokens=0,  
+            num_actual_tokens=num_decode_tokens,  
+            block_list=block_list,  
+            block_usage=block_usage,  
+            block_groups=block_groups,  
+            window_block_list=window_block_list,  
+            window_block_usage=window_block_usage,  
+            window_block_groups=window_block_groups,  
+            slot_mapping=slot_mapping,  
+            block_size=self.block_size,  
+            **tensor_fields  
+        )  
+      
+    def _get_initial_state_tensor(self):  
+        """Get initial state tensor for mamba layers."""  
+        if hasattr(self.model, 'get_initial_state'):  
+            return self.model.get_initial_state()  
+        return None  
+      
+    def _get_batch_ptr_tensor(self):  
+        """Get batch pointer tensor for mamba layers."""  
+        # Implementation depends on your specific needs  
+        return None  
+      
+    def _get_token_chunk_offset_ptr(self):  
+        """Get token chunk offset pointer for mamba layers."""  
+        # Implementation depends on your specific needs  
+        return None
+        
     def _make_buffer(self, *size: Union[int, torch.SymInt], dtype: torch.dtype, numpy: bool = True) -> CpuGpuBuffer:
         return CpuGpuBuffer(*size, dtype=dtype, device=self.device, pin_memory=self.pin_memory, with_numpy=numpy)
 
@@ -2003,7 +2138,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             target_bs * target_seq <= self.max_num_tokens
 
     def _get_attention_group_id_for_hybrid(self):
-        if self.num_mamba_layers == 0 or len(self.kv_cache_config.kv_cache_groups) == 0:
+        if self.num_mamba_like_layers == 0 or len(self.kv_cache_config.kv_cache_groups) == 0:
             return 0
 
         for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
@@ -2171,7 +2306,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         logits_indices = pad_list(logits_indices, round_up(len(logits_indices), self.logits_rounding),
                                   itertools.repeat(-1))
 
-        if self.num_mamba_layers > 0:
+        if self.num_mamba_like_layers > 0:
             # COMPUTE query_start_loc (similar to GPU)
             # This is a cumulative sum of query lengths
             query_start_loc_p_cpu = torch.zeros(len(query_lens) + 1,
@@ -2297,18 +2432,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         context_blocks_t: Optional[torch.tensor]
         context_blocks_t = async_h2d_copy(context_blocks, dtype=torch.int32).flatten() if target_blocks > 0 else None
 
-        attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(seq_lens_tensor=query_lens,
-                                                                     context_lens_tensor=context_lens,
-                                                                     slot_mapping=token_slots,
-                                                                     block_list=context_blocks_t,
-                                                                     attn_bias=attn_bias,
-                                                                     block_size=self.block_size,
-                                                                     prep_initial_states=prep_initial_states,
-                                                                     has_initial_states_p=has_initial_states_p,
-                                                                     last_chunk_indices_p=last_chunk_indices_p,
-                                                                     state_indices_tensor=state_indices_tensor,
-                                                                     query_start_loc=query_start_loc_p,
-                                                                     padding_mask_flat=padding_mask_flat)
+        attn_metadata = attn_metadata = self._create_metadata(  
+            is_prompt=True,  
+            seq_lens_tensor=query_lens,  
+            context_lens_tensor=context_lens,  
+            slot_mapping=token_slots,  
+            block_list=context_blocks_t,  
+            attn_bias=attn_bias,  
+            block_size=self.block_size,  
+            prep_initial_states=prep_initial_states,  
+            has_initial_states_p=has_initial_states_p,  
+            last_chunk_indices_p=last_chunk_indices_p,  
+            state_indices_tensor=state_indices_tensor,  
+            query_start_loc=query_start_loc_p,  
+            padding_mask_flat=padding_mask_flat  
+        )
         return PrefillInputData(request_ids=[req_ids],
                                 prompt_lens=[query_lens],
                                 token_ids=[token_ids],
@@ -2534,7 +2672,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     block_tables_chunk, slot_mapping.tolist(),
                     padded_batch_size * num_tokens)
 
-        if self.num_mamba_layers > 0:
+        if self.num_mamba_like_layers > 0:
             all_state_indices_cpu = []
             for group_idx in range(len(self.input_batch.block_table.block_tables)):
                 block_table_cpu_tensor = self.input_batch.block_table[group_idx].get_cpu_tensor()
@@ -2614,7 +2752,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             spec_decode_metadata = None
         logits_indices_device = async_h2d_copy(logits_indices, device=self.device)
 
-        attn_metadata = HPUAttentionMetadataV1.make_decode_metadata(
+        attn_metadata = self._create_metadata(  
+            is_prompt=False,  
             block_list=block_list_device,
             block_usage=block_usage_device,
             block_groups=block_groups_device,
@@ -3369,13 +3508,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             seq_lens_tensor = async_h2d_copy([seq_num_scheduled], dtype=torch.int32)
             context_lens_tensor = async_h2d_copy([0], dtype=torch.int32)
 
-            attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
-                seq_lens_tensor=seq_lens_tensor,
-                context_lens_tensor=context_lens_tensor,
-                slot_mapping=slot_mapping,
-                block_list=None,
-                attn_bias=None,
-                block_size=self.block_size,
+            attn_metadata = self._create_metadata(  
+                is_prompt=True,  
+                seq_lens_tensor=seq_lens_tensor,  
+                context_lens_tensor=context_lens_tensor,  
+                slot_mapping=slot_mapping,  
+                block_list=context_blocks_t,  
+                attn_bias=attn_bias, 
+                block_size=self.block_size,  
             )
             attn_metadata = trim_attn_metadata(attn_metadata)
             attn_metadata = self.set_attn_bias(attn_metadata, 1, len(input_ids), self.device, self.dtype)
@@ -4518,13 +4658,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             seq_lens_tensor = torch.full((bs, ), query_len, device=device, dtype=torch.int32)
             context_lens_tensor = torch.zeros((bs, ), device=device, dtype=torch.int32)
 
-            attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
-                seq_lens_tensor=seq_lens_tensor,
-                context_lens_tensor=context_lens_tensor,
-                slot_mapping=slot_mapping,
-                block_list=None,
-                attn_bias=None,
-                block_size=self.block_size,
+            attn_metadata = self._create_metadata(  
+                is_prompt=True,  
+                seq_lens_tensor=seq_lens_tensor,  
+                context_lens_tensor=context_lens_tensor,  
+                slot_mapping=slot_mapping,  
+                block_list=None,  
+                attn_bias=None,  
+                block_size=self.block_size,  
             )
 
             with set_forward_context(attn_metadata, self.vllm_config):
@@ -4877,7 +5018,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         req_id = f'{len(requests)}'
         block_ids = [[block_id] *
                      (round_up(total_tokens_for_blocks, g.kv_cache_spec.block_size) // g.kv_cache_spec.block_size)
-                     for g in self.kv_cache_config.kv_cache_groups] if self.num_mamba_layers > 0 else [[block_id] *
+                     for g in self.kv_cache_config.kv_cache_groups] if self.num_mamba_like_layers > 0 else [[block_id] *
                                                                                                        num_blocks]
         if self.is_pooling_model:
             model = cast(VllmModelForPooling, self.get_model())
@@ -5274,7 +5415,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def warmup_multimodal_graphs(self, buckets):
 
         phase = 'Graph/Multimodal'
-        from vllm.multimodal.budget import MultiModalBudget
+        from vllm.multimodal.encoder_budget import MultiModalBudget
         self.mm_budget = MultiModalBudget(
             self.vllm_config,
             self.mm_registry,
@@ -5283,26 +5424,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         is_batch_based = vision_bucket_manager.is_batch_based
         mm_config = self.model_config.get_multimodal_config()
 
-        is_image_warmup = (mm_config is not None and mm_config.get_dummy_options("image") is not None
-                           and self.mm_budget.mm_limits['image'] != 0)
-        is_video_warmup = (mm_config is not None and mm_config.get_dummy_options("video") is not None
-                           and self.mm_budget.mm_limits['video'] != 999)
-        warmup_configs = {
-            "image": (0, lambda: mm_config.get_dummy_options("image")),
-            "video": (999, lambda: mm_config.get_dummy_options("video"))
-        }
+        is_image_warmup = (mm_config is not None and self.mm_budget.mm_limits['image'] != 0)
+        is_video_warmup = (mm_config is not None and self.mm_budget.mm_limits['video'] != 999)
+
         width = height = None
         warmup_lists = []
+        '''
         for modality, (limit_value, get_options) in warmup_configs.items():
-            if (mm_config and mm_config.get_dummy_options(modality)
-                    and self.mm_budget.mm_limits[modality] != limit_value):
+            if (is_image_warmup or is_video_warmup):
                 options = get_options()
                 width = options.width if hasattr(options, 'width') else None
                 height = options.height if hasattr(options, 'height') else None
                 if width is not None and height is not None:
                     warmup_lists.append((width, height))
                 break
-
+        '''
         if not is_batch_based and len(buckets) > 0:
             patch_size = int(self.get_patch_size_from_model())
             warmup_lists = warmup_lists + \
@@ -5392,7 +5528,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             else:
                 max_bucket = max(self.bucketing_manager.decode_buckets[-1][0],
                                  self.bucketing_manager.prompt_buckets[-1][0])
-            if not self.is_pooling_model and not self.num_mamba_layers \
+            if not self.is_pooling_model and not self.num_mamba_like_layers \
                 and max_bucket > self.input_batch.max_num_reqs:
                 input_batch_bkp = self.input_batch
                 self.input_batch = InputBatch(
@@ -5495,7 +5631,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         logger.info(msg)
         self.profiler.end()
 
-        if not (self.num_mamba_layers or self.unified_attn or self.is_pooling_model) \
+        if not (self.num_mamba_like_layers or self.unified_attn or self.is_pooling_model) \
              and max_bucket > self.input_batch.max_num_reqs:
             self.input_batch = input_batch_bkp
         # NOTE(kzawora): This is a nasty workaround - for whatever cache_utils-related reason,
@@ -5710,7 +5846,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.is_encoder_only_attn = False
         self.may_add_encoder_only_layers_to_kv_cache_config()
 
-        if self.num_mamba_layers > 0:
+        if self.num_mamba_like_layers > 0:
             maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
         # if len(kv_cache_config.kv_cache_groups) > 1:
         block_sizes = [kv_cache_group.kv_cache_spec.block_size for kv_cache_group in kv_cache_config.kv_cache_groups]
@@ -5743,7 +5879,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         kv_caches: dict[str, torch.Tensor] = {}
         num_blocks = 0
-        if self.use_hybrid_cache and self.num_mamba_layers > 0:
+        if self.use_hybrid_cache and self.num_mamba_like_layers > 0:
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
                 # taking into account dummy block
                 size = (kv_cache_tensor.size + kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes)
@@ -5761,7 +5897,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     num_blocks = \
                         kv_cache_tensor_size // kv_cache_spec.page_size_bytes
                     if isinstance(kv_cache_spec, FullAttentionSpec):
-                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
+                        selected_kernel_size = 128 #TODO:
+                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, selected_kernel_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
                         # here attn does not share kv cache tensor, so we create separate tensors
@@ -5792,7 +5929,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         kv_caches[layer_name] = tuple(state_tensors)
                     else:
                         pass
-        elif self.use_naive_mamba_cache_sharing and self.num_mamba_layers > 0:
+        elif self.use_naive_mamba_cache_sharing and self.num_mamba_like_layers > 0:
             for group in kv_cache_config.kv_cache_groups:
                 kv_cache_spec = group.kv_cache_spec
                 for layer_name in group.layer_names:

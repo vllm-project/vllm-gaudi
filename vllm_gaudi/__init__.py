@@ -5,6 +5,8 @@ from vllm_gaudi.platform import HpuPlatform
 def register():
     """Register the HPU platform."""
     HpuPlatform.set_torch_compile()
+    #platform_cls = "vllm_gaudi.gaudi_platform.GaudiPlatform"
+    #from vllm_gaudi.ops.hpu_gated_deltanet import HPUQwen3NextGatedDeltaNet
     return "vllm_gaudi.platform.HpuPlatform"
 
 
@@ -24,6 +26,8 @@ def register_ops():
     import vllm_gaudi.v1.kv_offload.worker.cpu_hpu  # noqa: F401
     import vllm_gaudi.ops.hpu_attention  # noqa: F401
     import vllm_gaudi.ops.hpu_fused_moe  # noqa: F401
+    import vllm_gaudi.ops.hpu_gated_deltanet   # noqa: F401
+    #import vllm_gaudi.ops.hpu_gdn_attention_core  # noqa: F401
     import vllm_gaudi.ops.hpu_grouped_topk_router  # noqa: F401
     import vllm_gaudi.ops.hpu_layernorm  # noqa: F401
     import vllm_gaudi.ops.hpu_lora  # noqa: F401

@@ -15,9 +15,9 @@ from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.utils import has_quant_config
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
 
-from vllm.model_executor.layers.quantization.kernels import scaled_mm
+from vllm.model_executor.kernels.linear import scaled_mm, _POSSIBLE_FP8_KERNELS
 from vllm.platforms import PlatformEnum
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.pytorch import (
+from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
     PerTensorTorchFP8ScaledMMLinearKernel,
     ChannelWiseTorchFP8ScaledMMLinearKernel,
 )
@@ -37,8 +37,8 @@ class HPUChannelWiseTorchFP8ScaledMMLinearKernel(ChannelWiseTorchFP8ScaledMMLine
         return True, None
 
 
-if PlatformEnum.OOT not in scaled_mm._POSSIBLE_FP8_KERNELS:
-    scaled_mm._POSSIBLE_FP8_KERNELS[PlatformEnum.OOT] = [
+if PlatformEnum.OOT not in _POSSIBLE_FP8_KERNELS:
+    _POSSIBLE_FP8_KERNELS[PlatformEnum.OOT] = [
         HPUPerTensorTorchFP8ScaledMMLinearKernel,
         HPUChannelWiseTorchFP8ScaledMMLinearKernel,
     ]
@@ -152,7 +152,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         ep_shift = layer.ep_rank * num_experts
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
-        if layer.dp_size > 1 and self.use_dispatch_fn:
+        if layer.moe_parallel_config.dp_size > 1 and self.use_dispatch_fn:
             dispatch_fn = partial(dispatch_hidden_states, is_sequence_parallel=layer.is_sequence_parallel)
         else:
             dispatch_fn = None
