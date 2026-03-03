@@ -6,6 +6,7 @@ from copy import deepcopy
 import functools
 from functools import partial, wraps
 import itertools
+import json
 import math
 import os
 import sys
@@ -4318,6 +4319,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # shapes on tensors added to module via register_buffer()
             torch._dynamo.config.force_parameter_static_shapes = False
             self.compile_config = HPUCompileConfig()
+
+            # Log HPU compilation configuration for TORCH_TRACE/tlparse
+            self.compile_config.log_hpu_compile_config(model_name=self.model_config.model)
+
+            # Initialize regional compilation counter
+            self._compiled_regions_count = 0
+
             if self.compile_config.regional_compilation:
                 self._compile_methods()
                 self.regional_compilation_layers_list = [RMSNorm, VocabParallelEmbedding]
@@ -4357,7 +4365,35 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             for children_name, children_module in module.named_children():
                 self._regional_compilation(children_module, module, children_name)
 
+    def _log_regional_compile_start(self, name: str, module, model):
+        """Log regional compilation start for TORCH_TRACE/tlparse"""
+
+        if not os.getenv("TORCH_TRACE"):
+            return
+        try:
+            from torch._logging._internal import trace_structured
+
+            self._compiled_regions_count += 1
+
+            trace_structured("artifact",
+                             metadata_fn=lambda: {
+                                 "name": "hpu_regional_compile_start",
+                                 "encoding": "json",
+                             },
+                             payload_fn=lambda: json.dumps({
+                                 "region_name": name,
+                                 "module_type": type(module).__name__,
+                                 "parent_module": type(model).__name__,
+                                 "compiled_regions": self._compiled_regions_count,
+                             }))
+        except (ImportError, Exception):
+            # If trace_structured not available or fails, silently skip
+            pass
+
     def _compile_region(self, model, name, module):
+        # Log regional compilation start for TORCH_TRACE/tlparse
+        self._log_regional_compile_start(name, module, model)
+
         module = self._compile(module)
         setattr_nested(model, name, module)
 
@@ -5362,6 +5398,106 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             raise AssertionError(msg)
 
     @torch.inference_mode()
+    def _log_bucketing_config(self) -> None:
+        """Log HPU bucketing configuration for TORCH_TRACE/tlparse analysis.
+        
+        This logs the bucketing strategy and generated buckets as a JSON artifact
+        that will be displayed in tlparse reports, helping debug bucketing behavior.
+        """
+        if not os.getenv("TORCH_TRACE"):
+            return
+
+        from torch._logging._internal import trace_structured
+
+        bucketing_data = {
+            "unified_attn": self.unified_attn,
+            "enable_bucketing": self.enable_bucketing,
+            "is_pooling_model": self.is_pooling_model,
+        }
+
+        if self.unified_attn:
+            bucketing_data["unified_buckets"] = [{
+                "batch_size": b[0],
+                "prompt_len": b[1],
+                "decode_len": b[2]
+            } for b in self.bucketing_manager.unified_buckets]
+            bucketing_data["num_unified_buckets"] = len(self.bucketing_manager.unified_buckets)
+        else:
+            bucketing_data["prompt_buckets"] = [{
+                "batch_size": b[0],
+                "prompt_len": b[1],
+                "decode_len": b[2]
+            } for b in self.bucketing_manager.prompt_buckets]
+            bucketing_data["num_prompt_buckets"] = len(self.bucketing_manager.prompt_buckets)
+
+            if not self.is_pooling_model:
+                bucketing_data["decode_buckets"] = [{
+                    "batch_size": b[0],
+                    "prompt_len": b[1],
+                    "decode_len": b[2]
+                } for b in self.bucketing_manager.decode_buckets]
+                bucketing_data["num_decode_buckets"] = len(self.bucketing_manager.decode_buckets)
+
+        # Add multimodal buckets if available
+        if self.supports_mm_inputs and hasattr(self.get_model(), 'vision_bucket_manager'):
+            vision_mgr = self.get_model().vision_bucket_manager
+            if hasattr(vision_mgr, 'multimodal_buckets'):
+                bucketing_data["multimodal_buckets"] = list(vision_mgr.multimodal_buckets)
+                bucketing_data["num_multimodal_buckets"] = len(vision_mgr.multimodal_buckets)
+
+        trace_structured("artifact",
+                         metadata_fn=lambda: {
+                             "name": "hpu_bucketing_config",
+                             "encoding": "json",
+                         },
+                         payload_fn=lambda: json.dumps(bucketing_data, indent=2))
+
+    @torch.inference_mode()
+    def _log_dynamo_cache_stats(self) -> None:
+        """Log PyTorch Dynamo cache statistics for TORCH_TRACE/tlparse analysis.
+        
+        This helps diagnose compilation cache issues, recompilations, and cache
+        evictions that can cause performance problems during inference.
+        """
+        if not os.getenv("TORCH_TRACE"):
+            return
+
+        try:
+            import torch._dynamo.config as dynamo_config
+            from torch._dynamo.utils import counters
+            from torch._logging._internal import trace_structured
+
+            cache_stats = {
+                "dynamo_cache_size_limit": dynamo_config.cache_size_limit,
+            }
+
+            # Add recompilation limits (always included for diagnostics)
+            cache_stats["accumulated_recompile_limit"] = dynamo_config.accumulated_recompile_limit
+            cache_stats["recompile_limit"] = dynamo_config.recompile_limit
+
+            # Track actual compilations from Dynamo counters
+            # Note: counters["stats"]["unique_graphs"] counts all compilations including recompilations
+            total_compilations = counters["stats"].get("unique_graphs", 0)
+            cache_stats["total_compilations"] = total_compilations
+
+            # Calculate cache evictions (compilations that exceeded cache capacity during warmup)
+            cache_stats["dynamo_cache_evictions"] = max(0, total_compilations - cache_stats["dynamo_cache_size_limit"])
+
+            # Cache utilization percentage based on actual compilations
+            cache_stats["dynamo_cache_utilization_percentage"] = round(
+                (total_compilations / cache_stats["dynamo_cache_size_limit"]) *
+                100, 2) if cache_stats["dynamo_cache_size_limit"] > 0 else 0
+
+            trace_structured("artifact",
+                             metadata_fn=lambda: {
+                                 "name": "hpu_dynamo_cache_stats",
+                                 "encoding": "json",
+                             },
+                             payload_fn=lambda: json.dumps(cache_stats, indent=2))
+        except (ImportError, AttributeError, Exception):
+            # If we can't get cache stats, log a warning but don't fail
+            logger.warning("Could not log Dynamo cache stats.")
+
     def warmup_model(self) -> None:
         if not self.enable_bucketing:
             return
@@ -5374,6 +5510,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self.get_model().vision_bucket_manager = HPUVisionBucketManager(get_config().model_type)
                 msg = (f"Multimodal bucket : {self.get_model().vision_bucket_manager.multimodal_buckets}")
                 logger.info(msg)
+
+            # Log unified bucketing configuration
+            self._log_bucketing_config()
         else:
             self.bucketing_manager.generate_prompt_buckets()
             if not self.is_pooling_model:
@@ -5387,6 +5526,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self.get_model().vision_bucket_manager = HPUVisionBucketManager(get_config().model_type)
                 msg = (f"Multimodal bucket : {self.get_model().vision_bucket_manager.multimodal_buckets}")
                 logger.info(msg)
+
+            # Log prompt/decode bucketing configuration
+            self._log_bucketing_config()
             if self.is_pooling_model:
                 max_bucket = self.bucketing_manager.prompt_buckets[-1][0]
             else:
@@ -5493,6 +5635,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         msg = (f"Warmup finished in {elapsed_time:.0f} secs, "
                f"allocated {format_bytes(end_mem - start_mem)} of device memory")
         logger.info(msg)
+
+        # Log Dynamo cache statistics for debugging cache issues
+        self._log_dynamo_cache_stats()
+
+        from .vllm_marker import emit_vllm_chrome_event
+        emit_vllm_chrome_event("Warmup End")
         self.profiler.end()
 
         if not (self.num_mamba_layers or self.unified_attn or self.is_pooling_model) \
