@@ -4339,7 +4339,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         Compile methods which are not part of the compiled model i.e. those
         which will not be compiled during model's compilation.
         """
-        compiled_methods = ['metadata_processor.process_metadata', '_rotary_prepare_cos_sin']
+        compiled_methods = [
+            'metadata_processor.process_metadata',
+            '_rotary_prepare_cos_sin',
+            'compute_logits',
+        ]
         for method_name in compiled_methods:
             method = getattr_nested(self.model, method_name, None)
             if method is not None:
@@ -5330,7 +5334,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def warmup_multimodal_graphs(self, buckets):
 
         phase = 'Graph/Multimodal'
-        from vllm.multimodal.budget import MultiModalBudget
+        from vllm.multimodal.encoder_budget import MultiModalBudget
         self.mm_budget = MultiModalBudget(
             self.vllm_config,
             self.mm_registry,
