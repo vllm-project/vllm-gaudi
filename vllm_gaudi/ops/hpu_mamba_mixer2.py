@@ -334,15 +334,15 @@ class HPUMambaMixer2(MambaMixer2):
     # ------------------------------------------------------------------
     def _init_split_weights(self):
         gate_size = self.tped_intermediate_size
-        w = self.in_proj.weight.data  # [total_out, hidden_size]
+        w = self.in_proj.weight  # [total_out, hidden_size]
         b = self.in_proj.bias  # [total_out] or None
 
         self._states_weight = w[gate_size:].clone()  # [states_out, hidden]
         self._gate_weight = w[:gate_size].clone()  # [gate_out, hidden]
 
         if b is not None:
-            self._states_bias = b.data[gate_size:].clone()
-            self._gate_bias = b.data[:gate_size].clone()
+            self._states_bias = b[gate_size:].clone()
+            self._gate_bias = b[:gate_size].clone()
         else:
             self._states_bias = None
             self._gate_bias = None
