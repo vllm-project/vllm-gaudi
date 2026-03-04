@@ -69,7 +69,8 @@ def test_calc_KV_CACHE_PER_SEQ():
         'HIDDEN_SIZE': 4,
         'NUM_KEY_VALUE_HEADS': 2,
         'CACHE_DTYPE_BYTES': 2,
-        'NUM_ATTENTION_HEADS': 2
+        'NUM_ATTENTION_HEADS': 2,
+        'HEAD_DIM': math.nan
     }
     expected = ((2 * 128 * 2 * 4 * 2 * 2) / 2) / (1024 * 1024 * 1024)
     assert rules.calc_KV_CACHE_PER_SEQ(ctx) == expected
@@ -160,8 +161,8 @@ def test_calc_PROMPT_BS_STEP_GRAPHS(exp):
 @pytest.mark.parametrize("exp", [True, False])
 def test_calc_PROMPT_SEQ_RAMP_GRAPHS(exp):
     ctx = {
-        'VLLM_PROMPT_SEQ_BUCKET_STEP': 16,
-        'VLLM_PROMPT_SEQ_BUCKET_MIN': 2,
+        'VLLM_PROMPT_QUERY_BUCKET_STEP': 16,
+        'VLLM_PROMPT_QUERY_BUCKET_MIN': 2,
         'MAX_NUM_BATCHED_TOKENS': 32,
         'VLLM_EXPONENTIAL_BUCKETING': exp
     }
@@ -174,7 +175,7 @@ def test_calc_PROMPT_SEQ_STEP_GRAPHS(exp):
     ctx = {
         'MAX_NUM_BATCHED_TOKENS': 32,
         'MAX_MODEL_LEN': 64,
-        'VLLM_PROMPT_SEQ_BUCKET_STEP': 8,
+        'VLLM_PROMPT_QUERY_BUCKET_STEP': 8,
         'VLLM_EXPONENTIAL_BUCKETING': exp
     }
     expected = 0 if exp else int(1 + (32 - 8) / 8)
@@ -190,7 +191,7 @@ def test_calc_EST_NUM_PROMPT_GRAPHS(exp):
         'PROMPT_SEQ_STEP_GRAPHS': 5 if not exp else 0,
         'MAX_NUM_BATCHED_TOKENS': 2048,
         'MAX_MODEL_LEN': 4352,
-        'VLLM_PROMPT_SEQ_BUCKET_MIN': 128,
+        'VLLM_PROMPT_QUERY_BUCKET_MIN': 128,
         'VLLM_PROMPT_CTX_BUCKET_STEP': 1,
         'BLOCK_SIZE': 128,
         'VLLM_EXPONENTIAL_BUCKETING': exp
@@ -199,26 +200,30 @@ def test_calc_EST_NUM_PROMPT_GRAPHS(exp):
     assert rules.calc_EST_NUM_PROMPT_GRAPHS(ctx) == expected
 
 
-def test_calc_EST_GRAPH_PROMPT_RATIO():
-    ctx = {'EST_NUM_PROMPT_GRAPHS': 10, 'NUM_DECODE_GRAPHS': 30, 'APPROX_MEM_PER_GRAPH_MB': 10}
-    expected = math.ceil(10 / (10 + 30) * 100) / 100
+@pytest.mark.parametrize("exp", [True, False])
+def test_calc_EST_GRAPH_PROMPT_RATIO(exp):
+    ctx = {
+        'EST_NUM_PROMPT_GRAPHS': 10,
+        'NUM_DECODE_GRAPHS': 30,
+        'APPROX_MEM_PER_GRAPH_MB': 10,
+        'MAX_MODEL_LEN': 8448,
+        'VLLM_EXPONENTIAL_BUCKETING': exp
+    }
+
+    est_decode_graph_mem = 30 * 10
+    est_prompt_graph_mem = 10 * 10 if exp else 10 * 10 * pow(max(1, 8448 / 4352), 0.8552)
+    expected = est_prompt_graph_mem / (est_prompt_graph_mem + est_decode_graph_mem)
     assert rules.calc_EST_GRAPH_PROMPT_RATIO(ctx) == expected
 
 
-def test_calc_VLLM_GRAPH_PROMPT_RATIO():
-    ctx = {'EST_GRAPH_PROMPT_RATIO': 0.5}
-    expected = math.ceil(min(max(0.5, 0.1), 0.9) * 10) / 10
-    assert rules.calc_VLLM_GRAPH_PROMPT_RATIO(ctx) == expected
-
-
 def test_calc_DECODE_GRAPH_TARGET_GB():
-    ctx = {'NUM_DECODE_GRAPHS': 10, 'APPROX_MEM_PER_GRAPH_MB': 512}
-    expected = math.ceil(10 * 512 / 1024 * 10) / 10
+    ctx = {'NUM_DECODE_GRAPHS': 50, 'APPROX_MEM_PER_GRAPH_MB': 12}
+    expected = math.ceil(50 * 12 / 1024 * 100) / 100
     assert rules.calc_DECODE_GRAPH_TARGET_GB(ctx) == expected
 
 
 def test_calc_EST_GRAPH_RESERVE_MEM():
-    ctx = {'DECODE_GRAPH_TARGET_GB': 5, 'USABLE_MEM': 10, 'GPU_MEM_UTILIZATION': 0.8, 'VLLM_GRAPH_PROMPT_RATIO': 0.2}
+    ctx = {'DECODE_GRAPH_TARGET_GB': 5, 'USABLE_MEM': 10, 'GPU_MEM_UTILIZATION': 0.8, 'EST_GRAPH_PROMPT_RATIO': 0.2}
     expected = math.ceil(5 / (10 * 0.8 * (1 - 0.2)) * 100) / 100
     assert rules.calc_EST_GRAPH_RESERVE_MEM(ctx) == expected
 
@@ -239,8 +244,3 @@ def test_calc_VLLM_DECODE_BLOCK_BUCKET_MAX():
     ctx = {'MAX_NUM_SEQS': 16, 'MAX_MODEL_LEN': 128}
     expected = max(128, math.ceil((16 * 128) / 128))
     assert rules.calc_VLLM_DECODE_BLOCK_BUCKET_MAX(ctx) == expected
-
-
-def test_calc_VLLM_PROMPT_SEQ_BUCKET_MAX():
-    ctx = {'MAX_MODEL_LEN': 4096}
-    assert rules.calc_VLLM_PROMPT_SEQ_BUCKET_MAX(ctx) == 4096
