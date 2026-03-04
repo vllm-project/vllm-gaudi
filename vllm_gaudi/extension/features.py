@@ -17,22 +17,33 @@ def get_user_flags():
         Env('VLLM_PROMPT_BS_BUCKET_MIN', int),
         Env('VLLM_PROMPT_BS_BUCKET_STEP', int),
         Env('VLLM_PROMPT_BS_BUCKET_MAX', int),
+        Env('VLLM_PROMPT_BS_BUCKET_PAD_MAX', int),
+        Env('VLLM_PROMPT_BS_BUCKET_PAD_PERCENT', int),
         Env('VLLM_PROMPT_QUERY_BUCKET_MIN', int),
         Env('VLLM_PROMPT_QUERY_BUCKET_STEP', int),
         Env('VLLM_PROMPT_QUERY_BUCKET_MAX', int),
+        Env('VLLM_PROMPT_QUERY_BUCKET_PAD_MAX', int),
+        Env('VLLM_PROMPT_QUERY_BUCKET_PAD_PERCENT', int),
         Env('VLLM_PROMPT_SEQ_BUCKET_MIN', int),
         Env('VLLM_PROMPT_SEQ_BUCKET_STEP', int),
         Env('VLLM_PROMPT_SEQ_BUCKET_MAX', int),
+        Env('VLLM_PROMPT_SEQ_BUCKET_PAD_MAX', int),
+        Env('VLLM_PROMPT_SEQ_BUCKET_PAD_PERCENT', int),
         Env('VLLM_PROMPT_CTX_BUCKET_MIN', int),
         Env('VLLM_PROMPT_CTX_BUCKET_STEP', int),
         Env('VLLM_PROMPT_CTX_BUCKET_MAX', int),
+        Env('VLLM_PROMPT_CTX_BUCKET_PAD_MAX', int),
+        Env('VLLM_PROMPT_CTX_BUCKET_PAD_PERCENT', int),
         Env('VLLM_DECODE_BS_BUCKET_MIN', int),
         Env('VLLM_DECODE_BS_BUCKET_STEP', int),
         Env('VLLM_DECODE_BS_BUCKET_MAX', int),
+        Env('VLLM_DECODE_BS_BUCKET_PAD_MAX', int),
+        Env('VLLM_DECODE_BS_BUCKET_PAD_PERCENT', int),
         Env('VLLM_DECODE_BLOCK_BUCKET_MIN', int),
         Env('VLLM_DECODE_BLOCK_BUCKET_STEP', int),
         Env('VLLM_DECODE_BLOCK_BUCKET_MAX', int),
-        Env('VLLM_DECODE_BLOCK_BUCKET_LIMIT', int),
+        Env('VLLM_DECODE_BLOCK_BUCKET_PAD_MAX', int),
+        Env('VLLM_DECODE_BLOCK_BUCKET_PAD_PERCENT', int),
         Env('VLLM_BUCKETING_FROM_FILE', str),
 
         # Non-vllm flags that are also important to print
@@ -78,7 +89,7 @@ def unified_attn_dev_flags():
 
 def get_features():
     supported_attn_impls = ['flex_impl', 'fsdpa_impl', 'naive_impl']
-    bucketing_strategies = ['exponential_bucketing', 'linear_bucketing']
+    bucketing_strategies = ['linear_bucketing', 'exponential_bucketing']
     features = [
         Value('fp32_alibi_biases', True, env_var='VLLM_ALIBI_USE_FLOAT32_BIASES'),
         Value('fp32_softmax', Any(ModelType('qwen2'), All(ModelType('qwen2_5_vl'), Not(Enabled('unified_attn'))))),
@@ -97,8 +108,8 @@ def get_features():
               Any(Disabled('prefix_caching'), Enabled('unified_attn')),
               env_var='VLLM_CONTIGUOUS_PA'),
         Value('use_bucketing', True, env_var='VLLM_ENABLE_BUCKETING'),
-        Value('exponential_bucketing', True),
-        Value('linear_bucketing', True),
+        Value('exponential_bucketing', False, env_var='VLLM_EXPONENTIAL_BUCKETING', env_var_type=boolean),
+        Value('linear_bucketing', Not(Enabled('exponential_bucketing'))),
         ValueFromList('bucketing_strategy', bucketing_strategies),
         Value('defrag', Enabled('unified_attn')),
         Value('regional_compilation', True, env_var='VLLM_T_COMPILE_REGIONAL_COMPILATION', env_var_type=boolean),
