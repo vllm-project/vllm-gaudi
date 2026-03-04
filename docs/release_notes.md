@@ -6,6 +6,13 @@ This document provides an overview of the features, changes, and fixes introduce
 
 This version is based on [vLLM 0.16.0](https://github.com/vllm-project/vllm/releases/tag/v0.16.0) with support for [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
 
+Highlights:
+
+- **New Model Support** — Added support for **MiniMax-M2** (#964), **Hunyuan V1** (Dense & MoE bf16/FP8) (#875), and **Mistral-Large-3-675B** (#871). Expanded Vision/OCR model support with **DeepSeek OCR** (#954), **Ovis** (#846), **DotsOCR**, and **SeedOSS** (#977).
+- **Containerization & Deployment** — Introduced UBI (Universal Base Image) Dockerfiles and build instructions to streamline enterprise deployments (#713, #971).
+- **GPT-OSS Integration** — Added integration and support for GPT-OSS workloads (#887, #970).
+- **Quantization Enhancements** — Added `maxabs_pcs_pow2` scaling method configuration for dynamic quantization (#949).
+
 ## 0.15.1
 
 This version is based on [vLLM 0.15.1](https://github.com/vllm-project/vllm/releases/tag/v0.15.1) with support for [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).

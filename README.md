@@ -14,7 +14,11 @@ vLLM Hardware Plugin for Intel® Gaudi®
 
 ---
 *Latest News* 🔥
-- [2026/03] Version 0.16.0 is now available, built on [vLLM 0.16.0](https://github.com/vllm-project/vllm/releases/tag/v0.16.0) and fully compatible with [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
+- [2026/03] Version 0.16.0 is now available, built on [vLLM 0.16.0](https://github.com/vllm-project/vllm/releases/tag/v0.16.0) and fully compatible with [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html), highlights:
+  - **New Model Support** — Added support for **MiniMax-M2** (#964), **Hunyuan V1** (Dense & MoE bf16/FP8) (#875), and **Mistral-Large-3-675B** (#871). Expanded Vision/OCR model support with **DeepSeek OCR** (#954), **Ovis** (#846), **DotsOCR**, and **SeedOSS** (#977).
+  - **Containerization & Deployment** — Introduced UBI (Universal Base Image) Dockerfiles and build instructions to streamline enterprise deployments (#713, #971).
+  - **GPT-OSS Integration** — Added integration and support for GPT-OSS workloads (#887, #970).
+quantization (#949).
 - [2026/02] Version 0.15.1 is now available, built on [vLLM 0.15.1](https://github.com/vllm-project/vllm/releases/tag/v0.15.1) and fully compatible with [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html), highlights:
   - **New Model Support** — Added validated support for **Granite 4.0-h** and **Qwen3-VL** (dense and MoE variants) on Intel Gaudi 3, plus significant **Llama 4** stability fixes.
   - **Mamba / SSM Architecture Support** — HPU ops for Mamba mixer2, causal conv1d, and SSD combined kernels enabling hybrid SSM-Transformer models like Granite 4.0-h (#886, #897).
