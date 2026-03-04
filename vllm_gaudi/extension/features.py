@@ -55,6 +55,11 @@ def get_user_flags():
         Env('PT_HPU_SDPA_QKV_SLICE_MODE_FWD', boolean),
         Env('PT_HPU_SDPA_BC_FACTOR', int),
         Env('VLLM_FUSEDSDPA_SLIDE_THLD', int),
+
+        # FusedSDPA slicing flags
+        Env('VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD', int),
+        Env('VLLM_HPU_FSDPA_SLICE_CHUNK_SIZE', int),
+        Env('VLLM_HPU_FSDPA_SLICE_WITH_GRAPH_BREAKS', boolean),
     ]
     return to_dict(flags)
 
