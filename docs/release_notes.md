@@ -10,6 +10,17 @@ This version is based on [vLLM 0.16.0](https://github.com/vllm-project/vllm/rele
 
 This version is based on [vLLM 0.15.1](https://github.com/vllm-project/vllm/releases/tag/v0.15.1) with support for [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
 
+Highlights:
+
+- **New Model Support** — Added validated support for **Granite 4.0-h** and **Qwen3-VL** (dense and MoE variants) on Intel Gaudi 3, plus significant **Llama 4** stability fixes.
+- **Chunked Attention** — Full chunked prefill attention support for HPU, enabling better memory utilization on long sequences (#821).
+- **FlashAttention Online Merge** — Integrated FlashAttention online merge in Unified Attention for improved prefill performance (#785).
+- **KV Cache Sharing** — Added KV cache sharing support for HPU, enabling more efficient multi-query scenarios (#834).
+- **ModelOpt FP8 Quantization** — New support for NVIDIA ModelOpt FP8 quantization format for dense models (#890).
+- **Mamba / SSM Architecture Support** — HPU ops for Mamba mixer2, causal conv1d, and SSD combined kernels enabling hybrid SSM-Transformer models like Granite 4.0-h (#886, #897).
+- **Back-to-Back MatMul** — Added b2b matmul operation for improved MLA (Multi-Latent Attention) performance (#770).
+- **Heterogeneous KV Layout** — Prefill-side KV layout and block size support for heterogeneous (disaggregated) inference via NIXL (#867).
+
 ## 0.14.1
 
 This version is based on [vLLM 0.14.1](https://github.com/vllm-project/vllm/releases/tag/v0.14.1) with support for [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html), and introduces support for the following models on Gaudi 3:
