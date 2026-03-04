@@ -6693,7 +6693,7 @@ class HPUAttentionMetadataProcessor:
             mask = torch.triu(mask, diagonal=shift - window_size + 1)
             attn_bias = torch.log(mask)
 
-        attn_metadata = prefill_metadata._replace(window_attn_bias=attn_bias)
+        attn_metadata = custom_tuple_replace(prefill_metadata, "TrimmedAttentionMetadata", window_attn_bias=attn_bias)
         return attn_metadata
 
     def _set_attn_bias_for_chunked_attention(self, attn_metadata: HPUAttentionMetadataV1, batch_size: int, seq_len: int,
