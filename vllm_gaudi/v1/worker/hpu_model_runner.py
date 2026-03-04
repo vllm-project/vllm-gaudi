@@ -5281,9 +5281,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             batch = image_args
         else:
             mm_options = self.model_config.get_multimodal_config().get_limit_per_prompt(modality)
-            logger.info(f"_get_mm_dummy_batch SHIV debug {mm_options=}")
             count = mm_options.count if mm_options and hasattr(mm_options, 'count') else count
-            logger.info(f"_get_mm_dummy_batch SHIV debug {modality=} {count=}")
             batch = count
         if modality == 'image':
             mm_options = {"image": ImageDummyOptions(count=count, width=width, height=height), "video": None}
@@ -5296,10 +5294,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:
             raise NotImplementedError(f"Modality '{modality}' is not supported")
 
-        #logger.info(f"_get_mm_dummy_batch before get_dummy_mm_inputs SHIV debug {mm_options=}")
         dummy_mm_inputs = MultiModalRegistry().get_dummy_mm_inputs(self.model_config_copy, mm_counts={modality: count})
 
-        logger.info(f"_get_mm_dummy_batch after get_dummy_mm_inputs SHIV debug {dummy_mm_inputs=}")
         dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
         # We use the cache so that the item is saved to the cache,
         # but not read from the cache
@@ -5314,7 +5310,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def warmup_multimodal_graphs(self, buckets):
 
         phase = 'Graph/Multimodal'
-        logger.info("SHIVV DEBUG START MULTIMODAL GRAPHS DEBUG")
         from vllm.multimodal.encoder_budget import MultiModalBudget
         self.mm_budget = MultiModalBudget(
             self.vllm_config,
@@ -5328,15 +5323,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                            and self.mm_budget.mm_limits['image'] != 0)
         is_video_warmup = (mm_config is not None and mm_config.get_limit_per_prompt("video") is not None
                            and self.mm_budget.mm_limits['video'] != 999)
-        logger.info(f"SHIV dummy debug {mm_config.get_limit_per_prompt("image")=}")
-        logger.info(f"SHIV dummy debug {mm_config.get_limit_per_prompt("video")=}")
         warmup_configs = {
             "image": (0, lambda: mm_config.get_limit_per_prompt("image")),
             "video": (999, lambda: mm_config.get_limit_per_prompt("video"))
         }
         width = height = None
         warmup_lists = []
-        logger.info("SHIVV DEBUG middle MULTIMODAL GRAPHS DEBUG")
         for modality, (limit_value, get_options) in warmup_configs.items():
             if (mm_config and mm_config.get_limit_per_prompt(modality)
                     and self.mm_budget.mm_limits[modality] != limit_value):
@@ -5347,21 +5339,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     warmup_lists.append((width, height))
                 break
 
-        logger.info("SHIVV DEBUG middle2 MULTIMODAL GRAPHS DEBUG")
         if not is_batch_based and len(buckets) > 0:
             patch_size = int(self.get_patch_size_from_model())
             warmup_lists = warmup_lists + \
                 vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
-        logger.info("SHIVV DEBUG middle3 MULTIMODAL GRAPHS DEBUG")
         for modality, max_items in self.mm_budget.mm_limits.items():
-            logger.info(f"SHIVV DEBUG {modality=} {max_items=} MULTIMODAL GRAPHS DEBUG")
             if modality == 'image' and not is_image_warmup or modality == 'video' \
                 and not is_video_warmup:
                 continue
             phase = f'Graph/Multimodal({modality})'
             candidates = buckets if is_batch_based else warmup_lists
             for idx in range(len(candidates)):
-                logger.info(f"SHIVV DEBUG {idx=} MULTIMODAL GRAPHS DEBUG")
                 if is_batch_based:
                     image_args = candidates[idx]
                     width = 896  # pixels as in gemma3 config
@@ -5369,26 +5357,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 else:
                     image_args = None
                     width, height = candidates[idx]
-                logger.info(f"SHIVV DEBUG {image_args=} {width=} {height=} MULTIMODAL GRAPHS DEBUG")
                 batched_dummy_mm_inputs = self._get_mm_dummy_batch(modality,
                                                                    image_args=image_args,
                                                                    width=width,
                                                                    height=height)
-                logger.info(f"SHIVV DEBUG {batched_dummy_mm_inputs=} MULTIMODAL GRAPHS DEBUG")
                 dummy_encoder_outputs = \
                     self.model.embed_multimodal(
                     **batched_dummy_mm_inputs)
-                logger.info(f"SHIVV DEBUG {dummy_encoder_outputs=} MULTIMODAL GRAPHS DEBUG")
                 if is_batch_based:
                     sanity_check_mm_encoder_outputs(
                         dummy_encoder_outputs,
                         expected_num_items=candidates[idx],
                     )
                     self.graphed_buckets.add(candidates[idx])
-                logger.info(f"SHIVV DEBUG after if MULTIMODAL GRAPHS DEBUG")
                 self.log_warmup_multimodal(phase, idx, len(candidates), candidates[idx] if is_batch_based else 1, 0,
                                            width, height)
-        logger.info("SHIVV DEBUG FINISHED MULTIMODAL GRAPHS DEBUG")
 
     def _maybe_profile_unified_attn(self):
         unified_cfg_str = os.environ.get('VLLM_PROFILE_UNIFIED', None)
