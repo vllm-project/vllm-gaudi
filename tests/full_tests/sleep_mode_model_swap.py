@@ -9,26 +9,21 @@ exercising vLLM Sleep Mode Level 1 each time:
 
 Supports:
   - Multiple models (2 or more) with automatic cycling
-  - Tensor Parallelism (TP1, TP2, TP4, etc.)
   - Per-phase metrics collection and summary reporting
 
 Requires:
   VLLM_ENABLE_V1_MULTIPROCESSING=0
 
-Usage (two models, default):
+Usage (two models, legacy):
   VLLM_ENABLE_V1_MULTIPROCESSING=0 \
   python tests/full_tests/sleep_mode_model_swap.py \
-    --models meta-llama/Llama-3.1-8B-Instruct Qwen/Qwen3-0.6B
+    --model-a meta-llama/Llama-3.1-8B-Instruct \
+    --model-b Qwen/Qwen3-0.6B
 
   # Three models with cycling:
   VLLM_ENABLE_V1_MULTIPROCESSING=0 \
   python tests/full_tests/sleep_mode_model_swap.py \
     --models model1 model2 model3 --phases 15
-
-  # With tensor parallelism (TP2):
-  VLLM_ENABLE_V1_MULTIPROCESSING=0 \
-  python tests/full_tests/sleep_mode_model_swap.py \
-    --tensor-parallel-size 2 --models meta-llama/Llama-3.1-8B-Instruct
 
   # With eager mode (skip torch.compile):
   VLLM_ENABLE_V1_MULTIPROCESSING=0 VLLM_SKIP_WARMUP=true \
@@ -108,75 +103,32 @@ def print_outputs(model_name, outputs):
 
 
 def get_model_runner(llm):
-    """Get model runner for device assertions (only works with VLLM_ENABLE_V1_MULTIPROCESSING=0).
-    
-    Returns None if model runner cannot be accessed (e.g., with multiprocessing executors).
-    """
+    """Get model runner for device assertions (only works with VLLM_ENABLE_V1_MULTIPROCESSING=0)."""
     multiproc = os.getenv("VLLM_ENABLE_V1_MULTIPROCESSING")
-    if multiproc != "0":
-        return None
-    
-    try:
-        # Try v1 API structure first
+    if multiproc == "0":
         return llm.llm_engine.model_executor.driver_worker.worker.model_runner
-    except AttributeError:
-        try:
-            # Fallback for different executor types
-            executor = llm.llm_engine.model_executor
-            if hasattr(executor, 'driver_worker'):
-                return executor.driver_worker.worker.model_runner
-            elif hasattr(executor, '_workers') and executor._workers:
-                # For multiproc executors, try to access first worker
-                return executor._workers[0].model_runner
-            else:
-                return None
-        except Exception:
-            return None
+    return None
 
 
-def assert_model_device(model_runner, target_device, tensor_parallel_size=1):
-    """Assert all model parameters are on the expected device(s).
-    
-    For TP1, expects all parameters on a single device.
-    For TP2+, expects parameters distributed across multiple devices.
-    """
-    if not model_runner:
-        print(f"  ⓘ Device check skipped (model runner not accessible)")
-        return
-    
-    try:
+def assert_model_device(model_runner, target_device):
+    """Assert all model parameters are on the expected device."""
+    if model_runner:
         params_devices = list(set([p.device for p in model_runner.model.parameters()]))
-        
-        if tensor_parallel_size == 1:
-            # Single device expected
-            assert len(params_devices) == 1, f"Expected all params on one device, got {params_devices}"
-            assert params_devices[0].type == target_device, \
-                f"Expected device '{target_device}', got '{params_devices[0].type}'"
-            print(f"  ✓ Model parameters on {target_device}")
-        else:
-            # Multiple devices expected for TP
-            assert len(params_devices) == tensor_parallel_size, \
-                f"Expected params on {tensor_parallel_size} devices, got {len(params_devices)}: {params_devices}"
-            assert all(d.type == target_device for d in params_devices), \
-                f"Expected all params on {target_device}, got {params_devices}"
-            print(f"  ✓ Model parameters distributed across {len(params_devices)} {target_device} devices (TP{tensor_parallel_size})")
-    except Exception as e:
-        print(f"  ⚠ Device check failed: {e}")
+        assert len(params_devices) == 1, f"Expected all params on one device, got {params_devices}"
+        assert params_devices[0].type == target_device, \
+            f"Expected device '{target_device}', got '{params_devices[0].type}'"
+        print(f"  ✓ Model parameters on {target_device}")
 
 
-def load_model(model_name, enforce_eager=True, max_model_len=4096, tensor_parallel_size=1):
+def load_model(model_name, enforce_eager=True, max_model_len=4096):
     """Load a model and return (llm, metrics_dict)."""
     print(f"\n>>> Loading model: {model_name}")
-    if tensor_parallel_size > 1:
-        print(f"    Tensor Parallel Size: {tensor_parallel_size}")
-    
     with HabanaMemoryProfiler() as m:
         start = time.time()
         llm = LLM(
             model=model_name,
             enforce_eager=enforce_eager,
             max_model_len=max_model_len,
-            tensor_parallel_size=tensor_parallel_size,
         )
         elapsed = time.time() - start
     load_mem = m.consumed_device_memory / (1024**3)
@@ -202,7 +154,7 @@ def generate(llm, model_name):
     return outputs, {"gen_time_s": gen_time, "total_tokens": total_tokens}
 
 
-def sleep_model(llm, model_name, tensor_parallel_size=1):
+def sleep_model(llm, model_name):
     """Put the model to sleep and return metrics."""
     print(f"\n>>> Sleeping model: {model_name}")
     model_runner = get_model_runner(llm)
@@ -215,7 +167,7 @@ def sleep_model(llm, model_name, tensor_parallel_size=1):
     print(f"  Sleep time: {elapsed:.2f}s")
     print(f"  Memory freed: {m.get_summary_string()}")
 
-    assert_model_device(model_runner, "cpu", tensor_parallel_size)
+    assert_model_device(model_runner, "cpu")
 
     freed_bytes = -m.consumed_device_memory
     freed_gib = freed_bytes / (1024**3)
@@ -270,10 +222,7 @@ def destroy_model(llm, model_name):
 
 def get_model_label(index, num_models):
     """Convert model index to label (0->A, 1->B, 2->C, etc.)."""
-    if index < 26:
-        return chr(ord('A') + index)  # A, B, C, ..., Z
-    else:
-        return f"M{index}"  # M0, M1, M2, ... for >26 models
+    return chr(ord('A') + index)
 
 
 def print_metrics_table(all_metrics):
@@ -331,9 +280,6 @@ def main():
                         help="Enforce eager mode (disables torch.compile)")
     parser.add_argument("--phases", type=int, default=10, help="Number of swap phases (default: 10)")
     parser.add_argument("--max-model-len", type=int, default=4096, help="Maximum model context length (default: 4096)")
-    parser.add_argument("--tensor-parallel-size", type=int, default=1,
-                        help="Tensor parallel size (default: 1). Use TP2+ for distributed model parallelism")
-    
     args = parser.parse_args()
     
     # Handle backward compatibility: --model-a and --model-b
@@ -371,7 +317,6 @@ def main():
     print(f"  Models ({num_models}): {models}")
     print(f"  Phases:  {num_phases}")
     print(f"  Max model len: {args.max_model_len}")
-    print(f"  Tensor parallel size: {args.tensor_parallel_size}")
     print(f"  Enforce eager: {args.enforce_eager}")
     print(f"  VLLM_ENABLE_V1_MULTIPROCESSING: {multiproc}")
     print("=" * 60)
@@ -389,9 +334,9 @@ def main():
               f"Model {label} ({model_name})")
         print("=" * 60)
 
-        llm, load_m = load_model(model_name, args.enforce_eager, args.max_model_len, args.tensor_parallel_size)
+        llm, load_m = load_model(model_name, args.enforce_eager, args.max_model_len)
         _, gen_m = generate(llm, model_name)
-        sleep_m = sleep_model(llm, model_name, args.tensor_parallel_size)
+        sleep_m = sleep_model(llm, model_name)
         dest_m = destroy_model(llm, model_name)
 
         phase_metrics = {
@@ -425,8 +370,6 @@ def main():
     print("=" * 60)
     print(f"  ✓ {num_phases} phases completed")
     print(f"  ✓ Models ({num_models}): {', '.join(models)}")
-    if args.tensor_parallel_size > 1:
-        print(f"  ✓ Tensor Parallelism: TP{args.tensor_parallel_size}")
     print("  ✓ Full sleep-swap-wake cycle "
           "validated on Gaudi")
     print("=" * 60)
