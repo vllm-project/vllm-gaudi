@@ -78,6 +78,9 @@ def _depthwise_conv1d_tpc(
     # x:      (batch, dim, L)
     # weight: (dim, width)
     width = weight.shape[1]
+    if x.shape[2] < width:
+        raise ValueError(f"Input length ({x.shape[2]}) is smaller than kernel width"
+                         f" ({width}). Convolution is not defined for this configuration.")
     out_len = x.shape[2] - width + 1
 
     # Broadcast weight: (dim, width) -> (1, dim, 1) per kernel tap

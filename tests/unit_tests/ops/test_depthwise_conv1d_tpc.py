@@ -14,6 +14,9 @@ import torch
 import torch.nn.functional as F
 
 from vllm_gaudi.ops.causal_conv1d_pytorch import _depthwise_conv1d_tpc
+from vllm.platforms import current_platform
+
+DEVICE = current_platform.device_type
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -36,7 +39,7 @@ def _make_inputs(
     width: int,
     *,
     dtype: torch.dtype = torch.float32,
-    device: str = "cpu",
+    device: str = DEVICE,
     with_bias: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Create random x, weight, and optionally bias tensors."""
@@ -290,3 +293,25 @@ class TestDepthwiseConv1dTpcDeterminism:
         r1 = _depthwise_conv1d_tpc(x, weight, bias)
         r2 = _depthwise_conv1d_tpc(x, weight, bias)
         torch.testing.assert_close(r1, r2, atol=0, rtol=0)
+
+
+# ---------------------------------------------------------------------------
+# Tests — input length shorter than kernel width
+# ---------------------------------------------------------------------------
+
+
+class TestDepthwiseConv1dTpcInputShorterThanKernel:
+    """Raise ValueError when input length < kernel width."""
+
+    @pytest.mark.parametrize("seq_len,width", [(1, 4), (3, 4), (2, 8)])
+    def test_input_shorter_than_kernel_raises(self, seq_len, width):
+        """Input length < kernel width must raise ValueError."""
+        x, weight, bias = _make_inputs(1, 8, seq_len, width)
+        with pytest.raises(ValueError, match="smaller than kernel width"):
+            _depthwise_conv1d_tpc(x, weight, bias)
+
+    def test_input_shorter_than_kernel_no_bias(self):
+        """Same check holds when bias is None."""
+        x, weight, _ = _make_inputs(1, 8, 2, 4, with_bias=False)
+        with pytest.raises(ValueError, match="smaller than kernel width"):
+            _depthwise_conv1d_tpc(x, weight, bias=None)
