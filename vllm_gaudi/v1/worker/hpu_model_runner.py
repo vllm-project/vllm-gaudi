@@ -3086,18 +3086,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 continue
 
             num_prompt_tokens = len(request.prompt_token_ids)
-            prompt_token_ids = torch.tensor(
-                request.prompt_token_ids
-            ).to(self.device, non_blocking=True)
+            prompt_token_ids = torch.tensor(request.prompt_token_ids).to(self.device, non_blocking=True)
 
             # Set up target LogprobsTensors object.
             logprobs_tensors = in_progress_dict.get(req_id)
             if not logprobs_tensors:
                 # Create empty logprobs CPU tensors for the entire prompt.
                 # If chunked, we'll copy in slice by slice.
-                logprobs_tensors = LogprobsTensors.empty_cpu(
-                    num_prompt_tokens - 1, num_prompt_logprobs + 1
-                )
+                logprobs_tensors = LogprobsTensors.empty_cpu(num_prompt_tokens - 1, num_prompt_logprobs + 1)
                 in_progress_dict[req_id] = logprobs_tensors
 
             # Determine number of logits to retrieve.
@@ -3138,17 +3134,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
             # Compute prompt logprobs.
             logprobs = self.sampler.compute_logprobs(logits)
-            gathered = self.sampler.gather_logprobs(
-                logprobs, num_prompt_logprobs, tgt_token_ids)
+            gathered = self.sampler.gather_logprobs(logprobs, num_prompt_logprobs, tgt_token_ids)
 
             # Transfer HPU->CPU async.
             chunk_slice = slice(start_idx, start_idx + num_logits)
-            logprobs_tensors.logprob_token_ids[chunk_slice].copy_(
-                gathered.logprob_token_ids, non_blocking=True)
-            logprobs_tensors.logprobs[chunk_slice].copy_(
-                gathered.logprobs, non_blocking=True)
-            logprobs_tensors.selected_token_ranks[chunk_slice].copy_(
-                gathered.selected_token_ranks, non_blocking=True)
+            logprobs_tensors.logprob_token_ids[chunk_slice].copy_(gathered.logprob_token_ids, non_blocking=True)
+            logprobs_tensors.logprobs[chunk_slice].copy_(gathered.logprobs, non_blocking=True)
+            logprobs_tensors.selected_token_ranks[chunk_slice].copy_(gathered.selected_token_ranks, non_blocking=True)
 
         # Remove requests that have completed prefill from the batch
         # num_prompt_logprobs_dict.
@@ -3181,10 +3173,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             Combined LogprobsLists or None if no logprobs were requested.
         """
         # Collect only segments that have logprobs data
-        active_segments: list[tuple[list[str], LogprobsTensors]] = [
-            (req_ids, lp) for req_ids, lp in logprobs_segments
-            if lp is not None
-        ]
+        active_segments: list[tuple[list[str], LogprobsTensors]] = [(req_ids, lp) for req_ids, lp in logprobs_segments
+                                                                    if lp is not None]
         if not active_segments:
             return None
 
@@ -3193,10 +3183,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         num_cols = active_segments[0][1].logprob_token_ids.shape[1]
 
         # Pre-allocate output arrays
-        combined_token_ids = np.zeros(
-            (num_output_rows, num_cols), dtype=np.int64)
-        combined_logprobs = np.zeros(
-            (num_output_rows, num_cols), dtype=np.float32)
+        combined_token_ids = np.zeros((num_output_rows, num_cols), dtype=np.int64)
+        combined_logprobs = np.zeros((num_output_rows, num_cols), dtype=np.float32)
         combined_ranks = np.zeros(num_output_rows, dtype=np.int64)
 
         # Transfer each segment to CPU and scatter into output arrays
@@ -3208,8 +3196,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 combined_logprobs[idx] = lp_lists.logprobs[i]
                 combined_ranks[idx] = lp_lists.sampled_token_ranks[i]
 
-        return LogprobsLists(
-            combined_token_ids, combined_logprobs, combined_ranks)
+        return LogprobsLists(combined_token_ids, combined_logprobs, combined_ranks)
 
     def _is_quant_with_inc(self):
         quant_config = os.getenv("QUANT_CONFIG", None) is not None
@@ -3664,12 +3651,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Build logprobs from the sampler output.
         logprobs_output: LogprobsLists | None = None
         if sampler_output.logprobs_tensors is not None:
-            num_output_rows = max(
-                self.input_batch.req_id_to_index.values()) + 1
-            logprobs_output = self._build_logprobs_output(
-                [(list(selected_req_ids),
-                  sampler_output.logprobs_tensors)],
-                num_output_rows)
+            num_output_rows = max(self.input_batch.req_id_to_index.values()) + 1
+            logprobs_output = self._build_logprobs_output([(list(selected_req_ids), sampler_output.logprobs_tensors)],
+                                                          num_output_rows)
 
         if self.use_async_scheduling:
             model_runner_output = ModelRunnerOutput(
@@ -3910,8 +3894,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         decode_sampled_requests = []
         # Logprobs tracking: collect (req_ids, logprobs_tensors) segments
         # from each sampling call to combine at the end.
-        logprobs_segments: list[
-            tuple[list[str], LogprobsTensors | None]] = []
+        logprobs_segments: list[tuple[list[str], LogprobsTensors | None]] = []
         #if not has_kv_transfer_group():
         #    assert not (num_prefills > 0 and num_decodes > 0)
         # skip kv_connector if dummy run
@@ -3998,9 +3981,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                                    logits_requests)
                             prefill_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
                             prefill_sampled_requests.extend(logits_requests)
-                            logprobs_segments.append(
-                                (list(logits_requests),
-                                 sampler_output.logprobs_tensors))
+                            logprobs_segments.append((list(logits_requests), sampler_output.logprobs_tensors))
                 if self.is_driver_worker and self.profiler.enabled:
                     # Stop recording 'execute_model_generic' event
                     self.profiler.end()
@@ -4069,9 +4050,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
                     if spec_decode_metadata is None:
                         decode_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
-                        logprobs_segments.append(
-                            (list(pd_info.decode_req_ids),
-                             sampler_output.logprobs_tensors))
+                        logprobs_segments.append((list(pd_info.decode_req_ids), sampler_output.logprobs_tensors))
                     else:
                         # Handling spec decode sampling.
                         sampler_output = self.rejection_sampler(
@@ -4143,12 +4122,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             decode_sampled_token_ids.append(sampler_output.sampled_token_ids[:num_decodes].flatten())
             # Logprobs: rows match logits order (decodes first, then
             # prefills), so build req_ids in same order.
-            struct_logprobs_req_ids = (
-                list(pd_info.decode_req_ids)
-                + list(pd_info.prompt_req_ids))
-            logprobs_segments.append(
-                (struct_logprobs_req_ids,
-                 sampler_output.logprobs_tensors))
+            struct_logprobs_req_ids = (list(pd_info.decode_req_ids) + list(pd_info.prompt_req_ids))
+            logprobs_segments.append((struct_logprobs_req_ids, sampler_output.logprobs_tensors))
 
         if self.use_async_scheduling or self.use_structured_output:
             # For async scheduling: keep tokens on HPU and avoid CPU sync
@@ -4263,13 +4238,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Create output.
         all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
         # Compute prompt logprobs from prefill hidden states.
-        prompt_logprobs_dict = self._get_prompt_logprobs_dict(
-            prefill_hidden_states_for_logprobs, scheduler_output)
+        prompt_logprobs_dict = self._get_prompt_logprobs_dict(prefill_hidden_states_for_logprobs, scheduler_output)
 
         # Build combined logprobs from all sampling calls.
         max_req_index = max(self.input_batch.req_id_to_index.values())
-        logprobs = self._build_logprobs_output(
-            logprobs_segments, max_req_index + 1)
+        logprobs = self._build_logprobs_output(logprobs_segments, max_req_index + 1)
 
         if not warmup_mode:
             self.maybe_wait_for_kv_save()
