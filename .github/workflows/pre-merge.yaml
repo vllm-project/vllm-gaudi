@@ -389,53 +389,13 @@ jobs:
           clean: true # Ensure a clean workspace before checkout
 
       - name: Setup Docker environment and build image
-        # Using a multi-line string for the Dockerfile is generally fine,
-        # but consider moving it to a separate file for better readability/maintainability
         run: |
           echo "Attempting to build Docker image..."
-          # Ensure this image is accessible from GitHub Actions (e.g., public registry or authenticated private registry).
           docker build \
             --no-cache \
             --build-arg VLLM_COMMIT_ARG=${{ env.TEST_VLLM_COMMIT }} \
             -t hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }} \
-            -f - . <<EOF
-          FROM vault.habana.ai/gaudi-docker/1.23.0/ubuntu24.04/habanalabs/pytorch-installer-2.9.0:latest
-
-          ARG VLLM_COMMIT_ARG
-
-          COPY ./ /workspace/vllm-gaudi
-          WORKDIR /workspace
-
-          RUN git clone https://github.com/vllm-project/vllm.git vllm
-          WORKDIR /workspace/vllm
-          RUN git checkout \$VLLM_COMMIT_ARG
-
-          # Pinning versions in requirements might be good practice for CI consistency
-          RUN pip install pytest pytest_asyncio pytest-timeout
-          RUN pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git
-
-          ENV no_proxy=localhost,127.0.0.1
-          ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
-
-          # Ensure setup.py install works as expected
-          RUN bash -c 'pip install -r <(sed "/^torch/d" requirements/build.txt)'
-          RUN VLLM_TARGET_DEVICE=empty pip install --no-build-isolation .
-
-          # install development dependencies (for testing)
-          RUN python3 -m pip install -e tests/vllm_test_utils
-
-          WORKDIR /workspace/vllm-gaudi
-          RUN pip install -e .
-
-          WORKDIR /workspace
-          # Symlinks. Ensure target paths are correct relative to the current WORKDIR
-          # '/workspace/vllm/tests' is correct
-          # Ensure these are created relative to the /workspace/ directory
-          RUN ln -s /workspace/vllm/tests /workspace/tests \
-              && ln -s /workspace/vllm/examples /workspace/examples \
-              && ln -s /workspace/vllm/benchmarks /workspace/benchmarks
-
-          EOF
+            -f .github/Dockerfile.ci .
           echo "Docker image built successfully."
 
   hpu_unit_tests:

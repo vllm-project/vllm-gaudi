@@ -88,35 +88,11 @@ jobs:
       - name: Setup Docker environment and build image
         run: |
           echo "Attempting to build Docker image..."
-          docker build --no-cache -t hpu-plugin-v1-test-env-hourly-ci -f - . <<EOF
-          FROM vault.habana.ai/gaudi-docker/1.23.0/ubuntu24.04/habanalabs/pytorch-installer-2.9.0:latest
-
-          COPY ./ /workspace/vllm-gaudi
-          WORKDIR /workspace
-
-          RUN git clone https://github.com/vllm-project/vllm.git vllm
-          WORKDIR /workspace/vllm
-          RUN git checkout ${{ steps.latest_vllm_commit.outputs.LATEST_COMMIT }}
-
-          RUN pip install pytest pytest_asyncio pytest-timeout
-          RUN pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git
-
-          ENV no_proxy=localhost,127.0.0.1
-          ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
-
-          RUN bash -c 'pip install -r <(sed "/^[torch]/d" requirements/build.txt)'
-          RUN VLLM_TARGET_DEVICE=empty pip install --no-build-isolation .
-
-          RUN python3 -m pip install -e tests/vllm_test_utils
-
-          WORKDIR /workspace/vllm-gaudi
-          RUN pip install -e .
-
-          WORKDIR /workspace
-          RUN ln -s /workspace/vllm/tests /workspace/tests \
-              && ln -s /workspace/vllm/examples /workspace/examples \
-              && ln -s /workspace/vllm/benchmarks /workspace/benchmarks
-          EOF
+          docker build \
+            --no-cache \
+            --build-arg VLLM_COMMIT_ARG=${{ steps.latest_vllm_commit.outputs.LATEST_COMMIT }} \
+            -t hpu-plugin-v1-test-env-hourly-ci \
+            -f .github/Dockerfile.ci .
           echo "Docker image built successfully."
 
   # JOB 3: (UPDATED)
