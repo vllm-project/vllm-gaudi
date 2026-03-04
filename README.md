@@ -54,7 +54,7 @@ The vLLM Hardware Plugin for Intel® Gaudi® integrates [Intel® Gaudi® AI acce
 
     ```bash
     cd vllm-gaudi
-    pip install -e .
+    ./install.sh -e
     cd ..
     ```
 

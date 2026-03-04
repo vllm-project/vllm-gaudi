@@ -67,7 +67,7 @@ RUN \
     # Install vllm-gaudi plugin
     cd $VLLM_PATH2 && \
     git checkout ${VLLM_GAUDI_COMMIT} && \
-    VLLM_TARGET_DEVICE=hpu pip install -v . --no-build-isolation
+    VLLM_TARGET_DEVICE=hpu bash -c "./install.sh -v --no-build-isolation"
 # --- END: COMBINED RUN COMMAND ---
 
 # to be verified later PWolsza

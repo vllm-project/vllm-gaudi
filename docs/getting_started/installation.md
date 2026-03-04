@@ -129,7 +129,7 @@ There are two ways to install vLLM Hardware Plugin for Intel Gaudi from source: 
 5. Install vLLM Hardware Plugin for Intel Gaudi from source.
   
         cd vllm-gaudi
-        pip install -e .
+        ./install.sh -e
         cd ..
   
 To achieve the best performance on HPU, please follow the methods outlined in the
@@ -180,7 +180,7 @@ To install vLLM Hardware Plugin for Intel Gaudi and NIXL using a Dockerfile:
 3. Install vLLM Hardware Plugin for Intel Gaudi from source.
 
         cd vllm-gaudi
-        pip install -e .
+        ./install.sh -e
   
 4. Build NIXL.
   
