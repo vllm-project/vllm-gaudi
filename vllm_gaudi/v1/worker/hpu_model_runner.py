@@ -479,6 +479,11 @@ def apply_model_specific_patches(model_runner):
     maybe_set_chunked_attention_layers(model_runner)
     patch_llama4_get_attn_scale(model_runner.model)
 
+def apply_model_patches_before_load(model_runner):
+    import vllm.model_executor.models.qwen3_5 as qwen3_5
+    from vllm_gaudi.ops.hpu_gated_deltanet import HPUQwen3_5GatedDeltaNet
+    qwen3_5.Qwen3_5GatedDeltaNet = HPUQwen3_5GatedDeltaNet
+
 
 class HpuKVConnectorModelRunnerMixin(KVConnectorModelRunnerMixin):
 
@@ -1088,7 +1093,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
           
         # Create tensor fields only if needed  
         tensor_fields = {}
-        import remote_pdb;remote_pdb.set_trace()
         if self.gdn_hybrid:  
             tensor_fields.update({  
                 'has_initial_state': self._get_initial_state_tensor(),  
@@ -4336,6 +4340,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         import habana_frameworks.torch.core as htcore
         if self._is_quant_with_inc() or self.model_config.quantization == 'fp8':
             htcore.hpu_inference_set_env()
+        apply_model_patches_before_load(self)
         logger.info("Starting to load model %s...", self.model_config.model)
         with HabanaMemoryProfiler() as m:  # noqa: SIM117
             # When load_config.device differs from the platform device (e.g.

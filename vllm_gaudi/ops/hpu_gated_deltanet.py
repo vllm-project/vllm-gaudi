@@ -1,29 +1,19 @@
 import torch
-from vllm.model_executor.models.qwen3_5 import Qwen3_5GatedDeltaNet  
-from vllm.model_executor.custom_op import CustomOp  
-from einops import rearrange  
-from vllm.forward_context import ForwardContext, get_forward_context  
-from vllm.model_executor.layers.fla.ops import (   
-    fused_recurrent_gated_delta_rule,  
-)  
+from vllm.model_executor.models.qwen3_5 import Qwen3_5GatedDeltaNet
+
+from vllm.model_executor.custom_op import CustomOp
+from einops import rearrange
+from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.model_executor.layers.fla.ops import (
+    fused_recurrent_gated_delta_rule,
+)
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm_gaudi.ops.causal_conv1d_pytorch import (
-    hpu_causal_conv1d_fn,  
+    hpu_causal_conv1d_fn,
     hpu_causal_conv1d_update,
 )
-@CustomOp.register_oot(name="Qwen3_5GatedDeltaNet")
-class HPUQwen35GatedDeltaNet(Qwen3_5GatedDeltaNet):
-    """  
-    Gaudi-optimized implementation of Qwen3NextGatedDeltaNet.  
-    This class will replace the original Qwen3NextGatedDeltaNet when running on Gaudi.  
-    """  
-    '''
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Initialize any Gaudi-specific components here
-        self.gaudi_initialized = True
-    '''  
-      
+
+class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -36,7 +26,7 @@ class HPUQwen35GatedDeltaNet(Qwen3_5GatedDeltaNet):
         3. Output projection
         """
         num_tokens = hidden_states.size(0)
-        import remote_pdb;remote_pdb.set_trace()
+
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
@@ -87,38 +77,33 @@ class HPUQwen35GatedDeltaNet(Qwen3_5GatedDeltaNet):
         mixed_qkv: torch.Tensor,
         b: torch.Tensor,
         a: torch.Tensor,
-        core_attn_out: torch.Tensor, 
+        core_attn_out: torch.Tensor,
         layer_name: str,
-    ) -> None:  
-        """  
-        Gaudi-optimized implementation using TrimmedAttentionMetadata.  
-        """ 
-        
-        forward_context: ForwardContext = get_forward_context()  
-        self_layer = forward_context.no_compile_layers[layer_name]  
-          
-        # Get attention metadata (already TrimmedAttentionMetadata)  
-        attn_metadata = forward_context.attn_metadata  
-        if attn_metadata is None:  
-            # V1 profile run  
-            return  
-          
- 
-        trimmed_metadata = attn_metadata[self_layer.prefix]  
-          
-        # Verify it's TrimmedAttentionMetadata  
-        assert isinstance(trimmed_metadata, TrimmedAttentionMetadata)  
-          
-        # Call Gaudi-optimized core computation  
-        self._forward_core_hpu(  
-            self_layer,  
-            mixed_qkv=mixed_qkv,  
-            b=b,  
-            a=a,  
-            core_attn_out=core_attn_out,  
-            trimmed_metadata=trimmed_metadata,  
-        )  
-    
+    ) -> None:
+
+        forward_context: ForwardContext = get_forward_context()
+        self_layer = forward_context.no_compile_layers[layer_name]
+        import remote_pdb;remote_pdb.set_trace()
+        # Get attention metadata (already TrimmedAttentionMetadata)
+        attn_metadata = forward_context.attn_metadata
+        if attn_metadata is None:
+            # V1 profile run
+            return
+
+        trimmed_metadata = attn_metadata[self_layer.prefix]
+
+        # Verify it's TrimmedAttentionMetadata
+        assert isinstance(trimmed_metadata, TrimmedAttentionMetadata)
+        # Call Gaudi-optimized core computation
+        self._forward_core_hpu(
+            self_layer,
+            mixed_qkv=mixed_qkv,
+            b=b,
+            a=a,
+            core_attn_out=core_attn_out,
+            trimmed_metadata=trimmed_metadata,
+        )
+
     def _forward_core_hpu(
         self,
         mixed_qkv: torch.Tensor,
@@ -175,7 +160,7 @@ class HPUQwen35GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            mixed_qkv_spec = causal_conv1d_update(
+            mixed_qkv_spec = hpu_causal_conv1d_update(
                 mixed_qkv_spec,
                 conv_state,
                 conv_weights,
@@ -321,3 +306,4 @@ class HPUQwen35GatedDeltaNet(Qwen3_5GatedDeltaNet):
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
+
