@@ -50,7 +50,7 @@ class HpuMMEncoderAttention(MMEncoderAttention):
                                is_causal=False,
                                scale=self.scale,
                                softmax_mode="fast",
-                               recompute_mode=True,
+                               recompute_mode=False,#True,
                                valid_sequence_lengths=None)
             else:
                 lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
@@ -67,7 +67,7 @@ class HpuMMEncoderAttention(MMEncoderAttention):
                                         is_causal=False,
                                         scale=self.scale,
                                         softmax_mode="fast",
-                                        recompute_mode=True,
+                                        recompute_mode=False,#True,
                                         valid_sequence_lengths=None)
                     outputs.append(output_i)
                 out = torch.cat(outputs, dim=2)
