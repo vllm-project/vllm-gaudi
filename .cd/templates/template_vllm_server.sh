@@ -8,7 +8,9 @@ if [ $PT_HPU_LAZY_MODE -eq 0 ]; then
     export PT_HPU_ENABLE_EAGER_CACHE=true
 fi
 
-if [ "$VLLM_CONTIGUOUS_PA" = "True" ]; then # Checks if using contigous pa
+if [ "$VLLM_CONTIGUOUS_PA" = "True" ] && \
+   [ "$VLLM_UNIFIED_ATTN" = "False" ] || \
+   [ "$ENABLE_PREFIX_CACHING" = "False" ]; then # just conti pa or forced
     EXTRA_ARGS+=" --no-enable-prefix-caching"
 fi
 

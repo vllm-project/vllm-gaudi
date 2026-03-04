@@ -25,7 +25,7 @@ def calc_PT_HPU_ENABLE_LAZY_COLLECTIVES(ctx):
 
 
 def calc_VLLM_CONTIGUOUS_PA(ctx):
-    return not ctx['ENABLE_PREFIX_CACHING']
+    return not ctx['ENABLE_PREFIX_CACHING'] or ctx['VLLM_UNIFIED_ATTN']
 
 
 def calc_VLLM_DEFRAG(ctx):
