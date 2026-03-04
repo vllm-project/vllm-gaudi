@@ -60,33 +60,33 @@ HPU PyTorch bridge environment variables impacting vLLM execution:
 
 The following table lists the available variables with their default values:
 
-| Phase  | Variable name                                                            | Default value                                                                                                 |
-|--------|--------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
-| Prompt | batch size min (`VLLM_PROMPT_BS_BUCKET_MIN`)                             | `1`                                                                                                           |
-| Prompt | batch size step (`VLLM_PROMPT_BS_BUCKET_STEP`)                           | `1`                                                                                                           |
-| Prompt | batch size max (`VLLM_PROMPT_BS_BUCKET_MAX`)                             | `max_num_prefill_seqs`                                                                                        |
-| Prompt | batch size max abs padding (`VLLM_PROMPT_BS_BUCKET_PAD_MAX`)             | `16`                                                                                                          |
-| Prompt | batch size max padding percent (`VLLM_PROMPT_BS_BUCKET_PAD_PERCENT`)     | `25`                                                                                                          |
-| Prompt | query length min (`VLLM_PROMPT_QUERY_BUCKET_MIN`)                        | `block_size`                                                                                                  |
-| Prompt | query length step (`VLLM_PROMPT_QUERY_BUCKET_STEP`)                      | `block_size`                                                                                                  |
-| Prompt | query length max (`VLLM_PROMPT_QUERY_BUCKET_MAX`)                        | `max_num_batched_tokens`                                                                                      |
-| Prompt | query length max abs padding (`VLLM_PROMPT_QUERY_BUCKET_PAD_MAX`)        | `max_num_batched_tokens`                                                                                      |
-| Prompt | query length max padding percent (`VLLM_PROMPT_QUERY_BUCKET_PAD_PERCENT`)| `25`                                                                                                          |
-| Prompt | sequence ctx min (`VLLM_PROMPT_CTX_BUCKET_MIN`)                          | `0`                                                                                                           |
-| Prompt | sequence ctx step (`VLLM_PROMPT_CTX_BUCKET_STEP`)                        | `1`                                                                                                           |
-| Prompt | sequence ctx max (`VLLM_PROMPT_CTX_BUCKET_MAX`)                          | `(max_model_len - block_size) // block_size`                                                                  |
-| Prompt | sequence ctx max abs padding (`VLLM_PROMPT_CTX_BUCKET_PAD_MAX`)          | `max_num_batched_tokens // block_size`                                                                        |
-| Prompt | sequence ctx max padding percent (`VLLM_PROMPT_CTX_BUCKET_PAD_PERCENT`)  | `25`                                                                                                          |
-| Decode | batch size min (`VLLM_DECODE_BS_BUCKET_MIN`)                             | `1`                                                                                                           |
-| Decode | batch size step (`VLLM_DECODE_BS_BUCKET_STEP`)                           | `32`                                                                                                          |
-| Decode | batch size max (`VLLM_DECODE_BS_BUCKET_MAX`)                             | `max_num_seqs`                                                                                                |
-| Decode | batch size max abs padding (`VLLM_DECODE_BS_BUCKET_PAD_MAX`)             | `32`                                                                                                          |
-| Decode | batch size max padding percent (`VLLM_DECODE_BS_BUCKET_PAD_PERCENT`)     | `25`                                                                                                          |
-| Decode | block size min (`VLLM_DECODE_BLOCK_BUCKET_MIN`)                          | `1`                                                                                                           |
-| Decode | block size step (`VLLM_DECODE_BLOCK_BUCKET_STEP`)                        | `block_size`                                                                                                  |
-| Decode | block size max (`VLLM_DECODE_BLOCK_BUCKET_MAX`)                          | `max_model_len * max_num_seqs // block_size` <br>by default or `max_blocks` <br>if `VLLM_CONTIGUOUS_PA = True`|
-| Decode | block size max abs padding (`VLLM_DECODE_BLOCK_BUCKET_PAD_MAX`)          | `max_num_batched_tokens * max_num_seqs // block_size`                                                         |
-| Decode | block size max padding percent (`VLLM_DECODE_BLOCK_BUCKET_PAD_PERCENT`)  | `25`                                                                                                          |
+| Phase  | Variable name                                                            | Default value                                                                                                       |
+|--------|--------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------|
+| Prompt | batch size min (`VLLM_PROMPT_BS_BUCKET_MIN`)                             | `1`                                                                                                                 |
+| Prompt | batch size step (`VLLM_PROMPT_BS_BUCKET_STEP`)                           | `1`                                                                                                                 |
+| Prompt | batch size max (`VLLM_PROMPT_BS_BUCKET_MAX`)                             | `max_num_prefill_seqs`                                                                                              |
+| Prompt | batch size max abs padding (`VLLM_PROMPT_BS_BUCKET_PAD_MAX`)             | `ceil(max_num_prefill_seqs / 4)`                                                                                    |
+| Prompt | batch size max padding percent (`VLLM_PROMPT_BS_BUCKET_PAD_PERCENT`)     | `25`                                                                                                                |
+| Prompt | query length min (`VLLM_PROMPT_QUERY_BUCKET_MIN`)                        | `block_size`                                                                                                        |
+| Prompt | query length step (`VLLM_PROMPT_QUERY_BUCKET_STEP`)                      | `block_size`                                                                                                        |
+| Prompt | query length max (`VLLM_PROMPT_QUERY_BUCKET_MAX`)                        | `max_num_batched_tokens`                                                                                            |
+| Prompt | query length max abs padding (`VLLM_PROMPT_QUERY_BUCKET_PAD_MAX`)        | `ceil(max_num_batched_tokens / 4)`                                                                                  |
+| Prompt | query length max padding percent (`VLLM_PROMPT_QUERY_BUCKET_PAD_PERCENT`)| `25`                                                                                                                |
+| Prompt | sequence ctx min (`VLLM_PROMPT_CTX_BUCKET_MIN`)                          | `0`                                                                                                                 |
+| Prompt | sequence ctx step (`VLLM_PROMPT_CTX_BUCKET_STEP`)                        | `2`                                                                                                                 |
+| Prompt | sequence ctx max (`VLLM_PROMPT_CTX_BUCKET_MAX`)                          | `ceil((max_model_len - VLLM_PROMPT_QUERY_BUCKET_MIN) / block_size)`                                                 |
+| Prompt | sequence ctx max abs padding (`VLLM_PROMPT_CTX_BUCKET_PAD_MAX`)          | `ceil(max_num_batched_tokens / block_size)`                                                                         |
+| Prompt | sequence ctx max padding percent (`VLLM_PROMPT_CTX_BUCKET_PAD_PERCENT`)  | `25`                                                                                                                |
+| Decode | batch size min (`VLLM_DECODE_BS_BUCKET_MIN`)                             | `1`                                                                                                                 |
+| Decode | batch size step (`VLLM_DECODE_BS_BUCKET_STEP`)                           | `2`                                                                                                                 |
+| Decode | batch size max (`VLLM_DECODE_BS_BUCKET_MAX`)                             | `max_num_seqs`                                                                                                      |
+| Decode | batch size max abs padding (`VLLM_DECODE_BS_BUCKET_PAD_MAX`)             | `ceil(max_num_seqs / 4)`                                                                                            |
+| Decode | batch size max padding percent (`VLLM_DECODE_BS_BUCKET_PAD_PERCENT`)     | `25`                                                                                                                |
+| Decode | num blocks min (`VLLM_DECODE_BLOCK_BUCKET_MIN`)                          | `block_size`                                                                                                        |
+| Decode | num blocks step (`VLLM_DECODE_BLOCK_BUCKET_STEP`)                        | `block_size`                                                                                                        |
+| Decode | num blocks max (`VLLM_DECODE_BLOCK_BUCKET_MAX`)                          | `ceil(max_model_len * max_num_seqs / block_size)` <br>by default or `max_blocks` <br>if `VLLM_CONTIGUOUS_PA = True` |
+| Decode | num blocks max abs padding (`VLLM_DECODE_BLOCK_BUCKET_PAD_MAX`)          | `ceil(VLLM_DECODE_BLOCK_BUCKET_MAX / 4)`                                                                            |
+| Decode | num blocks max padding percent (`VLLM_DECODE_BLOCK_BUCKET_PAD_PERCENT`)  | `25`                                                                                                                |
 
 The default value of `25` for `VLLM_*_BUCKET_PAD_PERCENT` is a balance of warmup duration and runtime performance. Using smaller value like `10` introduce more buckets and reduces the padding to get better runtime performance. Setting to `0` to fall back to the original linear bucketing with minimum padding. And setting to `50` is close to the exponential bucketing except for the corresponding  `VLLM_*_BUCKET_MIN` is not `0` nor `1`.
 
