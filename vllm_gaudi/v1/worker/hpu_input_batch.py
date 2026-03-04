@@ -317,8 +317,6 @@ class InputBatch:
                 self.num_logprobs[req_id] = sampling_params.logprobs
             if sampling_params.prompt_logprobs is not None:
                 self.num_prompt_logprobs[req_id] = (sampling_params.prompt_logprobs)
-                print(f"[PROMPT_LOGPROBS][1-REGISTER] req_id={req_id} "
-                      f"prompt_logprobs={sampling_params.prompt_logprobs}")
 
             if sampling_params.allowed_token_ids:
                 self.has_allowed_token_ids.add(req_id)
@@ -619,25 +617,6 @@ class InputBatch:
         if hasattr(self, '_prompt_token_ids_cache'):
             self._prompt_token_ids_cache = None
 
-    def _compute_selective_max_num_logprobs(
-        self,
-        req_ids: list[str],
-    ) -> Optional[int]:
-        """Compute max_num_logprobs only for the given request IDs.
-
-        Unlike the global max_num_logprobs property which considers all
-        requests in the batch, this computes the maximum only for the
-        specific sub-batch being sampled. This avoids expensive logprobs
-        computation (log_softmax + topk) when no request in the current
-        sub-batch needs logprobs.
-        """
-        selective_logprobs = [
-            self.num_logprobs[rid]
-            for rid in req_ids
-            if rid in self.num_logprobs
-        ]
-        return max(selective_logprobs) if selective_logprobs else None
-
     def make_selective_sampling_metadata(
         self,
         req_id_output_token_ids: list[tuple[str, list[int]]],
@@ -687,11 +666,6 @@ class InputBatch:
             assert self.allowed_token_ids_mask_cpu_tensor is not None
             async_h2d_update(self.allowed_token_ids_mask_cpu_tensor, self.allowed_token_ids_mask, req_indices)
             allowed_token_ids_mask = self.allowed_token_ids_mask[req_indices]
-        # Compute max_num_logprobs only for this sub-batch's requests,
-        # so we skip logprobs computation when no request here needs it.
-        sub_batch_req_ids = [req_id for req_id, _ in req_id_output_token_ids]
-        selective_max_num_logprobs = self._compute_selective_max_num_logprobs(
-            sub_batch_req_ids)
         return SamplingMetadata(
             temperature=self.temperature[req_indices],
             all_greedy=self.all_greedy,
@@ -702,7 +676,7 @@ class InputBatch:
                 i: self.generators[req_idx]
                 for i, req_idx in enumerate(req_indices) if self.generators.get(req_idx, None) is not None
             },
-            max_num_logprobs=selective_max_num_logprobs,
+            max_num_logprobs=self.max_num_logprobs,
             prompt_token_ids=prompt_token_ids,
             frequency_penalties=self.frequency_penalties[req_indices],
             presence_penalties=self.presence_penalties[req_indices],
