@@ -591,7 +591,8 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
         total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
         attn_backend=backend,
     )
-    self.compat_hash = compute_nixl_compatibility_hash(self.vllm_config, self.backend_name, self.kv_topo.cross_layers_blocks)
+    self.compat_hash = compute_nixl_compatibility_hash(self.vllm_config, self.backend_name,
+                                                       self.kv_topo.cross_layers_blocks)
     self._physical_blocks_per_logical_kv_block = 1
 
 
