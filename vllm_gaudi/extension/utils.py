@@ -380,11 +380,13 @@ class ModuleFusedSDPA(torch.nn.Module):
             max_ctx_pad_default = math.ceil(max_num_batched_tokens / block_size)
             max_ctx_pad = int(os.getenv("VLLM_PROMPT_CTX_BUCKET_PAD_MAX", str(max_ctx_pad_default)))
             self.num_padded_ctx_chunks = math.ceil(max_ctx_pad * block_size / self.chunk_size)
+
+            import habana_frameworks.torch as ht
+            is_lazy = ht.utils.internal.is_lazy()
             self.with_graph_breaks = os.getenv("VLLM_HPU_FSDPA_SLICE_WITH_GRAPH_BREAKS",
-                                               "true").strip().lower() in ("1", "true")
+                                               str(is_lazy)).strip().lower() in ("1", "true")
             if self.with_graph_breaks:
-                import habana_frameworks.torch as ht
-                if ht.utils.internal.is_lazy():
+                if is_lazy:
                     self.break_graph = ht.core.mark_step
                 else:
                     self.break_graph = torch._dynamo.graph_break
