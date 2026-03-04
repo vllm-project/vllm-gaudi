@@ -167,9 +167,10 @@ stages:
   #     - name: e2e_qwen3_vl_load_generate
   #       flavor: g3.s
   #       command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_vl_load_generate_test
-      - name: pd_nixl_libfabric
-        flavor: g2.s
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_pd_disaggregate_nixl_libfabric_test
-      - name: pd_nixl_ucx_e2e
-        flavor: g2.s
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_pd_disaggregate_nixl_ucx_test
+  # ---- Tests below are unavailable in jenkins and are running in github actions for now, to unblock jenkins testing. ----
+      # - name: pd_nixl_libfabric
+      #   flavor: g2.m
+      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_pd_disaggregate_nixl_libfabric_test
+      # - name: pd_nixl_ucx_e2e
+      #   flavor: g2.m
+      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_pd_disaggregate_nixl_ucx_test
