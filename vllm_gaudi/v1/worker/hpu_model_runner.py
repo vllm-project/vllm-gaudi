@@ -5314,7 +5314,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def warmup_multimodal_graphs(self, buckets):
 
         phase = 'Graph/Multimodal'
-        from vllm.multimodal.budget import MultiModalBudget
+        from vllm.multimodal.encoder_budget import MultiModalBudget
         self.mm_budget = MultiModalBudget(
             self.vllm_config,
             self.mm_registry,
