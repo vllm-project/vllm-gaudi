@@ -14,24 +14,24 @@ class LinearBucketingStrategy:
         prompt_bs_bucket_cfg = read_bucket_settings('prompt',
                                                     'bs',
                                                     min=1,
-                                                    step=2,
+                                                    step=1,
                                                     max=max_num_prefill_seqs,
-                                                    pad_max=16,
+                                                    pad_max=math.ceil(max_num_prefill_seqs / 4),
                                                     pad_percent=25)
         prompt_query_bucket_cfg = read_bucket_settings('prompt',
                                                        'query',
                                                        min=block_size,
                                                        step=block_size,
                                                        max=max_num_batched_tokens,
-                                                       pad_max=max_num_batched_tokens,
+                                                       pad_max=math.ceil(max_num_batched_tokens / 4),
                                                        pad_percent=25)
-        max_ctx = math.ceil((max_model_len - prompt_query_bucket_cfg[0]) // block_size)
+        max_ctx = math.ceil((max_model_len - prompt_query_bucket_cfg[0]) / block_size)
         prompt_ctx_bucket_cfg = read_bucket_settings('prompt',
                                                      'ctx',
                                                      min=0,
                                                      step=2,
                                                      max=max_ctx,
-                                                     pad_max=max_num_batched_tokens // block_size,
+                                                     pad_max=math.ceil(max_num_batched_tokens / block_size),
                                                      pad_percent=25)
 
         if use_merged_prefill:
@@ -48,7 +48,7 @@ class LinearBucketingStrategy:
                                                          min=0,
                                                          step=4,
                                                          max=max_ctx * max_num_prefill_seqs,
-                                                         pad_max=max_num_batched_tokens // block_size,
+                                                         pad_max=math.ceil(max_num_batched_tokens / block_size),
                                                          pad_percent=25)
 
             msg = ('Merged prefill is enabled!\n'
@@ -74,10 +74,10 @@ class LinearBucketingStrategy:
                                                     min=1,
                                                     step=2,
                                                     max=max_num_seqs,
-                                                    pad_max=32,
+                                                    pad_max=math.ceil(max_num_seqs / 4),
                                                     pad_percent=25)
         decode_query_bucket_cfg = [1, 1, 1, 1, 1]
-        max_decode_blocks = max(math.ceil(max_model_len * max_num_seqs // block_size), block_size)
+        max_decode_blocks = max(math.ceil(max_model_len * max_num_seqs / block_size), block_size)
         if contiguous_pa:
             max_decode_blocks = max_blocks
         decode_block_bucket_cfg = read_bucket_settings('decode',
@@ -85,7 +85,7 @@ class LinearBucketingStrategy:
                                                        min=block_size,
                                                        step=block_size,
                                                        max=max_decode_blocks,
-                                                       pad_max=max_num_batched_tokens * max_num_seqs // block_size,
+                                                       pad_max=math.ceil(max_decode_blocks / 4),
                                                        pad_percent=25)
         if decode_block_bucket_cfg[2] > max_blocks:
             logger().info(
@@ -171,6 +171,8 @@ def warmup_range_with_limits(config: Tuple[int, int, int, int, int]) -> List[int
         return [16, 32, 48, 64, 80, 96, 112, 128]
     """
     bucket_min, bucket_step, bucket_max, pad_max, pad_percent = config
+    if pad_max == 0:
+        pad_max = bucket_max
     assert bucket_min <= bucket_max, ("bucket_min cannot be greater than bucket_max. "
                                       "If you want to skip warmup, set VLLM_SKIP_WARMUP=true")
     assert bucket_step > 0, f"bucket_step must be positive, got: ({bucket_step})"
