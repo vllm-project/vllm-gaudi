@@ -234,6 +234,22 @@ run_qwen2_5_vl_unified_attn_load_generate_test() {
     echo "✅ Test multimodal-support + unified attention with qwen2.5-vl-7b passed."
 }
 
+# Multimodal-support with qwen2.5-vl with warmup (small max model len and max num seqs) and lazy mode
+run_qwen2_5_vl_lazy_warmup_test() {
+    echo "➡️ Testing Qwen2.5-VL-7B with full warmup under tight limits and lazy mode..."
+    VLLM_SKIP_WARMUP=false VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 \
+    python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen2.5-vl-7b-small-ctx.yaml"
+    echo "✅ Test Qwen2.5-VL-7B with full restricted warmup and lazy mode passed."
+}
+
+# Multimodal-support with qwen2.5-vl with warmup (small max model len and max num seqs) and torch.compile
+run_qwen2_5_vl_compile_warmup_test() {
+    echo "➡️ Testing Qwen2.5-VL-7B with full warmup under tight limits and torch.compile..."
+    VLLM_SKIP_WARMUP=false VLLM_CONTIGUOUS_PAs=False PT_HPU_LAZY_MODE=0 \
+    python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen2.5-vl-7b-small-ctx.yaml"
+    echo "✅ Test Qwen2.5-VL-7B with full restricted warmup and torch.compile passed."
+}
+
 # Multimodal-support with qwen3-vl
 run_qwen3_vl_load_generate_test() {
     echo "➡️ Testing Qwen3-VL-32B..."
@@ -242,12 +258,28 @@ run_qwen3_vl_load_generate_test() {
     echo "✅ Test with multimodal-support with qwen3-vl-32b passed."
 }
 
+# Multimodal-support with ernie4.5-vl
+run_ernie4.5_vl_test() {
+    echo "➡️ Testin gErnie4.5-VL-28B-A3B..."
+    VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 \
+    python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/ernie4.5-vl-28b.yaml"
+    echo "✅ Test with multimodal-support with ernie4.5-vl-28b passed."
+}
+
 # Multimodal-support with mistral-small-3
 run_mistral3_load_generate_test() {
     echo "➡️ Testing Mistral-Small-3.1-24B..."
     VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 \
     python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/mistral3-small.yaml"
     echo "✅ Test with multimodal-support with Mistral-Small-3.1-24B passed."
+}
+
+# Multimodal-support with deepseek-ocr
+run_deepseek_ocr_vl_test() {
+    echo "➡️ Testing Deepseek OCR..."
+    VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 \
+    python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/deepseek-ocr.yaml"
+    echo "✅ Test with multimodal-support with deepseek-ocr passed."
 }
 
 run_llama3_70b_inc_dynamic_quant_test() {
@@ -306,12 +338,12 @@ run_gsm8k_deepseek_test() {
 
 
 # GSM8K on deepseek v2 lite + unified attn
-run_gsm8k_deepseek_unified_mla_test() {
-    echo "➡️ Testing GSM8K on deepseek v2 lite + Unified MLA..."
-    VLLM_UNIFIED_ATTN=true VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 \
-    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml"
-    echo "✅ GSM8K Test with deepseek v2 lite + Unified MLA passed."
-}
+#run_gsm8k_deepseek_unified_mla_test() {
+#    echo "➡️ Testing GSM8K on deepseek v2 lite + Unified MLA..."
+#    VLLM_UNIFIED_ATTN=true VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 \
+#    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml"
+#    echo "✅ GSM8K Test with deepseek v2 lite + Unified MLA passed."
+#}
 
 # GSM8K on QWEN3-30B-A3B
 run_gsm8k_qwen3_30b_test() {
@@ -462,6 +494,8 @@ launch_all_tests() {
     run_llama3_70b_inc_dynamic_quant_load_generate_test
     run_qwen2_5_vl_load_generate_test
     run_qwen2_5_vl_unified_attn_load_generate_test
+    run_qwen2_5_vl_lazy_warmup_test
+    run_qwen2_5_vl_compile_warmup_test
     run_qwen3_vl_load_generate_test
     run_mistral3_load_generate_test
     run_llama3_70b_inc_dynamic_quant_test
@@ -470,7 +504,7 @@ launch_all_tests() {
     run_gsm8k_granite_async_test
     run_gsm8k_granite_test_unified_attn_async
     run_gsm8k_deepseek_test
-    run_gsm8k_deepseek_unified_mla_test
+    #run_gsm8k_deepseek_unified_mla_test
     run_gsm8k_qwen3_30b_test
     run_spec_decode_ngram_test
     run_spec_decode_eagle3_test

@@ -17,7 +17,6 @@ from vllm_gaudi.extension.defragmentation import OnlineDefragmenter
 from vllm_gaudi.extension.profiler import (HabanaMemoryProfiler, format_bytes, setup_profiler)
 from vllm_gaudi.extension.runtime import get_config
 
-import vllm.envs as envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import (ensure_model_parallel_initialized, init_distributed_environment)
 from vllm.distributed.kv_transfer import (
@@ -96,8 +95,10 @@ class HPUWorker(WorkerBase):
 
     def init_profiler(self):
         """Initialize the profiler."""
-        if envs.VLLM_TORCH_PROFILER_DIR:
-            torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
+        torch_profiler_dir = os.getenv('VLLM_TORCH_PROFILER_DIR')
+        if torch_profiler_dir:
+            logger.warning("VLLM_TORCH_PROFILER_DIR is deprecated!")
+            torch_profiler_trace_dir = torch_profiler_dir
             logger.info("Profiling enabled. Traces will be saved to: %s", torch_profiler_trace_dir)
             if os.getenv('VLLM_PROFILER_ENABLED') == 'full':
                 fn = self.model_runner.profiler.full_trace_handler
@@ -302,12 +303,13 @@ class HPUWorker(WorkerBase):
             self.kv_cache_config = kv_cache_config
             self.model_runner.initialize_kv_cache(kv_cache_config)
             torch.hpu.synchronize()
-        msg = (f"Usable num_blocks: {kv_cache_config.num_blocks}, "
-               f"actual allocated num_blocks: "
-               f"{self.model_runner.kv_caches[0][0].shape[0]} "
-               f"(_PAD_BLOCK_ID={self.model_runner._PAD_BLOCK_ID}, "
-               f"_PAD_SLOT_ID={self.model_runner._PAD_SLOT_ID})")
-        logger.info(msg)
+        if len(self.model_runner.kv_caches) > 0:
+            msg = (f"Usable num_blocks: {kv_cache_config.num_blocks}, "
+                   f"actual allocated num_blocks: "
+                   f"{self.model_runner.kv_caches[0][0].shape[0]} "
+                   f"(_PAD_BLOCK_ID={self.model_runner._PAD_BLOCK_ID}, "
+                   f"_PAD_SLOT_ID={self.model_runner._PAD_SLOT_ID})")
+            logger.info(msg)
         msg = ("Initializing cache engine "
                f"took {m.get_summary_string()}")
         logger.info(msg)

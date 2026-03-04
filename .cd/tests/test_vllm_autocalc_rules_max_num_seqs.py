@@ -21,7 +21,8 @@ def test_calc_MAX_NUM_SEQS_fp8():
         'KV_CACHE_PER_SEQ': 2,
         'DTYPE': 'fp8',
         'VLLM_DECODE_BS_BUCKET_STEP': 8,
-        'MODEL': 'test'
+        'MODEL': 'test',
+        'HEAD_DIM': math.nan
     }
     val = (2 * 64 / 2)
     expected = max(1, math.floor(val / 8)) * 8
@@ -36,7 +37,8 @@ def test_calc_MAX_NUM_SEQS_non_fp8():
         'KV_CACHE_PER_SEQ': 2,
         'DTYPE': 'bfloat16',
         'VLLM_DECODE_BS_BUCKET_STEP': 8,
-        'MODEL': 'test'
+        'MODEL': 'test',
+        'HEAD_DIM': math.nan
     }
     val = (2 * 64 / 2)
     expected = math.ceil(val / 8) * 8
@@ -51,7 +53,8 @@ def test_calc_MAX_NUM_SEQS_vision_instruct_limit():
         'KV_CACHE_PER_SEQ': 2,
         'DTYPE': 'bfloat16',
         'VLLM_DECODE_BS_BUCKET_STEP': 8,
-        'MODEL': 'meta-llama/Llama-3.2-11B-Vision-Instruct'
+        'MODEL': 'meta-llama/Llama-3.2-11B-Vision-Instruct',
+        'HEAD_DIM': math.nan
     }
     assert rules.calc_MAX_NUM_SEQS(ctx) == 128
 
@@ -64,7 +67,8 @@ def test_calc_MAX_NUM_SEQS_not_enough_memory():
         'KV_CACHE_PER_SEQ': 2,
         'DTYPE': 'bfloat16',
         'VLLM_DECODE_BS_BUCKET_STEP': 8,
-        'MODEL': 'test'
+        'MODEL': 'test',
+        'HEAD_DIM': math.nan
     }
     with pytest.raises(ValueError):
         rules.calc_MAX_NUM_SEQS(ctx)
