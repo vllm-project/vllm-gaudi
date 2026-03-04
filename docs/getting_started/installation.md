@@ -172,7 +172,7 @@ To install vLLM Hardware Plugin for Intel Gaudi and NIXL using a Dockerfile:
         cd ..
         git clone https://github.com/vllm-project/vllm
         cd vllm
-        git checkout $VLLM_COMMIT_HASH
+        git checkout v0.16.0
         pip install -r <(sed '/^torch/d' requirements/build.txt)
         VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
         cd ..
