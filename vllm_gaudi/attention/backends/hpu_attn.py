@@ -354,10 +354,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         if isinstance(k_cache, tuple):
             k_cache = k_cache[0]  # Use only key_cache for MLA
         query = torch.cat([q_nope, q_pe], dim=-1)
-        if k_cache is not None:
-            key_cache = k_cache.unsqueeze(1)
-        else:
-            key_cache = None
+        key_cache = k_cache.unsqueeze(1) if k_cache is not None else None
         value_cache = None
         output = HPUPagedAttention.forward_decode(query=query,
                                                   key_cache=key_cache,
