@@ -116,7 +116,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import Of
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.v1.core.sched.output import GrammarOutput
 from vllm_gaudi.attention.backends.hpu_attn import HPUAttentionImpl
-
+from vllm_gaudi.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 if TYPE_CHECKING:
     import xgrammar as xgr
     import xgrammar.kernels.apply_token_bitmask_inplace_torch_compile as xgr_torch_compile  # noqa: E501
@@ -439,6 +439,7 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
     mamba_like_layer = ['.mixer', '.linear_attn']
     #import remote_pdb;remote_pdb.set_trace()
     # Iterate through all KV cache groups
+    gdn_hybrid = False
     for group_idx, kv_group in enumerate(kv_cache_config.kv_cache_groups):
         # kv_group.layer_names contains strings like "model.layers.5.mixer"
         for layer_name in kv_group.layer_names:
@@ -454,8 +455,8 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
                 layer.mamba.cache_group_idx = group_idx
             elif 'linear_attn' in layer_name:
                 layer = model.language_model.model.layers[layer_idx]
-                
-            logger.info(f"libin debug set mamba kv cache group id {layer=}")
+                gdn_hybrid = True  #TODO: should we return here since not sure if layer assign has any use
+    return gdn_hybrid
 
 
 def maybe_set_chunked_attention_layers(model_runner):
@@ -1054,15 +1055,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.is_causal = False
         assert not (self.unified_attn and not self.use_contiguous_pa), 'Unified attn requires contiguous_pa!'
         assert not (self.unified_attn and not self.use_merged_prefill), 'Unified attn requires merged_prefill!'
-        # Store the backend class for metadata creation  
-        self.attn_backend_cls = self.attn_backend.__class__ 
+        self.gdn_hybrid = False
     
     def _create_metadata(self, is_prompt: bool, **kwargs):  
         """  
         Factory method to create appropriate metadata based on backend type.  
         """  
-        # Check if using GDN backend  
-        if hasattr(self.attn_backend_cls, '__name__') and 'GDN' in self.attn_backend_cls.__name__:  
+        # Check if using GDN backend
+        if self.gdn_hybrid == True:  
             if is_prompt:  
                 return self._create_gdn_prefill_metadata(**kwargs)  
             else:  
@@ -1086,20 +1086,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         num_prefills = len(seq_lens_tensor) if seq_lens_tensor is not None else 0  
         num_prefill_tokens = seq_lens_tensor.sum().item() if seq_lens_tensor is not None else 0  
           
-        # Check if model has mamba layers  
-        has_mamba = (hasattr(self.model, 'config') and   
-                    getattr(self.model.config, 'use_mamba', False))  
-          
         # Create tensor fields only if needed  
-        tensor_fields = {}  
-        if has_mamba:  
+        tensor_fields = {}
+        import remote_pdb;remote_pdb.set_trace()
+        if self.gdn_hybrid:  
             tensor_fields.update({  
                 'has_initial_state': self._get_initial_state_tensor(),  
                 'batch_ptr': self._get_batch_ptr_tensor(),  
                 'token_chunk_offset_ptr': self._get_token_chunk_offset_ptr(),  
             })  
           
-        return GDNAttentionMetadata.make_gdn_prefill_metadata(  
+        return GDNAttentionMetadata.make_prefill_metadata(  
             num_prefills=num_prefills,  
             num_prefill_tokens=num_prefill_tokens,  
             num_decodes=0,  
@@ -1142,7 +1139,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 'token_chunk_offset_ptr': self._get_token_chunk_offset_ptr(),  
             })  
           
-        return GDNAttentionMetadata.make_gdn_decode_metadata(  
+        return GDNAttentionMetadata.make_decode_metadata(  
             num_prefills=0,  
             num_prefill_tokens=0,  
             num_decodes=num_decodes,  
@@ -5847,7 +5844,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.may_add_encoder_only_layers_to_kv_cache_config()
 
         if self.num_mamba_like_layers > 0:
-            maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
+            self.gdn_hybrid = maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
         # if len(kv_cache_config.kv_cache_groups) > 1:
         block_sizes = [kv_cache_group.kv_cache_spec.block_size for kv_cache_group in kv_cache_config.kv_cache_groups]
         if block_sizes != [self.cache_config.block_size]:
