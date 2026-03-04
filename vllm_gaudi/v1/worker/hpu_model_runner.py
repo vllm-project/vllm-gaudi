@@ -4492,11 +4492,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if orig_mod is not None:
                     _sync_moe_kernel_flags(orig_mod)
 
-                # INC may wrap MoE modules and miss new vLLM API fields.
-                # Force external router path and disable runner-internal gate.
-                experts.is_internal_router = False
-                if hasattr(experts, "_gate"):
+                # Force external router path: the model's forward checks
+                # experts.is_internal_router to decide the gate path.
+                if isinstance(experts, FusedMoE):
+                    # is_internal_router is a read-only property backed
+                    # by _gate; setting _gate=None makes it return False.
                     experts._gate = None
+                else:
+                    # INC wrappers (e.g. PatchedMixtralMoE) don't inherit
+                    # the property — set a plain attribute instead.
+                    experts.is_internal_router = False
                 runner = getattr(experts, "runner", None)
                 if runner is not None and hasattr(runner, "gate"):
                     runner.gate = None
