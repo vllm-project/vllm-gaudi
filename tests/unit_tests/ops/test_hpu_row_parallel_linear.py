@@ -191,6 +191,20 @@ class TestChunkingDecision:
         x = torch.randn(1024, INPUT_SIZE, dtype=torch.bfloat16, device="hpu")
         assert _count_async_allreduce_calls(layer, x) == 4
 
+    def test_chunking_enabled_with_bias(self, default_vllm_config, dist_init):
+        """Chunking triggers correctly when bias is enabled."""
+        layer = _create_layer(num_chunks=4, chunk_threshold=256, bias=True).to("hpu")
+        layer.tp_size = 2
+        x = torch.randn(1024, INPUT_SIZE, dtype=torch.bfloat16, device="hpu")
+        assert _count_async_allreduce_calls(layer, x) == 4
+
+    def test_no_chunking_below_threshold_with_bias(self, default_vllm_config, dist_init):
+        """Bias does not affect chunking decision when below threshold."""
+        layer = _create_layer(num_chunks=4, chunk_threshold=1024, bias=True).to("hpu")
+        layer.tp_size = 2
+        x = torch.randn(512, INPUT_SIZE, dtype=torch.bfloat16, device="hpu")
+        assert _count_async_allreduce_calls(layer, x) == 0
+
     def test_chunk_count_matches_config(self, default_vllm_config, dist_init):
         """Verify 2-chunk configuration produces exactly 2 async all_reduce calls."""
         layer = _create_layer(num_chunks=2, chunk_threshold=1).to("hpu")
@@ -250,6 +264,30 @@ class TestAccuracy:
         out = _chunked_output(layer, x, num_chunks=4)
         torch.testing.assert_close(ref, out, atol=0, rtol=0)
 
+    def test_3d_prompt_with_bias(self, default_vllm_config, dist_init):
+        """3D prompt input with bias — chunks along seq dim."""
+        layer = _create_layer(bias=True).to("hpu")
+        x = torch.randn(4, 256, INPUT_SIZE, dtype=torch.bfloat16, device="hpu")
+        ref = _reference_output(layer, x)
+        out = _chunked_output(layer, x, num_chunks=4)
+        torch.testing.assert_close(ref, out, atol=0, rtol=0)
+
+    def test_3d_decode_with_bias(self, default_vllm_config, dist_init):
+        """3D decode input with bias — chunks along batch dim."""
+        layer = _create_layer(bias=True).to("hpu")
+        x = torch.randn(32, 1, INPUT_SIZE, dtype=torch.bfloat16, device="hpu")
+        ref = _reference_output(layer, x)
+        out = _chunked_output(layer, x, num_chunks=4)
+        torch.testing.assert_close(ref, out, atol=0, rtol=0)
+
+    def test_uneven_chunks_with_bias(self, default_vllm_config, dist_init):
+        """Uneven chunks with bias produce correct output."""
+        layer = _create_layer(bias=True).to("hpu")
+        x = torch.randn(1000, INPUT_SIZE, dtype=torch.bfloat16, device="hpu")
+        ref = _reference_output(layer, x)
+        out = _chunked_output(layer, x, num_chunks=3)
+        torch.testing.assert_close(ref, out, atol=0, rtol=0)
+
     def test_uneven_chunks(self, default_vllm_config, dist_init):
         """Tokens not evenly divisible by num_chunks."""
         layer = _create_layer().to("hpu")
@@ -268,9 +306,26 @@ class TestAccuracy:
         out = _chunked_output(layer, x, num_chunks=num_chunks)
         torch.testing.assert_close(ref, out, atol=0, rtol=0)
 
+    @pytest.mark.parametrize("num_chunks", [2, 4, 8])
+    def test_various_chunk_counts_with_bias(self, default_vllm_config, dist_init, num_chunks):
+        """Accuracy with bias holds across different chunk counts."""
+        layer = _create_layer(bias=True).to("hpu")
+        x = torch.randn(2048, INPUT_SIZE, dtype=torch.bfloat16, device="hpu")
+        ref = _reference_output(layer, x)
+        out = _chunked_output(layer, x, num_chunks=num_chunks)
+        torch.testing.assert_close(ref, out, atol=0, rtol=0)
+
     def test_more_chunks_than_tokens(self, default_vllm_config, dist_init):
         """num_chunks > total_tokens still produces correct output."""
         layer = _create_layer().to("hpu")
+        x = torch.randn(3, INPUT_SIZE, dtype=torch.bfloat16, device="hpu")
+        ref = _reference_output(layer, x)
+        out = _chunked_output(layer, x, num_chunks=8)
+        torch.testing.assert_close(ref, out, atol=0, rtol=0)
+
+    def test_more_chunks_than_tokens_with_bias(self, default_vllm_config, dist_init):
+        """num_chunks > total_tokens with bias still produces correct output."""
+        layer = _create_layer(bias=True).to("hpu")
         x = torch.randn(3, INPUT_SIZE, dtype=torch.bfloat16, device="hpu")
         ref = _reference_output(layer, x)
         out = _chunked_output(layer, x, num_chunks=8)

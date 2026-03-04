@@ -52,8 +52,6 @@ We recommend this feature for:
 - Serving workloads with large batch sizes or long prefill sequences
 - Workloads where all-reduce communication is a significant fraction of the prefill time
 
-Do not use this feature for running without tensor parallelism (`TP = 1`), as there is no all-reduce to overlap. We also do not recommend it for serving only very short sequences with small batches, as chunking overhead outweighs the benefit.
-
 ## Configuration
 
 The feature is controlled by two environment variables:
@@ -76,7 +74,7 @@ export VLLM_ROW_PARALLEL_CHUNK_THRESHOLD=4096
 
 ## Performance Characteristics
 
-The speedup ratio is the chunked time divided by the baseline time, where values higher than 1.0 indicate speedup. The following tables show the speedup ratio for an isolated `RowParallelLinear` layer measured across different tensor parallelism sizes, chunk counts, and token counts. To interpret the values, consider the following:
+The speedup ratio is the baseline time divided by the chunked time, where values higher than 1.0 indicate speedup. The following tables show the speedup ratio for an isolated `RowParallelLinear` layer measured across different tensor parallelism sizes, chunk counts, and token counts. To interpret the values, consider the following:
 
 - Values greater than 1.0 indicate a speedup over the non-chunked baseline, for example, 1.5 means 50% faster.
 - Values below 1.0 indicate a slowdown due to chunking overhead exceeding the overlap benefit.
