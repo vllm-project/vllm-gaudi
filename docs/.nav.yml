@@ -33,6 +33,7 @@ nav:
     - features/bucketing_mechanism.md
     - features/floating_point_8.md
     - features/warmup.md
+    - features/row_parallel_chunking.md
   - Developer Guides:
     - dev_guide/plugin_system.md
     - dev_guide/ci-failures.md
