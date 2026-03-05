@@ -161,7 +161,7 @@ def test_cpu_offloading(cpu_block_size: int, attn_backend: str) -> None:
 
     port: int
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("0.0.0.0", 0))
+        s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
 
     events_endpoint = f"tcp://*:{port}"
