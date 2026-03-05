@@ -305,9 +305,7 @@ def main():
         models = args.models
 
     if len(models) < 2:
-        print("ERROR: At least 2 models required for swap testing")
-        import sys
-        sys.exit(1)
+        parser.error("At least 2 models are required for swap testing")
 
     num_phases = args.phases
 
