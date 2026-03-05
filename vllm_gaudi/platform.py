@@ -67,6 +67,20 @@ class HpuPlatform(Platform):
                     "hpu_attn.HPUAttentionBackendV1")
 
     @classmethod
+    def validate_request(
+        cls,
+        prompt,
+        params,
+        processed_inputs,
+    ) -> None:
+        from vllm.sampling_params import SamplingParams
+        if isinstance(params, SamplingParams):
+            if params.logprobs is not None or \
+                    params.prompt_logprobs is not None:
+                raise ValueError(
+                    "Gaudi doesn't support logprobs")
+
+    @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
         return True
 
