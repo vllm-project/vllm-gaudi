@@ -390,7 +390,9 @@ def test_compressed_tensors_wna16_moe_method(default_vllm_config: None, dist_ini
     mock_ctx.all_moe_layers = None
     mock_ctx.no_compile_layers = {oot_op.layer_name: oot_op}
     with override_forward_context(mock_ctx):
-        out = oot_op.forward_native(hidden_states, router_logits)
+
+        out = oot_op.runner.forward_impl(oot_op, hidden_states, router_logits, hidden_states)
+
 
     # Check correctness
     torch.testing.assert_close(ref_output, out, atol=1e-4, rtol=1e-4)
