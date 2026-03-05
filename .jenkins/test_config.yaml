@@ -8,7 +8,7 @@ stages:
         command: >-
           pip install pytest-timeout &&
           HABANA_VISIBLE_DEVICES=all pytest -vvv --timeout=300 --durations=10 --durations-min=1.0
-          -o junit_family=xunit1 --junitxml=${TEST_RESULTS_DIR}/test_unit_tests.xml
+          -o junit_family=xunit1 --junitxml=\${TEST_RESULTS_DIR}/test_unit_tests.xml
           tests/unit_tests
       - name: perf_tests_g3
         flavor: g3
@@ -25,9 +25,8 @@ stages:
         flavor: g3.m
         command: >-
           pip install lm-eval[api] &&
-          cd tests/unit_tests &&
-          PYTEST_ADDOPTS="-o junit_family=xunit1 --junitxml=${TEST_RESULTS_DIR}/test_pd_nixl_ucx.xml"
-          ./run_accuracy_test.sh
+          bash tests/full_tests/run_with_junit.sh pd_nixl_ucx
+          bash -c 'cd tests/unit_tests && ./run_accuracy_test.sh'
   - name: second_stage
     steps:
       - name: e2e_llama3_per_tensor_scaling_bundle
