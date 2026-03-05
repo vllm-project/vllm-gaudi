@@ -1,19 +1,20 @@
 import torch
 from vllm.model_executor.models.qwen3_5 import Qwen3_5GatedDeltaNet
 
-from vllm.model_executor.custom_op import CustomOp
+
 from einops import rearrange
-from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.layers.fla.ops import (
-    fused_recurrent_gated_delta_rule,
+from vllm.forward_context import ForwardContext, get_forward_context  
+from vllm.model_executor.layers.fla.ops import (   
+    fused_recurrent_gated_delta_rule,  
 )
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+
 from vllm_gaudi.ops.causal_conv1d_pytorch import (
     hpu_causal_conv1d_fn,
     hpu_causal_conv1d_update,
 )
+from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
 
-class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
+class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):      
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -25,17 +26,20 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         2. Core attention (custom op)
         3. Output projection
         """
+        hidden_states = hidden_states.view(-1, hidden_states.size(-1))
         num_tokens = hidden_states.size(0)
 
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
         mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+        print(f"libin debug gdn_attention_core 0 {hidden_states.shape=} {mixed_qkvz.shape=} {num_tokens=}")
         qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
         z_size = self.value_dim // self.tp_size
         mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
         z = z.reshape(z.size(0), -1, self.head_v_dim)
         ba, _ = self.in_proj_ba(hidden_states)
+        print(f"libin debug gdn_attention_core 1 {qkv_size=} {mixed_qkv.shape=}{ba.shape=}")
         b, a = ba.chunk(2, dim=-1)
 
         b = b.contiguous()
@@ -51,6 +55,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
+        print(f"libin debug gdn_attention_core {mixed_qkv.shape=} {b.shape=} {a.shape=} {core_attn_out.shape=}{self.prefix=}")
 
         self.gdn_attention_core(
             mixed_qkv,
@@ -77,40 +82,37 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         mixed_qkv: torch.Tensor,
         b: torch.Tensor,
         a: torch.Tensor,
-        core_attn_out: torch.Tensor,
+        core_attn_out: torch.Tensor, 
         layer_name: str,
-    ) -> None:
+    ) -> None:  
 
-        forward_context: ForwardContext = get_forward_context()
-        self_layer = forward_context.no_compile_layers[layer_name]
-        import remote_pdb;remote_pdb.set_trace()
-        # Get attention metadata (already TrimmedAttentionMetadata)
-        attn_metadata = forward_context.attn_metadata
-        if attn_metadata is None:
-            # V1 profile run
-            return
-
-        trimmed_metadata = attn_metadata[self_layer.prefix]
-
-        # Verify it's TrimmedAttentionMetadata
-        assert isinstance(trimmed_metadata, TrimmedAttentionMetadata)
-        # Call Gaudi-optimized core computation
-        self._forward_core_hpu(
-            self_layer,
-            mixed_qkv=mixed_qkv,
-            b=b,
-            a=a,
-            core_attn_out=core_attn_out,
-            trimmed_metadata=trimmed_metadata,
-        )
-
+        forward_context: ForwardContext = get_forward_context()  
+        self_layer = forward_context.no_compile_layers[layer_name]  
+ 
+        attn_metadata = forward_context.attn_metadata  
+        if attn_metadata is None:  
+            # V1 profile run  
+            return  
+        
+        # Call Gaudi-optimized core computation  
+        self._forward_core_hpu(  
+            self_layer,  
+            mixed_qkv=mixed_qkv,  
+            b=b,  
+            a=a,  
+            core_attn_out=core_attn_out,  
+            attn_metadata=attn_metadata,  
+        )  
+    
     def _forward_core_hpu(
         self,
-        mixed_qkv: torch.Tensor,
-        b: torch.Tensor,
-        a: torch.Tensor,
-        core_attn_out: torch.Tensor,
-    ):
+        self_layer,
+        mixed_qkv: torch.Tensor,  
+        b: torch.Tensor,  
+        a: torch.Tensor,  
+        core_attn_out: torch.Tensor,  
+        attn_metadata: HPUAttentionMetadataV1,  
+        ):
         """
         Core attention computation (called by custom op).
         """
@@ -120,24 +122,23 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         if attn_metadata is None:
             # V1 profile run
             return
-        import remote_pdb;remote_pdb.set_trace()
-        assert isinstance(attn_metadata, dict)
-        attn_metadata = attn_metadata[self.prefix]
-        assert isinstance(attn_metadata, GDNAttentionMetadata)
-        has_initial_state = attn_metadata.has_initial_state
-        spec_query_start_loc = attn_metadata.spec_query_start_loc
-        non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
-        spec_sequence_masks = attn_metadata.spec_sequence_masks
-        spec_token_indx = attn_metadata.spec_token_indx
-        non_spec_token_indx = attn_metadata.non_spec_token_indx
-        spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
-        non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
+
+        has_initial_state = attn_metadata.has_initial_states_p
+        spec_query_start_loc = None #TODO: need for speculative decode
+        non_spec_query_start_loc = attn_metadata.query_start_loc_p #HPU attention
+        spec_sequence_masks = None  #TODO: need for speculative decode
+        spec_token_indx = None  #TODO: need for speculative decode
+        non_spec_token_indx = None #TODO: need for speculative decode
+        spec_state_indices_tensor = None  # noqa: E501
+        non_spec_state_indices_tensor = attn_metadata.state_indices_tensor  # noqa: E501
         self_kv_cache = self.kv_cache[forward_context.virtual_engine]
         conv_state = self_kv_cache[0].transpose(-1, -2)
         ssm_state = self_kv_cache[1]
-        num_actual_tokens = attn_metadata.num_actual_tokens
-        num_accepted_tokens = attn_metadata.num_accepted_tokens
-
+        num_actual_tokens = None #TODO: need for speculative decode
+        num_accepted_tokens = None #TODO: need for speculative decode
+        #TODO: change this when supporting unified attention
+        num_prefills = 1 if attn_metadata.is_prompt else 0
+        num_decodes = 0 if attn_metadata.is_prompt else 1
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
@@ -157,11 +158,10 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         else:
             mixed_qkv_spec = None
             mixed_qkv_non_spec = mixed_qkv
-
+        '''
         # 1.1: Process the multi-query part
-        if spec_sequence_masks is not None:
+        if Faspec_sequence_masks is not None:
             mixed_qkv_spec = hpu_causal_conv1d_update(
-                mixed_qkv_spec,
                 conv_state,
                 conv_weights,
                 self.conv1d.bias,
@@ -174,33 +174,49 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 max_query_len=spec_state_indices_tensor.size(-1),
                 validate_data=False,
             )
-
+        '''
+        assert self.cache_config is not None
+        mamba_block_size = self.cache_config.mamba_block_size
+        block_idx_last_computed_token = None
+        block_idx_last_scheduled_token = None
+        block_idx_first_scheduled_token_p = None
+        num_computed_tokens_p = None
         # 1.2: Process the remaining part
-        if attn_metadata.num_prefills > 0:
+        if num_prefills > 0:
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "state_indices_tensor"
+            print(f"libin debug causaul_conv1d {mixed_qkv_non_spec_T.shape=}{conv_weights.shape=} {conv_state.shape=}")
             mixed_qkv_non_spec = hpu_causal_conv1d_fn(
-                mixed_qkv_non_spec_T,
-                conv_weights,
-                self.conv1d.bias,
+                x=mixed_qkv_non_spec_T,
+                weight=conv_weights,
+                bias=self.conv1d.bias,
                 activation=self.activation,
                 conv_states=conv_state,
                 has_initial_state=has_initial_state,
                 cache_indices=non_spec_state_indices_tensor,
+                block_idx_first_scheduled_token=block_idx_first_scheduled_token_p,
+                block_idx_last_scheduled_token=block_idx_last_scheduled_token,
+                initial_state_idx=block_idx_last_computed_token,
                 query_start_loc=non_spec_query_start_loc,
+                block_size_to_align=mamba_block_size,
+                num_computed_tokens=num_computed_tokens_p,
                 metadata=attn_metadata,
+                is_prompt=True
             ).transpose(0, 1)
-        elif attn_metadata.num_decodes > 0:
+        elif num_decodes > 0:  
             mixed_qkv_non_spec = hpu_causal_conv1d_update(
-                mixed_qkv_non_spec,
-                conv_state,
-                conv_weights,
-                self.conv1d.bias,
-                self.activation,
+                x=mixed_qkv_non_spec,
+                conv_state=conv_state,
+                weight=conv_weights,
+                bias=self.conv1d.bias,
+                activation=self.activation,
                 conv_state_indices=non_spec_state_indices_tensor[
                     : attn_metadata.num_actual_tokens
                 ],
+                block_idx_last_scheduled_token=block_idx_last_computed_token,
+                initial_state_idx=block_idx_last_computed_token,
+                query_start_loc=non_spec_query_start_loc,
                 validate_data=True,
             )
         else:

@@ -116,7 +116,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import Of
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.v1.core.sched.output import GrammarOutput
 from vllm_gaudi.attention.backends.hpu_attn import HPUAttentionImpl
-from vllm_gaudi.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+
 if TYPE_CHECKING:
     import xgrammar as xgr
     import xgrammar.kernels.apply_token_bitmask_inplace_torch_compile as xgr_torch_compile  # noqa: E501
@@ -601,11 +601,12 @@ class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
             kwargs.pop('warmup_mode')
         input_ids = kwargs['input_ids']
         model_has_chunked_attention = kwargs.pop('model_has_chunked_attention', False)
-        if (not self.unified_attn) and ('attn_metadata' in kwargs and not self.pooling_model):
+        if (not self.unified_attn) and ('attn_metadata' in kwargs and not self.pooling_model): 
             kwargs['attn_metadata'] = self.metadata_processor.process_metadata(kwargs['attn_metadata'],
                                                                                input_ids.size(0), input_ids.size(1),
                                                                                input_ids.device, self.dtype,
                                                                                model_has_chunked_attention)
+                
         if self._rotary_prepare_cos_sin is not None:
             self._rotary_prepare_cos_sin(kwargs['positions'], recompute_cos_sin=self.recompute_cos_sin)
         attn_meta = kwargs.pop('attn_metadata', None)
@@ -714,6 +715,7 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
     # input_hash(torch.tensor(123)) == input_hash(torch.tensor(321))
     # input_hash(123) != input_hash(321)
     # input_hash("abc") != input_hash("cba")
+
     attention_metadata = subtuple(metadata, 'TrimmedAttentionMetadata', [
         'attn_bias', 'seq_lens_tensor', 'context_lens_tensor', 'block_list', 'block_mapping', 'block_usage',
         'slot_mapping', 'is_prompt', 'block_size', 'block_groups', 'window_block_list', 'window_block_mapping',
@@ -722,7 +724,9 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
         'has_initial_states_p', 'last_chunk_indices_p', 'state_indices_tensor', 'query_start_loc', 'query_start_loc_p',
         'padding_mask_flat'
     ])
+  
     return attention_metadata
+
 
 
 def round_up(value: int, k: int):
@@ -1060,124 +1064,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.is_causal = False
         assert not (self.unified_attn and not self.use_contiguous_pa), 'Unified attn requires contiguous_pa!'
         assert not (self.unified_attn and not self.use_merged_prefill), 'Unified attn requires merged_prefill!'
-        self.gdn_hybrid = False
-    
-    def _create_metadata(self, is_prompt: bool, **kwargs):  
-        """  
-        Factory method to create appropriate metadata based on backend type.  
-        """  
-        # Check if using GDN backend
-        if self.gdn_hybrid == True:  
-            if is_prompt:  
-                return self._create_gdn_prefill_metadata(**kwargs)  
-            else:  
-                return self._create_gdn_decode_metadata(**kwargs)  
-          
-        # Default HPU metadata creation  
-        if is_prompt:  
-            return HPUAttentionMetadataV1.make_prefill_metadata(**kwargs)  
-        else:  
-            return HPUAttentionMetadataV1.make_decode_metadata(**kwargs)  
-      
-    def _create_gdn_prefill_metadata(self,   
-                                   seq_lens_tensor,  
-                                   context_lens_tensor,  
-                                   slot_mapping,  
-                                   block_list,  
-                                   attn_bias=None,  
-                                   **kwargs):  
-        """Create GDN metadata for prefill phase."""  
-        # Calculate GDN-specific counts  
-        num_prefills = len(seq_lens_tensor) if seq_lens_tensor is not None else 0  
-        num_prefill_tokens = seq_lens_tensor.sum().item() if seq_lens_tensor is not None else 0  
-          
-        # Create tensor fields only if needed  
-        tensor_fields = {}
-        if self.gdn_hybrid:  
-            tensor_fields.update({  
-                'has_initial_state': self._get_initial_state_tensor(),  
-                'batch_ptr': self._get_batch_ptr_tensor(),  
-                'token_chunk_offset_ptr': self._get_token_chunk_offset_ptr(),  
-            })  
-          
-        return GDNAttentionMetadata.make_prefill_metadata(  
-            num_prefills=num_prefills,  
-            num_prefill_tokens=num_prefill_tokens,  
-            num_decodes=0,  
-            num_decode_tokens=0,  
-            num_spec_decodes=0,  
-            num_spec_decode_tokens=0,  
-            num_actual_tokens=num_prefill_tokens,  
-            seq_lens_tensor=seq_lens_tensor,  
-            context_lens_tensor=context_lens_tensor,  
-            slot_mapping=slot_mapping,  
-            block_list=block_list,  
-            attn_bias=attn_bias,  
-            block_size=self.block_size,  
-            **tensor_fields  
-        )  
-      
-    def _create_gdn_decode_metadata(self,  
-                                  block_list,  
-                                  block_usage,  
-                                  block_groups,  
-                                  slot_mapping,  
-                                  window_block_list=None,  
-                                  window_block_usage=None,  
-                                  window_block_groups=None,  
-                                  **kwargs):  
-        """Create GDN metadata for decode phase."""  
-        num_decodes = len(block_usage) if block_usage is not None else 0  
-        num_decode_tokens = num_decodes  # Each decode has 1 token  
-          
-        # Check if model has mamba layers  
-        has_mamba = (hasattr(self.model, 'config') and   
-                    getattr(self.model.config, 'use_mamba', False))  
-          
-        # Create tensor fields only if needed  
-        tensor_fields = {}  
-        if has_mamba:  
-            tensor_fields.update({  
-                'has_initial_state': self._get_initial_state_tensor(),  
-                'batch_ptr': self._get_batch_ptr_tensor(),  
-                'token_chunk_offset_ptr': self._get_token_chunk_offset_ptr(),  
-            })  
-          
-        return GDNAttentionMetadata.make_decode_metadata(  
-            num_prefills=0,  
-            num_prefill_tokens=0,  
-            num_decodes=num_decodes,  
-            num_decode_tokens=num_decode_tokens,  
-            num_spec_decodes=0,  
-            num_spec_decode_tokens=0,  
-            num_actual_tokens=num_decode_tokens,  
-            block_list=block_list,  
-            block_usage=block_usage,  
-            block_groups=block_groups,  
-            window_block_list=window_block_list,  
-            window_block_usage=window_block_usage,  
-            window_block_groups=window_block_groups,  
-            slot_mapping=slot_mapping,  
-            block_size=self.block_size,  
-            **tensor_fields  
-        )  
-      
-    def _get_initial_state_tensor(self):  
-        """Get initial state tensor for mamba layers."""  
-        if hasattr(self.model, 'get_initial_state'):  
-            return self.model.get_initial_state()  
-        return None  
-      
-    def _get_batch_ptr_tensor(self):  
-        """Get batch pointer tensor for mamba layers."""  
-        # Implementation depends on your specific needs  
-        return None  
-      
-    def _get_token_chunk_offset_ptr(self):  
-        """Get token chunk offset pointer for mamba layers."""  
-        # Implementation depends on your specific needs  
-        return None
-        
+
     def _make_buffer(self, *size: Union[int, torch.SymInt], dtype: torch.dtype, numpy: bool = True) -> CpuGpuBuffer:
         return CpuGpuBuffer(*size, dtype=dtype, device=self.device, pin_memory=self.pin_memory, with_numpy=numpy)
 
@@ -2433,8 +2320,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         context_blocks_t: Optional[torch.tensor]
         context_blocks_t = async_h2d_copy(context_blocks, dtype=torch.int32).flatten() if target_blocks > 0 else None
 
-        attn_metadata = attn_metadata = self._create_metadata(  
-            is_prompt=True,  
+        attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
             seq_lens_tensor=query_lens,  
             context_lens_tensor=context_lens,  
             slot_mapping=token_slots,  
@@ -2753,8 +2639,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             spec_decode_metadata = None
         logits_indices_device = async_h2d_copy(logits_indices, device=self.device)
 
-        attn_metadata = self._create_metadata(  
-            is_prompt=False,  
+        attn_metadata = HPUAttentionMetadataV1.make_decode_metadata(
             block_list=block_list_device,
             block_usage=block_usage_device,
             block_groups=block_groups_device,
@@ -3509,8 +3394,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             seq_lens_tensor = async_h2d_copy([seq_num_scheduled], dtype=torch.int32)
             context_lens_tensor = async_h2d_copy([0], dtype=torch.int32)
 
-            attn_metadata = self._create_metadata(  
-                is_prompt=True,  
+            attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
                 seq_lens_tensor=seq_lens_tensor,  
                 context_lens_tensor=context_lens_tensor,  
                 slot_mapping=slot_mapping,  
@@ -4660,8 +4544,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             seq_lens_tensor = torch.full((bs, ), query_len, device=device, dtype=torch.int32)
             context_lens_tensor = torch.zeros((bs, ), device=device, dtype=torch.int32)
 
-            attn_metadata = self._create_metadata(  
-                is_prompt=True,  
+            attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
                 seq_lens_tensor=seq_lens_tensor,  
                 context_lens_tensor=context_lens_tensor,  
                 slot_mapping=slot_mapping,  
@@ -5847,9 +5730,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.kv_cache_config = kv_cache_config
         self.is_encoder_only_attn = False
         self.may_add_encoder_only_layers_to_kv_cache_config()
-
+        self.vllm_config.gdn_hybrid  = False
         if self.num_mamba_like_layers > 0:
-            self.gdn_hybrid = maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
+            self.vllm_config.gdn_hybrid = maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
         # if len(kv_cache_config.kv_cache_groups) > 1:
         block_sizes = [kv_cache_group.kv_cache_spec.block_size for kv_cache_group in kv_cache_config.kv_cache_groups]
         if block_sizes != [self.cache_config.block_size]:
@@ -5899,7 +5782,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     num_blocks = \
                         kv_cache_tensor_size // kv_cache_spec.page_size_bytes
                     if isinstance(kv_cache_spec, FullAttentionSpec):
-                        selected_kernel_size = 128 #TODO:
+                        selected_kernel_size = 128 #TODO remove hardcode
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, selected_kernel_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
