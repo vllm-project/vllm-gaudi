@@ -1,7 +1,8 @@
 # test_config.yaml
 stages:
-  - name: full_test_suite
+  - name: first_stage
     steps:
+      # --- due to offloading test .l is needed ---
       - name: unit_tests_g3
         flavor: g3.l
         command: >-
@@ -9,7 +10,6 @@ stages:
           HABANA_VISIBLE_DEVICES=all pytest -vvv --timeout=300 --durations=10 --durations-min=1.0
           -o junit_family=xunit1 --junitxml=${TEST_RESULTS_DIR}/test_unit_tests.xml
           tests/unit_tests
-      # --- hpu_perf_tests (1 card) ---
       - name: perf_tests_g3
         flavor: g3
         command: bash tests/full_tests/run_with_junit.sh perf_tests bash tests/full_tests/ci_perf_tests.sh
@@ -28,147 +28,46 @@ stages:
           cd tests/unit_tests &&
           PYTEST_ADDOPTS="-o junit_family=xunit1 --junitxml=${TEST_RESULTS_DIR}/test_pd_nixl_ucx.xml"
           ./run_accuracy_test.sh
-      # --- e2e tests: 1-card (g3) ---
-      - name: e2e_gemma3_load_generate
+  - name: second_stage
+    steps:
+      - name: e2e_llama3_per_tensor_scaling_bundle
         flavor: g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gemma3_load_generate_test
-      - name: e2e_basic_load_generate
+        command: >-
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_llama3_per_tensor_scaling_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_llama3_modelopt_per_tensor_scaling_load_generate_test
+      - name: e2e_awq_gptq_load_generate_bundle
         flavor: g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_basic_load_generate_test
-      # --- Individual e2e tests: 1-card (g3) --- (tests bundled by shared model are commented out below)
-      # - name: e2e_mla_moe_load_generate  # → deepseek_v2_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_mla_moe_load_generate_test
-      # - name: e2e_granite_inc_load_generate  # → granite_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_granite_inc_load_generate_test
-      # - name: e2e_deepseek_v2_inc_load_generate  # → deepseek_v2_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_deepseek_v2_inc_load_generate_test
-      # - name: e2e_qwen3_inc_dynamic_load_generate  # → qwen3_fp8_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_inc_dynamic_load_generate_test
-      - name: e2e_dsv2_blockfp8_static_fp8kv
-        flavor: g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_dsv2_blockfp8_static_scaling_fp8kv_load_generate_test
-      - name: e2e_qwen3_fp8_attn_static_fp8kv
-        flavor: g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test
-      - name: e2e_dsv2_blockfp8_static_fp8qkv
-        flavor: g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test
-      # - name: e2e_qwen3_blockfp8_dynamic_scaling  # → qwen3_fp8_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_blockfp8_dynamic_scaling_load_generate_test
-      - name: e2e_qwen3_compressed_tensor_dynamic
-        flavor: g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_compressed_tensor_dynamic_scaling_load_generate_test
-      - name: e2e_qwen3_moe_compressed_dynamic
-        flavor: g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_moe_compressed_tensor_dynamic_scaling_load_generate_test
-      - name: e2e_qwen3_moe_compressed_static_per_tensor
-        flavor: g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_load_generate_test
-      - name: e2e_qwen3_moe_compressed_static
-        flavor: g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_moe_compressed_tensor_static_scaling_load_generate_test
-      - name: e2e_llama3_per_tensor_scaling
-        flavor: g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_llama3_per_tensor_scaling_load_generate_test
-      - name: e2e_llama3_modelopt_per_tensor_scaling
-        flavor: g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_llama3_modelopt_per_tensor_scaling_load_generate_test
-      # - name: e2e_granite_inc_calibration_and_quantization  # → granite_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_granite_inc_calibration_and_quantization_load_generate_test
-      - name: e2e_awq_load_generate
-        flavor: g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_awq_load_generate_test
-      - name: e2e_gptq_load_generate
-        flavor: g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gptq_load_generate_test
-      - name: e2e_compressed_w4a16_channelwise
-        flavor: g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_compressed_w4a16_channelwise_load_generate_test
+        command: >-
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gptq_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_awq_load_generate_test
       - name: e2e_compressed_w4a16_moe_gidx
         flavor: g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_compressed_w4a16_moe_gidx_load_generate_test
-      # - name: e2e_llama3_70b_inc_dynamic_quant_load_generate  # → llama3_70b_fp8_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_llama3_70b_inc_dynamic_quant_load_generate_test
-      # - name: e2e_qwen2_5_vl_load_generate  # → qwen25_vl_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen2_5_vl_load_generate_test
-      # - name: e2e_qwen2_5_vl_unified_attn  # → qwen25_vl_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen2_5_vl_unified_attn_load_generate_test
-      # - name: e2e_qwen2_5_vl_lazy_warmup  # → qwen25_vl_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen2_5_vl_lazy_warmup_test
-      # - name: e2e_qwen2_5_vl_compile_warmup  # → qwen25_vl_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen2_5_vl_compile_warmup_test
+        command: >-
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_compressed_w4a16_moe_gidx_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_compressed_w4a16_channelwise_load_generate_test
       - name: e2e_ernie4_5_vl
         flavor: g3
         command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_ernie4.5_vl_test
-      # - name: e2e_mistral3_load_generate  # → mistral3_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_mistral3_load_generate_test
-      - name: e2e_deepseek_ocr_vl
-        flavor: g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_deepseek_ocr_vl_test
-      # - name: e2e_mistral3  # → mistral3_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_mistral3_test
-      # - name: e2e_llama3_70b_inc_dynamic_quant  # → llama3_70b_fp8_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_llama3_70b_inc_dynamic_quant_test
-      # - name: e2e_gsm8k_granite  # → granite_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_granite_test
-      # - name: e2e_gsm8k_granite_unified_attn  # → granite_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_granite_test_unified_attn
-      # - name: e2e_gsm8k_granite_async  # → granite_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_granite_async_test
-      # - name: e2e_gsm8k_granite_unified_attn_async  # → granite_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_granite_test_unified_attn_async
-      # - name: e2e_gsm8k_deepseek  # → deepseek_v2_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_deepseek_test
-      - name: e2e_spec_decode_ngram
-        flavor: g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_ngram_test
-      # - name: e2e_spec_decode_eagle3  # → eagle3_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_eagle3_test
-      # - name: e2e_spec_decode_eagle3_num_spec_2  # → eagle3_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_eagle3_num_spec_2_test
-      - name: e2e_ua_spec_decode_ngram
-        flavor: g2 # acc issue on g3, TODO: investigate and re-enable on g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_UA_spec_decode_ngram_test
-      # - name: e2e_ua_spec_decode_eagle3  # → eagle3_bundle
-      #   flavor: g3
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_UA_spec_decode_eagle3_test
-      - name: e2e_embedding_model
-        flavor: g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_embedding_model_test
       - name: e2e_cpu_offloading
         flavor: g2.l
         command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_cpu_offloading_test
       - name: e2e_offloading_connector
         flavor: g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_offloading_connector_test
+        command: >-
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_offloading_connector_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_embedding_model_test
       - name: e2e_sleep_mode
         flavor: g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_sleep_mode_test
-      - name: e2e_structured_output
+        command: >-
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_sleep_mode_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_structured_output_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_deepseek_ocr_vl_test
+      # Models: google/gemma-3-4b-it + facebook/opt-125m (2 tests)
+      - name: e2e_load_generate_bundle
         flavor: g3
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_structured_output_test
-      # --- Bundled e2e tests: same-model tests combined to avoid redundant HF downloads ---
+        command: >-
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gemma3_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_basic_load_generate_test
       # Model: ibm-granite/granite-3.3-2b-instruct (6 tests)
       - name: e2e_granite_bundle
         flavor: g3
@@ -218,24 +117,39 @@ stages:
         flavor: g3
         command: >-
           HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_inc_dynamic_load_generate_test &&
-          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_blockfp8_dynamic_scaling_load_generate_test
-      # --- e2e tests: 2-cards (g3.s) ---
-      - name: e2e_tp2_load_generate
-        flavor: g3.s
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_tp2_load_generate_test
+          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_blockfp8_dynamic_scaling_load_generate_test &&
+          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test
+      # Models: DSV2 blockFP8 variants (2 tests)
+      - name: e2e_dsv2_blockfp8_load_generate_bundle
+        flavor: g3
+        command: >-
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_dsv2_blockfp8_static_scaling_fp8kv_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test
+      # Models: Qwen/Qwen3-30B-A3B compressed tensor variants (3 tests)
+      - name: e2e_qwen3_moe_compressed_load_generate_bundle
+        flavor: g3
+        command: >-
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_moe_compressed_tensor_dynamic_scaling_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_moe_compressed_tensor_static_scaling_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_compressed_tensor_dynamic_scaling_load_generate_test
+      # Model: Qwen/Qwen3-4B — spec_decode + UA_spec_decode ngram (2 tests). They use g2 due to ua acc issue on g3 - #NOTE: checky why it fails.
+      - name: e2e_spec_decode_ngram_bundle
+        flavor: g2
+        command: >-
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_ngram_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_UA_spec_decode_ngram_test
       - name: e2e_deepseek_v2_inc_dynamic_tp2
         flavor: g3.s
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_deepseek_v2_inc_dynamic_tp2_load_generate_test
+        command: >-
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_deepseek_v2_inc_dynamic_tp2_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_qwen3_30b_test
       - name: e2e_gsm8k_qwen3_30b
         flavor: g3.s
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_qwen3_30b_test
-      - name: e2e_qwen3_vl_load_generate
+        command: 
+      # Models: facebook/opt-125m (TP=2) + Qwen3-VL-32B (2 tests)
+      - name: e2e_tp2_load_generate_bundle
         flavor: g3.s
-        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_vl_load_generate_test
-      #---- Tests below are unavailable in jenkins and are running in github actions for now, to unblock jenkins testing. ----
-      # - name: pd_nixl_libfabric
-      #   flavor: g2.m
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_pd_disaggregate_nixl_libfabric_test
-      # - name: pd_nixl_ucx_e2e
-      #   flavor: g2.m
-      #   command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_pd_disaggregate_nixl_ucx_test
+        command: >-
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_tp2_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_vl_load_generate_test
