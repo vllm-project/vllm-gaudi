@@ -75,10 +75,18 @@ class HpuPlatform(Platform):
     ) -> None:
         from vllm.sampling_params import SamplingParams
         if isinstance(params, SamplingParams):
-            if params.logprobs is not None or \
-                    params.prompt_logprobs is not None:
-                raise ValueError(
-                    "Gaudi doesn't support logprobs")
+            if params.logprobs is not None:
+                logger.warning(
+                    "Logprobs are not supported on Gaudi (HPU). "
+                    "The logprobs parameter will be ignored and the "
+                    "response will contain logprobs=null.")
+                params.logprobs = None
+            if params.prompt_logprobs is not None:
+                logger.warning(
+                    "Prompt logprobs are not supported on Gaudi (HPU). "
+                    "The prompt_logprobs parameter will be ignored and "
+                    "the response will contain prompt_logprobs=null.")
+                params.prompt_logprobs = None
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
