@@ -1,8 +1,18 @@
 #!/bin/bash
 
-# Exit immediately if a command exits with a non-zero status.
-# This ensures that if any test fails, the script will stop.
-set -e
+# Allow sourcing this script to import helper functions (write_junit_xml, etc.)
+# without executing any test or modifying shell options.
+# Usage: source ci_e2e_discoverable_tests.sh __source_only__
+# This guard MUST stay before 'set -e' to avoid altering the caller's shell.
+if [[ "${1:-}" == "__source_only__" ]]; then
+  # Skip set -e and the entrypoint; only define the functions below.
+  _CI_E2E_SOURCE_ONLY=1
+else
+  _CI_E2E_SOURCE_ONLY=0
+  # Exit immediately if a command exits with a non-zero status.
+  # This ensures that if any test fails, the script will stop.
+  set -e
+fi
 
 # --- Configuration ---
 # Defines the path to the vllm-gaudi directory.
@@ -28,11 +38,12 @@ get_pytest_junit_args() {
 }
 
 # Writes a JUnit XML result file for non-pytest tests (plain python scripts).
-# Usage: write_junit_xml "test_name" exit_code "optional error message"
+# Usage: write_junit_xml "test_name" exit_code elapsed_seconds "optional error message"
 write_junit_xml() {
     local test_name="$1"
     local exit_code="$2"
-    local error_msg="${3:-}"
+    local elapsed="${3:-0}"
+    local error_msg="${4:-}"
     if [[ -z "$TEST_RESULTS_DIR" ]]; then
         return
     fi
@@ -45,8 +56,8 @@ write_junit_xml() {
         cat > "$log_path" <<EOF
 <?xml version="1.0" encoding="utf-8"?>
 <testsuites>
-  <testsuite name="${test_name}" tests="1" errors="0" failures="0" skipped="0" timestamp="${timestamp}">
-    <testcase classname="e2e_tests" name="${test_name}" time="0"/>
+  <testsuite name="${test_name}" tests="1" errors="0" failures="0" skipped="0" timestamp="${timestamp}" time="${elapsed}">
+    <testcase classname="e2e_tests" name="${test_name}" time="${elapsed}"/>
   </testsuite>
 </testsuites>
 EOF
@@ -54,8 +65,8 @@ EOF
         cat > "$log_path" <<EOF
 <?xml version="1.0" encoding="utf-8"?>
 <testsuites>
-  <testsuite name="${test_name}" tests="1" errors="0" failures="1" skipped="0" timestamp="${timestamp}">
-    <testcase classname="e2e_tests" name="${test_name}" time="0">
+  <testsuite name="${test_name}" tests="1" errors="0" failures="1" skipped="0" timestamp="${timestamp}" time="${elapsed}">
+    <testcase classname="e2e_tests" name="${test_name}" time="${elapsed}">
       <failure message="Test failed with exit code ${exit_code}">${error_msg}</failure>
     </testcase>
   </testsuite>
@@ -69,9 +80,11 @@ EOF
 run_with_junit() {
     local test_name="$1"
     shift
+    local start_time=$SECONDS
     local exit_code=0
     "$@" || exit_code=$?
-    write_junit_xml "$test_name" "$exit_code"
+    local elapsed=$(( SECONDS - start_time ))
+    write_junit_xml "$test_name" "$exit_code" "$elapsed"
     if [[ "$exit_code" -ne 0 ]]; then
         return "$exit_code"
     fi
@@ -601,6 +614,11 @@ usage() {
 
 # --- Script Entry Point ---
 
+# If sourced with __source_only__, stop here — functions are defined, nothing to run.
+if [[ "$_CI_E2E_SOURCE_ONLY" -eq 1 ]]; then
+  return 0 2>/dev/null || true
+fi
+
 # Default to 'run_all_tests' if no function name is provided as an argument.
 # The ${1:-run_all_tests} syntax means "use $1 if it exists, otherwise use 'run_all_tests'".
 FUNCTION_TO_RUN=${1:-launch_all_tests}
@@ -618,16 +636,21 @@ fi
 # Check if the provided argument corresponds to a declared function in this script.
 if declare -f "$FUNCTION_TO_RUN" > /dev/null
 then
-  # If the function exists, call it. Capture exit code for JUnit XML reporting.
+  # Run the function in a subshell with set -e re-enabled so that multi-command
+  # test functions correctly fail on the FIRST failing command rather than
+  # silently continuing (set +e in the parent would otherwise disable errexit
+  # inside the function body).
+  local_start=$SECONDS
   set +e
-  "$FUNCTION_TO_RUN"
+  (set -e; "$FUNCTION_TO_RUN")
   TEST_EXIT_CODE=$?
   set -e
+  ELAPSED=$(( SECONDS - local_start ))
 
   # For non-pytest tests (python scripts), generate JUnit XML from the exit code.
   # If pytest already wrote the XML file, this is a no-op (write_junit_xml checks TEST_RESULTS_DIR).
   if [[ -n "${TEST_RESULTS_DIR:-}" && ! -f "$JUNIT_XML_PATH" ]]; then
-    write_junit_xml "$FUNCTION_TO_RUN" "$TEST_EXIT_CODE"
+    write_junit_xml "$FUNCTION_TO_RUN" "$TEST_EXIT_CODE" "$ELAPSED"
   fi
 
   exit $TEST_EXIT_CODE
