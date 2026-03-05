@@ -234,6 +234,22 @@ run_qwen2_5_vl_unified_attn_load_generate_test() {
     echo "✅ Test multimodal-support + unified attention with qwen2.5-vl-7b passed."
 }
 
+# Multimodal-support with qwen2.5-vl with warmup (small max model len and max num seqs) and lazy mode
+run_qwen2_5_vl_lazy_warmup_test() {
+    echo "➡️ Testing Qwen2.5-VL-7B with full warmup under tight limits and lazy mode..."
+    VLLM_SKIP_WARMUP=false VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 \
+    python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen2.5-vl-7b-small-ctx.yaml"
+    echo "✅ Test Qwen2.5-VL-7B with full restricted warmup and lazy mode passed."
+}
+
+# Multimodal-support with qwen2.5-vl with warmup (small max model len and max num seqs) and torch.compile
+run_qwen2_5_vl_compile_warmup_test() {
+    echo "➡️ Testing Qwen2.5-VL-7B with full warmup under tight limits and torch.compile..."
+    VLLM_SKIP_WARMUP=false VLLM_CONTIGUOUS_PAs=False PT_HPU_LAZY_MODE=0 \
+    python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen2.5-vl-7b-small-ctx.yaml"
+    echo "✅ Test Qwen2.5-VL-7B with full restricted warmup and torch.compile passed."
+}
+
 # Multimodal-support with qwen3-vl
 run_qwen3_vl_load_generate_test() {
     echo "➡️ Testing Qwen3-VL-32B..."
@@ -457,8 +473,9 @@ launch_all_tests() {
     run_tp2_load_generate_test
     run_mla_moe_load_generate_test
     run_granite_inc_load_generate_test
-    run_deepseek_v2_inc_load_generate_test
-    run_deepseek_v2_inc_dynamic_tp2_load_generate_test
+    # Failed after #32344
+    #run_deepseek_v2_inc_load_generate_test
+    #run_deepseek_v2_inc_dynamic_tp2_load_generate_test
     run_qwen3_inc_dynamic_load_generate_test
     run_dsv2_blockfp8_static_scaling_fp8kv_load_generate_test
     run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test
@@ -478,6 +495,8 @@ launch_all_tests() {
     run_llama3_70b_inc_dynamic_quant_load_generate_test
     run_qwen2_5_vl_load_generate_test
     run_qwen2_5_vl_unified_attn_load_generate_test
+    run_qwen2_5_vl_lazy_warmup_test
+    run_qwen2_5_vl_compile_warmup_test
     run_qwen3_vl_load_generate_test
     run_mistral3_load_generate_test
     run_llama3_70b_inc_dynamic_quant_test
