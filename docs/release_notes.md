@@ -4,29 +4,19 @@ This document provides an overview of the features, changes, and fixes introduce
 
 ## 0.16.0
 
-This version is based on [vLLM 0.16.0](https://github.com/vllm-project/vllm/releases/tag/v0.16.0) with support for [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
+This version is based on [vLLM 0.16.0](https://github.com/vllm-project/vllm/releases/tag/v0.16.0) and supports [Intel® Gaudi® Software v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
 
-Highlights:
+This release introduces validated support and critical stability fixes for Qwen3-VL models leveraging HPUMMEncoderAttention. Performance and stability have been largely improved via various backported Mamba architecture optimizations, Docker and UBI infrastructure enhancements, and a forced CPU loading mechanism for INC quantization to prevent OOM errors.
 
-- **New Model Support** — Added support for **MiniMax-M2** (#964), **Hunyuan V1** (Dense & MoE bf16/FP8) (#875), and **Mistral-Large-3-675B** (#871). Expanded Vision/OCR model support with **DeepSeek OCR** (#954), **Ovis** (#846), **DotsOCR**, and **SeedOSS** (#977).
-- **Containerization & Deployment** — Introduced UBI (Universal Base Image) Dockerfiles and build instructions to streamline enterprise deployments (#713, #971).
-- **GPT-OSS Integration** — Added integration and support for GPT-OSS workloads (#887, #970).
-- **Quantization Enhancements** — Added `maxabs_pcs_pow2` scaling method configuration for dynamic quantization (#949).
+For a full list of changes see the [Detailed Release Notes](release_notes_v0.16.0.md).
 
 ## 0.15.1
 
-This version is based on [vLLM 0.15.1](https://github.com/vllm-project/vllm/releases/tag/v0.15.1) with support for [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
+This version is based on [vLLM 0.15.1](https://github.com/vllm-project/vllm/releases/tag/v0.15.1) and supports [Intel® Gaudi® Software v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
 
-Highlights:
+This release introduces validated support for Granite 4.0-h and Qwen3-VL (dense and MoE variants) on Intel Gaudi 3, alongside significant Llama 4 stability fixes. It also features major prefill performance improvements via full chunked prefill attention, FlashAttention online merge, b2b matmul operations, and KV cache sharing. Additionally, this version adds HPU ops for Mamba/SSM architectures to enable hybrid models, and introduces new support for  ModelOpt FP8 quantization.
 
-- **New Model Support** — Added validated support for **Granite 4.0-h** and **Qwen3-VL** (dense and MoE variants) on Intel Gaudi 3, plus significant **Llama 4** stability fixes.
-- **Chunked Attention** — Full chunked prefill attention support for HPU, enabling better memory utilization on long sequences (#821).
-- **FlashAttention Online Merge** — Integrated FlashAttention online merge in Unified Attention for improved prefill performance (#785).
-- **KV Cache Sharing** — Added KV cache sharing support for HPU, enabling more efficient multi-query scenarios (#834).
-- **ModelOpt FP8 Quantization** — New support for NVIDIA ModelOpt FP8 quantization format for dense models (#890).
-- **Mamba / SSM Architecture Support** — HPU ops for Mamba mixer2, causal conv1d, and SSD combined kernels enabling hybrid SSM-Transformer models like Granite 4.0-h (#886, #897).
-- **Back-to-Back MatMul** — Added b2b matmul operation for improved MLA (Multi-Latent Attention) performance (#770).
-- **Heterogeneous KV Layout** — Prefill-side KV layout and block size support for heterogeneous (disaggregated) inference via NIXL (#867).
+For a full list of changes see the [Detailed Release Notes](release_notes_v0.15.1.md).
 
 ## 0.14.1
 

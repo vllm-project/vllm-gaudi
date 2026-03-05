@@ -14,14 +14,14 @@ vLLM Hardware Plugin for Intel® Gaudi®
 
 ---
 *Latest News* 🔥
-- [2026/03] Version 0.16.0 is now available, built on [vLLM 0.16.0](https://github.com/vllm-project/vllm/releases/tag/v0.16.0) and fully compatible with [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html), highlights:
-  - **New Model Support** — Added support for **MiniMax-M2** (#964), **Hunyuan V1** (Dense & MoE bf16/FP8) (#875), and **Mistral-Large-3-675B** (#871). Expanded Vision/OCR model support with **DeepSeek OCR** (#954), **Ovis** (#846), **DotsOCR**, and **SeedOSS** (#977).
-  - **Containerization & Deployment** — Introduced UBI (Universal Base Image) Dockerfiles and build instructions to streamline enterprise deployments (#713, #971).
-  - **GPT-OSS Integration** — Added integration and support for GPT-OSS workloads (#887, #970).
-quantization (#949).
-- [2026/02] Version 0.15.1 is now available, built on [vLLM 0.15.1](https://github.com/vllm-project/vllm/releases/tag/v0.15.1) and fully compatible with [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html), highlights:
-  - **New Model Support** — Added validated support for **Granite 4.0-h** and **Qwen3-VL** (dense and MoE variants) on Intel Gaudi 3, plus significant **Llama 4** stability fixes.
-  - **Mamba / SSM Architecture Support** — HPU ops for Mamba mixer2, causal conv1d, and SSD combined kernels enabling hybrid SSM-Transformer models like Granite 4.0-h (#886, #897).
+- [2026/03] Version 0.16.0 is now available, built on [vLLM 0.16.0](https://github.com/vllm-project/vllm/releases/tag/v0.16.0) and fully compatible with [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
+
+  This release introduces validated support and critical stability fixes for Qwen3-VL models leveraging HPUMMEncoderAttention. Performance and stability have been largely improved via various backported Mamba architecture optimizations, Docker and UBI infrastructure enhancements, and a forced CPU loading mechanism for INC quantization to prevent OOM errors.
+
+- [2026/02] Version 0.15.1 is now available, built on [vLLM 0.15.1](https://github.com/vllm-project/vllm/releases/tag/v0.15.1) and fully compatible with [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
+
+  This release introduces validated support for Granite 4.0-h and Qwen3-VL (dense and MoE variants) on Intel Gaudi 3, alongside significant Llama 4 stability fixes. It also features major prefill performance improvements via full chunked prefill attention, FlashAttention online merge, b2b matmul operations, and KV cache sharing. Additionally, this version adds HPU ops for Mamba/SSM architectures to enable hybrid models, and introduces new support for  ModelOpt FP8 quantization.
+
 - [2026/02] Version 0.14.1 is now available, built on [vLLM 0.14.1](https://github.com/vllm-project/vllm/releases/tag/v0.14.1) and fully compatible with [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html). It introduces support for Granite 4.0h and Qwen 3 VL models.
 - [2026/01] Version 0.13.0 is now available, built on [vLLM 0.13.0](https://github.com/vllm-project/vllm/releases/tag/v0.13.0) and fully compatible with [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html). It introduces experimental dynamic quantization for MatMul and KV‑cache operations to improve performance and also supports additional models.
 - [2025/11] The 0.11.2 release introduces the production-ready version of the vLLM Hardware Plugin for Intel® Gaudi® v1.22.2. The plugin is an alternative to the [vLLM fork](https://github.com/HabanaAI/vllm-fork), which reaches end of life with this release and will be deprecated in v1.24.0, remaining functional only for legacy use cases. We strongly encourage all fork users to begin planning their migration to the plugin. For more information about this release, see the [Release Notes](docs/release_notes.md).
