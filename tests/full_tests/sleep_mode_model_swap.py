@@ -221,8 +221,16 @@ def destroy_model(llm, model_name):
 
 
 def get_model_label(index):
-    """Convert model index to label (0->A, 1->B, 2->C, etc.)."""
-    return chr(ord('A') + index)
+    """Convert model index to an Excel-style label (0->A, 1->B, ..., 25->Z, 26->AA, etc.)."""
+    if index < 0:
+        raise ValueError(f"Model index must be non-negative, got {index}")
+    # Convert zero-based index to a 1-based number for Excel-style column naming
+    n = index + 1
+    label_chars = []
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        label_chars.append(chr(ord('A') + rem))
+    return "".join(reversed(label_chars))
 
 
 def print_metrics_table(all_metrics):
