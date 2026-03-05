@@ -170,14 +170,16 @@ class ModuleFusedSDPA(torch.nn.Module):
         valid_sequence_lengths,
         padding_side="left",
         window_size=None,
+        sinks=None,
     ):
         if window_size is not None:
             return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode,
                                                 recompute_mode, valid_sequence_lengths, padding_side, False, False,
-                                                window_size)
+                                                window_size, sinks)
         else:
             return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode,
-                                                recompute_mode, valid_sequence_lengths, padding_side)
+                                                recompute_mode, valid_sequence_lengths, padding_side, False, False,
+                                                (-1, -1), sinks)
 
 
 class ModuleFP8FusedSDPA(torch.nn.Module):
@@ -188,14 +190,14 @@ class ModuleFP8FusedSDPA(torch.nn.Module):
         self.fp8_fused_sdpa = fusedSDPA
 
         # set the descale_amax and scale_amax 1.0 temporarily
-        self.descale_amax = torch.tensor(1.0)
-        self.scale_amax = torch.tensor(1.0)
-        self.scale_q = torch.tensor(1.0)
-        self.scale_k = torch.tensor(1.0)
-        self.scale_v = torch.tensor(1.0)
-        self.d_scale_q = torch.tensor(1.0)
-        self.d_scale_k = torch.tensor(1.0)
-        self.d_scale_v = torch.tensor(1.0)
+        self.descale_amax = torch.tensor(1.0, dtype=torch.float32)
+        self.scale_amax = torch.tensor(1.0, dtype=torch.float32)
+        self.scale_q = torch.tensor(1.0, dtype=torch.float32)
+        self.scale_k = torch.tensor(1.0, dtype=torch.float32)
+        self.scale_v = torch.tensor(1.0, dtype=torch.float32)
+        self.d_scale_q = torch.tensor(1.0, dtype=torch.float32)
+        self.d_scale_k = torch.tensor(1.0, dtype=torch.float32)
+        self.d_scale_v = torch.tensor(1.0, dtype=torch.float32)
 
     def quant_input(self, x, scale):
         return torch.ops.hpu.cast_to_fp8_v2(x, scale, False, False, torch.float8_e4m3fn)[0]

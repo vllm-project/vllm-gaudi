@@ -340,7 +340,7 @@ class HPUMambaMixer2(MambaMixer2):
         if attn_metadata is not None:
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
             # conv_state = (..., dim, width-1) yet contiguous along 'dim'
-            conv_state = self_kv_cache[0].transpose(-1, -2)
+            conv_state = self_kv_cache[0]
             ssm_state = self_kv_cache[1]
 
             state_indices_tensor = attn_metadata.state_indices_tensor[self.cache_group_idx]

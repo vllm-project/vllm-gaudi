@@ -10,6 +10,11 @@ from typing import Optional
 
 class HPUVocabParallelEmbeddingWithLoRA(VocabParallelEmbeddingWithLoRA):
 
+    @property
+    def quant_method(self):
+        """Delegate quant_method access to the base layer."""
+        return self.base_layer.quant_method
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # NB: Don't use torch.narrow here. torch.narrow triggers some
         # Dynamic Shape specialization in torch.compile

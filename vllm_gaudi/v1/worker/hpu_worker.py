@@ -17,7 +17,6 @@ from vllm_gaudi.extension.defragmentation import OnlineDefragmenter
 from vllm_gaudi.extension.profiler import (HabanaMemoryProfiler, format_bytes, setup_profiler)
 from vllm_gaudi.extension.runtime import get_config
 
-import vllm.envs as envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import (ensure_model_parallel_initialized, init_distributed_environment)
 from vllm.distributed.kv_transfer import (
@@ -96,8 +95,10 @@ class HPUWorker(WorkerBase):
 
     def init_profiler(self):
         """Initialize the profiler."""
-        if envs.VLLM_TORCH_PROFILER_DIR:
-            torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
+        torch_profiler_dir = os.getenv('VLLM_TORCH_PROFILER_DIR')
+        if torch_profiler_dir:
+            logger.warning("VLLM_TORCH_PROFILER_DIR is deprecated!")
+            torch_profiler_trace_dir = torch_profiler_dir
             logger.info("Profiling enabled. Traces will be saved to: %s", torch_profiler_trace_dir)
             if os.getenv('VLLM_PROFILER_ENABLED') == 'full':
                 fn = self.model_runner.profiler.full_trace_handler
@@ -244,7 +245,7 @@ class HPUWorker(WorkerBase):
             fake_hpu_cache_alloc = 4 * 2**30  # take 4 GiB flat on fake hpu
             return fake_hpu_cache_alloc
         with HabanaMemoryProfiler() as m:
-            self.model_runner.profile_run()
+            self.model_runner.profile_run(initialize_only=True)
             torch.hpu.synchronize()
         msg = ("Model profiling run "
                f"took {m.get_summary_string()}")
@@ -291,16 +292,24 @@ class HPUWorker(WorkerBase):
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
 
+        # Init kv cache connector here, because it requires
+        # `kv_cache_config`.
+        # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
+        # because `initialize_kv_cache` will inject kv cache groups not
+        # related to kv cache connector (e.g. kv cache sharing layers).
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+
         with HabanaMemoryProfiler() as m:
             self.kv_cache_config = kv_cache_config
             self.model_runner.initialize_kv_cache(kv_cache_config)
             torch.hpu.synchronize()
-        msg = (f"Usable num_blocks: {kv_cache_config.num_blocks}, "
-               f"actual allocated num_blocks: "
-               f"{self.model_runner.kv_caches[0][0].shape[0]} "
-               f"(_PAD_BLOCK_ID={self.model_runner._PAD_BLOCK_ID}, "
-               f"_PAD_SLOT_ID={self.model_runner._PAD_SLOT_ID})")
-        logger.info(msg)
+        if len(self.model_runner.kv_caches) > 0:
+            msg = (f"Usable num_blocks: {kv_cache_config.num_blocks}, "
+                   f"actual allocated num_blocks: "
+                   f"{self.model_runner.kv_caches[0][0].shape[0]} "
+                   f"(_PAD_BLOCK_ID={self.model_runner._PAD_BLOCK_ID}, "
+                   f"_PAD_SLOT_ID={self.model_runner._PAD_SLOT_ID})")
+            logger.info(msg)
         msg = ("Initializing cache engine "
                f"took {m.get_summary_string()}")
         logger.info(msg)
@@ -480,8 +489,6 @@ def init_worker_distributed_environment(
     torch.distributed.all_reduce(dummy_tensor_hpu)
     assert dummy_tensor_hpu.item() == parallel_config.world_size * parallel_config.data_parallel_size
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size, parallel_config.pipeline_parallel_size)
-
-    ensure_kv_transfer_initialized(vllm_config)
 
 
 @contextmanager
