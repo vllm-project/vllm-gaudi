@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from enum import Enum
 from functools import partial
 from typing import Union
 
@@ -28,6 +29,10 @@ from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOp)
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.utils import has_quant_config
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
+
+
+def _normalize_moe_activation(activation):
+    return activation.value if isinstance(activation, Enum) else activation
 
 
 @UnquantizedFusedMoEMethod.register_oot
@@ -123,7 +128,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids,
             topk_weights,
             permuted_weights=True,
-            activation=layer.activation,
+            activation=_normalize_moe_activation(layer.activation),
         )
         if layer.moe_config.dp_size > 1:
             return output.view(*(output.size(0), *input_shape[1:]))
@@ -177,7 +182,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 topk_ids.to(torch.int64),
                 topk_weights.to(x.dtype),
                 permuted_weights=True,
-                activation=layer.activation,
+                activation=_normalize_moe_activation(layer.activation),
             ).view(*input_shape)
 
         output = layer.moe_op(
@@ -185,7 +190,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids,
             topk_weights,
             permuted_weights=True,
-            activation=layer.activation,
+            activation=_normalize_moe_activation(layer.activation),
         )
         if layer.moe_config.dp_size > 1:
             return output.view(*(output.size(0), *input_shape[1:]))
@@ -206,7 +211,10 @@ def patched_fused_moe_forward(
     router_logits: torch.Tensor,
 ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
     """
-    Patched forward method that bypasses the custom op to avoid recompilation issues.
+    Patched forward method using MoERunner API.
+
+    Delegate to runner.forward which owns routed-input transforms,
+    custom-op invocation signature, and output truncation/reduction semantics.
     """
     og_hidden_states = hidden_states.shape[-1]
     original_hidden_states = hidden_states

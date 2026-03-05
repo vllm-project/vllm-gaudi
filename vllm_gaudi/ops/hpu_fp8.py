@@ -150,6 +150,8 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         num_experts = layer.local_num_experts
         ep_shift = layer.ep_rank * num_experts
+        dp_size = layer.moe_parallel_config.dp_size
+        is_sequence_parallel = layer.moe_parallel_config.is_sequence_parallel
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
         if layer.moe_config.dp_size > 1 and self.use_dispatch_fn:
@@ -190,6 +192,8 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         router_logits: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
+        dp_size = layer.moe_parallel_config.dp_size
+        is_sequence_parallel = layer.moe_parallel_config.is_sequence_parallel
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
@@ -209,13 +213,13 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
             dp_metadata = get_hpu_dp_metadata()
             if not (has_quant_config(layer.vllm_config.model_config) and self.use_dispatch_fn):
                 hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
-                x = dispatch_tensor(x, hidden_states_across_dp, layer.is_sequence_parallel)
+                x = dispatch_tensor(x, hidden_states_across_dp, is_sequence_parallel)
 
             topk_ids_across_dp = dp_metadata.topk_ids_across_dp if dp_metadata is not None else None
-            topk_ids = dispatch_tensor(topk_ids, topk_ids_across_dp, layer.is_sequence_parallel)
+            topk_ids = dispatch_tensor(topk_ids, topk_ids_across_dp, is_sequence_parallel)
 
             topk_weights_across_dp = dp_metadata.topk_weights_across_dp if dp_metadata is not None else None
-            topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, layer.is_sequence_parallel)
+            topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, is_sequence_parallel)
 
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
