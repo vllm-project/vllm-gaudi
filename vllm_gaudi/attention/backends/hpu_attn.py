@@ -354,7 +354,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         if isinstance(k_cache, tuple):
             k_cache = k_cache[0]  # Use only key_cache for MLA
         query = torch.cat([q_nope, q_pe], dim=-1)
-        key_cache = k_cache.unsqueeze(1)
+        key_cache = k_cache.unsqueeze(1) if k_cache is not None else None
         value_cache = None
         output = HPUPagedAttention.forward_decode(query=query,
                                                   key_cache=key_cache,
@@ -378,8 +378,13 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
     # during each graph execution
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
-        self.W_UV: torch.Tensor = self.W_UV.contiguous()
-        self.W_UK_T: torch.Tensor = self.W_UK_T.contiguous()
+        # W_UV and W_UK_T are plain tensor attributes (not nn.Parameter or
+        # register_buffer), so model.to('hpu') won't move them.  When INC
+        # CPU-first loading is active the source weights live on CPU, making
+        # these derived tensors CPU-resident too — which then causes a device
+        # mismatch at the bmm calls in forward.  Explicitly place on HPU.
+        self.W_UV: torch.Tensor = self.W_UV.contiguous().to("hpu")
+        self.W_UK_T: torch.Tensor = self.W_UK_T.contiguous().to("hpu")
 
     # NOTE(Chendi): PR25184 using output buffer as default, which can't be used in HPU Graph,
     # so we override and always return a new tensor
@@ -578,7 +583,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
             if key.dtype == torch.float32 and key.dtype != key_cache.dtype:
                 key = key.to(key_cache.dtype)
-            if key.dtype == torch.float32 and value.dtype != value_cache.dtype:
+            if value.dtype == torch.float32 and value.dtype != value_cache.dtype:
                 value = value.to(value_cache.dtype)
             if query.dtype != key.dtype:
                 query = query.to(key.dtype)
@@ -1200,3 +1205,15 @@ class HPUUnifiedMLAImpl(MLACommonImpl[HPUUnifiedAttentionMetadata], torch.nn.Mod
 
     def forward_mha(self, *args, **kwargs) -> torch.Tensor:
         raise NotImplementedError("Use forward method for HPUUnifiedMLAImpl")
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        # Parent MLACommonImpl extracts W_UV and W_UK_T from kv_b_proj weights
+        # These projection matrices are used for latent ↔ full space conversions
+        super().process_weights_after_loading(act_dtype)
+        # W_UV and W_UK_T are plain tensor attributes (not nn.Parameter or
+        # register_buffer), so model.to('hpu') won't move them.  When INC
+        # CPU-first loading is active the source weights live on CPU, making
+        # these derived tensors CPU-resident too — which then causes a device
+        # mismatch at the bmm calls in forward.  Explicitly place on HPU.
+        self.W_UV: torch.Tensor = self.W_UV.contiguous().to("hpu")
+        self.W_UK_T: torch.Tensor = self.W_UK_T.contiguous().to("hpu")

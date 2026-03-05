@@ -1,0 +1,48 @@
+# Shared CI Dockerfile for vllm-gaudi test workflows.
+# Used by: pre-merge.yaml, hourly-ci.yaml, create-release-branch.yaml
+#
+# Build args:
+#   VLLM_COMMIT_ARG - the upstream vLLM commit to checkout and test against
+#   PT_VERSION      - PyTorch version (must match the base image)
+
+ARG PT_VERSION=2.9.0
+ARG BASE_IMAGE=vault.habana.ai/gaudi-docker/1.23.0/ubuntu24.04/habanalabs/pytorch-installer-${PT_VERSION}:latest
+FROM ${BASE_IMAGE}
+
+ARG VLLM_COMMIT_ARG
+ARG PT_VERSION
+
+COPY ./ /workspace/vllm-gaudi
+WORKDIR /workspace
+
+RUN git clone https://github.com/vllm-project/vllm.git vllm
+WORKDIR /workspace/vllm
+RUN git checkout ${VLLM_COMMIT_ARG}
+
+# Test dependencies
+RUN pip install pytest pytest_asyncio pytest-timeout
+RUN pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git
+
+ENV no_proxy=localhost,127.0.0.1
+ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
+
+# Install vLLM build requirements (excluding torch, already in base image)
+RUN bash -c 'pip install -r <(sed "/^torch/d" requirements/build.txt)'
+RUN VLLM_TARGET_DEVICE=empty pip install --no-build-isolation .
+
+# Install development dependencies (for testing)
+RUN python3 -m pip install -e tests/vllm_test_utils
+
+# Install vllm-gaudi plugin
+WORKDIR /workspace/vllm-gaudi
+RUN pip install -e .
+
+# Install torchaudio (CPU wheel, matching PyTorch version in base image)
+# torchaudio is imported from upstream vLLM code
+RUN pip install --no-deps --extra-index-url https://download.pytorch.org/whl/cpu torchaudio==${PT_VERSION}
+
+# Create convenience symlinks
+WORKDIR /workspace
+RUN ln -s /workspace/vllm/tests /workspace/tests \
+    && ln -s /workspace/vllm/examples /workspace/examples \
+    && ln -s /workspace/vllm/benchmarks /workspace/benchmarks

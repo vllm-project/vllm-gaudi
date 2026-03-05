@@ -57,9 +57,9 @@ ENV TORCH_TYPE=${TORCH_TYPE} \
 COPY LICENSE /licenses/
 
 # System setup - Remove FIPS provider and add EPEL
-RUN dnf -y update && \
-    dnf install -y --allowerasing python3-dnf-plugin-versionlock && \
+RUN dnf install -y --allowerasing python3-dnf-plugin-versionlock && \
     dnf versionlock add redhat-release* && \
+    dnf -y update && \
     # '|| true' is added to support RHEL 9.4 in which openssl-fips-provider-so is not installed
     rpm -e --nodeps openssl-fips-provider-so || true && \
     dnf install -y --allowerasing https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \

@@ -54,6 +54,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model, get_model_loader
+from vllm.platforms import current_platform
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem)
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
@@ -146,6 +147,25 @@ HPU_TORCH_DTYPE_TO_STR_DTYPE = {
 }
 
 shutdown_inc_called = False
+
+
+@contextlib.contextmanager
+def _override_platform_device_type(device_type: str):
+    """Temporarily override current_platform.device_type to match load device.
+
+    When load_config.device is set (e.g. "cpu" for INC quantization), the
+    model loader uses ``torch.set_default_device(load_device)`` so implicit
+    tensor creation goes to that device.  However, upstream vLLM code also
+    creates tensors with explicit ``device=current_platform.device_type``
+    (always "hpu").  The mix of CPU-default and HPU-explicit causes
+    RuntimeError.  This context manager aligns both paths.
+    """
+    original = current_platform.device_type
+    try:
+        current_platform.device_type = device_type
+        yield
+    finally:
+        current_platform.device_type = original
 
 
 class BucketingFailedException(Exception):
@@ -374,19 +394,29 @@ def is_mm_optimized(model):
 def patch_llama4_get_attn_scale(model):
 
     config = getattr(model, "config", None)
-    is_llama4 = (getattr(config, "model_type", None) == "llama4") or ("llama4" in type(model).__name__.lower())
+    if not config:
+        return
+
+    is_llama4 = (getattr(config, "model_type", "") == "llama4") or \
+                ("llama4" in type(model).__name__.lower())
     if not is_llama4:
         return
 
-    for layer in model.language_model.model.layers:
+    text_config = getattr(config, "text_config", config)
+    use_qk_norm = getattr(text_config, "use_qk_norm", False)
 
+    layers_container = getattr(model, "language_model", model)
+    internal_model = getattr(layers_container, "model", layers_container)
+    layers = getattr(internal_model, "layers", [])
+
+    for layer in layers:
         if "Llama4Attention" not in type(layer.self_attn).__name__:
             continue
 
         attn = layer.self_attn
 
         def _get_attn_scale_for_hpu(self, positions):
-            if self.qk_norm is not None:
+            if use_qk_norm:
                 positions = positions.flatten()
             floor = torch.floor((positions + 1.0) / self.floor_scale)
             attn_scale = torch.log(floor + 1.0) * self.attn_scale + 1.0
@@ -2153,35 +2183,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # of prefix caching for mamba2 (wip). We need to take care
             # of the interaction with chunked prefill in order to
             # satisfy constraint (2).
-            # TODO (tdoublep): This code could probably be optimized.
-            last_chunk_indices = []
-            last_chunk_index = -1
-            seqlen_pos = 0
+
             chunk_size = self.model_config.get_mamba_chunk_size()
-            for req_idx in range(len(contents.req_ids)):
-                this_num_computed = num_computed_tokens_p_cpu[req_idx].item()
-                this_new_tokens = (query_start_loc_p_cpu[req_idx + 1].item() - query_start_loc_p_cpu[req_idx].item())
-
-                # if computed tokens are not chunk-aligned, use the first
-                # chunk to finish it off
-                if this_num_computed % chunk_size != 0:
-                    # how many tokens to finish the chunk?
-                    last_chunk_index += 1
-                    chunk_len = (cdiv(this_num_computed, chunk_size) * chunk_size - this_num_computed)
-                    # we can only use at most this_new_tokens
-                    chunk_len = min(chunk_len, this_new_tokens)
-                    seqlen_pos += chunk_len
-                    this_new_tokens -= chunk_len
-
-                n_chunks = cdiv(this_new_tokens, chunk_size)
-                for chunk in range(n_chunks):
-                    last_chunk_index += 1
-                    chunk_len = min(chunk_size, this_new_tokens)
-                    seqlen_pos += chunk_len
-                    this_new_tokens -= chunk_len
-
-                assert this_new_tokens == 0
-                last_chunk_indices.append(last_chunk_index)
+            assert chunk_size > 0
+            nphysical_chunks = target_seq // chunk_size
+            assert nphysical_chunks > 0, (f"target_seq={target_seq} must be >= chunk_size={chunk_size}")
+            last_chunk_indices = [nphysical_chunks - 1 for _ in range(len(contents.req_ids))]
 
             num_prefill_reqs = len(contents.req_ids)
             all_state_indices_cpu = []
@@ -4143,7 +4150,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             htcore.hpu_inference_set_env()
         logger.info("Starting to load model %s...", self.model_config.model)
         with HabanaMemoryProfiler() as m:  # noqa: SIM117
-            self.model = get_model(vllm_config=self.vllm_config)
+            # When load_config.device differs from the platform device (e.g.
+            # "cpu" for INC quantization), upstream code that uses both
+            # torch.set_default_device (via the model loader context manager)
+            # and explicit device=current_platform.device_type creates a
+            # device mismatch. Temporarily aligning device_type with the
+            # load device makes both paths consistent, avoiding RuntimeError
+            # in modules like DeepseekScalingRotaryEmbedding.
+            load_device = self.vllm_config.load_config.device
+            ctx = _override_platform_device_type(load_device) \
+                if load_device and load_device != current_platform.device_type \
+                else contextlib.nullcontext()
+            with ctx:
+                self.model = get_model(vllm_config=self.vllm_config)
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
         self.model_memory_usage = m.consumed_device_memory
@@ -5127,10 +5146,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # but not read from the cache
         assert dummy_mm_item is not None, "Item should not already be cached"
 
-        dummy_mm_items = [dummy_mm_item] * batch
-
         return next(mm_kwargs_group for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
-            dummy_mm_items,
+            [(modality, dummy_mm_item)] * batch,
             device=self.device,
             pin_memory=self.pin_memory,
         ))
@@ -5138,7 +5155,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def warmup_multimodal_graphs(self, buckets):
 
         phase = 'Graph/Multimodal'
-        from vllm.v1.worker.utils import MultiModalBudget
+        from vllm.multimodal.encoder_budget import MultiModalBudget
         self.mm_budget = MultiModalBudget(
             self.vllm_config,
             self.mm_registry,
