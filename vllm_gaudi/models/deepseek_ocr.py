@@ -3,7 +3,6 @@
 from collections.abc import Mapping
 
 import torch
-import torch.nn as nn
 
 from vllm.distributed import get_pp_group
 from vllm.sequence import IntermediateTensors
@@ -17,28 +16,6 @@ from vllm.model_executor.models.deepseek_ocr import (
     DeepseekOCRProcessingInfo,
     DeepseekOCRDummyInputsBuilder,
 )
-
-import habana_frameworks.torch.core as htcore
-
-
-class HpuDeepseekOCRVisual(nn.Module):
-
-    def __init__(
-        self,
-        sam_model,
-        vision_model,
-    ):
-        super().__init__()
-        self.sam_model = sam_model
-        self.vision_model = vision_model
-        self.patch_size = 16
-
-    def forward(self, image_tensor: torch.Tensor) -> torch.Tensor:
-        htcore.mark_step()
-        features_1 = self.sam_model(image_tensor)
-        htcore.mark_step()
-        features_2 = self.vision_model(image_tensor, features_1)
-        return features_1, features_2
 
 
 class HpuDeepseekOCRDummyInputsBuilder(DeepseekOCRDummyInputsBuilder):
@@ -92,54 +69,6 @@ class HpuDeepseekOCRForCausalLM(DeepseekOCRForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        self.visual = HpuDeepseekOCRVisual(self.sam_model, self.vision_model)
-
-    def _encode_global_features(self, image_tensor: torch.Tensor) -> torch.Tensor:
-        global_features_1, global_features_2 = self.visual(image_tensor)
-        features = torch.cat(
-            (
-                global_features_2[:, 1:],
-                global_features_1.flatten(2).permute(0, 2, 1),
-            ),
-            dim=-1,
-        )
-        features = self.projector(features)
-
-        _, hw, dim = features.shape
-        side = int(hw**0.5)
-
-        features = features.view(side, side, dim)
-        newline = self.image_newline[None, None, :].expand(side, 1, dim)
-        features = torch.cat([features, newline], dim=1)
-        return features.view(-1, dim)
-
-    def _encode_local_features(self, patches: torch.Tensor, crop_shape: torch.Tensor) -> torch.Tensor | None:
-        if torch.sum(patches).item() == 0:
-            return None
-
-        local_features_1, local_features_2 = self.visual(patches)
-        features = torch.cat(
-            (
-                local_features_2[:, 1:],
-                local_features_1.flatten(2).permute(0, 2, 1),
-            ),
-            dim=-1,
-        )
-        features = self.projector(features)
-
-        _, hw, dim = features.shape
-        patch_side = int(hw**0.5)
-
-        width_tiles = int(crop_shape[0].item())
-        height_tiles = int(crop_shape[1].item())
-
-        features = (features.view(height_tiles, width_tiles, patch_side, patch_side,
-                                  dim).permute(0, 2, 1, 3, 4).reshape(height_tiles * patch_side,
-                                                                      width_tiles * patch_side, dim))
-        newline = self.image_newline[None, None, :].expand(height_tiles * patch_side, 1, dim)
-        features = torch.cat([features, newline], dim=1)
-
-        return features.view(-1, dim)
 
     def forward(
         self,
