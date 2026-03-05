@@ -64,7 +64,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
 
-        if layer.moe_parallel_config.dp_size > 1 and self.use_dispatch_fn:
+        if layer.dp_size > 1 and self.use_dispatch_fn:
             dispatch_fn = partial(dispatch_hidden_states, is_sequence_parallel=layer.is_sequence_parallel)
         else:
             dispatch_fn = None
@@ -106,7 +106,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids = topk_ids.to(torch.int64)
             topk_weights = topk_weights.to(x.dtype)
 
-        if layer.moe_parallel_config.dp_size > 1:
+        if layer.dp_size > 1:
             dp_metadata = get_hpu_dp_metadata()
             if not (has_quant_config(layer.vllm_config.model_config) and self.use_dispatch_fn):
                 hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
@@ -128,7 +128,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             permuted_weights=True,
             activation=_normalize_moe_activation(layer.activation),
         )
-        if layer.moe_parallel_config.dp_size > 1:
+        if layer.dp_size > 1:
             return output.view(*(output.size(0), *input_shape[1:]))
         else:
             return output.view(*input_shape)
@@ -159,7 +159,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids = topk_ids.to(torch.int64)
             topk_weights = topk_weights.to(x.dtype)
 
-        if layer.moe_parallel_config.dp_size > 1:
+        if layer.dp_size > 1:
             dp_metadata = get_hpu_dp_metadata()
             if not (has_quant_config(layer.vllm_config.model_config) and self.use_dispatch_fn):
                 hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
@@ -190,7 +190,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             permuted_weights=True,
             activation=_normalize_moe_activation(layer.activation),
         )
-        if layer.moe_parallel_config.dp_size > 1:
+        if layer.dp_size > 1:
             return output.view(*(output.size(0), *input_shape[1:]))
         else:
             return output.view(*input_shape)
