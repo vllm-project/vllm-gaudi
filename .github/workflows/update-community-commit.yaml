@@ -1,0 +1,103 @@
+name: "Update vLLM Community Commit"
+
+on:
+  # This enables manual triggering of the workflow from the GitHub Actions UI
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: >
+          Choose how to set VLLM_COMMUNITY_COMMIT.
+          'latest' means no checkout override — the live vllm CI commit is used as-is.
+          'pin' means the HPU CI test will check out the specific commit SHA provided below.
+        required: true
+        type: choice
+        options:
+          - latest
+          - pin
+        default: latest
+      commit_id:
+        description: >
+          The vLLM commit SHA to pin to (only used when mode is 'pin').
+          Leave empty when mode is 'latest'.
+        required: false
+        type: string
+
+# This permission is required for the action to push changes to the repository
+permissions:
+  contents: write
+
+jobs:
+  update-community-commit:
+    name: "Update and Push Community Commit"
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Validate inputs
+      - name: "Validate inputs"
+        run: |
+          if [[ "${{ github.event.inputs.mode }}" == "pin" ]]; then
+            commit_id="${{ github.event.inputs.commit_id }}"
+            if [[ -z "$commit_id" ]]; then
+              echo "ERROR: commit_id must be provided when mode is 'pin'."
+              exit 1
+            elif [[ ! "$commit_id" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+              echo "ERROR: commit_id must be a valid Git commit SHA (7-40 hexadecimal characters)."
+              exit 1
+            fi
+          fi
+          if [[ "${{ github.event.inputs.mode }}" == "latest" && -n "${{ github.event.inputs.commit_id }}" ]]; then
+            echo "ERROR: commit_id must be empty when mode is 'latest'."
+            exit 1
+          fi
+
+      # Step 2: Check out the specific branch we need to modify
+      - name: "Checkout the target branch"
+        uses: actions/checkout@v4
+        with:
+          ref: "vllm/last-good-commit-for-vllm-gaudi"
+          # Fetch full history to ensure we can push changes
+          fetch-depth: 0
+
+      # Step 3: Configure Git user for the commit
+      - name: "Configure Git"
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # Step 4: Update VLLM_COMMUNITY_COMMIT with the chosen value
+      - name: "Update VLLM_COMMUNITY_COMMIT file"
+        run: |
+          if [[ "${{ github.event.inputs.mode }}" == "latest" ]]; then
+            NEW_VALUE="latest"
+            echo "Setting VLLM_COMMUNITY_COMMIT to 'latest' (no checkout override)."
+          else
+            NEW_VALUE="${{ github.event.inputs.commit_id }}"
+            echo "Pinning VLLM_COMMUNITY_COMMIT to commit: ${NEW_VALUE}"
+          fi
+
+          # Write the new value as the first line, then append the rest of the file
+          # (comment block) directly — avoiding command substitution which strips
+          # trailing newlines and can subtly alter the preserved content.
+          if [[ -s VLLM_COMMUNITY_COMMIT ]]; then
+            { printf '%s\n' "${NEW_VALUE}"; tail -n +2 VLLM_COMMUNITY_COMMIT; } > VLLM_COMMUNITY_COMMIT.tmp
+          else
+            printf '%s\n' "${NEW_VALUE}" > VLLM_COMMUNITY_COMMIT.tmp
+          fi
+          mv VLLM_COMMUNITY_COMMIT.tmp VLLM_COMMUNITY_COMMIT
+
+      # Step 5: Commit and push the changes if the file has been modified
+      - name: "Commit and push changes"
+        run: |
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "No changes to commit. The file already contains the correct value."
+          else
+            if [[ "${{ github.event.inputs.mode }}" == "latest" ]]; then
+              MSG="CI: Set VLLM_COMMUNITY_COMMIT to 'latest' (unpin vllm)"
+            else
+              MSG="CI: Pin VLLM_COMMUNITY_COMMIT to ${{ github.event.inputs.commit_id }}"
+            fi
+            git add VLLM_COMMUNITY_COMMIT
+            git commit -m "${MSG}"
+            git push
+            echo "Successfully pushed the updated VLLM_COMMUNITY_COMMIT."
+          fi

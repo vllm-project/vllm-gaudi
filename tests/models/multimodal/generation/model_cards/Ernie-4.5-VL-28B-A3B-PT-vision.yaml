@@ -1,0 +1,9 @@
+model_card:
+  model_name: "baidu/ERNIE-4.5-VL-28B-A3B-PT"
+  tasks: multimodal_generation
+  num_fewshot: 5
+  limit: 250
+  trust_remote_code: True
+metrics:
+  name: exact_match,strict-match
+  value: 0.88
