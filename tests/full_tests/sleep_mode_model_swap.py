@@ -220,7 +220,7 @@ def destroy_model(llm, model_name):
     return {"destroy_time_s": elapsed, "cleanup_gib": cleanup_gib}
 
 
-def get_model_label(index, num_models):
+def get_model_label(index):
     """Convert model index to label (0->A, 1->B, 2->C, etc.)."""
     return chr(ord('A') + index)
 
@@ -264,16 +264,17 @@ def print_metrics_table(all_metrics):
 
 def main():
     parser = argparse.ArgumentParser(description="Sleep Mode Model Swapping Test")
-    
+
     # Support both new --models and legacy --model-a/--model-b for backward compatibility
-    parser.add_argument("--models", type=str, nargs='+', default=None,
+    parser.add_argument("--models",
+                        type=str,
+                        nargs='+',
+                        default=None,
                         help="List of models to cycle through (space-separated). "
-                             "Example: --models model1 model2 model3")
-    parser.add_argument("--model-a", type=str, default=None, 
-                        help="(Legacy) First model. Use --models instead")
-    parser.add_argument("--model-b", type=str, default=None,
-                        help="(Legacy) Second model. Use --models instead")
-    
+                        "Example: --models model1 model2 model3")
+    parser.add_argument("--model-a", type=str, default=None, help="(Legacy) First model. Use --models instead")
+    parser.add_argument("--model-b", type=str, default=None, help="(Legacy) Second model. Use --models instead")
+
     parser.add_argument("--enforce-eager",
                         action="store_true",
                         default=False,
@@ -281,7 +282,7 @@ def main():
     parser.add_argument("--phases", type=int, default=10, help="Number of swap phases (default: 10)")
     parser.add_argument("--max-model-len", type=int, default=4096, help="Maximum model context length (default: 4096)")
     args = parser.parse_args()
-    
+
     # Handle backward compatibility: --model-a and --model-b
     if args.models is None:
         models = []
@@ -294,12 +295,12 @@ def main():
             models = ["meta-llama/Llama-3.1-8B-Instruct", "Qwen/Qwen3-0.6B"]
     else:
         models = args.models
-    
+
     if len(models) < 2:
         print("ERROR: At least 2 models required for swap testing")
         import sys
         sys.exit(1)
-    
+
     num_phases = args.phases
 
     # Validate environment
@@ -327,7 +328,7 @@ def main():
     for phase in range(1, num_phases + 1):
         model_index = (phase - 1) % num_models
         model_name = models[model_index]
-        label = get_model_label(model_index, num_models)
+        label = get_model_label(model_index)
 
         print("\n" + "=" * 60)
         print(f"  PHASE {phase}/{num_phases}: "
