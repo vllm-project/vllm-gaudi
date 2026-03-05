@@ -5272,7 +5272,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         mm_config = self.model_config.get_multimodal_config()
 
         is_image_warmup = (mm_config is not None and mm_config.get_limit_per_prompt("image") is not None
-                           and "image" in  self.mm_budget.mm_limits and self.mm_budget.mm_limits['image'] != 0)
+                           and "image" in self.mm_budget.mm_limits and self.mm_budget.mm_limits['image'] != 0)
         is_video_warmup = (mm_config is not None and mm_config.get_limit_per_prompt("video") is not None
                            and "video" in self.mm_budget.mm_limits and self.mm_budget.mm_limits['video'] != 999)
         warmup_configs = {
