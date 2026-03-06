@@ -466,7 +466,6 @@ run_structured_output_test() {
 run_qwen_online_test() {
     echo "➡️ Testing Qwen Online Mode Tests..."
     cd ${VLLM_GAUDI_PREFIX}/tests/unit_tests;  bash run_qwen3_online_test.sh
-    echo "✅ Test with structured outputs passed."
 }
 
 # --- Utility Functions ---
