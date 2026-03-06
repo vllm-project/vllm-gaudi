@@ -569,6 +569,55 @@ jobs:
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
 
+  # Build-test production Dockerfiles when they are modified
+  check_dockerfile_changes:
+    needs: [retrieve_head_sha]
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    outputs:
+      nixl_changed: ${{ steps.check.outputs.nixl_changed }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
+          fetch-depth: 0
+      - name: Detect changed Dockerfiles
+        id: check
+        run: |
+          # Compare PR head against merge base to find changed files
+          CHANGED=$(git diff --name-only origin/${{ github.event.pull_request.base.ref }}...HEAD -- '.cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest')
+          if [ -n "$CHANGED" ]; then
+            echo "nixl_changed=true" >> "$GITHUB_OUTPUT"
+            echo "Nixl Dockerfile was modified"
+          else
+            echo "nixl_changed=false" >> "$GITHUB_OUTPUT"
+            echo "Nixl Dockerfile was NOT modified"
+          fi
+
+  build_nixl_dockerfile:
+    needs: [check_dockerfile_changes, discover_runner, retrieve_head_sha]
+    if: needs.check_dockerfile_changes.outputs.nixl_changed == 'true'
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
+          clean: true
+      - name: Build nixl Dockerfile (validation only)
+        run: |
+          echo "Building .cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest to verify it builds correctly..."
+          docker build \
+            --no-cache \
+            -t nixl-dockerfile-build-test \
+            -f .cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest \
+            .
+          echo "Nixl Dockerfile build succeeded."
+      - name: Cleanup test image
+        if: always()
+        run: docker rmi -f nixl-dockerfile-build-test || true
+
   pre_merge_hpu_test:
     # --- UPDATED: Add discover_runner dependency ---
     needs: [hpu_unit_tests, e2e, hpu_perf_tests, calibration_tests, discover_runner]
