@@ -238,7 +238,8 @@ class HPUBucketingManager():
         if self.num_hpu_blocks is None:
             new_ctx = 0
         else:
-            new_ctx = min(calc_fallback_value(ctx, self.fallback_blocks_base_step), self.num_hpu_blocks + self.block_size)
+            new_ctx = min(calc_fallback_value(ctx, self.fallback_blocks_base_step),
+                          self.num_hpu_blocks + self.block_size)
         return (new_batch_size, new_seq_len, new_ctx)
 
     def find_prompt_bucket(self, batch_size, seq_len, ctx=0):
