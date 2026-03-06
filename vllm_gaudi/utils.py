@@ -5,6 +5,11 @@ import vllm.utils.torch_utils as torch_utils
 from vllm_gaudi.extension.runtime import get_config
 import vllm.v1.core.sched.async_scheduler as _async_sched_module
 from vllm_gaudi.v1.core.sched.hpu_async_scheduler import HPUAsyncScheduler
+import vllm.model_executor.model_loader.utils as hpu_utils
+import vllm.model_executor.model_loader.base_loader as base_loader
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.layers.attention import (Attention, MLAAttention)
+from vllm.model_executor.model_loader.reload import set_torchao_reload_attrs
 from typing import (Any, Optional, TypeVar, Union)
 import torch
 import habana_frameworks.torch as htorch
@@ -258,6 +263,25 @@ def make_mrope_positions_tensor_with_pad(input_positions: list[list[int]], input
     return torch.tensor(mrope_input_positions, dtype=torch.long, device='cpu')
 
 
+def hpu_process_weights_after_loading(model, model_config, target_device):
+    """Gaudi override: accept device strings (e.g., "hpu")."""
+    target_device = torch.device(target_device)
+    for _, module in model.named_modules():
+        quant_method = getattr(module, "quant_method", None)
+        if isinstance(quant_method, QuantizeMethodBase):
+            #with device_loading_context(module, target_device):
+            quant_method.process_weights_after_loading(module)
+
+    # Initialize post-load attention weights for both Attention and MLA.
+    for _, module in model.named_modules():
+        if isinstance(module, (Attention, MLAAttention)) and hasattr(module, "process_weights_after_loading"):
+            #with device_loading_context(module, target_device):
+            module.process_weights_after_loading(model_config.dtype)
+
+    if model_config.quantization == "torchao":
+        set_torchao_reload_attrs(model, model_config)
+
+
 class HPUCompileConfig:
     """
     Configuration class, which holds arguments that will be
@@ -330,3 +354,5 @@ class HPUCompileConfig:
 
 
 _async_sched_module.AsyncScheduler = HPUAsyncScheduler
+hpu_utils.process_weights_after_loading = hpu_process_weights_after_loading
+base_loader.process_weights_after_loading = hpu_process_weights_after_loading
