@@ -12,6 +12,7 @@ from vllm_gaudi.ops.causal_conv1d_pytorch import (
     hpu_causal_conv1d_fn,
     hpu_causal_conv1d_update,
 )
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
 
 class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):      
@@ -132,7 +133,22 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         spec_state_indices_tensor = None  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.state_indices_tensor  # noqa: E501
         self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-        conv_state = self_kv_cache[0].transpose(-1, -2)
+        # Keep cache layout expected by hpu_causal_conv1d_*: [num_cache_lines, state_len, dim].
+        conv_state = self_kv_cache[0]
+        if non_spec_state_indices_tensor is not None and non_spec_state_indices_tensor.dim() > 1:
+            # Hybrid metadata can hold one state-index row per cache group.
+            # Select the row that matches this layer cache shape.
+            num_cache_lines = conv_state.size(0)
+            inferred_group_idx = None
+            for row_idx in range(non_spec_state_indices_tensor.size(0)):
+                row = non_spec_state_indices_tensor[row_idx]
+                valid = ((row == PAD_SLOT_ID) | ((row >= 0) & (row < num_cache_lines))).all()
+                if bool(valid):
+                    inferred_group_idx = row_idx
+                    break
+            if inferred_group_idx is None:
+                inferred_group_idx = 0
+            non_spec_state_indices_tensor = non_spec_state_indices_tensor[inferred_group_idx]
         ssm_state = self_kv_cache[1]
         num_actual_tokens = None #TODO: need for speculative decode
         num_accepted_tokens = None #TODO: need for speculative decode
