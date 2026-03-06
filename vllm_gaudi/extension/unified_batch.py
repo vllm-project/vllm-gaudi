@@ -295,7 +295,10 @@ class DynamicPlaceholderMempool:
 
 class UnifiedBatchPersistentContext:
 
-    def __init__(self, max_num_batched_tokens, max_shared_blocks, max_unique_blocks, block_size, dtype, profiler):
+    def __init__(self, max_num_batched_tokens, max_shared_blocks, max_unique_blocks, block_size, dtype, profiler,
+                 num_query_heads: int = 0):
+        self.num_query_heads = num_query_heads
+        self.block_size = block_size
         # Convert torch dtype to numpy dtype
         if hasattr(dtype, 'numpy_dtype'):
             np_dtype = dtype.numpy_dtype
@@ -562,48 +565,21 @@ def _prepare_shared_bias_hpu(
     dtype: torch.dtype,
     np_dtype: np.dtype,
     slot_mapping_dtype: torch.dtype,
-    use_chunked_processing: bool,
     use_dense_bias_generation: bool,
 ) -> None:
     """
     Prepare shared bias tensors on HPU.
     
-    This function handles three approaches for shared bias generation:
-    1. Chunked dense: For large shared blocks, generate bias per-chunk during attention
-    2. Non-chunked dense: Scatter on CPU, broadcast on HPU (static shapes)
-    3. Sparse (legacy): Dynamic scatter on HPU with fallback to CPU in case of too many shared tokens.
+    Always generates the full bias tensor. Memory-saving chunking is handled at
+    attention compute time by chunking along the query dimension (Q-chunking).
     
-    Modifies attn_metadata.shared_bias and attn_metadata.shared_bias_chunked in place.
+    This function handles two approaches for full bias generation:
+    1. Dense: Scatter on CPU, broadcast on HPU (static shapes)
+    2. Sparse (legacy): Dynamic scatter on HPU with fallback to CPU in case of too many shared tokens.
+    
+    Modifies attn_metadata.shared_bias in place.
     """
-    if use_chunked_processing:
-        with persistent_ctx.profiler.record_event('internal', 'shared_bias_chunked_prep'):
-            # CHUNKED DENSE APPROACH:
-            # - Scatter block_usages into dense (target_qlen, target_shared_blocks) on CPU
-            # - Don't generate full bias - just pass the dense block_usages
-            # - Attention code will generate bias per chunk by slicing block_usages
-
-            # Use persistent buffer - get view of required size and zero it
-            block_usages_dense = persistent_ctx.block_usages_dense[:target_qlen, :target_shared_blocks]
-            block_usages_dense.fill(0)  # Reset to 0 (fully masked)
-
-            # Scatter: block_usages_dense[token_idx, block_idx] = block_usage value
-            block_usages_dense[shared_token_idx, shared_block_idx] = shared_block_usage
-
-            # Transfer dense tensor to HPU - shape is fully static (target_qlen, target_shared_blocks)
-            hpu_block_usages_dense = persistent_ctx.hpu_tensor(block_usages_dense, (target_qlen, target_shared_blocks),
-                                                               0, torch.int32)
-
-            # DON'T generate full bias - attention code will generate per chunk
-            attn_metadata.shared_bias = None
-            attn_metadata.shared_bias_chunked = SharedBlockChunkedBiasData(
-                block_usages=hpu_block_usages_dense,
-                num_query_tokens=target_qlen,
-                num_shared_blocks=target_shared_blocks,
-                split_chunked_graphs=get_config().unified_attn_split_graphs,
-            )
-        return
-
-    # Non-chunked paths
+    # Dense bias generation path
     if use_dense_bias_generation:
         with persistent_ctx.profiler.record_event('internal', 'shared_bias_dense_prep'):
             # DENSE APPROACH: Scatter on CPU (any shape), broadcast on HPU (static shape)
@@ -822,21 +798,12 @@ def create_unified_batch(
     fmin = torch.finfo(dtype).min
     feps = torch.finfo(dtype).tiny
 
-    # Determine if we should use chunked computation for shared blocks
-    # NOTE(kzawora): Chunked processing computes attention in chunks to save memory.
-    # With chunked dense generation, we only allocate (target_qlen, target_shared_blocks) for block_usages
-    # instead of the full (target_qlen, target_shared_blocks, block_size) bias tensor.
-    # Bias is generated per chunk: (target_qlen, chunk_size, block_size)
-    default_chunk_size = get_config(
-    ).unified_attn_shared_attn_chunk_size  # Process up to 64 blocks at a time for shared attention
-    use_chunked_processing = get_config().unified_attn_chunked_shared_attn and bool(
-        target_shared_blocks > default_chunk_size)  # Chunked dense processing - generates bias per chunk
-
-    # Pad target_shared_blocks to be a multiple of chunk_size for chunked processing
-    # This ensures all chunks have exactly chunk_size blocks (static shapes in the kernel)
-    if use_chunked_processing and target_shared_blocks % default_chunk_size != 0:
-        target_shared_blocks = (
-            (target_shared_blocks + default_chunk_size - 1) // default_chunk_size) * default_chunk_size
+    # NOTE(kzawora): Q-chunked shared attention handles memory at attention time by
+    # chunking along the query dimension when the attention matrix is too large.
+    # The full bias tensor (target_qlen × target_shared_blocks × block_size) is always
+    # generated — it's comparatively small (~hundreds of MBs). The expensive attention
+    # matrix (num_heads × query_len × kv_len) is what gets chunked at compute time.
+    # No KV-chunk padding or chunk_size computation is needed here.
 
     # Dense bias generation: scatter on CPU (any shape), then broadcast on HPU (static shape)
     # This avoids dynamic-length coordinate arrays on HPU entirely
@@ -854,8 +821,8 @@ def create_unified_batch(
             # For chunked processing: still allocate full bias for now (stepping stone to verify correctness)
             # shared_bias will be set below after HPU acceleration
             shared_bias=None,  # Will be set below
-            shared_bias_chunked=None,  # Will be set below if chunked processing is enabled
-            shared_chunk_size=default_chunk_size if use_chunked_processing else 0,
+            shared_bias_chunked=None,  # Legacy: unused with Q-chunked approach
+            shared_chunk_size=0,  # Legacy: unused with Q-chunked approach
             unique_blocks=target_unique_blocks,
             unique_block_mapping=persistent_ctx.hpu_tensor(unique_block_mapping, (target_unique_blocks, ), -1,
                                                            slot_mapping_dtype),
@@ -864,7 +831,7 @@ def create_unified_batch(
             feps=to_hpu(feps, dtype=dtype),
             inputL_hpu_tensors=dict(),
             inputM_hpu_tensors=dict(),
-            split_graphs=get_config().unified_attn_split_graphs,
+            split_graphs=get_config().unified_attn_split_graphs and contains_prompts,
             online_merge=get_config().unified_attn_online_merge,
         )
 
@@ -895,7 +862,6 @@ def create_unified_batch(
                 dtype=dtype,
                 np_dtype=np_dtype,
                 slot_mapping_dtype=slot_mapping_dtype,
-                use_chunked_processing=use_chunked_processing,
                 use_dense_bias_generation=use_dense_bias_generation,
             )
 
