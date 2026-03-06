@@ -736,7 +736,7 @@ def with_thread_limits():
     """
     Decorator to temporarily set OMP_NUM_THREADS and PyTorch threads,
     and restore them after the function call.
-    
+
     Args:
         div_omp: divide CPU cores by this for OMP_NUM_THREADS
         div_torch: divide CPU cores by this for torch.set_num_threads
@@ -1626,7 +1626,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def _get_model_type(self) -> Optional[str]:
         """
         Safely extract the model type from vllm_config.
-        
+
         Returns:
             The model type string if available, None otherwise.
         """
@@ -4436,18 +4436,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         self._detached_moe_gates.add(id(experts))
 
     def _sync_shared_moe_gates(self):
-        """Re-sync SharedFusedMoE._gate after INC conversion.
+        """Apply SharedFusedMoE post-INC synchronization and compatibility.
 
-        After INC converts/patches the model, the block-level gate
-        (e.g. mlp.gate) is properly patched. This method restores
-        the SharedFusedMoE._gate reference so that the overlapped
-        execution path inside FusedMoE.forward_impl() also uses the
-        patched gate.
-
-        Only experts whose _gate was explicitly detached by
-        _remove_duplicate_submodules are restored; experts whose
-        _gate was originally None are left unchanged.
+        Synchronizes per-layer MoE state after INC conversion, including
+        router handling and compatibility flags expected by INC wrappers.
+        Detached gate tracking is used only as a cleanup aid.
         """
+
+        def _sync_moe_kernel_flags(module: torch.nn.Module):
+            moe_config = getattr(module, "moe_config", None)
+            for name in (
+                    "use_pplx_kernels",
+                    "use_deepep_ht_kernels",
+                    "use_deepep_ll_kernels",
+                    "use_mori_kernels",
+                    "use_fi_all2allv_kernels",
+            ):
+                setattr(module, name, bool(getattr(moe_config, name, False)))
+
         model = self.get_model()
         if not hasattr(model, "model"):
             return
@@ -4457,9 +4463,28 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 continue
             block_gate = getattr(mlp, 'gate', None)
             experts = getattr(mlp, 'experts', None)
-            if (block_gate is not None and experts is not None and id(experts) in self._detached_moe_gates):
-                experts._gate = block_gate
-                self._detached_moe_gates.remove(id(experts))
+            if block_gate is not None and experts is not None:
+                _sync_moe_kernel_flags(experts)
+                orig_mod = getattr(experts, "orig_mod", None)
+                if orig_mod is not None:
+                    _sync_moe_kernel_flags(orig_mod)
+
+                # Force external router path: the model's forward checks
+                # experts.is_internal_router to decide the gate path.
+                if isinstance(experts, FusedMoE):
+                    # is_internal_router is a read-only property backed
+                    # by _gate; setting _gate=None makes it return False.
+                    experts._gate = None
+                else:
+                    # INC wrappers (e.g. PatchedMixtralMoE) don't inherit
+                    # the property — set a plain attribute instead.
+                    experts.is_internal_router = False
+                runner = getattr(experts, "runner", None)
+                if runner is not None and hasattr(runner, "gate"):
+                    runner.gate = None
+
+                if id(experts) in self._detached_moe_gates:
+                    self._detached_moe_gates.remove(id(experts))
 
     def _inc_preprocess(self):
         _apply_inc_patch()
@@ -5209,7 +5234,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.get_model().vision_bucket_manager.is_batch_based:
             batch = image_args
         else:
-            mm_options = self.model_config.get_multimodal_config().get_dummy_options(modality)
+            mm_options = self.model_config.get_multimodal_config().get_limit_per_prompt(modality)
             count = mm_options.count if mm_options and hasattr(mm_options, 'count') else count
             batch = count
         if modality == 'image':
@@ -5248,18 +5273,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         is_batch_based = vision_bucket_manager.is_batch_based
         mm_config = self.model_config.get_multimodal_config()
 
-        is_image_warmup = (mm_config is not None and mm_config.get_dummy_options("image") is not None
-                           and self.mm_budget.mm_limits['image'] != 0)
-        is_video_warmup = (mm_config is not None and mm_config.get_dummy_options("video") is not None
-                           and self.mm_budget.mm_limits['video'] != 999)
+        is_image_warmup = (mm_config is not None and mm_config.get_limit_per_prompt("image") is not None
+                           and "image" in self.mm_budget.mm_limits and self.mm_budget.mm_limits['image'] != 0)
+        is_video_warmup = (mm_config is not None and mm_config.get_limit_per_prompt("video") is not None
+                           and "video" in self.mm_budget.mm_limits and self.mm_budget.mm_limits['video'] != 999)
         warmup_configs = {
-            "image": (0, lambda: mm_config.get_dummy_options("image")),
-            "video": (999, lambda: mm_config.get_dummy_options("video"))
+            "image": (0, lambda: mm_config.get_limit_per_prompt("image")),
+            "video": (999, lambda: mm_config.get_limit_per_prompt("video"))
         }
         width = height = None
         warmup_lists = []
         for modality, (limit_value, get_options) in warmup_configs.items():
-            if (mm_config and mm_config.get_dummy_options(modality)
+            if (mm_config and mm_config.get_limit_per_prompt(modality)
                     and self.mm_budget.mm_limits[modality] != limit_value):
                 options = get_options()
                 width = options.width if hasattr(options, 'width') else None
@@ -5329,7 +5354,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     @torch.inference_mode()
     def _log_bucketing_config(self) -> None:
         """Log HPU bucketing configuration for TORCH_TRACE/tlparse analysis.
-        
+
         This logs the bucketing strategy and generated buckets as a JSON artifact
         that will be displayed in tlparse reports, helping debug bucketing behavior.
         """
@@ -5384,7 +5409,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     @torch.inference_mode()
     def _log_dynamo_cache_stats(self) -> None:
         """Log PyTorch Dynamo cache statistics for TORCH_TRACE/tlparse analysis.
-        
+
         This helps diagnose compilation cache issues, recompilations, and cache
         evictions that can cause performance problems during inference.
         """
