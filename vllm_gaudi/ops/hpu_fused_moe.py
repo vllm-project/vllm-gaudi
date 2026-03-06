@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from enum import Enum
 from functools import partial
 from typing import Union
 
@@ -28,6 +29,10 @@ from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOp)
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.utils import has_quant_config
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
+
+
+def _normalize_moe_activation(activation):
+    return activation.value if isinstance(activation, Enum) else activation
 
 
 @UnquantizedFusedMoEMethod.register_oot
@@ -62,7 +67,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
 
         if layer.moe_config.dp_size > 1 and self.use_dispatch_fn:
-            dispatch_fn = partial(dispatch_hidden_states, is_sequence_parallel=layer.is_sequence_parallel)
+            dispatch_fn = partial(dispatch_hidden_states, is_sequence_parallel=layer.moe_config.is_sequence_parallel)
         else:
             dispatch_fn = None
 
@@ -123,7 +128,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids,
             topk_weights,
             permuted_weights=True,
-            activation=layer.activation,
+            activation=_normalize_moe_activation(layer.activation),
         )
         if layer.moe_config.dp_size > 1:
             return output.view(*(output.size(0), *input_shape[1:]))
@@ -177,7 +182,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 topk_ids.to(torch.int64),
                 topk_weights.to(x.dtype),
                 permuted_weights=True,
-                activation=layer.activation,
+                activation=_normalize_moe_activation(layer.activation),
             ).view(*input_shape)
 
         output = layer.moe_op(
@@ -185,7 +190,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids,
             topk_weights,
             permuted_weights=True,
-            activation=layer.activation,
+            activation=_normalize_moe_activation(layer.activation),
         )
         if layer.moe_config.dp_size > 1:
             return output.view(*(output.size(0), *input_shape[1:]))

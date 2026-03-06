@@ -473,9 +473,8 @@ launch_all_tests() {
     run_tp2_load_generate_test
     run_mla_moe_load_generate_test
     run_granite_inc_load_generate_test
-    # Failed after #32344
-    #run_deepseek_v2_inc_load_generate_test
-    #run_deepseek_v2_inc_dynamic_tp2_load_generate_test
+    run_deepseek_v2_inc_load_generate_test
+    run_deepseek_v2_inc_dynamic_tp2_load_generate_test
     run_qwen3_inc_dynamic_load_generate_test
     run_dsv2_blockfp8_static_scaling_fp8kv_load_generate_test
     run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test
