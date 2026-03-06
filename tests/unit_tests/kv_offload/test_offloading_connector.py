@@ -42,10 +42,10 @@ from vllm.v1.kv_offload.worker.worker import (
     TransferSpec,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
-from vllm.v1.request import Request
 
 from .utils import (
     EOS_TOKEN_ID,
+    create_request_compatible_with_signature,
     create_model_runner_output,
     create_scheduler,
     create_vllm_config,
@@ -215,14 +215,18 @@ class RequestRunner:
     def new_request(self, token_ids: list[int]):
         self.req_id += 1
 
-        req = Request(
-            request_id=str(self.req_id),
-            prompt_token_ids=token_ids,
-            sampling_params=SamplingParams(max_tokens=1000),
-            pooling_params=None,
-            eos_token_id=EOS_TOKEN_ID,
-            block_hasher=self._block_hasher,
-        )
+        sampling_params = SamplingParams(max_tokens=1000)
+        sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+
+        request_kwargs: dict[str, Any] = {
+            "request_id": str(self.req_id),
+            "prompt_token_ids": token_ids,
+            "sampling_params": sampling_params,
+            "pooling_params": None,
+            "block_hasher": self._block_hasher,
+        }
+
+        req = create_request_compatible_with_signature(**request_kwargs)
 
         self.scheduler.add_request(req)
 

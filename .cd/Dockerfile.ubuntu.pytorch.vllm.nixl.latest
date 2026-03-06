@@ -14,6 +14,7 @@ FROM ${DOCKER_URL}/${VERSION}/${BASE_NAME}/${REPO_TYPE}/pytorch-${TORCH_TYPE_SUF
 
 # Parameterize commit/branch for vllm-project & vllm-gaudi checkout
 # leave empty to use last-good-commit-for-vllm-gaudi
+ARG PT_VERSION
 ARG VLLM_PROJECT_COMMIT=
 ARG VLLM_GAUDI_COMMIT=main
 
@@ -54,7 +55,7 @@ RUN \
     git fetch upstream --tags || true && \
     git checkout ${VLLM_PROJECT_COMMIT} && \
     # Install vllm-project/vllm
-    pip install -r <(sed '/^torch/d' requirements/build.txt) && \
+    bash -c 'pip install -r <(sed "/^torch/d" requirements/build.txt)' && \
     VLLM_TARGET_DEVICE=empty pip install --no-build-isolation . && \
     # Install vllm-gaudi plugin
     cd $VLLM_PATH2 && \
@@ -62,6 +63,9 @@ RUN \
     VLLM_TARGET_DEVICE=hpu pip install -v . --no-build-isolation && \
     python install_nixl.py
 # --- END: COMBINED RUN COMMAND ---
+
+# Install torchaudio (CPU wheel, matching PyTorch version in base image)
+RUN pip install --no-cache-dir --no-deps --extra-index-url https://download.pytorch.org/whl/cpu torchaudio==${PT_VERSION}
 
 # Install additional Python packages
 RUN pip install datasets && \
