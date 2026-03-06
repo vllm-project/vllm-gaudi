@@ -1,8 +1,19 @@
-export VLLM_EXPONENTIAL_BUCKETING=true
 export VLLM_LOGGING_LEVEL=DEBUG
 export VLLM_DELAYED_SAMPLING=true
 export TRANSFORMERS_VERBOSITY=info
-export VLLM_EXPONENTIAL_BUCKETING=False
+export VLLM_EXPONENTIAL_BUCKETING=false
+export VLLM_BUCKETING_STRATEGY=linear_bucketing
+# Hybrid GDN/Mamba aligns prompt query buckets to mamba_chunk_size (2048).
+# Keep query bucket config consistent to avoid generating zero valid buckets.
+export VLLM_PROMPT_QUERY_BUCKET_MIN=2048
+export VLLM_PROMPT_QUERY_BUCKET_STEP=2048
+export VLLM_PROMPT_QUERY_BUCKET_MAX=2048
+export VLLM_PROMPT_SEQ_BUCKET_MIN=1
+export VLLM_PROMPT_SEQ_BUCKET_STEP=1
+export VLLM_PROMPT_SEQ_BUCKET_MAX=128
+export VLLM_PROMPT_CTX_BUCKET_MIN=0
+export VLLM_PROMPT_CTX_BUCKET_STEP=1
+export VLLM_PROMPT_CTX_BUCKET_MAX=64
 export VLLM_FUSED_BLOCK_SOFTMAX_ADJUSTMENT=False
 export PT_HPU_ENABLE_LAZY_COLLECTIVES=true
 export EXPERIMENTAL_WEIGHT_SHARING=0
@@ -14,4 +25,10 @@ export VLLM_CONTIGUOUS_PA=true
 export VLLM_DEFRAG=true
 export VLLM_USE_HYBRID_CACHE=true
 export VLLM_USE_NAIVE_MAMBA_CACHE_SHARING=false
-python test.py --mode text 2>&1  |tee log.txt
+python test.py \
+  --mode text \
+  --text-api chat \
+  --max-model-len 16384 \
+  --max-num-batched-tokens 4096 \
+  --prompt "Reply in one short English sentence: Hello, how are you?" 
+	2>&1 | tee log.txt

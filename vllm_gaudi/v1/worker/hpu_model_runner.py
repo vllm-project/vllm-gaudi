@@ -93,7 +93,7 @@ from vllm.model_executor.models.interfaces import (supports_eagle3, supports_tra
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.transformers_utils.config import is_interleaved
-from vllm.v1.worker.utils import (AttentionGroup, sanity_check_mm_encoder_outputs)
+from vllm.v1.worker.utils import (AttentionGroup, prepare_kernel_block_sizes, sanity_check_mm_encoder_outputs)
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -849,6 +849,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.interleaved_sliding_window = (is_interleaved(vllm_config.model_config.hf_text_config)
                                            and self.sliding_window)
         self.block_size = cache_config.block_size
+        # Preferred Gaudi paged-attention kernel granularity.
+        # Final kernel block size is selected per KV group during
+        # initialize_kv_cache based on divisibility constraints.
+        self.attn_block_size = 128
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         # Override settings when profiling a single prefill/decode
@@ -1806,10 +1810,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                               skip_copy=not batch_changed)
         return sampling_metadata
 
-    def get_habana_paged_attn_buffers(self, block_tables, slot_mapping, batch_size):
-        last_block_usage = [slot[0] % self.block_size + 1 for slot in slot_mapping]
+    def get_habana_paged_attn_buffers(self, block_tables, slot_mapping, batch_size, block_size=None):
+        block_size = self.attn_block_size if block_size is None else block_size
+        last_block_usage = [slot[0] % block_size + 1 for slot in slot_mapping]
         block_groups = [[i] * len(bt) for i, bt in enumerate(block_tables)]
-        block_usage = [[self.block_size] * (len(bt) - 1) + [lbu] for bt, lbu in zip(block_tables, last_block_usage)
+        block_usage = [[block_size] * (len(bt) - 1) + [lbu] for bt, lbu in zip(block_tables, last_block_usage)
                        if bt]
         block_list = flatten(block_tables)
         block_groups = flatten(block_groups)
@@ -2326,7 +2331,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             slot_mapping=token_slots,  
             block_list=context_blocks_t,  
             attn_bias=attn_bias,  
-            block_size=self.block_size,  
+            block_size=self.attn_block_size,  
             prep_initial_states=prep_initial_states,  
             has_initial_states_p=has_initial_states_p,  
             last_chunk_indices_p=last_chunk_indices_p,  
@@ -2386,10 +2391,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                   block_table_cpu_tensor,
                                   scheduler_output=None) -> DecodeInputData:
 
+        decode_block_size = self.attn_block_size
+
         # NOTE(kzawora): the +1 is what causes this entire thing to work,
         # as in the paged attention, we don't fetch just the context from cache,
         # but also kvs for the current token
-        num_blocks = np.ceil((context_lens + 1) / self.block_size).astype(np.int32).tolist()
+        num_blocks = np.ceil((context_lens + 1) / decode_block_size).astype(np.int32).tolist()
 
         num_tokens_per_req = num_scheduled_tokens[:num_decodes]
         num_tokens = max(num_tokens_per_req)
@@ -2480,15 +2487,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Look up the block_idx in the block table (logical<>physical map)
         # to compute this.
         block_number = torch.ones((padded_batch_size, num_tokens), dtype=torch.int32) * self._PAD_BLOCK_ID
-        block_number[:num_decodes] = torch.gather(input=block_table_cpu_tensor, dim=1, index=(index // self.block_size))
+        block_number[:num_decodes] = torch.gather(input=block_table_cpu_tensor,
+                              dim=1,
+                              index=(index // decode_block_size))
         block_number.apply_(self.defragmenter.resolve)
 
-        block_offsets = padded_index % self.block_size
-        slot_mapping = block_number * self.block_size + block_offsets
+        block_offsets = padded_index % decode_block_size
+        slot_mapping = block_number * decode_block_size + block_offsets
         # set an out of range value for the padding tokens so that they
         # are ignored when inserting into the KV cache.
         slot_mapping = slot_mapping[:padded_batch_size]
-        dummy_slots = itertools.cycle(range(self._PAD_SLOT_ID, self._PAD_SLOT_ID + self.block_size))
+        pad_slot_base = self._PAD_BLOCK_ID * decode_block_size
+        dummy_slots = itertools.cycle(range(pad_slot_base, pad_slot_base + decode_block_size))
         slot_mapping[num_decodes:].apply_(lambda _, ds=dummy_slots: next(ds))
 
         #####################################
@@ -2529,11 +2539,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.get_habana_paged_attn_buffers(
                 block_tables_list,
                 slot_mapping.tolist(),
-                padded_batch_size * num_tokens
+                padded_batch_size * num_tokens,
+                block_size=decode_block_size,
             )
 
         if self.interleaved_sliding_window:
-            sliding_block_size = (self.sliding_window // self.block_size)
+            sliding_block_size = (self.sliding_window // decode_block_size)
 
             # Adjust sliding block size for specific model types
             model_type = self._get_model_type()
@@ -2544,10 +2555,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             window_block_list, window_block_groups, window_block_usage = \
                 self.get_habana_paged_attn_buffers(
                     window_block_tables, slot_mapping.tolist(),
-                    padded_batch_size * num_tokens)
+                    padded_batch_size * num_tokens,
+                    block_size=decode_block_size)
 
         if self.model_has_chunked_attention:
-            chunk_size_in_blocks = (self.model.model.config.text_config.attention_chunk_size // self.block_size)
+            chunk_size_in_blocks = (self.model.model.config.text_config.attention_chunk_size // decode_block_size)
             seq_lens_block = [len(block_table) for block_table in block_tables_list]
             num_seq_chunks = [math.ceil(sl / chunk_size_in_blocks) - 1 for sl in seq_lens_block]
             block_tables_chunk = [
@@ -2557,7 +2569,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             chunked_block_list, chunked_block_groups, chunked_block_usage = \
                 self.get_habana_paged_attn_buffers(
                     block_tables_chunk, slot_mapping.tolist(),
-                    padded_batch_size * num_tokens)
+                    padded_batch_size * num_tokens,
+                    block_size=decode_block_size)
 
         if self.num_mamba_like_layers > 0:
             all_state_indices_cpu = []
@@ -2645,7 +2658,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             block_groups=block_groups_device,
             input_positions=None,
             slot_mapping=slot_mapping_device,
-            block_size=self.block_size,
+            block_size=decode_block_size,
             window_block_list=window_block_list_device,
             window_block_usage=window_block_usage_device,
             window_block_groups=window_block_groups_device,
@@ -3725,7 +3738,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         block_list = attn_metadata.block_list
         max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
-        max_context_len = max_context_len * self.block_size
+        block_size = getattr(prefill_metadata, "block_size", self.block_size)
+        max_context_len = max_context_len * block_size
         past_mask = torch.arange(0, max_context_len, dtype=torch.int32, device=device)
         past_mask = (past_mask.view(1, -1).expand(batch_size, -1).ge(context_lens_t.view(-1, 1)).view(
             batch_size, 1, -1).expand(batch_size, seq_len, -1).view(batch_size, 1, seq_len, -1))
@@ -5733,34 +5747,33 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.vllm_config.gdn_hybrid  = False
         if self.num_mamba_like_layers > 0:
             self.vllm_config.gdn_hybrid = maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
-        # if len(kv_cache_config.kv_cache_groups) > 1:
-        block_sizes = [kv_cache_group.kv_cache_spec.block_size for kv_cache_group in kv_cache_config.kv_cache_groups]
-        if block_sizes != [self.cache_config.block_size]:
-            assert self.cache_config.cpu_offload_gb == 0, (
-                "Cannot re-initialize the input batch when CPU weight "
-                "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
-                "for more details.")
-            # recreate with block size set for hybrid mamba+attention as got from
-            # HybridAttentionMambaModelConfig.verify_and_update_config
-            # block size is set also in platform.py::check_and_update_config but respects set above
-            self.input_batch = InputBatch(
-                max_num_reqs=self.max_num_reqs,
-                max_model_len=self.max_model_len,
-                max_num_batched_tokens=self.max_num_tokens,
-                device=self.device,
-                pin_memory=self.pin_memory,
-                vocab_size=self.model_config.get_vocab_size(),
-                block_sizes=block_sizes,
-                kernel_block_sizes=block_sizes,  # no splitting for Mamba
-                is_spec_decode=bool(self.vllm_config.speculative_config),
-                logitsprocs=self.input_batch.logitsprocs,
-                is_pooling_model=self.is_pooling_model,
-            )
-
         self.initialize_attn_backend(kv_cache_config)
-        if self.is_encoder_only_attn:
-            kernel_block_sizes: list[int] = []
-            self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
+        kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, self.attn_groups)
+        self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
+
+        kernel_block_size_by_gid: dict[int, int] = {}
+        kernel_idx = 0
+        for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+                continue
+            kernel_block_size_by_gid[gid] = kernel_block_sizes[kernel_idx]
+            kernel_idx += 1
+
+        selected_attn_kernel_sizes = [
+            kernel_block_size_by_gid[gid]
+            for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups)
+            if isinstance(kv_cache_group.kv_cache_spec, FullAttentionSpec)
+        ]
+        if selected_attn_kernel_sizes:
+            self.attn_block_size = selected_attn_kernel_sizes[0]
+            if len(set(selected_attn_kernel_sizes)) > 1:
+                logger.warning(
+                    "Multiple FullAttention kernel block sizes selected: %s. "
+                    "Using %d for decode metadata.",
+                    selected_attn_kernel_sizes,
+                    self.attn_block_size,
+                )
 
         kv_caches: dict[str, torch.Tensor] = {}
         num_blocks = 0
@@ -5771,7 +5784,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 tensor = torch.zeros(size // 2, dtype=torch.bfloat16, device=self.device)
                 for layer_name in kv_cache_tensor.shared_by:
                     kv_caches[layer_name] = tensor
-            for group in kv_cache_config.kv_cache_groups:
+            for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
                 kv_cache_spec = group.kv_cache_spec
                 for layer_name in group.layer_names:
                     kv_cache_spec = group.kv_cache_spec
@@ -5782,8 +5795,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     num_blocks = \
                         kv_cache_tensor_size // kv_cache_spec.page_size_bytes
                     if isinstance(kv_cache_spec, FullAttentionSpec):
-                        selected_kernel_size = 128 #TODO remove hardcode
-                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, selected_kernel_size,
+                        attn_kernel_block_size = kernel_block_size_by_gid[group_idx]
+                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1,
+                                                                              attn_kernel_block_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
                         # here attn does not share kv cache tensor, so we create separate tensors
@@ -6580,7 +6594,8 @@ class HPUAttentionMetadataProcessor:
 
             block_list = attn_metadata.block_list
             max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
-            max_context_len = max_context_len * self.block_size
+            block_size = getattr(prefill_metadata, "block_size", self.block_size)
+            max_context_len = max_context_len * block_size
 
             invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=device) - 1
             past_indices = torch.arange(max_context_len, device=device)
@@ -6641,7 +6656,8 @@ class HPUAttentionMetadataProcessor:
             assert context_lens_t is not None
             block_list = prefill_metadata.block_list
             max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
-            max_context_len = max_context_len * self.block_size
+            block_size = getattr(prefill_metadata, "block_size", self.block_size)
+            max_context_len = max_context_len * block_size
             query_positions = torch.arange(seq_len, device=device)
             total_token_positions = context_lens_t.unsqueeze(-1) + query_positions.unsqueeze(0)
             which_chunk = (total_token_positions // chunk_size)
@@ -6709,7 +6725,8 @@ class HPUAttentionMetadataProcessor:
             block_usage = metadata.block_usage
             block_groups = metadata.block_groups
 
-        mask = torch.arange(0, self.block_size, device=device, dtype=torch.int32).unsqueeze(0)
+        block_size = getattr(metadata, "block_size", self.block_size)
+        mask = torch.arange(0, block_size, device=device, dtype=torch.int32).unsqueeze(0)
         mask = mask >= block_usage.unsqueeze(-1)
         attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(mask, -math.inf))
 

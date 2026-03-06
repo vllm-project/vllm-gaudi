@@ -27,7 +27,6 @@ def register_ops():
     import vllm_gaudi.ops.hpu_attention  # noqa: F401
     import vllm_gaudi.ops.hpu_fused_moe  # noqa: F401
     import vllm_gaudi.ops.hpu_gated_deltanet   # noqa: F401
-    #import vllm_gaudi.ops.hpu_gdn_attention_core  # noqa: F401
     import vllm_gaudi.ops.hpu_grouped_topk_router  # noqa: F401
     import vllm_gaudi.ops.hpu_layernorm  # noqa: F401
     import vllm_gaudi.ops.hpu_lora  # noqa: F401

@@ -1,19 +1,63 @@
 import torch
 from vllm.model_executor.models.qwen3_5 import Qwen3_5GatedDeltaNet
+from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
+from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.distributed import tensor_model_parallel_all_gather
 
 
 from einops import rearrange
 from vllm.forward_context import ForwardContext, get_forward_context  
-from vllm.model_executor.layers.fla.ops import (   
-    fused_recurrent_gated_delta_rule,  
-)
+
 
 from vllm_gaudi.ops.causal_conv1d_pytorch import (
     hpu_causal_conv1d_fn,
     hpu_causal_conv1d_update,
 )
+from vllm_gaudi.ops.hpu_gdn_pytorch import (
+    hpu_chunk_gated_delta_rule,
+    hpu_fused_gdn_gating,
+    hpu_fused_recurrent_gated_delta_rule,
+)
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
+
+
+def _hpu_qwen3next_sparse_moe_forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    orig_shape = hidden_states.shape
+    hidden_dim = orig_shape[-1]
+    hidden_states = hidden_states.reshape(-1, hidden_dim)
+    num_tokens = hidden_states.shape[0]
+
+    if self.is_sequence_parallel:
+        hidden_states = sequence_parallel_chunk(hidden_states)
+
+    if self.experts.is_internal_router:
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states, router_logits=hidden_states
+        )
+    else:
+        router_logits, _ = self.gate(hidden_states)
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states, router_logits=router_logits
+        )
+
+    if self.shared_expert is not None:
+        final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
+
+    if self.is_sequence_parallel:
+        final_hidden_states = tensor_model_parallel_all_gather(final_hidden_states, 0)
+        final_hidden_states = final_hidden_states[:num_tokens]
+    elif self.tp_size > 1:
+        final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
+            final_hidden_states
+        )
+
+    return final_hidden_states.reshape(orig_shape)
+
+
+if not getattr(Qwen3NextSparseMoeBlock, "_hpu_shape_patch_applied", False):
+    Qwen3NextSparseMoeBlock.forward = _hpu_qwen3next_sparse_moe_forward
+    Qwen3NextSparseMoeBlock._hpu_shape_patch_applied = True
 
 class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):      
     def forward(
@@ -34,13 +78,12 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         # Part 1: Input Projection
         # ============================================================
         mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        print(f"libin debug gdn_attention_core 0 {hidden_states.shape=} {mixed_qkvz.shape=} {num_tokens=}")
         qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
         z_size = self.value_dim // self.tp_size
         mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
         z = z.reshape(z.size(0), -1, self.head_v_dim)
         ba, _ = self.in_proj_ba(hidden_states)
-        print(f"libin debug gdn_attention_core 1 {qkv_size=} {mixed_qkv.shape=}{ba.shape=}")
+
         b, a = ba.chunk(2, dim=-1)
 
         b = b.contiguous()
@@ -56,8 +99,6 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        print(f"libin debug gdn_attention_core {mixed_qkv.shape=} {b.shape=} {a.shape=} {core_attn_out.shape=}{self.prefix=}")
-
         self.gdn_attention_core(
             mixed_qkv,
             b,
@@ -150,11 +191,14 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 inferred_group_idx = 0
             non_spec_state_indices_tensor = non_spec_state_indices_tensor[inferred_group_idx]
         ssm_state = self_kv_cache[1]
-        num_actual_tokens = None #TODO: need for speculative decode
+        # TrimmedAttentionMetadata on Gaudi does not expose upstream
+        # GDNAttentionMetadata counters (num_prefills/num_decodes/num_actual_tokens).
+        # Use prompt flag and local tensor sizes for phase-1 flow control.
+        num_actual_tokens = mixed_qkv.size(0)
         num_accepted_tokens = None #TODO: need for speculative decode
-        #TODO: change this when supporting unified attention
-        num_prefills = 1 if attn_metadata.is_prompt else 0
-        num_decodes = 0 if attn_metadata.is_prompt else 1
+        is_prompt = bool(attn_metadata.is_prompt)
+        num_prefills = 1 if is_prompt else 0
+        num_decodes = 0 if is_prompt else 1
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
@@ -174,9 +218,9 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         else:
             mixed_qkv_spec = None
             mixed_qkv_non_spec = mixed_qkv
-        '''
+  
         # 1.1: Process the multi-query part
-        if Faspec_sequence_masks is not None:
+        if spec_sequence_masks is not None:
             mixed_qkv_spec = hpu_causal_conv1d_update(
                 conv_state,
                 conv_weights,
@@ -190,7 +234,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 max_query_len=spec_state_indices_tensor.size(-1),
                 validate_data=False,
             )
-        '''
+
         assert self.cache_config is not None
         mamba_block_size = self.cache_config.mamba_block_size
         block_idx_last_computed_token = None
@@ -202,7 +246,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "state_indices_tensor"
-            print(f"libin debug causaul_conv1d {mixed_qkv_non_spec_T.shape=}{conv_weights.shape=} {conv_state.shape=}")
+          
             mixed_qkv_non_spec = hpu_causal_conv1d_fn(
                 x=mixed_qkv_non_spec_T,
                 weight=conv_weights,
@@ -220,7 +264,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 metadata=attn_metadata,
                 is_prompt=True
             ).transpose(0, 1)
-        elif num_decodes > 0:  
+        elif num_decodes > 0:
             mixed_qkv_non_spec = hpu_causal_conv1d_update(
                 x=mixed_qkv_non_spec,
                 conv_state=conv_state,
@@ -228,12 +272,12 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 bias=self.conv1d.bias,
                 activation=self.activation,
                 conv_state_indices=non_spec_state_indices_tensor[
-                    : attn_metadata.num_actual_tokens
+                    : num_actual_tokens
                 ],
                 block_idx_last_scheduled_token=block_idx_last_computed_token,
                 initial_state_idx=block_idx_last_computed_token,
                 query_start_loc=non_spec_query_start_loc,
-                validate_data=True,
+                validate_data=False,
             )
         else:
             mixed_qkv_non_spec = None
@@ -243,10 +287,10 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             mixed_qkv_non_spec
         )
 
-        g, beta = fused_gdn_gating(self.A_log, a, b, self.dt_bias)
+        g, beta = hpu_fused_gdn_gating(self.A_log, a, b, self.dt_bias)
 
         if spec_sequence_masks is not None:
-            if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
+            if num_prefills == 0 and num_decodes == 0:
                 g_spec = g
                 beta_spec = beta
                 g_non_spec = None
@@ -266,7 +310,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            core_attn_out_spec, last_recurrent_state = fused_recurrent_gated_delta_rule(
+            core_attn_out_spec, last_recurrent_state = hpu_fused_recurrent_gated_delta_rule(
                 q=query_spec,
                 k=key_spec,
                 v=value_spec,
@@ -283,13 +327,13 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             core_attn_out_spec, last_recurrent_state = None, None
 
         # 2.2: Process the remaining part
-        if attn_metadata.num_prefills > 0:
+        if is_prompt:
             initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
             initial_state[~has_initial_state, ...] = 0
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
-            ) = self.chunk_gated_delta_rule(
+            ) = hpu_chunk_gated_delta_rule(
                 q=query_non_spec,
                 k=key_non_spec,
                 v=value_non_spec,
@@ -304,9 +348,9 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
                 ssm_state.dtype
             )
-        elif attn_metadata.num_decodes > 0:
+        elif num_decodes > 0:
             core_attn_out_non_spec, last_recurrent_state = (
-                fused_recurrent_gated_delta_rule(
+                hpu_fused_recurrent_gated_delta_rule(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
@@ -314,9 +358,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                     beta=beta_non_spec,
                     initial_state=ssm_state,
                     inplace_final_state=True,
-                    cu_seqlens=non_spec_query_start_loc[
-                        : attn_metadata.num_decodes + 1
-                    ],
+                    cu_seqlens=non_spec_query_start_loc[: num_decodes + 1],
                     ssm_state_indices=non_spec_state_indices_tensor,
                     use_qk_l2norm_in_kernel=True,
                 )

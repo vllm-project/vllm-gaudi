@@ -117,9 +117,61 @@ class HpuPlatform(Platform):
         # NOTE(kzawora): default block size for Gaudi should be 128
         # smaller sizes still work, but very inefficiently
         cache_config = vllm_config.cache_config
-        logger.info(f"libin debug check update config {cache_config=}")
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 128
+        # Hybrid GDN/Mamba models may compute a non-128-aligned cache
+        # block size (e.g. 1056). Gaudi attention kernels require 128
+        # granularity, so pad to the next multiple of 128 early, before
+        # KV cache specs and block tables are materialized.
+        if (
+            cache_config
+            and cache_config.block_size is not None
+            and vllm_config.model_config is not None
+            and vllm_config.model_config.is_hybrid
+        ):
+            original_block_size = cache_config.block_size
+            aligned_block_size = ((original_block_size + 127) // 128) * 128
+            if aligned_block_size != original_block_size:
+                logger.warning(
+                    "Padding hybrid cache block_size from %d to %d to satisfy "
+                    "Gaudi 128-token kernel alignment.",
+                    original_block_size,
+                    aligned_block_size,
+                )
+                cache_config.block_size = aligned_block_size
+                # Keep explicit mamba alignment mode in sync with the
+                # adjusted attention block size.
+                if cache_config.mamba_cache_mode == "align":
+                    cache_config.mamba_block_size = aligned_block_size
+
+                # Keep padded mamba page size consistent with adjusted
+                # attention block size to avoid mixed page-size assumptions
+                # during MambaSpec creation.
+                if cache_config.mamba_page_size_padded is not None:
+                    if cache_config.mamba_page_size_padded % original_block_size == 0:
+                        old_padded_page_size = cache_config.mamba_page_size_padded
+                        bytes_per_token = (
+                            cache_config.mamba_page_size_padded // original_block_size
+                        )
+                        cache_config.mamba_page_size_padded = (
+                            bytes_per_token * aligned_block_size
+                        )
+                        logger.info(
+                            "Rescaled mamba_page_size_padded from %d to %d "
+                            "after hybrid block_size alignment (%d -> %d).",
+                            old_padded_page_size,
+                            cache_config.mamba_page_size_padded,
+                            original_block_size,
+                            aligned_block_size,
+                        )
+                    else:
+                        logger.warning(
+                            "Cannot safely rescale mamba_page_size_padded=%d "
+                            "with original block_size=%d after hybrid alignment; "
+                            "leaving value unchanged.",
+                            cache_config.mamba_page_size_padded,
+                            original_block_size,
+                        )
         if (parallel_config.distributed_executor_backend in ['mp', 'uni']
                 and envs.VLLM_WORKER_MULTIPROC_METHOD == 'fork'):
             if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD", None) is not None:
@@ -155,8 +207,6 @@ class HpuPlatform(Platform):
             logger.info("[HPU] Forcing CompilationMode.NONE "
                         "compilation mode")
             compilation_config.mode = CompilationMode.NONE
-
-        print(f"========={compilation_config.custom_ops=}===========")
 
         # Force CPU loading for INC quantization to prevent OOM during weight loading.
         # INC FP8 quantization requires weights to be loaded to CPU first, then
