@@ -82,8 +82,8 @@ from vllm.v1.kv_cache_interface import (
     EncoderOnlyAttentionSpec,
 )
 from vllm.v1.worker.kv_connector_model_runner_mixin import (KVConnectorModelRunnerMixin)
-from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors, DraftTokenIds, ModelRunnerOutput,
-                             AsyncModelRunnerOutput, KVConnectorOutput)
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsLists, LogprobsTensors, DraftTokenIds,
+                             ModelRunnerOutput, AsyncModelRunnerOutput, KVConnectorOutput)
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import bind_kv_cache, add_kv_sharing_layers_to_kv_cache_groups
@@ -204,6 +204,8 @@ class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
         """Copy the device tensors to the host and return a ModelRunnerOutput.
 
         This function blocks until the copy is finished.
+        Note: logprobs are already handled synchronously and stored in
+        model_runner_output.logprobs before this wrapper is created.
         """
 
         # Release the device tensor once the copy has completed
@@ -736,7 +738,7 @@ def with_thread_limits():
     """
     Decorator to temporarily set OMP_NUM_THREADS and PyTorch threads,
     and restore them after the function call.
-    
+
     Args:
         div_omp: divide CPU cores by this for OMP_NUM_THREADS
         div_torch: divide CPU cores by this for torch.set_num_threads
@@ -1626,7 +1628,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def _get_model_type(self) -> Optional[str]:
         """
         Safely extract the model type from vllm_config.
-        
+
         Returns:
             The model type string if available, None otherwise.
         """
@@ -3045,42 +3047,84 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     def _get_prompt_logprobs_dict(
         self,
-        hidden_states: torch.Tensor,
+        prefill_hidden_states: dict[str, torch.Tensor],
         scheduler_output: "SchedulerOutput",
     ) -> dict[str, Optional[LogprobsTensors]]:
+        """Compute prompt logprobs for prefill requests.
+
+        Args:
+            prefill_hidden_states: Dict mapping req_id to the full
+                (non-flattened) hidden states from the prefill forward pass.
+                Each tensor has shape [1, seq_len, hidden_dim] or
+                [seq_len, hidden_dim].
+            scheduler_output: The scheduler output containing
+                num_scheduled_tokens per request.
+
+        Returns:
+            Dict mapping req_id to LogprobsTensors for completed prefills.
+        """
         num_prompt_logprobs_dict = self.input_batch.num_prompt_logprobs
         if not num_prompt_logprobs_dict:
             return {}
 
+        in_progress_dict = self.input_batch.in_progress_prompt_logprobs_cpu
         prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
 
         # Since prompt logprobs are a rare feature, prioritize simple,
         # maintainable loop over optimal performance.
         completed_prefill_reqs = []
-        for i, (req_id, num_prompt_logprobs) in enumerate(num_prompt_logprobs_dict.items()):
+        for req_id, num_prompt_logprobs in num_prompt_logprobs_dict.items():
+            if req_id not in prefill_hidden_states:
+                continue
 
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
 
             # Get metadata for this request.
             request = self.requests[req_id]
+            if request.prompt_token_ids is None:
+                # Prompt logprobs is incompatible with prompt embeddings
+                continue
+
             num_prompt_tokens = len(request.prompt_token_ids)
             prompt_token_ids = torch.tensor(request.prompt_token_ids).to(self.device, non_blocking=True)
 
+            # Set up target LogprobsTensors object.
+            logprobs_tensors = in_progress_dict.get(req_id)
+            if not logprobs_tensors:
+                # Create empty logprobs CPU tensors for the entire prompt.
+                # If chunked, we'll copy in slice by slice.
+                logprobs_tensors = LogprobsTensors.empty_cpu(num_prompt_tokens - 1, num_prompt_logprobs + 1)
+                in_progress_dict[req_id] = logprobs_tensors
+
             # Determine number of logits to retrieve.
-            start_tok = request.num_computed_tokens + 1
+            start_idx = request.num_computed_tokens
+            start_tok = start_idx + 1
             num_remaining_tokens = num_prompt_tokens - start_tok
-            if num_tokens < num_remaining_tokens:
+            if num_tokens <= num_remaining_tokens:
                 # This is a chunk, more tokens remain.
+                # In the == case, there are no more prompt logprobs to
+                # produce but we want to defer returning them to the next
+                # step where we have new generated tokens to return.
                 num_logits = num_tokens
             else:
                 # This is the last chunk of prompt tokens to return.
                 num_logits = num_remaining_tokens
                 completed_prefill_reqs.append(req_id)
+                prompt_logprobs_dict[req_id] = logprobs_tensors
+
+            if num_logits <= 0:
+                # This can happen for the final chunk if we prefilled
+                # exactly (num_prompt_tokens - 1) tokens for this request
+                # in the prior step.
+                continue
 
             # Get the logits corresponding to this req's prompt tokens.
-            # If this is a partial request (i.e. chunked prefill),
-            # then there is prompt logprob generated for each index.
-            prompt_hidden_states = hidden_states[i, :num_logits]
+            # HPU does one prefill at a time so the hidden states tensor
+            # has the full sequence for this request.
+            hs = prefill_hidden_states[req_id]
+            if hs.dim() == 3:
+                hs = hs.squeeze(0)  # [seq_len, hidden_dim]
+            prompt_hidden_states = hs[:num_logits]
             logits = self.model.compute_logits(prompt_hidden_states)
 
             # Get the "target" tokens for each index. For prompt at index i,
@@ -3090,24 +3134,69 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
             # Compute prompt logprobs.
             logprobs = self.sampler.compute_logprobs(logits)
-            token_ids, logprobs, ranks = self.sampler.gather_logprobs(logprobs, num_prompt_logprobs, tgt_token_ids)
+            gathered = self.sampler.gather_logprobs(logprobs, num_prompt_logprobs, tgt_token_ids)
 
-            # Transfer GPU->CPU async.
-            prompt_logprobs_dict[req_id] = LogprobsTensors(
-                token_ids.to("cpu", non_blocking=True),
-                logprobs.to("cpu", non_blocking=True),
-                ranks.to("cpu", non_blocking=True),
-            )
+            # Transfer HPU->CPU async.
+            chunk_slice = slice(start_idx, start_idx + num_logits)
+            logprobs_tensors.logprob_token_ids[chunk_slice].copy_(gathered.logprob_token_ids, non_blocking=True)
+            logprobs_tensors.logprobs[chunk_slice].copy_(gathered.logprobs, non_blocking=True)
+            logprobs_tensors.selected_token_ranks[chunk_slice].copy_(gathered.selected_token_ranks, non_blocking=True)
 
         # Remove requests that have completed prefill from the batch
         # num_prompt_logprobs_dict.
         for req_id in completed_prefill_reqs:
             del num_prompt_logprobs_dict[req_id]
+            in_progress_dict.pop(req_id, None)
 
-        # Must synchronize the non-blocking GPU->CPU transfers.
-        torch.hpu.synchronize()
+        # Must synchronize the non-blocking HPU->CPU transfers.
+        if prompt_logprobs_dict:
+            torch.hpu.synchronize()
 
         return prompt_logprobs_dict
+
+    def _build_logprobs_output(
+        self,
+        logprobs_segments: list[tuple[list[str], LogprobsTensors | None]],
+        num_output_rows: int,
+    ) -> LogprobsLists | None:
+        """Build a combined LogprobsLists from logprobs collected across
+        multiple sampler calls (e.g. separate prefill/decode sampling).
+
+        Args:
+            logprobs_segments: list of (req_ids, logprobs_tensors) pairs.
+                Each pair maps sampler output rows to request IDs.
+                logprobs_tensors may be None if no logprobs were computed.
+            num_output_rows: total number of rows in the output array
+                (typically max_req_index + 1).
+
+        Returns:
+            Combined LogprobsLists or None if no logprobs were requested.
+        """
+        # Collect only segments that have logprobs data
+        active_segments: list[tuple[list[str], LogprobsTensors]] = [(req_ids, lp) for req_ids, lp in logprobs_segments
+                                                                    if lp is not None]
+        if not active_segments:
+            return None
+
+        # Determine the number of logprob columns from the first
+        # active segment
+        num_cols = active_segments[0][1].logprob_token_ids.shape[1]
+
+        # Pre-allocate output arrays
+        combined_token_ids = np.zeros((num_output_rows, num_cols), dtype=np.int64)
+        combined_logprobs = np.zeros((num_output_rows, num_cols), dtype=np.float32)
+        combined_ranks = np.zeros(num_output_rows, dtype=np.int64)
+
+        # Transfer each segment to CPU and scatter into output arrays
+        for req_ids, lp_tensors in active_segments:
+            lp_lists = lp_tensors.tolists()
+            for i, req_id in enumerate(req_ids):
+                idx = self.input_batch.req_id_to_index[req_id]
+                combined_token_ids[idx] = lp_lists.logprob_token_ids[i]
+                combined_logprobs[idx] = lp_lists.logprobs[i]
+                combined_ranks[idx] = lp_lists.sampled_token_ranks[i]
+
+        return LogprobsLists(combined_token_ids, combined_logprobs, combined_ranks)
 
     def _is_quant_with_inc(self):
         quant_config = os.getenv("QUANT_CONFIG", None) is not None
@@ -3559,12 +3648,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                  unified_data=batch)
         ################## Spec Decode end ##################
 
+        # Build logprobs from the sampler output.
+        logprobs_output: LogprobsLists | None = None
+        if sampler_output.logprobs_tensors is not None:
+            num_output_rows = max(self.input_batch.req_id_to_index.values()) + 1
+            logprobs_output = self._build_logprobs_output([(list(selected_req_ids), sampler_output.logprobs_tensors)],
+                                                          num_output_rows)
+
         if self.use_async_scheduling:
             model_runner_output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
                 req_id_to_index=req_id_to_index_output_copy,
                 sampled_token_ids=sampled_token_ids,
-                logprobs=None,
+                logprobs=logprobs_output,
                 prompt_logprobs_dict={},
                 pooler_output=[],
             )
@@ -3579,7 +3675,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             req_ids=batch.req_ids_cpu,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=sampled_token_ids,
-            logprobs=None,
+            logprobs=logprobs_output,
             prompt_logprobs_dict={},
             pooler_output=[],
         )
@@ -3792,12 +3888,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             0 if dummy_prefill_input_data_batches_across_dp is None \
             else len(dummy_prefill_input_data_batches_across_dp.request_ids)
         decode_data, dummy_decode_input_data_across_dp = decode_input_data
-        #FIXME(kzawora): Currently there's no handling of logprobs. Fix that
-        # later.
         prefill_sampled_token_ids = []
         prefill_sampled_requests = []
         decode_sampled_token_ids = []
         decode_sampled_requests = []
+        # Logprobs tracking: collect (req_ids, logprobs_tensors) segments
+        # from each sampling call to combine at the end.
+        logprobs_segments: list[tuple[list[str], LogprobsTensors | None]] = []
         #if not has_kv_transfer_group():
         #    assert not (num_prefills > 0 and num_decodes > 0)
         # skip kv_connector if dummy run
@@ -3816,6 +3913,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         non_flattened_hidden_states_prefills = []
         aux_hidden_states_prefills = []
         sample_hidden_states_prefills = []
+        # Collect per-request prefill hidden states for prompt logprobs.
+        prefill_hidden_states_for_logprobs: dict[str, torch.Tensor] = {}
         decode_sampled_token_ids_device = None
         # NOTE(tianmu-li): For structured output, combine logits before
         # postprocessing. Should it be done for all requests?
@@ -3858,6 +3957,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         warmup_mode=warmup_mode)
                 htorch.core.mark_step()
                 non_flattened_hidden_states_prefills.append(non_flattened_hidden_states)
+                # Collect prefill hidden states for prompt logprobs.
+                # req_id is a list of request IDs in this prefill batch.
+                for i, rid in enumerate(req_id):
+                    if rid in self.input_batch.num_prompt_logprobs:
+                        prefill_hidden_states_for_logprobs[rid] = \
+                            non_flattened_hidden_states[i]
                 if self.use_aux_hidden_state_outputs:
                     aux_hidden_states_prefills.append(aux_hidden_states)
                 sample_hidden_states_prefills.append(sample_hidden_states)
@@ -3876,6 +3981,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                                    logits_requests)
                             prefill_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
                             prefill_sampled_requests.extend(logits_requests)
+                            logprobs_segments.append((list(logits_requests), sampler_output.logprobs_tensors))
                 if self.is_driver_worker and self.profiler.enabled:
                     # Stop recording 'execute_model_generic' event
                     self.profiler.end()
@@ -3944,6 +4050,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
                     if spec_decode_metadata is None:
                         decode_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
+                        logprobs_segments.append((list(pd_info.decode_req_ids), sampler_output.logprobs_tensors))
                     else:
                         # Handling spec decode sampling.
                         sampler_output = self.rejection_sampler(
@@ -4013,6 +4120,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             for i in range(logits.shape[0] - num_decodes):
                 prefill_sampled_token_ids.append(sampler_output.sampled_token_ids[num_decodes + i].flatten())
             decode_sampled_token_ids.append(sampler_output.sampled_token_ids[:num_decodes].flatten())
+            # Logprobs: rows match logits order (decodes first, then
+            # prefills), so build req_ids in same order.
+            struct_logprobs_req_ids = (list(pd_info.decode_req_ids) + list(pd_info.prompt_req_ids))
+            logprobs_segments.append((struct_logprobs_req_ids, sampler_output.logprobs_tensors))
 
         if self.use_async_scheduling or self.use_structured_output:
             # For async scheduling: keep tokens on HPU and avoid CPU sync
@@ -4073,7 +4184,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     start_idx += num_tokens
 
         ################## RETURN ##################
-        # NOTE(kzawora): idk what happens if part of batch doesn't have logprobs
 
         ######### UPDATE REQUEST STATE WITH GENERATED TOKENS #########
         for req_id in self.input_batch.req_ids[:num_reqs]:
@@ -4127,12 +4237,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         # Create output.
         all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
-        # prompt_logprobs_dict: dict[
-        #    str, Optional[LogprobsTensors]] = self._get_prompt_logprobs_dict(
-        #        prefill_hidden_states_device, scheduler_output)
-        prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
-        all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
-        logprobs = None
+        # Compute prompt logprobs from prefill hidden states.
+        prompt_logprobs_dict = self._get_prompt_logprobs_dict(prefill_hidden_states_for_logprobs, scheduler_output)
+
+        # Build combined logprobs from all sampling calls.
+        max_req_index = max(self.input_batch.req_id_to_index.values())
+        logprobs = self._build_logprobs_output(logprobs_segments, max_req_index + 1)
 
         if not warmup_mode:
             self.maybe_wait_for_kv_save()
@@ -4436,18 +4546,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         self._detached_moe_gates.add(id(experts))
 
     def _sync_shared_moe_gates(self):
-        """Re-sync SharedFusedMoE._gate after INC conversion.
+        """Apply SharedFusedMoE post-INC synchronization and compatibility.
 
-        After INC converts/patches the model, the block-level gate
-        (e.g. mlp.gate) is properly patched. This method restores
-        the SharedFusedMoE._gate reference so that the overlapped
-        execution path inside FusedMoE.forward_impl() also uses the
-        patched gate.
-
-        Only experts whose _gate was explicitly detached by
-        _remove_duplicate_submodules are restored; experts whose
-        _gate was originally None are left unchanged.
+        Synchronizes per-layer MoE state after INC conversion, including
+        router handling and compatibility flags expected by INC wrappers.
+        Detached gate tracking is used only as a cleanup aid.
         """
+
+        def _sync_moe_kernel_flags(module: torch.nn.Module):
+            moe_config = getattr(module, "moe_config", None)
+            for name in (
+                    "use_pplx_kernels",
+                    "use_deepep_ht_kernels",
+                    "use_deepep_ll_kernels",
+                    "use_mori_kernels",
+                    "use_fi_all2allv_kernels",
+            ):
+                setattr(module, name, bool(getattr(moe_config, name, False)))
+
         model = self.get_model()
         if not hasattr(model, "model"):
             return
@@ -4457,9 +4573,28 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 continue
             block_gate = getattr(mlp, 'gate', None)
             experts = getattr(mlp, 'experts', None)
-            if (block_gate is not None and experts is not None and id(experts) in self._detached_moe_gates):
-                experts._gate = block_gate
-                self._detached_moe_gates.remove(id(experts))
+            if block_gate is not None and experts is not None:
+                _sync_moe_kernel_flags(experts)
+                orig_mod = getattr(experts, "orig_mod", None)
+                if orig_mod is not None:
+                    _sync_moe_kernel_flags(orig_mod)
+
+                # Force external router path: the model's forward checks
+                # experts.is_internal_router to decide the gate path.
+                if isinstance(experts, FusedMoE):
+                    # is_internal_router is a read-only property backed
+                    # by _gate; setting _gate=None makes it return False.
+                    experts._gate = None
+                else:
+                    # INC wrappers (e.g. PatchedMixtralMoE) don't inherit
+                    # the property — set a plain attribute instead.
+                    experts.is_internal_router = False
+                runner = getattr(experts, "runner", None)
+                if runner is not None and hasattr(runner, "gate"):
+                    runner.gate = None
+
+                if id(experts) in self._detached_moe_gates:
+                    self._detached_moe_gates.remove(id(experts))
 
     def _inc_preprocess(self):
         _apply_inc_patch()
@@ -5209,7 +5344,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.get_model().vision_bucket_manager.is_batch_based:
             batch = image_args
         else:
-            mm_options = self.model_config.get_multimodal_config().get_dummy_options(modality)
+            mm_options = self.model_config.get_multimodal_config().get_limit_per_prompt(modality)
             count = mm_options.count if mm_options and hasattr(mm_options, 'count') else count
             batch = count
         if modality == 'image':
@@ -5248,18 +5383,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         is_batch_based = vision_bucket_manager.is_batch_based
         mm_config = self.model_config.get_multimodal_config()
 
-        is_image_warmup = (mm_config is not None and mm_config.get_dummy_options("image") is not None
-                           and self.mm_budget.mm_limits['image'] != 0)
-        is_video_warmup = (mm_config is not None and mm_config.get_dummy_options("video") is not None
-                           and self.mm_budget.mm_limits['video'] != 999)
+        is_image_warmup = (mm_config is not None and mm_config.get_limit_per_prompt("image") is not None
+                           and "image" in self.mm_budget.mm_limits and self.mm_budget.mm_limits['image'] != 0)
+        is_video_warmup = (mm_config is not None and mm_config.get_limit_per_prompt("video") is not None
+                           and "video" in self.mm_budget.mm_limits and self.mm_budget.mm_limits['video'] != 999)
         warmup_configs = {
-            "image": (0, lambda: mm_config.get_dummy_options("image")),
-            "video": (999, lambda: mm_config.get_dummy_options("video"))
+            "image": (0, lambda: mm_config.get_limit_per_prompt("image")),
+            "video": (999, lambda: mm_config.get_limit_per_prompt("video"))
         }
         width = height = None
         warmup_lists = []
         for modality, (limit_value, get_options) in warmup_configs.items():
-            if (mm_config and mm_config.get_dummy_options(modality)
+            if (mm_config and mm_config.get_limit_per_prompt(modality)
                     and self.mm_budget.mm_limits[modality] != limit_value):
                 options = get_options()
                 width = options.width if hasattr(options, 'width') else None
@@ -5329,7 +5464,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     @torch.inference_mode()
     def _log_bucketing_config(self) -> None:
         """Log HPU bucketing configuration for TORCH_TRACE/tlparse analysis.
-        
+
         This logs the bucketing strategy and generated buckets as a JSON artifact
         that will be displayed in tlparse reports, helping debug bucketing behavior.
         """
@@ -5384,7 +5519,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     @torch.inference_mode()
     def _log_dynamo_cache_stats(self) -> None:
         """Log PyTorch Dynamo cache statistics for TORCH_TRACE/tlparse analysis.
-        
+
         This helps diagnose compilation cache issues, recompilations, and cache
         evictions that can cause performance problems during inference.
         """
