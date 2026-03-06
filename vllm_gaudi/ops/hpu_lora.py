@@ -1,8 +1,6 @@
 import torch
 import torch.nn.functional as F
 from vllm.lora.layers import VocabParallelEmbeddingWithLoRA
-from vllm.lora.layers import LogitsProcessorWithLoRA
-from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
 from vllm.lora import layers
 from vllm.platforms import current_platform
 from typing import Optional
@@ -49,57 +47,14 @@ class HPUVocabParallelEmbeddingWithLoRA(VocabParallelEmbeddingWithLoRA):
         return full_output.view_as(full_output_org)
 
 
-class HPULogitsProcessorWithLoRA(LogitsProcessorWithLoRA):
-
-    def _get_logits(
-        self,
-        hidden_states: torch.Tensor,
-        lm_head: VocabParallelEmbedding,
-        embedding_bias: Optional[torch.Tensor] = None,
-    ) -> Optional[torch.Tensor]:
-        # Get the logits for the next tokens.
-        logits = lm_head.quant_method.apply(lm_head, hidden_states)
-        if embedding_bias is not None:
-            logits += embedding_bias
-
-        # Gather logits for TP
-        logits = self.base_layer._gather_logits(logits)
-
-        if logits is None:
-            return None
-
-        if self.sharded_to_full_mapping_gpu is not None:
-            # Reindex full logits tensor to ensure 1:1 mapping between
-            # index and token_id
-            # Example for:
-            #   org_vocab_size = 4
-            #   added_vocab_size = 2
-            #   pad_to_size = 8
-            #   tp_size = 2
-
-            # indices:  [0, 1, 2,  3, 4, 5, 6,  7]
-            # token_id: [0, 1, 4, -1, 2, 3, 5, -1]
-
-            # Therefore, the mapping is expected to be:
-            # [0, 1, 4, 6, 2, 3, 5, 7] so that when we reindex,
-            # we get:
-            # indices:  [0, 1, 2, 3, 4, 5,  6,  7]
-            # token_id: [0, 1, 2, 3, 4, 5, -1, -1]
-            logits = logits[:, self.sharded_to_full_mapping_gpu]
-
-        lora_output: Optional[torch.Tensor] = self.punica_wrapper.add_lora_logits(logits, hidden_states,
-                                                                                  self.lora_a_stacked,
-                                                                                  self.lora_b_stacked, 1.0)
-
-        if not current_platform.can_update_inplace():
-            logits = lora_output
-
-        # Remove paddings in vocab (if any).
-        logits = logits[:, :self.base_layer.vocab_size]
-        return logits
-
-
-# refer to https://github.com/vllm-project/vllm/pull/21923 for more details
+# Refer to https://github.com/vllm-project/vllm/pull/21923 for more details
 # on why this patching is needed.
 layers.VocabParallelEmbeddingWithLoRA = HPUVocabParallelEmbeddingWithLoRA
-layers.LogitsProcessorWithLoRA = HPULogitsProcessorWithLoRA
+
+# Patch _all_lora_classes so from_layer() creates HPU-specific instances.
+# The module-level patching above is not sufficient because vllm.lora.utils
+# captures class references at import time via `from ... import`.
+from vllm.lora.utils import _all_lora_classes  # noqa: E402
+
+_all_lora_classes.discard(VocabParallelEmbeddingWithLoRA)
+_all_lora_classes.add(HPUVocabParallelEmbeddingWithLoRA)
