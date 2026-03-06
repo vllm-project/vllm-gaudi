@@ -277,7 +277,7 @@ run_mistral3_load_generate_test() {
 # Multimodal-support with deepseek-ocr
 run_deepseek_ocr_vl_test() {
     echo "➡️ Testing Deepseek OCR..."
-    VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 \
+    PT_HPU_DISABLE_pass_remove_unnecessary_bmm_view=True VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=0 \
     python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/deepseek-ocr.yaml"
     echo "✅ Test with multimodal-support with deepseek-ocr passed."
 }
