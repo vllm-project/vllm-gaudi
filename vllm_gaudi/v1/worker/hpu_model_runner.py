@@ -5562,6 +5562,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # If we can't get cache stats, log a warning but don't fail
             logger.warning("Could not log Dynamo cache stats.")
 
+    @torch.inference_mode()
     def warmup_model(self) -> None:
         if not self.enable_bucketing:
             return
