@@ -307,6 +307,9 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             beta_non_spec = beta
 
         # 2. Recurrent attention
+        # Prefer upstream-style op dispatch when available on the module,
+        # but keep gaudi PyTorch fallback for environments without the custom op.
+        chunk_rule = getattr(self, "chunk_gated_delta_rule", hpu_chunk_gated_delta_rule)
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:

@@ -239,26 +239,190 @@ def hpu_chunk_gated_delta_rule(
     v: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
-    initial_state: torch.Tensor,
-    output_final_state: bool,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    use_qk_l2norm_in_kernel: bool = True,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    use_qk_l2norm_in_kernel: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """PyTorch replacement for chunk_gated_delta_rule.
 
-    For phase 1 we compute equivalent outputs via recurrent formulation.
+    This path intentionally mirrors upstream prefill call semantics without
+    delegating to the fused recurrent helper.
     """
-    out, final_state = hpu_fused_recurrent_gated_delta_rule(
-        q=q,
-        k=k,
-        v=v,
-        g=g,
-        beta=beta,
-        initial_state=initial_state,
-        inplace_final_state=not output_final_state,
-        cu_seqlens=cu_seqlens,
-        ssm_state_indices=None,
-        num_accepted_tokens=None,
-        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-    )
+
+    B, T, H, Kdim = q.shape
+    _, _, HV, Vdim = v.shape
+    device = q.device
+    chunk_size = 64
+
+    if cu_seqlens is not None:
+        if B != 1:
+            raise ValueError("When cu_seqlens is used, expected batch size B=1.")
+        seq_ranges = _materialize_seq_ranges(cu_seqlens, B * T)
+        num_seqs = len(seq_ranges)
+    else:
+        num_seqs = B
+        seq_ranges = [(i * T, (i + 1) * T) for i in range(B)]
+
+    # Match upstream grouped-value semantics.
+    if H != HV:
+        if HV % H == 0:
+            repeat = HV // H
+            q = q.repeat_interleave(repeat, dim=2)
+            k = k.repeat_interleave(repeat, dim=2)
+            H = HV
+        else:
+            raise ValueError(
+                "Unsupported head mapping in hpu_chunk_gated_delta_rule: "
+                f"q/k heads={H}, value heads={HV}. Expected HV % H == 0."
+            )
+
+    if scale is None:
+        scale = k.shape[-1] ** -0.5
+
+    # Match upstream ChunkGatedDeltaRuleFunction behavior: normalize full
+    # q/k tensors before the core chunk pipeline.
+    if use_qk_l2norm_in_kernel:
+        q = _l2norm_last_dim(q.to(torch.float32))
+        k = _l2norm_last_dim(k.to(torch.float32))
+
+    # Flatten token axis for shared varlen/non-varlen logic.
+    qf = q.reshape(-1, H, Kdim).to(torch.float32)
+    kf = k.reshape(-1, H, Kdim).to(torch.float32)
+    vf = v.reshape(-1, HV, Vdim).to(torch.float32)
+    gf = g.reshape(-1, HV).to(torch.float32)
+    bf = beta.reshape(-1, HV).to(torch.float32)
+
+    # Upstream match: `chunk_local_cumsum` in fla/ops/cumsum.py.
+    # Stage 1 computes per-chunk cumulative g in log-space.
+    g_cumsum = torch.empty_like(gf)
+    for bos, eos in seq_ranges:
+        for cs in range(bos, eos, chunk_size):
+            ce = min(cs + chunk_size, eos)
+            g_cumsum[cs:ce] = torch.cumsum(gf[cs:ce], dim=0)
+
+    # Initial state layout: [num_seqs, H, V, K].
+    if initial_state is None:
+        init_state = torch.zeros(
+            (num_seqs, H, Vdim, Kdim),
+            dtype=torch.float32,
+            device=device,
+        )
+    else:
+        if initial_state.shape[0] != num_seqs:
+            raise ValueError(
+                "The number of initial states is expected to equal the number "
+                f"of input sequences ({num_seqs}), got {initial_state.shape[0]}."
+            )
+        init_state = initial_state.to(torch.float32)
+
+    out = torch.empty((qf.shape[0], H, Vdim), dtype=torch.float32, device=device)
+    final_state = torch.empty_like(init_state) if output_final_state else None
+
+    # Upstream stage mapping (chunk.py::chunk_gated_delta_rule_fwd):
+    # Stage 2  -> `chunk_scaled_dot_kkt_fwd`
+    # Stage 3  -> `solve_tril`
+    # Stage 4  -> `recompute_w_u_fwd`
+    # Stage 5  -> `chunk_gated_delta_rule_fwd_h`
+    # Stage 6  -> `chunk_fwd_o`
+    # Implemented below with PyTorch math to avoid Triton dependency.
+    eye_cache: dict[int, torch.Tensor] = {}
+    for seq_id, (bos, eos) in enumerate(seq_ranges):
+        if eos <= bos:
+            if final_state is not None:
+                final_state[seq_id] = init_state[seq_id]
+            continue
+
+        state = init_state[seq_id].clone()  # [H, V, K]
+
+        for cs in range(bos, eos, chunk_size):
+            ce = min(cs + chunk_size, eos)
+            tc = ce - cs
+
+            q_chunk = qf[cs:ce]          # [Tc, H, K]
+            k_chunk = kf[cs:ce]          # [Tc, H, K]
+            v_chunk = vf[cs:ce]          # [Tc, H, V]
+            g_chunk = g_cumsum[cs:ce]    # [Tc, H]
+            beta_chunk = bf[cs:ce]       # [Tc, H]
+
+            # Upstream match: `chunk_scaled_dot_kkt_fwd` + `solve_tril`.
+            # A_lower[t, j] = beta[t] * <k_t, k_j> * exp(g_t - g_j), j < t
+            # A_solve = (I + A_lower)^(-1)
+            A_solve = torch.empty((H, tc, tc), dtype=torch.float32, device=device)
+            for h in range(H):
+                kh = k_chunk[:, h, :]  # [Tc, K]
+                bh = beta_chunk[:, h]  # [Tc]
+                gh = g_chunk[:, h]     # [Tc]
+                dot = kh @ kh.transpose(0, 1)
+                coeff = bh[:, None] * torch.exp(gh[:, None] - gh[None, :])
+                a_lower = torch.tril(dot * coeff, diagonal=-1)
+                if tc not in eye_cache:
+                    eye_cache[tc] = torch.eye(tc, dtype=torch.float32, device=device)
+                lmat = eye_cache[tc] + a_lower
+                A_solve[h] = torch.linalg.solve_triangular(
+                    lmat,
+                    eye_cache[tc],
+                    upper=False,
+                )
+
+            # Upstream match: `recompute_w_u_fwd`.
+            u_chunk = torch.empty((tc, H, Vdim), dtype=torch.float32, device=device)
+            w_chunk = torch.empty((tc, H, Kdim), dtype=torch.float32, device=device)
+            for h in range(H):
+                rhs_u = v_chunk[:, h, :] * beta_chunk[:, h:h + 1]
+                rhs_w = (
+                    k_chunk[:, h, :]
+                    * (beta_chunk[:, h] * torch.exp(g_chunk[:, h]))[:, None]
+                )
+                u_chunk[:, h, :] = A_solve[h] @ rhs_u
+                w_chunk[:, h, :] = A_solve[h] @ rhs_w
+
+            # Upstream match: `chunk_gated_delta_rule_fwd_h`.
+            # Performs chunk-level state transition and produces v_new.
+            v_new_chunk = torch.empty((tc, H, Vdim), dtype=torch.float32, device=device)
+            h_start = state
+            for h in range(H):
+                state_h = h_start[h]  # [V, K]
+                # [Tc, V] = [Tc, K] @ [K, V]
+                proj = w_chunk[:, h, :] @ state_h.transpose(0, 1)
+                val = u_chunk[:, h, :] - proj
+
+                # Apply the within-chunk g normalization from upstream kernel.
+                g_last = g_chunk[-1, h]
+                val = val * torch.exp(g_last - g_chunk[:, h])[:, None]
+                state_h = state_h * torch.exp(g_last)
+
+                # state_h += v_new^T @ k
+                state_h = state_h + val.transpose(0, 1) @ k_chunk[:, h, :]
+                v_new_chunk[:, h, :] = val
+                state[h] = state_h
+
+            # Upstream match: `chunk_fwd_o`.
+            for h in range(H):
+                qh = q_chunk[:, h, :]     # [Tc, K]
+                kh = k_chunk[:, h, :]     # [Tc, K]
+                vh = v_new_chunk[:, h, :] # [Tc, V]
+                hs = h_start[h]           # [V, K]
+                gh = g_chunk[:, h]        # [Tc]
+
+                base = qh @ hs.transpose(0, 1)  # [Tc, V]
+                attn = qh @ kh.transpose(0, 1)  # [Tc, Tc]
+                attn = attn * torch.exp(gh[:, None] - gh[None, :])
+                attn = torch.tril(attn)
+                out[cs:ce, h, :] = (base + attn @ vh) * scale
+
+        if final_state is not None:
+            final_state[seq_id] = state
+
+    out = out.to(v.dtype)
+    if cu_seqlens is not None:
+        out = out.unsqueeze(0)
+    else:
+        out = out.view(B, T, H, Vdim)
+
+    if final_state is None:
+        return out, None
+    if initial_state is not None:
+        final_state = final_state.to(initial_state.dtype)
     return out, final_state
