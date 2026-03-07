@@ -148,7 +148,7 @@ class HPUMambaMixer2(MambaMixer2):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
-        CustomOp.__init__(self)
+        super(MambaMixer2, self).__init__()
 
         self.tp_size = get_tensor_model_parallel_world_size()
 
