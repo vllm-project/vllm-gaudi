@@ -45,3 +45,10 @@ def register_model():
 
     from vllm_gaudi.models.deepseek_ocr import HpuDeepseekOCRForCausalLM  # noqa: F401
     ModelRegistry.register_model("DeepseekOCRForCausalLM", "vllm_gaudi.models.deepseek_ocr:HpuDeepseekOCRForCausalLM")
+
+    from vllm_gaudi.models.qwen2_5_omni_thinker import HpuQwen2_5OmniThinkerForConditionalGeneration  # noqa: F401
+    ModelRegistry.register_model(
+        "Qwen2_5OmniModel", "vllm_gaudi.models.qwen2_5_omni_thinker:HpuQwen2_5OmniThinkerForConditionalGeneration")
+    ModelRegistry.register_model(
+        "Qwen2_5OmniForConditionalGeneration",
+        "vllm_gaudi.models.qwen2_5_omni_thinker:HpuQwen2_5OmniThinkerForConditionalGeneration")
