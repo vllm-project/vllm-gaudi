@@ -3,22 +3,27 @@
 """
 Sleep Mode Model Swapping Test for Gaudi
 =========================================
-Runs N phases (default 10) alternating between Model A and
-Model B, exercising vLLM Sleep Mode Level 1 each time:
+Runs N phases (default 10) cycling through multiple models,
+exercising vLLM Sleep Mode Level 1 each time:
   Load -> Generate -> Sleep -> Destroy  (repeat x N)
 
-Collects per-phase metrics (load time, generate time, sleep
-time, destroy time, memory freed, output tokens) and prints
-a summary table at the end.
+Supports:
+  - Multiple models (2 or more) with automatic cycling
+  - Per-phase metrics collection and summary reporting
 
 Requires:
   VLLM_ENABLE_V1_MULTIPROCESSING=0
 
-Usage:
+Usage (two models, legacy):
   VLLM_ENABLE_V1_MULTIPROCESSING=0 \
   python tests/full_tests/sleep_mode_model_swap.py \
     --model-a meta-llama/Llama-3.1-8B-Instruct \
     --model-b Qwen/Qwen3-0.6B
+
+  # Three models with cycling:
+  VLLM_ENABLE_V1_MULTIPROCESSING=0 \
+  python tests/full_tests/sleep_mode_model_swap.py \
+    --models model1 model2 model3 --phases 15
 
   # With eager mode (skip torch.compile):
   VLLM_ENABLE_V1_MULTIPROCESSING=0 VLLM_SKIP_WARMUP=true \
@@ -215,9 +220,22 @@ def destroy_model(llm, model_name):
     return {"destroy_time_s": elapsed, "cleanup_gib": cleanup_gib}
 
 
+def get_model_label(index):
+    """Convert model index to an Excel-style label (0->A, 1->B, ..., 25->Z, 26->AA, etc.)."""
+    if index < 0:
+        raise ValueError(f"Model index must be non-negative, got {index}")
+    # Convert zero-based index to a 1-based number for Excel-style column naming
+    n = index + 1
+    label_chars = []
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        label_chars.append(chr(ord('A') + rem))
+    return "".join(reversed(label_chars))
+
+
 def print_metrics_table(all_metrics):
     """Print a summary table of per-phase metrics."""
-    hdr = (f"{'Phase':>5}  {'Model':<45}  "
+    hdr = (f"{'Phase':>5}  {'Lbl':>3}  {'Model':<35}  "
            f"{'Load(s)':>7}  {'Gen(s)':>7}  "
            f"{'Sleep(s)':>8}  {'Del(s)':>7}  "
            f"{'Freed(GiB)':>10}  {'Tokens':>7}")
@@ -226,8 +244,10 @@ def print_metrics_table(all_metrics):
     print(hdr)
     print(sep)
     for m in all_metrics:
+        model_label = m.get('model_label', '?')
         print(f"{m['phase']:>5}  "
-              f"{m['model']:<45}  "
+              f"{model_label:>3}  "
+              f"{m['model']:<35}  "
               f"{m['load_time_s']:>7.2f}  "
               f"{m['gen_time_s']:>7.2f}  "
               f"{m['sleep_time_s']:>8.2f}  "
@@ -240,7 +260,7 @@ def print_metrics_table(all_metrics):
         k: sum(m[k] for m in all_metrics) / n
         for k in ('load_time_s', 'gen_time_s', 'sleep_time_s', 'destroy_time_s', 'freed_gib', 'total_tokens')
     }
-    print(f"{'AVG':>5}  {'':<45}  "
+    print(f"{'AVG':>5}  {'':<3}  {'':<35}  "
           f"{avg['load_time_s']:>7.2f}  "
           f"{avg['gen_time_s']:>7.2f}  "
           f"{avg['sleep_time_s']:>8.2f}  "
@@ -252,8 +272,17 @@ def print_metrics_table(all_metrics):
 
 def main():
     parser = argparse.ArgumentParser(description="Sleep Mode Model Swapping Test")
-    parser.add_argument("--model-a", type=str, default="meta-llama/Llama-3.1-8B-Instruct", help="First model to load")
-    parser.add_argument("--model-b", type=str, default="Qwen/Qwen3-0.6B", help="Second model to load (swap target)")
+
+    # Support both new --models and legacy --model-a/--model-b for backward compatibility
+    parser.add_argument("--models",
+                        type=str,
+                        nargs='+',
+                        default=None,
+                        help="List of models to cycle through (space-separated). "
+                        "Example: --models model1 model2 model3")
+    parser.add_argument("--model-a", type=str, default=None, help="(Legacy) First model. Use --models instead")
+    parser.add_argument("--model-b", type=str, default=None, help="(Legacy) Second model. Use --models instead")
+
     parser.add_argument("--enforce-eager",
                         action="store_true",
                         default=False,
@@ -262,7 +291,22 @@ def main():
     parser.add_argument("--max-model-len", type=int, default=4096, help="Maximum model context length (default: 4096)")
     args = parser.parse_args()
 
-    models = [args.model_a, args.model_b]
+    # Handle backward compatibility: --model-a and --model-b
+    if args.models is None:
+        models = []
+        if args.model_a:
+            models.append(args.model_a)
+        if args.model_b:
+            models.append(args.model_b)
+        if not models:
+            # Use defaults
+            models = ["meta-llama/Llama-3.1-8B-Instruct", "Qwen/Qwen3-0.6B"]
+    else:
+        models = args.models
+
+    if len(models) < 2:
+        parser.error("At least 2 models are required for swap testing")
+
     num_phases = args.phases
 
     # Validate environment
@@ -273,11 +317,11 @@ def main():
         print("  Set VLLM_ENABLE_V1_MULTIPROCESSING=0"
               " for device assertions")
 
+    num_models = len(models)
     print("=" * 60)
     print("  SLEEP MODE MODEL SWAPPING TEST")
     print("=" * 60)
-    print(f"  Model A: {args.model_a}")
-    print(f"  Model B: {args.model_b}")
+    print(f"  Models ({num_models}): {models}")
     print(f"  Phases:  {num_phases}")
     print(f"  Max model len: {args.max_model_len}")
     print(f"  Enforce eager: {args.enforce_eager}")
@@ -288,12 +332,13 @@ def main():
     test_start = time.time()
 
     for phase in range(1, num_phases + 1):
-        model_name = models[(phase - 1) % 2]
-        label = "A" if (phase - 1) % 2 == 0 else "B"
+        model_index = (phase - 1) % num_models
+        model_name = models[model_index]
+        label = get_model_label(model_index)
 
         print("\n" + "=" * 60)
         print(f"  PHASE {phase}/{num_phases}: "
-              f"Model {label} -- Load, Generate, Sleep")
+              f"Model {label} ({model_name})")
         print("=" * 60)
 
         llm, load_m = load_model(model_name, args.enforce_eager, args.max_model_len)
@@ -304,6 +349,8 @@ def main():
         phase_metrics = {
             "phase": phase,
             "model": model_name,
+            "model_label": label,
+            "model_index": model_index,
             **load_m,
             **gen_m,
             **sleep_m,
@@ -329,8 +376,7 @@ def main():
     print("  TEST PASSED ✓")
     print("=" * 60)
     print(f"  ✓ {num_phases} phases completed")
-    print(f"  ✓ Model A ({args.model_a})")
-    print(f"  ✓ Model B ({args.model_b})")
+    print(f"  ✓ Models ({num_models}): {', '.join(models)}")
     print("  ✓ Full sleep-swap-wake cycle "
           "validated on Gaudi")
     print("=" * 60)
