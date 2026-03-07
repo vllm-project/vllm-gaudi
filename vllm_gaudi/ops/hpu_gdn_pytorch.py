@@ -167,7 +167,7 @@ def hpu_fused_recurrent_gated_delta_rule(
     num_state_indices = (
         int(state_indices_tensor.shape[0]) if state_indices_tensor is not None else 0
     )
-    print(f"libin debug recur {seq_ranges=}")
+    #print(f"libin debug recur {seq_ranges=}")
     for seq_id, (bos, eos) in enumerate(seq_ranges):
         if eos <= bos:
             continue
@@ -300,6 +300,8 @@ def hpu_chunk_gated_delta_rule(
     for bos, eos in seq_ranges:
         for cs in range(bos, eos, chunk_size):
             ce = min(cs + chunk_size, eos)
+            # [Stage 1: chunk_local_cumsum] per-chunk prefix sum of g.
+            # Resets at each chunk boundary [cs, ce).
             g_cumsum[cs:ce] = torch.cumsum(gf[cs:ce], dim=0)
 
     # Initial state layout: [num_seqs, H, V, K].
@@ -325,9 +327,16 @@ def hpu_chunk_gated_delta_rule(
     # Stage 3  -> `solve_tril`
     # Stage 4  -> `recompute_w_u_fwd`
     # Stage 5  -> `chunk_gated_delta_rule_fwd_h`
+    #   - kernel variant mapping:
+    #     `chunk_gated_delta_rule_fwd_kernel_h_blockdim64` is represented by
+    #     this PyTorch stage when chunk_size == 64 (see `chunk_size` above).
+    #     The loop below computes the same per-chunk state transition and
+    #     v_new accumulation semantics as the Triton kernel, but in eager
+    #     PyTorch math.
     # Stage 6  -> `chunk_fwd_o`
     # Implemented below with PyTorch math to avoid Triton dependency.
     eye_cache: dict[int, torch.Tensor] = {}
+    #print(f"libin debug chunk {seq_ranges=}")
     for seq_id, (bos, eos) in enumerate(seq_ranges):
         if eos <= bos:
             if final_state is not None:
@@ -335,7 +344,7 @@ def hpu_chunk_gated_delta_rule(
             continue
 
         state = init_state[seq_id].clone()  # [H, V, K]
-
+        print(f"libin debug chunk {seq_id=} {bos=} {eos=} {state.shape=}")
         for cs in range(bos, eos, chunk_size):
             ce = min(cs + chunk_size, eos)
             tc = ce - cs
@@ -379,9 +388,14 @@ def hpu_chunk_gated_delta_rule(
                 w_chunk[:, h, :] = A_solve[h] @ rhs_w
 
             # Upstream match: `chunk_gated_delta_rule_fwd_h`.
+            # This block is the functional mapping of
+            # `chunk_gated_delta_rule_fwd_kernel_h_blockdim64` in fallback
+            # mode (blockdim64 <-> chunk_size=64).
             # Performs chunk-level state transition and produces v_new.
             v_new_chunk = torch.empty((tc, H, Vdim), dtype=torch.float32, device=device)
-            h_start = state
+            # Stage 6 must use the chunk-start state. Keep a snapshot before
+            # Stage 5 mutates `state` in-place.
+            h_start = state.clone()
             for h in range(H):
                 state_h = h_start[h]  # [V, K]
                 # [Tc, V] = [Tc, K] @ [K, V]
@@ -406,10 +420,14 @@ def hpu_chunk_gated_delta_rule(
                 hs = h_start[h]           # [V, K]
                 gh = g_chunk[:, h]        # [Tc]
 
+                # [Stage 6: chunk_fwd_o] term 1, recurrent base from h_start.
                 base = qh @ hs.transpose(0, 1)  # [Tc, V]
+                # [Stage 6: chunk_fwd_o] term 2, lower-triangular intra-chunk
+                # contribution weighted by exp(g_i - g_j).
                 attn = qh @ kh.transpose(0, 1)  # [Tc, Tc]
                 attn = attn * torch.exp(gh[:, None] - gh[None, :])
                 attn = torch.tril(attn)
+                # [Stage 6: chunk_fwd_o] final output for this chunk/head.
                 out[cs:ce, h, :] = (base + attn @ vh) * scale
 
         if final_state is not None:

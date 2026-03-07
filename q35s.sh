@@ -27,8 +27,6 @@ export VLLM_USE_HYBRID_CACHE=true
 export VLLM_USE_NAIVE_MAMBA_CACHE_SHARING=false
 python test.py \
   --mode text \
-  --text-api chat \
+  --text-api generate \
   --max-model-len 16384 \
-  --max-num-batched-tokens 4096 \
-  --prompt "Reply in one short English sentence: Hello, how are you?" 
-	2>&1 | tee log.txt
+  --max-num-batched-tokens 4096 2>&1 | tee log.txt

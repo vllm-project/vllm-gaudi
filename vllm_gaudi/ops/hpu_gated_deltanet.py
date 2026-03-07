@@ -18,7 +18,6 @@ from vllm_gaudi.ops.hpu_gdn_pytorch import (
     hpu_fused_gdn_gating,
     hpu_fused_recurrent_gated_delta_rule,
 )
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
 
 
@@ -60,6 +59,11 @@ if not getattr(Qwen3NextSparseMoeBlock, "_hpu_shape_patch_applied", False):
     Qwen3NextSparseMoeBlock._hpu_shape_patch_applied = True
 
 class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):      
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Assigned by model runner per KV cache group for hybrid GDN models.
+        self.cache_group_idx: int | None = None
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -71,8 +75,21 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         2. Core attention (custom op)
         3. Output projection
         """
+        #import remote_pdb;remote_pdb.set_trace()
         hidden_states = hidden_states.view(-1, hidden_states.size(-1))
         num_tokens = hidden_states.size(0)
+
+        # Prompt buckets on HPU can include padded tokens. Mask once before
+        # projections so q/k/v/b/a/z for padded rows are all zero.
+        attn_metadata = get_forward_context().attn_metadata
+        if attn_metadata is not None and bool(getattr(attn_metadata, "is_prompt", False)):
+            padding_mask_flat = getattr(attn_metadata, "padding_mask_flat", None)
+            if (
+                padding_mask_flat is not None
+                and padding_mask_flat.numel() == hidden_states.size(0)
+            ):
+                hidden_mask = padding_mask_flat.view(-1, 1).to(dtype=hidden_states.dtype)
+                hidden_states = hidden_states * hidden_mask
 
         # ============================================================
         # Part 1: Input Projection
@@ -168,6 +185,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         has_initial_state = attn_metadata.has_initial_states_p
         spec_query_start_loc = None #TODO: need for speculative decode
         non_spec_query_start_loc = attn_metadata.query_start_loc_p #HPU attention
+        padding_mask_flat = getattr(attn_metadata, "padding_mask_flat", None)
         spec_sequence_masks = None  #TODO: need for speculative decode
         spec_token_indx = None  #TODO: need for speculative decode
         non_spec_token_indx = None #TODO: need for speculative decode
@@ -177,19 +195,21 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         # Keep cache layout expected by hpu_causal_conv1d_*: [num_cache_lines, state_len, dim].
         conv_state = self_kv_cache[0]
         if non_spec_state_indices_tensor is not None and non_spec_state_indices_tensor.dim() > 1:
-            # Hybrid metadata can hold one state-index row per cache group.
-            # Select the row that matches this layer cache shape.
-            num_cache_lines = conv_state.size(0)
-            inferred_group_idx = None
-            for row_idx in range(non_spec_state_indices_tensor.size(0)):
-                row = non_spec_state_indices_tensor[row_idx]
-                valid = ((row == PAD_SLOT_ID) | ((row >= 0) & (row < num_cache_lines))).all()
-                if bool(valid):
-                    inferred_group_idx = row_idx
-                    break
-            if inferred_group_idx is None:
-                inferred_group_idx = 0
-            non_spec_state_indices_tensor = non_spec_state_indices_tensor[inferred_group_idx]
+            # Require explicit cache-group binding from model runner (Mamba style).
+            # Heuristic row inference is ambiguous (e.g., batch size 1), so fail
+            # fast instead of silently selecting a wrong cache-group row.
+            cache_group_idx = getattr(self, "cache_group_idx", None)
+            assert cache_group_idx is not None, (
+                "HPUQwen3_5GatedDeltaNet requires linear_attn.cache_group_idx when "
+                "state_indices_tensor is 2D; ensure model runner assigns "
+                "layer.linear_attn.cache_group_idx per KV cache group."
+            )
+            assert 0 <= int(cache_group_idx) < non_spec_state_indices_tensor.size(0), (
+                f"Invalid cache_group_idx={cache_group_idx} for "
+                f"state_indices_tensor rows={non_spec_state_indices_tensor.size(0)}"
+            )
+            print(f"libin debug cache group idx: {cache_group_idx}")
+            non_spec_state_indices_tensor = non_spec_state_indices_tensor[int(cache_group_idx)]
         ssm_state = self_kv_cache[1]
         # TrimmedAttentionMetadata on Gaudi does not expose upstream
         # GDNAttentionMetadata counters (num_prefills/num_decodes/num_actual_tokens).
@@ -197,11 +217,39 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         num_actual_tokens = mixed_qkv.size(0)
         num_accepted_tokens = None #TODO: need for speculative decode
         is_prompt = bool(attn_metadata.is_prompt)
+        token_mask_flat: torch.Tensor | None = None
+        chunk_query_start_loc = non_spec_query_start_loc
+        if is_prompt and non_spec_query_start_loc is not None:
+            # query_start_loc_p[-1] is the number of valid (unpadded) prompt tokens.
+            try:
+                num_actual_tokens = int(non_spec_query_start_loc[-1].item())
+            except Exception:
+                num_actual_tokens = mixed_qkv.size(0)
+
+        if is_prompt and padding_mask_flat is not None:
+            token_mask_flat = padding_mask_flat.view(-1, 1).to(dtype=mixed_qkv.dtype)
+
+            # Keep static shape for chunk prefill by using per-sequence padded
+            # cu_seqlens when input is bucket-padded [batch, target_seq].
+            if non_spec_state_indices_tensor is not None:
+                num_rows = int(non_spec_state_indices_tensor.numel())
+                total_tokens = int(mixed_qkv.size(0))
+                if num_rows > 0 and total_tokens % num_rows == 0:
+                    padded_seq_len = total_tokens // num_rows
+                    chunk_query_start_loc = torch.arange(
+                        0,
+                        (num_rows + 1) * padded_seq_len,
+                        padded_seq_len,
+                        device=mixed_qkv.device,
+                        dtype=non_spec_query_start_loc.dtype if non_spec_query_start_loc is not None else torch.int32,
+                    )
+
         num_prefills = 1 if is_prompt else 0
         num_decodes = 0 if is_prompt else 1
-        mixed_qkv = mixed_qkv[:num_actual_tokens]
-        b = b[:num_actual_tokens]
-        a = a[:num_actual_tokens]
+        if not is_prompt:
+            mixed_qkv = mixed_qkv[:num_actual_tokens]
+            b = b[:num_actual_tokens]
+            a = a[:num_actual_tokens]
 
         # 1. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(
@@ -264,6 +312,8 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 metadata=attn_metadata,
                 is_prompt=True
             ).transpose(0, 1)
+            if token_mask_flat is not None:
+                mixed_qkv_non_spec = mixed_qkv_non_spec * token_mask_flat
         elif num_decodes > 0:
             mixed_qkv_non_spec = hpu_causal_conv1d_update(
                 x=mixed_qkv_non_spec,
@@ -288,6 +338,10 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         )
 
         g, beta = hpu_fused_gdn_gating(self.A_log, a, b, self.dt_bias)
+        if token_mask_flat is not None:
+            token_mask_h = token_mask_flat.view(1, -1, 1).to(dtype=g.dtype)
+            g = g * token_mask_h
+            beta = beta * token_mask_h
 
         if spec_sequence_masks is not None:
             if num_prefills == 0 and num_decodes == 0:
@@ -344,7 +398,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 beta=beta_non_spec,
                 initial_state=initial_state,
                 output_final_state=True,
-                cu_seqlens=non_spec_query_start_loc,
+                cu_seqlens=chunk_query_start_loc,
                 use_qk_l2norm_in_kernel=True,
             )
             # Init cache
@@ -370,17 +424,39 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             core_attn_out_non_spec, last_recurrent_state = None, None
 
         # 3. Merge core attention output
+        # Prompt prefill may keep padded/static token shape (e.g. 2048) while
+        # num_actual_tokens tracks valid tokens (e.g. 39). Copy by observed
+        # tensor shape to avoid mismatched assignment.
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
+            merged_tokens = core_attn_out_non_spec.shape[1]
             merged_out = torch.empty(
-                (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
+                (1, merged_tokens, *core_attn_out_spec.shape[2:]),
                 dtype=core_attn_out_non_spec.dtype,
                 device=core_attn_out_non_spec.device,
             )
             merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
             merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-            core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
+            merged = merged_out.squeeze(0)
+            if merged.shape[0] == core_attn_out.shape[0]:
+                core_attn_out.copy_(merged)
+            else:
+                n = min(num_actual_tokens, merged.shape[0], core_attn_out.shape[0])
+                core_attn_out[:n] = merged[:n]
         elif spec_sequence_masks is not None:
-            core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
+            spec_out = core_attn_out_spec.squeeze(0)
+            if spec_out.shape[0] == core_attn_out.shape[0]:
+                core_attn_out.copy_(spec_out)
+            else:
+                n = min(num_actual_tokens, spec_out.shape[0], core_attn_out.shape[0])
+                core_attn_out[:n] = spec_out[:n]
         else:
-            core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
+            non_spec_out = core_attn_out_non_spec.squeeze(0)
+            if non_spec_out.shape[0] == core_attn_out.shape[0]:
+                core_attn_out.copy_(non_spec_out)
+            else:
+                n = min(num_actual_tokens, non_spec_out.shape[0], core_attn_out.shape[0])
+                core_attn_out[:n] = non_spec_out[:n]
+
+        if token_mask_flat is not None:
+            core_attn_out.mul_(token_mask_flat.view(-1, 1, 1))
 

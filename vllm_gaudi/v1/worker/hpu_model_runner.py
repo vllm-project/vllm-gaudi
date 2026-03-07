@@ -437,6 +437,19 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
     if not any(arch in getattr(model.config, 'architectures', []) for arch in mamba_like_arch):  
         return
     mamba_like_layer = ['.mixer', '.linear_attn']
+
+    def _get_decoder_layer_by_idx(model_obj, idx: int):
+        # Qwen3.5 multimodal path: model.language_model.model.layers
+        if hasattr(model_obj, "language_model") and hasattr(model_obj.language_model, "model"):
+            layers = getattr(model_obj.language_model.model, "layers", None)
+            if layers is not None:
+                return layers[idx]
+        # Text-only path: model.model.layers
+        if hasattr(model_obj, "model"):
+            layers = getattr(model_obj.model, "layers", None)
+            if layers is not None:
+                return layers[idx]
+        return None
     #import remote_pdb;remote_pdb.set_trace()
     # Iterate through all KV cache groups
     gdn_hybrid = False
@@ -454,8 +467,10 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
                 layer = model.model.layers[layer_idx]
                 layer.mamba.cache_group_idx = group_idx
             elif 'linear_attn' in layer_name:
-                layer = model.language_model.model.layers[layer_idx]
-                gdn_hybrid = True  #TODO: should we return here since not sure if layer assign has any use
+                layer = _get_decoder_layer_by_idx(model, layer_idx)
+                if layer is not None and hasattr(layer, "linear_attn"):
+                    layer.linear_attn.cache_group_idx = group_idx
+                    gdn_hybrid = True
     return gdn_hybrid
 
 
@@ -629,6 +644,7 @@ class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
                                  num_tokens=self.dummy_num_input_tokens,
                                  num_tokens_across_dp=self.dummy_num_tokens_across_dp_cpu), set_hpu_dp_metadata(
                                      self.vllm_config, num_real_tokens):
+
             hidden_states = self.model(*args, **kwargs)
             if self._rotary_prepare_cos_sin is not None:
                 self._reset_rotary_cos_sin()

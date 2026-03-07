@@ -34,7 +34,7 @@ def run_text_only(
         gpu_memory_utilization=gpu_memory_utilization,
     )  
       
-    sampling_params = SamplingParams(max_tokens=5, temperature=0.0, top_p=1.0)
+    sampling_params = SamplingParams(max_tokens=100, temperature=0.0, top_p=1.0)
 
     if text_api == "chat":
         # Use chat-form input for instruct models to avoid prompt-format drift.
