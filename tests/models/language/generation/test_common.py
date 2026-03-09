@@ -8,7 +8,7 @@ from lm_eval.models.vllm_causallms import VLLM
 import os
 
 
-def launch_lm_eval(eval_config: dict):
+def launch_lm_eval(eval_config):
     trust_remote_code = eval_config.get('trust_remote_code', False)
     dtype = eval_config.get('dtype', 'bfloat16')
     max_num_seqs = eval_config.get('max_num_seqs', 128)
@@ -36,10 +36,6 @@ def launch_lm_eval(eval_config: dict):
     }
     if kv_cache_dtype is not None:
         model_args['kv_cache_dtype'] = kv_cache_dtype
-
-    gpu_memory_utilization = eval_config.get('gpu_memory_utilization')
-    if gpu_memory_utilization is not None:
-        model_args['gpu_memory_utilization'] = gpu_memory_utilization
 
     if eval_config.get("inc"):
         assert os.environ.get('QUANT_CONFIG', None), "must set QUANT_CONFIG environment variable for using INC"
