@@ -450,7 +450,6 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
             if layers is not None:
                 return layers[idx]
         return None
-    #import remote_pdb;remote_pdb.set_trace()
     # Iterate through all KV cache groups
     gdn_hybrid = False
     for group_idx, kv_group in enumerate(kv_cache_config.kv_cache_groups):

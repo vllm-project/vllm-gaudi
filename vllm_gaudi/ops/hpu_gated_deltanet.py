@@ -75,13 +75,13 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         2. Core attention (custom op)
         3. Output projection
         """
-        #import remote_pdb;remote_pdb.set_trace()
         hidden_states = hidden_states.view(-1, hidden_states.size(-1))
         num_tokens = hidden_states.size(0)
 
         # Prompt buckets on HPU can include padded tokens. Mask once before
         # projections so q/k/v/b/a/z for padded rows are all zero.
         attn_metadata = get_forward_context().attn_metadata
+
         if attn_metadata is not None and bool(getattr(attn_metadata, "is_prompt", False)):
             padding_mask_flat = getattr(attn_metadata, "padding_mask_flat", None)
             if (
@@ -243,13 +243,16 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                         device=mixed_qkv.device,
                         dtype=non_spec_query_start_loc.dtype if non_spec_query_start_loc is not None else torch.int32,
                     )
+                    print(f"libin debug using padded cu_seqlens: {chunk_query_start_loc} with padded_seq_len={padded_seq_len}")
 
         num_prefills = 1 if is_prompt else 0
         num_decodes = 0 if is_prompt else 1
         if not is_prompt:
+            print(f"libin debug decode {mixed_qkv.shape=} {b.shape=} {a.shape=} {num_actual_tokens=}")
             mixed_qkv = mixed_qkv[:num_actual_tokens]
             b = b[:num_actual_tokens]
             a = a[:num_actual_tokens]
+
 
         # 1. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(
@@ -315,6 +318,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             if token_mask_flat is not None:
                 mixed_qkv_non_spec = mixed_qkv_non_spec * token_mask_flat
         elif num_decodes > 0:
+
             mixed_qkv_non_spec = hpu_causal_conv1d_update(
                 x=mixed_qkv_non_spec,
                 conv_state=conv_state,
@@ -403,9 +407,11 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             )
             # Init cache
             ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
-                ssm_state.dtype
+                device=ssm_state.device,
+                dtype=ssm_state.dtype,
             )
         elif num_decodes > 0:
+
             core_attn_out_non_spec, last_recurrent_state = (
                 hpu_fused_recurrent_gated_delta_rule(
                     q=query_non_spec,
@@ -420,6 +426,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                     use_qk_l2norm_in_kernel=True,
                 )
             )
+            #import remote_pdb; remote_pdb.set_trace()
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
 
@@ -459,4 +466,5 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
         if token_mask_flat is not None:
             core_attn_out.mul_(token_mask_flat.view(-1, 1, 1))
+        print(f"libin debug linear attn output {core_attn_out=}")
 

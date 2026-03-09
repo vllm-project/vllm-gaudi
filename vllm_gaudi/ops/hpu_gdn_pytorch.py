@@ -344,7 +344,6 @@ def hpu_chunk_gated_delta_rule(
             continue
 
         state = init_state[seq_id].clone()  # [H, V, K]
-        print(f"libin debug chunk {seq_id=} {bos=} {eos=} {state.shape=}")
         for cs in range(bos, eos, chunk_size):
             ce = min(cs + chunk_size, eos)
             tc = ce - cs
@@ -400,16 +399,18 @@ def hpu_chunk_gated_delta_rule(
                 state_h = h_start[h]  # [V, K]
                 # [Tc, V] = [Tc, K] @ [K, V]
                 proj = w_chunk[:, h, :] @ state_h.transpose(0, 1)
-                val = u_chunk[:, h, :] - proj
+                # Match upstream chunk_delta_h: v_new consumed by chunk_fwd_o
+                # is the unnormalized residual before applying g_last-g_t.
+                val_raw = u_chunk[:, h, :] - proj
+                v_new_chunk[:, h, :] = val_raw
 
-                # Apply the within-chunk g normalization from upstream kernel.
                 g_last = g_chunk[-1, h]
-                val = val * torch.exp(g_last - g_chunk[:, h])[:, None]
+                # Only state update uses the within-chunk g normalization.
+                val_state = val_raw * torch.exp(g_last - g_chunk[:, h])[:, None]
                 state_h = state_h * torch.exp(g_last)
 
                 # state_h += v_new^T @ k
-                state_h = state_h + val.transpose(0, 1) @ k_chunk[:, h, :]
-                v_new_chunk[:, h, :] = val
+                state_h = state_h + val_state.transpose(0, 1) @ k_chunk[:, h, :]
                 state[h] = state_h
 
             # Upstream match: `chunk_fwd_o`.
@@ -422,6 +423,8 @@ def hpu_chunk_gated_delta_rule(
 
                 # [Stage 6: chunk_fwd_o] term 1, recurrent base from h_start.
                 base = qh @ hs.transpose(0, 1)  # [Tc, V]
+                # Match upstream chunk_fwd_o: base is weighted by exp(g_t).
+                base = base * torch.exp(gh)[:, None]
                 # [Stage 6: chunk_fwd_o] term 2, lower-triangular intra-chunk
                 # contribution weighted by exp(g_i - g_j).
                 attn = qh @ kh.transpose(0, 1)  # [Tc, Tc]
@@ -433,7 +436,7 @@ def hpu_chunk_gated_delta_rule(
         if final_state is not None:
             final_state[seq_id] = state
 
-    out = out.to(v.dtype)
+    out = out.to(q.dtype)
     if cu_seqlens is not None:
         out = out.unsqueeze(0)
     else:

@@ -3,11 +3,22 @@
 Run Qwen3.5 in language-only or text+image mode based on arguments.  
 """  
 import argparse  
+import re
 import sys  
 from vllm import LLM, SamplingParams  
 from PIL import Image  
 import requests  
 from io import BytesIO  
+
+
+def _strip_think_text(text: str) -> str:
+    """Remove Qwen reasoning blocks from visible output."""
+    # Remove complete <think>...</think> blocks first.
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    # If generation was truncated mid-think, drop the dangling think suffix.
+    if "<think>" in text:
+        text = text.split("<think>", 1)[0]
+    return text.strip()
   
   
 def run_text_only(
@@ -31,25 +42,36 @@ def run_text_only(
         max_model_len=max_model_len,
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
-        gpu_memory_utilization=gpu_memory_utilization,
+        gpu_memory_utilization=gpu_memory_utilization, enforce_eager=True
     )  
       
-    sampling_params = SamplingParams(max_tokens=100, temperature=0.0, top_p=1.0)
+    sampling_params = SamplingParams(max_tokens=256, temperature=0.0, top_p=1.0)
 
     if text_api == "chat":
         # Use chat-form input for instruct models to avoid prompt-format drift.
         messages = [
-            {"role": "system", "content": "You are a helpful assistant. Reply in English only."},
+            {
+                "role": "system",
+                "content": (
+                    "You are a helpful assistant. Reply in English only. "
+                    "Do not output <think> tags or hidden reasoning."
+                ),
+            },
             {"role": "user", "content": prompt},
         ]
         outputs = llm.chat(messages, sampling_params)
     elif text_api == "generate":
-        outputs = llm.generate(prompt, sampling_params)
+        direct_prompt = (
+            "Answer directly and concisely. "
+            "Do not output <think> tags or hidden reasoning.\n"
+            f"User: {prompt}\nAssistant:"
+        )
+        outputs = llm.generate(direct_prompt, sampling_params)
     else:
         raise ValueError(f"Unsupported text_api: {text_api}")
       
     for output in outputs:  
-        generated_text = output.outputs[0].text  
+        generated_text = _strip_think_text(output.outputs[0].text)
         print(f"Generated: {generated_text}")  
   
   
