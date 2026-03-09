@@ -22,15 +22,14 @@ echo $VLLM_GAUDI_PREFIX
 #   tests/models/language/generation/generation_mm_multi.py
 
 # Gemma3 with image input
-# (afierka): Disabling tests due to issues with torch compile mode. Tracking in GAUDISW-246894
-# run_gemma3_load_generate_test() {
-#     echo "➡️ Testing gemma-3-4b-it..."
-#     VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
-#     echo "✅ Test with multimodal-support with gemma-3-4b-it passed."
-#     echo "➡️ Testing gemma-3-4b-it with multiple images(applying sliding_window)..."
-#     VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm_multi.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-27b-it.yaml"
-#     echo "✅ Test with multimodal-support with multiple images gemma-3-27b-it passed."
-# }
+run_gemma3_load_generate_test() {
+    echo "➡️ Testing gemma-3-4b-it..."
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
+    echo "✅ Test with multimodal-support with gemma-3-4b-it passed."
+    echo "➡️ Testing gemma-3-4b-it with multiple images(applying sliding_window)..."
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm_multi.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-27b-it.yaml"
+    echo "✅ Test with multimodal-support with multiple images gemma-3-27b-it passed."
+}
 
 # Basic model test
 run_basic_load_generate_test() {
