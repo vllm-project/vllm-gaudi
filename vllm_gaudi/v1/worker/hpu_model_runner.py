@@ -1732,6 +1732,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # This is prompt
                 break
 
+            # Route multi-token decode recomputation to prefill path.
+            # The decode path inflates all tensors by max(num_tokens),
+            # causing OOM when preempted requests need many tokens
+            # recomputed. The prefill path handles variable-length
+            # sequences naturally. Spec decode uses small num_tokens
+            # (2-8) and is handled correctly by the decode path.
+            if num_scheduled_tokens > 1 \
+                    and self.speculative_config is None:
+                break
+
             # This is decode
             # NOTE(chendi): To support spec decode,
             # we don't assume num_scheduled_tokens == 1.
@@ -1753,9 +1763,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             num_prompt_tokens = self.input_batch.num_prompt_tokens[i]
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
 
-            # Must be prompt
-            assert num_computed_tokens < num_prompt_tokens
             # NOTE(kzawora): In preempted sequences, num_output_tokens can be > 0, and still be a valid prefill
+            # NOTE: Multi-token decode recomputation requests may also be
+            # routed here; they have num_computed_tokens >= num_prompt_tokens.
 
             prompt_req_ids.append(req_id)
             prompt_scheduled_tokens.append(num_scheduled_tokens)
@@ -2059,6 +2069,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     num_output_logits = seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1
             else:
                 num_output_logits = max(0, seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1)
+            # Cap to scheduled tokens (needed when decode recomputation
+            # requests are routed through the prefill path).
+            num_output_logits = min(num_output_logits,
+                                    seq_num_scheduled_tokens)
             logits_positions = list(range(seq_num_scheduled_tokens - num_output_logits, seq_num_scheduled_tokens))
 
             new_batch_contents = BatchContents(
