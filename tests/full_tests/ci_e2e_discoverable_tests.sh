@@ -22,15 +22,14 @@ echo $VLLM_GAUDI_PREFIX
 #   tests/models/language/generation/generation_mm_multi.py
 
 # Gemma3 with image input
-# (afierka): Disabling tests due to issues with torch compile mode. Tracking in GAUDISW-246894
-# run_gemma3_load_generate_test() {
-#     echo "➡️ Testing gemma-3-4b-it..."
-#     VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
-#     echo "✅ Test with multimodal-support with gemma-3-4b-it passed."
-#     echo "➡️ Testing gemma-3-4b-it with multiple images(applying sliding_window)..."
-#     VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm_multi.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-27b-it.yaml"
-#     echo "✅ Test with multimodal-support with multiple images gemma-3-27b-it passed."
-# }
+run_gemma3_load_generate_test() {
+    echo "➡️ Testing gemma-3-4b-it..."
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
+    echo "✅ Test with multimodal-support with gemma-3-4b-it passed."
+    echo "➡️ Testing gemma-3-4b-it with multiple images(applying sliding_window)..."
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm_multi.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-27b-it.yaml"
+    echo "✅ Test with multimodal-support with multiple images gemma-3-27b-it passed."
+}
 
 # Basic model test
 run_basic_load_generate_test() {
@@ -235,18 +234,10 @@ run_qwen2_5_vl_unified_attn_load_generate_test() {
     echo "✅ Test multimodal-support + unified attention with qwen2.5-vl-7b passed."
 }
 
-# Multimodal-support with qwen2.5-vl with warmup (small max model len and max num seqs) and lazy mode
-run_qwen2_5_vl_lazy_warmup_test() {
-    echo "➡️ Testing Qwen2.5-VL-7B with full warmup under tight limits and lazy mode..."
-    VLLM_SKIP_WARMUP=false VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 \
-    python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen2.5-vl-7b-small-ctx.yaml"
-    echo "✅ Test Qwen2.5-VL-7B with full restricted warmup and lazy mode passed."
-}
-
 # Multimodal-support with qwen2.5-vl with warmup (small max model len and max num seqs) and torch.compile
 run_qwen2_5_vl_compile_warmup_test() {
     echo "➡️ Testing Qwen2.5-VL-7B with full warmup under tight limits and torch.compile..."
-    VLLM_SKIP_WARMUP=false VLLM_CONTIGUOUS_PAs=False PT_HPU_LAZY_MODE=0 \
+    VLLM_SKIP_WARMUP=false VLLM_CONTIGUOUS_PAs=False \
     python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen2.5-vl-7b-small-ctx.yaml"
     echo "✅ Test Qwen2.5-VL-7B with full restricted warmup and torch.compile passed."
 }
@@ -262,7 +253,7 @@ run_qwen3_vl_load_generate_test() {
 # Multimodal-support with ernie4.5-vl
 run_ernie4.5_vl_test() {
     echo "➡️ Testin gErnie4.5-VL-28B-A3B..."
-    VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 \
+    VLLM_SKIP_WARMUP=true \
     python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/ernie4.5-vl-28b.yaml"
     echo "✅ Test with multimodal-support with ernie4.5-vl-28b passed."
 }

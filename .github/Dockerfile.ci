@@ -6,7 +6,7 @@
 #   PT_VERSION      - PyTorch version (must match the base image)
 
 ARG PT_VERSION=2.9.0
-ARG BASE_IMAGE=vault.habana.ai/gaudi-docker/1.23.0/ubuntu24.04/habanalabs/pytorch-installer-${PT_VERSION}:latest
+ARG BASE_IMAGE=vault.habana.ai/gaudi-docker/1.23.0/ubuntu24.04/habanalabs/pytorch-upstream-installer-${PT_VERSION}:latest
 FROM ${BASE_IMAGE}
 
 ARG VLLM_COMMIT_ARG
