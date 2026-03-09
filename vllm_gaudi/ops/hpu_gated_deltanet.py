@@ -1,4 +1,4 @@
-import torch
+import torch, os
 from vllm.model_executor.models.qwen3_5 import Qwen3_5GatedDeltaNet
 from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
 from vllm.model_executor.models.utils import sequence_parallel_chunk
@@ -63,6 +63,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         super().__init__(*args, **kwargs)
         # Assigned by model runner per KV cache group for hybrid GDN models.
         self.cache_group_idx: int | None = None
+        self.mamba_chunk_size: int = getattr(self.cache_config, "mamba_block_size", 128) if self.cache_config is not None else 128
 
     def forward(
         self,
@@ -224,7 +225,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             try:
                 num_actual_tokens = int(non_spec_query_start_loc[-1].item())
             except Exception:
-                num_actual_tokens = mixed_qkv.size(0)
+                num_actual_tokens = num_actual_tokens
 
         if is_prompt and padding_mask_flat is not None:
             token_mask_flat = padding_mask_flat.view(-1, 1).to(dtype=mixed_qkv.dtype)
@@ -243,7 +244,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                         device=mixed_qkv.device,
                         dtype=non_spec_query_start_loc.dtype if non_spec_query_start_loc is not None else torch.int32,
                     )
-                    print(f"libin debug using padded cu_seqlens: {chunk_query_start_loc} with padded_seq_len={padded_seq_len}")
+                   
 
         num_prefills = 1 if is_prompt else 0
         num_decodes = 0 if is_prompt else 1
@@ -293,6 +294,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         block_idx_first_scheduled_token_p = None
         num_computed_tokens_p = None
         # 1.2: Process the remaining part
+        mixed_qkv_non_spec_T = None
         if num_prefills > 0:
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
             # - "cache_indices" updates the conv_state cache in positions
@@ -391,6 +393,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         if is_prompt:
             initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
             initial_state[~has_initial_state, ...] = 0
+            
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -410,6 +413,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 device=ssm_state.device,
                 dtype=ssm_state.dtype,
             )
+            
         elif num_decodes > 0:
 
             core_attn_out_non_spec, last_recurrent_state = (
@@ -426,9 +430,78 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                     use_qk_l2norm_in_kernel=True,
                 )
             )
-            #import remote_pdb; remote_pdb.set_trace()
+
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
+
+        if core_attn_out_non_spec is not None or last_recurrent_state is not None:
+            save_root = "./vllm_qwen3next_debug"
+            os.makedirs(save_root, exist_ok=True)
+            safe_layer_name = "".join(
+                c if (c.isalnum() or c in "._-") else "_" for c in self.prefix
+            ) or "unnamed_layer"
+            if not hasattr(self, "_debug_save_step"):
+                self._debug_save_step = 0
+            step = self._debug_save_step
+            self._debug_save_step += 1
+            tp_rank = 0
+            out_path = os.path.join(
+                save_root,
+                f"{safe_layer_name}.tp{tp_rank}.step{step:06d}.pt",
+            )
+
+            save_state_indices = None
+            save_last_recurrent_state = last_recurrent_state
+            if non_spec_state_indices_tensor is not None:
+                flat_indices = non_spec_state_indices_tensor.reshape(-1).to(
+                    device=ssm_state.device,
+                    dtype=torch.long,
+                )
+                if flat_indices.numel() > 0:
+                    valid = (flat_indices >= 0) & (flat_indices < ssm_state.shape[0])
+                    save_state_indices = flat_indices[valid]
+                    if save_state_indices.numel() > 0:
+                        save_last_recurrent_state = ssm_state.index_select(
+                            0,
+                            save_state_indices,
+                        )
+                    else:
+                        save_last_recurrent_state = ssm_state[:0]
+
+            torch.save(
+                {
+                    "layer_name": self.prefix,
+                    "tp_rank": tp_rank,
+                    "step": step,
+                    "updated_state_indices": (
+                        save_state_indices.detach().cpu()
+                        if save_state_indices is not None
+                        else None
+                    ),
+                    "core_attn_out_non_spec": (
+                        core_attn_out_non_spec.detach().cpu()
+                        if core_attn_out_non_spec is not None
+                        else None
+                    ),
+                    "mixed_qkv_non_spec_T": (
+                        mixed_qkv_non_spec_T.detach().cpu()
+                        if mixed_qkv_non_spec_T is not None
+                        else None
+                    ),
+                    "mixed_qkv_non_spec": (
+                        mixed_qkv_non_spec.detach().cpu()
+                        if mixed_qkv_non_spec is not None
+                        else None
+                    ),
+                    "last_recurrent_state": (
+                        save_last_recurrent_state.detach().cpu()
+                        if save_last_recurrent_state is not None
+                        else None
+                    ),
+                },
+                out_path,
+            )
+            print(f'libin debug saved recurrent state and attention output to {out_path}')
 
         # 3. Merge core attention output
         # Prompt prefill may keep padded/static token shape (e.g. 2048) while
@@ -466,5 +539,5 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
         if token_mask_flat is not None:
             core_attn_out.mul_(token_mask_flat.view(-1, 1, 1))
-        print(f"libin debug linear attn output {core_attn_out=}")
+        
 

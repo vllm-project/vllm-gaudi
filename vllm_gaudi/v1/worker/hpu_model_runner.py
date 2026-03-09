@@ -939,7 +939,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.model_config.get_num_layers_by_block_type(self.parallel_config, block_type)   
             for block_type in mamba_like  
         )
+
+        hf_text_config = self.model_config.hf_text_config
+        self.mamba_chunk_size_is_explicit = (
+            self.num_mamba_like_layers > 0
+            and (
+                getattr(hf_text_config, "mamba_chunk_size", None) is not None
+                or getattr(hf_text_config, "chunk_size", None) is not None
+            )
+        )
+
         self.mamba_chunk_size = self.model_config.get_mamba_chunk_size() if self.num_mamba_like_layers > 0 else 0
+       
         self.use_hybrid_cache = os.getenv('VLLM_USE_HYBRID_CACHE', 'false').strip().lower() in ("1", "true")
         self.use_naive_mamba_cache_sharing = os.getenv('VLLM_USE_NAIVE_MAMBA_CACHE_SHARING',
                                                        'true').strip().lower() in ("1", "true")
@@ -1045,7 +1056,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                               max_num_batched_tokens=self.max_num_batched_tokens,
                                               max_model_len=self.max_model_len,
                                               num_speculative_tokens=num_speculative_tokens,
-                                              mamba_chunk_size=self.mamba_chunk_size)
+                                              mamba_chunk_size=self.mamba_chunk_size,
+                                              mamba_chunk_size_is_explicit=self.mamba_chunk_size_is_explicit)
             self.graphed_buckets: set[Any] = set()
             self.graphed_multimodal_buckets: set[Any] = set()
         else:

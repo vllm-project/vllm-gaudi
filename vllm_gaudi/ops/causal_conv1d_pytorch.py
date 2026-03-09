@@ -222,7 +222,6 @@ def hpu_causal_conv1d_fn(
     seq_input = seq_input.unsqueeze(0)
     seq_out = F.conv1d(seq_input, weight_dw, bias=bias_work, groups=dim)
     seq_out = _apply_activation(seq_out, activation)
-    print(f"libin debug conv{batch_cache_idx=}{new_state=} {seq_out=}")
     # Update conv state
     # Update cache with the latest state_len tokens for this sequence
     with torch.no_grad():

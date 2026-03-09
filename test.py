@@ -36,13 +36,13 @@ def run_text_only(
       
     llm = LLM(  
         model=model_name,  
-        trust_remote_code=True, # enforce_eager=True,
+        trust_remote_code=True,  enforce_eager=True,
         language_model_only=True,  # Disables all multimodal modules
         tensor_parallel_size=tensor_parallel_size,
         max_model_len=max_model_len,
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
-        gpu_memory_utilization=gpu_memory_utilization, enforce_eager=True
+        gpu_memory_utilization=gpu_memory_utilization, #enforce_eager=True
     )  
       
     sampling_params = SamplingParams(max_tokens=256, temperature=0.0, top_p=1.0)
@@ -115,7 +115,7 @@ def run_text_image(
     # Format prompt for multimodal input  
     formatted_prompt = f"<|vision_start|><|image_pad|><|vision_end|>{prompt}"  
       
-    sampling_params = SamplingParams(max_tokens=10, temperature=0.7)  
+    sampling_params = SamplingParams(max_tokens=3, temperature=0.7)  
     outputs = llm.generate({  
         "prompt": formatted_prompt,  
         "multi_modal_data": {"image": image},  
