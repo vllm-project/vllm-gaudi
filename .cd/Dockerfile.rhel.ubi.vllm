@@ -16,8 +16,6 @@ ARG PT_MODULES_REPO_NAME=gaudi-pt-modules
 ARG PT_PACKAGE_NAME_NON_DEFAULT_PYTHON_SUBSTRING=
 ARG PYPI_INDEX_URL="https://pypi.org/simple/"
 ARG HABANA_RPM_REPO_PATH="rhel/9/${OS_VERSION}"
-# can be upstream or fork
-ARG TORCH_TYPE=upstream
 ARG VLLM_GAUDI_COMMIT=main
 ARG VLLM_PROJECT_COMMIT=
 
@@ -35,7 +33,6 @@ ARG OS_STRING
 ARG PT_VERSION
 ARG PYPI_INDEX_URL
 ARG HABANA_RPM_REPO_PATH
-ARG TORCH_TYPE
 
 # Labels for RHEL certification.
 # Note: when SYNAPSE_REVISION=latest, this metadata intentionally records "latest"
@@ -44,8 +41,7 @@ LABEL vendor="Habanalabs Ltd." \
     release="${SYNAPSE_VERSION}-${SYNAPSE_REVISION}"
 
 # Environment variables - Habana-specific paths and configurations
-ENV TORCH_TYPE=${TORCH_TYPE} \
-    PT_VERSION=${PT_VERSION} \
+ENV PT_VERSION=${PT_VERSION} \
     OS_STRING="${OS_STRING}" \
     VLLM_TARGET_DEVICE="hpu" \
     GC_KERNEL_PATH=/usr/lib/habanalabs/libtpc_kernels.so \
@@ -72,7 +68,7 @@ RUN printf "[BaseOS]\\nname=CentOS Linux 9 - BaseOS\\nbaseurl=https://mirror.str
 
 # Install system dependencies
 RUN dnf install -y --allowerasing \
-    wget git jq libomp \
+    wget git-core jq libomp \
     # Image processing dependencies (needed for pillow-simd -> habana-media-loader)
     zlib-devel libjpeg-turbo-devel \
     # habanalabs-thunk dependency
@@ -143,7 +139,6 @@ ARG PT_PACKAGE_NAME_NON_DEFAULT_PYTHON_SUBSTRING
 ARG PYPI_INDEX_URL
 ARG SYNAPSE_VERSION
 ARG SYNAPSE_REVISION
-ARG TORCH_TYPE
 
 # Environment variables inherited from base, OS_STRING needed for PyTorch install
 ENV OS_STRING="${OS_STRING}"
@@ -157,10 +152,14 @@ RUN SYNAPSE_REVISION_RUNTIME=$(cat /etc/habanalabs/synapse_revision) && \
     tar -zxf "${PT_PACKAGE_NAME}" -C "${TMP_PATH}" && \
     cd "${TMP_PATH}" && \
     export SKIP_INSTALL_DEPENDENCIES=1 && \
-    PYTHON_INDEX_URL="--extra-index-url ${PYPI_INDEX_URL}" ./install.sh $SYNAPSE_VERSION $SYNAPSE_REVISION_RUNTIME $TORCH_TYPE && \
+    PYTHON_INDEX_URL="--extra-index-url ${PYPI_INDEX_URL}" ./install.sh $SYNAPSE_VERSION $SYNAPSE_REVISION_RUNTIME upstream && \
     cd / && \
     rm -rf "${TMP_PATH}" "${PT_PACKAGE_NAME}" && \
     dnf clean all
+
+# Install torchaudio (CPU-only, matching PT version)
+RUN pip install --no-cache-dir --no-deps --extra-index-url https://download.pytorch.org/whl/cpu \
+    torchaudio==${PT_VERSION}
 
 WORKDIR /workspace
 
@@ -181,7 +180,7 @@ ENV BASE_NAME=${BASE_NAME} \
     VLLM_PATH2=/workspace/vllm-gaudi
 
 # Install additional system dependencies
-RUN dnf install -y gettext jq git --allowerasing && \
+RUN dnf install -y gettext --allowerasing && \
     dnf clean all && \
     ln -sf /usr/bin/python3 /usr/bin/python
 
@@ -211,21 +210,6 @@ RUN set -e && \
     git checkout ${VLLM_GAUDI_COMMIT} && \
     VLLM_TARGET_DEVICE=hpu pip install --no-cache-dir -v . --no-build-isolation && \
     pip check
-
-# The scripts below are used for benchmarks testing and autocalc:
-# RUN pip3 install -v -e $VLLM_PATH/tests/vllm_test_utils
-##Install additional Python packages
-#RUN pip3 install datasets pandas
-#
-## Copy utility scripts and configuration
-#RUN mkdir -p /root/scripts/
-#COPY .cd/templates /root/scripts/templates/
-#COPY .cd/entrypoints /root/scripts/entrypoints/
-#COPY .cd/server /root/scripts/server/
-#COPY .cd/benchmark /root/scripts/benchmark/
-#WORKDIR /root/scripts
-# Set testing entrypoint script
-#ENTRYPOINT ["python3", "-m", "entrypoints.entrypoint_main"]
 
 # Setup non-root user for OpenShift compatibility
 RUN umask 002 && \
