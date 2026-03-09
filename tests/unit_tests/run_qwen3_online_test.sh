@@ -7,7 +7,7 @@ MODELS=(
   # "Qwen/Qwen3.5-35B-A3B"
 )
 
-HOST="0.0.0.0"
+HOST="127.0.0.1"
 BASE_PORT=8002
 
 export VLLM_SKIP_WARMUP=false
