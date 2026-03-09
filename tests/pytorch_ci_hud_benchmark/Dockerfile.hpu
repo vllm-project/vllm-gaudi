@@ -54,8 +54,10 @@ RUN mkdir -p $VLLM_PLUGIN_PATH && \
     git checkout $VLLM_GAUDI_COMMIT && \
     VLLM_TARGET_DEVICE=hpu && pip install -v $VLLM_PLUGIN_PATH --no-build-isolation
 
+# Install torchaudio (CPU wheel, matching PyTorch version in base image)
+# torchaudio is imported from upstream vLLM code (e.g. via Ovis model registration)
 RUN pip install datasets && \
     pip install pandas && \
-    pip install --no-deps torchaudio==${PT_VERSION}
+    pip install --no-deps --extra-index-url https://download.pytorch.org/whl/cpu torchaudio==${PT_VERSION}
 
 ENTRYPOINT ["/bin/bash"]
