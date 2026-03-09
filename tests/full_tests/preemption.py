@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 from vllm import LLM, SamplingParams
 
 # Sample prompts.
@@ -40,4 +42,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        import traceback
+        print("An error occurred during generation:")
+        traceback.print_exc()
+        os._exit(1)
