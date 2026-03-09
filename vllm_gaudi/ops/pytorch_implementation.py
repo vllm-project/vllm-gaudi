@@ -4,7 +4,13 @@ import torch
 import torch.nn.functional as F
 
 
-def new_chunk_cumsum(dt, A, chunk_size, dt_bias=None, dt_softplus=False, dt_limit=(0.0, float("inf"))):
+def new_chunk_cumsum(dt,
+                     A,
+                     chunk_size,
+                     dt_bias=None,
+                     dt_softplus=False,
+                     dt_limit=(0.0, float("inf")),
+                     padding_mask=None):
     """
     Arguments:
         dt: Tensor - (seqlen, nheads)
@@ -13,6 +19,7 @@ def new_chunk_cumsum(dt, A, chunk_size, dt_bias=None, dt_softplus=False, dt_limi
         dt_bias: Optional Tensor - (nheads)
         dt_softplus: bool
         dt_limit: tuple - (min: float, max: float)
+        padding_mask: Optional Tensor - (seqlen, 1) or (seqlen,)
 
     Return:
         dA_cumsum: Tensor - (nheads, nchunks, chunk_size)
@@ -31,6 +38,10 @@ def new_chunk_cumsum(dt, A, chunk_size, dt_bias=None, dt_softplus=False, dt_limi
         dt = F.softplus(dt)
 
     dt = torch.clamp(dt, dt_min, dt_max)
+
+    if padding_mask is not None:
+        dt = dt * padding_mask.view(seqlen, 1).float()
+
     dA = dt * A.view(1, nheads)
     dA = dA.transpose(0, 1).reshape(nheads, nchunks, chunk_size)
     dt = dt.transpose(0, 1).reshape(nheads, nchunks, chunk_size)
