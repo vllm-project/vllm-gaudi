@@ -1754,6 +1754,30 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         return PromptDecodeInfo(prompt_req_ids, decode_req_ids, prompt_scheduled_tokens)
 
+    def _update_async_output_token_ids(self):
+        """Update output_token_ids with tokens from the previous async step.
+
+        In async scheduling mode, postprocessed_sampled_token_ids is not
+        populated (tokens stay on HPU), so output_token_ids never gets
+        updated. This method syncs the previous step's sampled tokens
+        from HPU to CPU and appends them to each request's
+        output_token_ids, enabling correct penalty computation during
+        sampling.
+        """
+        if not self.use_async_scheduling:
+            return
+        prev_sampled = self.input_batch.prev_sampled_token_ids
+        if prev_sampled is None:
+            return
+        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        if prev_req_id_to_index is None:
+            return
+        prev_tokens_cpu = prev_sampled.cpu().tolist()
+        for req_id, prev_idx in prev_req_id_to_index.items():
+            req_state = self.requests.get(req_id)
+            if req_state is not None and prev_idx < len(prev_tokens_cpu):
+                req_state.output_token_ids.append(prev_tokens_cpu[prev_idx])
+
     def _generate_req_id_output_token_ids_lst(self,
                                               request_ids: Optional[list[str]] = None,
                                               pad_to: Optional[int] = None,
@@ -3810,6 +3834,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         warmup_mode = self.warmup_mode
         self.scheduler_output = None
         self.warmup_mode = False
+
+        # Update output_token_ids with tokens from previous async step
+        # so that sampling penalties are correctly applied.
+        self._update_async_output_token_ids()
 
         if self.unified_attn:
             return self.unified_execute_model(scheduler_output, warmup_mode=warmup_mode)

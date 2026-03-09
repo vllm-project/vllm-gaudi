@@ -646,3 +646,98 @@ def test_model_torch_regional_compilation(default_vllm_config: None, dist_init, 
     assert_compilation(model, "lm_head", VocabParallelEmbedding)
     assert_compilation(model, "model.decoder.final_layer_norm", LayerNorm)
     assert_compilation(model, "model.decoder.embed_tokens", VocabParallelEmbedding)
+
+
+def test_update_async_output_token_ids_populates_tokens(model_runner, dist_init):
+    """Verify _update_async_output_token_ids transfers previous-step sampled
+    tokens into each request's output_token_ids (GAUDISW-245824)."""
+    req_ids = ("req_0", "req_1")
+    scheduler_output = _schedule_new_request(*req_ids)
+    model_runner._update_states(scheduler_output)
+
+    # Enable async scheduling on the runner
+    model_runner.use_async_scheduling = True
+
+    # Simulate previous step: sampled token 42 for req_0 (idx 0),
+    # token 99 for req_1 (idx 1)
+    model_runner.input_batch.prev_sampled_token_ids = torch.tensor([42, 99], dtype=torch.int32, device="cpu")
+    model_runner.input_batch.prev_req_id_to_index = {
+        "req_0": 0,
+        "req_1": 1,
+    }
+
+    # Precondition: output_token_ids should be empty
+    assert model_runner.requests["req_0"].output_token_ids == []
+    assert model_runner.requests["req_1"].output_token_ids == []
+
+    model_runner._update_async_output_token_ids()
+
+    assert model_runner.requests["req_0"].output_token_ids == [42]
+    assert model_runner.requests["req_1"].output_token_ids == [99]
+
+
+def test_update_async_output_token_ids_accumulates(model_runner, dist_init):
+    """Verify repeated calls accumulate tokens across steps."""
+    req_ids = ("req_0", )
+    scheduler_output = _schedule_new_request(*req_ids)
+    model_runner._update_states(scheduler_output)
+    model_runner.use_async_scheduling = True
+
+    # Step 1
+    model_runner.input_batch.prev_sampled_token_ids = torch.tensor([10], dtype=torch.int32, device="cpu")
+    model_runner.input_batch.prev_req_id_to_index = {"req_0": 0}
+    model_runner._update_async_output_token_ids()
+
+    # Step 2
+    model_runner.input_batch.prev_sampled_token_ids = torch.tensor([20], dtype=torch.int32, device="cpu")
+    model_runner._update_async_output_token_ids()
+
+    assert model_runner.requests["req_0"].output_token_ids == [10, 20]
+
+
+def test_update_async_output_token_ids_noop_sync_mode(model_runner, dist_init):
+    """When async scheduling is off, calling the method is a no-op."""
+    req_ids = ("req_0", )
+    scheduler_output = _schedule_new_request(*req_ids)
+    model_runner._update_states(scheduler_output)
+    model_runner.use_async_scheduling = False
+
+    model_runner.input_batch.prev_sampled_token_ids = torch.tensor([42], dtype=torch.int32, device="cpu")
+    model_runner.input_batch.prev_req_id_to_index = {"req_0": 0}
+
+    model_runner._update_async_output_token_ids()
+
+    assert model_runner.requests["req_0"].output_token_ids == []
+
+
+def test_update_async_output_token_ids_noop_no_prev(model_runner, dist_init):
+    """When there are no previous tokens, calling the method is a no-op."""
+    req_ids = ("req_0", )
+    scheduler_output = _schedule_new_request(*req_ids)
+    model_runner._update_states(scheduler_output)
+    model_runner.use_async_scheduling = True
+
+    # prev_sampled_token_ids defaults to None
+    model_runner._update_async_output_token_ids()
+
+    assert model_runner.requests["req_0"].output_token_ids == []
+
+
+def test_update_async_output_token_ids_skips_finished_req(model_runner, dist_init):
+    """If a request in prev_req_id_to_index was already finished, skip it."""
+    req_ids = ("req_0", )
+    scheduler_output = _schedule_new_request(*req_ids)
+    model_runner._update_states(scheduler_output)
+    model_runner.use_async_scheduling = True
+
+    model_runner.input_batch.prev_sampled_token_ids = torch.tensor([42, 99], dtype=torch.int32, device="cpu")
+    # req_1 was in previous batch but has since been removed
+    model_runner.input_batch.prev_req_id_to_index = {
+        "req_0": 0,
+        "req_1": 1,
+    }
+
+    model_runner._update_async_output_token_ids()
+
+    assert model_runner.requests["req_0"].output_token_ids == [42]
+    assert "req_1" not in model_runner.requests
