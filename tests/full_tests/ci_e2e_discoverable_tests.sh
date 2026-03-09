@@ -292,29 +292,9 @@ run_llama3_70b_inc_dynamic_quant_test() {
 
 # --- LM-eval tests ---
 # Tests below score models on lmeval tasks, usually gsm8k
-# Final scores are verified against thresholds specified in .yaml config files in tests/full_tests/model_cards/*
+# Final scores are verified against thresholds specified in .yaml config files in tests/full_tests_model_cards/*
 # If the score is below the threshold, the test will fail. For implementation details see:
 #   tests/models/language/generation/test_common.py
-
-# GSM8K on granite-4.0-h
-run_gsm8k_granite_4_test() {
-    echo "➡️ Testing GSM8K on granite-4-h..."
-    BATCH_SIZE=8 \
-    VLLM_EXPONENTIAL_BUCKETING=false \
-    VLLM_PROMPT_QUERY_BUCKET_MIN=256 \
-    VLLM_PROMPT_QUERY_BUCKET_MAX=4096 \
-    VLLM_PROMPT_QUERY_BUCKET_STEP=256 \
-    VLLM_DECODE_BS_BUCKET_MIN=16 \
-    VLLM_DECODE_BS_BUCKET_STEP=16 \
-    VLLM_DECODE_BS_BUCKET_MAX=16 \
-    VLLM_CONTIGUOUS_PA=true \
-    VLLM_SKIP_WARMUP=true \
-    ENABLE_APC=false \
-    ASYNC_SCHEDULING=true \
-    TP_SIZE=1 \
-    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/granite-4-h-small.yaml"
-    echo "✅ Test with granite-4-h passed."
-}
 
 # GSM8K on granite-8b
 run_gsm8k_granite_test() {
