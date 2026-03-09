@@ -35,6 +35,7 @@ def _mamba_chunk_scan_combined_fwd(
         dt_softplus=False,
         dt_limit=(0.0, float("inf")),
         state_dtype=None,
+        padding_mask=None,
 ):
     assert is_int_pow_2(chunk_size), "chunk_size must be integer power of 2"
     seqlen, nheads, headdim = x.shape
@@ -81,6 +82,7 @@ def _mamba_chunk_scan_combined_fwd(
         dt_bias=dt_bias,
         dt_softplus=dt_softplus,
         dt_limit=dt_limit,
+        padding_mask=padding_mask,
     )
 
     nchunks = seqlen // chunk_size
@@ -150,6 +152,7 @@ def hpu_mamba_chunk_scan_combined_varlen(
         dt_softplus=False,
         dt_limit=(0.0, float("inf")),
         state_dtype=None,
+        padding_mask=None,
 ):
     """
     Argument:
@@ -192,6 +195,7 @@ def hpu_mamba_chunk_scan_combined_varlen(
         dt_softplus=dt_softplus,
         dt_limit=dt_limit,
         state_dtype=state_dtype,
+        padding_mask=padding_mask,
     )
 
     return varlen_states
