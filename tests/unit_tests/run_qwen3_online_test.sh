@@ -7,10 +7,10 @@ MODELS=(
   # "Qwen/Qwen3.5-35B-A3B"
 )
 
-HOST="127.0.0.1"
+HOST="0.0.0.0"
 BASE_PORT=8002
 
-export VLLM_SKIP_WARMUP=false
+export VLLM_SKIP_WARMUP=0
 # export PT_HPU_LAZY_MODE=1
 export PYTHONUNBUFFERED=1
 
@@ -51,7 +51,8 @@ wait_for_server() {
   local port="$1"
   local server_pid="$2"
   local log_file="$3"
-  local max_wait="${4:-600}"
+  local model="$4"
+  local max_wait="${5:-600}"
   local waited=0
 
   echo "Waiting for server on port ${port}..."
@@ -113,7 +114,7 @@ warmup_model() {
   tail -n +1 -f "${log_file}" &
   TAIL_PID=$!
 
-  wait_for_server "${port}" "${SERVER_PID}" "${log_file}"
+  wait_for_server "${port}" "${SERVER_PID}" "${log_file}" "${model}"
 
   echo "Sending curl request to ${model}..."
 
