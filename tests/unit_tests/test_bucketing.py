@@ -109,7 +109,12 @@ class _MockConfig:
 
 @patch('vllm_gaudi.extension.bucketing.exponential.get_config')
 def test_exponential_decode_cfgs_non_contiguous_pa_bounded(mock_get_config):
-    """max_decode_blocks should be max_blocks + block_size when use_contiguous_pa=False."""
+    """max_decode_blocks should be max_blocks * 2 when use_contiguous_pa=False.
+
+    The 2x multiplier accounts for prefix-cache block sharing: the same
+    physical block can appear in multiple sequences' block tables, so total
+    block references may exceed num_hpu_blocks.
+    """
     mock_get_config.return_value = _MockConfig(use_contiguous_pa=False)
     strategy = ExponentialBucketingStrategy()
 
@@ -120,7 +125,7 @@ def test_exponential_decode_cfgs_non_contiguous_pa_bounded(mock_get_config):
         max_num_batched_tokens=131072, max_model_len=91964,
         max_blocks=max_blocks)
 
-    expected_max = max_blocks + block_size  # 3721
+    expected_max = max_blocks * 2  # 7186
     assert block_cfg[2] == expected_max, (
         f"Expected max_decode_blocks={expected_max}, got {block_cfg[2]}")
 
@@ -159,10 +164,10 @@ def test_exponential_decode_max_never_exceeds_bounded_value(mock_get_config):
         max_blocks=max_blocks)
 
     # The old (buggy) formula would produce min(91964//128*256, ...) = 183808
-    # The fix should give max_blocks + block_size = 3721
-    assert block_cfg[2] <= max_blocks + block_size, (
+    # The fix should give max_blocks * 2 = 7186
+    assert block_cfg[2] <= max_blocks * 2, (
         f"Decode bucket max {block_cfg[2]} exceeds bounded limit "
-        f"{max_blocks + block_size}. Buckets are too large!")
+        f"{max_blocks * 2}. Buckets are too large!")
     # Sanity: must not be the old gigantic value
     old_buggy_value = max_model_len // block_size * max_num_seqs
     assert block_cfg[2] < old_buggy_value, (
@@ -174,10 +179,10 @@ def test_exponential_decode_max_never_exceeds_bounded_value(mock_get_config):
 def test_exponential_warmup_range_respects_max(mock_get_config):
     """warmup_range_with_limit should not produce values exceeding bmax."""
     mock_get_config.return_value = _MockConfig(use_contiguous_pa=False)
-    config = (1, 256, 3721, 13)
+    config = (1, 256, 7186, 14)
     buckets = warmup_range_with_limit(config)
-    assert max(buckets) <= 3721, (
-        f"Max bucket {max(buckets)} exceeds configured max 3721")
+    assert max(buckets) <= 7186, (
+        f"Max bucket {max(buckets)} exceeds configured max 7186")
     assert min(buckets) >= 1
 
 
@@ -192,7 +197,7 @@ def test_exponential_warmup_range_contiguous_pa(mock_get_config):
 
 
 def test_fallback_bucket_ctx_capped():
-    """generate_fallback_bucket should cap ctx at num_hpu_blocks + block_size."""
+    """generate_fallback_bucket should cap ctx at num_hpu_blocks * 2 + block_size."""
     from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 
     mgr = HPUBucketingManager.__new__(HPUBucketingManager)
@@ -205,10 +210,11 @@ def test_fallback_bucket_ctx_capped():
     mgr.block_size = 128
     mgr.use_sliding_window = False
 
+    cap = mgr.num_hpu_blocks * 2 + mgr.block_size  # 7314
     # Request a ctx far larger than num_hpu_blocks
     _, _, new_ctx = mgr.generate_fallback_bucket(batch_size=64, seq_len=512, ctx=50000)
-    assert new_ctx <= mgr.num_hpu_blocks + mgr.block_size, (
-        f"Fallback ctx {new_ctx} exceeds cap {mgr.num_hpu_blocks + mgr.block_size}")
+    assert new_ctx <= cap, (
+        f"Fallback ctx {new_ctx} exceeds cap {cap}")
 
 
 # --- Scenarios derived from real server logs (Qwen3-32B, TP=2, max-model-len=91964) ---
@@ -219,15 +225,15 @@ _REAL_BLOCK_SIZE = 128
 _REAL_MAX_NUM_SEQS = 256
 _REAL_MAX_BLOCKS = 3593  # num_hpu_blocks
 _REAL_MAX_BATCHED_TOKENS = 2048
-_REAL_FIXED_MAX_DECODE_BLOCKS = _REAL_MAX_BLOCKS + _REAL_BLOCK_SIZE  # 3721
+_REAL_FIXED_MAX_DECODE_BLOCKS = _REAL_MAX_BLOCKS * 2  # 7186
 _REAL_BUGGY_MAX_DECODE_BLOCKS = 183808  # min(91964//128*256, 3593*256//4)
 
 
 @patch('vllm_gaudi.extension.bucketing.exponential.get_config')
 def test_real_scenario_decode_cfg_matches_fixed_log(mock_get_config):
-    """Verify decode bucket config matches the fixed server log output exactly.
+    """Verify decode bucket config matches expected values for real scenario.
 
-    From log: Decode bucket config ... block:[1, 256, 3721, 13]
+    With max_blocks * 2: block config should be [1, 256, 7186, 14]
     """
     mock_get_config.return_value = _MockConfig(use_contiguous_pa=False)
     strategy = ExponentialBucketingStrategy()
@@ -239,14 +245,14 @@ def test_real_scenario_decode_cfg_matches_fixed_log(mock_get_config):
         max_model_len=_REAL_MAX_MODEL_LEN,
         max_blocks=_REAL_MAX_BLOCKS)
 
-    # Expected from fixed log: [1, 256, 3721, 13]
+    # Expected: [1, 256, 7186, 14]
     assert block_cfg[0] == 1, f"block min: expected 1, got {block_cfg[0]}"
     assert block_cfg[1] == _REAL_MAX_NUM_SEQS, (
         f"block step: expected {_REAL_MAX_NUM_SEQS}, got {block_cfg[1]}")
     assert block_cfg[2] == _REAL_FIXED_MAX_DECODE_BLOCKS, (
         f"block max: expected {_REAL_FIXED_MAX_DECODE_BLOCKS}, got {block_cfg[2]}")
     import math
-    expected_limit = math.ceil(math.log2(_REAL_MAX_BLOCKS)) + 1  # 13
+    expected_limit = math.ceil(math.log2(_REAL_MAX_BLOCKS * 2)) + 1  # 14
     assert block_cfg[3] == expected_limit, (
         f"block limit: expected {expected_limit}, got {block_cfg[3]}")
 
@@ -322,10 +328,12 @@ def test_real_scenario_decode_bs_range_matches_log(mock_get_config):
         f"BS range mismatch.\nExpected: {expected_bs}\nGot:      {bs_range}")
 
 
-def test_real_scenario_fallback_ctx_4026_capped_to_3721():
-    """Reproduce real fallback from log: ctx=4026 should cap to <= 3721.
+def test_real_scenario_fallback_ctx_4026_not_truncated():
+    """Reproduce real fallback from log: ctx=4026 should produce a bucket >= 4026.
 
-    Log: "Decode bucket for (24, 1, 4026) was not prepared. Adding new bucket: (24, 1, 3721)"
+    With the raised cap (num_hpu_blocks * 2 + block_size = 7314), 
+    calc_fallback_value(4026, 32) = 4096, which is within the cap and >= the
+    requested ctx.  This prevents HPU graph cache misses that caused OOM.
     """
     from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 
@@ -342,9 +350,12 @@ def test_real_scenario_fallback_ctx_4026_capped_to_3721():
     new_bs, _, new_ctx = mgr.generate_fallback_bucket(
         batch_size=24, seq_len=1, ctx=4026)
 
-    assert new_ctx <= _REAL_FIXED_MAX_DECODE_BLOCKS, (
-        f"Fallback ctx {new_ctx} exceeds cap {_REAL_FIXED_MAX_DECODE_BLOCKS}. "
-        f"Log showed it should fall back to 3721.")
+    cap = mgr.num_hpu_blocks * 2 + mgr.block_size  # 7314
+    assert new_ctx >= 4026, (
+        f"Fallback ctx {new_ctx} is smaller than requested 4026 — "
+        f"this would cause HPU graph recompilation and potential OOM.")
+    assert new_ctx <= cap, (
+        f"Fallback ctx {new_ctx} exceeds cap {cap}")
     assert new_bs >= 24, f"Batch size should be >= 24, got {new_bs}"
 
 
@@ -368,3 +379,36 @@ def test_real_scenario_prompt_cfg_matches_log(mock_get_config):
     assert list(bs_cfg) == [1, 2, 1, 1], f"prompt bs cfg: {bs_cfg}"
     assert list(query_cfg) == [128, 128, 2048, 11], f"prompt query cfg: {query_cfg}"
     assert list(ctx_cfg) == [0, 1, 702, 11], f"prompt ctx cfg: {ctx_cfg}"
+
+
+def test_real_scenario_fallback_ctx_3833_not_truncated():
+    """Regression test for the OOM crash scenario: 22 seqs with 3833 total block refs.
+
+    Before fix: fallback capped ctx at 3721 < 3833 actual, causing the block_list
+    tensor (3833 elements) to not match the bucket (3721), triggering HPU graph
+    recompilation at 97.6% KV cache utilization -> OOM.
+
+    After fix: fallback returns ctx >= 3833, so the graph matches and no
+    recompilation occurs.
+    """
+    from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
+
+    mgr = HPUBucketingManager.__new__(HPUBucketingManager)
+    mgr.max_num_seqs = _REAL_MAX_NUM_SEQS
+    mgr.max_num_batched_tokens = _REAL_MAX_BATCHED_TOKENS
+    mgr.fallback_bs_base_step = 2
+    mgr.fallback_seq_base_step = 32
+    mgr.fallback_blocks_base_step = 32
+    mgr.num_hpu_blocks = _REAL_MAX_BLOCKS
+    mgr.block_size = _REAL_BLOCK_SIZE
+    mgr.use_sliding_window = False
+
+    new_bs, _, new_ctx = mgr.generate_fallback_bucket(
+        batch_size=22, seq_len=1, ctx=3833)
+
+    assert new_ctx >= 3833, (
+        f"Fallback ctx {new_ctx} < 3833: block_list won't be padded, "
+        f"HPU graph cache miss will trigger recompilation and likely OOM.")
+    cap = mgr.num_hpu_blocks * 2 + mgr.block_size  # 7314
+    assert new_ctx <= cap, (
+        f"Fallback ctx {new_ctx} exceeds cap {cap}")
