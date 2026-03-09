@@ -1612,7 +1612,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             return self.vllm_config.model_config.hf_config.model_type
         return None
 
-    def _get_num_decodes(self) -> int:
+    def _get_num_decodes(self, scheduler_output: "SchedulerOutput") -> int:
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
         #TODO: remove later
@@ -1621,13 +1621,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         for i in range(num_reqs):
             req_id = self.input_batch.req_ids[i]
             assert req_id is not None
-
-            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
-            num_prompt_tokens = self.input_batch.num_prompt_tokens[i]
-
-            if num_computed_tokens < num_prompt_tokens and \
-                not self.is_decoder_only(req_id):
-                # This is prompt
+            if self._is_prompt(i, scheduler_output):
                 continue
             num_decodes += 1
         return num_decodes
@@ -3457,7 +3451,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         num_decodes = 0
         decode_index = None
         if self.use_async_scheduling:
-            num_decodes = self._get_num_decodes()
+            num_decodes = self._get_num_decodes(scheduler_output)
             decode_index = self._prepare_input_ids(scheduler_output, return_index=True)
             input_ids_hpu = self.input_ids_hpu
 
