@@ -513,6 +513,7 @@ launch_all_tests() {
     run_gsm8k_deepseek_test
     #run_gsm8k_deepseek_unified_mla_test
     run_gsm8k_qwen3_30b_test
+    run_preemption_test
     run_spec_decode_ngram_test
     run_spec_decode_eagle3_test
     run_spec_decode_eagle3_num_spec_2_test
