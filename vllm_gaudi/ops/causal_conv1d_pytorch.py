@@ -83,6 +83,17 @@ def _depthwise_conv1d_tpc(
                          f" ({width}). Convolution is not defined for this configuration.")
     out_len = x.shape[2] - width + 1
 
+    # Upcast to float32 for accumulation when using reduced-precision dtypes
+    # (bfloat16 / float16).  This matches the behaviour of F.conv1d which
+    # internally accumulates in fp32.
+    orig_dtype = x.dtype
+    needs_upcast = orig_dtype in (torch.bfloat16, torch.float16)
+    if needs_upcast:
+        x = x.float()
+        weight = weight.float()
+        if bias is not None:
+            bias = bias.float()
+
     # Broadcast weight: (dim, width) -> (1, dim, 1) per kernel tap
     w = weight.unsqueeze(0)  # (1, dim, width)
     out = x[:, :, :out_len] * w[:, :, 0:1]
@@ -91,6 +102,9 @@ def _depthwise_conv1d_tpc(
 
     if bias is not None:
         out = out + bias.unsqueeze(0).unsqueeze(-1)
+
+    if needs_upcast:
+        out = out.to(orig_dtype)
 
     return out
 
