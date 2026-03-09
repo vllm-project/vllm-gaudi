@@ -148,7 +148,7 @@ class HPUMambaMixer2(MambaMixer2):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
-        CustomOp.__init__(self)
+        super(MambaMixer2, self).__init__()
 
         self.tp_size = get_tensor_model_parallel_world_size()
 
@@ -436,6 +436,7 @@ class HPUMambaMixer2(MambaMixer2):
                 dt_limit=(0.0, float("inf")),
                 out=output.view(output.shape[0], -1, self.head_dim),
                 state_dtype=ssm_state.dtype,
+                padding_mask=padding_mask_flat,
             )[last_chunk_indices_p]
             output = output * padding_mask_flat.view(output.shape[0], 1)
 
