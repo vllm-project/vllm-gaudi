@@ -1055,6 +1055,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             return [[self._resolve_block(b) for b in bl] for bl in block_table_list]
 
         return self.defragmenter.resolve_all(block_table_list)
+
     def reset_encoder_cache(self) -> None:
         """Clear the HPU-side encoder cache storing vision embeddings.
 
