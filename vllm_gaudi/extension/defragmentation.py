@@ -225,8 +225,8 @@ class OnlineDefragmenter:
         # We only need distinct ids for a swap. They will be scaled by block_size inside swap.
         # If for some reason only 1 block exists, skip warmup gracefully.
         try:
-            k_cache = self.cache_utils.kv_caches[0][0]
-            num_blocks_available = k_cache.shape[0] // self.cache_utils.block_size
+            k_cache = self.kv_caches[0][0]
+            num_blocks_available = k_cache.shape[0] // self.block_size
         except Exception:
             num_blocks_available = 0
         if num_blocks_available < 2:
