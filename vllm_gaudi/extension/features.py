@@ -72,6 +72,10 @@ def unified_attn_dev_flags():
             'unified_attn_softmax_fa2',
             All(VersionRange(">=1.24.0.279"), Enabled('unified_attn'), Kernel(softmax_fa2), Hardware('gaudi3'),
                 Not(Enabled('unified_attn_chunked_shared_attn')))),
+        Value('unified_attn_softmax_fa2_with_inputs',
+              False,
+              env_var='VLLM_SOFTMAX_FA2_WITH_INPUTS',
+              env_var_type=boolean),
     ]
     return flags
 
