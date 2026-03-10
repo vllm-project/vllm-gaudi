@@ -1055,6 +1055,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             return [[self._resolve_block(b) for b in bl] for bl in block_table_list]
 
         return self.defragmenter.resolve_all(block_table_list)
+    def reset_encoder_cache(self) -> None:
+        """Clear the HPU-side encoder cache storing vision embeddings.
+
+        This should be called when model weights are updated to ensure
+        stale embeddings computed with old weights are not reused.
+        """
+        self.encoder_cache.clear()
 
     def _make_buffer(self, *size: Union[int, torch.SymInt], dtype: torch.dtype, numpy: bool = True) -> CpuGpuBuffer:
         return CpuGpuBuffer(*size, dtype=dtype, device=self.device, pin_memory=self.pin_memory, with_numpy=numpy)
