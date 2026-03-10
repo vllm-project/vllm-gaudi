@@ -29,7 +29,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (find_matched_target)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
     CompressedTensorsW8A8Fp8MoEMethod, CompressedTensorsWNA16MarlinMoEMethod)
-from vllm.model_executor.layers.quantization.kernels.mixed_precision import (MPLinearKernel, MPLinearLayerConfig)
+from vllm.model_executor.kernels.linear.mixed_precision import (
+    MPLinearKernel,
+    MPLinearLayerConfig,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (pack_quantized_values_into_int32,
                                                                        unpack_quantized_values_into_int32, GroupShape)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import validate_fp8_block_shape
