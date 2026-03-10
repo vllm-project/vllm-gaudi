@@ -12,6 +12,7 @@ from vllm_gaudi.extension.utils import VLLMKVCache
 from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, B2BMatmul, ModuleFusedSDPA, Softmax, VLLMFP8KVCache)
 from vllm_gaudi.extension.unified import HPUUnifiedAttentionMetadata
 import vllm_gaudi.extension.kernels as kernels
+from vllm.forward_context import ForwardContext, get_forward_context
 
 
 class HPUMLAAttention(MLAAttention):
@@ -39,6 +40,76 @@ class HPUMLAAttention(MLAAttention):
         HPUFusedSDPA = kernels.fsdpa()
         self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
             else ModuleFusedSDPA(HPUFusedSDPA)
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        output_shape: torch.Size | None = None,
+    ) -> torch.Tensor:
+        if self.calculate_kv_scales:
+            torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
+
+        if self.use_direct_call:
+            forward_context: ForwardContext = get_forward_context()
+            attn_metadata = forward_context.attn_metadata
+            if isinstance(attn_metadata, dict):
+                attn_metadata = attn_metadata[self.layer_name]
+            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+            #slot_mapping = forward_context.slot_mapping
+
+            #assert isinstance(slot_mapping, dict), (
+            #    f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
+            #)
+            #self.impl.do_kv_cache_update(
+            #    kv_c_normed,
+            #    k_pe,
+            #    self_kv_cache,
+            #    slot_mapping.get(self.layer_name),
+            #    self.kv_cache_dtype,
+            #    self._k_scale,
+            #)
+            if self.attn_backend.accept_output_buffer:
+                output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
+                self.forward_impl(
+                    q,
+                    kv_c_normed,
+                    k_pe,
+                    self_kv_cache,
+                    attn_metadata,
+                    output=output,
+                )
+                return output
+            else:
+                return self.forward_impl(q, kv_c_normed, k_pe, self_kv_cache, attn_metadata)
+        else:
+            kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
+                kv_c_normed,
+                k_pe,
+                self.layer_name,
+                self.kv_cache_dtype,
+                self._k_scale,
+            )
+            if self.attn_backend.accept_output_buffer:
+                output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
+                torch.ops.vllm.unified_mla_attention_with_output(
+                    q,
+                    kv_c_normed,
+                    k_pe,
+                    output,
+                    self.layer_name,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
+                )
+                return output
+            else:
+                return torch.ops.vllm.unified_mla_attention(
+                    q,
+                    kv_c_normed,
+                    k_pe,
+                    self.layer_name,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
+                )
 
     def forward_impl(
         self,
