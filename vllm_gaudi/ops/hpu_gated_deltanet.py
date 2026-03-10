@@ -63,7 +63,21 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         super().__init__(*args, **kwargs)
         # Assigned by model runner per KV cache group for hybrid GDN models.
         self.cache_group_idx: int | None = None
-        self.mamba_chunk_size: int = getattr(self.cache_config, "mamba_block_size", 128) if self.cache_config is not None else 128
+        # Use configured chunk size when explicitly set; otherwise default to
+        # 128 to match HPU prompt bucket alignment.
+        hf_text_config = getattr(self.model_config, "hf_text_config", None)
+        has_explicit_chunk_size = (
+            hf_text_config is not None
+            and (
+                getattr(hf_text_config, "mamba_chunk_size", None) is not None
+                or getattr(hf_text_config, "chunk_size", None) is not None
+            )
+        )
+        self.mamba_chunk_size = (
+            self.model_config.get_mamba_chunk_size()
+            if has_explicit_chunk_size
+            else 128
+        )
 
     def forward(
         self,
@@ -319,6 +333,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             ).transpose(0, 1)
             if token_mask_flat is not None:
                 mixed_qkv_non_spec = mixed_qkv_non_spec * token_mask_flat
+            #import remote_pdb; remote_pdb.set_trace()  # DEBUG
         elif num_decodes > 0:
 
             mixed_qkv_non_spec = hpu_causal_conv1d_update(
@@ -407,6 +422,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 output_final_state=True,
                 cu_seqlens=chunk_query_start_loc,
                 use_qk_l2norm_in_kernel=True,
+                chunk_size=self.mamba_chunk_size,
             )
             # Init cache
             ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
@@ -433,7 +449,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
-
+        '''
         if core_attn_out_non_spec is not None or last_recurrent_state is not None:
             save_root = "./vllm_qwen3next_debug"
             os.makedirs(save_root, exist_ok=True)
@@ -502,7 +518,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 out_path,
             )
             print(f'libin debug saved recurrent state and attention output to {out_path}')
-
+        '''
         # 3. Merge core attention output
         # Prompt prefill may keep padded/static token shape (e.g. 2048) while
         # num_actual_tokens tracks valid tokens (e.g. 39). Copy by observed

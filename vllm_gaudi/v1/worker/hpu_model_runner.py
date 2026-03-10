@@ -949,7 +949,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             )
         )
 
-        self.mamba_chunk_size = self.model_config.get_mamba_chunk_size() if self.num_mamba_like_layers > 0 else 0
+        # For HPU GDN, use configured chunk size when explicitly provided;
+        # otherwise default to 128 to match bucket alignment.
+        if self.num_mamba_like_layers > 0:
+            self.mamba_chunk_size = (
+                self.model_config.get_mamba_chunk_size()
+                if self.mamba_chunk_size_is_explicit
+                else 128
+            )
+        else:
+            self.mamba_chunk_size = 0
        
         self.use_hybrid_cache = os.getenv('VLLM_USE_HYBRID_CACHE', 'false').strip().lower() in ("1", "true")
         self.use_naive_mamba_cache_sharing = os.getenv('VLLM_USE_NAIVE_MAMBA_CACHE_SHARING',
@@ -2259,7 +2268,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             last_chunk_indices = []
             last_chunk_index = -1
             seqlen_pos = 0
-            chunk_size = self.model_config.get_mamba_chunk_size()
+            chunk_size = self.mamba_chunk_size
             for req_idx in range(len(contents.req_ids)):
                 this_num_computed = num_computed_tokens_p_cpu[req_idx].item()
                 this_new_tokens = (query_start_loc_p_cpu[req_idx + 1].item() - query_start_loc_p_cpu[req_idx].item())

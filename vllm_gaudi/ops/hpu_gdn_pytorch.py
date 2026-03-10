@@ -262,6 +262,7 @@ def hpu_chunk_gated_delta_rule(
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
+    chunk_size: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """PyTorch replacement for chunk_gated_delta_rule.
 
@@ -272,7 +273,8 @@ def hpu_chunk_gated_delta_rule(
     B, T, H, Kdim = q.shape
     _, _, HV, Vdim = v.shape
     device = q.device
-    chunk_size = 64
+    if chunk_size <= 0:
+        raise ValueError(f"chunk_size must be > 0, got {chunk_size}.")
 
     if cu_seqlens is not None:
         if B != 1:
