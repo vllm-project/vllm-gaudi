@@ -23,7 +23,7 @@ Dockerfile, refer to the [Installation](../installation.md) guide.
 
 Before you start, ensure that your environment meets the following requirements:
 
-- Ubuntu 22.04 or 24.04
+- Ubuntu 22.04 or 24.04, Red Hat Enterprise Linux (RHEL) 9.4 or 9.6
 - Python 3.10
 - Intel® Gaudi® 2 or 3 AI accelerator
 - Intel® Gaudi® software version {{ VERSION }} or later
