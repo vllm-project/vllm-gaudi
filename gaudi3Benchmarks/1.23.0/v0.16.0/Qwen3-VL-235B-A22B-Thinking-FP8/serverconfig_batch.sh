@@ -12,6 +12,7 @@ export ENABLE_FUSION_BEFORE_NORM=true
 export VLLM_SKIP_WARMUP=false
 export VLLM_GRAPH_PROMPT_RATIO=0.3
 export VLLM_CONTIGUOUS_PA=true
+export VLLM_DEFRAG=true
 vllm serve \
   --model Qwen/Qwen3-VL-235B-A22B-Thinking-FP8 \
   --port 8090 \

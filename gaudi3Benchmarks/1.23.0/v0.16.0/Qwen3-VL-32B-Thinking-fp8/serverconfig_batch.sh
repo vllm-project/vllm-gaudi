@@ -12,7 +12,6 @@ export VLLM_SKIP_WARMUP=false
 export VLLM_GRAPH_PROMPT_RATIO=0.3
 export VLLM_CONTIGUOUS_PA=true
 export VLLM_DEFRAG=true
-
 vllm serve \
   --model Qwen/Qwen3-VL-32B-Thinkking-FP8 \
   --port 8100 \
