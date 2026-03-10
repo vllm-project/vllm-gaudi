@@ -207,8 +207,7 @@ class HPUBucketingManager():
             # Safety cap for fallback: max ctx from prepared decode buckets.
             # Prevents catastrophic allocations from corrupt batch data while
             # allowing calc_fallback_value to handle moderate overflow.
-            self._fallback_max_ctx = max(
-                (ctx for _, _, ctx in self.decode_buckets), default=0)
+            self._fallback_max_ctx = max((ctx for _, _, ctx in self.decode_buckets), default=0)
             if self.num_speculative_tokens:
                 # The existing buckets are used as seed decode buckets
                 self.seed_decode_buckets = self.decode_buckets
