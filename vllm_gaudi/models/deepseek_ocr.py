@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 
 import torch
+import habana_frameworks.torch.core as htcore
 
 from vllm.distributed import get_pp_group
 from vllm.sequence import IntermediateTensors
@@ -70,6 +71,62 @@ class HpuDeepseekOCRForCausalLM(DeepseekOCRForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+    def _encode_global_features(self, image_tensor: torch.Tensor) -> torch.Tensor:
+        global_features_1 = self.sam_model(image_tensor)
+        htcore.mark_step()
+        global_features_2 = self.vision_model(image_tensor, global_features_1)
+        htcore.mark_step()
+
+        features = torch.cat(
+            (
+                global_features_2[:, 1:],
+                global_features_1.flatten(2).permute(0, 2, 1),
+            ),
+            dim=-1,
+        )
+        features = self.projector(features)
+
+        _, hw, dim = features.shape
+        side = int(hw**0.5)
+
+        features = features.view(side, side, dim)
+        newline = self.image_newline[None, None, :].expand(side, 1, dim)
+        features = torch.cat([features, newline], dim=1)
+        return features.view(-1, dim)
+
+    def _encode_local_features(self, patches: torch.Tensor, crop_shape: torch.Tensor) -> torch.Tensor | None:
+        if torch.sum(patches).item() == 0:
+            return None
+
+        local_features_1 = self.sam_model(patches)
+        htcore.mark_step()
+        local_features_2 = self.vision_model(patches, local_features_1)
+        htcore.mark_step()
+
+        local_features_1, local_features_2 = self.visual(patches)
+        features = torch.cat(
+            (
+                local_features_2[:, 1:],
+                local_features_1.flatten(2).permute(0, 2, 1),
+            ),
+            dim=-1,
+        )
+        features = self.projector(features)
+
+        _, hw, dim = features.shape
+        patch_side = int(hw**0.5)
+
+        width_tiles = int(crop_shape[0].item())
+        height_tiles = int(crop_shape[1].item())
+
+        features = (features.view(height_tiles, width_tiles, patch_side, patch_side,
+                                  dim).permute(0, 2, 1, 3, 4).reshape(height_tiles * patch_side,
+                                                                      width_tiles * patch_side, dim))
+        newline = self.image_newline[None, None, :].expand(height_tiles * patch_side, 1, dim)
+        features = torch.cat([features, newline], dim=1)
+
+        return features.view(-1, dim)
 
     def forward(
         self,
