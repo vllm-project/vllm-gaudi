@@ -2,9 +2,25 @@
 
 This document provides an overview of the features, changes, and fixes introduced in each release of the vLLM Hardware Plugin for Intel® Gaudi®.
 
+## 0.16.0
+
+This version is based on [vLLM 0.16.0](https://github.com/vllm-project/vllm/releases/tag/v0.16.0) and supports [Intel® Gaudi® Software v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
+
+This release introduces validated support and critical stability fixes for Qwen3-VL models leveraging HPUMMEncoderAttention. Performance and stability were improved through backported Mamba architecture optimizations, Docker and UBI infrastructure enhancements, and a forced CPU loading mechanism for INC quantization to prevent OOM errors.
+
+For a full list of changes, see the [Detailed Release Notes](release_notes_v0.16.0.md).
+
+## 0.15.1
+
+This version is based on [vLLM 0.15.1](https://github.com/vllm-project/vllm/releases/tag/v0.15.1) and supports [Intel® Gaudi® Software v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
+
+This release introduces validated support for Granite 4.0-h and Qwen3-VL (dense and MoE variants) on Intel Gaudi 3, alongside significant Llama 4 stability fixes. It also features major prefill performance improvements via full chunked prefill attention, FlashAttention online merge, b2b matmul operations, and KV cache sharing. Additionally, this version adds HPU ops for Mamba/SSM architectures to enable hybrid models, and introduces new support for ModelOpt FP8 quantization.
+
+For a full list of changes see the [Detailed Release Notes](release_notes_v0.15.1.md).
+
 ## 0.14.1
 
-This version is based on [vLLM 0.14.1](https://github.com/vllm-project/vllm/releases/tag/v0.14.1) with support [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html), and introduces support for the following models on Gaudi 3:
+This version is based on [vLLM 0.14.1](https://github.com/vllm-project/vllm/releases/tag/v0.14.1) with support for [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html), and introduces support for the following models on Gaudi 3:
 
 - [ibm-granite/granite-4.0-h-small](https://huggingface.co/ibm-granite/granite-4.0-h-small)
 - [Qwen/Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct)
