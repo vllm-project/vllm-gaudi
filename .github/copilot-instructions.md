@@ -42,6 +42,10 @@ The plugin follows vLLM's pluggable architecture. Key subsystems:
 
 ## Commit and PR Conventions
 
+- **Never commit directly to `main`**. Always work on a feature branch.
+  - If you have write access: create a branch in the repo (e.g., `git checkout -b my-feature`)
+  - If you don't have write access: fork the repo and create a branch in your fork
+- Create a Pull Request from your branch targeting the appropriate base branch. Default target is `main` unless a specific release branch is specified (e.g., `releases/0.16.0`)
 - All PRs are squash-merged with PR number appended: `Title (#NNN)`
 - Commit messages must include `Signed-off-by:` (enforced by pre-commit hook via DCO)
 - Common title patterns:
