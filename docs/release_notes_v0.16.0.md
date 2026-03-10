@@ -75,10 +75,6 @@ This release is based on [vLLM v0.16.0](https://github.com/vllm-project/vllm/rel
 - Fix sampler & TP>1 recompilations ([#935](https://github.com/vllm-project/vllm-gaudi/pull/935))
 - Restore default `temperature=0` for the server after #32723 ([#1037](https://github.com/vllm-project/vllm-gaudi/pull/1037))
 
-## Security
-
-When using non-default values for `presence_penalty`, `frequency_penalty`, or `repetition_penalty`, vLLM-Gaudi on `releases/v0.15.1` (or older) crashes during sampling because the internal tensor padding utility relies on NumPy, which produces tensors incompatible with `torch.compile` on HPU. The fix (PR #893) replaces the NumPy-based padding with a pure PyTorch implementation and is already included in `releases/v0.16.0` and `main`.
-
 ## Full Changelog
 
 | PR | Title | Author |
