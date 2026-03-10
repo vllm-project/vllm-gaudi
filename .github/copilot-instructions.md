@@ -6,7 +6,7 @@ This is **vllm-gaudi** — the vLLM Hardware Plugin for Intel® Gaudi® AI accel
 
 - **Package**: `vllm_gaudi` (installed as `vllm-gaudi`)
 - **License**: Apache-2.0
-- **Python**: 3.10–3.12
+- **Python**: Supported versions are defined in `pyproject.toml` (`requires-python`)
 - **Entry point**: `vllm_gaudi/__init__.py` registers the HPU platform, ops, models, and utilities into vLLM's plugin system.
 
 ## Getting Started
@@ -34,7 +34,7 @@ The plugin follows vLLM's pluggable architecture. Key subsystems:
 ## Code Style
 
 - **Formatter**: `yapf` (column limit 120) + `ruff` (line length 120)
-- **Linter**: `ruff` with pycodestyle (E), pyflakes (F), pyupgrade (UP), flake8-bugbear (B), flake8-simplify (SIM)
+- **Linter**: `ruff` with pycodestyle (E), pyflakes (F), pyupgrade (UP), flake8-bugbear (B), flake8-simplify (SIM). Note: `vllm_gaudi/extension/` is currently excluded from ruff
 - **Pre-commit hooks**: Install via `pip install -r requirements-lint.txt && pre-commit install`
 - **SPDX headers**: New Python files should include `# SPDX-License-Identifier: Apache-2.0` as the first comment line
 - **Imports**: Use absolute imports. Avoid star imports where possible (F405/F403 are currently suppressed)
@@ -45,7 +45,7 @@ The plugin follows vLLM's pluggable architecture. Key subsystems:
 - **Never commit directly to `main`**. Always work on a feature branch.
   - If you have write access: create a branch in the repo (e.g., `git checkout -b my-feature`)
   - If you don't have write access: fork the repo and create a branch in your fork
-- Create a Pull Request from your branch targeting the appropriate base branch. Default target is `main` unless a specific release branch is specified (e.g., `releases/0.16.0`)
+- Create a Pull Request from your branch targeting the appropriate base branch. Default target is `main` unless a specific release branch is specified (e.g., `releases/v0.16.0`)
 - All PRs are squash-merged with PR number appended: `Title (#NNN)`
 - Commit messages must include `Signed-off-by:` (enforced by pre-commit hook via DCO)
 - Common title patterns:
