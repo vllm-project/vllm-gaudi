@@ -158,7 +158,8 @@ RUN SYNAPSE_REVISION_RUNTIME=$(cat /etc/habanalabs/synapse_revision) && \
     dnf clean all
 
 # Install torchaudio (CPU-only, matching PT version)
-RUN pip install --no-cache-dir --no-deps --extra-index-url https://download.pytorch.org/whl/cpu \
+ARG EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir --no-deps --extra-index-url ${EXTRA_INDEX_URL} \
     torchaudio==${PT_VERSION}
 
 WORKDIR /workspace
