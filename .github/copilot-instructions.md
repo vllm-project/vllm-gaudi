@@ -15,7 +15,9 @@ See the [README — Getting Started](../README.md#getting-started) for installat
 
 ## Architecture
 
-The plugin follows vLLM's pluggable architecture. Key subsystems:
+The plugin follows vLLM's pluggable architecture. For Intel® Gaudi® hardware details (MME, TPC, profiling, etc.), see the [Intel® Gaudi® Documentation](https://docs.habana.ai/en/latest/index.html).
+
+Key subsystems:
 
 | Directory | Purpose |
 |-----------|---------|
@@ -55,6 +57,12 @@ The plugin follows vLLM's pluggable architecture. Key subsystems:
   - CI changes: `[CI] Description (#NNN)`
   - Reverts: `Revert "Original title" (#NNN)`
   - Topic tags: `[warmup][multimodal] Description (#NNN)`
+
+### Confidentiality and content rules
+
+- **No internal references**: Never include internal ticket numbers (e.g., Jira IDs), links to internal sites (Jira, Confluence, etc.), or internal file paths (e.g., `/mnt/weka/...`) in PR titles, descriptions, commit messages, or code comments
+- **No raw performance numbers**: Do not include absolute performance metrics or profiling data/screenshots. Relative improvements are acceptable (e.g., "~20% throughput gain for long contexts") but raw numbers, benchmarks, or profiler outputs must not appear in PRs
+- **PR titles must be descriptive**: Use a clear summary of the change, not a ticket reference
 
 ## Testing
 
