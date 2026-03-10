@@ -6023,43 +6023,39 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     if any(name in tensor_layers for name in g.layer_names)
                 ]
 
-            # First pass: allocate one raw bfloat16 tensor per kv_cache_tensor.
-            # The extra page accounts for the dummy block across all distinct layer types
-            # (Mamba + Attention combined), so the tensor can hold (num_blocks+1) pages
-            # for each spec type without running out of space.
-            raw_tensors: dict[int, torch.Tensor] = {}
-            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                seen_spec_types: set[type] = set()
-                extra_page = 0
-                for g in tensor_to_groups[id(kv_cache_tensor)]:
-                    if type(g.kv_cache_spec) not in seen_spec_types:
-                        seen_spec_types.add(type(g.kv_cache_spec))
-                        extra_page += g.kv_cache_spec.page_size_bytes
-                size = kv_cache_tensor.size + extra_page
-                tensor = torch.zeros(size // 2, dtype=torch.bfloat16, device=self.device)
-                raw_tensors[id(kv_cache_tensor)] = tensor
-                for layer_name in kv_cache_tensor.shared_by:
-                    kv_caches[layer_name] = tensor
-
             # Use the actual number of allocatable blocks from the KV cache config.
             # Previously num_blocks was computed as kv_cache_tensor_size // spec.page_size_bytes,
             # which is inflated (it divides the combined tensor size by a single spec's page size),
             # causing Mamba data to nearly fill the entire tensor and leaving no room for Attention.
             num_blocks = kv_cache_config.num_blocks
 
-            # Second pass: compute the byte offset where Attention data begins for each tensor.
-            # Mamba uses an interleaved page layout: (num_blocks+1) pages × mamba_page_size bytes.
-            # Attention K and V caches are placed immediately after the Mamba data region.
+            # First pass: allocate one raw bfloat16 tensor per kv_cache_tensor and record offsets.
+            # In the naive sharing scheme all Mamba layers share one memory region and all
+            # Attention layers share one K region plus one V region within the same allocation.
+            # Memory layout within each raw tensor (bytes):
+            #   [0 ... mamba_end)          Mamba interleaved pages  (all Mamba layers)
+            #   [mamba_end ... k_end)      Attention K cache         (all Attn layers, shared)
+            #   [k_end ... v_end)          Attention V cache         (all Attn layers, shared)
+            # Size = (num_blocks+1) × (mamba_page + 2 × attn_page)
+            raw_tensors: dict[int, torch.Tensor] = {}
             mamba_end_bytes: dict[int, int] = {}
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                end_bytes = 0
+                mamba_page = 0
+                attn_page = 0
                 for g in tensor_to_groups[id(kv_cache_tensor)]:
-                    if isinstance(g.kv_cache_spec, MambaSpec):
-                        end_bytes = (num_blocks + 1) * g.kv_cache_spec.page_size_bytes
-                        break
-                mamba_end_bytes[id(kv_cache_tensor)] = end_bytes
+                    if isinstance(g.kv_cache_spec, MambaSpec) and mamba_page == 0:
+                        mamba_page = g.kv_cache_spec.page_size_bytes
+                    elif isinstance(g.kv_cache_spec, FullAttentionSpec) and attn_page == 0:
+                        attn_page = g.kv_cache_spec.page_size_bytes
+                # Attention requires two regions of attn_page each: one for K, one for V.
+                size = (num_blocks + 1) * (mamba_page + 2 * attn_page)
+                tensor = torch.zeros(size // 2, dtype=torch.bfloat16, device=self.device)
+                raw_tensors[id(kv_cache_tensor)] = tensor
+                for layer_name in kv_cache_tensor.shared_by:
+                    kv_caches[layer_name] = tensor
+                mamba_end_bytes[id(kv_cache_tensor)] = (num_blocks + 1) * mamba_page
 
-            # Third pass: create typed strided views for each layer within the shared raw tensor.
+            # Second pass: create typed strided views for each layer within the shared raw tensor.
             for group in kv_cache_config.kv_cache_groups:
                 kv_cache_spec = group.kv_cache_spec
                 for layer_name in group.layer_names:
