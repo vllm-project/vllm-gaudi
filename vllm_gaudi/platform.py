@@ -112,7 +112,6 @@ class HpuPlatform(Platform):
         # smaller sizes still work, but very inefficiently
         cache_config = vllm_config.cache_config
         if not cache_config.user_specified_block_size:
-            #if cache_config and cache_config.block_size is None:
             cache_config.block_size = 128
         if (parallel_config.distributed_executor_backend in ['mp', 'uni']
                 and envs.VLLM_WORKER_MULTIPROC_METHOD == 'fork'):
