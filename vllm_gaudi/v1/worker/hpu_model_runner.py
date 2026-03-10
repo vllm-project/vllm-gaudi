@@ -6030,12 +6030,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     num_blocks = \
                         kv_cache_tensor_size // kv_cache_spec.page_size_bytes
                     if isinstance(kv_cache_spec, FullAttentionSpec):
-                        reshaped = kv_caches[layer_name].view(kv_cache_spec.dtype).reshape(
-                            2, (num_blocks + 1) * kv_cache_spec.block_size,
-                            kv_cache_spec.num_kv_heads, kv_cache_spec.head_size
-                        )
-                        kc, vc = reshaped.unbind()  # (key cache, val cache)
-                        # adding None for scales for dynamic quantization for now, TODO: change that once needed
+                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
+                                                                              kv_cache_spec.num_kv_heads,
+                                                                              kv_cache_spec.head_size)
+                        # Attention does not share memory with Mamba layers even when they share the
+                        # same kv_cache_tensor allocation; create separate tensors to avoid overlap.
+                        kc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
+                        vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         kv_caches[layer_name] = (kc, vc, None, None)
                     elif isinstance(kv_cache_spec, MambaSpec):
                         # This is almost the same as for gpu runner in vllm
