@@ -65,9 +65,10 @@ RUN \
 # --- END: COMBINED RUN COMMAND ---
 
 # Install additional Python packages
+ARG EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu
 RUN pip install datasets && \
     pip install pandas && \
-    pip install --no-cache-dir --no-deps --extra-index-url https://download.pytorch.org/whl/cpu \
+    pip install --no-cache-dir --no-deps --extra-index-url ${EXTRA_INDEX_URL} \
     torchaudio==${PT_VERSION}
 
 # Copy utility scripts and configuration
