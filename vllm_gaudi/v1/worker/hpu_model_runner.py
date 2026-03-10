@@ -45,6 +45,7 @@ from vllm.model_executor.layers.attention import MLAAttention
 from vllm.v1.attention.selector import get_attn_backend
 
 from vllm.config import (VllmConfig, get_layers_from_vllm_config, update_config)
+from vllm.config.cache import CacheConfig
 from vllm.config.multimodal import ImageDummyOptions, VideoDummyOptions
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
@@ -834,7 +835,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.sliding_window = model_config.get_sliding_window()
         self.interleaved_sliding_window = (is_interleaved(vllm_config.model_config.hf_text_config)
                                            and self.sliding_window)
-        self.block_size = cache_config.block_size
+        placeholder_block_size = (self.cache_config.block_size or CacheConfig.DEFAULT_BLOCK_SIZE)
+        self._init_block_sizes = [placeholder_block_size]
+        self._init_kernel_block_sizes = [placeholder_block_size]
+        self.block_size = placeholder_block_size  #cache_config.block_size
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         # Override settings when profiling a single prefill/decode
@@ -878,7 +882,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.head_size,
             self.dtype,
             self.kv_cache_dtype_str,
-            self.block_size,
+            #self.block_size,
             use_mla=self.model_config.use_mla,
         )
         self.attn_backend_name = getattr(self.attn_backend, "__name__", None)
@@ -954,6 +958,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
         # Persistent batch.
+
+        placeholder_block_size = (self.cache_config.block_size or CacheConfig.DEFAULT_BLOCK_SIZE)
+        self._init_block_sizes = [placeholder_block_size]
+        self._init_kernel_block_sizes = [placeholder_block_size]
 
         self.input_batch = InputBatch(
             max_num_reqs=self.scheduler_config.max_num_seqs,
@@ -6196,11 +6204,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if not isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec)
         ]
 
-        if block_sizes != [self.cache_config.block_size] or kernel_block_sizes != [self.cache_config.block_size]:
+        if block_sizes != self._init_block_sizes or kernel_block_sizes != self._init_kernel_block_sizes:
             assert self.cache_config.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
                 "for more details.")
+            self._init_block_sizes = block_sizes
+            self._init_kernel_block_sizes = kernel_block_sizes
             self.input_batch = InputBatch(
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=max(self.max_model_len, self.max_encoder_len),
