@@ -9,6 +9,10 @@ This is **vllm-gaudi** — the vLLM Hardware Plugin for Intel® Gaudi® AI accel
 - **Python**: 3.10–3.12
 - **Entry point**: `vllm_gaudi/__init__.py` registers the HPU platform, ops, models, and utilities into vLLM's plugin system.
 
+## Getting Started
+
+See the [README — Getting Started](../README.md#getting-started) for installation instructions (vLLM checkout, plugin install, Docker).
+
 ## Architecture
 
 The plugin follows vLLM's pluggable architecture. Key subsystems:
