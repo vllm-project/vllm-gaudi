@@ -257,8 +257,11 @@ class HPUWorker(WorkerBase):
         # recipes we will use the extra memory for graphs/blocks
         free_hpu_memory = torch.hpu.mem_get_info()[0]
 
-        graph_reserved_mem = (float(os.environ.get('VLLM_GRAPH_RESERVED_MEM', '0.1'))
-                              if not self.model_config.enforce_eager else 0)
+        use_hpu_graph = get_config().bridge_mode == 'lazy' \
+            and not self.model_config.enforce_eager
+        graph_reserved_mem = float(
+            os.environ.get('VLLM_GRAPH_RESERVED_MEM', '0.1')
+        ) if use_hpu_graph else 0
         graph_headroom = 1 - graph_reserved_mem
         available_hpu_memory = free_hpu_memory * \
             self.cache_config.gpu_memory_utilization
