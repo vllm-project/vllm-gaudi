@@ -2024,8 +2024,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 num_output_logits = max(0, seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1)
             # Cap to scheduled tokens (needed when decode recomputation
             # requests are routed through the prefill path).
-            num_output_logits = min(num_output_logits,
-                                    seq_num_scheduled_tokens)
+            num_output_logits = min(num_output_logits, seq_num_scheduled_tokens)
             logits_positions = list(range(seq_num_scheduled_tokens - num_output_logits, seq_num_scheduled_tokens))
 
             new_batch_contents = BatchContents(
@@ -5034,8 +5033,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # Consider the token space for draft tokens to propose
             # The draft tokens for eagle consumes block table space
             num_lookahead_tokens += self.speculative_config.num_speculative_tokens
-        seq_lengths = [min(b * block_size - num_lookahead_tokens,
-                           self.max_model_len) for b in blocks]
+        seq_lengths = [min(b * block_size - num_lookahead_tokens, self.max_model_len) for b in blocks]
         return seq_lengths
 
     def distribute_sum_evenly(self, total_sum, max_length):
