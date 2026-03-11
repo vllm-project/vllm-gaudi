@@ -226,7 +226,6 @@ def hpu_causal_conv1d_fn(
     # Update cache with the latest state_len tokens for this sequence
     with torch.no_grad():
         conv_states[batch_cache_idx, -state_len:, :] = new_state.transpose(-1, -2)
-        
 
     return seq_out.squeeze(0).to(original_dtype)
 

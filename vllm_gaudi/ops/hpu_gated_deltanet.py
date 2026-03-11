@@ -223,7 +223,6 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 f"Invalid cache_group_idx={cache_group_idx} for "
                 f"state_indices_tensor rows={non_spec_state_indices_tensor.size(0)}"
             )
-            print(f"libin debug cache group idx: {cache_group_idx}")
             non_spec_state_indices_tensor = non_spec_state_indices_tensor[int(cache_group_idx)]
         ssm_state = self_kv_cache[1]
         # TrimmedAttentionMetadata on Gaudi does not expose upstream
@@ -264,7 +263,6 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         num_prefills = 1 if is_prompt else 0
         num_decodes = 0 if is_prompt else 1
         if not is_prompt:
-            print(f"libin debug decode {mixed_qkv.shape=} {b.shape=} {a.shape=} {num_actual_tokens=}")
             mixed_qkv = mixed_qkv[:num_actual_tokens]
             b = b[:num_actual_tokens]
             a = a[:num_actual_tokens]
@@ -518,7 +516,6 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 },
                 out_path,
             )
-            print(f'libin debug saved recurrent state and attention output to {out_path}')
         '''
         # 3. Merge core attention output
         # Prompt prefill may keep padded/static token shape (e.g. 2048) while

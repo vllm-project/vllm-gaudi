@@ -333,7 +333,6 @@ def hpu_fused_recurrent_gated_delta_rule(
     num_state_indices = (
         int(state_indices_tensor.shape[0]) if state_indices_tensor is not None else 0
     )
-    #print(f"libin debug recur {seq_ranges=}")
     for seq_id, (bos, eos) in enumerate(seq_ranges):
         if eos <= bos:
             continue
@@ -348,10 +347,8 @@ def hpu_fused_recurrent_gated_delta_rule(
             safe_idx = torch.where(valid_seq, raw_idx, torch.zeros_like(raw_idx))
             prev_state = state_work.index_select(0, safe_idx)
             h_state = prev_state.squeeze(0)
-            print(f"libin debug recurrent rule seq_id={seq_id} raw_idx={raw_idx.item()} safe_idx={safe_idx.item()} valid_seq={valid_seq.item()}")  # --- IGNORE ---'')
         else:
             h_state = state_work[seq_id]
-            print(f"libin debug recurrent rule seq_id={seq_id}")
 
         for t in range(bos, eos):
             q_t = qf[t]

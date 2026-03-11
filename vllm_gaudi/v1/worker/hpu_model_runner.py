@@ -5791,7 +5791,29 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         kv_caches: dict[str, torch.Tensor] = {}
         num_blocks = 0
         if self.use_hybrid_cache and self.num_mamba_like_layers > 0:
+            # Build layer_name -> spec lookup for skipping raw buffer
+            # allocation for GDN/linear_attention groups (they use
+            # contiguous tensors instead).
+            _layer_spec: dict[str, KVCacheSpec] = {}
+            for group in kv_cache_config.kv_cache_groups:
+                for ln in group.layer_names:
+                    _layer_spec[ln] = group.kv_cache_spec
+
+            def _needs_raw_buffer(kv_cache_tensor) -> bool:
+                """Return False if all layers in this tensor are
+                GDN/linear_attention MambaSpec (they will get contiguous
+                tensors later)."""
+                for ln in kv_cache_tensor.shared_by:
+                    spec = _layer_spec.get(ln)
+                    if not isinstance(spec, MambaSpec) or \
+                            spec.mamba_type not in ("gdn_attention",
+                                                    "linear_attention"):
+                        return True
+                return False
+
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+                if not _needs_raw_buffer(kv_cache_tensor):
+                    continue
                 # taking into account dummy block
                 size = (kv_cache_tensor.size + kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes)
                 tensor = torch.zeros(size // 2, dtype=torch.bfloat16, device=self.device)
@@ -5817,27 +5839,57 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         kc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         kv_caches[layer_name] = (kc, vc, None, None)
-                    elif isinstance(kv_cache_spec, MambaSpec):
-                        # This is almost the same as for gpu runner in vllm
-                        # only change is + 1 for dummy block
-                        raw_tensor = kv_caches[layer_name]
+                    elif isinstance(kv_cache_spec, MambaSpec) and \
+                            kv_cache_spec.mamba_type in ("gdn_attention", "linear_attention"):
+                        # HPU does not correctly handle fancy indexing on
+                        # non-contiguous strided views (as_strided with page
+                        # gaps) for GDN/linear_attention layers.  Allocate
+                        # plain contiguous tensors instead, matching the naive
+                        # path's layout which is proven accurate.
+                        # Skip if already created by a sibling layer sharing
+                        # the same kv_cache_tensor (same as naive path).
+                        if isinstance(kv_caches.get(layer_name), tuple):
+                            continue
                         state_tensors = []
-                        storage_offset_bytes = 0
                         for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                            dtype_size = get_dtype_size(dtype)
-                            num_element_per_page = (kv_cache_spec.page_size_bytes // dtype_size)
                             target_shape = (num_blocks + 1, *shape)
-                            stride = torch.empty(target_shape).stride()
-                            target_stride = (num_element_per_page, *stride[1:])
-                            assert storage_offset_bytes % dtype_size == 0
-                            tensor = torch.as_strided(
-                                raw_tensor,
-                                size=target_shape,
-                                stride=target_stride,
-                                storage_offset=storage_offset_bytes // dtype_size,
-                            )
+                            tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
                             state_tensors.append(tensor)
-                            storage_offset_bytes += stride[0] * dtype_size
+                        # Propagate to all layers sharing the same kv_cache_tensor.
+                        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+                            if layer_name not in kv_cache_tensor.shared_by:
+                                continue
+                            for shared_layer in kv_cache_tensor.shared_by:
+                                kv_caches[shared_layer] = tuple(state_tensors)
+                            break
+                    elif isinstance(kv_cache_spec, MambaSpec):
+                        # Standard Mamba2 and other MambaSpec types: use the
+                        # original as_strided interleaved layout from the raw
+                        # shared buffer.
+                        raw = kv_caches[layer_name]
+                        offset = 0
+                        state_tensors = []
+                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                            numel_per_block = math.prod(shape)
+                            elem_size = raw.element_size()
+                            target_dtype_size = get_dtype_size(dtype)
+                            # view raw bf16 buffer as target dtype
+                            raw_view = raw.view(dtype) if dtype != raw.dtype else raw
+                            target_shape = (num_blocks + 1, *shape)
+                            stride_inner = []
+                            s = 1
+                            for d in reversed(shape):
+                                stride_inner.append(s)
+                                s *= d
+                            stride_inner.reverse()
+                            page_numel = kv_cache_spec.page_size_bytes // target_dtype_size
+                            stride_block = page_numel
+                            full_stride = (stride_block, *stride_inner)
+                            storage_offset = offset // target_dtype_size
+                            t = torch.as_strided(
+                                raw_view, target_shape, full_stride, storage_offset)
+                            state_tensors.append(t)
+                            offset += numel_per_block * target_dtype_size
                         kv_caches[layer_name] = tuple(state_tensors)
                     else:
                         pass
