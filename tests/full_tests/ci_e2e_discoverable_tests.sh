@@ -1,8 +1,18 @@
 #!/bin/bash
 
-# Exit immediately if a command exits with a non-zero status.
-# This ensures that if any test fails, the script will stop.
-set -e
+# Allow sourcing this script to import helper functions (write_junit_xml, etc.)
+# without executing any test or modifying shell options.
+# Usage: source ci_e2e_discoverable_tests.sh __source_only__
+# This guard MUST stay before 'set -e' to avoid altering the caller's shell.
+if [[ "${1:-}" == "__source_only__" ]]; then
+  # Skip set -e and the entrypoint; only define the functions below.
+  _CI_E2E_SOURCE_ONLY=1
+else
+  _CI_E2E_SOURCE_ONLY=0
+  # Exit immediately if a command exits with a non-zero status.
+  # This ensures that if any test fails, the script will stop.
+  set -e
+fi
 
 # --- Configuration ---
 # Defines the path to the vllm-gaudi directory.
@@ -10,6 +20,75 @@ set -e
 VLLM_GAUDI_PREFIX=${VLLM_GAUDI_PREFIX:-"vllm-gaudi"}
 echo $VLLM_GAUDI_PREFIX
 
+# --- JUnit XML Reporting ---
+# When TEST_RESULTS_DIR is set (e.g. by Jenkins), generate JUnit XML reports
+# so that Jenkins can parse and display test results.
+# This mirrors the behavior of .jenkins/lm-eval-harness/run-tests.sh.
+
+# Returns pytest JUnit XML flags for a given test name.
+# Usage: pytest ... $(get_pytest_junit_args "test_name")
+get_pytest_junit_args() {
+    local test_name="$1"
+    if [[ -n "$TEST_RESULTS_DIR" ]]; then
+        local random_suffix
+        random_suffix=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 4; echo)
+        local log_path="${TEST_RESULTS_DIR}/test_${test_name}_${random_suffix}.xml"
+        echo "-o junit_family=xunit1 --junitxml=${log_path}"
+    fi
+}
+
+# Writes a JUnit XML result file for non-pytest tests (plain python scripts).
+# Usage: write_junit_xml "test_name" exit_code elapsed_seconds "optional error message"
+write_junit_xml() {
+    local test_name="$1"
+    local exit_code="$2"
+    local elapsed="${3:-0}"
+    local error_msg="${4:-}"
+    if [[ -z "$TEST_RESULTS_DIR" ]]; then
+        return
+    fi
+    local random_suffix
+    random_suffix=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 4; echo)
+    local log_path="${TEST_RESULTS_DIR}/test_${test_name}_${random_suffix}.xml"
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S")
+    if [[ "$exit_code" -eq 0 ]]; then
+        cat > "$log_path" <<EOF
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+  <testsuite name="${test_name}" tests="1" errors="0" failures="0" skipped="0" timestamp="${timestamp}" time="${elapsed}">
+    <testcase classname="e2e_tests" name="${test_name}" time="${elapsed}"/>
+  </testsuite>
+</testsuites>
+EOF
+    else
+        cat > "$log_path" <<EOF
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+  <testsuite name="${test_name}" tests="1" errors="0" failures="1" skipped="0" timestamp="${timestamp}" time="${elapsed}">
+    <testcase classname="e2e_tests" name="${test_name}" time="${elapsed}">
+      <failure message="Test failed with exit code ${exit_code}">${error_msg}</failure>
+    </testcase>
+  </testsuite>
+</testsuites>
+EOF
+    fi
+}
+
+# Runs a non-pytest python command and generates JUnit XML for the result.
+# Usage: run_with_junit "test_name" command [args...]
+run_with_junit() {
+    local test_name="$1"
+    shift
+    local start_time=$SECONDS
+    local exit_code=0
+    "$@" || exit_code=$?
+    local elapsed=$(( SECONDS - start_time ))
+    write_junit_xml "$test_name" "$exit_code" "$elapsed"
+    if [[ "$exit_code" -ne 0 ]]; then
+        return "$exit_code"
+    fi
+}
 
 
 # --- Loading and Generation tests ---
@@ -535,15 +614,46 @@ usage() {
 
 # --- Script Entry Point ---
 
+# If sourced with __source_only__, stop here — functions are defined, nothing to run.
+if [[ "$_CI_E2E_SOURCE_ONLY" -eq 1 ]]; then
+  return 0 2>/dev/null || true
+fi
+
 # Default to 'run_all_tests' if no function name is provided as an argument.
 # The ${1:-run_all_tests} syntax means "use $1 if it exists, otherwise use 'run_all_tests'".
 FUNCTION_TO_RUN=${1:-launch_all_tests}
 
+# Set up JUnit XML reporting for pytest invocations within the test function.
+# When TEST_RESULTS_DIR is set (by Jenkins), any pytest call will automatically
+# produce a JUnit XML report, matching the behavior of .jenkins/lm-eval-harness/run-tests.sh.
+if [[ -n "${TEST_RESULTS_DIR:-}" ]]; then
+  mkdir -p "$TEST_RESULTS_DIR"
+  JUNIT_XML_PATH="${TEST_RESULTS_DIR}/test_${FUNCTION_TO_RUN}.xml"
+  export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} -o junit_family=xunit1 --junitxml=${JUNIT_XML_PATH}"
+  echo "JUnit XML reporting enabled: ${JUNIT_XML_PATH}"
+fi
+
 # Check if the provided argument corresponds to a declared function in this script.
 if declare -f "$FUNCTION_TO_RUN" > /dev/null
 then
-  # If the function exists, call it.
-  "$FUNCTION_TO_RUN"
+  # Run the function in a subshell with set -e re-enabled so that multi-command
+  # test functions correctly fail on the FIRST failing command rather than
+  # silently continuing (set +e in the parent would otherwise disable errexit
+  # inside the function body).
+  local_start=$SECONDS
+  set +e
+  (set -e; "$FUNCTION_TO_RUN")
+  TEST_EXIT_CODE=$?
+  set -e
+  ELAPSED=$(( SECONDS - local_start ))
+
+  # For non-pytest tests (python scripts), generate JUnit XML from the exit code.
+  # If pytest already wrote the XML file, this is a no-op (write_junit_xml checks TEST_RESULTS_DIR).
+  if [[ -n "${TEST_RESULTS_DIR:-}" && ! -f "$JUNIT_XML_PATH" ]]; then
+    write_junit_xml "$FUNCTION_TO_RUN" "$TEST_EXIT_CODE" "$ELAPSED"
+  fi
+
+  exit $TEST_EXIT_CODE
 else
   # If the function doesn't exist, show an error and the usage guide.
   echo "❌ Error: Function '${FUNCTION_TO_RUN}' is not defined."

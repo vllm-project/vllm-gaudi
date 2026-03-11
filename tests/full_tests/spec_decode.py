@@ -154,8 +154,8 @@ def test_ngram(is_enable, args, prompts, sampling_params, task_key, result_queue
 
 def test_eagle_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
     VLLM_CLS = LLM if prompts is not None else VLLM
-    kwargs = {"model":"meta-llama/Meta-Llama-3-8B-Instruct"} if prompts is not None \
-        else {"pretrained":"meta-llama/Meta-Llama-3-8B-Instruct","batch_size":"16"}
+    kwargs = {"model":"meta-llama/Llama-3.1-8B-Instruct"} if prompts is not None \
+        else {"pretrained":"meta-llama/Llama-3.1-8B-Instruct","batch_size":"16"}
     try:
         if not is_enable:
             llm = VLLM_CLS(
@@ -190,8 +190,8 @@ def test_eagle_model(is_enable, args, prompts, sampling_params, task_key, result
 
 def test_eagle3_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
     VLLM_CLS = LLM if prompts is not None else VLLM
-    kwargs = {"model":"meta-llama/Meta-Llama-3-8B-Instruct",} if prompts is not None \
-        else {"pretrained":"meta-llama/Meta-Llama-3-8B-Instruct","batch_size":"16"}
+    kwargs = {"model":"meta-llama/Llama-3.1-8B-Instruct",} if prompts is not None \
+        else {"pretrained":"meta-llama/Llama-3.1-8B-Instruct","batch_size":"16"}
     try:
         if not is_enable:
             llm = VLLM_CLS(
