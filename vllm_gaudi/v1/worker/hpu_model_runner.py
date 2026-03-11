@@ -5104,7 +5104,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             for cache in cache_or_cachelist:
                 if cache is None:
                     continue
-                kv_cache_per_layer.append(cache.view(-1, self.block_size, *cache.shape[1:]))
+                cache_4d = cache.view(-1, self.block_size,
+                                      *cache.shape[1:])
+                # Exclude dummy/padding block (last block) so that the
+                # number of blocks matches kv_cache_config.num_blocks
+                # expected by the NIXL connector (GAUDISW-247260).
+                cache_4d = cache_4d[:-1]
+                kv_cache_per_layer.append(cache_4d)
                 #NOTE(Chendi): Do not remove, call torch data_ptr to record physical address
                 cache.data_ptr()
             kv_caches_4D[layer_name] = TensorTuple(tuple(kv_cache_per_layer)) \
