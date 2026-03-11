@@ -157,9 +157,10 @@ class OnlineDefragmenter:
             for b in blocks:
                 self.use_block(self.resolve(b))
         for req_id in finished_reqs:
-            for b in self.req_blocks[req_id]:
-                self.free_block(self.resolve(b))
-            del self.req_blocks[req_id]
+            if req_id in self.req_blocks:  # this check is needed in case user cancels a request (Ctrl+C) before it is added to req_blocks
+                for b in self.req_blocks[req_id]:
+                    self.free_block(self.resolve(b))
+                del self.req_blocks[req_id]
 
     def free_blocks(self):
         """ Free block generator """

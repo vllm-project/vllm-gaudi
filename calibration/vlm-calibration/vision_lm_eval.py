@@ -4,6 +4,7 @@ This example shows how to use vLLM for running offline inference with
 multi-image input on vision language models for text generation,
 using the chat template defined by the model.
 """
+import os
 
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -11,10 +12,11 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from lm_eval import tasks, evaluator
 from lm_eval.models.vllm_vlms import VLLM_VLM
 
+os.environ["VLLM_SKIP_WARMUP"] = "true"
 IMAGE_LIMIT = 1
 
 
-def run_generate():
+def run_generate(args):
     config_template_bf16 = {
         "model_name": "REPLACE_ME",
         "lm_eval_kwargs": {
@@ -35,7 +37,6 @@ def run_generate():
             **config_template_bf16["vllm_kwargs"],
             "quantization": args.quantization,
             "kv_cache_dtype": args.kv_cache_dtype,
-            "weights_load_device": args.weights_load_device,
         }
     }
     config_template_vision_fp8 = {
@@ -46,24 +47,23 @@ def run_generate():
         },
         "vllm_kwargs": {
             **config_template_fp8["vllm_kwargs"],
-            "max_num_seqs": 32,
-            "use_padding_aware_scheduling": True,
-            "max_num_prefill_seqs": 1,  # TODO: remove when higher prefill batch size will be supported
+            "max_num_seqs": 32,  # (afierka) TODO: remove hardcoding and add param for max_num_seqs
             "disable_log_stats": True,  # TODO: investigate error when running with log stats
         },
     }
     lm_instance_cfg = {
         **config_template_vision_fp8,
-        "model_name": "Meta-Llama-3.2-11B-Vision-Instruct",
+        "model_name": args.model_path,
         "lm_eval_kwargs": {
             **config_template_vision_fp8["lm_eval_kwargs"],
-            "batch_size": 8,
+            "batch_size": 8,  # (afierka) TODO: add param for batch size and remove hardcoding
         },
         "vllm_kwargs": {
             **config_template_vision_fp8["vllm_kwargs"],
             "pretrained": args.model_path,
             "enforce_eager": args.enforce_eager,
             "max_model_len": args.max_model_len,
+            "enable_expert_parallel": args.expert_parallel,
         },
     }
     lm = VLLM_VLM(**lm_instance_cfg["vllm_kwargs"], **lm_instance_cfg["lm_eval_kwargs"])
@@ -72,7 +72,7 @@ def run_generate():
     task_manager = tasks.TaskManager(include_path="./meta-configs")
     task_dict = tasks.get_task_dict(task_name, task_manager)
     eval_kwargs = {
-        "limit": 1,
+        "limit": 1,  # (afierka) TODO: remove hardcoding and add param for limit
         "fewshot_as_multiturn": True,
         "apply_chat_template": True,
     }
@@ -82,7 +82,7 @@ def run_generate():
 
 
 def main(args):
-    run_generate()
+    run_generate(args)
 
 
 if __name__ == "__main__":
@@ -90,6 +90,7 @@ if __name__ == "__main__":
                                     'vision language models that support multi-image input for text '
                                     'generation')
     parser.add_argument('--model-path', '-p', type=str, default="", help='Huggingface model path')
+    parser.add_argument('--expert-parallel', action='store_true', help='Whether to use expert parallel')
     parser = AsyncEngineArgs.add_cli_args(parser)
 
     args = parser.parse_args()

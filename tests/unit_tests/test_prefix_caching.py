@@ -16,7 +16,6 @@ DEVICE = current_platform.device_type
 def get_vllm_config():
     model_config = ModelConfig(
         model="facebook/opt-125m",
-        task="generate",
         tokenizer="facebook/opt-125m",
         tokenizer_mode="auto",
         trust_remote_code=True,
@@ -32,7 +31,6 @@ def get_vllm_config():
     cache_config = CacheConfig(
         block_size=128,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype="auto",
     )
     parallel_config = ParallelConfig()

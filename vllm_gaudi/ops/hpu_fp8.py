@@ -15,6 +15,34 @@ from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.utils import has_quant_config
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
 
+from vllm.model_executor.kernels import linear as scaled_mm
+from vllm.platforms import PlatformEnum
+from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
+    PerTensorTorchFP8ScaledMMLinearKernel,
+    ChannelWiseTorchFP8ScaledMMLinearKernel,
+)
+
+
+class HPUPerTensorTorchFP8ScaledMMLinearKernel(PerTensorTorchFP8ScaledMMLinearKernel):
+
+    @classmethod
+    def is_supported(cls, compute_capability: int | None = None) -> tuple[bool, str | None]:
+        return True, None
+
+
+class HPUChannelWiseTorchFP8ScaledMMLinearKernel(ChannelWiseTorchFP8ScaledMMLinearKernel):
+
+    @classmethod
+    def is_supported(cls, compute_capability: int | None = None) -> tuple[bool, str | None]:
+        return True, None
+
+
+if PlatformEnum.OOT not in scaled_mm._POSSIBLE_FP8_KERNELS:
+    scaled_mm._POSSIBLE_FP8_KERNELS[PlatformEnum.OOT] = [
+        HPUPerTensorTorchFP8ScaledMMLinearKernel,
+        HPUChannelWiseTorchFP8ScaledMMLinearKernel,
+    ]
+
 
 class Fp8LinearMethod(OrigFp8LinearMethod):
 
@@ -124,8 +152,8 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         ep_shift = layer.ep_rank * num_experts
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
-        if layer.dp_size > 1 and self.use_dispatch_fn:
-            dispatch_fn = partial(dispatch_hidden_states, is_sequence_parallel=layer.is_sequence_parallel)
+        if layer.moe_config.dp_size > 1 and self.use_dispatch_fn:
+            dispatch_fn = partial(dispatch_hidden_states, is_sequence_parallel=layer.moe_config.is_sequence_parallel)
         else:
             dispatch_fn = None
 
@@ -148,6 +176,11 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         if self.block_quant:
             layer = hpu_ops.fp8_block_moe_prepare_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
         else:
+            if self.quant_config.activation_scheme == "static":
+                if (layer.w13_input_scale is None or layer.w2_input_scale is None):
+                    raise ValueError("QuantConfig has static quantization, but found "
+                                     "activation scales are None.")
+                layer.w13_input_scale = torch.nn.Parameter(layer.w13_input_scale.max(), requires_grad=False)
             layer = hpu_ops.fp8_channel_moe_prepare_weights(layer)
 
     def apply_monolithic(
@@ -157,6 +190,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         router_logits: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
+        is_sequence_parallel = layer.moe_config.is_sequence_parallel
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
@@ -172,17 +206,17 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
             topk_ids = topk_ids.to(torch.int64)
             topk_weights = topk_weights.to(x.dtype)
 
-        if layer.dp_size > 1:
+        if layer.moe_config.dp_size > 1:
             dp_metadata = get_hpu_dp_metadata()
             if not (has_quant_config(layer.vllm_config.model_config) and self.use_dispatch_fn):
                 hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
-                x = dispatch_tensor(x, hidden_states_across_dp, layer.is_sequence_parallel)
+                x = dispatch_tensor(x, hidden_states_across_dp, is_sequence_parallel)
 
             topk_ids_across_dp = dp_metadata.topk_ids_across_dp if dp_metadata is not None else None
-            topk_ids = dispatch_tensor(topk_ids, topk_ids_across_dp, layer.is_sequence_parallel)
+            topk_ids = dispatch_tensor(topk_ids, topk_ids_across_dp, is_sequence_parallel)
 
             topk_weights_across_dp = dp_metadata.topk_weights_across_dp if dp_metadata is not None else None
-            topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, layer.is_sequence_parallel)
+            topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, is_sequence_parallel)
 
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])

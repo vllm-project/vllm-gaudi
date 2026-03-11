@@ -13,11 +13,12 @@ import torch
 import vllm_gaudi.extension.kernels as kernels
 import vllm_gaudi.extension.ops as ops
 from vllm_gaudi.extension.runtime import get_config
-from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, ModuleFusedSDPA, Softmax, VLLMFP8KVCache, VLLMKVCache)
+from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, B2BMatmul, ModuleFusedSDPA, ModuleFP8FusedSDPA, Softmax,
+                                        VLLMFP8KVCache, VLLMKVCache)
 
 from vllm.v1.attention.backend import (AttentionBackend, AttentionImpl, AttentionLayer, AttentionMetadata,
                                        AttentionType)
-from vllm.model_executor.layers.attention.mla_attention import MLACommonImpl
+from vllm.model_executor.layers.attention.mla_attention import (MLACommonImpl)
 from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention, HPUPagedAttentionMetadata,
                                                      HPUPagedAttentionMetadataBuilder)
 
@@ -148,6 +149,7 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
     block_size: int
+    prep_initial_states: bool
     slot_mapping: torch.Tensor
     attn_bias: Optional[torch.Tensor]
     seq_lens_tensor: Optional[torch.Tensor]
@@ -175,6 +177,9 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     chunked_block_list: Optional[torch.Tensor] = None
     chunked_block_groups: Optional[torch.Tensor] = None
     chunked_block_usage: Optional[torch.Tensor] = None
+    has_initial_states_p: Optional[torch.Tensor] = None
+    last_chunk_indices_p: Optional[torch.Tensor] = None
+    state_indices_tensor: Optional[torch.Tensor] = None  # shape: [batch,]
 
 
 @dataclass
@@ -204,6 +209,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         qk_head_dim: int,
         v_head_dim: int,
         kv_b_proj: ColumnParallelLinear,
+        sinks: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> None:
         torch.nn.Module.__init__(self)
@@ -232,15 +238,23 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         self.softmax = Softmax()
         self.matmul_av = Matmul() if not self.enable_fp8_attn \
             else FP8Matmul()
-        self.batch2block_matmul = Matmul() if not self.enable_fp8_attn \
+        self.batch2block_matmul = B2BMatmul() if not self.enable_fp8_attn \
             else FP8Matmul()
-        self.block2batch_matmul = Matmul() if not self.enable_fp8_attn \
+        self.block2batch_matmul = B2BMatmul() if not self.enable_fp8_attn \
             else FP8Matmul()
         self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn \
             else VLLMFP8KVCache()
         HPUFusedSDPA = kernels.fsdpa()
         self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
             else ModuleFusedSDPA(HPUFusedSDPA)
+
+        try:
+            from habana_frameworks.torch.hpex.kernels import fp8_fused_sdpa
+            if self.enable_fp8_attn:
+                self.fused_scaled_dot_product_attention = ModuleFP8FusedSDPA(fp8_fused_sdpa)
+        except ImportError:
+            pass
+
         self.use_merged_prefill = get_config().merged_prefill
         self.prefill_impl = get_config().prompt_attn_impl
         assert self.prefill_impl != 'fsdpa_impl' or alibi_slopes is None, \
@@ -261,54 +275,22 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "TritonMLAImpl")
+        self.sinks = sinks
+        if sinks is not None:
+            assert sinks.shape[0] == num_heads, ("Sinks must have the same number of heads as the number of "
+                                                 f"heads in the layer. Sinks shape: {sinks.shape}, "
+                                                 f"num_heads: {num_heads}.")
 
-    def forward(
-        self,
-        layer: AttentionLayer,
-        q: torch.Tensor,
-        k_c_normed: torch.Tensor,  # key in unified attn
-        k_pe: torch.Tensor,  # value in unified attn
-        kv_cache: torch.Tensor,
-        attn_metadata: HPUAttentionMetadata,
-        output: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        if output is not None:
-            raise NotImplementedError("output is not yet supported for MLAImplBase")
-
-        is_prefill = attn_metadata.is_prompt
-
-        if not is_prefill:
-            # decode
-            q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-            # Convert from (B, N, P) to (N, B, P)
-            q_nope = q_nope.transpose(0, 1)
-            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-            decode_ql_nope = torch.bmm(q_nope, self.W_UK_T)
-            # Convert from (N, B, L) to (B, N, L)
-            decode_ql_nope = decode_ql_nope.transpose(0, 1)
-
-        slot_mapping = attn_metadata.slot_mapping.flatten() if attn_metadata.slot_mapping is not None else None
-
-        latent_vec_k = torch.concat((k_c_normed, k_pe.view(*k_c_normed.shape[:-1], self.qk_rope_head_dim)), dim=-1)
-        latent_vec_k = latent_vec_k.view(-1, self.qk_rope_head_dim + self.kv_lora_rank)
-
-        # write the latent and rope to kv cache
-        if kv_cache is not None and len(kv_cache) >= 2:
-            self.latent_cache_k(latent_vec_k, kv_cache[0], slot_mapping)
-            k_cache = kv_cache[0]
-
-        if is_prefill:
-            return self._forward_prefill(q, latent_vec_k, k_cache, attn_metadata)
-        else:
-            return self._forward_decode(decode_ql_nope, q_pe, k_cache, attn_metadata)
-
-    def _forward_prefill(  # type: ignore
+    def forward_mha(  # type: ignore
             self, q: torch.Tensor, latent_vec_k: torch.Tensor, k_cache: torch.Tensor,
             attn_metadata: HPUAttentionMetadata) -> torch.Tensor:
 
         ##### get prefix cache #####
         if attn_metadata.block_list is not None:
             current = latent_vec_k
+            # Patch for vllm-gaudi kv_cache tuple format.
+            if isinstance(k_cache, tuple):
+                k_cache = k_cache[0]  # Use only key_cache for MLA
             past = self.latent_cache_k.fetch_from_cache(k_cache.unflatten(0, (-1, attn_metadata.block_size)),
                                                         attn_metadata.block_list)
             past = past.view(-1, past.shape[-1])
@@ -363,9 +345,14 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
 
         return output.reshape(-1, self.num_heads * v.shape[-1])
 
-    def _forward_decode(  # type: ignore
+    def forward_mqa(  # type: ignore
             self, q_nope: torch.Tensor, q_pe: torch.Tensor, k_cache: torch.Tensor,
             attn_metadata: HPUAttentionMetadata) -> torch.Tensor:
+        if k_cache is not None and isinstance(k_cache, tuple):
+            key_cache, value_cache, k_scales, v_scales = \
+                HPUPagedAttention.split_kv_cache(k_cache, self.num_kv_heads, self.head_size)
+        if isinstance(k_cache, tuple):
+            k_cache = k_cache[0]  # Use only key_cache for MLA
         query = torch.cat([q_nope, q_pe], dim=-1)
         key_cache = k_cache.unsqueeze(1)
         value_cache = None
@@ -385,15 +372,19 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                                                   keys_fetch_func=self.latent_cache_k.fetch_from_cache,
                                                   values_fetch_func=None,
                                                   kv_lora_rank=self.kv_lora_rank)
-        result = self._v_up_proj(output)
-        return result
+        return output
 
     # NOTE(Xinyu): Make the loaded weight contiguous to avoid the transpose
     # during each graph execution
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
-        self.W_UV: torch.Tensor = self.W_UV.contiguous()
-        self.W_UK_T: torch.Tensor = self.W_UK_T.contiguous()
+        # W_UV and W_UK_T are plain tensor attributes (not nn.Parameter or
+        # register_buffer), so model.to('hpu') won't move them.  When INC
+        # CPU-first loading is active the source weights live on CPU, making
+        # these derived tensors CPU-resident too — which then causes a device
+        # mismatch at the bmm calls in forward.  Explicitly place on HPU.
+        self.W_UV: torch.Tensor = self.W_UV.contiguous().to("hpu")
+        self.W_UK_T: torch.Tensor = self.W_UK_T.contiguous().to("hpu")
 
     # NOTE(Chendi): PR25184 using output buffer as default, which can't be used in HPU Graph,
     # so we override and always return a new tensor
@@ -437,6 +428,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
+        sinks: Optional[torch.Tensor] = None,
     ) -> None:
         super(AttentionImpl, self).__init__()
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
@@ -456,9 +448,9 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         self.softmax = Softmax()
         self.matmul_av = Matmul() if not self.enable_fp8_attn \
             else FP8Matmul()
-        self.batch2block_matmul = Matmul() if not self.enable_fp8_attn \
+        self.batch2block_matmul = B2BMatmul() if not self.enable_fp8_attn \
             else FP8Matmul()
-        self.block2batch_matmul = Matmul() if not self.enable_fp8_attn \
+        self.block2batch_matmul = B2BMatmul() if not self.enable_fp8_attn \
             else FP8Matmul()
         self.k_cache = VLLMKVCache() if not self.enable_fp8_attn \
             else VLLMFP8KVCache()
@@ -503,6 +495,11 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             raise NotImplementedError("Encoder self-attention "
                                       "is not implemented for "
                                       "HPUAttentionImpl")
+        self.sinks = sinks
+        if sinks is not None:
+            assert sinks.shape[0] == num_heads, ("Sinks must have the same number of heads as the number of "
+                                                 f"heads in the layer. Sinks shape: {sinks.shape}, "
+                                                 f"num_heads: {num_heads}.")
 
         self.is_chunked_attention = False
 
@@ -547,7 +544,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         if self.attn_type == AttentionType.ENCODER_DECODER:
             return self.forward_encoder_decoder(
                 query=query,
@@ -585,6 +581,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         if kv_cache is not None and isinstance(kv_cache, tuple):
             key_cache, value_cache, k_scales, v_scales = \
                 HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
+            if key.dtype == torch.float32 and key.dtype != key_cache.dtype:
+                key = key.to(key_cache.dtype)
+            if key.dtype == torch.float32 and value.dtype != value_cache.dtype:
+                value = value.to(value_cache.dtype)
+            if query.dtype != key.dtype:
+                query = query.to(key.dtype)
             if self.kv_sharing_target_layer_name is None:
                 # Reshape the input keys and values and store them in the cache.
                 # If kv_cache is not provided, the new key and value tensors are
@@ -723,6 +725,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             'key_cache': key_cache,
             'value_cache': value_cache,
             'block_size': block_size,
+            "sinks": self.sinks,
             'k_scales': k_scales,
             'v_scales': v_scales,
         }
@@ -1197,15 +1200,20 @@ class HPUUnifiedMLAImpl(MLACommonImpl[HPUUnifiedAttentionMetadata], torch.nn.Mod
     def is_mla(cls) -> bool:
         return True
 
-    def _forward_decode(self, *args, **kwargs) -> torch.Tensor:
+    def forward_mqa(self, *args, **kwargs) -> torch.Tensor:
         raise NotImplementedError("Use forward method for HPUUnifiedMLAImpl")
 
-    def _forward_prefill(self, *args, **kwargs) -> torch.Tensor:
+    def forward_mha(self, *args, **kwargs) -> torch.Tensor:
         raise NotImplementedError("Use forward method for HPUUnifiedMLAImpl")
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # Parent MLACommonImpl extracts W_UV and W_UK_T from kv_b_proj weights
         # These projection matrices are used for latent ↔ full space conversions
         super().process_weights_after_loading(act_dtype)
-        self.W_UV: torch.Tensor = self.W_UV.contiguous()
-        self.W_UK_T: torch.Tensor = self.W_UK_T.contiguous()
+        # W_UV and W_UK_T are plain tensor attributes (not nn.Parameter or
+        # register_buffer), so model.to('hpu') won't move them.  When INC
+        # CPU-first loading is active the source weights live on CPU, making
+        # these derived tensors CPU-resident too — which then causes a device
+        # mismatch at the bmm calls in forward.  Explicitly place on HPU.
+        self.W_UV: torch.Tensor = self.W_UV.contiguous().to("hpu")
+        self.W_UK_T: torch.Tensor = self.W_UK_T.contiguous().to("hpu")

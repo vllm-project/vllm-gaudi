@@ -1,6 +1,8 @@
 ###############################################################################
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
 ###############################################################################
+import sys
+
 import habana_frameworks.torch.hpu as hthpu
 
 
@@ -9,4 +11,4 @@ def detect_hpu():
 
 
 if __name__ == "__main__":
-    print(detect_hpu())
+    sys.exit(int(detect_hpu()))

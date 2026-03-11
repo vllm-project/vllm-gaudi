@@ -4,7 +4,8 @@
 ###############################################################################
 
 set -e
-cd "$(dirname "$0")"
+pushd "$(dirname "$0")" > /dev/null
+trap 'popd > /dev/null' EXIT
 
 ALLOWED_DEVICES=("g2" "g3")
 
@@ -42,11 +43,11 @@ create_measure_config() {
     model_name_lower=$(echo "$2" | tr '[:upper:]' '[:lower:]')
 
     if [[ $model_name_lower =~ ^mixtral ]]; then
-        tmp_config="{\"method\": \"HOOKS\",\"mode\": \"MEASURE\",\"observer\": \"maxabs\",\"allowlist\": {\"types\": [], \"names\":  []},\"blocklist\": {\"types\": [], \"names\":  [\"self_attn\", \"lm_head\"]},\"quantize_weight\": false,\"dump_stats_path\": \"$1/$2/$3/inc_output\"}"
+        tmp_config="{\"method\": \"HOOKS\",\"mode\": \"MEASURE\",\"observer\": \"maxabs\",\"allowlist\": {\"types\": [], \"names\":  []},\"blocklist\": {\"types\": [], \"names\":  [\"self_attn\", \"lm_head\"]},\"quantize_weight\": false,\"dump_stats_path\": \"$1/$2/$3/inc_output\",\"calibration_sample_interval\": 1}"
     elif [[ $model_name_lower =~ ^deepseek ]]; then
-        tmp_config="{\"method\": \"HOOKS\",\"mode\": \"MEASURE\",\"observer\": \"maxabs\",\"allowlist\": {\"types\": [], \"names\":  []},\"blocklist\": {\"types\": [], \"names\":  [\"lm_head\", \"mlp\\\.gate\\\b\"]},\"quantize_weight\": false,\"dump_stats_path\": \"$1/$2/$3/inc_output\"}"
+        tmp_config="{\"method\": \"HOOKS\",\"mode\": \"MEASURE\",\"observer\": \"maxabs\",\"allowlist\": {\"types\": [], \"names\":  []},\"blocklist\": {\"types\": [], \"names\":  [\"lm_head\", \"mlp\\\.gate\\\b\"]},\"quantize_weight\": false,\"dump_stats_path\": \"$1/$2/$3/inc_output\",\"calibration_sample_interval\": 1}"
     else
-        tmp_config="{\"method\": \"HOOKS\",\"mode\": \"MEASURE\",\"observer\": \"maxabs\",\"allowlist\": {\"types\": [], \"names\":  []},\"blocklist\": {\"types\": [], \"names\":  []},\"quantize_weight\": false,\"dump_stats_path\": \"$1/$2/$3/inc_output\"}"
+        tmp_config="{\"method\": \"HOOKS\",\"mode\": \"MEASURE\",\"observer\": \"maxabs\",\"allowlist\": {\"types\": [], \"names\":  []},\"blocklist\": {\"types\": [], \"names\":  []},\"quantize_weight\": false,\"dump_stats_path\": \"$1/$2/$3/inc_output\",\"calibration_sample_interval\": 1}"
     fi
     echo "$tmp_config" > $1/$2/maxabs_measure_$3.json
 }
@@ -106,7 +107,7 @@ while getopts "m:b:l:t:d:h:o:r:ue" OPT; do
             BATCH_SIZE="$OPTARG"
             ;;
         o )
-            FP8_DIR=$(realpath "$OPTARG")
+            FP8_DIR=$(realpath -m "$OPTARG")
             ;;
         l )
             LIMIT="$OPTARG"
@@ -143,17 +144,16 @@ fi
 MODEL_NAME=$(extract_last_folder_name "$MODEL_PATH")
 model_name_lower=$(echo "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')
 
-echo "Step 0 - detecting used device type [g2, g3]"
-DEVICE_TYPE=$(python3 step-0-detect-device.py) || (echo "Detecting device process failed" && exit 1)
-DEVICE_TYPE="g$DEVICE_TYPE"
-echo "Detected device type: $DEVICE_TYPE"
-echo "Step 0 done"
-
+echo "Step 0 - detecting used device type ${ALLOWED_DEVICES[*]}"
+python3 step-0-detect-device.py > /dev/null  || DEVICE_TYPE=$?
+DEVICE_TYPE="g${DEVICE_TYPE}"
 # Check if the provided device type is valid
 if [[ ! " ${ALLOWED_DEVICES[*]} " =~ " $DEVICE_TYPE " ]]; then
     echo "Invalid device type: $DEVICE_TYPE. Allowed devices: ${ALLOWED_DEVICES[*]}"
     exit 1
 fi
+echo "Detected device type: $DEVICE_TYPE"
+echo "Step 0 done"
 
 if [[ $TP_SIZE -gt 8 ]]; then
     MULTI_NODE_SETUP=true

@@ -10,6 +10,8 @@ from typing import List, Tuple
 from vllm_gaudi.extension.logger import logger as logger
 from vllm_gaudi.extension.runtime import get_config
 
+LONG_CTX_THRESHOLD = 8192
+
 
 def calc_fallback_value(n: int, base_step: int):
     """ Calculate next bucket for yet unbucketized value"""
@@ -236,7 +238,8 @@ class HPUBucketingManager():
         if self.num_hpu_blocks is None:
             new_ctx = 0
         else:
-            new_ctx = min(calc_fallback_value(ctx, self.fallback_blocks_base_step), self.num_hpu_blocks)
+            new_ctx = min(calc_fallback_value(ctx, self.fallback_blocks_base_step),
+                          self.num_hpu_blocks + self.block_size)
         return (new_batch_size, new_seq_len, new_ctx)
 
     def find_prompt_bucket(self, batch_size, seq_len, ctx=0):
@@ -354,6 +357,9 @@ def generate_buckets(bs_range,
     use_merged_prefill = get_config().merged_prefill
     use_contiguous_pa = get_config().use_contiguous_pa
 
+    if is_prompt and mamba_chunk_size > 0:
+        query_range = [math.ceil(query / mamba_chunk_size) * mamba_chunk_size for query in query_range]
+
     def expand_to_neighbor_buckets(bs_idx, bs_range, ctx_idx, ctx_range, max_num_batched_tokens):
         '''
         Expand 2d bucket (bs, query) to include:
@@ -399,11 +405,11 @@ def generate_buckets(bs_range,
     def no_corrections(bs, query, ctx):
         return (bs, query, ctx)
 
+    def mamba_decode_corrector(bs, query, ctx):
+        return (bs, query, min(ctx, bs * math.floor(max_model_len / block_size)))
+
     def correct_for_max_model_len(bs, query, ctx):
         return (bs, query, min(ctx, bs * math.ceil(max_model_len / block_size)))
-
-    def correct_for_mamba_chunk_size(bs, query, ctx):
-        return (bs, math.ceil(query / mamba_chunk_size) * mamba_chunk_size, ctx)
 
     def batch_size_smaller_than_blocks(bs, query, ctx):
         if not bs <= ctx:
@@ -430,8 +436,8 @@ def generate_buckets(bs_range,
         return filters_map[phase][use_contiguous_pa]
 
     def get_corrector(is_prompt, use_contiguous_pa):
-        if is_prompt and mamba_chunk_size > 0:
-            return correct_for_mamba_chunk_size
+        if mamba_chunk_size > 0 and not is_prompt:
+            return mamba_decode_corrector
         elif is_prompt or use_contiguous_pa:
             return no_corrections
         else:
@@ -439,6 +445,10 @@ def generate_buckets(bs_range,
 
     def get_max_bucket_per_query(bs, query):
         return (bs, query, math.ceil((max_model_len - query) // block_size))
+
+    def is_ctx_allowed(ctx):
+        ctx_bucket_max = get_config().VLLM_PROMPT_CTX_BUCKET_MAX
+        return ctx >= 0 and (ctx_bucket_max is None or ctx < ctx_bucket_max)
 
     buckets = set()
     buckets_2d = set()
@@ -460,9 +470,9 @@ def generate_buckets(bs_range,
         for bs, ctx in buckets_2d:
             is_max_ctx = ctx == max_ctx
             for query in query_range:
-                if is_prompt and is_max_ctx:
+                if is_prompt and is_max_ctx and max_model_len >= LONG_CTX_THRESHOLD:  # only for long ctx
                     bs, query, edge_ctx = get_max_bucket_per_query(bs, query)
-                    if edge_ctx >= 0:
+                    if is_ctx_allowed(edge_ctx):
                         ctx = edge_ctx
                 if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
                     buckets.add(corrector(bs, query, ctx))

@@ -36,7 +36,7 @@ class HpuPlatform(Platform):
     dispatch_key: str = "HPU"
     ray_device_key: str = "HPU"
     device_control_env_var: str = "HABANA_VISIBLE_MODULES"
-    supported_quantization: list[str] = ["compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu"]
+    supported_quantization: list[str] = ["compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu", "modelopt"]
     simple_compile_backend = "hpu_backend"
     additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
 
@@ -45,6 +45,7 @@ class HpuPlatform(Platform):
         cls,
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
+        num_heads: Optional[int] = None,
     ) -> str:
         if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on HPU.")
@@ -110,7 +111,7 @@ class HpuPlatform(Platform):
         # NOTE(kzawora): default block size for Gaudi should be 128
         # smaller sizes still work, but very inefficiently
         cache_config = vllm_config.cache_config
-        if cache_config and cache_config.block_size is None:
+        if not cache_config.user_specified_block_size:
             cache_config.block_size = 128
         if (parallel_config.distributed_executor_backend in ['mp', 'uni']
                 and envs.VLLM_WORKER_MULTIPROC_METHOD == 'fork'):
@@ -150,6 +151,16 @@ class HpuPlatform(Platform):
 
         print(f"========={compilation_config.custom_ops=}===========")
 
+        # Force CPU loading for INC quantization to prevent OOM during weight loading.
+        # INC FP8 quantization requires weights to be loaded to CPU first, then
+        # quantized and moved to device. Without this, weights are loaded directly
+        # to HPU in BF16 which causes OOM for large models.
+        model_config = vllm_config.model_config
+        is_inc_quant = (model_config is not None and model_config.quantization == "inc") or os.getenv("QUANT_CONFIG")
+        if is_inc_quant and vllm_config.load_config is not None and vllm_config.load_config.device is None:
+            logger.info("[HPU] INC quantization detected, loading weights to CPU first")
+            vllm_config.load_config.device = "cpu"
+
         # Disable multi-stream for shared experts as no Stream on CPU
         os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
@@ -159,6 +170,12 @@ class HpuPlatform(Platform):
             vllm_config.scheduler_config.async_scheduling and vllm_config.speculative_config is None
 
     @classmethod
+    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
+        # TODO: HPU still sets block_size in check_and_update_config.
+        # Move that logic here so block_size is chosen by the backend.
+        pass
+
+    @classmethod
     def is_pin_memory_available(cls):
         logger.warning("Pin memory is not supported on HPU.")
         return False
@@ -166,6 +183,10 @@ class HpuPlatform(Platform):
     @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm_gaudi.lora.punica_wrapper.punica_hpu.PunicaWrapperHPU"
+
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        return True
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:

@@ -76,7 +76,9 @@ class InputBatch:
         kernel_block_sizes: list[int],
         logitsprocs: Optional[LogitsProcessors] = None,
         is_spec_decode: bool = False,
+        is_pooling_model: bool = False,
     ):
+        self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -112,15 +114,13 @@ class InputBatch:
             self.num_computed_tokens_cpu_tensor.numpy()
 
         # Block table.
-        self.block_table = MultiGroupBlockTable(
-            max_num_reqs=max_num_reqs,
-            max_model_len=max_model_len,
-            max_num_batched_tokens=max_num_batched_tokens,
-            pin_memory=pin_memory,
-            device=device,
-            block_sizes=block_sizes,
-            kernel_block_sizes=kernel_block_sizes,
-        )
+        self.block_table = MultiGroupBlockTable(max_num_reqs=max_num_reqs,
+                                                max_model_len=max_model_len,
+                                                max_num_batched_tokens=max_num_batched_tokens,
+                                                pin_memory=pin_memory,
+                                                device=device,
+                                                block_sizes=block_sizes,
+                                                kernel_block_sizes=kernel_block_sizes)
 
         # Sampling-related.
         self.temperature = torch.empty((max_num_reqs, ), dtype=torch.float32, device=device)
@@ -393,6 +393,11 @@ class InputBatch:
                 self.lora_id_to_lora_request.pop(lora_id)
             self.request_lora_mapping[req_index] = 0
 
+        if self.is_pooling_model:
+            self.pooling_params.pop(req_id, None)
+            self.pooling_states.pop(req_id, None)
+            return req_index
+
         self.has_allowed_token_ids.discard(req_id)
         if self.allowed_token_ids_mask_cpu_tensor is not None:
             # False means we don't fill with -inf.
@@ -451,6 +456,10 @@ class InputBatch:
         self.request_lora_mapping[i1], self.request_lora_mapping[i2] =\
             self.request_lora_mapping[i2], self.request_lora_mapping[i1]
 
+        if self.is_pooling_model:
+            # Sampling and logits parameters don't apply to pooling models.
+            return
+
         if self.allowed_token_ids_mask_cpu_tensor is not None:
             self.allowed_token_ids_mask_cpu_tensor[i1], \
                 self.allowed_token_ids_mask_cpu_tensor[i2] =\
@@ -508,6 +517,11 @@ class InputBatch:
                 self.generators[empty_index] = generator
 
             self.request_lora_mapping[empty_index] = self.request_lora_mapping[last_req_index]
+
+            if self.is_pooling_model:
+                last_req_index -= 1
+                # Sampling state not used by pooling models.
+                continue
 
             if self.allowed_token_ids_mask_cpu_tensor is not None:
                 self.allowed_token_ids_mask_cpu_tensor[empty_index] = self.allowed_token_ids_mask_cpu_tensor[
