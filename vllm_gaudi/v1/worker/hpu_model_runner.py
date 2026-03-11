@@ -1631,7 +1631,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             req_start_idx += num_scheduled_tokens
 
         # Convert bool tensor to index tensor for merge embedding statically if optimized mm
-        if self.uses_mrope:
+
+        # Qwen3.5 expects a bool multimodal mask here; avoid converting it to index form.
+        arches = getattr(getattr(self.model_config, "hf_config", None), "architectures", None) or []
+        is_qwen35 = any("Qwen3_5" in arch for arch in arches)
+
+        if self.uses_mrope and not is_qwen35:
             is_mm_embed_index = torch.nonzero(is_mm_embed[:total_num_scheduled_tokens], as_tuple=True)[0]
             # Bounds validation on CPU
             if len(is_mm_embed_index) > 0 and is_mm_embed_index.max() >= total_num_scheduled_tokens:
