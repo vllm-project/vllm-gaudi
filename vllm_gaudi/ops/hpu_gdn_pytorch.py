@@ -19,19 +19,168 @@ from vllm_gaudi.extension.logger import logger as init_logger
 logger = init_logger()
 
 
+def _chunk_vectorized_body(
+    q_chunk: torch.Tensor,   # [Tc, H, K]
+    k_chunk: torch.Tensor,   # [Tc, H, K]
+    v_chunk: torch.Tensor,   # [Tc, H, V]
+    g_chunk: torch.Tensor,   # [Tc, H]
+    beta_chunk: torch.Tensor,# [Tc, H]
+    state: torch.Tensor,     # [H, V, K]
+    eye: torch.Tensor,       # [Tc, Tc]
+    scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compilable vectorized chunk body for hpu_chunk_gated_delta_rule.
+
+    Returns (out_chunk [Tc, H, V], new_state [H, V, K]).
+    """
+    k_h = k_chunk.permute(1, 0, 2).contiguous()      # [H, Tc, K]
+    g_h = g_chunk.transpose(0, 1).contiguous()        # [H, Tc]
+    beta_h = beta_chunk.transpose(0, 1).contiguous()  # [H, Tc]
+
+    dot = torch.bmm(k_h, k_h.transpose(1, 2))
+    coeff = beta_h.unsqueeze(-1) * torch.exp(
+        g_h.unsqueeze(-1) - g_h.unsqueeze(-2)
+    )
+    a_lower = torch.tril(dot * coeff, diagonal=-1)
+    lmat = eye.unsqueeze(0) + a_lower
+    A_solve = _hpu_solve_lower_triangular_batched(
+        lmat, eye, use_vectorized=True,
+    )
+
+    rhs_u = v_chunk.permute(1, 0, 2).contiguous() * beta_h.unsqueeze(-1)
+    rhs_w = k_h * (beta_h * torch.exp(g_h)).unsqueeze(-1)
+    u_chunk = torch.bmm(A_solve, rhs_u).permute(1, 0, 2).contiguous()
+    w_chunk = torch.bmm(A_solve, rhs_w).permute(1, 0, 2).contiguous()
+
+    h_start = state.clone()
+    v_new_chunk = u_chunk - torch.einsum("thk,hvk->thv", w_chunk, h_start)
+
+    # Prefer reshape/index broadcasting over chained unsqueeze on
+    # sliced tensors for HPU graph lowering stability.
+    tc = k_chunk.shape[0]
+    H = k_h.shape[0]
+    g_last_tc_h = g_chunk[-1:, :]  # [1, H]
+    decay_tc_h = torch.exp(g_last_tc_h - g_chunk)
+    val_state = v_new_chunk * decay_tc_h.reshape(tc, H, 1)
+    new_state = (
+        h_start * torch.exp(g_last_tc_h[0]).reshape(H, 1, 1)
+        + torch.einsum("thv,thk->hvk", val_state, k_chunk)
+    )
+
+    q_h = q_chunk.permute(1, 0, 2).contiguous()
+    v_new_h = v_new_chunk.permute(1, 0, 2).contiguous()
+    base_h = torch.einsum("htk,hvk->htv", q_h, h_start)
+    base_h = base_h * torch.exp(g_h).reshape(H, tc, 1)
+    attn_h = torch.bmm(q_h, k_h.transpose(1, 2))
+    g_h_l = g_h.reshape(H, tc, 1)
+    g_h_r = g_h.reshape(H, 1, tc)
+    attn_h = attn_h * torch.exp(g_h_l - g_h_r)
+    attn_h = torch.tril(attn_h)
+    out_chunk = (
+        base_h + torch.bmm(attn_h, v_new_h)
+    ).permute(1, 0, 2) * scale
+
+    return out_chunk, new_state
+
+
+def _recurrent_timestep_body(
+    q_t: torch.Tensor,     # [H, K]
+    k_t: torch.Tensor,     # [H, K]
+    v_t: torch.Tensor,     # [HV, V]
+    g_t: torch.Tensor,     # [HV]
+    b_t: torch.Tensor,     # [HV]
+    h_state: torch.Tensor, # [HV, V, K]
+    scale: float,
+    HV: int, H: int, Kdim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compilable per-timestep body for hpu_fused_recurrent_gated_delta_rule.
+
+    Returns (out_t [HV, V], updated h_state [HV, V, K]).
+    """
+    q_t = q_t * scale
+    h_state = h_state * torch.exp(g_t).view(HV, 1, 1)
+    proj = torch.sum(h_state * k_t.view(H, 1, Kdim), dim=-1)
+    v_new = (v_t - proj) * b_t.view(HV, 1)
+    h_state = h_state + v_new.unsqueeze(-1) * k_t.view(H, 1, Kdim)
+    out_t = torch.sum(h_state * q_t.view(H, 1, Kdim), dim=-1)
+    return out_t, h_state
+
+
 def _hpu_solve_lower_triangular_batched(
     lmat: torch.Tensor,
     eye: torch.Tensor,
     use_vectorized: bool,
 ) -> torch.Tensor:
-    """Solve L X = I for lower-triangular batched matrices.
+    """Solve L X = I for lower-triangular matrices.
 
-    `use_vectorized=True` uses fully vectorized batched inverse.
-    `use_vectorized=False` uses the current triangular-solve path.
+    Default: uses ``torch.linalg.inv`` (vectorized) or
+    ``torch.linalg.solve_triangular`` (per-head).
+
+    Set ``VLLM_GDN_USE_FORWARD_SUB=1`` to switch to the manual
+    forward-substitution path (row-by-row with diagonal division via
+    ``bmm``).  This path exists for HPU where linalg ops are unsupported,
+    but currently has an **accuracy issue** — the model output degrades
+    (e.g. only generates "hello").  Keep the linalg default for correctness
+    debugging; enable forward-sub once the accuracy issue is resolved.
+
+    Args:
+        lmat: [..., N, N] lower-triangular matrix
+        eye:  [N, N] identity matrix (pre-cached for efficiency)
+        use_vectorized: True  -> ``torch.linalg.inv`` / vectorized sub
+                        False -> ``torch.linalg.solve_triangular`` / per-head sub
+
+    Returns:
+        [..., N, N] inverse of lmat
     """
-    if use_vectorized:
-        return torch.linalg.inv(lmat)
-    return torch.linalg.solve_triangular(lmat, eye, upper=False)
+    use_forward_sub = os.getenv("VLLM_GDN_USE_FORWARD_SUB", "0") == "1"
+
+    if not use_forward_sub:
+        # --- Default: linalg path (accurate, not supported on HPU) ---
+        if use_vectorized:
+            return torch.linalg.inv(lmat)
+        return torch.linalg.solve_triangular(lmat, eye, upper=False)
+
+    # --- Forward-substitution path (HPU-safe, accuracy issue open) ---
+    if lmat.ndim < 2 or lmat.shape[-1] != lmat.shape[-2]:
+        raise ValueError(f"Expected square matrix [..., N, N], got {tuple(lmat.shape)}")
+
+    n = lmat.shape[-1]
+    batch_shape = lmat.shape[:-2]
+
+    lflat = lmat.reshape(-1, n, n)
+
+    rhs = eye
+    if rhs.ndim == 2:
+        if batch_shape:
+            view_shape = (1,) * len(batch_shape) + rhs.shape
+            rhs = rhs.reshape(view_shape).expand(batch_shape + rhs.shape)
+    elif rhs.ndim == lmat.ndim:
+        if rhs.shape[-2:] != (n, n):
+            raise ValueError(
+                f"RHS trailing shape must be ({n}, {n}), got {tuple(rhs.shape[-2:])}"
+            )
+        if rhs.shape[:-2] != batch_shape:
+            rhs = rhs.expand(batch_shape + (n, n))
+    else:
+        raise ValueError(
+            f"Unsupported RHS rank: rhs.ndim={rhs.ndim}, lmat.ndim={lmat.ndim}."
+        )
+    rhs_flat = rhs.reshape(-1, n, n)
+
+    # Row-wise forward substitution with diagonal division.
+    # NOTE: This path has a known accuracy issue on HPU — outputs degrade
+    # compared to the linalg reference.  Under investigation.
+    x = torch.zeros_like(rhs_flat)
+    for i in range(n):
+        rhs_i = rhs_flat[:, i, :]
+        if i > 0:
+            corr = torch.bmm(lflat[:, i:i + 1, :i], x[:, :i, :]).squeeze(1)
+            rhs_i = rhs_i - corr
+
+        diag = lflat[:, i, i].unsqueeze(-1)
+        x[:, i, :] = rhs_i / diag
+
+    return x.reshape(lmat.shape)
 
 def _materialize_seq_ranges(cu_seqlens: torch.Tensor, total_tokens: int) -> list[tuple[int, int]]:
     """Convert cu_seqlens to safe [bos, eos) ranges on CPU.
@@ -94,6 +243,7 @@ def hpu_fused_gdn_gating(
     return g.unsqueeze(0), beta_out.unsqueeze(0)
 
 
+@torch._dynamo.disable
 def hpu_fused_recurrent_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -214,18 +364,11 @@ def hpu_fused_recurrent_gated_delta_rule(
                 q_t = _l2norm_last_dim(q_t)
                 k_t = _l2norm_last_dim(k_t)
 
-            q_t = q_t * scale
-
-            # Gating decay on recurrent state.
-            h_state.mul_(torch.exp(g_t).view(HV, 1, 1))
-
-            # v update and recurrent state update.
-            proj = torch.sum(h_state * k_t.view(H, 1, Kdim), dim=-1)
-            v_new = (v_t - proj) * b_t.view(HV, 1)
-            h_state.add_(v_new.unsqueeze(-1) * k_t.view(H, 1, Kdim))
-
-            # Output projection.
-            out[t] = torch.sum(h_state * q_t.view(H, 1, Kdim), dim=-1)
+            out_t, h_state = _recurrent_timestep_body(
+                q_t, k_t, v_t, g_t, b_t, h_state,
+                scale, HV, H, Kdim,
+            )
+            out[t] = out_t
 
         # Persist state back to selected cache line.
         if state_indices_tensor is not None and state_indices_valid is not None:
@@ -251,6 +394,7 @@ def hpu_fused_recurrent_gated_delta_rule(
     return out, final_state
 
 
+@torch._dynamo.disable
 def hpu_chunk_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -269,6 +413,15 @@ def hpu_chunk_gated_delta_rule(
     This path intentionally mirrors upstream prefill call semantics without
     delegating to the fused recurrent helper.
     """
+    if torch.compiler.is_compiling():
+        return _hpu_chunk_gated_delta_rule_eager(
+            q=q, k=k, v=v, g=g, beta=beta, scale=scale,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            chunk_size=chunk_size,
+        )
     # https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fla/ops/chunk_scaled_dot_kkt.py#L132
     B, T, H, Kdim = q.shape
     _, _, HV, Vdim = v.shape
@@ -361,6 +514,8 @@ def hpu_chunk_gated_delta_rule(
     use_vectorized_chunk = (
         os.getenv("VLLM_GAUDI_GDN_CHUNK_VECTORIZED", "1") == "1"
     )
+    if torch.compiler.is_compiling():
+        use_vectorized_chunk = False
 
     for seq_id, (bos, eos) in enumerate(seq_ranges):
         if eos <= bos:
@@ -383,56 +538,13 @@ def hpu_chunk_gated_delta_rule(
                 eye_cache[tc] = torch.eye(tc, dtype=torch.float32, device=device)
 
             if use_vectorized_chunk:
-                # Vectorized path across all heads.
-                k_h = k_chunk.permute(1, 0, 2).contiguous()      # [H, Tc, K]
-                g_h = g_chunk.transpose(0, 1).contiguous()       # [H, Tc]
-                beta_h = beta_chunk.transpose(0, 1).contiguous() # [H, Tc]
-
-                dot = torch.bmm(k_h, k_h.transpose(1, 2))
-                coeff = beta_h.unsqueeze(-1) * torch.exp(
-                    g_h.unsqueeze(-1) - g_h.unsqueeze(-2)
+                out[cs:ce], state = _chunk_vectorized_body(
+                    q_chunk, k_chunk, v_chunk, g_chunk, beta_chunk,
+                    state, eye_cache[tc], scale,
                 )
-                a_lower = torch.tril(dot * coeff, diagonal=-1)
-                lmat = eye_cache[tc].unsqueeze(0) + a_lower
-                A_solve = _hpu_solve_lower_triangular_batched(
-                    lmat,
-                    eye_cache[tc],
-                    use_vectorized=True,
-                )
-
-                rhs_u = (
-                    v_chunk.permute(1, 0, 2).contiguous()
-                    * beta_h.unsqueeze(-1)
-                )
-                rhs_w = k_h * (beta_h * torch.exp(g_h)).unsqueeze(-1)
-                u_chunk = torch.bmm(A_solve, rhs_u).permute(1, 0, 2).contiguous()
-                w_chunk = torch.bmm(A_solve, rhs_w).permute(1, 0, 2).contiguous()
-
-                h_start = state.clone()
-                v_new_chunk = u_chunk - torch.einsum("thk,hvk->thv", w_chunk, h_start)
-
-                g_last = g_h[:, -1]
-                val_state = v_new_chunk * torch.exp(
-                    g_last.unsqueeze(0) - g_chunk
-                ).unsqueeze(-1)
-                state = (
-                    h_start * torch.exp(g_last).unsqueeze(-1).unsqueeze(-1)
-                    + torch.einsum("thv,thk->hvk", val_state, k_chunk)
-                )
-
-                q_h = q_chunk.permute(1, 0, 2).contiguous()
-                v_new_h = v_new_chunk.permute(1, 0, 2).contiguous()
-                base_h = torch.einsum("htk,hvk->htv", q_h, h_start)
-                base_h = base_h * torch.exp(g_h).unsqueeze(-1)
-                attn_h = torch.bmm(q_h, k_h.transpose(1, 2))
-                attn_h = attn_h * torch.exp(g_h.unsqueeze(-1) - g_h.unsqueeze(-2))
-                attn_h = torch.tril(attn_h)
-                out[cs:ce] = (
-                    base_h + torch.bmm(attn_h, v_new_h)
-                ).permute(1, 0, 2) * scale
             else:
-                # Current per-head reference path.
-                A_solve = torch.empty((H, tc, tc), dtype=torch.float32, device=device)
+                # Per-head reference path (list accumulation for HPU compat).
+                a_solve_list: list[torch.Tensor] = []
                 for h in range(H):
                     kh = k_chunk[:, h, :]
                     bh = beta_chunk[:, h]
@@ -441,37 +553,43 @@ def hpu_chunk_gated_delta_rule(
                     coeff = bh[:, None] * torch.exp(gh[:, None] - gh[None, :])
                     a_lower = torch.tril(dot * coeff, diagonal=-1)
                     lmat = eye_cache[tc] + a_lower
-                    A_solve[h] = _hpu_solve_lower_triangular_batched(
+                    a_solve_h = _hpu_solve_lower_triangular_batched(
                         lmat,
                         eye_cache[tc],
                         use_vectorized=False,
                     )
+                    a_solve_list.append(a_solve_h.unsqueeze(0))
+                A_solve = torch.cat(a_solve_list, dim=0)
 
-                u_chunk = torch.empty((tc, H, Vdim), dtype=torch.float32, device=device)
-                w_chunk = torch.empty((tc, H, Kdim), dtype=torch.float32, device=device)
+                u_list: list[torch.Tensor] = []
+                w_list: list[torch.Tensor] = []
                 for h in range(H):
                     rhs_u = v_chunk[:, h, :] * beta_chunk[:, h:h + 1]
                     rhs_w = (
                         k_chunk[:, h, :]
                         * (beta_chunk[:, h] * torch.exp(g_chunk[:, h]))[:, None]
                     )
-                    u_chunk[:, h, :] = A_solve[h] @ rhs_u
-                    w_chunk[:, h, :] = A_solve[h] @ rhs_w
+                    u_list.append((A_solve[h] @ rhs_u).unsqueeze(1))
+                    w_list.append((A_solve[h] @ rhs_w).unsqueeze(1))
+                u_chunk = torch.cat(u_list, dim=1)
+                w_chunk = torch.cat(w_list, dim=1)
 
-                v_new_chunk = torch.empty((tc, H, Vdim), dtype=torch.float32, device=device)
+                v_new_list: list[torch.Tensor] = []
                 h_start = state.clone()
                 for h in range(H):
                     state_h = h_start[h]
                     proj = w_chunk[:, h, :] @ state_h.transpose(0, 1)
                     val_raw = u_chunk[:, h, :] - proj
-                    v_new_chunk[:, h, :] = val_raw
+                    v_new_list.append(val_raw.unsqueeze(1))
 
                     g_last = g_chunk[-1, h]
                     val_state = val_raw * torch.exp(g_last - g_chunk[:, h])[:, None]
                     state_h = state_h * torch.exp(g_last)
                     state_h = state_h + val_state.transpose(0, 1) @ k_chunk[:, h, :]
                     state[h] = state_h
+                v_new_chunk = torch.cat(v_new_list, dim=1)
 
+                out_list: list[torch.Tensor] = []
                 for h in range(H):
                     qh = q_chunk[:, h, :]
                     kh = k_chunk[:, h, :]
@@ -484,7 +602,8 @@ def hpu_chunk_gated_delta_rule(
                     attn = qh @ kh.transpose(0, 1)
                     attn = attn * torch.exp(gh[:, None] - gh[None, :])
                     attn = torch.tril(attn)
-                    out[cs:ce, h, :] = (base + attn @ vh) * scale
+                    out_list.append(((base + attn @ vh) * scale).unsqueeze(1))
+                out[cs:ce] = torch.cat(out_list, dim=1)
 
         if final_state is not None:
             final_state[seq_id] = state
@@ -500,3 +619,32 @@ def hpu_chunk_gated_delta_rule(
     if initial_state is not None:
         final_state = final_state.to(initial_state.dtype)
     return out, final_state
+
+
+@torch._dynamo.disable
+def _hpu_chunk_gated_delta_rule_eager(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+    use_qk_l2norm_in_kernel: bool = False,
+    chunk_size: int = 64,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    return hpu_chunk_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        scale=scale,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+        cu_seqlens=cu_seqlens,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        chunk_size=chunk_size,
+    )

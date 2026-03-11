@@ -433,7 +433,7 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
     if isinstance(model, HpuModelAdapter):
         model = model.model
 
-    mamba_like_arch = ["GraniteMoeHybridForCausalLM", "Qwen3_5MoeForConditionalGeneration"]
+    mamba_like_arch = ["GraniteMoeHybridForCausalLM", "Qwen3_5MoeForConditionalGeneration", "Qwen3_5ForConditionalGeneration"]
     if not any(arch in getattr(model.config, 'architectures', []) for arch in mamba_like_arch):  
         return
     mamba_like_layer = ['.mixer', '.linear_attn']
@@ -451,7 +451,6 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
                 return layers[idx]
         return None
     # Iterate through all KV cache groups
-    gdn_hybrid = False
     for group_idx, kv_group in enumerate(kv_cache_config.kv_cache_groups):
         # kv_group.layer_names contains strings like "model.layers.5.mixer"
         for layer_name in kv_group.layer_names:
@@ -469,8 +468,6 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
                 layer = _get_decoder_layer_by_idx(model, layer_idx)
                 if layer is not None and hasattr(layer, "linear_attn"):
                     layer.linear_attn.cache_group_idx = group_idx
-                    gdn_hybrid = True
-    return gdn_hybrid
 
 
 def maybe_set_chunked_attention_layers(model_runner):
@@ -2269,35 +2266,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # of prefix caching for mamba2 (wip). We need to take care
             # of the interaction with chunked prefill in order to
             # satisfy constraint (2).
-            # TODO (tdoublep): This code could probably be optimized.
-            last_chunk_indices = []
-            last_chunk_index = -1
-            seqlen_pos = 0
             chunk_size = self.mamba_chunk_size
-            for req_idx in range(len(contents.req_ids)):
-                this_num_computed = num_computed_tokens_p_cpu[req_idx].item()
-                this_new_tokens = (query_start_loc_p_cpu[req_idx + 1].item() - query_start_loc_p_cpu[req_idx].item())
-
-                # if computed tokens are not chunk-aligned, use the first
-                # chunk to finish it off
-                if this_num_computed % chunk_size != 0:
-                    # how many tokens to finish the chunk?
-                    last_chunk_index += 1
-                    chunk_len = (cdiv(this_num_computed, chunk_size) * chunk_size - this_num_computed)
-                    # we can only use at most this_new_tokens
-                    chunk_len = min(chunk_len, this_new_tokens)
-                    seqlen_pos += chunk_len
-                    this_new_tokens -= chunk_len
-
-                n_chunks = cdiv(this_new_tokens, chunk_size)
-                for chunk in range(n_chunks):
-                    last_chunk_index += 1
-                    chunk_len = min(chunk_size, this_new_tokens)
-                    seqlen_pos += chunk_len
-                    this_new_tokens -= chunk_len
-
-                assert this_new_tokens == 0
-                last_chunk_indices.append(last_chunk_index)
+            assert chunk_size > 0
+            nphysical_chunks = target_seq // chunk_size
+            assert nphysical_chunks > 0, (f"target_seq={target_seq} must be >= chunk_size={chunk_size}")
+            last_chunk_indices = [nphysical_chunks - 1 for _ in range(len(contents.req_ids))]
 
             num_prefill_reqs = len(contents.req_ids)
             all_state_indices_cpu = []
@@ -3449,12 +3422,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             context_lens_tensor = async_h2d_copy([0], dtype=torch.int32)
 
             attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
-                seq_lens_tensor=seq_lens_tensor,  
-                context_lens_tensor=context_lens_tensor,  
-                slot_mapping=slot_mapping,  
-                block_list=context_blocks_t,  
-                attn_bias=attn_bias, 
-                block_size=self.block_size,  
+                seq_lens_tensor=seq_lens_tensor,
+                context_lens_tensor=context_lens_tensor,
+                slot_mapping=slot_mapping,
+                block_list=None,
+                attn_bias=None,
+                block_size=self.block_size,
             )
             attn_metadata = trim_attn_metadata(attn_metadata)
             attn_metadata = self.set_attn_bias(attn_metadata, 1, len(input_ids), self.device, self.dtype)
@@ -5785,9 +5758,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.kv_cache_config = kv_cache_config
         self.is_encoder_only_attn = False
         self.may_add_encoder_only_layers_to_kv_cache_config()
-        self.vllm_config.gdn_hybrid  = False
         if self.num_mamba_like_layers > 0:
-            self.vllm_config.gdn_hybrid = maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
+            maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
         kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, self.attn_groups)
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)

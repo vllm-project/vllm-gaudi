@@ -236,10 +236,11 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         chunk_query_start_loc = non_spec_query_start_loc
         if is_prompt and non_spec_query_start_loc is not None:
             # query_start_loc_p[-1] is the number of valid (unpadded) prompt tokens.
-            try:
-                num_actual_tokens = int(non_spec_query_start_loc[-1].item())
-            except Exception:
-                num_actual_tokens = num_actual_tokens
+            if not torch.compiler.is_compiling():
+                try:
+                    num_actual_tokens = int(non_spec_query_start_loc[-1].item())
+                except Exception:
+                    num_actual_tokens = num_actual_tokens
 
         if is_prompt and padding_mask_flat is not None:
             token_mask_flat = padding_mask_flat.view(-1, 1).to(dtype=mixed_qkv.dtype)

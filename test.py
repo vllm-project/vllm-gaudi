@@ -36,7 +36,7 @@ def run_text_only(
       
     llm = LLM(  
         model=model_name,  
-        trust_remote_code=True,  enforce_eager=True,
+        trust_remote_code=True,  #enforce_eager=True,
         language_model_only=True,  # Disables all multimodal modules
         tensor_parallel_size=tensor_parallel_size,
         max_model_len=max_model_len,
@@ -45,7 +45,7 @@ def run_text_only(
         gpu_memory_utilization=gpu_memory_utilization, #enforce_eager=True
     )  
       
-    sampling_params = SamplingParams(max_tokens=2, temperature=0.0, top_p=1.0)
+    sampling_params = SamplingParams(max_tokens=50, temperature=0.0, top_p=1.0)
 
     if text_api == "chat":
         # Use chat-form input for instruct models to avoid prompt-format drift.
@@ -83,7 +83,7 @@ def run_text_image(
     max_model_len: int = 512,
     max_num_seqs: int = 1,
     max_num_batched_tokens: int = 512,
-    gpu_memory_utilization: float = 0.75,
+    gpu_memory_utilization: float = 0.5,
 ):
     """Run Qwen3.5 with text+image support."""  
     print(f"Running {model_name} with text+image support...")  
