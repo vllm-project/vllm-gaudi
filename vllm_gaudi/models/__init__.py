@@ -49,3 +49,8 @@ def register_model():
     import vllm_gaudi.models.gptoss_mxfp4  # noqa: F401
     import vllm_gaudi.models.qwen3_next  # noqa: F401
     import vllm_gaudi.models.qwen3_5  # noqa: F401
+
+    from vllm_gaudi.models.qwen3_omni_moe_thinker import HpuQwen3OmniMoeThinkerForConditionalGeneration  # noqa: F401
+    ModelRegistry.register_model(
+        "Qwen3OmniMoeForConditionalGeneration",
+        "vllm_gaudi.models.qwen3_omni_moe_thinker:HpuQwen3OmniMoeThinkerForConditionalGeneration")
