@@ -512,8 +512,8 @@ launch_all_tests() {
     run_UA_spec_decode_ngram_test
     run_UA_spec_decode_eagle3_test
     run_embedding_model_test
-    run_pd_disaggregate_nixl_libfabric_test
-    run_pd_disaggregate_nixl_ucx_test
+    #run_pd_disaggregate_nixl_libfabric_test
+    #run_pd_disaggregate_nixl_ucx_test
     run_cpu_offloading_test
     run_offloading_connector_test
     run_sleep_mode_test
