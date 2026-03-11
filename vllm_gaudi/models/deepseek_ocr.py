@@ -104,7 +104,6 @@ class HpuDeepseekOCRForCausalLM(DeepseekOCRForCausalLM):
         local_features_2 = self.vision_model(patches, local_features_1)
         htcore.mark_step()
 
-        local_features_1, local_features_2 = self.visual(patches)
         features = torch.cat(
             (
                 local_features_2[:, 1:],
