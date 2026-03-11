@@ -279,9 +279,6 @@ class HPUMambaMixer2(MambaMixer2):
     ):
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
-        if not self._split_weights_ready:
-            self._init_split_weights()
-
         # 1. Split in_proj into two GEMMs for TPC/MME pipelining.
         #    GEMM 1 (states: x,B,C,dt) is dispatched to the MME first;
         #    GEMM 2 (gate) is dispatched second.  The Gaudi runtime can
@@ -329,8 +326,10 @@ class HPUMambaMixer2(MambaMixer2):
     # does NOT require a separate TPC transpose of the weight, unlike
     # a raw torch.mm or a non-contiguous view.
     #
-    # Called lazily on the first forward so that checkpoint weights have
-    # already been loaded into self.in_proj.weight.
+    # Must be called AFTER checkpoint weights have been loaded into
+    # self.in_proj.weight and BEFORE PT_COMPILE_ONLY_MODE warmup,
+    # because .clone() does not copy data in compile-only mode.
+    # Called from apply_model_specific_patches() in hpu_model_runner.
     # ------------------------------------------------------------------
     def _init_split_weights(self):
         gate_size = self.tped_intermediate_size
