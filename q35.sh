@@ -1,4 +1,4 @@
-export MODEL=/software/data/pytorch/huggingface/hub/models--Qwen--Qwen3-VL-32B-Instruct-FP8/snapshots/4bf2c2f39c37c0fede78bede4056e1f18cdf8109/
+export MODEL=/software/data/pytorch/huggingface/hub/models--Qwen--Qwen3.5-35B-A3B-FP8/snapshots/0b2752837483aa34b3db6e83e151b150c0e00e49/
 export VLLM_USE_HYBRID_CACHE=true
 export VLLM_USE_NAIVE_MAMBA_CACHE_SHARING=false
 

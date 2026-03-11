@@ -5800,15 +5800,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     _layer_spec[ln] = group.kv_cache_spec
 
             def _needs_raw_buffer(kv_cache_tensor) -> bool:
-                """Return False if all layers in this tensor are
-                GDN/linear_attention MambaSpec (they will get contiguous
-                tensors later)."""
+                """Return False when every layer in this tensor will allocate
+                its own storage (FullAttentionSpec creates separate kc/vc;
+                GDN/linear_attention MambaSpec uses contiguous tensors).
+                Only standard Mamba2 MambaSpec needs the raw shared buffer
+                for as_strided views."""
                 for ln in kv_cache_tensor.shared_by:
                     spec = _layer_spec.get(ln)
-                    if not isinstance(spec, MambaSpec) or \
-                            spec.mamba_type not in ("gdn_attention",
-                                                    "linear_attention"):
-                        return True
+                    if isinstance(spec, FullAttentionSpec):
+                        continue
+                    if isinstance(spec, MambaSpec) and \
+                            spec.mamba_type in ("gdn_attention",
+                                                "linear_attention"):
+                        continue
+                    # Standard Mamba2 or unknown spec — needs raw buffer
+                    return True
                 return False
 
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
