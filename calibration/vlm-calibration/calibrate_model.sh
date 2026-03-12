@@ -79,7 +79,7 @@ TP_SIZE=1
 eager_mode="off"
 RANK=""
 USE_EP=""
-while getopts "m:b:l:t:d:h:o:r:u:e" OPT; do
+while getopts "m:b:l:t:d:h:o:r:ue" OPT; do
     case ${OPT} in
         m )
             MODEL_PATH="$OPTARG"

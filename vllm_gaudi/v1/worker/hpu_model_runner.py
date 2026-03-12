@@ -878,7 +878,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.head_size,
             self.dtype,
             self.kv_cache_dtype_str,
-            self.block_size,
             use_mla=self.model_config.use_mla,
         )
         self.attn_backend_name = getattr(self.attn_backend, "__name__", None)
@@ -1044,6 +1043,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.is_causal = False
         assert not (self.unified_attn and not self.use_contiguous_pa), 'Unified attn requires contiguous_pa!'
         assert not (self.unified_attn and not self.use_merged_prefill), 'Unified attn requires merged_prefill!'
+
+    def reset_encoder_cache(self) -> None:
+        """Clear the HPU-side encoder cache storing vision embeddings.
+
+        This should be called when model weights are updated to ensure
+        stale embeddings computed with old weights are not reused.
+        """
+        self.encoder_cache.clear()
 
     def _make_buffer(self, *size: Union[int, torch.SymInt], dtype: torch.dtype, numpy: bool = True) -> CpuGpuBuffer:
         return CpuGpuBuffer(*size, dtype=dtype, device=self.device, pin_memory=self.pin_memory, with_numpy=numpy)
