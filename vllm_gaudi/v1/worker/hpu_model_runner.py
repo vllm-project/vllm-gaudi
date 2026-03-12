@@ -6122,6 +6122,58 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #   │                 │             │    │  flat slot addressing        │
             #   └──────────────────────────────┘    └──────────────────────────────┘
             #
+            # CONCRETE EXAMPLE — Jamba-v0.1 (Mamba1, TP=1):
+            #
+            #   Model: 40 layers = 36 mamba + 4 attention
+            #   Pattern: [9 mamba, 1 attn] × 4
+            #   hidden_size=4096, mamba_expand=2, mamba_d_state=16,
+            #   mamba_d_conv=4, num_kv_heads=8, head_size=128,
+            #   block_size=16, dtype=bfloat16
+            #
+            #   Mamba state shapes (per page):
+            #     conv_state: (3, 8192) dtype=float32  →  3 × 8192 × 4B = 98,304 B
+            #     ssm_state:  (8192, 16) dtype=bfloat16 →  8192 × 16 × 2B = 262,144 B
+            #     total S0+S1 = 360,448 B
+            #
+            #   Attention K+V (per page):
+            #     K+V = 2 × block_size × num_kv_heads × head_size × 2B
+            #         = 2 × 16 × 8 × 128 × 2 = 65,536 B
+            #
+            #   page_size = max(360,448, 65,536) = 360,448 B
+            #   (mamba needs more, so attention pages are padded up)
+            #
+            #   One page (360,448 bytes = 351.5 KiB):
+            #
+            #   MAMBA page:                     ATTENTION page (on HPU):
+            #   byte 0                          byte 0
+            #   ┌────────────────────────┐      ┌───────────────────────────┐
+            #   │ conv_state (float32)   │      │ UNUSED in backing tensor  │
+            #   │ 98,304 B (27.3%)       │      │ (all 360,448 B wasted)    │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │                           │
+            #   ├────────────────────────┤      │ Separate K tensor:        │
+            #   │ ssm_state (bfloat16)   │      │   (num_blocks×16, 8, 128) │
+            #   │ 262,144 B (72.7%)      │      │   = 32,768 B/page         │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │ Separate V tensor:        │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │   (num_blocks×16, 8, 128) │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │   = 32,768 B/page         │
+            #   ├────────────────────────┤      │                           │
+            #   │ (no padding; S0+S1=P)  │      │ Total K+V = 65,536 B     │
+            #   └────────────────────────┘      └───────────────────────────┘
+            #   byte 360,448                    byte 360,448
+            #
+            #   Backing tensor for tensor[0] with N blocks:
+            #     Size = N × 360,448 bytes (+ 1 dummy page)
+            #     Shared by: 9 mamba layers + 1 attention layer
+            #     Mamba uses 100% of bytes in its assigned pages
+            #     Attention wastes 100% of bytes in backing tensor
+            #       (uses separate K/V tensors instead)
+            #
+            #   HPU memory overhead per tensor[i]:
+            #     backing tensor:     N × 360,448 B
+            #     + attention K:      N × 32,768 B  (separate tensor)
+            #     + attention V:      N × 32,768 B  (separate tensor)
+            #     = N × 425,984 B total (1.18× the upstream budget)
+            #
             # page_size_bytes is the same for all groups in hybrid models
             # (HybridAttentionMambaModelConfig.verify_and_update_config pads
             # mamba page size to match attention page size at startup)
