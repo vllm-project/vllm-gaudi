@@ -357,9 +357,12 @@ def _naive_prompt_attention(query: torch.Tensor,
             htcore.mark_step()
         attn_weights.add_(position_bias)
     if attn_bias is not None:
-        if attn_weights.dtype != attn_bias.dtype:
-            attn_bias = attn_bias.to(dtype=attn_weights.dtype)
-        attn_weights.add_(attn_bias)
+        if attn_bias.dtype == torch.bool:
+            attn_weights = attn_weights.masked_fill(~attn_bias, float("-inf"))
+        else:
+            if attn_weights.dtype != attn_bias.dtype:
+                attn_bias = attn_bias.to(dtype=attn_weights.dtype)
+            attn_weights.add_(attn_bias)
     if sinks is not None:
         sink = sinks.reshape(1, -1, 1, 1).expand(query.shape[0], -1, query.shape[-2], -1)
         if query_heads != kv_heads:
@@ -404,10 +407,6 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
     recompute_mode = True
     assert attn_bias is not None or valid_seq_lengths is not None, \
         'Either attn_bias or valid_seq_lengths must be != None'
-    if is_causal and attn_bias is not None:
-        # TODO: causal + attn_bias is not yet supported
-        is_causal = False
-        valid_seq_lengths = None
 
     args = [
         query, key, value, attn_bias, 0.0, is_causal, scale, softmax_mode, recompute_mode, valid_seq_lengths,
