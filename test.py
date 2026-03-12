@@ -12,13 +12,38 @@ from io import BytesIO
 
 
 def _strip_think_text(text: str) -> str:
-    """Remove Qwen reasoning blocks from visible output."""
-    # Remove complete <think>...</think> blocks first.
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-    # If generation was truncated mid-think, drop the dangling think suffix.
-    if "<think>" in text:
-        text = text.split("<think>", 1)[0]
-    return text.strip()
+    """
+    Remove Qwen reasoning blocks from visible output.
+    Matches the official vLLM Qwen3ReasoningParser behavior.
+    
+    The Qwen3 reasoning parser works as follows:
+    1. Strip <think> if present in the generated output (old template style)
+    2. Everything before </think> is reasoning (hidden)
+    3. Everything after </think> is content (visible/scoreable)
+    4. If no </think> present, everything is reasoning (truncated output)
+    
+    This returns only the CONTENT part (after </think>), which is what
+    lm_eval uses for scoring.
+    """
+    start_token = "<think>"
+    end_token = "</think>"
+    
+    # Strip <think> if present in the generated output
+    # (newer templates put <think> in the prompt, so it usually won't appear)
+    if start_token in text:
+        text = text.partition(start_token)[2]
+    
+    # Find the end token
+    if end_token not in text:
+        # No </think> means output was truncated - everything is reasoning
+        # Return empty string since there's no content yet
+        return ""
+    
+    # Extract content (everything after </think>)
+    reasoning, _, content = text.partition(end_token)
+    
+    # Return only the content part (what comes after </think>)
+    return content.strip() if content else ""
   
   
 def run_text_only(
@@ -30,51 +55,152 @@ def run_text_only(
     max_num_seqs: int,
     max_num_batched_tokens: int,
     gpu_memory_utilization: float,
+    enable_reasoning: bool = False,  # Off by default
 ):
     """Run Qwen3.5 in language-only mode."""  
-    print(f"Running {model_name} in language-only mode...")  
+    mode_desc = "with reasoning" if enable_reasoning else "without reasoning"
+    print(f"Running {model_name} in language-only mode ({mode_desc})...")  
       
     llm = LLM(  
         model=model_name,  
-        trust_remote_code=True,  #enforce_eager=True,
+        trust_remote_code=True,
         language_model_only=True,  # Disables all multimodal modules
         tensor_parallel_size=tensor_parallel_size,
         max_model_len=max_model_len,
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
-        gpu_memory_utilization=gpu_memory_utilization, #enforce_eager=True
+        gpu_memory_utilization=gpu_memory_utilization,
+    )
+    
+    # Adjust max_tokens based on reasoning mode: 50 for direct, 500 for reasoning
+    max_tokens = 500 if enable_reasoning else 50
+    
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=max_tokens,
+    )
+
+    # # Alternative: Balanced sampling parameters for natural, helpful responses
+    # # For deterministic/factual use: temperature=0.0
+    # # For creative use: temperature=0.9, top_p=0.95
+    # sampling_params = SamplingParams(
+    #     temperature=0.7,           # Balanced creativity
+    #     top_p=0.9,                 # Nucleus sampling
+    #     max_tokens=2048,           # Allow longer responses
+    #     repetition_penalty=1.05,   # Discourage repetition
+    #     stop=["</s>", "<|im_end|>"],  # Natural stop tokens
+    # )
+
+    # Get processor for chat template
+    from transformers import AutoProcessor
+    processor = AutoProcessor.from_pretrained(model_name)
+    if enable_reasoning:
+        system_content = "You are a helpful assistant. Think step-by-step and show your reasoning."
+    else:
+        system_content = (
+            "You are a helpful assistant. Answer directly and concisely. "
+            "Do not output <think> tags or hidden reasoning."
+        )
+    
+    messages = [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": prompt},
+    ]
+
+    # Apply chat template with enable_thinking parameter
+    prompts = processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=enable_reasoning  # Control reasoning at template level
+    )
+
+    outputs = llm.generate(prompts, sampling_params)
+
+    print(f"\n****Prompt****:\n{prompts}\n")
+    for output in outputs:
+        generated_text = output.outputs[0].text
+        
+        if enable_reasoning:
+            # Show both raw and cleaned output when reasoning is enabled
+            clean_text = _strip_think_text(generated_text)
+            print(f"****Generated (with <think> tags)****:\n{generated_text}\n")
+            print(f"=" * 80)
+            print(f"****Generated (cleaned)****:\n{clean_text}\n")
+        else:
+            # Just show the output when reasoning is disabled
+            print(f"****Generated****:\n{generated_text}\n")
+
+
+def run_gsm8k(
+    model_name: str,
+    prompt: str,
+    text_api: str,
+    tensor_parallel_size: int,
+    max_model_len: int,
+    max_num_seqs: int,
+    max_num_batched_tokens: int,
+    gpu_memory_utilization: float,
+):
+    """Run Qwen3.5 with GSM8K lm_eval settings."""  
+    print(f"Running {model_name} in GSM8K mode (matching lm_eval settings)...")  
+      
+    llm = LLM(  
+        model=model_name,  
+        trust_remote_code=True,
+        language_model_only=True,  # Disables all multimodal modules
+        tensor_parallel_size=tensor_parallel_size,
+        max_model_len=max_model_len,
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=max_num_batched_tokens,
+        gpu_memory_utilization=gpu_memory_utilization,
+        reasoning_parser='qwen3',  # CRITICAL: Enable Qwen3 reasoning parser at engine level
+        seed=1234,  # Match lm_eval seed for reproducibility
     )  
       
-    sampling_params = SamplingParams(max_tokens=50, temperature=0.0, top_p=1.0)
+    # Match lm_eval defaults for GSM8K
+    # lm_eval uses: gen_kwargs: {'until': ['Question:', '</s>', '<|im_end|>'], 'do_sample': False, 'temperature': 0.0}
+    # In vLLM, 'until' maps to 'stop' parameter
+    sampling_params = SamplingParams(
+        temperature=0.0,  # Greedy decoding (deterministic) - matches do_sample=False
+        max_tokens=16384,  # Set high, but generation will stop at 'stop' sequences
+        stop=["Question:", "</s>", "<|im_end|>"],  # Match lm_eval 'until' parameter
+    )
 
-    if text_api == "chat":
-        # Use chat-form input for instruct models to avoid prompt-format drift.
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a helpful assistant. Reply in English only. "
-                    "Do not output <think> tags or hidden reasoning."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ]
-        outputs = llm.chat(messages, sampling_params)
-    elif text_api == "generate":
-        direct_prompt = (
-            "Answer directly and concisely. "
-            "Do not output <think> tags or hidden reasoning.\n"
-            f"User: {prompt}\nAssistant:"
-        )
-        outputs = llm.generate(direct_prompt, sampling_params)
-    else:
-        raise ValueError(f"Unsupported text_api: {text_api}")
-      
-    for output in outputs:  
-        generated_text = _strip_think_text(output.outputs[0].text)
-        print(f"Generated: {generated_text}")  
-  
-  
+    # Get processor for chat template
+    from transformers import AutoProcessor
+    processor = AutoProcessor.from_pretrained(model_name)
+
+    # Match lm_eval format: no system message for GSM8K
+    messages = [
+        {"role": "user", "content": prompt},
+    ]
+
+    # Apply chat template
+    prompts = processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True
+    )
+
+    outputs = llm.generate(prompts, sampling_params)
+
+    print(f"\n****Prompt****:\n{prompts}\n")
+    for output in outputs:
+        generated_text = output.outputs[0].text
+        clean_text = _strip_think_text(generated_text)
+
+        # Debug info for reasoning parser behavior
+        num_tokens = len(output.outputs[0].token_ids)
+        finish_reason = output.outputs[0].finish_reason
+        print(f"****Generated (Raw with <think> tags)****:")
+        print(f"Tokens: {num_tokens}, Finish reason: {finish_reason}")
+        print(f"{generated_text}\n")
+        print(f"=" * 80)
+
+        print(f"****Generated (Cleaned - like lm_eval reasoning_parser=qwen3)****:")
+        print(f"This is what lm_eval would use for scoring:\n{clean_text}\n")
+
 def run_text_image(
     model_name: str,
     prompt: str,
@@ -213,12 +339,12 @@ def run_text_video(
         print(f"Generated: {generated_text}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Run Qwen3.5 in language-only, text+image, or text+video mode")  
+    parser = argparse.ArgumentParser(description="Run Qwen3.5 in language-only, text+image, text+video, or GSM8K mode")  
     parser.add_argument(  
         "--mode",  
-        choices=["text", "image", "video"],  
+        choices=["text", "image", "video", "gsm8k"],  
         required=True,  
-        help="Mode: 'text' for language-only, 'image' for text+image, 'video' for text+video"  
+        help="Mode: 'text' for language-only, 'image' for text+image, 'video' for text+video, 'gsm8k' for GSM8K evaluation"  
     )
     parser.add_argument(  
         "--model",  
@@ -275,7 +401,18 @@ def main():
         "--video-url",
         default="https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen2-VL/space_woaudio.mp4",
         help="Video URL (required for video mode)"
-    )  
+    )
+    parser.add_argument(
+        "--reasoning",
+        action="store_true",
+        help="Enable reasoning mode for text generation (uses <think> tags). Off by default."
+    )
+    parser.add_argument(
+        "--use-reasoning-parser",
+        action="store_true",
+        help="Use Qwen3 reasoning parser (like lm_eval reasoning_parser=qwen3). "
+             "Shows both reasoning and final answer separately."
+    )
       
     args = parser.parse_args()
     
@@ -285,11 +422,24 @@ def main():
             args.prompt = "What's in this image?"
         elif args.mode == "video":
             args.prompt = "What's in this video?"
+        elif args.mode == "gsm8k":
+            args.prompt = "A robe takes 2 bolts of blue fiber and half that much white fiber.  How many bolts in total does it take?"
         else:
             args.prompt = "Hello, how are you?"  
-      
     if args.mode == "text":  
         run_text_only(
+            args.model,
+            args.prompt,
+            args.text_api,
+            args.tensor_parallel_size,
+            args.max_model_len,
+            args.max_num_seqs,
+            args.max_num_batched_tokens,
+            args.gpu_memory_utilization,
+            enable_reasoning=args.reasoning,  # Pass reasoning flag
+        )
+    elif args.mode == "gsm8k":  
+        run_gsm8k(
             args.model,
             args.prompt,
             args.text_api,
