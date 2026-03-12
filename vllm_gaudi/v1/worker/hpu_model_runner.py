@@ -5964,6 +5964,32 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         kv_caches: dict[str, torch.Tensor] = {}
         num_blocks = 0
         if self.use_hybrid_cache and self.num_mamba_layers > 0:
+            # Hybrid cache memory layout for models with both mamba and
+            # attention layers (e.g. a model with 36 mamba + 4 attention
+            # layers in groups of [9 mamba, 1 attn, 9 mamba, 1 attn,
+            # 9 mamba, 1 attn, 9 mamba, 1 attn]):
+            #
+            # SHARED BACKING TENSORS (one per mamba group, int8):
+            #   Each backing tensor is shared by all mamba layers in a
+            #   group. Within each page (block), the mamba state is laid
+            #   out as non-overlapping regions:
+            #
+            #   Page layout (per block):
+            #   ┌──────────────────────────────────────────────────────┐
+            #   │ conv_state: bytes [0, S0)           dtype=float32   │
+            #   │ ssm_state:  bytes [S0, S0+S1)       dtype=bfloat16  │
+            #   │ padding:    bytes [S0+S1, page_size) (unused)       │
+            #   └──────────────────────────────────────────────────────┘
+            #   All mamba layers in the group see the same page layout
+            #   and the same blocks — this is intentional: they share
+            #   state so the block allocator assigns them identical
+            #   block tables per request.
+            #
+            # SEPARATE ATTENTION TENSORS:
+            #   Attention layers get their own K and V tensors (not
+            #   shared with the mamba backing tensor) since attention
+            #   KV cache has a different structure (heads × head_dim).
+            #
             # page_size_bytes is the same for all groups in hybrid models
             # (HybridAttentionMambaModelConfig.verify_and_update_config pads
             # mamba page size to match attention page size at startup)
@@ -6011,6 +6037,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         raw_tensor = kv_caches[layer_name]
                         state_tensors = []
                         storage_offset_bytes = 0
+                        state_byte_ranges = []
                         for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
                             dtype_size = get_dtype_size(dtype)
                             num_element_per_page = (kv_cache_spec.page_size_bytes // dtype_size)
@@ -6024,17 +6051,23 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                 stride=target_stride,
                                 storage_offset=storage_offset_bytes // dtype_size,
                             )
+                            state_byte_ranges.append(
+                                (storage_offset_bytes,
+                                 storage_offset_bytes + stride[0] * dtype_size))
                             state_tensors.append(tensor)
                             storage_offset_bytes += stride[0] * dtype_size
                         kv_caches[layer_name] = tuple(state_tensors)
                         logger.debug(
                             "[Hybrid cache] Mamba layer %s: "
                             "%d state tensors, shapes=%s, dtypes=%s, "
-                            "num_blocks=%d, total_bytes_per_block=%d",
+                            "num_blocks=%d, per-block byte ranges=%s "
+                            "(total %d bytes/block of %d page bytes)",
                             layer_name, len(state_tensors),
                             [tuple(s.shape) for s in state_tensors],
                             [s.dtype for s in state_tensors],
-                            num_blocks, storage_offset_bytes)
+                            num_blocks, state_byte_ranges,
+                            storage_offset_bytes,
+                            kv_cache_spec.page_size_bytes)
                     else:
                         pass
         elif self.use_naive_mamba_cache_sharing and self.num_mamba_layers > 0:
