@@ -6174,6 +6174,82 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #     + attention V:      N × 32,768 B  (separate tensor)
             #     = N × 425,984 B total (1.18× the upstream budget)
             #
+            # CONCRETE EXAMPLE — Bamba-9B (Mamba2, TP=1):
+            #
+            #   Model: 32 layers = 26 mamba2 + 6 attention (BambaForCausalLM)
+            #   hidden_size=4096, mamba_expand=2, mamba_d_state=256,
+            #   mamba_d_conv=4, mamba_n_heads=128, mamba_d_head=64,
+            #   mamba_n_groups=1, num_kv_heads=8, head_size=128,
+            #   block_size=16, dtype=bfloat16
+            #
+            #   Mamba2 state shapes differ from Mamba1:
+            #     Mamba1 ssm_state: (intermediate, d_state)     — 2D
+            #     Mamba2 ssm_state: (num_heads, head_dim, d_state) — 3D
+            #
+            #   conv_dim = intermediate + 2 × n_groups × d_state
+            #            = 8192 + 2 × 1 × 256 = 8704
+            #
+            #   Mamba2 state shapes (per page):
+            #     conv_state: (3, 8704) dtype=float32
+            #       → 3 × 8704 × 4B = 104,448 B (2.4% of page)
+            #     ssm_state:  (128, 64, 256) dtype=bfloat16
+            #       → 128 × 64 × 256 × 2B = 4,194,304 B (97.6% of page)
+            #     total S0+S1 = 4,298,752 B (4.10 MiB)
+            #
+            #   Attention K+V (per page):
+            #     K+V = 2 × 16 × 8 × 128 × 2 = 65,536 B
+            #
+            #   page_size = max(4,298,752, 65,536) = 4,298,752 B (4.10 MiB)
+            #   (Mamba2 d_state=256 makes pages 11.9× larger than Jamba)
+            #
+            #   One page (4,298,752 bytes = 4.10 MiB):
+            #
+            #   MAMBA2 page:                    ATTENTION page (on HPU):
+            #   byte 0                          byte 0
+            #   ┌────────────────────────┐      ┌───────────────────────────┐
+            #   │ conv_state (float32)   │      │ UNUSED in backing tensor  │
+            #   │ 104,448 B (2.4%)       │      │ (all 4,298,752 B wasted)  │
+            #   │ ▓▓                     │      │                           │
+            #   ├────────────────────────┤      │ Separate K tensor:        │
+            #   │ ssm_state (bfloat16)   │      │   (num_blocks×16, 8, 128) │
+            #   │ 4,194,304 B (97.6%)    │      │   = 32,768 B/page         │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │ Separate V tensor:        │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │   (num_blocks×16, 8, 128) │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │   = 32,768 B/page         │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │                           │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │ Total K+V = 65,536 B     │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │   (1.5% of page)          │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │                           │
+            #   ├────────────────────────┤      │                           │
+            #   │ (no padding; S0+S1=P)  │      │                           │
+            #   └────────────────────────┘      └───────────────────────────┘
+            #   byte 4,298,752                  byte 4,298,752
+            #
+            #   HPU memory overhead per tensor[i]:
+            #     backing tensor:     N × 4,298,752 B
+            #     + attention K:      N × 32,768 B  (separate tensor)
+            #     + attention V:      N × 32,768 B  (separate tensor)
+            #     = N × 4,364,288 B total (1.015× the upstream budget)
+            #
+            #   COMPARISON — Mamba1 (Jamba) vs Mamba2 (Bamba):
+            #
+            #     With N = 100 blocks, both models save the same absolute
+            #     6,619,136 B (6.3 MiB) from tensor reuse, because the
+            #     attention K+V size is the same.  But the relative impact
+            #     is very different due to page size:
+            #
+            #                          Jamba (Mamba1)    Bamba (Mamba2)
+            #     page_size:           360,448 B         4,298,752 B
+            #     K+V / page:          18.2%             1.5%
+            #     HPU overhead:        +18.2%            +1.5%
+            #     Backing total:       36.4 MiB          414.1 MiB
+            #     Savings:             6.3 MiB (15.4%)   6.3 MiB (1.5%)
+            #
+            #     Mamba2's d_state=256 makes pages so large that attention
+            #     K+V becomes negligible.  Tensor reuse still saves the
+            #     same absolute memory, but the relative benefit shrinks
+            #     from ~15% to ~1.5%.
+            #
             # TENSOR-REUSE APPROACH (PR #1127) — eliminating separate K/V:
             #
             #   PR #1127 proposes that attention reuse the backing tensor
@@ -6247,6 +6323,61 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #   Total:               43,024,384 B    36,405,248 B
             #   Overhead vs budget:        +18.2%           0.0%
             #   Savings:                     —        6,619,136 B (6.3 MiB)
+            #
+            #   TENSOR REUSE WITH MAMBA2 (Bamba-9B, N = 100 blocks):
+            #
+            #     The page_size is 4,298,752 B (4.10 MiB) — 11.9× Jamba.
+            #     PR #1127's contiguous reshape fails even harder here:
+            #
+            #       backing has (N+1) × 4,298,752 / 2 = (N+1) × 2,149,376
+            #       reshape needs 2 × (N+1) × 16 × 8 × 128 = (N+1) × 32,768
+            #       → 2,149,376 ≠ 32,768 ⇒ 65.6× mismatch (vs 5.5× for Jamba)
+            #
+            #     Correct strided K/V views for Bamba:
+            #
+            #       page_stride = 4,298,752 / 2 = 2,149,376 elements (bf16)
+            #
+            #       K = as_strided(backing.view(bf16),
+            #             size  = (N+1, 16, 8, 128),
+            #             stride= (2149376, 1024, 128, 1),
+            #             offset= 0)
+            #
+            #       V = as_strided(backing.view(bf16),
+            #             size  = (N+1, 16, 8, 128),
+            #             stride= (2149376, 1024, 128, 1),
+            #             offset= 16384)
+            #
+            #     Byte layout of ONE PAGE with tensor reuse (Bamba):
+            #
+            #     ┌──────────────────────────────────────────────────────────┐
+            #     │ byte 0                                                  │
+            #     │  K data: 16 × 8 × 128 × 2B = 32,768 B                  │
+            #     │  ▓                               (0.8% of page)         │
+            #     ├──────────────────────────────────────────────────────────┤
+            #     │ byte 32,768                                             │
+            #     │  V data: 16 × 8 × 128 × 2B = 32,768 B                  │
+            #     │  ▓                               (0.8% of page)         │
+            #     ├──────────────────────────────────────────────────────────┤
+            #     │ byte 65,536                                             │
+            #     │  (structural padding: 4,233,216 B = 98.5% of page)      │
+            #     │  same bytes that mamba2 conv/ssm would use if this       │
+            #     │  page were assigned to a mamba group instead             │
+            #     └──────────────────────────────────────────────────────────┘
+            #     byte 4,298,752
+            #
+            #                             Current        Tensor-reuse
+            #     Backing tensor:     434,173,952 B   434,173,952 B
+            #     Separate K tensor:    3,309,568 B             0 B
+            #     Separate V tensor:    3,309,568 B             0 B
+            #                          ─────────────  ─────────────
+            #     Total:              440,793,088 B   434,173,952 B
+            #     Overhead vs budget:        +1.5%           0.0%
+            #     Savings:                    —        6,619,136 B (6.3 MiB)
+            #
+            #     Mamba2's large d_state pushes 98.5% of each attention page
+            #     into structural padding.  Tensor reuse saves memory, but
+            #     the relative benefit drops from 15.4% (Jamba) to 1.5%
+            #     (Bamba) because the backing tensor is already so large.
             #
             #   CONSTRAINT: strided K/V views are NOT contiguous, so
             #   index_copy_ with flat slot_mapping may not work directly.
