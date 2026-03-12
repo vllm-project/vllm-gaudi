@@ -56,7 +56,7 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.platforms import current_platform
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem)
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -4968,7 +4968,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                            total_tokens,
                            scheduled_tokens,
                            is_prompt,
-                           block_id=0):
+                           block_id=0,
+                           mm_features=None):
         # Spec decode: blocks should include look ahead tokens (eagle)
         total_tokens_for_blocks = total_tokens
         if self.speculative_config and self.speculative_config.use_eagle():
@@ -5000,7 +5001,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             req = NewRequestData(
                 req_id=req_id,
                 prompt_token_ids=prompt_token_ids,
-                mm_features=[],
+                mm_features=mm_features if mm_features is not None else [],
                 sampling_params=None,
                 pooling_params=pooling_param,
                 block_ids=block_ids,
@@ -5013,7 +5014,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             req = NewRequestData(
                 req_id=req_id,
                 prompt_token_ids=prompt_token_ids,
-                mm_features=[],
+                mm_features=mm_features if mm_features is not None else [],
                 sampling_params=sampling_params,
                 pooling_params=None,
                 block_ids=block_ids,
@@ -5026,8 +5027,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:
             num_scheduled_tokens[req_id] = scheduled_tokens
 
-    def _add_dummy_unified_request(self, requests, is_prompt, is_unique, block_num, num_computed_tokens,
-                                   num_scheduled_tokens, scheduled_tokens):
+    def _add_dummy_unified_request(self,
+                                   requests,
+                                   is_prompt,
+                                   is_unique,
+                                   block_num,
+                                   num_computed_tokens,
+                                   num_scheduled_tokens,
+                                   scheduled_tokens,
+                                   mm_features=None):
         from vllm.v1.core.sched.output import NewRequestData
 
         req_id = f'{len(requests)}'
@@ -5045,7 +5053,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         req = NewRequestData(
             req_id=req_id,
             prompt_token_ids=prompt_token_ids,
-            mm_features=[],
+            mm_features=mm_features if mm_features is not None else [],
             sampling_params=sampling_params,
             pooling_params=None,
             block_ids=[block_num],
@@ -5186,12 +5194,22 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                 scheduled_tokens)
         self._execute_dummy_scenario(requests, scheduled_tokens)
 
-    def _prepare_dummy_scenario(self, prompt_cfg, decode_cfg):
+    def _prepare_dummy_scenario(self, prompt_cfg, decode_cfg, run_id: str = ""):
         requests: list[NewRequestData] = []
         scheduled_tokens: dict[str, int] = {}
 
         if prompt_cfg:
             prompt_bs, prompt_query_len, prompt_num_blocks = prompt_cfg
+
+            # Create dummy mm_features if multimodal model (uses default count and dimensions from model config)
+            mm_features = None
+            if self.supports_mm_inputs and os.environ.get('VLLM_PROFILE_PROMPT', None) is not None:
+                mm_config = self.model_config.get_multimodal_config()
+                if mm_config:
+                    if mm_config.limit_per_prompt.get("image"):
+                        mm_features = self._create_dummy_mm_features(modality="image", unique_id=run_id)
+                    elif mm_config.limit_per_prompt.get("video"):
+                        mm_features = self._create_dummy_mm_features(modality="video", unique_id=run_id)
 
             if self.is_pooling_model:
                 prompt_total_tokens = [prompt_query_len]
@@ -5219,7 +5237,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                             num_computed_tokens=(context_len * self.block_size),
                                             total_tokens=tokens,
                                             scheduled_tokens=prompt_query_len,
-                                            is_prompt=True)
+                                            is_prompt=True,
+                                            mm_features=mm_features)
         if decode_cfg:
             decode_bs, decode_query_len, decode_num_blocks = decode_cfg
             if self.use_contiguous_pa:
@@ -5292,8 +5311,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.bucketing_manager.decode_buckets.insert(0, decode_cfg)
         torch.hpu.synchronize()
         profiler.start()
-        for _ in range(steps):
-            self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
+        for step_idx in range(steps):
+            # Pass unique run_id to ensure MM embeddings are recomputed each time
+            self._prepare_dummy_scenario(prompt_cfg, decode_cfg, run_id=f"run{step_idx}")
             torch.hpu.synchronize()
             profiler.step()
         profiler.stop()
@@ -5337,6 +5357,49 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             return self.model.model.visual.patch_size
         return 1
 
+    def _get_dummy_mm_inputs_with_options(
+        self,
+        modality: str,
+        count: int,
+        width: int | None = None,
+        height: int | None = None,
+        num_frames: int | None = None,
+    ):
+        """Helper to get dummy multimodal inputs with custom options."""
+
+        # Create custom mm_options with specific width/height
+        mm_options = None
+        if width is not None and height is not None:
+            if modality == 'image':
+                mm_options = {"image": ImageDummyOptions(count=count, width=width, height=height)}
+            elif modality == 'video':
+                mm_options = {
+                    "video":
+                    VideoDummyOptions(count=count,
+                                      width=width,
+                                      height=height,
+                                      num_frames=num_frames if num_frames is not None else 100)
+                }
+
+        # Use the registry's API with custom mm_options
+        if mm_options is not None:
+            processor = self.mm_registry.create_processor(self.model_config)
+            processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
+                seq_len=self.model_config.max_model_len,
+                mm_counts={modality: count},
+                mm_options=mm_options,
+            )
+            from vllm.multimodal.processing import TimingContext
+            dummy_mm_inputs = processor.apply(processor_inputs, timing_ctx=TimingContext(enabled=False))
+        else:
+            # Fallback to default options
+            dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
+                self.model_config,
+                mm_counts={modality: count},
+            )
+
+        return dummy_mm_inputs
+
     def _get_mm_dummy_batch(
         self,
         modality: str,
@@ -5346,26 +5409,29 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
         assert self.mm_budget is not None
-        num_frames = 100
-        count = 1
         if self.get_model().vision_bucket_manager.is_batch_based:
             batch = image_args
+            count = 1
         else:
-            mm_options = self.model_config.get_multimodal_config().get_limit_per_prompt(modality)
-            count = mm_options.count if mm_options and hasattr(mm_options, 'count') else count
+            mm_options = self.model_config.get_multimodal_config().limit_per_prompt.get(modality)
+            count = mm_options.count if mm_options and hasattr(mm_options, 'count') else 1
             batch = count
-        if modality == 'image':
-            mm_options = {"image": ImageDummyOptions(count=count, width=width, height=height), "video": None}
-        elif modality == 'video':
-            num_frames = mm_options.num_frames if mm_options and hasattr(mm_options, 'num_frames') else num_frames
-            mm_options = {
-                "image": None,
-                "video": VideoDummyOptions(count=count, num_frames=num_frames, width=width, height=height)
-            }
-        else:
-            raise NotImplementedError(f"Modality '{modality}' is not supported")
 
-        dummy_mm_inputs = MultiModalRegistry().get_dummy_mm_inputs(self.model_config_copy, mm_counts={modality: count})
+        # Get num_frames for video modality
+        num_frames = None
+        if modality == 'video':
+            mm_config_options = self.model_config.get_multimodal_config().limit_per_prompt.get(modality)
+            if mm_config_options and hasattr(mm_config_options, 'num_frames'):
+                num_frames = mm_config_options.num_frames
+
+        # Use the common helper to get dummy inputs with custom dimensions
+        dummy_mm_inputs = self._get_dummy_mm_inputs_with_options(
+            modality=modality,
+            count=count,
+            width=width,
+            height=height,
+            num_frames=num_frames,
+        )
 
         dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
         # We use the cache so that the item is saved to the cache,
@@ -5377,6 +5443,47 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             device=self.device,
             pin_memory=self.pin_memory,
         ))
+
+    def _create_dummy_mm_features(
+        self,
+        modality: str = "image",
+        unique_id: str = "",
+    ) -> list:
+        """Create dummy multimodal features for profiling using default model config (count, width, height).
+        Args:
+            modality: The modality type (e.g., "image" or "video")
+            unique_id: A unique identifier suffix to prevent caching across multiple calls
+        """
+        from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+        mm_config = self.model_config.get_multimodal_config()
+
+        # Use default count, width, and height from model config
+        dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
+            self.model_config,
+            mm_counts={modality: mm_config.get_limit_per_prompt(modality)},
+        )
+
+        # Extract mm_features from the dummy inputs
+        mm_features = []
+        if "mm_kwargs" in dummy_mm_inputs and modality in dummy_mm_inputs["mm_kwargs"]:
+            mm_items = dummy_mm_inputs["mm_kwargs"][modality]
+            mm_positions = dummy_mm_inputs.get("mm_placeholders", {}).get(modality, [])
+
+            for idx in range(len(mm_items)):
+                mm_position = mm_positions[idx] if idx < len(mm_positions) else PlaceholderRange(offset=0, length=1)
+
+                # Create unique identifier to prevent caching across profile runs
+                identifier = f"DUMMY_{unique_id}_{idx}" if unique_id else f"DUMMY_{idx}"
+
+                mm_features.append(
+                    MultiModalFeatureSpec(
+                        data=mm_items[idx],
+                        modality=modality,
+                        identifier=identifier,
+                        mm_position=mm_position,
+                    ))
+
+        return mm_features
 
     def warmup_multimodal_graphs(self, buckets):
 
@@ -5390,25 +5497,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         is_batch_based = vision_bucket_manager.is_batch_based
         mm_config = self.model_config.get_multimodal_config()
 
-        is_image_warmup = (mm_config is not None and mm_config.get_limit_per_prompt("image") is not None
+        # Determine which modalities to warmup based on limits
+        is_image_warmup = (mm_config is not None and mm_config.limit_per_prompt.get("image") is not None
                            and "image" in self.mm_budget.mm_limits and self.mm_budget.mm_limits['image'] != 0)
-        is_video_warmup = (mm_config is not None and mm_config.get_limit_per_prompt("video") is not None
+        is_video_warmup = (mm_config is not None and mm_config.limit_per_prompt.get("video") is not None
                            and "video" in self.mm_budget.mm_limits and self.mm_budget.mm_limits['video'] != 999)
-        warmup_configs = {
-            "image": (0, lambda: mm_config.get_limit_per_prompt("image")),
-            "video": (999, lambda: mm_config.get_limit_per_prompt("video"))
-        }
-        width = height = None
+
+        # Get width/height from config if available for warmup_lists
         warmup_lists = []
-        for modality, (limit_value, get_options) in warmup_configs.items():
-            if (mm_config and mm_config.get_limit_per_prompt(modality)
-                    and self.mm_budget.mm_limits[modality] != limit_value):
-                options = get_options()
-                width = options.width if hasattr(options, 'width') else None
-                height = options.height if hasattr(options, 'height') else None
-                if width is not None and height is not None:
-                    warmup_lists.append((width, height))
-                break
+        if not is_batch_based and mm_config:
+            # Try to get dimensions from first available modality config
+            for modality in ["image", "video"]:
+                mm_options = mm_config.limit_per_prompt.get(modality)
+                if mm_options:
+                    width = getattr(mm_options, 'width', None)
+                    height = getattr(mm_options, 'height', None)
+                    if width is not None and height is not None:
+                        warmup_lists.append((width, height))
+                        break
 
         if not is_batch_based and len(buckets) > 0:
             patch_size = int(self.get_patch_size_from_model())
