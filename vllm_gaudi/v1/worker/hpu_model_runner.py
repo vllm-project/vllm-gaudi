@@ -1613,15 +1613,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # total tokens across the padded layout and pass padded_seq_len
             # so _gather_mm_embeddings can map positions correctly.
             padded_seq_len = None
+            effective_total_tokens = total_num_scheduled_tokens
             if token_ids.ndim == 2 and token_ids.shape[0] > 1:
                 padded_seq_len = token_ids.shape[-1]
-                total_num_scheduled_tokens = (
+                effective_total_tokens = (
                     token_ids.shape[0] * token_ids.shape[1]
                 )
 
             mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output,
                                                                 req_ids,
-                                                                total_num_scheduled_tokens=total_num_scheduled_tokens,
+                                                                total_num_scheduled_tokens=effective_total_tokens,
                                                                 padded_seq_len=padded_seq_len)
             # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa
             # This may require moving multimodal input preps into _prepare_inputs,        # noqa
