@@ -463,6 +463,11 @@ run_structured_output_test() {
     echo "✅ Test with structured outputs passed."
 }
 
+run_qwen_online_test() {
+    echo "➡️ Testing Qwen Online Mode Tests..."
+    cd ${VLLM_GAUDI_PREFIX}/tests/unit_tests;  bash run_qwen3_online_test.sh
+}
+
 # --- Utility Functions ---
 
 # Function to run all tests sequentially
@@ -518,6 +523,7 @@ launch_all_tests() {
     run_offloading_connector_test
     run_sleep_mode_test
     run_structured_output_test
+    run_qwen_online_test
     echo "🎉 All test suites passed successfully!"
 }
 
