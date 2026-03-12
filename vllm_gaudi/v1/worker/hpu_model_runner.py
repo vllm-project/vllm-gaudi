@@ -5965,30 +5965,39 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         num_blocks = 0
         if self.use_hybrid_cache and self.num_mamba_layers > 0:
             # Hybrid cache memory layout for models with both mamba and
-            # attention layers (e.g. a model with 36 mamba + 4 attention
-            # layers in groups of [9 mamba, 1 attn, 9 mamba, 1 attn,
-            # 9 mamba, 1 attn, 9 mamba, 1 attn]):
+            # attention layers (e.g. Jamba-like: 36 mamba + 4 attention).
             #
-            # SHARED BACKING TENSORS (one per mamba group, int8):
-            #   Each backing tensor is shared by all mamba layers in a
-            #   group. Within each page (block), the mamba state is laid
-            #   out as non-overlapping regions:
+            # SHARED BACKING TENSORS (int8, one per position in the
+            # repeating pattern):
+            #   The KV cache manager groups layers so that each backing
+            #   tensor is shared by layers from EVERY group — typically
+            #   9 mamba layers + 1 attention layer.  All of them appear
+            #   in the same kv_cache_tensor.shared_by list.
             #
-            #   Page layout (per block):
+            #   Different kv_cache_groups get independent block tables,
+            #   so within a single backing tensor a block is used by
+            #   exactly ONE group at a time — no two layer types ever
+            #   read/write the same block simultaneously.
+            #
+            #   How each layer type interprets a page (block):
+            #
+            #   Mamba layers — strided views into byte sub-ranges:
             #   ┌──────────────────────────────────────────────────────┐
             #   │ conv_state: bytes [0, S0)           dtype=float32   │
             #   │ ssm_state:  bytes [S0, S0+S1)       dtype=bfloat16  │
-            #   │ padding:    bytes [S0+S1, page_size) (unused)       │
+            #   │ (unused):   bytes [S0+S1, page_size)                │
             #   └──────────────────────────────────────────────────────┘
-            #   All mamba layers in the group see the same page layout
-            #   and the same blocks — this is intentional: they share
-            #   state so the block allocator assigns them identical
-            #   block tables per request.
             #
-            # SEPARATE ATTENTION TENSORS:
-            #   Attention layers get their own K and V tensors (not
-            #   shared with the mamba backing tensor) since attention
-            #   KV cache has a different structure (heads × head_dim).
+            #   Attention layers — full page reinterpreted as K/V:
+            #   ┌──────────────────────────────────────────────────────┐
+            #   │ entire page viewed as                                │
+            #   │   (block_size, num_kv_heads, head_size) × dtype     │
+            #   └──────────────────────────────────────────────────────┘
+            #   NOTE: on HPU we currently allocate separate K and V
+            #   tensors for attention (not views of the backing tensor)
+            #   because the HPU attention backend expects a (K, V,
+            #   k_scales, v_scales) tuple.  The backing-tensor pages
+            #   assigned to the attention group therefore go unused.
             #
             # page_size_bytes is the same for all groups in hybrid models
             # (HybridAttentionMambaModelConfig.verify_and_update_config pads
@@ -6022,13 +6031,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
-                        # here attn does not share kv cache tensor, so we create separate tensors
+                        # The attention layer shares the same backing tensor
+                        # (and shared_by list) as the mamba layers in its
+                        # group, but uses a different block table so the blocks
+                        # never overlap at runtime.  On HPU the attention
+                        # backend needs separate (K, V) tensors, so we
+                        # allocate new ones here instead of viewing the
+                        # backing tensor (as the GPU runner does).
                         kc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         kv_caches[layer_name] = (kc, vc, None, None)
                         logger.debug(
                             "[Hybrid cache] Attention layer %s: "
-                            "K/V shape=%s, dtype=%s, num_blocks=%d",
+                            "K/V shape=%s, dtype=%s, num_blocks=%d "
+                            "(separate K/V tensors; shares backing tensor "
+                            "and block pool with mamba layers in same group)",
                             layer_name, kv_cache_shape,
                             kv_cache_spec.dtype, num_blocks)
                     elif isinstance(kv_cache_spec, MambaSpec):
@@ -6085,7 +6102,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
-                        # here attn does not share kv cache tensor, so we create separate tensors
+                        # Attention shares the same shared_by group as mamba
+                        # layers but the HPU backend needs separate K/V tensors.
                         kc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         kv_caches[layer_name] = (kc, vc, None, None)
