@@ -5987,17 +5987,32 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #   │ ssm_state:  bytes [S0, S0+S1)       dtype=bfloat16  │
             #   │ (unused):   bytes [S0+S1, page_size)                │
             #   └──────────────────────────────────────────────────────┘
+            #   Verified: S0+S1 ≤ page_size (asserted below).
             #
-            #   Attention layers — full page reinterpreted as K/V:
+            #   Attention layers — K+V data fills the full page:
             #   ┌──────────────────────────────────────────────────────┐
-            #   │ entire page viewed as                                │
-            #   │   (block_size, num_kv_heads, head_size) × dtype     │
+            #   │ K: block_size × num_kv_heads × head_size × dtype    │
+            #   │ V: block_size × num_kv_heads × head_size × dtype    │
+            #   │ K+V = page_size_bytes (by FullAttentionSpec definition)│
             #   └──────────────────────────────────────────────────────┘
-            #   NOTE: on HPU we currently allocate separate K and V
-            #   tensors for attention (not views of the backing tensor)
-            #   because the HPU attention backend expects a (K, V,
-            #   k_scales, v_scales) tuple.  The backing-tensor pages
-            #   assigned to the attention group therefore go unused.
+            #   On GPU, the attention layer views the backing tensor
+            #   directly (K and V interleaved per block, with
+            #   _update_hybrid_attention_mamba_layout re-striding).
+            #   On HPU, the attention cache uses flat slot addressing
+            #   (index_copy_ with slot_mapping) which requires
+            #   contiguous K and V tensors.  Per-block interleaving
+            #   would need a non-linear slot remapping that index_copy_
+            #   cannot express with constant strides.  Therefore HPU
+            #   allocates separate K and V tensors for attention.
+            #
+            #   MEMORY NOTE: this means each group position uses
+            #   ~2× page_size × num_blocks (backing tensor + separate
+            #   K/V), whereas the upstream budget assumes 1×.  Any
+            #   block the allocator assigns to attention occupies space
+            #   in the backing tensor (wasted) AND in the separate K/V
+            #   tensors.  Both must cover all num_blocks because the
+            #   block allocator can assign any block number to any
+            #   group.
             #
             # page_size_bytes is the same for all groups in hybrid models
             # (HybridAttentionMambaModelConfig.verify_and_update_config pads
@@ -6031,23 +6046,33 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
-                        # The attention layer shares the same backing tensor
-                        # (and shared_by list) as the mamba layers in its
-                        # group, but uses a different block table so the blocks
-                        # never overlap at runtime.  On HPU the attention
-                        # backend needs separate (K, V) tensors, so we
-                        # allocate new ones here instead of viewing the
-                        # backing tensor (as the GPU runner does).
+                        # Verify: K+V data per block == page_size (by
+                        # FullAttentionSpec definition), so K+V for all
+                        # num_blocks fits exactly inside the backing tensor.
+                        kv_elements = math.prod(kv_cache_shape)
+                        attn_kv_bytes = 2 * kv_elements * kv_cache_spec.dtype.itemsize
+                        backing_bytes = kv_cache_tensor_size + page_size_bytes
+                        assert attn_kv_bytes <= backing_bytes, (
+                            f"Attention K+V ({attn_kv_bytes} bytes) exceeds "
+                            f"backing tensor ({backing_bytes} bytes) for "
+                            f"layer {layer_name}")
+                        # HPU allocates separate K/V tensors (not views of
+                        # the backing tensor) because index_copy_ with flat
+                        # slot_mapping requires contiguous K/V, and
+                        # per-block interleaving can't be expressed with
+                        # constant strides in a flat tensor.
                         kc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         kv_caches[layer_name] = (kc, vc, None, None)
                         logger.debug(
                             "[Hybrid cache] Attention layer %s: "
-                            "K/V shape=%s, dtype=%s, num_blocks=%d "
-                            "(separate K/V tensors; shares backing tensor "
-                            "and block pool with mamba layers in same group)",
+                            "K/V shape=%s, dtype=%s, num_blocks=%d, "
+                            "K+V=%d bytes fits in backing tensor "
+                            "(%d bytes); separate K/V tensors allocated "
+                            "(HPU flat-addressing constraint)",
                             layer_name, kv_cache_shape,
-                            kv_cache_spec.dtype, num_blocks)
+                            kv_cache_spec.dtype, num_blocks,
+                            attn_kv_bytes, backing_bytes)
                     elif isinstance(kv_cache_spec, MambaSpec):
                         # This is almost the same as for gpu runner in vllm
                         # only change is + 1 for dummy block
@@ -6074,6 +6099,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             state_tensors.append(tensor)
                             storage_offset_bytes += stride[0] * dtype_size
                         kv_caches[layer_name] = tuple(state_tensors)
+                        # Verify: all mamba states fit within one page.
+                        # storage_offset_bytes is the total bytes used per
+                        # block across all state tensors; it must not exceed
+                        # page_size to avoid overlapping the next block.
+                        assert storage_offset_bytes <= kv_cache_spec.page_size_bytes, (
+                            f"Mamba states for {layer_name} use "
+                            f"{storage_offset_bytes} bytes/block but "
+                            f"page_size is only "
+                            f"{kv_cache_spec.page_size_bytes} bytes")
                         logger.debug(
                             "[Hybrid cache] Mamba layer %s: "
                             "%d state tensors, shapes=%s, dtypes=%s, "
@@ -6087,6 +6121,31 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             kv_cache_spec.page_size_bytes)
                     else:
                         pass
+            # Log memory summary for hybrid cache
+            num_backing = len(kv_cache_config.kv_cache_tensors)
+            num_attn_layers = sum(
+                1 for g in kv_cache_config.kv_cache_groups
+                if isinstance(g.kv_cache_spec, FullAttentionSpec))
+            backing_total = sum(
+                t.size + page_size_bytes
+                for t in kv_cache_config.kv_cache_tensors)
+            attn_extra = num_attn_layers * (
+                kv_cache_config.kv_cache_tensors[0].size + page_size_bytes
+            ) if num_attn_layers > 0 else 0
+            budget = max(1, sum(
+                t.size for t in kv_cache_config.kv_cache_tensors))
+            overhead_pct = (backing_total + attn_extra) / budget * 100 - 100
+            logger.warning(
+                "[Hybrid cache] HPU memory: %d backing tensors "
+                "(%d bytes) + %d separate attention K/V pairs "
+                "(%d bytes) = %d bytes total.  The upstream budget "
+                "assumed %d bytes.  Overhead ≈ %.0f%% "
+                "(HPU cannot view the backing tensor for attention "
+                "due to flat index_copy_ addressing).",
+                num_backing, backing_total,
+                num_attn_layers, attn_extra,
+                backing_total + attn_extra,
+                budget, overhead_pct)
         elif self.use_naive_mamba_cache_sharing and self.num_mamba_layers > 0:
             for group in kv_cache_config.kv_cache_groups:
                 kv_cache_spec = group.kv_cache_spec
