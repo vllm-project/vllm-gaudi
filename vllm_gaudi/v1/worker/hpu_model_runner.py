@@ -6183,7 +6183,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #   block_size=16, dtype=bfloat16
             #
             #   Mamba2 state shapes differ from Mamba1:
-            #     Mamba1 ssm_state: (intermediate, d_state)     — 2D
+            #     Mamba1 ssm_state: (intermediate, d_state)        — 2D
             #     Mamba2 ssm_state: (num_heads, head_dim, d_state) — 3D
             #
             #   conv_dim = intermediate + 2 × n_groups × d_state
