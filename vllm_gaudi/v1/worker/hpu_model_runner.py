@@ -6193,12 +6193,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     def get_kv_caches_4D(self, kv_caches) -> dict[str, torch.Tensor]:
         kv_caches_4D: dict[str, torch.Tensor] = {}
+        expected_num_blocks = self.kv_cache_config.num_blocks
         for layer_name, cache_or_cachelist in kv_caches.items():
             kv_cache_per_layer = []
             for cache in cache_or_cachelist:
-                if cache is None:
+                if cache is None or not isinstance(cache, torch.Tensor):
                     continue
-                kv_cache_per_layer.append(cache.view(-1, self.block_size, *cache.shape[1:]))
+
+                # HPU KV cache is allocated as flattened slots and includes one
+                # extra dummy/pad block at the end. NIXL expects real blocks only.
+                cache_4d = cache.view(-1, self.block_size, *cache.shape[1:])
+                if cache_4d.shape[0] == expected_num_blocks + 1:
+                    cache_4d = cache_4d[:expected_num_blocks]
+
+                kv_cache_per_layer.append(cache_4d)
                 #NOTE(Chendi): Do not remove, call torch data_ptr to record physical address
                 cache.data_ptr()
             kv_caches_4D[layer_name] = TensorTuple(tuple(kv_cache_per_layer)) \
