@@ -64,6 +64,7 @@ class HPUBucketingManager():
         self.block_size = block_size
         self.max_num_batched_tokens = max_num_batched_tokens
         self.num_hpu_blocks = None
+        self._fallback_max_ctx = 0
         self.max_model_len = max_model_len
         self.num_speculative_tokens = num_speculative_tokens
         self.mamba_chunk_size = mamba_chunk_size
@@ -203,6 +204,10 @@ class HPUBucketingManager():
                                                    self.max_num_seqs, self.max_num_prefill_seqs,
                                                    self.max_num_batched_tokens, self.block_size, self.num_hpu_blocks,
                                                    buckets_from_file, self.mamba_chunk_size)
+            # Safety cap for fallback: max ctx from prepared decode buckets.
+            # Prevents catastrophic allocations from corrupt batch data while
+            # allowing calc_fallback_value to handle moderate overflow.
+            self._fallback_max_ctx = max((ctx for _, _, ctx in self.decode_buckets), default=0)
             if self.num_speculative_tokens:
                 # The existing buckets are used as seed decode buckets
                 self.seed_decode_buckets = self.decode_buckets
@@ -238,8 +243,11 @@ class HPUBucketingManager():
         if self.num_hpu_blocks is None:
             new_ctx = 0
         else:
-            new_ctx = min(calc_fallback_value(ctx, self.fallback_blocks_base_step),
-                          self.num_hpu_blocks + self.block_size)
+            new_ctx = calc_fallback_value(ctx, self.fallback_blocks_base_step)
+            # Safety cap: limit to max prepared decode bucket ctx to prevent
+            # catastrophic graph compilation from corrupted batch data.
+            if self._fallback_max_ctx > 0:
+                new_ctx = min(new_ctx, self._fallback_max_ctx)
         return (new_batch_size, new_seq_len, new_ctx)
 
     def find_prompt_bucket(self, batch_size, seq_len, ctx=0):
