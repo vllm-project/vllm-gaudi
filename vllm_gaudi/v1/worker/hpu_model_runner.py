@@ -6174,6 +6174,91 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #     + attention V:      N × 32,768 B  (separate tensor)
             #     = N × 425,984 B total (1.18× the upstream budget)
             #
+            # TENSOR-REUSE APPROACH (PR #1127) — eliminating separate K/V:
+            #
+            #   PR #1127 proposes that attention reuse the backing tensor
+            #   instead of allocating separate K/V tensors.  The key idea:
+            #   create K and V as *views* of the backing tensor, just like
+            #   mamba already creates strided views for conv/ssm states.
+            #
+            #   WHAT PR #1127 DOES (contiguous reshape):
+            #
+            #     backing = torch.zeros(size // 2, dtype=bfloat16)
+            #
+            #     # For attention:
+            #     reshaped = backing.view(dtype).reshape(
+            #         2, (N+1) * block_size, num_kv_heads, head_size)
+            #     K, V = reshaped.unbind()
+            #
+            #   WHY THIS FAILS for Jamba-v0.1 (mamba page > attention page):
+            #
+            #     backing has (N+1) × 360,448 / 2 = (N+1) × 180,224 elements
+            #     reshape needs 2 × (N+1) × 16 × 8 × 128 = (N+1) × 32,768
+            #     → 180,224 ≠ 32,768 ⇒ RuntimeError (shape mismatch)
+            #
+            #     The backing tensor is 5.5× larger than what the contiguous
+            #     reshape expects, because page_size (360,448 B) is padded to
+            #     match mamba, while attention K+V only needs 65,536 B/page.
+            #
+            #   CORRECT FIX — strided K/V views (page-aligned):
+            #
+            #     Instead of a contiguous reshape, create K and V as strided
+            #     views with stride[0] = page_size // dtype_size, so each
+            #     page's K/V data occupies the first 65,536 bytes of the
+            #     360,448-byte page, exactly like mamba's conv/ssm views:
+            #
+            #     page_stride = 360,448 / 2 = 180,224 elements (bf16)
+            #
+            #     K = as_strided(backing.view(bf16),
+            #           size  = (N+1, 16, 8, 128),
+            #           stride= (180224, 1024, 128, 1),
+            #           offset= 0)
+            #
+            #     V = as_strided(backing.view(bf16),
+            #           size  = (N+1, 16, 8, 128),
+            #           stride= (180224, 1024, 128, 1),
+            #           offset= 16384)          # after K data
+            #
+            #   Byte layout of ONE PAGE with tensor reuse:
+            #
+            #   ┌──────────────────────────────────────────────────────────┐
+            #   │ byte 0                                                  │
+            #   │  K data: 16 × 8 × 128 × 2B = 32,768 B                  │
+            #   │  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  (9.1% of page)             │
+            #   ├──────────────────────────────────────────────────────────┤
+            #   │ byte 32,768                                             │
+            #   │  V data: 16 × 8 × 128 × 2B = 32,768 B                  │
+            #   │  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  (9.1% of page)             │
+            #   ├──────────────────────────────────────────────────────────┤
+            #   │ byte 65,536                                             │
+            #   │  (structural padding: 294,912 B = 81.8% of page)        │
+            #   │  same bytes that mamba would use for conv/ssm if this    │
+            #   │  page were assigned to a mamba group instead             │
+            #   └──────────────────────────────────────────────────────────┘
+            #   byte 360,448
+            #
+            #   Memory comparison (Jamba-v0.1, N = 100 blocks):
+            #
+            #                           Current        Tensor-reuse
+            #   Backing tensor:      36,405,248 B     36,405,248 B
+            #   Separate K tensor:    3,309,568 B              0 B
+            #   Separate V tensor:    3,309,568 B              0 B
+            #                        ─────────────   ─────────────
+            #   Total:               43,024,384 B    36,405,248 B
+            #   Overhead vs budget:        +18.2%           0.0%
+            #   Savings:                     —        6,619,136 B (6.3 MiB)
+            #
+            #   CONSTRAINT: strided K/V views are NOT contiguous, so
+            #   index_copy_ with flat slot_mapping may not work directly.
+            #   The attention backend must either:
+            #     (a) use scatter/gather ops that handle non-contiguous
+            #         tensors, or
+            #     (b) remap slot indices to account for the page stride
+            #         (slot → page * page_stride + intra_page_offset).
+            #   This is the fundamental reason the current code allocates
+            #   separate contiguous K/V tensors — it works with the
+            #   existing HPU attention backend without modification.
+            #
             # page_size_bytes is the same for all groups in hybrid models
             # (HybridAttentionMambaModelConfig.verify_and_update_config pads
             # mamba page size to match attention page size at startup)
