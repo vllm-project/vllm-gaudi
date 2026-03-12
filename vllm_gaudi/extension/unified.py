@@ -176,6 +176,42 @@ def convert_cl_aligned_tensor(input_hpu, reference_size) -> torch.tensor:
     return input_hpu
 
 
+def run_softmax_fa2(
+        s_attn: torch.tensor,
+        fmin: torch.tensor,
+        inputL_hpu_tensors: Dict[tuple, torch.Tensor] = None,
+        inputM_hpu_tensors: Dict[tuple, torch.Tensor] = None) -> tuple[torch.tensor, torch.tensor, torch.tensor]:
+    """Helper to run softmax_fa2 with fallback logic."""
+    # TODO: remove dtype check once full support is added for fp8 in unified attention
+    # TODO 2: this is for testing softmax_fa2 with and without inputs - to be modified once we have more confidence in the kernel's robustness without inputs
+    if get_config().unified_attn_softmax_fa2 and s_attn.dtype == torch.bfloat16:
+        use_fa2_inputs = get_config().unified_attn_softmax_fa2_with_inputs
+        # Without inputs: kernel allocates output based on CL(kv_len).
+        # When kv_len < query_len the buffer is too small, so fall back to manual.
+        can_use_fa2_no_inputs = (not use_fa2_inputs) and s_attn.shape[-1] >= s_attn.shape[-2]
+
+        if use_fa2_inputs:
+            inputM_hpu, inputL_hpu = create_softmax_fa2_input_tensors(s_attn, fmin, inputL_hpu_tensors,
+                                                                      inputM_hpu_tensors)
+            s_attn, s_max, s_sum, _exp_max_fixup_hpu = torch.ops.hpu.softmax_fa2(s_attn,
+                                                                                 inputM=inputM_hpu,
+                                                                                 inputL=inputL_hpu)
+            s_max = convert_cl_aligned_tensor(s_max, list(s_attn.shape[:-1]))
+            s_sum = convert_cl_aligned_tensor(s_sum, list(s_attn.shape[:-1]))
+            return s_attn, s_max, s_sum
+        elif can_use_fa2_no_inputs:
+            s_attn, s_max, s_sum = torch.ops.hpu.softmax_fa2(s_attn)
+            s_max = convert_cl_aligned_tensor(s_max, list(s_attn.shape[:-1]))
+            s_sum = convert_cl_aligned_tensor(s_sum, list(s_attn.shape[:-1]))
+            return s_attn, s_max, s_sum
+
+    # Fallback/Default path
+    s_max = torch.maximum(s_attn.amax(-1), fmin)
+    s_attn = torch.exp(s_attn - s_max.unsqueeze(-1))
+    s_sum = torch.sum(s_attn, -1)
+    return s_attn, s_max, s_sum
+
+
 def online_merge_step(
     acc_attn: Optional[torch.tensor],
     acc_max: Optional[torch.tensor],
@@ -300,19 +336,8 @@ def partial_attn_causal(query: torch.tensor,
         b = bias[q_min:q_max, 0:q_max]
 
         s_attn = torch.matmul(q, k.transpose(-1, -2)) + b.unsqueeze(0).unsqueeze(0)
-        # TODO: remove dtype check once full support is added for fp8 in unified attention
-        if get_config().unified_attn_softmax_fa2 and s_attn.dtype == torch.bfloat16:
-            inputM_hpu, inputL_hpu = create_softmax_fa2_input_tensors(s_attn, fmin, inputL_hpu_tensors,
-                                                                      inputM_hpu_tensors)
-            s_attn, s_max, s_sum, _exp_max_fixup_hpu = torch.ops.hpu.softmax_fa2(s_attn,
-                                                                                 inputM=inputM_hpu,
-                                                                                 inputL=inputL_hpu)
-            s_max = convert_cl_aligned_tensor(s_max, list(s_attn.shape[:-1]))
-            s_sum = convert_cl_aligned_tensor(s_sum, list(s_attn.shape[:-1]))
-        else:
-            s_max = torch.maximum(s_attn.amax(-1), fmin)
-            s_attn = torch.exp(s_attn - s_max.unsqueeze(-1))
-            s_sum = torch.sum(s_attn, -1)
+        # Softmax
+        s_attn, s_max, s_sum = run_softmax_fa2(s_attn, fmin, inputL_hpu_tensors, inputM_hpu_tensors)
 
         # Attention: s_attn @ v
         s_attn = torch.matmul(s_attn, v)
@@ -387,18 +412,8 @@ def _partial_attn_shared_core(query: torch.tensor,
     attn = attn.flatten(0, 1)
     attn = attn + bias
 
-    # TODO: remove dtype check once full support is added for fp8 in unified attention
-    if get_config().unified_attn_softmax_fa2 and attn.dtype == torch.bfloat16:
-        inputM_hpu, inputL_hpu = create_softmax_fa2_input_tensors(attn, fmin, inputL_hpu_tensors, inputM_hpu_tensors)
-        attn, local_max, local_sum, _exp_max_fixup_hpu = torch.ops.hpu.softmax_fa2(attn,
-                                                                                   inputM=inputM_hpu,
-                                                                                   inputL=inputL_hpu)
-        local_max = convert_cl_aligned_tensor(local_max, list(attn.shape[:-1]))
-        local_sum = convert_cl_aligned_tensor(local_sum, list(attn.shape[:-1]))
-    else:
-        local_max = torch.maximum(attn.amax(-1), fmin)
-        attn = torch.exp(attn - local_max.unsqueeze(-1))
-        local_sum = attn.sum(-1)
+    # Softmax
+    attn, local_max, local_sum = run_softmax_fa2(attn, fmin, inputL_hpu_tensors, inputM_hpu_tensors)
 
     attn = torch.matmul(attn.unflatten(0, (kv_heads if not is_mla else num_heads, -1)), value).flatten(0, 1)
 
