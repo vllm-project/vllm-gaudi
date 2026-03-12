@@ -5965,9 +5965,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         num_blocks = 0
         if self.use_hybrid_cache and self.num_mamba_layers > 0:
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                # taking into account dummy block
-                size = (kv_cache_tensor.size + kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes)
-                tensor = torch.zeros(size // 2, dtype=torch.bfloat16, device=self.device)
+                # Find the correct page_size_bytes for layers sharing this tensor
+                page_size_bytes = max(
+                    group.kv_cache_spec.page_size_bytes
+                    for group in kv_cache_config.kv_cache_groups
+                    if any(ln in kv_cache_tensor.shared_by for ln in group.layer_names)
+                )
+                # Taking into account dummy block (+1 page).
+                # Use int8 (byte-level) backing tensor to correctly support
+                # dtype reinterpretation via .view(dtype) for different layer
+                # types (attention and mamba may use different dtypes).
+                size = kv_cache_tensor.size + page_size_bytes
+                tensor = torch.zeros(size, dtype=torch.int8, device=self.device)
                 for layer_name in kv_cache_tensor.shared_by:
                     kv_caches[layer_name] = tensor
             for group in kv_cache_config.kv_cache_groups:
@@ -6002,7 +6011,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             target_stride = (num_element_per_page, *stride[1:])
                             assert storage_offset_bytes % dtype_size == 0
                             tensor = torch.as_strided(
-                                raw_tensor,
+                                raw_tensor.view(dtype),
                                 size=target_shape,
                                 stride=target_stride,
                                 storage_offset=storage_offset_bytes // dtype_size,
