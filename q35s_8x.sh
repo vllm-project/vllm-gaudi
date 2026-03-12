@@ -17,11 +17,11 @@ export FUSER_ENABLE_LOW_UTILIZATION=true
 export ENABLE_FUSION_BEFORE_NORM=true
 export VLLM_SKIP_WARMUP=true
 export VLLM_GRAPH_RESERVED_MEM=0.1
-# export VLLM_CONTIGUOUS_PA=true
-# export VLLM_DEFRAG=true
+export VLLM_CONTIGUOUS_PA=true
+export VLLM_DEFRAG=true
 export VLLM_USE_HYBRID_CACHE=true
 export VLLM_USE_NAIVE_MAMBA_CACHE_SHARING=false
-export MODEL=/root/.cache/huggingface/hub/models--Qwen--Qwen3.5-397B-A17B-FP8/snapshots/9f1f3de9a3a48cfd340fd73ca98c02625b7afb3b/
+export MODEL=/software/data/pytorch/huggingface/hub/models--Qwen--Qwen3.5-397B-A17B-FP8/snapshots/9f1f3de9a3a48cfd340fd73ca98c02625b7afb3b/
 python test.py \
   --model $MODEL \
   --mode text \
