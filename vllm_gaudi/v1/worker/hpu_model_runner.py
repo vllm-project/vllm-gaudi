@@ -5965,7 +5965,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         num_blocks = 0
         if self.use_hybrid_cache and self.num_mamba_layers > 0:
             # Hybrid cache memory layout for models with both mamba and
-            # attention layers (e.g. Jamba-like: 36 mamba + 4 attention).
+            # attention layers (e.g. Granite 4.0: 36 mamba2 + 4 attention).
             #
             # SHARED BACKING TENSORS (int8, one per position in the
             # repeating pattern):
@@ -6017,8 +6017,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # HOW ONE BACKING TENSOR IS USED BY 9 MAMBA + 1 ATTENTION:
             #
             #   Upstream groups layers by spec type (MambaSpec, FullAttentionSpec),
-            #   then splits into sub-groups of equal size.  For Jamba (36 mamba + 4
-            #   attention, pattern [9 mamba, 1 attn] × 4):
+            #   then splits into sub-groups of equal size.  For Granite 4.0
+            #   (36 mamba2 + 4 attention, pattern [9 mamba2, 1 attn] × 4):
             #
             #     9 mamba groups (4 layers each, one per pattern repetition)
             #     + 1 attention group (4 layers)
@@ -6122,85 +6122,63 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #   │                 │             │    │  flat slot addressing        │
             #   └──────────────────────────────┘    └──────────────────────────────┘
             #
-            # CONCRETE EXAMPLE — Jamba-v0.1 (Mamba1, TP=1):
+            # CONCRETE EXAMPLE — Granite 4.0 (Mamba2, TP=1):
             #
-            #   Model: 40 layers = 36 mamba + 4 attention
-            #   Pattern: [9 mamba, 1 attn] × 4
-            #   hidden_size=4096, mamba_expand=2, mamba_d_state=16,
-            #   mamba_d_conv=4, num_kv_heads=8, head_size=128,
-            #   block_size=16, dtype=bfloat16
-            #
-            #   Mamba state shapes (per page):
-            #     conv_state: (3, 8192) dtype=float32  →  3 × 8192 × 4B = 98,304 B
-            #     ssm_state:  (8192, 16) dtype=bfloat16 →  8192 × 16 × 2B = 262,144 B
-            #     total S0+S1 = 360,448 B
-            #
-            #   Attention K+V (per page):
-            #     K+V = 2 × block_size × num_kv_heads × head_size × 2B
-            #         = 2 × 16 × 8 × 128 × 2 = 65,536 B
-            #
-            #   page_size = max(360,448, 65,536) = 360,448 B
-            #   (mamba needs more, so attention pages are padded up)
-            #
-            #   One page (360,448 bytes = 351.5 KiB):
-            #
-            #   MAMBA page:                     ATTENTION page (on HPU):
-            #   byte 0                          byte 0
-            #   ┌────────────────────────┐      ┌───────────────────────────┐
-            #   │ conv_state (float32)   │      │ UNUSED in backing tensor  │
-            #   │ 98,304 B (27.3%)       │      │ (all 360,448 B wasted)    │
-            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │                           │
-            #   ├────────────────────────┤      │ Separate K tensor:        │
-            #   │ ssm_state (bfloat16)   │      │   (num_blocks×16, 8, 128) │
-            #   │ 262,144 B (72.7%)      │      │   = 32,768 B/page         │
-            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │ Separate V tensor:        │
-            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │   (num_blocks×16, 8, 128) │
-            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │   = 32,768 B/page         │
-            #   ├────────────────────────┤      │                           │
-            #   │ (no padding; S0+S1=P)  │      │ Total K+V = 65,536 B     │
-            #   └────────────────────────┘      └───────────────────────────┘
-            #   byte 360,448                    byte 360,448
-            #
-            #   Backing tensor for tensor[0] with N blocks:
-            #     Size = N × 360,448 bytes (+ 1 dummy page)
-            #     Shared by: 9 mamba layers + 1 attention layer
-            #     Mamba uses 100% of bytes in its assigned pages
-            #     Attention wastes 100% of bytes in backing tensor
-            #       (uses separate K/V tensors instead)
-            #
-            #   HPU memory overhead per tensor[i]:
-            #     backing tensor:     N × 360,448 B
-            #     + attention K:      N × 32,768 B  (separate tensor)
-            #     + attention V:      N × 32,768 B  (separate tensor)
-            #     = N × 425,984 B total (1.18× the upstream budget)
-            #
-            # CONCRETE EXAMPLE — Bamba-9B (Mamba2, TP=1):
-            #
-            #   Model: 32 layers = 26 mamba2 + 6 attention (BambaForCausalLM)
-            #   hidden_size=4096, mamba_expand=2, mamba_d_state=256,
-            #   mamba_d_conv=4, mamba_n_heads=128, mamba_d_head=64,
-            #   mamba_n_groups=1, num_kv_heads=8, head_size=128,
-            #   block_size=16, dtype=bfloat16
-            #
-            #   Mamba2 state shapes differ from Mamba1:
-            #     Mamba1 ssm_state: (intermediate, d_state)        — 2D
-            #     Mamba2 ssm_state: (num_heads, head_dim, d_state) — 3D
-            #
-            #   conv_dim = intermediate + 2 × n_groups × d_state
-            #            = 8192 + 2 × 1 × 256 = 8704
+            #   Model: 40 layers = 36 mamba2 + 4 attention
+            #     (GraniteMoeHybridForCausalLM)
+            #   Pattern: [9 mamba2, 1 attn] × 4
+            #   GraniteMoeHybridConfig defaults:
+            #     hidden_size=4096, mamba_expand=2, mamba_d_state=256,
+            #     mamba_d_conv=4, mamba_n_heads=128, mamba_d_head=64,
+            #     mamba_n_groups=1, num_kv_heads=32, head_size=128,
+            #     block_size=16, dtype=bfloat16
             #
             #   Mamba2 state shapes (per page):
+            #     conv_dim = intermediate + 2 × n_groups × d_state
+            #              = 8192 + 2 × 1 × 256 = 8704
             #     conv_state: (3, 8704) dtype=float32
-            #       → 3 × 8704 × 4B = 104,448 B (2.4% of page)
+            #       → 3 × 8704 × 4B = 104,448 B (S0)
             #     ssm_state:  (128, 64, 256) dtype=bfloat16
-            #       → 128 × 64 × 256 × 2B = 4,194,304 B (97.6% of page)
+            #       → 128 × 64 × 256 × 2B = 4,194,304 B (S1)
             #     total S0+S1 = 4,298,752 B (4.10 MiB)
             #
             #   Attention K+V (per page):
-            #     K+V = 2 × 16 × 8 × 128 × 2 = 65,536 B
+            #     K = block_size × num_kv_heads × head_size × 2B
+            #       = 16 × 32 × 128 × 2 = 131,072 B
+            #     V = 16 × 32 × 128 × 2 = 131,072 B
+            #     K+V = 262,144 B (256 KiB)
             #
-            #   page_size = max(4,298,752, 65,536) = 4,298,752 B (4.10 MiB)
-            #   (Mamba2 d_state=256 makes pages 11.9× larger than Jamba)
+            #   page_size = max(S0+S1, K+V)
+            #             = max(4,298,752, 262,144) = 4,298,752 B (4.10 MiB)
+            #   (mamba2 states dominate — attention pages are padded up)
+            #
+            # NO-OVERLAP VERIFICATION — backing tensor is large enough:
+            #
+            #   The block allocator assigns each page to exactly ONE group,
+            #   so mamba and attention never write the same page.  Within
+            #   a page, different state tensors must not overlap:
+            #
+            #   CHECK 1: Mamba states within one page (no inter-state overlap)
+            #     conv_state occupies bytes [0, 104,448)
+            #     ssm_state  occupies bytes [104,448, 4,298,752)
+            #     Ranges are disjoint: 104,448 ≤ 104,448 ✓
+            #     Total = S0+S1 = 4,298,752 ≤ page_size = 4,298,752 ✓
+            #     (asserted at line ~6482 below)
+            #
+            #   CHECK 2: Attention K+V within one page
+            #     K data occupies bytes [0, 131,072)
+            #     V data occupies bytes [131,072, 262,144)
+            #     Ranges are disjoint: 131,072 ≤ 131,072 ✓
+            #     Total K+V = 262,144 ≤ page_size = 4,298,752 ✓
+            #     (asserted at line ~6431 below)
+            #
+            #   CHECK 3: Cross-type safety (mamba vs attention)
+            #     Different groups use disjoint page sets (block allocator) ✓
+            #     No two layer types ever read/write the same page ✓
+            #
+            #   RESULT: The backing tensor is large enough to keep both
+            #   mamba2 state (4,298,752 B) and attention K+V (262,144 B)
+            #   on HPU without any overlaps.
             #
             #   One page (4,298,752 bytes = 4.10 MiB):
             #
@@ -6211,44 +6189,32 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #   │ 104,448 B (2.4%)       │      │ (all 4,298,752 B wasted)  │
             #   │ ▓▓                     │      │                           │
             #   ├────────────────────────┤      │ Separate K tensor:        │
-            #   │ ssm_state (bfloat16)   │      │   (num_blocks×16, 8, 128) │
-            #   │ 4,194,304 B (97.6%)    │      │   = 32,768 B/page         │
+            #   │ ssm_state (bfloat16)   │      │   (num_blocks×16, 32,128) │
+            #   │ 4,194,304 B (97.6%)    │      │   = 131,072 B/page        │
             #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │ Separate V tensor:        │
-            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │   (num_blocks×16, 8, 128) │
-            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │   = 32,768 B/page         │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │   (num_blocks×16, 32,128) │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │   = 131,072 B/page        │
             #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │                           │
-            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │ Total K+V = 65,536 B     │
-            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │   (1.5% of page)          │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │ Total K+V = 262,144 B    │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │   (6.1% of page)          │
             #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │                           │
             #   ├────────────────────────┤      │                           │
             #   │ (no padding; S0+S1=P)  │      │                           │
             #   └────────────────────────┘      └───────────────────────────┘
             #   byte 4,298,752                  byte 4,298,752
             #
+            #   Backing tensor for tensor[0] with N blocks:
+            #     Size = N × 4,298,752 bytes (+ 1 dummy page)
+            #     Shared by: 9 mamba2 layers + 1 attention layer
+            #     Mamba2 uses 100% of bytes in its assigned pages
+            #     Attention wastes 100% of bytes in backing tensor
+            #       (uses separate K/V tensors instead)
+            #
             #   HPU memory overhead per tensor[i]:
             #     backing tensor:     N × 4,298,752 B
-            #     + attention K:      N × 32,768 B  (separate tensor)
-            #     + attention V:      N × 32,768 B  (separate tensor)
-            #     = N × 4,364,288 B total (1.015× the upstream budget)
-            #
-            #   COMPARISON — Mamba1 (Jamba) vs Mamba2 (Bamba):
-            #
-            #     With N = 100 blocks, both models save the same absolute
-            #     6,619,136 B (6.3 MiB) from tensor reuse, because the
-            #     attention K+V size is the same.  But the relative impact
-            #     is very different due to page size:
-            #
-            #                          Jamba (Mamba1)    Bamba (Mamba2)
-            #     page_size:           360,448 B         4,298,752 B
-            #     K+V / page:          18.2%             1.5%
-            #     HPU overhead:        +18.2%            +1.5%
-            #     Backing total:       36.4 MiB          414.1 MiB
-            #     Savings:             6.3 MiB (15.4%)   6.3 MiB (1.5%)
-            #
-            #     Mamba2's d_state=256 makes pages so large that attention
-            #     K+V becomes negligible.  Tensor reuse still saves the
-            #     same absolute memory, but the relative benefit shrinks
-            #     from ~15% to ~1.5%.
+            #     + attention K:      N × 131,072 B  (separate tensor)
+            #     + attention V:      N × 131,072 B  (separate tensor)
+            #     = N × 4,560,896 B total (1.061× the upstream budget)
             #
             # TENSOR-REUSE APPROACH (PR #1127) — eliminating separate K/V:
             #
@@ -6266,118 +6232,78 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #         2, (N+1) * block_size, num_kv_heads, head_size)
             #     K, V = reshaped.unbind()
             #
-            #   WHY THIS FAILS for Jamba-v0.1 (mamba page > attention page):
+            #   WHY THIS FAILS for Granite 4.0 (mamba page > attention page):
             #
-            #     backing has (N+1) × 360,448 / 2 = (N+1) × 180,224 elements
-            #     reshape needs 2 × (N+1) × 16 × 8 × 128 = (N+1) × 32,768
-            #     → 180,224 ≠ 32,768 ⇒ RuntimeError (shape mismatch)
+            #     backing has (N+1) × 4,298,752 / 2 = (N+1) × 2,149,376 elements
+            #     reshape needs 2 × (N+1) × 16 × 32 × 128 = (N+1) × 131,072
+            #     → 2,149,376 ≠ 131,072 ⇒ RuntimeError (16.4× shape mismatch)
             #
-            #     The backing tensor is 5.5× larger than what the contiguous
-            #     reshape expects, because page_size (360,448 B) is padded to
-            #     match mamba, while attention K+V only needs 65,536 B/page.
+            #     The backing tensor is 16.4× larger than what the contiguous
+            #     reshape expects, because page_size (4,298,752 B) is padded to
+            #     match mamba, while attention K+V only needs 262,144 B/page.
             #
             #   CORRECT FIX — strided K/V views (page-aligned):
             #
             #     Instead of a contiguous reshape, create K and V as strided
             #     views with stride[0] = page_size // dtype_size, so each
-            #     page's K/V data occupies the first 65,536 bytes of the
-            #     360,448-byte page, exactly like mamba's conv/ssm views:
+            #     page's K/V data occupies the first 262,144 bytes of the
+            #     4,298,752-byte page, exactly like mamba's conv/ssm views:
             #
-            #     page_stride = 360,448 / 2 = 180,224 elements (bf16)
+            #     page_stride = 4,298,752 / 2 = 2,149,376 elements (bf16)
             #
             #     K = as_strided(backing.view(bf16),
-            #           size  = (N+1, 16, 8, 128),
-            #           stride= (180224, 1024, 128, 1),
+            #           size  = (N+1, 16, 32, 128),
+            #           stride= (2149376, 4096, 128, 1),
             #           offset= 0)
             #
             #     V = as_strided(backing.view(bf16),
-            #           size  = (N+1, 16, 8, 128),
-            #           stride= (180224, 1024, 128, 1),
-            #           offset= 16384)          # after K data
+            #           size  = (N+1, 16, 32, 128),
+            #           stride= (2149376, 4096, 128, 1),
+            #           offset= 65536)          # after K data (65,536 elements)
+            #
+            #   NO-OVERLAP CHECK FOR STRIDED K/V VIEWS:
+            #
+            #     Within one page, K occupies bf16 elements [0, 65,536)
+            #     = bytes [0, 131,072), and V occupies elements [65,536, 131,072)
+            #     = bytes [131,072, 262,144).  K and V are disjoint ✓
+            #
+            #     Across pages, K[page i] starts at element i × 2,149,376.
+            #     K[page i] ends at i × 2,149,376 + 65,536.
+            #     K[page i+1] starts at (i+1) × 2,149,376 = i × 2,149,376 + 2,149,376.
+            #     Gap = 2,149,376 - 65,536 = 2,083,840 elements (no overlap) ✓
             #
             #   Byte layout of ONE PAGE with tensor reuse:
             #
             #   ┌──────────────────────────────────────────────────────────┐
             #   │ byte 0                                                  │
-            #   │  K data: 16 × 8 × 128 × 2B = 32,768 B                  │
-            #   │  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  (9.1% of page)             │
+            #   │  K data: 16 × 32 × 128 × 2B = 131,072 B                │
+            #   │  ▓▓▓▓▓                            (3.0% of page)        │
             #   ├──────────────────────────────────────────────────────────┤
-            #   │ byte 32,768                                             │
-            #   │  V data: 16 × 8 × 128 × 2B = 32,768 B                  │
-            #   │  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  (9.1% of page)             │
+            #   │ byte 131,072                                            │
+            #   │  V data: 16 × 32 × 128 × 2B = 131,072 B                │
+            #   │  ▓▓▓▓▓                            (3.0% of page)        │
             #   ├──────────────────────────────────────────────────────────┤
-            #   │ byte 65,536                                             │
-            #   │  (structural padding: 294,912 B = 81.8% of page)        │
-            #   │  same bytes that mamba would use for conv/ssm if this    │
+            #   │ byte 262,144                                            │
+            #   │  (structural padding: 4,036,608 B = 93.9% of page)      │
+            #   │  same bytes that mamba2 conv/ssm would use if this       │
             #   │  page were assigned to a mamba group instead             │
             #   └──────────────────────────────────────────────────────────┘
-            #   byte 360,448
+            #   byte 4,298,752
             #
-            #   Memory comparison (Jamba-v0.1, N = 100 blocks):
+            #   Memory comparison (Granite 4.0, N = 100 blocks):
             #
             #                           Current        Tensor-reuse
-            #   Backing tensor:      36,405,248 B     36,405,248 B
-            #   Separate K tensor:    3,309,568 B              0 B
-            #   Separate V tensor:    3,309,568 B              0 B
-            #                        ─────────────   ─────────────
-            #   Total:               43,024,384 B    36,405,248 B
-            #   Overhead vs budget:        +18.2%           0.0%
-            #   Savings:                     —        6,619,136 B (6.3 MiB)
+            #   Backing tensor:     434,173,952 B   434,173,952 B
+            #   Separate K tensor:   13,238,272 B             0 B
+            #   Separate V tensor:   13,238,272 B             0 B
+            #                        ─────────────  ─────────────
+            #   Total:              460,650,496 B   434,173,952 B
+            #   Overhead vs budget:        +6.1%           0.0%
+            #   Savings:                    —       26,476,544 B (25.2 MiB)
             #
-            #   TENSOR REUSE WITH MAMBA2 (Bamba-9B, N = 100 blocks):
-            #
-            #     The page_size is 4,298,752 B (4.10 MiB) — 11.9× Jamba.
-            #     PR #1127's contiguous reshape fails even harder here:
-            #
-            #       backing has (N+1) × 4,298,752 / 2 = (N+1) × 2,149,376
-            #       reshape needs 2 × (N+1) × 16 × 8 × 128 = (N+1) × 32,768
-            #       → 2,149,376 ≠ 32,768 ⇒ 65.6× mismatch (vs 5.5× for Jamba)
-            #
-            #     Correct strided K/V views for Bamba:
-            #
-            #       page_stride = 4,298,752 / 2 = 2,149,376 elements (bf16)
-            #
-            #       K = as_strided(backing.view(bf16),
-            #             size  = (N+1, 16, 8, 128),
-            #             stride= (2149376, 1024, 128, 1),
-            #             offset= 0)
-            #
-            #       V = as_strided(backing.view(bf16),
-            #             size  = (N+1, 16, 8, 128),
-            #             stride= (2149376, 1024, 128, 1),
-            #             offset= 16384)
-            #
-            #     Byte layout of ONE PAGE with tensor reuse (Bamba):
-            #
-            #     ┌──────────────────────────────────────────────────────────┐
-            #     │ byte 0                                                  │
-            #     │  K data: 16 × 8 × 128 × 2B = 32,768 B                  │
-            #     │  ▓                               (0.8% of page)         │
-            #     ├──────────────────────────────────────────────────────────┤
-            #     │ byte 32,768                                             │
-            #     │  V data: 16 × 8 × 128 × 2B = 32,768 B                  │
-            #     │  ▓                               (0.8% of page)         │
-            #     ├──────────────────────────────────────────────────────────┤
-            #     │ byte 65,536                                             │
-            #     │  (structural padding: 4,233,216 B = 98.5% of page)      │
-            #     │  same bytes that mamba2 conv/ssm would use if this       │
-            #     │  page were assigned to a mamba group instead             │
-            #     └──────────────────────────────────────────────────────────┘
-            #     byte 4,298,752
-            #
-            #                             Current        Tensor-reuse
-            #     Backing tensor:     434,173,952 B   434,173,952 B
-            #     Separate K tensor:    3,309,568 B             0 B
-            #     Separate V tensor:    3,309,568 B             0 B
-            #                          ─────────────  ─────────────
-            #     Total:              440,793,088 B   434,173,952 B
-            #     Overhead vs budget:        +1.5%           0.0%
-            #     Savings:                    —        6,619,136 B (6.3 MiB)
-            #
-            #     Mamba2's large d_state pushes 98.5% of each attention page
-            #     into structural padding.  Tensor reuse saves memory, but
-            #     the relative benefit drops from 15.4% (Jamba) to 1.5%
-            #     (Bamba) because the backing tensor is already so large.
+            #   Granite 4.0's large mamba2 d_state=256 makes pages 4.10 MiB.
+            #   Attention K+V uses only 6.1% of each page.  Tensor reuse
+            #   saves 25.2 MiB (6.1%) — a modest but worthwhile improvement.
             #
             #   CONSTRAINT: strided K/V views are NOT contiguous, so
             #   index_copy_ with flat slot_mapping may not work directly.
