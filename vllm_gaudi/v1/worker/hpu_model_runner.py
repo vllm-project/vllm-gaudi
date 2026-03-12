@@ -6014,6 +6014,59 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #   block allocator can assign any block number to any
             #   group.
             #
+            # HOW ONE BACKING TENSOR IS USED BY 9 MAMBA + 1 ATTENTION:
+            #
+            #   Upstream groups layers by spec type (MambaSpec, FullAttentionSpec),
+            #   then splits into sub-groups of equal size.  For Jamba (36 mamba + 4
+            #   attention, pattern [9 mamba, 1 attn] × 4):
+            #
+            #     9 mamba groups (4 layers each, one per pattern repetition)
+            #     + 1 attention group (4 layers)
+            #     = 10 kv_cache_groups, each with group_size=4 layers.
+            #
+            #   get_kv_cache_config_from_groups creates group_size=4 backing
+            #   tensors.  Tensor i gets the i-th layer from EVERY group:
+            #
+            #     tensor[0].shared_by = [layer.0.mixer,  layer.1.mixer, ...,
+            #                            layer.8.mixer,  layer.9.self_attn]
+            #     tensor[1].shared_by = [layer.10.mixer, layer.11.mixer, ...,
+            #                            layer.18.mixer, layer.19.self_attn]
+            #     ...
+            #     tensor[3].shared_by = [layer.30.mixer, ..., layer.38.mixer,
+            #                            layer.39.self_attn]
+            #
+            #   Each of the 10 layers in a tensor belongs to a different group,
+            #   so each has its OWN block table.  The block allocator assigns
+            #   pages independently per group — no two groups ever share a page.
+            #
+            #   Runtime block assignment within tensor[0] (N pages total):
+            #
+            #   ┌────────┬────────┬────────┬────────┬────────┬────────┬───────┐
+            #   │ page 0 │ page 1 │ page 2 │ page 3 │ page 4 │ page 5 │ ...   │
+            #   │ (free) │ grp1   │ (free) │ grp9   │ (free) │ grp0   │       │
+            #   │        │ seq 0  │        │ seq 0  │        │ seq 0  │       │
+            #   └────────┴────────┴────────┴────────┴────────┴────────┴───────┘
+            #   grp0  = mamba group 0 → layer.0.mixer
+            #   grp1  = mamba group 1 → layer.1.mixer
+            #   ...
+            #   grp8  = mamba group 8 → layer.8.mixer
+            #   grp9  = attn  group  → layer.9.self_attn
+            #
+            #   All 9 mamba layers create IDENTICAL strided views over the
+            #   entire backing tensor (same offset, same stride per page).
+            #   They never collide because each layer's group assigns
+            #   disjoint pages.
+            #
+            #   Mamba page (grp0-8):        Attention page (grp9):
+            #   ┌───────────────────────┐   ┌───────────────────────┐
+            #   │ conv_state [0, S0)    │   │ On GPU: K+V data      │
+            #   │ ssm_state  [S0, S0+S1)│   │ (viewed from tensor)  │
+            #   │ (padding)  [S0+S1, P) │   │                       │
+            #   └───────────────────────┘   │ On HPU: page UNUSED   │
+            #   S0+S1 ≤ P (asserted below)  │ (separate K/V tensors │
+            #                               │ allocated instead)    │
+            #                               └───────────────────────┘
+            #
             # page_size_bytes is the same for all groups in hybrid models
             # (HybridAttentionMambaModelConfig.verify_and_update_config pads
             # mamba page size to match attention page size at startup)
