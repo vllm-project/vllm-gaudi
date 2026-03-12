@@ -277,7 +277,7 @@ run_mistral3_load_generate_test() {
 # Multimodal-support with deepseek-ocr
 run_deepseek_ocr_vl_test() {
     echo "➡️ Testing Deepseek OCR..."
-    VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 \
+    PT_HPU_DISABLE_pass_remove_unnecessary_bmm_view=True VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=0 \
     python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/deepseek-ocr.yaml"
     echo "✅ Test with multimodal-support with deepseek-ocr passed."
 }
@@ -417,19 +417,19 @@ run_embedding_model_test() {
 
 # pd_disaggregate_nixl_libfabric
 run_pd_disaggregate_nixl_libfabric_test() {
-    #echo "➡️ Testing PD disaggregate through NIXL libfabric."
-    #git clone https://github.com/intel-staging/nixl.git -b v0.6.0_OFI
-    #cp -r nixl /tmp/nixl_source
-    #cd nixl; WHEELS_CACHE_HOME=/workspace/hf_cache/wheels_cache_ofi python install_nixl.py; cd ..
-    #rm -rf nixl
-    #cd ${VLLM_GAUDI_PREFIX}/tests/unit_tests; DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=OFI bash run_accuracy_test.sh
+    echo "➡️ Testing PD disaggregate through NIXL libfabric."
+    git clone https://github.com/intel-staging/nixl.git -b v0.6.0_OFI
+    cp -r nixl /tmp/nixl_source
+    cd nixl; WHEELS_CACHE_HOME=/workspace/hf_cache/wheels_cache_ofi python install_nixl.py; cd ..
+    rm -rf nixl
+    cd ${VLLM_GAUDI_PREFIX}/tests/unit_tests; DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=OFI bash run_accuracy_test.sh
     echo "✅ PD disaggregate through NIXL libfabric."
 }
 
 run_pd_disaggregate_nixl_ucx_test() {
-    #echo "➡️ Testing PD disaggregate through NIXL UCX."
-    #WHEELS_CACHE_HOME=/workspace/hf_cache/wheels_cache_ucx python "${VLLM_GAUDI_PREFIX}/install_nixl.py"
-    #cd ${VLLM_GAUDI_PREFIX}/tests/unit_tests; DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=UCX bash run_accuracy_test.sh
+    echo "➡️ Testing PD disaggregate through NIXL UCX."
+    WHEELS_CACHE_HOME=/workspace/hf_cache/wheels_cache_ucx python "${VLLM_GAUDI_PREFIX}/install_nixl.py"
+    cd ${VLLM_GAUDI_PREFIX}/tests/unit_tests; DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=UCX bash run_accuracy_test.sh
     echo "✅ PD disaggregate through NIXL UCX."
 }
 
@@ -512,8 +512,8 @@ launch_all_tests() {
     run_UA_spec_decode_ngram_test
     run_UA_spec_decode_eagle3_test
     run_embedding_model_test
-    #run_pd_disaggregate_nixl_libfabric_test
-    #run_pd_disaggregate_nixl_ucx_test
+    run_pd_disaggregate_nixl_libfabric_test
+    run_pd_disaggregate_nixl_ucx_test
     run_cpu_offloading_test
     run_offloading_connector_test
     run_sleep_mode_test
