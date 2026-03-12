@@ -1,3 +1,4 @@
+import logging
 import os
 import bisect
 import math
@@ -446,6 +447,14 @@ def generate_buckets(bs_range,
             omitted_buckets.add(("condition: bs <= ctx, ", "-> bs, query, ctx: ", bs, query, ctx))
         return bs <= ctx
 
+    def num_ctx_tokens_less_or_equal_batched_max_model_len(bs, query, ctx):
+        is_valid = ctx <= math.ceil(max_model_len / block_size) * bs if ctx > ctx_range[0] else True
+        if not is_valid:
+            omitted_buckets.add(
+                ("condition: ctx <= math.ceil(max_model_len / block_size) * bs if ctx > ctx_range[0] else True",
+                 "-> bs, query, ctx: ", bs, query, ctx))
+        return is_valid
+
     filters_map = {
         "prompt": {
             # depends only on merged_prefill
@@ -454,8 +463,8 @@ def generate_buckets(bs_range,
         },
         "decode": {
             # depends only on contiguous PA
-            True: [],
-            False: [batch_size_smaller_than_blocks],
+            True: [num_ctx_tokens_less_or_equal_batched_max_model_len],
+            False: [batch_size_smaller_than_blocks, num_ctx_tokens_less_or_equal_batched_max_model_len],
         }
     }
 
@@ -518,6 +527,32 @@ def generate_buckets(bs_range,
             logger().error(bucket)
         raise RuntimeError("Generated 0 " + phase +
                            " buckets. Please adjust the bucketing configuration according to README")
+
+    if logger().getEffectiveLevel() <= logging.DEBUG and omitted_buckets:
+        phase = "prompt" if is_prompt else "decode"
+        omitted_buckets_str = "\n".join(map(str, sorted(omitted_buckets)))
+        msg = f"Omitted {len(omitted_buckets)} {phase} buckets:\n{omitted_buckets_str}"
+        logger().debug(msg)
+
+    return sorted(buckets)
+
+
+def generate_unified_buckets(query_range, shared_ctx_range, unique_ctx_range, bs, block_size, max_model_len):
+    buckets = set()
+    is_causal = [0, 1]
+
+    for query, shared_ctx, unique_ctx, causal in itertools.product(query_range, shared_ctx_range, unique_ctx_range,
+                                                                   is_causal):
+        if causal:
+            max_bs = min(bs, query)
+            if math.ceil(shared_ctx * block_size // max_bs) <= max_model_len:
+                buckets.add((query, shared_ctx, unique_ctx, causal))
+        elif query <= bs:
+            # non causal query = current bs
+            if shared_ctx > 0 or unique_ctx > 0:
+                if shared_ctx == 0 or (math.ceil(shared_ctx * block_size // (query // 2)) <= max_model_len):
+                    if shared_ctx > 0 or query <= unique_ctx:
+                        buckets.add((query, shared_ctx, unique_ctx, causal))
 
     return sorted(buckets)
 
