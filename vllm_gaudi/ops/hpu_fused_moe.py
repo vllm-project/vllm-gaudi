@@ -36,6 +36,10 @@ def _normalize_moe_activation(activation):
     return activation.value if isinstance(activation, Enum) else activation
 
 
+def _normalize_moe_activation(activation):
+    return activation.value if isinstance(activation, Enum) else activation
+
+
 @UnquantizedFusedMoEMethod.register_oot
 class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     """MoE method without quantization."""
