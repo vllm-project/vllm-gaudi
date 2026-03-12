@@ -6052,20 +6052,75 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #   grp8  = mamba group 8 → layer.8.mixer
             #   grp9  = attn  group  → layer.9.self_attn
             #
-            #   All 9 mamba layers create IDENTICAL strided views over the
-            #   entire backing tensor (same offset, same stride per page).
-            #   They never collide because each layer's group assigns
-            #   disjoint pages.
+            #   PHYSICAL BYTE LAYOUT INSIDE ONE BACKING TENSOR:
             #
-            #   Mamba page (grp0-8):        Attention page (grp9):
-            #   ┌───────────────────────┐   ┌───────────────────────┐
-            #   │ conv_state [0, S0)    │   │ On GPU: K+V data      │
-            #   │ ssm_state  [S0, S0+S1)│   │ (viewed from tensor)  │
-            #   │ (padding)  [S0+S1, P) │   │                       │
-            #   └───────────────────────┘   │ On HPU: page UNUSED   │
-            #   S0+S1 ≤ P (asserted below)  │ (separate K/V tensors │
-            #                               │ allocated instead)    │
-            #                               └───────────────────────┘
+            #   All 9 mamba layers create IDENTICAL strided views over the
+            #   ENTIRE backing tensor — same storage_offset, same stride.
+            #   The strided view for each state (conv, ssm) spans every page
+            #   with stride = page_size_bytes / dtype_size elements:
+            #
+            #   Backing tensor (flat int8, total = N × P bytes, P=page_size):
+            #
+            #   byte: 0                 P               2P              3P
+            #         ├─── page 0 ──────┼─── page 1 ────┼─── page 2 ────┤ ...
+            #         │                 │                │               │
+            #   Mamba strided view (conv_state, storage_offset=0):
+            #         │[0, S0)          │[0, S0)         │[0, S0)        │
+            #         │ ▲ data if       │ ▲ data if      │ ▲ data if     │
+            #         │   assigned      │   assigned     │   assigned    │
+            #         │                 │                │               │
+            #   Mamba strided view (ssm_state, storage_offset=S0):
+            #         │[S0, S0+S1)      │[S0, S0+S1)     │[S0, S0+S1)   │
+            #         │ ▲ data if       │ ▲ data if      │ ▲ data if    │
+            #         │   assigned      │   assigned     │   assigned   │
+            #         │                 │                │              │
+            #         │[S0+S1, P)       │[S0+S1, P)      │[S0+S1, P)   │
+            #         │  (padding)      │  (padding)     │  (padding)   │
+            #         └─────────────────┴────────────────┴──────────────┘
+            #
+            #   S0 = conv_state bytes/page (e.g. conv_dim × (kernel-1) × 4B)
+            #   S1 = ssm_state bytes/page (e.g. num_heads × ssm_state_size × 2B)
+            #   P  = page_size_bytes (padded to match attention page size)
+            #   S0+S1 ≤ P (asserted below)
+            #
+            #   Every mamba layer sees the SAME view — conv_state and ssm_state
+            #   are at the same byte offsets in every page.  They never collide
+            #   because each layer's group has its own block table that assigns
+            #   disjoint pages.  At runtime, layer.X.mixer indexes into its
+            #   view with state_indices_tensor[cache_group_idx], which maps
+            #   to pages allocated only by that layer's group.
+            #
+            #   Example: which pages each group reads/writes at runtime:
+            #
+            #   Page:  │ 0     │ 1     │ 2     │ 3     │ 4     │ 5    │ ...
+            #   ───────┼───────┼───────┼───────┼───────┼───────┼──────┤
+            #   grp0   │       │       │       │       │       │ ████ │ layer.0.mixer
+            #   grp1   │       │ ████  │       │       │       │      │ layer.1.mixer
+            #   grp2   │       │       │       │       │       │      │ layer.2.mixer
+            #   ...    │       │       │       │       │       │      │
+            #   grp8   │       │       │       │       │       │      │ layer.8.mixer
+            #   grp9   │       │       │       │ ████  │       │      │ layer.9.self_attn
+            #          └───────┴───────┴───────┴───────┴───────┴──────┘
+            #   ████ = page assigned to that group for a particular sequence.
+            #   Each page is used by exactly one group at any time.
+            #
+            #   Bytes accessed inside an assigned page (P = page_size):
+            #
+            #   Mamba page (grp0-8):                Attention page (grp9):
+            #   ┌──────────────────────────────┐    ┌──────────────────────────────┐
+            #   │ byte 0          │             │    │ ON GPU:                      │
+            #   │  conv_state     │ S0 bytes    │    │  K+V viewed from backing     │
+            #   │  (float32)      │ (used)      │    │  tensor with re-striding     │
+            #   ├─────────────────┤             │    │  (_update_hybrid_attention_  │
+            #   │ byte S0         │             │    │   mamba_layout)              │
+            #   │  ssm_state      │ S1 bytes    │    ├──────────────────────────────┤
+            #   │  (bfloat16)     │ (used)      │    │ ON HPU:                      │
+            #   ├─────────────────┤             │    │  page UNUSED (wasted)        │
+            #   │ byte S0+S1      │             │    │  — HPU allocates separate    │
+            #   │  (padding)      │ P-S0-S1     │    │  contiguous K and V tensors  │
+            #   │                 │ (unused)    │    │  because index_copy_ needs   │
+            #   │                 │             │    │  flat slot addressing        │
+            #   └──────────────────────────────┘    └──────────────────────────────┘
             #
             # page_size_bytes is the same for all groups in hybrid models
             # (HybridAttentionMambaModelConfig.verify_and_update_config pads
