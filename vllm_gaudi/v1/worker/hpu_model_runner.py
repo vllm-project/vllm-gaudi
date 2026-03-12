@@ -40,7 +40,6 @@ from vllm_gaudi.v1.worker.hpu_dp_utils import set_hpu_dp_metadata
 
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.attention import MLAAttention
 from vllm.v1.attention.selector import get_attn_backend
 
 from vllm.config import (VllmConfig, get_layers_from_vllm_config, update_config)
@@ -51,7 +50,6 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.platforms import current_platform
@@ -71,11 +69,9 @@ from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
 from vllm.v1.attention.backends.utils import create_fast_prefill_custom_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
-    MLAAttentionSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
     EncoderOnlyAttentionSpec,
@@ -1159,55 +1155,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             format. Layers that do not need KV cache are not included.
         """
 
-        forward_ctx = self.vllm_config.compilation_config.static_forward_context
-        block_size = self.vllm_config.cache_config.block_size
         kv_cache_spec: dict[str, KVCacheSpec] = {}
-        cache_dtype_str = self.vllm_config.cache_config.cache_dtype
-        for layer_name, attn_module in forward_ctx.items():
-            kv_sharing_target_layer_name = getattr(attn_module, 'kv_sharing_target_layer_name', None)
-            if kv_sharing_target_layer_name is not None:
-                from vllm.model_executor.layers.attention.attention import validate_kv_sharing_target
-                try:
-                    validate_kv_sharing_target(
-                        layer_name,
-                        kv_sharing_target_layer_name,
-                        forward_ctx,
-                    )
-                    self.shared_kv_cache_layers[layer_name] = kv_sharing_target_layer_name
-                except Exception as e:
-                    logger.error("KV sharing validation failed for %s -> %s: %s", layer_name,
-                                 kv_sharing_target_layer_name, e)
+        layer_type = cast(type[Any], AttentionLayerBase)
+        attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type)
+        for layer_name, attn_module in attn_layers.items():
+            if isinstance(attn_module, Attention) and (kv_tgt_layer := attn_module.kv_sharing_target_layer_name):
+                self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
                 continue
-            if isinstance(attn_module, FusedMoE):
-                continue
-
-            # TODO: Support other attention modules, e.g., sliding window,
-            # cross-attention
-            if isinstance(attn_module, MambaBase):
-                kv_cache_spec[layer_name] = attn_module.get_kv_cache_spec(self.vllm_config)
-            elif isinstance(attn_module, Attention):
-                if attn_module.attn_type == AttentionType.DECODER:
-                    kv_cache_spec[layer_name] = FullAttentionSpec(block_size=block_size,
-                                                                  num_kv_heads=attn_module.num_kv_heads,
-                                                                  head_size=attn_module.head_size,
-                                                                  dtype=self.kv_cache_dtype)
-                elif attn_module.attn_type in (AttentionType.ENCODER, AttentionType.ENCODER_ONLY):
-                    # encoder-only attention does not need KV cache.
-                    continue
-                elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
-                    raise NotImplementedError
-                else:
-                    raise ValueError(f"Unknown attention type: {attn_module.attn_type}")
-            elif isinstance(attn_module, MLAAttention):
-                if layer_name in kv_cache_spec:
-                    continue
-                kv_cache_spec[layer_name] = MLAAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=attn_module.head_size,
-                    dtype=self.kv_cache_dtype,
-                    cache_dtype_str=cache_dtype_str,
-                )
+            # Skip modules that don't need KV cache (eg encoder-only attention)
+            if spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec
 
@@ -5832,7 +5789,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             break
                     num_blocks = \
                         kv_cache_tensor_size // kv_cache_spec.page_size_bytes
-                    if isinstance(kv_cache_spec, FullAttentionSpec):
+                    if isinstance(kv_cache_spec, AttentionSpec):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
@@ -5875,7 +5832,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             break
                     num_blocks = \
                         kv_cache_tensor_size // kv_cache_spec.page_size_bytes
-                    if isinstance(kv_cache_spec, FullAttentionSpec):
+                    if isinstance(kv_cache_spec, AttentionSpec):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
@@ -5923,7 +5880,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     # different GPUs, and `kv_cache_config.num_blocks` is set to
                     # the min of all `num_blocks`. Verify it here.
                     assert num_blocks >= kv_cache_config.num_blocks
-                    if isinstance(kv_cache_spec, FullAttentionSpec):
+                    if isinstance(kv_cache_spec, AttentionSpec):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
@@ -5979,7 +5936,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
                 kv_caches[layer_name] = kv_caches[target_layer_name]
         assert layer_names == set(kv_caches.keys()), "Some layers are not correctly initialized"
-        bind_kv_cache(kv_caches, self.vllm_config.compilation_config.static_forward_context, self.kv_caches)
+        num_attn_module = (2 if self.model_config.hf_config.model_type == "longcat_flash" else 1)
+        bind_kv_cache(kv_caches, self.vllm_config.compilation_config.static_forward_context, self.kv_caches,
+                      num_attn_module)
 
         if self.enable_bucketing:
             self.bucketing_manager.num_hpu_blocks = num_blocks
