@@ -6216,38 +6216,34 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #     + attention V:      N × 131,072 B  (separate tensor)
             #     = N × 4,560,896 B total (1.061× the upstream budget)
             #
-            # TENSOR-REUSE APPROACH (PR #1127) — eliminating separate K/V:
+            # TENSOR-REUSE — why attention K/V can't use a contiguous reshape:
             #
-            #   PR #1127 proposes that attention reuse the backing tensor
-            #   instead of allocating separate K/V tensors.  The key idea:
-            #   create K and V as *views* of the backing tensor, just like
-            #   mamba already creates strided views for conv/ssm states.
+            #   To save memory, attention could reuse the backing tensor
+            #   instead of allocating separate K/V tensors, just like mamba
+            #   already creates strided views for conv/ssm states.
             #
-            #   WHAT PR #1127 DOES (contiguous reshape):
+            #   A naive approach tries a contiguous reshape:
             #
             #     backing = torch.zeros(size // 2, dtype=bfloat16)
-            #
-            #     # For attention:
             #     reshaped = backing.view(dtype).reshape(
             #         2, (N+1) * block_size, num_kv_heads, head_size)
             #     K, V = reshaped.unbind()
             #
-            #   WHY THIS FAILS for Granite 4.0 (mamba page > attention page):
+            #   This fails because the backing tensor is sized to the
+            #   mamba page, which is much larger than attention K+V:
             #
-            #     backing has (N+1) × 4,298,752 / 2 = (N+1) × 2,149,376 elements
+            #     backing has (N+1) × 4,298,752 / 2 = (N+1) × 2,149,376 elems
             #     reshape needs 2 × (N+1) × 16 × 32 × 128 = (N+1) × 131,072
-            #     → 2,149,376 ≠ 131,072 ⇒ RuntimeError (16.4× shape mismatch)
+            #     → 2,149,376 ≠ 131,072  (16.4× larger)
+            #     → RuntimeError: shape mismatch
             #
-            #     The backing tensor is 16.4× larger than what the contiguous
-            #     reshape expects, because page_size (4,298,752 B) is padded to
-            #     match mamba, while attention K+V only needs 262,144 B/page.
+            #   The mismatch arises because page_size (4,298,752 B) is set
+            #   by mamba state needs, while attention K+V only uses
+            #   262,144 B per page.  A contiguous reshape can't bridge
+            #   this gap — it treats the entire backing tensor as dense
+            #   attention data, ignoring the per-page structure.
             #
-            #   CORRECT FIX — strided K/V views (page-aligned):
-            #
-            #     Instead of a contiguous reshape, create K and V as strided
-            #     views with stride[0] = page_size // dtype_size, so each
-            #     page's K/V data occupies the first 262,144 bytes of the
-            #     4,298,752-byte page, exactly like mamba's conv/ssm views:
+            #   The correct approach uses strided views (like mamba does):
             #
             #     page_stride = 4,298,752 / 2 = 2,149,376 elements (bf16)
             #
@@ -6259,34 +6255,31 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #     V = as_strided(backing.view(bf16),
             #           size  = (N+1, 16, 32, 128),
             #           stride= (2149376, 4096, 128, 1),
-            #           offset= 65536)          # after K data (65,536 elements)
+            #           offset= 65536)   # after K data (65,536 bf16 elements)
             #
-            #   NO-OVERLAP CHECK FOR STRIDED K/V VIEWS:
+            #   This places K+V at the START of each page, with
+            #   stride[0] = page_stride skipping over the unused padding
+            #   to reach the next page's K+V data.
             #
-            #     Within one page, K occupies bf16 elements [0, 65,536)
-            #     = bytes [0, 131,072), and V occupies elements [65,536, 131,072)
-            #     = bytes [131,072, 262,144).  K and V are disjoint ✓
+            #   No-overlap check for strided K/V views:
+            #     Within one page: K uses bf16 elements [0, 65536),
+            #       V uses [65536, 131072). Disjoint ✓
+            #     Across pages: K[i] ends at i×2,149,376 + 65,536;
+            #       K[i+1] starts at (i+1)×2,149,376.
+            #       Gap = 2,149,376 − 65,536 = 2,083,840 elements. ✓
             #
-            #     Across pages, K[page i] starts at element i × 2,149,376.
-            #     K[page i] ends at i × 2,149,376 + 65,536.
-            #     K[page i+1] starts at (i+1) × 2,149,376 = i × 2,149,376 + 2,149,376.
-            #     Gap = 2,149,376 - 65,536 = 2,083,840 elements (no overlap) ✓
-            #
-            #   Byte layout of ONE PAGE with tensor reuse:
+            #   One page with tensor reuse (attention assigned):
             #
             #   ┌──────────────────────────────────────────────────────────┐
             #   │ byte 0                                                  │
-            #   │  K data: 16 × 32 × 128 × 2B = 131,072 B                │
-            #   │  ▓▓▓▓▓                            (3.0% of page)        │
+            #   │  K data: 16 × 32 × 128 × 2B = 131,072 B  (3.0%)        │
             #   ├──────────────────────────────────────────────────────────┤
             #   │ byte 131,072                                            │
-            #   │  V data: 16 × 32 × 128 × 2B = 131,072 B                │
-            #   │  ▓▓▓▓▓                            (3.0% of page)        │
+            #   │  V data: 16 × 32 × 128 × 2B = 131,072 B  (3.0%)        │
             #   ├──────────────────────────────────────────────────────────┤
             #   │ byte 262,144                                            │
-            #   │  (structural padding: 4,036,608 B = 93.9% of page)      │
-            #   │  same bytes that mamba2 conv/ssm would use if this       │
-            #   │  page were assigned to a mamba group instead             │
+            #   │  (padding: 4,036,608 B = 93.9% — used by mamba2 when    │
+            #   │   this page is assigned to a mamba group instead)        │
             #   └──────────────────────────────────────────────────────────┘
             #   byte 4,298,752
             #
@@ -6301,20 +6294,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #   Overhead vs budget:        +6.1%           0.0%
             #   Savings:                    —       26,476,544 B (25.2 MiB)
             #
-            #   Granite 4.0's large mamba2 d_state=256 makes pages 4.10 MiB.
-            #   Attention K+V uses only 6.1% of each page.  Tensor reuse
-            #   saves 25.2 MiB (6.1%) — a modest but worthwhile improvement.
-            #
-            #   CONSTRAINT: strided K/V views are NOT contiguous, so
-            #   index_copy_ with flat slot_mapping may not work directly.
-            #   The attention backend must either:
-            #     (a) use scatter/gather ops that handle non-contiguous
-            #         tensors, or
-            #     (b) remap slot indices to account for the page stride
-            #         (slot → page * page_stride + intra_page_offset).
-            #   This is the fundamental reason the current code allocates
-            #   separate contiguous K/V tensors — it works with the
-            #   existing HPU attention backend without modification.
+            #   However, the current code allocates SEPARATE contiguous
+            #   K/V tensors because strided views are non-contiguous, and
+            #   the HPU attention backend uses index_copy_ with flat
+            #   slot_mapping that requires contiguous K/V.  To enable
+            #   tensor reuse, the backend would need either:
+            #     (a) scatter/gather ops for non-contiguous tensors, or
+            #     (b) slot remapping: slot → page * page_stride + offset.
             #
             # page_size_bytes is the same for all groups in hybrid models
             # (HybridAttentionMambaModelConfig.verify_and_update_config pads
