@@ -169,6 +169,8 @@ class HPUMambaMixer2(MambaMixer2):
         self.num_heads = num_heads
         self.n_groups = n_groups
 
+        self.num_spec = get_current_vllm_config().num_speculative_tokens
+
         self.groups_ssm_state_size = self.n_groups * self.ssm_state_size
         self.conv_dim = intermediate_size + 2 * self.groups_ssm_state_size
 
