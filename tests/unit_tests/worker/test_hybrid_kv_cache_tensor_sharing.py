@@ -200,6 +200,111 @@ def test_attention_strided_views_into_backing_tensor():
         "K data from page i would bleed into page i+1")
 
 
+def test_3d_strided_kv_cache_index_ops():
+    """Verify that 3D strided K/V caches work with index_copy_ and
+    index_select, matching the flat_pa pattern used in HPU attention.
+
+    The actual implementation creates 3D K/V tensors:
+      shape  = (num_slots, num_kv_heads, head_size)
+      stride = (slot_stride, head_size, 1)
+
+    where slot_stride = page_elements // block_size, and slot indexing
+    maps slot = block_id * block_size + offset to the correct page.
+    This test verifies:
+      1. index_copy_ writes to the correct memory locations
+      2. index_select reads back the correct data
+      3. unflatten + index_select (the flat_pa pattern) works correctly
+      4. K and V data don't interfere with each other
+    """
+    page_size, _, _, _, _ = _compute_page_size_bytes()
+    N = 5  # small for testing
+    num_slots = (N + 1) * BLOCK_SIZE
+
+    backing = torch.zeros((N + 1) * page_size, dtype=torch.int8)
+
+    dtype_size = ATTN_DTYPE.itemsize
+    page_elements = page_size // dtype_size
+    kv_elements = NUM_KV_HEADS * HEAD_SIZE
+    slot_stride = page_elements // BLOCK_SIZE
+
+    # Verify preconditions
+    assert page_size % dtype_size == 0
+    assert page_elements % BLOCK_SIZE == 0
+    assert 2 * kv_elements <= slot_stride, (
+        f"K+V ({2*kv_elements}) exceeds slot_stride ({slot_stride})")
+
+    # Create 3D strided K and V
+    kc = torch.as_strided(
+        backing.view(ATTN_DTYPE),
+        size=(num_slots, NUM_KV_HEADS, HEAD_SIZE),
+        stride=(slot_stride, HEAD_SIZE, 1),
+        storage_offset=0,
+    )
+    vc = torch.as_strided(
+        backing.view(ATTN_DTYPE),
+        size=(num_slots, NUM_KV_HEADS, HEAD_SIZE),
+        stride=(slot_stride, HEAD_SIZE, 1),
+        storage_offset=kv_elements,
+    )
+
+    assert kc.shape == (num_slots, NUM_KV_HEADS, HEAD_SIZE)
+    assert vc.shape == (num_slots, NUM_KV_HEADS, HEAD_SIZE)
+    assert kc.stride(0) == slot_stride
+
+    # ── Test index_copy_ ──
+    # Write to block 2, offset 3 (slot = 2*16+3 = 35)
+    slot_mapping = torch.tensor([35], dtype=torch.long)
+    k_data = torch.randn(1, NUM_KV_HEADS, HEAD_SIZE, dtype=ATTN_DTYPE)
+    v_data = torch.randn(1, NUM_KV_HEADS, HEAD_SIZE, dtype=ATTN_DTYPE)
+
+    kc.index_copy_(0, slot_mapping, k_data)
+    vc.index_copy_(0, slot_mapping, v_data)
+
+    # ── Test index_select ──
+    k_readback = kc.index_select(0, slot_mapping)
+    v_readback = vc.index_select(0, slot_mapping)
+
+    assert torch.equal(k_readback, k_data)
+    assert torch.equal(v_readback, v_data)
+
+    # ── Test unflatten + index_select (flat_pa pattern) ──
+    # flat_pa does: key_cache.unflatten(0, (-1, block_size)).index_select(0, blocks)
+    block_list = torch.tensor([2], dtype=torch.long)
+    kc_4d = kc.unflatten(0, (-1, BLOCK_SIZE))
+    assert kc_4d.shape == (N + 1, BLOCK_SIZE, NUM_KV_HEADS, HEAD_SIZE)
+    k_block = kc_4d.index_select(0, block_list)
+    assert k_block.shape == (1, BLOCK_SIZE, NUM_KV_HEADS, HEAD_SIZE)
+    # Offset 3 within block 2 should match what we wrote
+    assert torch.equal(k_block[0, 3], k_data[0])
+
+    # ── Test multiple slots across different blocks ──
+    slots = torch.tensor([0, 16, 32, 48, 64], dtype=torch.long)  # blocks 0-4, offset 0
+    k_batch = torch.randn(5, NUM_KV_HEADS, HEAD_SIZE, dtype=ATTN_DTYPE)
+    v_batch = torch.randn(5, NUM_KV_HEADS, HEAD_SIZE, dtype=ATTN_DTYPE)
+
+    kc.index_copy_(0, slots, k_batch)
+    vc.index_copy_(0, slots, v_batch)
+
+    k_read = kc.index_select(0, slots)
+    v_read = vc.index_select(0, slots)
+
+    assert torch.equal(k_read, k_batch)
+    assert torch.equal(v_read, v_batch)
+
+    # ── Verify K and V don't interfere ──
+    # Write a known pattern to K and a different one to V at the same slot
+    test_slot = torch.tensor([10], dtype=torch.long)
+    k_pattern = torch.ones(1, NUM_KV_HEADS, HEAD_SIZE, dtype=ATTN_DTYPE) * 42.0
+    v_pattern = torch.ones(1, NUM_KV_HEADS, HEAD_SIZE, dtype=ATTN_DTYPE) * -7.0
+
+    kc.index_copy_(0, test_slot, k_pattern)
+    vc.index_copy_(0, test_slot, v_pattern)
+
+    # Read back: K should be 42, V should be -7
+    assert torch.equal(kc.index_select(0, test_slot), k_pattern)
+    assert torch.equal(vc.index_select(0, test_slot), v_pattern)
+
+
 def test_contiguous_reshape_fails_when_page_larger_than_kv():
     """Demonstrate that a contiguous reshape fails with a shape mismatch.
 

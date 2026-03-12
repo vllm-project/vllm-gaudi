@@ -5998,21 +5998,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #   On GPU, the attention layer views the backing tensor
             #   directly (K and V interleaved per block, with
             #   _update_hybrid_attention_mamba_layout re-striding).
-            #   On HPU, the attention cache uses flat slot addressing
-            #   (index_copy_ with slot_mapping) which requires
-            #   contiguous K and V tensors.  Per-block interleaving
-            #   would need a non-linear slot remapping that index_copy_
-            #   cannot express with constant strides.  Therefore HPU
-            #   allocates separate K and V tensors for attention.
-            #
-            #   MEMORY NOTE: this means each group position uses
-            #   ~2× page_size × num_blocks (backing tensor + separate
-            #   K/V), whereas the upstream budget assumes 1×.  Any
-            #   block the allocator assigns to attention occupies space
-            #   in the backing tensor (wasted) AND in the separate K/V
-            #   tensors.  Both must cover all num_blocks because the
-            #   block allocator can assign any block number to any
-            #   group.
+            #   On HPU, K and V are created as strided views of the
+            #   backing tensor using torch.as_strided.  The slot stride
+            #   (dim-0 stride) is page_elements // block_size, so flat
+            #   slot indexing (index_copy_ with slot_mapping) maps each
+            #   slot to the correct page-aligned position.  K occupies
+            #   the first kv_elements per slot, V follows with a
+            #   storage_offset of kv_elements.  No separate allocation
+            #   is needed.
             #
             # HOW ONE BACKING TENSOR IS USED BY 9 MAMBA + 1 ATTENTION:
             #
@@ -6108,18 +6101,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #
             #   Mamba page (grp0-8):                Attention page (grp9):
             #   ┌──────────────────────────────┐    ┌──────────────────────────────┐
-            #   │ byte 0          │             │    │ ON GPU:                      │
-            #   │  conv_state     │ S0 bytes    │    │  K+V viewed from backing     │
-            #   │  (float32)      │ (used)      │    │  tensor with re-striding     │
-            #   ├─────────────────┤             │    │  (_update_hybrid_attention_  │
-            #   │ byte S0         │             │    │   mamba_layout)              │
-            #   │  ssm_state      │ S1 bytes    │    ├──────────────────────────────┤
-            #   │  (bfloat16)     │ (used)      │    │ ON HPU:                      │
-            #   ├─────────────────┤             │    │  page UNUSED (wasted)        │
-            #   │ byte S0+S1      │             │    │  — HPU allocates separate    │
-            #   │  (padding)      │ P-S0-S1     │    │  contiguous K and V tensors  │
-            #   │                 │ (unused)    │    │  because index_copy_ needs   │
-            #   │                 │             │    │  flat slot addressing        │
+            #   │ byte 0          │             │    │ K+V viewed from backing      │
+            #   │  conv_state     │ S0 bytes    │    │ tensor via torch.as_strided  │
+            #   │  (float32)      │ (used)      │    │                              │
+            #   ├─────────────────┤             │    │ Per slot within page:        │
+            #   │ byte S0         │             │    │  K: kv_elements (used)       │
+            #   │  ssm_state      │ S1 bytes    │    │  V: kv_elements (used)       │
+            #   │  (bfloat16)     │ (used)      │    │  gap: slot_stride-2*kv_elem  │
+            #   ├─────────────────┤             │    │                              │
+            #   │ byte S0+S1      │             │    │ No separate allocation;      │
+            #   │  (padding)      │ P-S0-S1     │    │ index_copy_ works with       │
+            #   │                 │ (unused)    │    │ strided slot addressing      │
             #   └──────────────────────────────┘    └──────────────────────────────┘
             #
             # CONCRETE EXAMPLE — Granite 4.0 (Mamba2, TP=1):
@@ -6182,22 +6174,22 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #
             #   One page (4,298,752 bytes = 4.10 MiB):
             #
-            #   MAMBA2 page:                    ATTENTION page (on HPU):
+            #   MAMBA2 page:                    ATTENTION page:
             #   byte 0                          byte 0
             #   ┌────────────────────────┐      ┌───────────────────────────┐
-            #   │ conv_state (float32)   │      │ UNUSED in backing tensor  │
-            #   │ 104,448 B (2.4%)       │      │ (all 4,298,752 B wasted)  │
-            #   │ ▓▓                     │      │                           │
-            #   ├────────────────────────┤      │ Separate K tensor:        │
-            #   │ ssm_state (bfloat16)   │      │   (num_blocks×16, 32,128) │
-            #   │ 4,194,304 B (97.6%)    │      │   = 131,072 B/page        │
-            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │ Separate V tensor:        │
-            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │   (num_blocks×16, 32,128) │
-            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │   = 131,072 B/page        │
+            #   │ conv_state (float32)   │      │ K+V data via as_strided   │
+            #   │ 104,448 B (2.4%)       │      │                           │
+            #   │ ▓▓                     │      │ Per slot (×16 per page):  │
+            #   ├────────────────────────┤      │  K: 4096 bf16 (8,192 B)   │
+            #   │ ssm_state (bfloat16)   │      │  V: 4096 bf16 (8,192 B)   │
+            #   │ 4,194,304 B (97.6%)    │      │  gap to next slot         │
             #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │                           │
-            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │ Total K+V = 262,144 B    │
-            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │   (6.1% of page)          │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │ Total K+V used per page: │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │   262,144 B (6.1%)        │
             #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │                           │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │ Strided views share the   │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │ backing tensor — no extra │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │ allocation needed         │
             #   ├────────────────────────┤      │                           │
             #   │ (no padding; S0+S1=P)  │      │                           │
             #   └────────────────────────┘      └───────────────────────────┘
@@ -6207,100 +6199,33 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #     Size = N × 4,298,752 bytes (+ 1 dummy page)
             #     Shared by: 9 mamba2 layers + 1 attention layer
             #     Mamba2 uses 100% of bytes in its assigned pages
-            #     Attention wastes 100% of bytes in backing tensor
-            #       (uses separate K/V tensors instead)
+            #     Attention uses strided views (K+V at page start)
             #
-            #   HPU memory overhead per tensor[i]:
+            #   HPU memory per tensor[i] (no overhead):
             #     backing tensor:     N × 4,298,752 B
-            #     + attention K:      N × 131,072 B  (separate tensor)
-            #     + attention V:      N × 131,072 B  (separate tensor)
-            #     = N × 4,560,896 B total (1.061× the upstream budget)
+            #     (K/V are strided views — no separate allocation)
             #
-            # TENSOR-REUSE — why attention K/V can't use a contiguous reshape:
+            #   Strided K/V layout within one attention page:
             #
-            #   To save memory, attention could reuse the backing tensor
-            #   instead of allocating separate K/V tensors, just like mamba
-            #   already creates strided views for conv/ssm states.
-            #
-            #   A naive approach tries a contiguous reshape:
-            #
-            #     backing = torch.zeros(size // 2, dtype=bfloat16)
-            #     reshaped = backing.view(dtype).reshape(
-            #         2, (N+1) * block_size, num_kv_heads, head_size)
-            #     K, V = reshaped.unbind()
-            #
-            #   This fails because the backing tensor is sized to the
-            #   mamba page, which is much larger than attention K+V:
-            #
-            #     backing has (N+1) × 4,298,752 / 2 = (N+1) × 2,149,376 elems
-            #     reshape needs 2 × (N+1) × 16 × 32 × 128 = (N+1) × 131,072
-            #     → 2,149,376 ≠ 131,072  (16.4× larger)
-            #     → RuntimeError: shape mismatch
-            #
-            #   The mismatch arises because page_size (4,298,752 B) is set
-            #   by mamba state needs, while attention K+V only uses
-            #   262,144 B per page.  A contiguous reshape can't bridge
-            #   this gap — it treats the entire backing tensor as dense
-            #   attention data, ignoring the per-page structure.
-            #
-            #   The correct approach uses strided views (like mamba does):
-            #
-            #     page_stride = 4,298,752 / 2 = 2,149,376 elements (bf16)
+            #     page_elements = page_size_bytes / dtype_size
+            #     slot_stride   = page_elements / block_size
+            #     kv_elements   = num_kv_heads × head_size
             #
             #     K = as_strided(backing.view(bf16),
-            #           size  = (N+1, 16, 32, 128),
-            #           stride= (2149376, 4096, 128, 1),
+            #           size  = ((N+1)×16, 32, 128),
+            #           stride= (slot_stride, 128, 1),
             #           offset= 0)
             #
             #     V = as_strided(backing.view(bf16),
-            #           size  = (N+1, 16, 32, 128),
-            #           stride= (2149376, 4096, 128, 1),
-            #           offset= 65536)   # after K data (65,536 bf16 elements)
+            #           size  = ((N+1)×16, 32, 128),
+            #           stride= (slot_stride, 128, 1),
+            #           offset= kv_elements)
             #
-            #   This places K+V at the START of each page, with
-            #   stride[0] = page_stride skipping over the unused padding
-            #   to reach the next page's K+V data.
-            #
-            #   No-overlap check for strided K/V views:
-            #     Within one page: K uses bf16 elements [0, 65536),
-            #       V uses [65536, 131072). Disjoint ✓
-            #     Across pages: K[i] ends at i×2,149,376 + 65,536;
-            #       K[i+1] starts at (i+1)×2,149,376.
-            #       Gap = 2,149,376 − 65,536 = 2,083,840 elements. ✓
-            #
-            #   One page with tensor reuse (attention assigned):
-            #
-            #   ┌──────────────────────────────────────────────────────────┐
-            #   │ byte 0                                                  │
-            #   │  K data: 16 × 32 × 128 × 2B = 131,072 B  (3.0%)        │
-            #   ├──────────────────────────────────────────────────────────┤
-            #   │ byte 131,072                                            │
-            #   │  V data: 16 × 32 × 128 × 2B = 131,072 B  (3.0%)        │
-            #   ├──────────────────────────────────────────────────────────┤
-            #   │ byte 262,144                                            │
-            #   │  (padding: 4,036,608 B = 93.9% — used by mamba2 when    │
-            #   │   this page is assigned to a mamba group instead)        │
-            #   └──────────────────────────────────────────────────────────┘
-            #   byte 4,298,752
-            #
-            #   Memory comparison (Granite 4.0, N = 100 blocks):
-            #
-            #                           Current        Tensor-reuse
-            #   Backing tensor:     434,173,952 B   434,173,952 B
-            #   Separate K tensor:   13,238,272 B             0 B
-            #   Separate V tensor:   13,238,272 B             0 B
-            #                        ─────────────  ─────────────
-            #   Total:              460,650,496 B   434,173,952 B
-            #   Overhead vs budget:        +6.1%           0.0%
-            #   Savings:                    —       26,476,544 B (25.2 MiB)
-            #
-            #   However, the current code allocates SEPARATE contiguous
-            #   K/V tensors because strided views are non-contiguous, and
-            #   the HPU attention backend uses index_copy_ with flat
-            #   slot_mapping that requires contiguous K/V.  To enable
-            #   tensor reuse, the backend would need either:
-            #     (a) scatter/gather ops for non-contiguous tensors, or
-            #     (b) slot remapping: slot → page * page_stride + offset.
+            #   For Granite 4.0: slot_stride = 2,149,376/16 = 134,336
+            #   K uses elements [0, 4096) per slot
+            #   V uses elements [4096, 8192) per slot
+            #   Gap to next slot: 134,336 - 8,192 = 126,144 elements
+            #   index_copy_ and index_select work with these strides.
             #
             # page_size_bytes is the same for all groups in hybrid models
             # (HybridAttentionMambaModelConfig.verify_and_update_config pads
@@ -6334,33 +6259,58 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
-                        # Verify: K+V data per block == page_size (by
-                        # FullAttentionSpec definition), so K+V for all
-                        # num_blocks fits exactly inside the backing tensor.
-                        kv_elements = math.prod(kv_cache_shape)
-                        attn_kv_bytes = 2 * kv_elements * kv_cache_spec.dtype.itemsize
-                        backing_bytes = kv_cache_tensor_size + page_size_bytes
-                        assert attn_kv_bytes <= backing_bytes, (
-                            f"Attention K+V ({attn_kv_bytes} bytes) exceeds "
-                            f"backing tensor ({backing_bytes} bytes) for "
-                            f"layer {layer_name}")
-                        # HPU allocates separate K/V tensors (not views of
-                        # the backing tensor) because index_copy_ with flat
-                        # slot_mapping requires contiguous K/V, and
-                        # per-block interleaving can't be expressed with
-                        # constant strides in a flat tensor.
-                        kc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
-                        vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
+                        # Create K and V as strided views of the backing
+                        # tensor (same approach as mamba layers).
+                        # Each page has room for K+V+padding.  K and V are
+                        # placed consecutively at the start of each page:
+                        #   K: kv_elements per slot × block_size slots
+                        #   V: kv_elements per slot × block_size slots
+                        # The slot stride (dim-0 stride) is
+                        #   page_elements // block_size
+                        # so that slot (block_id * block_size + offset)
+                        # maps to page block_id at the correct byte offset.
+                        raw_tensor = kv_caches[layer_name]
+                        dtype = kv_cache_spec.dtype
+                        dtype_size = dtype.itemsize
+                        block_size = kv_cache_spec.block_size
+                        num_kv_heads = kv_cache_spec.num_kv_heads
+                        head_size = kv_cache_spec.head_size
+                        kv_elements = num_kv_heads * head_size
+                        page_elements = page_size_bytes // dtype_size
+                        assert page_size_bytes % dtype_size == 0, (
+                            f"page_size_bytes ({page_size_bytes}) must be "
+                            f"divisible by dtype size ({dtype_size})")
+                        assert page_elements % block_size == 0, (
+                            f"page_elements ({page_elements}) must be "
+                            f"divisible by block_size ({block_size})")
+                        slot_stride = page_elements // block_size
+                        assert 2 * kv_elements <= slot_stride, (
+                            f"K+V elements per slot (2×{kv_elements}="
+                            f"{2*kv_elements}) exceeds slot stride "
+                            f"({slot_stride}); K and V data would overlap")
+                        num_slots = (num_blocks + 1) * block_size
+                        kc = torch.as_strided(
+                            raw_tensor.view(dtype),
+                            size=(num_slots, num_kv_heads, head_size),
+                            stride=(slot_stride, head_size, 1),
+                            storage_offset=0,
+                        )
+                        vc = torch.as_strided(
+                            raw_tensor.view(dtype),
+                            size=(num_slots, num_kv_heads, head_size),
+                            stride=(slot_stride, head_size, 1),
+                            storage_offset=kv_elements,
+                        )
                         kv_caches[layer_name] = (kc, vc, None, None)
                         logger.debug(
                             "[Hybrid cache] Attention layer %s: "
                             "K/V shape=%s, dtype=%s, num_blocks=%d, "
-                            "K+V=%d bytes fits in backing tensor "
-                            "(%d bytes); separate K/V tensors allocated "
-                            "(HPU flat-addressing constraint)",
+                            "slot_stride=%d (page_elements=%d, "
+                            "block_size=%d); strided views of backing "
+                            "tensor (no separate allocation)",
                             layer_name, kv_cache_shape,
-                            kv_cache_spec.dtype, num_blocks,
-                            attn_kv_bytes, backing_bytes)
+                            dtype, num_blocks,
+                            slot_stride, page_elements, block_size)
                     elif isinstance(kv_cache_spec, MambaSpec):
                         # This is almost the same as for gpu runner in vllm
                         # only change is + 1 for dummy block
@@ -6417,42 +6367,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             backing_total = sum(
                 t.size + page_size_bytes
                 for t in kv_cache_config.kv_cache_tensors)
-            attn_extra = num_attn_layers * (
-                kv_cache_config.kv_cache_tensors[0].size + page_size_bytes
-            ) if num_attn_layers > 0 else 0
             budget = max(1, sum(
                 t.size for t in kv_cache_config.kv_cache_tensors))
-            overhead_pct = (backing_total + attn_extra) / budget * 100 - 100
-            logger.warning(
+            logger.info(
                 "[Hybrid cache] HPU memory: %d backing tensors "
-                "(%d bytes) + %d separate attention K/V pairs "
-                "(%d bytes) = %d bytes total.  The upstream budget "
-                "assumed %d bytes.  Overhead ≈ %.0f%% "
-                "(HPU cannot view the backing tensor for attention "
-                "due to flat index_copy_ addressing).",
+                "(%d bytes), %d attention layers use strided views "
+                "(no separate allocation, 0%% overhead).  "
+                "Upstream budget: %d bytes.",
                 num_backing, backing_total,
-                num_attn_layers, attn_extra,
-                backing_total + attn_extra,
-                budget, overhead_pct)
+                num_attn_layers, budget)
         elif self.use_naive_mamba_cache_sharing and self.num_mamba_layers > 0:
             # Shared backing tensor approach: allocate a single int8 backing
             # tensor per kv_cache_tensor (including +1 dummy page), then
-            # create strided views for mamba layers (matching the upstream
-            # GPU approach) and separate contiguous K/V tensors for
-            # attention layers.
-            #
-            # NOTE: Attention K/V CANNOT be created via a contiguous
-            # reshape of the backing tensor (e.g. reshape + unbind).
-            # A contiguous reshape places K in the first half and V in
-            # the second half of the tensor.  Mamba strided views place
-            # block B at offset B * page_stride.  These layouts are
-            # incompatible — mamba block B's strided region would span
-            # multiple attention K blocks in the contiguous layout.
-            # When the block allocator assigns adjacent block IDs to
-            # different layer types (mamba vs attention), data
-            # corruption occurs (decode tokens shifted by one).
-            # Therefore attention must use separate K/V tensors, while
-            # mamba layers share strided views of the backing tensor.
+            # create strided views for both mamba and attention layers.
+            # Attention K/V are placed at the start of each page using
+            # torch.as_strided, with the same page stride as mamba.
             page_size_bytes = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
                 # Taking into account dummy block (+1 page).
@@ -6485,13 +6414,40 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
-                        # Attention must use separate contiguous K/V
-                        # tensors because HPU's index_copy_ with flat
-                        # slot_mapping requires contiguous K/V, and
-                        # the shared backing tensor has a page-based
-                        # stride incompatible with flat slot addressing.
-                        kc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
-                        vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
+                        # Attention K/V as strided views of the backing
+                        # tensor (same page layout as mamba).
+                        raw_tensor = kv_caches[layer_name]
+                        dtype = kv_cache_spec.dtype
+                        dtype_size = dtype.itemsize
+                        block_size = kv_cache_spec.block_size
+                        num_kv_heads = kv_cache_spec.num_kv_heads
+                        head_size = kv_cache_spec.head_size
+                        kv_elements = num_kv_heads * head_size
+                        page_elements = page_size_bytes // dtype_size
+                        assert page_size_bytes % dtype_size == 0, (
+                            f"page_size_bytes ({page_size_bytes}) must be "
+                            f"divisible by dtype size ({dtype_size})")
+                        assert page_elements % block_size == 0, (
+                            f"page_elements ({page_elements}) must be "
+                            f"divisible by block_size ({block_size})")
+                        slot_stride = page_elements // block_size
+                        assert 2 * kv_elements <= slot_stride, (
+                            f"K+V elements per slot (2×{kv_elements}="
+                            f"{2*kv_elements}) exceeds slot stride "
+                            f"({slot_stride}); K and V data would overlap")
+                        num_slots = (num_blocks + 1) * block_size
+                        kc = torch.as_strided(
+                            raw_tensor.view(dtype),
+                            size=(num_slots, num_kv_heads, head_size),
+                            stride=(slot_stride, head_size, 1),
+                            storage_offset=0,
+                        )
+                        vc = torch.as_strided(
+                            raw_tensor.view(dtype),
+                            size=(num_slots, num_kv_heads, head_size),
+                            stride=(slot_stride, head_size, 1),
+                            storage_offset=kv_elements,
+                        )
                         kv_caches[layer_name] = (kc, vc, None, None)
                     elif isinstance(kv_cache_spec, MambaSpec):
                         # Mamba layers use strided views into the shared
