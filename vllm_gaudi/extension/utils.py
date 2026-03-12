@@ -6,12 +6,14 @@
 ###############################################################################
 
 import os
+import math
 from functools import lru_cache, wraps
 from typing import Optional, Any
 
 import habana_frameworks.torch as htorch
 import torch
 import itertools
+from vllm_gaudi.extension.logger import logger
 
 from vllm_gaudi.extension.runtime import get_config
 
