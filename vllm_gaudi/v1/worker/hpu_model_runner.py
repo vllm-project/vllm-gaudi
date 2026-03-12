@@ -5464,7 +5464,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             mm_counts={modality: mm_config.get_limit_per_prompt(modality)},
         )
 
-        logger.info(f"Create dummy MM inputs for modality '{modality}' with unique_id '{unique_id}': {mm_config}")
         # Extract mm_features from the dummy inputs
         mm_features = []
         if "mm_kwargs" in dummy_mm_inputs and modality in dummy_mm_inputs["mm_kwargs"]:
@@ -5511,9 +5510,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # Try to get dimensions from first available modality config
             for modality in ["image", "video"]:
                 mm_options = mm_config.limit_per_prompt.get(modality)
-                if mm_options and hasattr(mm_options, 'width') and hasattr(mm_options, 'height'):
-                    if mm_options.width is not None and mm_options.height is not None:
-                        warmup_lists.append((mm_options.width, mm_options.height))
+                if mm_options:
+                    width = getattr(mm_options, 'width', None)
+                    height = getattr(mm_options, 'height', None)
+                    if width is not None and height is not None:
+                        warmup_lists.append((width, height))
                         break
 
         if not is_batch_based and len(buckets) > 0:
