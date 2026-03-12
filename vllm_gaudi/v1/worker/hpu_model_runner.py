@@ -5964,13 +5964,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         kv_caches: dict[str, torch.Tensor] = {}
         num_blocks = 0
         if self.use_hybrid_cache and self.num_mamba_layers > 0:
+            # page_size_bytes is the same for all groups in hybrid models
+            # (HybridAttentionMambaModelConfig.verify_and_update_config pads
+            # mamba page size to match attention page size at startup)
+            page_size_bytes = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                # Find the correct page_size_bytes for layers sharing this tensor
-                page_size_bytes = max(
-                    group.kv_cache_spec.page_size_bytes
-                    for group in kv_cache_config.kv_cache_groups
-                    if any(ln in kv_cache_tensor.shared_by for ln in group.layer_names)
-                )
                 # Taking into account dummy block (+1 page).
                 # Use int8 (byte-level) backing tensor to correctly support
                 # dtype reinterpretation via .view(dtype) for different layer
