@@ -5977,6 +5977,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 tensor = torch.zeros(size, dtype=torch.int8, device=self.device)
                 for layer_name in kv_cache_tensor.shared_by:
                     kv_caches[layer_name] = tensor
+                logger.debug(
+                    "[Hybrid cache] Backing tensor: %d bytes "
+                    "(data=%d + dummy_page=%d), shared by: %s",
+                    size, kv_cache_tensor.size, page_size_bytes,
+                    kv_cache_tensor.shared_by)
             for group in kv_cache_config.kv_cache_groups:
                 kv_cache_spec = group.kv_cache_spec
                 for layer_name in group.layer_names:
@@ -5995,6 +6000,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         kc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         kv_caches[layer_name] = (kc, vc, None, None)
+                        logger.debug(
+                            "[Hybrid cache] Attention layer %s: "
+                            "K/V shape=%s, dtype=%s, num_blocks=%d",
+                            layer_name, kv_cache_shape,
+                            kv_cache_spec.dtype, num_blocks)
                     elif isinstance(kv_cache_spec, MambaSpec):
                         # This is almost the same as for gpu runner in vllm
                         # only change is + 1 for dummy block
@@ -6017,6 +6027,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             state_tensors.append(tensor)
                             storage_offset_bytes += stride[0] * dtype_size
                         kv_caches[layer_name] = tuple(state_tensors)
+                        logger.debug(
+                            "[Hybrid cache] Mamba layer %s: "
+                            "%d state tensors, shapes=%s, dtypes=%s, "
+                            "num_blocks=%d, total_bytes_per_block=%d",
+                            layer_name, len(state_tensors),
+                            [tuple(s.shape) for s in state_tensors],
+                            [s.dtype for s in state_tensors],
+                            num_blocks, storage_offset_bytes)
                     else:
                         pass
         elif self.use_naive_mamba_cache_sharing and self.num_mamba_layers > 0:
