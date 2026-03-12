@@ -72,6 +72,10 @@ class HPUBucketingManager():
         self.fallback_seq_base_step = 32
         self.fallback_blocks_base_step = 32
 
+        if self.mamba_chunk_size > 0:
+            assert(self.max_num_batched_tokens % self.mamba_chunk_size == 0), \
+            f"max_num_batched_tokens should be divisible by mamba_chunk_size ({self.mamba_chunk_size})"
+
         self.use_sliding_window = get_config().PT_HPU_SDPA_QKV_SLICE_MODE_FWD
         if self.use_sliding_window:
             self.slice_size = get_config().PT_HPU_SDPA_BC_FACTOR if \
@@ -225,7 +229,7 @@ class HPUBucketingManager():
 
     ### RETRIEVE BUCKETS FUNCTIONS ###
 
-    def generate_fallback_bucket(self, batch_size, seq_len, ctx):
+    def generate_fallback_bucket(self, batch_size, seq_len, ctx, is_prompt=False):
         assert self.max_num_batched_tokens is not None
         new_batch_size = calc_fallback_value(batch_size, self.fallback_bs_base_step)
         if new_batch_size > self.max_num_seqs:
@@ -234,6 +238,8 @@ class HPUBucketingManager():
             new_seq_len = math.ceil(seq_len / self.slice_size) * self.slice_size
         else:
             new_seq_len = min(calc_fallback_value(seq_len, self.fallback_seq_base_step), self.max_num_batched_tokens)
+        if self.mamba_chunk_size > 0 and is_prompt:
+            new_seq_len = math.ceil(new_seq_len / self.mamba_chunk_size) * self.mamba_chunk_size
 
         if self.num_hpu_blocks is None:
             new_ctx = 0
@@ -246,7 +252,7 @@ class HPUBucketingManager():
         if self.initialized:
             found_bucket = find_equal_or_closest_greater_config(self.prompt_buckets, (batch_size, seq_len, ctx))
             if found_bucket is None:
-                new_bucket = self.generate_fallback_bucket(batch_size, seq_len, ctx)
+                new_bucket = self.generate_fallback_bucket(batch_size, seq_len, ctx, is_prompt=True)
                 logger().warning(f"Prompt bucket for {batch_size, seq_len, ctx}"
                                  f" was not prepared. Adding new bucket: {new_bucket}")
                 self.prompt_buckets.append(new_bucket)
