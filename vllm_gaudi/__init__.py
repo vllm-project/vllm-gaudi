@@ -43,7 +43,12 @@ def register_ops():
     register_row_parallel()
 
     # Register HPU LoRA layers only when row parallel chunking is active
-    if int(os.environ.get('VLLM_ROW_PARALLEL_CHUNKS', '1')) > 1:
+    env_value = os.environ.get('VLLM_ROW_PARALLEL_CHUNKS', '1')
+    try:
+        row_parallel_chunks = int(env_value)
+    except ValueError:
+        row_parallel_chunks = 1
+    if row_parallel_chunks > 1:
         from vllm_gaudi.lora.layers.hpu_row_parallel_linear import register_hpu_lora_layers
         register_hpu_lora_layers()
 

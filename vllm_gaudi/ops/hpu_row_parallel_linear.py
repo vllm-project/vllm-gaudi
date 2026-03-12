@@ -15,6 +15,8 @@ from vllm.distributed import (
 from vllm.distributed.parallel_state import get_tp_group
 from vllm_gaudi.extension.runtime import get_config
 
+_registered = False
+
 
 def register():
     """Conditionally register HPURowParallelLinear as OOT replacement.
@@ -22,7 +24,16 @@ def register():
     Only registers when VLLM_ROW_PARALLEL_CHUNKS > 1, avoiding memory
     overhead from unconditional layer replacement (GAUDISW-247164).
     """
-    num_chunks = int(os.environ.get('VLLM_ROW_PARALLEL_CHUNKS', '1'))
+    global _registered
+    if _registered:
+        return
+    _registered = True
+
+    env_value = os.environ.get('VLLM_ROW_PARALLEL_CHUNKS', '1')
+    try:
+        num_chunks = int(env_value)
+    except ValueError:
+        num_chunks = 1
     if num_chunks > 1:
         RowParallelLinear.register_oot(HPURowParallelLinear)
 
