@@ -406,14 +406,32 @@ def create_fused_moe_router(
 _orig_default_moe_runner_init = DefaultMoERunner.__init__
 
 
-def _patched_default_moe_runner_init(self, layer, *args, **kwargs):
-    self.layer = layer
-    return _orig_default_moe_runner_init(self, layer, *args, **kwargs)
+_orig_default_moe_runner_forward = DefaultMoERunner.forward
 
 
-DefaultMoERunner.__init__ = _patched_default_moe_runner_init
+def _patched_default_moe_runner_forward(self, *args, **kwargs):
+    if self.quant_method is not None and hasattr(self.quant_method, "apply_monolithic"):
+        return _orig_default_moe_runner_forward(self, *args, **kwargs)
 
-DefaultMoERunner.forward = patched_fused_moe_forward
+    # fallback path
+    hidden_states, router_logits = args[:2]
+
+    shared_output, fused_output = self.forward_impl(
+        self.layer,
+        hidden_states,
+        router_logits,
+        *args[2:],
+        **kwargs,
+    )
+
+    if fused_output is None:
+        return shared_output
+
+    return fused_output
+
+
+DefaultMoERunner.forward = _patched_default_moe_runner_forward
+
 vllm.model_executor.layers.fused_moe.layer.get_compressed_expert_map = \
     get_compressed_expert_map
 vllm.model_executor.layers.fused_moe.router.router_factory.create_fused_moe_router = \

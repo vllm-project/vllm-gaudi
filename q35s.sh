@@ -21,9 +21,9 @@ export VLLM_CONTIGUOUS_PA=true
 export VLLM_DEFRAG=true
 export VLLM_USE_HYBRID_CACHE=true
 export VLLM_USE_NAIVE_MAMBA_CACHE_SHARING=false
-#export MODEL=/software/data/pytorch/huggingface/hub/models--Qwen--Qwen3.5-35B-A3B/snapshots/ec2d4ece1ffb563322cbee9a48fe0e3fcbce0307/
+export MODEL=/software/data/pytorch/huggingface/hub/models--Qwen--Qwen3.5-35B-A3B/snapshots/ec2d4ece1ffb563322cbee9a48fe0e3fcbce0307/
 
-export MODEL=/software/data/pytorch/huggingface/hub/models--Qwen--Qwen3.5-0.8B/snapshots/2fc06364715b967f1860aea9cf38778875588b17/
+# export MODEL=/software/data/pytorch/huggingface/hub/models--Qwen--Qwen3.5-0.8B/snapshots/2fc06364715b967f1860aea9cf38778875588b17/
 python test.py \
   --model $MODEL \
   --mode text \
