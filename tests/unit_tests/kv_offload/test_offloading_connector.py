@@ -27,7 +27,7 @@ from vllm.v1.core.kv_cache_utils import (
     init_none_hash,
 )
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
 from vllm.v1.kv_offload.abstract import (
     LoadStoreSpec,
     OffloadingEvent,
@@ -160,8 +160,24 @@ class RequestRunner:
             },
         )
 
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_gpu_blocks,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer"],
+                    FullAttentionSpec(
+                        block_size=gpu_block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                )
+            ],
+        )
+
         self.scheduler: Scheduler = create_scheduler(vllm_config, num_blocks=num_gpu_blocks)
-        self.worker_connector = OffloadingConnector(vllm_config, KVConnectorRole.WORKER)
+        self.worker_connector = OffloadingConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
 
         # register worker kv_caches to enable OffloadingWorker creations
         self.worker_connector.register_cross_layers_kv_cache(
