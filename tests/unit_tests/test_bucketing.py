@@ -79,7 +79,7 @@ def test_generate_decode_buckets():
 def test_exponential_decode_block_limit_cap(monkeypatch):
     """Verify that the decode block limit is capped to avoid excessive warmup.
 
-    Reproduces the GAUDISW-247226 scenario: max_num_seqs=21 with a large KV
+    Reproduces the large KV cache scenario with max_num_seqs=21: a large KV
     cache (65536 blocks) previously produced ~126 decode buckets and ~30 min
     warmup.  With the cap the block dimension should have at most 8 exponential
     steps, giving significantly fewer total buckets.
