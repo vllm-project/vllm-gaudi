@@ -46,6 +46,7 @@ def get_user_flags():
         Env('VLLM_FUSEDSDPA_SLIDE_THLD', int),
 
         # FusedSDPA slicing flags
+        Env('VLLM_HPU_FSDPA_SLICE_ENABLED', boolean),
         Env('VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD', int),
         Env('VLLM_HPU_FSDPA_SLICE_CHUNK_SIZE', int),
         Env('VLLM_HPU_FSDPA_SLICE_WITH_GRAPH_BREAKS', boolean),
@@ -133,5 +134,13 @@ def get_features():
               All(VersionRange(">=1.24.0.460"), MinPackageVersion("neural_compressor_pt", "3.7")),
               env_var_type=boolean),
         Value('use_hpu_aligned_scale', False, env_var='HPU_ALIGNED_SCALE', env_var_type=boolean),
+        Value('use_boolean_mask',
+              Enabled('enable_fsdpa_slicing'),
+              env_var='VLLM_USE_BOOLEAN_MASK',
+              env_var_type=boolean),
+        Value('enable_fsdpa_slicing',
+              All(Enabled("linear_bucketing"), Not(Enabled('merged_prefill'))),
+              env_var='VLLM_HPU_FSDPA_SLICE_ENABLED',
+              env_var_type=boolean),
     ]
     return split_values_and_flags(features)

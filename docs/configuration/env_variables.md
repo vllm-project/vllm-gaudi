@@ -105,7 +105,8 @@ FusedSDPA can be split into smaller chunks to improve performance by:
 
 | Parameter name                           | Description                                                                                  | Default value                              |
 | ---------------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------ |
-| `VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD`      | KV length threshold above which slicing is applied. Set to `-1` to disable slicing.          | `min(max_num_batched_tokens, 8192)`        |
+| `VLLM_HPU_FSDPA_SLICE_ENABLED`           | Enable the slicing.                                                                          | `True` for linear bucketing strategy       |
+| `VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD`      | KV length threshold above which slicing is applied.                                          | `min(max_num_batched_tokens, 8192)`        |
 | `VLLM_HPU_FSDPA_SLICE_CHUNK_SIZE`        | Chunk size for `q_len` and `kv_len` in each chunk. Rounded up to the next multiple of 1024.  | `VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD // 2`   |
 | `VLLM_HPU_FSDPA_SLICE_WITH_GRAPH_BREAKS` | Places each chunk in a separate graph to reduce compilation time.                            | `true` for lazy mode and `false` otherwise |
 

@@ -332,6 +332,10 @@ class ModuleFusedSDPA(torch.nn.Module):
         return output.to(q.dtype)
 
     def _setup_slicing(self) -> bool:
+        enable_slicing = get_config().enable_fsdpa_slicing
+        if not enable_slicing:
+            return False
+
         from vllm_gaudi.extension.bucketing.common import get_bucketing_manager
         bucketing_manager = get_bucketing_manager()
         enable_slicing = bucketing_manager is not None
