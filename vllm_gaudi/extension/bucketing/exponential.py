@@ -90,7 +90,14 @@ class ExponentialBucketingStrategy():
         decode_bs_limit = math.ceil(math.log2(max_num_seqs)) + 1
         decode_bs_bucket_cfg = [1, 2, max_num_seqs, decode_bs_limit]
         decode_query_bucket_cfg = [1, 1, 1, 1]
-        max_decode_block_limit = math.ceil(math.log2(max_blocks)) + 1
+        # Cap block limit to avoid excessive decode warmup buckets.
+        # Without the cap, large KV caches (e.g. 131K context) produce
+        # 17-18 block buckets which, combined with batch-size buckets,
+        # yields 100+ decode graphs and 30+ min warmup time.
+        decode_block_limit_cap = max(8, decode_bs_limit + 2)
+        max_decode_block_limit = min(
+            math.ceil(math.log2(max_blocks)) + 1,
+            decode_block_limit_cap)
         max_decode_blocks = max_blocks if use_contiguous_pa else \
                             max_blocks + block_size
         decode_block_bucket_cfg = [1, max_num_seqs, max_decode_blocks, max_decode_block_limit]
