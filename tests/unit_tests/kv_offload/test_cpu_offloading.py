@@ -15,9 +15,7 @@ from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import BlockStored, KVEventBatch
 from vllm.platforms import current_platform
 
-CPU_BLOCK_SIZES = [
-    128,
-]
+CPU_BLOCK_SIZES = [128]
 ATTN_BACKENDS = ["CUSTOM"]
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 
