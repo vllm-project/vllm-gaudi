@@ -450,3 +450,42 @@ def test_real_scenario_fallback_ctx_7408_not_truncated():
 
     assert new_ctx >= 7408, (f"Fallback ctx {new_ctx} < 7408: tensor/graph size mismatch.")
     assert new_ctx == calc_fallback_value(7408, 32), (f"Fallback ctx {new_ctx} should equal calc_fallback_value result")
+
+
+def test_exponential_decode_block_limit_cap(monkeypatch):
+    """Verify that the decode block limit is capped to avoid excessive warmup.
+
+    Reproduces the GAUDISW-247226 scenario: max_num_seqs=21 with a large KV
+    cache (65536 blocks) previously produced ~126 decode buckets and ~30 min
+    warmup.  With the cap the block dimension should have at most 6 exponential
+    steps, giving significantly fewer total buckets.
+    """
+    monkeypatch.setenv("VLLM_EXPONENTIAL_BUCKETING", "true")
+    monkeypatch.setenv("VLLM_CONTIGUOUS_PA", "true")
+    clear_config()
+    get_config()
+
+    strategy = ExponentialBucketingStrategy()
+    max_num_seqs = 21
+    block_size = 128
+    max_num_batched_tokens = 8192
+    max_model_len = 131072
+    max_blocks = 65536
+
+    bs_cfg, query_cfg, block_cfg = strategy.get_decode_cfgs(max_num_seqs, block_size, max_num_batched_tokens,
+                                                            max_model_len, max_blocks)
+
+    bs_range = strategy.get_range(bs_cfg)
+    block_range = strategy.get_range(block_cfg)
+
+    # decode_bs_limit = ceil(log2(21)) + 1 = 6
+    # cap = max(6, 6) = 6  →  block_limit capped at 6
+    assert block_cfg[3] == 6
+
+    # Block range: 6 exponential values + 1 (bmin_origin=1) ≤ 7 unique values
+    assert len(block_range) <= 7
+
+    # Total decode buckets (Cartesian product) should be much less than
+    # the uncapped ~126.
+    total = len(bs_range) * len(block_range)
+    assert total <= 50
