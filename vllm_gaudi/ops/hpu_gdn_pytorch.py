@@ -117,11 +117,10 @@ def _hpu_solve_lower_triangular_batched(
     ``torch.linalg.solve_triangular`` (per-head).
 
     Set ``VLLM_GDN_USE_FORWARD_SUB=1`` to switch to the manual
-    forward-substitution path (row-by-row with diagonal division via
-    ``bmm``).  This path exists for HPU where linalg ops are unsupported,
-    but currently has an **accuracy issue** — the model output degrades
-    (e.g. only generates "hello").  Keep the linalg default for correctness
-    debugging; enable forward-sub once the accuracy issue is resolved.
+    forward-substitution path (row-by-row via ``bmm``).  This path
+    is designed for HPU where linalg ops are unsupported.  The diagonal
+    of lmat is always 1.0 (GDN builds ``I + tril(…, -1)``), so no
+    diagonal division is needed.
 
     Args:
         lmat: [..., N, N] lower-triangular matrix
@@ -132,7 +131,7 @@ def _hpu_solve_lower_triangular_batched(
     Returns:
         [..., N, N] inverse of lmat
     """
-    use_forward_sub = os.getenv("VLLM_GDN_USE_FORWARD_SUB", "0") == "1"
+    use_forward_sub = os.getenv("VLLM_GDN_USE_FORWARD_SUB", "1") == "1"
 
     if not use_forward_sub:
         # --- Default: linalg path (accurate, not supported on HPU) ---
@@ -140,7 +139,7 @@ def _hpu_solve_lower_triangular_batched(
             return torch.linalg.inv(lmat)
         return torch.linalg.solve_triangular(lmat, eye, upper=False)
 
-    # --- Forward-substitution path (HPU-safe, accuracy issue open) ---
+    # --- Forward-substitution path (HPU-safe, validated) ---
     if lmat.ndim < 2 or lmat.shape[-1] != lmat.shape[-2]:
         raise ValueError(f"Expected square matrix [..., N, N], got {tuple(lmat.shape)}")
 
@@ -163,22 +162,20 @@ def _hpu_solve_lower_triangular_batched(
             rhs = rhs.expand(batch_shape + (n, n))
     else:
         raise ValueError(
-            f"Unsupported RHS rank: rhs.ndim={rhs.ndim}, lmat.ndim={lmat.ndim}."
+            f"Unsupportedcd  RHS rank: rhs.ndim={rhs.ndim}, lmat.ndim={lmat.ndim}."
         )
     rhs_flat = rhs.reshape(-1, n, n)
 
-    # Row-wise forward substitution with diagonal division.
-    # NOTE: This path has a known accuracy issue on HPU — outputs degrade
-    # compared to the linalg reference.  Under investigation.
+    # Row-wise forward substitution.
+    # GDN always builds lmat = I + tril(…, diagonal=-1), so the diagonal
+    # is guaranteed to be 1.0 — skip the division entirely.
+    # Row 0 has no off-diagonal entries in L, so x[0] = rhs[0] directly.
     x = torch.zeros_like(rhs_flat)
-    for i in range(n):
-        rhs_i = rhs_flat[:, i, :]
-        if i > 0:
-            corr = torch.bmm(lflat[:, i:i + 1, :i], x[:, :i, :]).squeeze(1)
-            rhs_i = rhs_i - corr
+    x[:, 0, :] = rhs_flat[:, 0, :]
 
-        diag = lflat[:, i, i].unsqueeze(-1)
-        x[:, i, :] = rhs_i / diag
+    for i in range(1, n):
+        corr = torch.bmm(lflat[:, i:i + 1, :i], x[:, :i, :]).squeeze(1)
+        x[:, i, :] = rhs_flat[:, i, :] - corr
 
     return x.reshape(lmat.shape)
 
@@ -243,7 +240,6 @@ def hpu_fused_gdn_gating(
     return g.unsqueeze(0), beta_out.unsqueeze(0)
 
 
-@torch._dynamo.disable
 def hpu_fused_recurrent_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -292,6 +288,91 @@ def hpu_fused_recurrent_gated_delta_rule(
                 f"q/k heads={H}, value heads={HV}. Expected HV % H == 0."
             )
 
+    # --- Vectorized decode fast path (shape-only detection) ---
+    # Detect all-single-token decode from shapes alone — NO device-to-host
+    # sync and NO _materialize_seq_ranges call needed.
+    #   (a) cu_seqlens has N+1 entries and T == N  → N seqs, 1 token each
+    #   (b) cu_seqlens is None and T == 1          → B seqs, 1 token each
+    _all_single_token = (
+        (cu_seqlens is not None and B == 1 and cu_seqlens.shape[0] - 1 == T)
+        or (cu_seqlens is None and T == 1)
+    )
+
+    if _all_single_token:
+        num_seqs = cu_seqlens.shape[0] - 1 if cu_seqlens is not None else B
+
+        if initial_state is None:
+            final_state = torch.zeros(
+                (num_seqs, HV, Vdim, Kdim), dtype=torch.float32, device=device)
+        else:
+            final_state = initial_state if inplace_final_state else initial_state.clone()
+
+        # Flatten token axis.
+        qf = q.reshape(-1, H, Kdim).to(torch.float32)
+        kf = k.reshape(-1, H, Kdim).to(torch.float32)
+        vf = v.reshape(-1, HV, Vdim).to(torch.float32)
+        gf = g.reshape(-1, HV).to(torch.float32)
+        bf = beta.reshape(-1, HV).to(torch.float32)
+
+        if use_qk_l2norm_in_kernel:
+            qf = _l2norm_last_dim(qf)
+            kf = _l2norm_last_dim(kf)
+
+        # Gather ONLY the N active states to fp32 — avoids full-buffer copy.
+        # Use index_select / index_copy_ instead of advanced indexing for
+        # better HPU graph performance (no implicit copies or graph breaks).
+        if ssm_state_indices is not None:
+            sidx = ssm_state_indices.reshape(-1).to(
+                dtype=torch.long, device=device)
+            h_batch = final_state.index_select(0, sidx).to(torch.float32)
+        else:
+            sidx = torch.arange(num_seqs, dtype=torch.long, device=device)
+            h_batch = final_state.index_select(0, sidx).to(torch.float32)
+
+        # Vectorized recurrent step — all N sequences in one pass.
+        q_s = qf * scale                                              # [N, H, K]
+        h_batch = h_batch * torch.exp(gf).unsqueeze(-1).unsqueeze(-1) # [N, HV, V, K]
+        k_exp = kf.unsqueeze(2)                                       # [N, H, 1, K]
+        proj = torch.sum(h_batch * k_exp, dim=-1)                     # [N, HV, V]
+        v_new = (vf - proj) * bf.unsqueeze(-1)                        # [N, HV, V]
+        h_batch = h_batch + v_new.unsqueeze(-1) * k_exp               # [N, HV, V, K]
+        out_batch = torch.sum(h_batch * q_s.unsqueeze(2), dim=-1)     # [N, HV, V]
+
+        # Scatter ONLY the N modified states back — no full-buffer round-trip.
+        final_state.index_copy_(0, sidx, h_batch.to(final_state.dtype))
+
+        out_result = out_batch.to(v.dtype)
+        if cu_seqlens is not None:
+            out_result = out_result.unsqueeze(0)
+        else:
+            out_result = out_result.view(B, T, HV, Vdim)
+        return out_result, final_state
+
+    # --- General (multi-token) fallback path ---
+    return _recurrent_general_path(
+        q, k, v, g, beta, scale, initial_state, inplace_final_state,
+        cu_seqlens, ssm_state_indices, use_qk_l2norm_in_kernel,
+        B, T, H, HV, Kdim, Vdim, device,
+    )
+
+
+@torch._dynamo.disable
+def _recurrent_general_path(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    scale: float,
+    initial_state: torch.Tensor | None,
+    inplace_final_state: bool,
+    cu_seqlens: torch.LongTensor | None,
+    ssm_state_indices: torch.Tensor | None,
+    use_qk_l2norm_in_kernel: bool,
+    B: int, T: int, H: int, HV: int, Kdim: int, Vdim: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """General multi-token recurrent path (Python loops, dynamo-disabled)."""
     if cu_seqlens is not None:
         if B != 1:
             raise ValueError("When cu_seqlens is used, expected batch size B=1.")

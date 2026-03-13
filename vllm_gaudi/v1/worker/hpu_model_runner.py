@@ -467,7 +467,8 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
             elif 'linear_attn' in layer_name:
                 layer = _get_decoder_layer_by_idx(model, layer_idx)
                 if layer is not None and hasattr(layer, "linear_attn"):
-                    layer.linear_attn.cache_group_idx = group_idx
+                    layer.linear_attn.cache_group_idx = torch.tensor(
+                        group_idx, dtype=torch.long, device="hpu")
 
 
 def maybe_set_chunked_attention_layers(model_runner):
@@ -908,7 +909,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.head_size,
             self.dtype,
             self.kv_cache_dtype_str,
-            self.block_size,
             use_mla=self.model_config.use_mla,
         )
         self.attn_backend_name = getattr(self.attn_backend, "__name__", None)
@@ -3010,6 +3010,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             is_causal = 1 if attn_metadata.causal_bias is not None else 0
             cfg = (seq_len, shared, unique)
             seen = cfg in self.seen_configs
+
             self.seen_configs.add(cfg)
             if not seen and not warmup_mode:
                 logger.warning("Configuration: (query, shared_blocks, unique_blocks) %s, (%s) was not warmed-up!", \
@@ -6083,7 +6084,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         ]
 
         if block_sizes != [self.cache_config.block_size] or kernel_block_sizes != [self.cache_config.block_size]:
-            assert self.cache_config.cpu_offload_gb == 0, (
+            assert self.vllm_config.offload_config.uva.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
                 "for more details.")

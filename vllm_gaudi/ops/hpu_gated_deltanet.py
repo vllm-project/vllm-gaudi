@@ -62,7 +62,9 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Assigned by model runner per KV cache group for hybrid GDN models.
-        self.cache_group_idx: int | None = None
+        # Stored as a tensor so torch.compile treats it as dynamic (integers
+        # on nn.Module are guarded as static, causing per-layer recompilation).
+        self.cache_group_idx: torch.Tensor | None = None
         # Use configured chunk size when explicitly set; otherwise default to
         # 128 to match HPU prompt bucket alignment.
         hf_text_config = getattr(self.model_config, "hf_text_config", None)
@@ -136,7 +138,6 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             b,
             a,
             core_attn_out,
-            self.prefix,
         )
 
         # ============================================================
@@ -157,11 +158,9 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         b: torch.Tensor,
         a: torch.Tensor,
         core_attn_out: torch.Tensor, 
-        layer_name: str,
     ) -> None:  
 
         forward_context: ForwardContext = get_forward_context()  
-        self_layer = forward_context.no_compile_layers[layer_name]  
  
         attn_metadata = forward_context.attn_metadata  
         if attn_metadata is None:  
@@ -170,7 +169,6 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         
         # Call Gaudi-optimized core computation  
         self._forward_core_hpu(  
-            self_layer,  
             mixed_qkv=mixed_qkv,  
             b=b,  
             a=a,  
@@ -180,7 +178,6 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
     
     def _forward_core_hpu(
         self,
-        self_layer,
         mixed_qkv: torch.Tensor,  
         b: torch.Tensor,  
         a: torch.Tensor,  
@@ -213,17 +210,22 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             # Require explicit cache-group binding from model runner (Mamba style).
             # Heuristic row inference is ambiguous (e.g., batch size 1), so fail
             # fast instead of silently selecting a wrong cache-group row.
-            cache_group_idx = getattr(self, "cache_group_idx", None)
-            assert cache_group_idx is not None, (
-                "HPUQwen3_5GatedDeltaNet requires linear_attn.cache_group_idx when "
-                "state_indices_tensor is 2D; ensure model runner assigns "
-                "layer.linear_attn.cache_group_idx per KV cache group."
-            )
-            assert 0 <= int(cache_group_idx) < non_spec_state_indices_tensor.size(0), (
-                f"Invalid cache_group_idx={cache_group_idx} for "
-                f"state_indices_tensor rows={non_spec_state_indices_tensor.size(0)}"
-            )
-            non_spec_state_indices_tensor = non_spec_state_indices_tensor[int(cache_group_idx)]
+            cache_group_idx = self.cache_group_idx
+            if not torch.compiler.is_compiling():
+                assert cache_group_idx is not None, (
+                    "HPUQwen3_5GatedDeltaNet requires linear_attn.cache_group_idx when "
+                    "state_indices_tensor is 2D; ensure model runner assigns "
+                    "layer.linear_attn.cache_group_idx per KV cache group."
+                )
+                assert 0 <= int(cache_group_idx) < non_spec_state_indices_tensor.size(0), (
+                    f"Invalid cache_group_idx={cache_group_idx} for "
+                    f"state_indices_tensor rows={non_spec_state_indices_tensor.size(0)}"
+                )
+            # Use index_select instead of direct scalar-tensor indexing to
+            # avoid _local_scalar_dense (data-dependent op) during tracing.
+            non_spec_state_indices_tensor = non_spec_state_indices_tensor.index_select(
+                0, cache_group_idx.view(1)
+            ).squeeze(0)
         ssm_state = self_kv_cache[1]
         # TrimmedAttentionMetadata on Gaudi does not expose upstream
         # GDNAttentionMetadata counters (num_prefills/num_decodes/num_actual_tokens).
@@ -448,75 +450,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
-        '''
-        if core_attn_out_non_spec is not None or last_recurrent_state is not None:
-            save_root = "./vllm_qwen3next_debug"
-            os.makedirs(save_root, exist_ok=True)
-            safe_layer_name = "".join(
-                c if (c.isalnum() or c in "._-") else "_" for c in self.prefix
-            ) or "unnamed_layer"
-            if not hasattr(self, "_debug_save_step"):
-                self._debug_save_step = 0
-            step = self._debug_save_step
-            self._debug_save_step += 1
-            tp_rank = 0
-            out_path = os.path.join(
-                save_root,
-                f"{safe_layer_name}.tp{tp_rank}.step{step:06d}.pt",
-            )
-
-            save_state_indices = None
-            save_last_recurrent_state = last_recurrent_state
-            if non_spec_state_indices_tensor is not None:
-                flat_indices = non_spec_state_indices_tensor.reshape(-1).to(
-                    device=ssm_state.device,
-                    dtype=torch.long,
-                )
-                if flat_indices.numel() > 0:
-                    valid = (flat_indices >= 0) & (flat_indices < ssm_state.shape[0])
-                    save_state_indices = flat_indices[valid]
-                    if save_state_indices.numel() > 0:
-                        save_last_recurrent_state = ssm_state.index_select(
-                            0,
-                            save_state_indices,
-                        )
-                    else:
-                        save_last_recurrent_state = ssm_state[:0]
-
-            torch.save(
-                {
-                    "layer_name": self.prefix,
-                    "tp_rank": tp_rank,
-                    "step": step,
-                    "updated_state_indices": (
-                        save_state_indices.detach().cpu()
-                        if save_state_indices is not None
-                        else None
-                    ),
-                    "core_attn_out_non_spec": (
-                        core_attn_out_non_spec.detach().cpu()
-                        if core_attn_out_non_spec is not None
-                        else None
-                    ),
-                    "mixed_qkv_non_spec_T": (
-                        mixed_qkv_non_spec_T.detach().cpu()
-                        if mixed_qkv_non_spec_T is not None
-                        else None
-                    ),
-                    "mixed_qkv_non_spec": (
-                        mixed_qkv_non_spec.detach().cpu()
-                        if mixed_qkv_non_spec is not None
-                        else None
-                    ),
-                    "last_recurrent_state": (
-                        save_last_recurrent_state.detach().cpu()
-                        if save_last_recurrent_state is not None
-                        else None
-                    ),
-                },
-                out_path,
-            )
-        '''
+        
         # 3. Merge core attention output
         # Prompt prefill may keep padded/static token shape (e.g. 2048) while
         # num_actual_tokens tracks valid tokens (e.g. 39). Copy by observed
