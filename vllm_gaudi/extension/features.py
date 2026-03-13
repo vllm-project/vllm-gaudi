@@ -129,5 +129,6 @@ def get_features():
               All(VersionRange(">=1.24.0.460"), MinPackageVersion("neural_compressor_pt", "3.7")),
               env_var_type=boolean),
         Value('use_hpu_aligned_scale', False, env_var='HPU_ALIGNED_SCALE', env_var_type=boolean),
+        Value('use_boolean_mask', False, env_var='VLLM_USE_BOOLEAN_MASK', env_var_type=boolean),
     ]
     return split_values_and_flags(features)
