@@ -90,6 +90,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
+
         if self.model_type in ["gpt_oss"] and self.is_mxfp4:
             from vllm.utils.math_utils import round_up
             # Fused gate_up_proj (column parallel)
@@ -139,7 +140,8 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                     num_experts,
                     w13_up_dim,
                     hidden_size,
-                    dtype=params_dtype),
+                    dtype=params_dtype
+                ),
                 requires_grad=False,
             )
             layer.register_parameter("w13_weight", w13_weight)
@@ -157,17 +159,20 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                     num_experts,
                     hidden_size,
                     intermediate_size_per_partition,
-                    dtype=params_dtype),
+                    dtype=params_dtype
+                ),
                 requires_grad=False,
             )
-
-            w2_bias = torch.nn.Parameter(torch.zeros(
-                    num_experts,
-                    hidden_size,
-                    dtype=params_dtype),
-                    requires_grad=False,)
-            layer.register_parameter("w2_bias", w2_bias)
-            set_weight_attrs(w2_bias, extra_weight_attrs)
+            layer.register_parameter("w2_weight", w2_weight)
+            set_weight_attrs(w2_weight, extra_weight_attrs)
+            if self.moe.has_bias:
+                w2_bias = torch.nn.Parameter(torch.zeros(
+                        num_experts,
+                        hidden_size,
+                        dtype=params_dtype),
+                        requires_grad=False,)
+                layer.register_parameter("w2_bias", w2_bias)
+                set_weight_attrs(w2_bias, extra_weight_attrs)
 
     def apply_monolithic(
         self,
