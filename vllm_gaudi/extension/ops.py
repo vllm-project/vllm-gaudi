@@ -80,7 +80,7 @@ def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, sink, bat
                  batch2block_matmul_op, block2batch_matmul_op):
     # When fp32_softmax is enabled attn is left in fp32 after Q@K
     # We can return to native dtype after we renormalize and calculate the adjustments
-    if block_bias is not None and attn.dtype != block_bias.dtype:
+    if block_bias is not None and block_bias.dtype != torch.bool and attn.dtype != block_bias.dtype:
         block_bias = block_bias.to(dtype=attn.dtype)
     # TODO: w/a with 5D req as the block_softmax kernel does not support 4D attn tensor, which is used in e.g. Granite-3B
     if get_config().fused_block_softmax and get_config().fused_block_softmax_adjustment and attn.dim() == 5:
@@ -89,7 +89,10 @@ def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, sink, bat
             attn = attn.to(value.dtype)
     else:
         if block_bias is not None:
-            attn.add_(block_bias)
+            if block_bias.dtype == torch.bool:
+                attn.masked_fill_(~block_bias, -math.inf)
+            else:
+                attn.add_(block_bias)
         block_max = attn.amax(dim=-1, keepdim=True)
         if sink is not None:
             block_max = torch.maximum(block_max, sink)
@@ -109,9 +112,9 @@ def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, sink, bat
             attn_sink = attn_sink.exp()
             if attn_sink.dtype == torch.float32:
                 attn_sink = attn_sink.to(value.dtype)
-            #TODO: Removing this .sum and using attn_sink directly
-            #results in wrong output which does not make sense.
-            #Looks like a Synapse issue, need to investigate further.
+            # TODO: Removing this .sum and using attn_sink directly
+            # results in wrong output which does not make sense.
+            # Looks like a Synapse issue, need to investigate further.
             block_sums_sink = attn_sink.sum(dim=-1, keepdim=True)
             block_sums = block_sums + block_sums_sink
     attn = matmul_av_op(attn, value)
@@ -357,9 +360,12 @@ def _naive_prompt_attention(query: torch.Tensor,
             htcore.mark_step()
         attn_weights.add_(position_bias)
     if attn_bias is not None:
-        if attn_weights.dtype != attn_bias.dtype:
-            attn_bias = attn_bias.to(dtype=attn_weights.dtype)
-        attn_weights.add_(attn_bias)
+        if attn_bias.dtype == torch.bool:
+            attn_weights.masked_fill_(~attn_bias, -math.inf)
+        else:
+            if attn_weights.dtype != attn_bias.dtype:
+                attn_bias = attn_bias.to(dtype=attn_weights.dtype)
+            attn_weights.add_(attn_bias)
     if sinks is not None:
         sink = sinks.reshape(1, -1, 1, 1).expand(query.shape[0], -1, query.shape[-2], -1)
         if query_heads != kv_heads:
