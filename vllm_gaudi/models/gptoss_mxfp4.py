@@ -34,7 +34,9 @@ def convert_moe_packed_tensors(
     scales,
     *,
     dtype: torch.dtype = torch.bfloat16,
-    rows_per_chunk: int = 32768 * 1024,  # Large default chosen to process many rows per kernel launch and reduce overhead; lower this if you need to limit peak memory usage.
+    # Large default chosen to process many rows per kernel launch and reduce overhead; 
+    # lower this if you need to limit peak memory usage.
+    rows_per_chunk: int = 32768 * 1024,  
 ) -> torch.Tensor:
     """
     Convert the mxfp4 weights again, dequantizing and makes them compatible with the forward
