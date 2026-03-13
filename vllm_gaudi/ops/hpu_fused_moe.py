@@ -130,49 +130,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             layer.register_parameter("w2_bias", w2_bias)
             set_weight_attrs(w2_bias, extra_weight_attrs)
         else:
-            if self.moe.is_act_and_mul:
-                w13_up_dim = 2 * intermediate_size_per_partition
-            else:
-                w13_up_dim = intermediate_size_per_partition
-            # Fused gate_up_proj (column parallel)
-            w13_weight = torch.nn.Parameter(
-                torch.empty(
-                    num_experts,
-                    w13_up_dim,
-                    hidden_size,
-                    dtype=params_dtype
-                ),
-                requires_grad=False,
-            )
-            layer.register_parameter("w13_weight", w13_weight)
-            set_weight_attrs(w13_weight, extra_weight_attrs)
-            if self.moe.has_bias:
-                w13_bias = torch.nn.Parameter(
-                    torch.zeros(num_experts, w13_up_dim, dtype=params_dtype),
-                    requires_grad=False,
-                )
-                layer.register_parameter("w13_bias", w13_bias)
-                set_weight_attrs(w13_bias, extra_weight_attrs)
-            # down_proj (row parallel)
-            w2_weight = torch.nn.Parameter(
-                torch.empty(
-                    num_experts,
-                    hidden_size,
-                    intermediate_size_per_partition,
-                    dtype=params_dtype
-                ),
-                requires_grad=False,
-            )
-            layer.register_parameter("w2_weight", w2_weight)
-            set_weight_attrs(w2_weight, extra_weight_attrs)
-            if self.moe.has_bias:
-                w2_bias = torch.nn.Parameter(torch.zeros(
-                        num_experts,
-                        hidden_size,
-                        dtype=params_dtype),
-                        requires_grad=False,)
-                layer.register_parameter("w2_bias", w2_bias)
-                set_weight_attrs(w2_bias, extra_weight_attrs)
+            super().create_weights(layer, num_experts, hidden_size, intermediate_size_per_partition, params_dtype, **extra_weight_attrs)
 
     def apply_monolithic(
         self,

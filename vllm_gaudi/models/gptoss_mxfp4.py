@@ -13,51 +13,21 @@ from vllm.distributed import (
 
 from vllm.model_executor.models.utils import is_pp_missing_parameter
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.platforms import current_platform
 
-def _normalize_quantization_config(self, config: PretrainedConfig):
 
-    # Skip mxfp4 quantization to use custom loading logic
+# Store original implementations before patching
+_original_normalize_quantization_config = ModelArchConfigConvertorBase._normalize_quantization_config
+_original_load_weights = GptOssModel.load_weights
+
+def _patched_normalize_quantization_config(self, config: PretrainedConfig):
+    # Skip mxfp4 quantization to use custom loading logic for gpt_oss
     if getattr(config, "model_type", None) == "gpt_oss":
         quant_cfg = getattr(config, "quantization_config", None)
         if quant_cfg is not None and quant_cfg.get("quant_method", "").lower() == "mxfp4":
             return None
 
-    quant_cfg = getattr(config, "quantization_config", None)
-    if quant_cfg is None:
-        # compressed-tensors uses a "compression_config" key
-        quant_cfg = getattr(config, "compression_config", None)
-
-    else:
-        # Set quant_method for ModelOpt models.
-        producer_name = quant_cfg.get("producer", {}).get("name")
-        if producer_name == "modelopt":
-            quant_algo = quant_cfg.get("quantization", {}).get("quant_algo")
-            if quant_algo is not None:
-                quant_algo_upper = str(quant_algo).upper()
-                if quant_algo_upper in {
-                    "FP8",
-                    "FP8_PER_CHANNEL_PER_TOKEN",
-                    "FP8_PB_WO",
-                }:
-                    quant_cfg["quant_method"] = "modelopt"
-                elif quant_algo_upper == "NVFP4":
-                    quant_cfg["quant_method"] = "modelopt_fp4"
-                else:
-                    raise ValueError(f"Unknown ModelOpt quant algo: {quant_algo}")
-
-    if quant_cfg is not None:
-        # Use the community standard 'quant_method'
-        quant_method = quant_cfg.get("quant_method", "").lower()
-
-        # Normalize library names
-        quant_method = quant_method.replace(
-            "compressed_tensors", "compressed-tensors"
-        )
-
-        quant_cfg["quant_method"] = quant_method
-
-    return quant_cfg
+    # For all other models, use the original vLLM implementation
+    return _original_normalize_quantization_config(self, config)
 
 def convert_moe_packed_tensors(
     blocks,
@@ -270,54 +240,35 @@ def _load_weights_mxfp4_dequantize_hpu(
         loaded_params.add(name)
     return loaded_params
 
-def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-    stacked_params_mapping = [
-        # (param_name, shard_name, shard_id)
-        (".qkv_proj", ".q_proj", "q"),
-        (".qkv_proj", ".k_proj", "k"),
-        (".qkv_proj", ".v_proj", "v"),
-    ]
+def patched_load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+    # Check if this is gpt_oss model with mxfp4 quantization
+    quant_cfg = getattr(self.config, "quantization_config", None)
+    quant_method = quant_cfg.get("quant_method") if quant_cfg else None
 
-    tp_rank = get_tensor_model_parallel_rank()
-    tp_size = get_tensor_model_parallel_world_size()
-
-    # Attention heads per rank
-    heads_per_rank = self.config.num_attention_heads // tp_size
-    head_start = tp_rank * heads_per_rank
-
-    ep_size = get_ep_group().world_size
-    ep_rank = get_ep_group().rank
-    num_experts = self.config.num_local_experts
-    experts_per_rank = num_experts // ep_size
-    ep_rank_start = ep_rank * experts_per_rank
-    ep_rank_end = (ep_rank + 1) * experts_per_rank
-
-    quant_method = (
-        self.config.quantization_config["quant_method"]
-        if hasattr(self.config, "quantization_config")
-        else None
-    )
+    # Only use custom loading for gpt_oss + mxfp4
     if quant_method == "mxfp4":
-        if current_platform.device_name == "hpu":
-            return self._load_weights_mxfp4_dequantize_hpu(
-                ep_rank_end,
-                ep_rank_start,
-                heads_per_rank,
-                head_start,
-                weights,
-                stacked_params_mapping,
-            )
-        else:
-            return self._load_weights_mxfp4(
-                ep_rank_end,
-                ep_rank_start,
-                heads_per_rank,
-                head_start,
-                weights,
-                stacked_params_mapping,
-            )
-    else:
-        return self._load_weights_other(
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
+        ]
+
+        tp_rank = get_tensor_model_parallel_rank()
+        tp_size = get_tensor_model_parallel_world_size()
+
+        # Attention heads per rank
+        heads_per_rank = self.config.num_attention_heads // tp_size
+        head_start = tp_rank * heads_per_rank
+
+        ep_size = get_ep_group().world_size
+        ep_rank = get_ep_group().rank
+        num_experts = self.config.num_local_experts
+        experts_per_rank = num_experts // ep_size
+        ep_rank_start = ep_rank * experts_per_rank
+        ep_rank_end = (ep_rank + 1) * experts_per_rank
+
+        return self._load_weights_mxfp4_dequantize_hpu(
             ep_rank_end,
             ep_rank_start,
             heads_per_rank,
@@ -326,6 +277,12 @@ def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
             stacked_params_mapping,
         )
 
-ModelArchConfigConvertorBase._normalize_quantization_config = _normalize_quantization_config
-GptOssModel.load_weights = load_weights
+    # For all other models, use the original vLLM implementation
+    return _original_load_weights(self, weights)
+
+
+# Apply monkey patches unconditionally
+# The wrappers check at runtime whether to use custom logic or delegate to original
+ModelArchConfigConvertorBase._normalize_quantization_config = _patched_normalize_quantization_config
 GptOssModel._load_weights_mxfp4_dequantize_hpu = _load_weights_mxfp4_dequantize_hpu
+GptOssModel.load_weights = patched_load_weights
