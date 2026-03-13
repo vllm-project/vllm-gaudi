@@ -299,6 +299,10 @@ def hpu_fused_recurrent_gated_delta_rule(
     )
 
     if _all_single_token:
+        #logger.debug("libin debug hpu_fused_recurrent_gated_delta_rule: B=%d T=%d q=%s v=%s cu_seqlens=%s ssm_state_indices=%s",
+        #         q.shape[0], q.shape[1], q.shape, v.shape,
+        #         cu_seqlens.shape if cu_seqlens is not None else None,
+        #         ssm_state_indices.shape if ssm_state_indices is not None else None)
         num_seqs = cu_seqlens.shape[0] - 1 if cu_seqlens is not None else B
 
         if initial_state is None:
@@ -471,7 +475,6 @@ def _recurrent_general_path(
 
     return out, final_state
 
-
 @torch._dynamo.disable
 def hpu_chunk_gated_delta_rule(
     q: torch.Tensor,
@@ -488,18 +491,10 @@ def hpu_chunk_gated_delta_rule(
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """PyTorch replacement for chunk_gated_delta_rule.
 
-    This path intentionally mirrors upstream prefill call semantics without
-    delegating to the fused recurrent helper.
+    Runs the eager path with Python loops.  torch.compile dispatch to
+    _hpu_chunk_gated_delta_rule_compiled is disabled for now (re-enable
+    once torch.compile performance improves).
     """
-    if torch.compiler.is_compiling():
-        return _hpu_chunk_gated_delta_rule_eager(
-            q=q, k=k, v=v, g=g, beta=beta, scale=scale,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            cu_seqlens=cu_seqlens,
-            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-            chunk_size=chunk_size,
-        )
     # https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fla/ops/chunk_scaled_dot_kkt.py#L132
     B, T, H, Kdim = q.shape
     _, _, HV, Vdim = v.shape
@@ -592,8 +587,6 @@ def hpu_chunk_gated_delta_rule(
     use_vectorized_chunk = (
         os.getenv("VLLM_GAUDI_GDN_CHUNK_VECTORIZED", "1") == "1"
     )
-    if torch.compiler.is_compiling():
-        use_vectorized_chunk = False
 
     for seq_id, (bos, eos) in enumerate(seq_ranges):
         if eos <= bos:
@@ -697,32 +690,3 @@ def hpu_chunk_gated_delta_rule(
     if initial_state is not None:
         final_state = final_state.to(initial_state.dtype)
     return out, final_state
-
-
-@torch._dynamo.disable
-def _hpu_chunk_gated_delta_rule_eager(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g: torch.Tensor,
-    beta: torch.Tensor,
-    scale: float | None = None,
-    initial_state: torch.Tensor | None = None,
-    output_final_state: bool = False,
-    cu_seqlens: torch.LongTensor | None = None,
-    use_qk_l2norm_in_kernel: bool = False,
-    chunk_size: int = 64,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    return hpu_chunk_gated_delta_rule(
-        q=q,
-        k=k,
-        v=v,
-        g=g,
-        beta=beta,
-        scale=scale,
-        initial_state=initial_state,
-        output_final_state=output_final_state,
-        cu_seqlens=cu_seqlens,
-        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-        chunk_size=chunk_size,
-    )
