@@ -45,8 +45,7 @@ class HpuPlatform(Platform):
         cls,
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
-        num_heads: int,  # Add this
-        **kwargs,       # Add this for future compatibility
+        num_heads: Optional[int] = None,
     ) -> str:
         if hasattr(attn_selector_config, 'kv_cache_spec') and \
             hasattr(attn_selector_config.kv_cache_spec, '__class__') and \
@@ -117,7 +116,7 @@ class HpuPlatform(Platform):
         # NOTE(kzawora): default block size for Gaudi should be 128
         # smaller sizes still work, but very inefficiently
         cache_config = vllm_config.cache_config
-        if cache_config and cache_config.block_size is None:
+        if not cache_config.user_specified_block_size:
             cache_config.block_size = 128
         # Hybrid GDN/Mamba models may compute a non-128-aligned cache
         # block size (e.g. 1056). Gaudi attention kernels require 128
@@ -225,6 +224,12 @@ class HpuPlatform(Platform):
         # However, for HPU, speculative decoding is not supported with async scheduling.
         vllm_config.scheduler_config.async_scheduling = \
             vllm_config.scheduler_config.async_scheduling and vllm_config.speculative_config is None
+
+    @classmethod
+    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
+        # TODO: HPU still sets block_size in check_and_update_config.
+        # Move that logic here so block_size is chosen by the backend.
+        pass
 
     @classmethod
     def is_pin_memory_available(cls):

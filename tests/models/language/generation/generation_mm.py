@@ -76,9 +76,6 @@ def run_model(model_name: str, inputs: Union[dict, list[dict]], modality: str, *
     #    "fps": 1,
     # }
     passed_mm_processor_kwargs = extra_engine_args.get("mm_processor_kwargs", {})
-    passed_mm_processor_kwargs.setdefault("min_pixels", 28 * 28)
-    passed_mm_processor_kwargs.setdefault("max_pixels", 1280 * 28 * 28)
-    passed_mm_processor_kwargs.setdefault("fps", 1)
     extra_engine_args.update({"mm_processor_kwargs": passed_mm_processor_kwargs})
 
     extra_engine_args.setdefault("max_model_len", 32768)

@@ -64,10 +64,10 @@ The Dockerfile supports the following build arguments:
 | Build argument | Default value | Description |
 |----------------|---------------|-------------|
 | `ARTIFACTORY_URL` | `vault.habana.ai` | Intel Gaudi software repository URL. |
-| `SYNAPSE_VERSION` | `1.22.2` | Intel Gaudi software suite version. |
+| `SYNAPSE_VERSION` | `{{ VERSION }}` | Intel Gaudi software suite version. |
 | `SYNAPSE_REVISION` | `32` | Specific revision of the software suite. |
 | `BASE_NAME` | `rhel9.6` | Base RHEL UBI image version. |
-| `PT_VERSION` | `2.7.1` | PyTorch version. |
+| `PT_VERSION` | `{{ PT_VERSION }}` | PyTorch version. |
 | `TORCH_TYPE` | `upstream` | PyTorch distribution type. |
 | `VLLM_GAUDI_COMMIT` | `main` | vLLM Hardware Plugin for Intel Gaudi commit or branch. |
 | `VLLM_PROJECT_COMMIT` | empty | Specific vLLM project commit. |
@@ -75,9 +75,9 @@ The Dockerfile supports the following build arguments:
 To override build arguments, use the `--build-arg` flag, as in this example:
 
         $ docker build -f .cd/Dockerfile.rhel.ubi.vllm -t vllm-gaudi:ubi \
-                --build-arg SYNAPSE_VERSION=1.22.2 \
+                --build-arg SYNAPSE_VERSION={{ VERSION }} \
                 --build-arg SYNAPSE_REVISION=32 \
-                --build-arg PT_VERSION=2.7.1 \
+                --build-arg PT_VERSION={{ PT_VERSION }} \
                 --build-arg TORCH_TYPE=upstream \
                 --build-arg VLLM_GAUDI_COMMIT=main \
                 --build-arg VLLM_PROJECT_COMMIT= \

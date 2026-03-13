@@ -150,6 +150,9 @@ class HPUWorker(WorkerBase):
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 
+    def reset_encoder_cache(self) -> None:
+        self.model_runner.reset_encoder_cache()
+
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
@@ -325,6 +328,8 @@ class HPUWorker(WorkerBase):
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
         return time.perf_counter() - start_t
+
+        return self.vllm_config.compilation_config.compilation_time
 
     def sample_tokens(self, grammar_output: "GrammarOutput|None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
