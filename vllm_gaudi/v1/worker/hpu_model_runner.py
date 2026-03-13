@@ -1700,6 +1700,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if self._is_prompt(i, scheduler_output):
                 break
 
+            # NOTE(chendi): To support spec decode,
+            # we don't assume num_scheduled_tokens == 1.
             decode_req_ids.append(req_id)
             num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
             num_computed_tokens_decode.append(int(num_computed_tokens + 1))
