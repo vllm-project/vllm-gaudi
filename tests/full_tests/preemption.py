@@ -31,11 +31,13 @@ def main():
     # The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
     outputs = llm.generate(prompts, sampling_params)
+    assert len(outputs) == len(prompts), f"Expected {len(prompts)} outputs, got {len(outputs)}"
     # Print the outputs.
     print("\nGenerated Outputs:\n" + "-" * 60)
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
+        assert len(generated_text) > 0, f"Empty output for prompt: {prompt!r}"
         print(f"Prompt:    {prompt!r}")
         print(f"Output:    {generated_text!r}")
         print("-" * 60)
