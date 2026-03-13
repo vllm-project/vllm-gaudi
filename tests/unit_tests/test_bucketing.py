@@ -9,6 +9,7 @@ import pytest
 
 import vllm_gaudi.extension.bucketing.linear as linear
 from vllm_gaudi.extension.bucketing.common import generate_buckets
+from vllm_gaudi.extension.bucketing.exponential import ExponentialBucketingStrategy
 from vllm_gaudi.extension.runtime import get_config, clear_config
 
 
@@ -73,3 +74,42 @@ def test_generate_decode_buckets():
                                max_num_batched_tokens, block_size, max_blocks)
     assert len(buckets) == 18
     assert all(ctx <= bs * (max_model_len // block_size) for bs, _, ctx in buckets)
+
+
+def test_exponential_decode_block_limit_cap(monkeypatch):
+    """Verify that the decode block limit is capped to avoid excessive warmup.
+
+    Reproduces the GAUDISW-247226 scenario: max_num_seqs=21 with a large KV
+    cache (65536 blocks) previously produced ~126 decode buckets and ~30 min
+    warmup.  With the cap the block dimension should have at most 8 exponential
+    steps, giving significantly fewer total buckets.
+    """
+    monkeypatch.setenv("VLLM_EXPONENTIAL_BUCKETING", "true")
+    monkeypatch.setenv("VLLM_CONTIGUOUS_PA", "true")
+    clear_config()
+    get_config()
+
+    strategy = ExponentialBucketingStrategy()
+    max_num_seqs = 21
+    block_size = 128
+    max_num_batched_tokens = 8192
+    max_model_len = 131072
+    max_blocks = 65536
+
+    bs_cfg, query_cfg, block_cfg = strategy.get_decode_cfgs(
+        max_num_seqs, block_size, max_num_batched_tokens, max_model_len, max_blocks)
+
+    bs_range = strategy.get_range(bs_cfg)
+    block_range = strategy.get_range(block_cfg)
+
+    # decode_bs_limit = ceil(log2(21)) + 1 = 6
+    # cap = max(8, 6 + 2) = 8  →  block_limit capped at 8
+    assert block_cfg[3] == 8
+
+    # Block range: 8 exponential values + 1 (bmin_origin=1) ≤ 9 unique values
+    assert len(block_range) <= 9
+
+    # Total decode buckets (Cartesian product) should be much less than
+    # the uncapped ~126.
+    total = len(bs_range) * len(block_range)
+    assert total <= 70
