@@ -89,7 +89,10 @@ def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, sink, bat
             attn = attn.to(value.dtype)
     else:
         if block_bias is not None:
-            attn.add_(block_bias)
+            if block_bias.dtype == torch.bool:
+                attn = attn.masked_fill(~block_bias, -math.inf)
+            else:
+                attn.add_(block_bias)
         block_max = attn.amax(dim=-1, keepdim=True)
         if sink is not None:
             block_max = torch.maximum(block_max, sink)
@@ -357,9 +360,12 @@ def _naive_prompt_attention(query: torch.Tensor,
             htcore.mark_step()
         attn_weights.add_(position_bias)
     if attn_bias is not None:
-        if attn_weights.dtype != attn_bias.dtype:
-            attn_bias = attn_bias.to(dtype=attn_weights.dtype)
-        attn_weights.add_(attn_bias)
+        if attn_bias.dtype == torch.bool:
+            attn_weights = attn_weights.masked_fill(~attn_bias, -math.inf)
+        else:
+            if attn_weights.dtype != attn_bias.dtype:
+                attn_bias = attn_bias.to(dtype=attn_weights.dtype)
+            attn_weights.add_(attn_bias)
     if sinks is not None:
         sink = sinks.reshape(1, -1, 1, 1).expand(query.shape[0], -1, query.shape[-2], -1)
         if query_heads != kv_heads:
