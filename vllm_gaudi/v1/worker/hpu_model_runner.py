@@ -420,6 +420,12 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
 
 
 def maybe_set_chunked_attention_layers(model_runner):
+    """Enable chunked-attention path for models with attention_chunk_size (e.g. DeepSeek V3.2).
+
+    Sets model_has_chunked_attention and marks ChunkedLocalAttention impls with
+    is_chunked_attention=True so decode metadata and prefill use chunked block lists
+    and chunked_attn_bias for 16k/32k long context.
+    """
     if hasattr(model_runner.model.config, 'text_config') and \
         hasattr(model_runner.model.config.text_config, 'attention_chunk_size') and \
         model_runner.model.config.text_config.attention_chunk_size:
@@ -887,11 +893,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                  f"{self.speculative_config.method}")
             self.rejection_sampler = RejectionSampler(self.sampler)
 
-        # Keep in int64 to avoid overflow with long context
+        # int64 for position/length indices to avoid overflow with long context (e.g. 32k+).
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
 
-        # Keep in int64 to avoid overflow with long context
+        # int64 to avoid overflow with long context when computing position ranges.
         self.arange_np = np.arange(max(self.max_num_reqs + 1, self.max_model_len, self.max_num_tokens), dtype=np.int64)
 
         # Layer pairings for cross-layer KV sharing.
@@ -2504,6 +2510,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     window_block_tables, slot_mapping.tolist(),
                     padded_batch_size * num_tokens)
 
+        # Chunked-attention models (e.g. DeepSeek V3.2): decode uses only last-chunk
+        # blocks so attention sees the same context window as chunked prefill.
         if self.model_has_chunked_attention:
             chunk_size_in_blocks = (self.model.model.config.text_config.attention_chunk_size // self.block_size)
             seq_lens_block = [len(block_table) for block_table in block_tables_list]

@@ -144,7 +144,13 @@ class HPUUnifiedMLABackend(HPUAttentionBackend):
 
 @dataclass
 class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
-    """Metadata for HPUAttentionbackend."""
+    """Metadata for HPU attention backends.
+
+    Chunked prefill / long-context (e.g. 16k, 32k) uses the chunked_* fields:
+    chunked_slot_mapping, chunked_attn_bias, chunked_block_mapping, chunked_block_list,
+    chunked_block_groups, chunked_block_usage. They describe the last-chunk KV blocks
+    and attention bias for models with attention_chunk_size (e.g. DeepSeek V3.2 sparse).
+    """
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
@@ -362,17 +368,12 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         else:
             v_padded = v
 
-        # For cross-chunk attention (context-carrying chunks), FusedSDPA falls back to
-        # is_causal=False + valid_seq_lengths=None when attn_bias is present (see
-        # _fsdpa_prompt_attention TODO comment). Its behaviour with rectangular Q/KV
-        # (q_len < kv_len) under this config is undefined/untested, so we force
-        # naive_impl here to guarantee correctness via direct attn_bias application.
-        #
-        # Fix D: For the first chunk (no cached context), pass attn_bias=None so that
-        # _fsdpa_prompt_attention uses the original working path: is_causal=True +
-        # valid_seq_lengths.  When Fix B provides an attn_bias here and is_causal=True,
-        # _fsdpa_prompt_attention overrides to is_causal=False+valid_seq_lengths=None,
-        # changing the attention semantics from the tested 8K baseline.
+        # Chunked prefill (16k/32k): For cross-chunk attention (prefix-cached context),
+        # FusedSDPA falls back to is_causal=False + valid_seq_lengths=None when
+        # attn_bias is present; behaviour with rectangular Q/KV (q_len < kv_len) is
+        # undefined, so we use naive_impl here for correctness. For the first chunk
+        # (no cached context), pass attn_bias=None so the backend uses is_causal=True
+        # + valid_seq_lengths.
         has_context = attn_metadata.block_list is not None
         impl = 'naive_impl' if has_context else self.prefill_impl
         attn_bias_arg = attn_metadata.attn_bias if has_context else None
