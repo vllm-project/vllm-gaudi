@@ -235,7 +235,7 @@ class ModuleFusedSDPA(torch.nn.Module):
                 k_chunk = k[..., kv_start:kv_end, :]
                 v_chunk = v[..., kv_start:kv_end, :]
 
-                is_causal_chunk = kv_chunk_idx == 0 and q_chunk_idx != 0
+                is_causal_chunk = kv_chunk_idx == 0 and q_chunk_idx >= self.num_padded_query_chunks
                 # chunk sizes must be multiples of 1024 to get valid m and linv
                 is_causal_chunk = is_causal_chunk and q_chunk_size % 1024 == 0 and kv_chunk_size % 1024 == 0
                 # use mask only for the causal chunks that may have padding
