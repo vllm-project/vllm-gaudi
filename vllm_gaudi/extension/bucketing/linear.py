@@ -154,21 +154,21 @@ def warmup_range_with_limits(config: Tuple[int, int, int, int, int]) -> List[int
     3. Always include `bucket_max` as the last bucket.
 
     Example:
-    1. for config = (0, 8, 64, 64, 0)
+    1. for config = (0, 8, 64, 64, 0), fallback to linear bucketing without padding limits:
         ramp_up = [0, 1, 2, 4, 8]
         stable = [16, 24, 32, 40, 48, 56, 64]
         return [0, 1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64]
-    2. for config = (0, 8, 64, 64, 50)
+    2. for config = (0, 8, 64, 64, 50), fallback to exponential bucketing:
         ramp_up = [0, 1, 2, 4, 8]
-        stable = [16, 24, 32, 48, 64]  # 40 and 56 are skipped due to padding ratio limit
-        return [0, 1, 2, 4, 8, 16, 24, 32, 48, 64]
+        stable = [16, 32, 64]  # [24, 40, 48, 56] are skipped due to padding ratio limit
+        return [0, 1, 2, 4, 8, 16, 32, 64]
     3. for config = (0, 8, 64, 16, 50)
         ramp_up = [0, 1, 2, 4, 8]
-        stable = [16, 32, 48, 64]  # 24, 40, 56 are skipped due to absolute padding limit
+        stable = [16, 32, 48, 64]  # [24, 40, 56] are skipped due to absolute padding limit
         return [0, 1, 2, 4, 8, 16, 32, 48, 64]
     4. for config = (16, 16, 128, 32, 25)
-        stable = [16, 32, 48, 64, 80, 96, 112, 128]  # no ramp up phase
-        return [16, 32, 48, 64, 80, 96, 112, 128]
+        stable = [16, 32, 48, 64, 80, 96, 128]  # no ramp up phase
+        return [16, 32, 48, 64, 80, 96, 128]
     """
     bucket_min, bucket_step, bucket_max, pad_max, pad_percent = config
     if pad_max == 0:
