@@ -48,7 +48,8 @@ def register_model():
 
     import vllm_gaudi.models.gptoss_mxfp4  # noqa: F401
 
-    # DeepSeek V3 with HPU-optimized sparse attention (V3.2)
+    # DeepSeek V3 with HPU-optimized sparse attention (V3.2); supports chunked prefill
+    # and long context (16k/32k) via HPU MLA backends.
     from vllm_gaudi.models.hpu_deepseek_v3 import HpuDeepseekV3ForCausalLM  # noqa: F401
     ModelRegistry.register_model(
         "DeepseekV3ForCausalLM",  # Standard architecture name

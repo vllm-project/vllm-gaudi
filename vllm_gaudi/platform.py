@@ -47,6 +47,14 @@ class HpuPlatform(Platform):
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: Optional[int] = None,
     ) -> str:
+        """Return the attention backend class name for the given config.
+
+        When use_sparse is True (e.g. DeepSeek V3.2), token selection is done in the
+        custom attention class before the backend; the backend sees already-selected
+        tokens. If use_mla is also True: unified_attn selects HPUUnifiedMLABackend,
+        otherwise (chunked prefill mode) HPUMLAAttentionBackend is used for
+        TrimmedAttentionMetadata compatibility.
+        """
         if attn_selector_config.use_sparse:
             # DeepSeek V3.2 uses sparse attention on top of MLA
             # Sparse selection logic is handled in the custom attention class before

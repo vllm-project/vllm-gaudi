@@ -18,6 +18,7 @@ class HPURotaryEmbedding(RotaryEmbedding):
                         positions: torch.Tensor,
                         offsets: Optional[torch.Tensor] = None,
                         recompute_cos_sin: bool = False):
+        """Build cos/sin buffers for RoPE. Supports offsets (long-context, LoRA) and scaling (e.g. DeepSeek)."""
         self.recompute_cos_sin = recompute_cos_sin
         if offsets is not None:
             offsets = offsets.view(positions.shape[0], -1)
@@ -44,8 +45,8 @@ class HPURotaryEmbedding(RotaryEmbedding):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from habana_frameworks.torch.hpex.kernels import (RotaryPosEmbeddingMode, apply_rotary_pos_emb)
 
-        # Prepare cos-sin caches for long-context + LoRA with offsets for every
-        # forward, since the offset information wasn't available previously
+        # Prepare cos/sin for long-context and LoRA (offsets) or when scaling is used
+        # (scaling_factors / scaling_factor for DeepSeek-style RoPE); recompute when needed.
         if not hasattr(self, "sin") or self.recompute_cos_sin:
             self.prepare_cos_sin(positions, offsets, recompute_cos_sin=True)
         if hasattr(self, "scaling_factors") or hasattr(self, "scaling_factor") or self.sin is None:

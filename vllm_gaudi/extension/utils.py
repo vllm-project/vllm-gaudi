@@ -53,6 +53,7 @@ class Softmax(torch.nn.Module):
 
 
 def get_kv_fetch_extra_args(**kwargs):
+    """Filter KV-fetch kwargs by runtime config (e.g. per-token scaling for FP8 / long context)."""
     if not get_config().per_token_kv_scaling_support:
         kwargs.pop('scales', None)
     return kwargs
