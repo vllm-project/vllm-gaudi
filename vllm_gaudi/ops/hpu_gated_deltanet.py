@@ -150,7 +150,15 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
-        output[:num_tokens], _ = self.out_proj(core_attn_out)
+
+        proj_out, _ = self.out_proj(core_attn_out)
+
+        # output may be [num_tokens, hidden] or [batch, 1, hidden] in decode.
+        # Normalize to 2D token-major view before assignment.
+        output_2d = output.view(-1, output.shape[-1])
+        proj_out_2d = proj_out.view(-1, proj_out.shape[-1])
+
+        output_2d[:num_tokens] = proj_out_2d[:num_tokens]
 
     def gdn_attention_core(
         self,
@@ -261,9 +269,18 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                         dtype=non_spec_query_start_loc.dtype if non_spec_query_start_loc is not None else torch.int32,
                     )
                    
+        if is_prompt:
+            num_prefills = 1
+            num_decodes = 0
+        else:
+            num_prefills = 0
+            if non_spec_state_indices_tensor is not None:
+                num_decodes = int(non_spec_state_indices_tensor.numel())
+            elif non_spec_query_start_loc is not None:
+                num_decodes = int(non_spec_query_start_loc.numel()) - 1
+            else:
+                num_decodes = int(num_actual_tokens)
 
-        num_prefills = 1 if is_prompt else 0
-        num_decodes = 0 if is_prompt else 1
         if not is_prompt:
             mixed_qkv = mixed_qkv[:num_actual_tokens]
             b = b[:num_actual_tokens]
@@ -484,5 +501,3 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             else:
                 n = min(num_actual_tokens, non_spec_out.shape[0], core_attn_out.shape[0])
                 core_attn_out[:n] = non_spec_out[:n]
-
-
