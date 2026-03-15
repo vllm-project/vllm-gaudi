@@ -6,7 +6,7 @@ export VLLM_BUCKETING_STRATEGY=linear_bucketing
 # Keep query bucket config consistent to avoid generating zero valid buckets.
 export VLLM_PROMPT_QUERY_BUCKET_MIN=128
 export VLLM_PROMPT_QUERY_BUCKET_STEP=128
-export VLLM_PROMPT_QUERY_BUCKET_MAX=256
+export VLLM_PROMPT_QUERY_BUCKET_MAX=128
 export VLLM_PROMPT_CTX_BUCKET_MIN=0
 export VLLM_PROMPT_CTX_BUCKET_STEP=1
 export VLLM_PROMPT_CTX_BUCKET_MAX=64
@@ -21,12 +21,13 @@ export VLLM_CONTIGUOUS_PA=true
 export VLLM_DEFRAG=true
 export VLLM_USE_HYBRID_CACHE=true
 export VLLM_USE_NAIVE_MAMBA_CACHE_SHARING=false
-export MODEL=/software/data/pytorch/huggingface/hub/models--Qwen--Qwen3.5-35B-A3B/snapshots/ec2d4ece1ffb563322cbee9a48fe0e3fcbce0307/
+#export MODEL=/software/data/pytorch/huggingface/hub/models--Qwen--Qwen3.5-35B-A3B/snapshots/ec2d4ece1ffb563322cbee9a48fe0e3fcbce0307/
 
-# export MODEL=/software/data/pytorch/huggingface/hub/models--Qwen--Qwen3.5-0.8B/snapshots/2fc06364715b967f1860aea9cf38778875588b17/
+export MODEL=/software/data/pytorch/huggingface/hub/models--Qwen--Qwen3.5-0.8B/snapshots/2fc06364715b967f1860aea9cf38778875588b17/
 python test.py \
   --model $MODEL \
   --mode text \
   --text-api generate \
+  --prompt "Nebius stock rose by double-digits on Wednesday. The cloud-computing company is set to get an investment from chip maker Nvidia, which continues to backstop the artificial-intelligence boom.Nvidia will invest $2 billion in Nebius to enable the company to deploy more than five gigawatts of computing capacity by the end of 2030, the companies said on Wednesday.Nebius shares were up 16%. The company had a market capitalization of just over $24 billion as of Tuesday’s close, and is one of a number of so-called “neoclouds,” smaller cloud-computing companies providing capacity for artificial intelligence. tell me more about nividia "  \
   --max-model-len 16384 \
   --max-num-batched-tokens 4096 2>&1 | tee log.txt

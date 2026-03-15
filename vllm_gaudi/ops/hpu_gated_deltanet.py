@@ -408,7 +408,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         # 2.2: Process the remaining part
         if is_prompt:
             initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
-            initial_state[~has_initial_state, ...] = 0
+            initial_state[~has_initial_state.bool(), ...] = 0
             
             (
                 core_attn_out_non_spec,
