@@ -53,23 +53,30 @@ class HpuMMEncoderAttention(MMEncoderAttention):
                                recompute_mode=True,
                                valid_sequence_lengths=None)
             else:
-                lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-                q_chunks = torch.split(query, lens, dim=2)
-                k_chunks = torch.split(key, lens, dim=2)
-                v_chunks = torch.split(value, lens, dim=2)
-                outputs = []
-                for q_i, k_i, v_i in zip(q_chunks, k_chunks, v_chunks):
-                    output_i = fsdpa_op(q_i,
-                                        k_i,
-                                        v_i,
-                                        None,
-                                        dropout_p=0.0,
-                                        is_causal=False,
-                                        scale=self.scale,
-                                        softmax_mode="fast",
-                                        recompute_mode=True,
-                                        valid_sequence_lengths=None)
-                    outputs.append(output_i)
+                outputs = []  
+                start_idx = 0  
+                # Iterate through sequence boundaries using tensor operations  
+                for i in range(len(cu_seqlens) - 1):  
+                    end_idx = cu_seqlens[i + 1]  
+                      
+                    # Extract chunks using tensor indexing  
+                    q_i = query[:, :, start_idx:end_idx, :]  
+                    k_i = key[:, :, start_idx:end_idx, :]  
+                    v_i = value[:, :, start_idx:end_idx, :]  
+                      
+                    # Process each chunk  
+                    output_i = fsdpa_op(q_i,  
+                                        k_i,  
+                                        v_i,  
+                                        None,  
+                                        dropout_p=0.0,  
+                                        is_causal=False,  
+                                        scale=self.scale,  
+                                        softmax_mode="fast",  
+                                        recompute_mode=True,  
+                                        valid_sequence_lengths=None)  
+                    outputs.append(output_i)  
+                    start_idx = end_idx  
                 out = torch.cat(outputs, dim=2)
                 return out.transpose(1, 2)
         else:
