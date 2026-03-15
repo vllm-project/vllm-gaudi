@@ -1,4 +1,4 @@
-model_name: "Qwen/Qwen3-VL-32B-Instruct-FP8"
+model_name: "baidu/ERNIE-4.5-VL-28B-A3B-PT"
 
 description: >
   ERNIE-4.5-VL-28B-A3B model validated for image multi-
@@ -10,6 +10,7 @@ test_config:
       mm_processor_kwargs:
         min_pixels: 784
         max_pixels: 1003520
+      trust_remote_code: true
     input_data_config:
       num_prompts: 4
       media_source: default
