@@ -88,18 +88,14 @@ stages:
           HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_mla_moe_load_generate_test &&
           HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_deepseek_v2_inc_load_generate_test &&
           HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_deepseek_test
-      # Model: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic (2 tests)
-      - name: e2e_llama3_70b_fp8_bundle
+      # Model: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic
+      - name: e2e_llama3_70b_fp8
         flavor: g3
-        command: >-
-          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_llama3_70b_inc_dynamic_quant_load_generate_test &&
-          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_llama3_70b_inc_dynamic_quant_test
-      # Model: mistralai/Mistral-Small-3.1-24B-Instruct-2503 (2 tests)
-      - name: e2e_mistral3_bundle
+        command: HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_llama3_70b_inc_dynamic_quant_load_generate_test
+      # Model: mistralai/Mistral-Small-3.1-24B-Instruct-2503
+      - name: e2e_mistral3
         flavor: g3
-        command: >-
-          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_mistral3_load_generate_test &&
-          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_mistral3_test
+        command: HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_mistral3_load_generate_test
       # Model: meta-llama/Llama-3.1-8B-Instruct + yuhuili/EAGLE3-LLaMA3.1-Instruct-8B (3 tests)
       - name: e2e_eagle3_spec_decode_bundle
         flavor: g3
@@ -134,15 +130,12 @@ stages:
         command: >-
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_ngram_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_UA_spec_decode_ngram_test
-      - name: e2e_deepseek_v2_inc_dynamic_tp2
+      # Models: DeepSeek-V2-Lite-Chat (TP2) + Qwen3-30B-A3B GSM8K (2 tests, both need 2 cards)
+      - name: e2e_dsv2_tp2_and_qwen3_30b_gsm8k_bundle
         flavor: g3.s
         command: >-
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_deepseek_v2_inc_dynamic_tp2_load_generate_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_qwen3_30b_test
-      - name: e2e_gsm8k_qwen3_30b
-        flavor: g3.s
-        command: 
-      # Preemption handling test (meta-llama/Meta-Llama-3-8B-Instruct)
       - name: e2e_preemption
         flavor: g3
         command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_preemption_test
