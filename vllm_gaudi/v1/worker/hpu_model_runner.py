@@ -5986,7 +5986,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 its own storage (FullAttentionSpec creates separate kc/vc;
                 GDN/linear_attention MambaSpec uses contiguous tensors).
                 Only standard Mamba2 MambaSpec needs the raw shared buffer
-                for as_strided views."""
+                for as_strided views.
+                Note: GDN/linear_attention cannot use as_strided because
+                torch.compile's aot_autograd does not support input mutations
+                on views with different dtypes (the raw buffer is bf16 but
+                GDN states may be float32)."""
                 for ln in kv_cache_tensor.shared_by:
                     spec = _layer_spec.get(ln)
                     if isinstance(spec, FullAttentionSpec):
@@ -6029,13 +6033,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         kv_caches[layer_name] = (kc, vc, None, None)
                     elif isinstance(kv_cache_spec, MambaSpec) and \
                             kv_cache_spec.mamba_type in ("gdn_attention", "linear_attention"):
-                        # HPU does not correctly handle fancy indexing on
-                        # non-contiguous strided views (as_strided with page
-                        # gaps) for GDN/linear_attention layers.  Allocate
-                        # plain contiguous tensors instead, matching the naive
-                        # path's layout which is proven accurate.
-                        # Skip if already created by a sibling layer sharing
-                        # the same kv_cache_tensor (same as naive path).
+                        # GDN/linear_attention layers use contiguous tensors
+                        # because torch.compile's aot_autograd cannot handle
+                        # input mutations on as_strided views with different
+                        # dtypes (raw buffer is bf16, GDN states are float32).
                         if isinstance(kv_caches.get(layer_name), tuple):
                             continue
                         state_tensors = []
