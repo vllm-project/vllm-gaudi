@@ -485,7 +485,4 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 n = min(num_actual_tokens, non_spec_out.shape[0], core_attn_out.shape[0])
                 core_attn_out[:n] = non_spec_out[:n]
 
-        if token_mask_flat is not None:
-            core_attn_out.mul_(token_mask_flat.view(-1, 1, 1))
-        
 
