@@ -13,6 +13,9 @@ stages:
       - name: perf_tests_g3
         flavor: g3
         command: bash tests/full_tests/run_with_junit.sh perf_tests bash tests/full_tests/ci_perf_tests.sh
+      - name: calibration_arg_parsing_tests
+        flavor: g3
+        command: bash tests/calibration_tests/test_calibrate_model_arg_parsing.sh
       # --- hpu_pd_tests (3 cards: PREFILLER_TP_SIZE=1, DECODER_TP_SIZE=2 defaults) ---
       - name: pd_nixl_ucx_g3m
         flavor: g3.m
@@ -20,7 +23,7 @@ stages:
           pip install lm-eval[api] &&
           bash tests/full_tests/run_with_junit.sh pd_nixl_ucx
           bash -c 'cd tests/unit_tests && ./run_accuracy_test.sh'
-  - name: second_stage
+  # - name: second_stage
     steps:
       - name: e2e_llama3_per_tensor_scaling_bundle
         flavor: g3
@@ -139,6 +142,10 @@ stages:
       - name: e2e_gsm8k_qwen3_30b
         flavor: g3.s
         command: 
+      # Preemption handling test (meta-llama/Meta-Llama-3-8B-Instruct)
+      - name: e2e_preemption
+        flavor: g3
+        command: VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_preemption_test
       # Models: facebook/opt-125m (TP=2) + Qwen3-VL-32B (2 tests)
       - name: e2e_tp2_load_generate_bundle
         flavor: g3.s
