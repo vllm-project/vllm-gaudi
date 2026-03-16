@@ -4960,6 +4960,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     def _generate_seq_lengths(self, num_samples, num_blocks, block_size):
         assert num_samples <= num_blocks
+
+        # ensure the actual number of blocks is less than the KV cache blocks
+        num_blocks = min(self.kv_cache_config.num_blocks, num_blocks)
+
         blocks = [num_blocks // num_samples] * num_samples
         missing_blocks = num_blocks - sum(blocks)
         for i in range(missing_blocks):
