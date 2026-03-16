@@ -1630,7 +1630,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         req_id = self.input_batch.req_ids[req_idx]
         num_computed_tokens = int(self.input_batch.num_computed_tokens_cpu[req_idx])
         num_prompt_tokens = int(self.input_batch.num_prompt_tokens[req_idx])
-        num_scheduled_tokens = scheduler_output.num_scheduled_tokens.get(req_id)
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
         spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens.get(req_id)
 
         num_decode_tokens = 1 if spec_decode_tokens is None else len(spec_decode_tokens) + 1
