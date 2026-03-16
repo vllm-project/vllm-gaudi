@@ -3,7 +3,6 @@ model_card:
   tasks: gsm8k_cot
   num_fewshot: 8
   limit: 500
-  max_num_seqs: 10
   dtype: bfloat16
   gpu_memory_utilization: 0.1
   max_num_seqs: 8
