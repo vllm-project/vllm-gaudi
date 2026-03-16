@@ -90,6 +90,13 @@ class HPUCompressedTensorsLinearMethod(OrigCompressedTensorsLinearMethod):
             if scheme_dict:
                 weight_quant = scheme_dict.get("weights")
             hpu_scheme = HPUCompressedTensorsW8A8Fp8(scheme.strategy, scheme.is_static_input_scheme, weight_quant)
+        elif (scheme_classname == "CompressedTensorsW8A8Int8"):
+            scheme_dict = self.quantization_config.get_scheme_dict(layer, layer.prefix)
+            weight_quant = None
+            if scheme_dict:
+                weight_quant = scheme_dict.get("weights")
+            hpu_scheme = HPUCompressedTensorsW8A8Int8_BF16Fallback(scheme.strategy, scheme.is_static_input_scheme,
+                                                                   weight_quant)
         elif (scheme_classname == "CompressedTensorsWNA16"):
             matched_target = find_matched_target(layer_name=layer.prefix,
                                                  module=layer,
@@ -255,6 +262,66 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                                             input_scale=input_scale,
                                             bias=bias,
                                             trans_B=False)
+
+
+@CustomOp.register_oot(name='CompressedTensorsW8A8Int8')
+class HPUCompressedTensorsW8A8Int8_BF16Fallback(CompressedTensorsScheme):
+    """
+    Note: BF16 weights are used instead of INT8 because an INT8 GEMM kernel is not available.
+    """
+
+    def __init__(self, strategy: str, is_static_input_scheme: bool, weight_quant: QuantizationArgs):
+        self.strategy = strategy
+        self.is_static_input_scheme = is_static_input_scheme
+        self.weight_quant = weight_quant
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return -1
+
+    def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int, output_partition_sizes: list[int],
+                       input_size: int, output_size: int, params_dtype: torch.dtype, **extra_weight_attrs):
+
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        if hpu_ops.is_hpu_gaudi2:
+            weight_loader = hpu_ops.gaudi_weight_wrapper(weight_loader)
+        output_size_per_partition = sum(output_partition_sizes)
+        layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
+        layer.weight_block_size = None
+
+        weight = ModelWeightParameter(data=torch.empty(output_size_per_partition,
+                                                       input_size_per_partition,
+                                                       dtype=torch.int8),
+                                      input_dim=1,
+                                      output_dim=0,
+                                      weight_loader=weight_loader)
+        layer.register_parameter("weight", weight)
+
+        if layer.scheme.strategy == QuantizationStrategy.CHANNEL:
+            weight_scale = ChannelQuantScaleParameter(data=torch.empty((output_size_per_partition, 1),
+                                                                       dtype=torch.float32),
+                                                      output_dim=0,
+                                                      weight_loader=weight_loader)
+        else:
+            raise ValueError(f"Weight strategy={layer.scheme.strategy} not implemented for int8 weights dequantization")
+
+        layer.register_parameter("weight_scale", weight_scale)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+
+        weight_bf16 = (layer.weight.to(torch.float32) * layer.weight_scale).to(torch.bfloat16)
+
+        layer._parameters.pop("weight", None)
+        layer._parameters.pop("weight_scale", None)
+
+        layer.weight = torch.nn.Parameter(weight_bf16, requires_grad=False)
+
+    def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor, bias: Optional[torch.Tensor] = None):
+
+        return torch.nn.functional.linear(x, layer.weight, bias)
 
 
 @CustomOp.register_oot(name='CompressedTensorsW8A8Fp8MoEMethod')
