@@ -367,6 +367,13 @@ run_mistral3_test() {
     echo "✅ Test with multimodal-support with Mistral-Small-3.1-24B passed."
 }
 
+# Preemption test
+run_preemption_test() {
+    echo "➡️ Testing preemption handling..."
+    VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/preemption.py"
+    echo "✅ Test with preemption handling passed."
+}
+
 # Spec decode with ngram
 run_spec_decode_ngram_test() {
     echo "➡️ Testing Spec-decode with ngram..."
@@ -506,6 +513,7 @@ launch_all_tests() {
     run_gsm8k_deepseek_test
     #run_gsm8k_deepseek_unified_mla_test
     run_gsm8k_qwen3_30b_test
+    run_preemption_test
     run_spec_decode_ngram_test
     run_spec_decode_eagle3_test
     run_spec_decode_eagle3_num_spec_2_test

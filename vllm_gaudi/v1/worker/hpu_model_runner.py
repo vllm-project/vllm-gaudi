@@ -325,38 +325,6 @@ def gather_list(input, indices, v):
     return [input[i] if i is not None else v for i in indices]
 
 
-def ensure_decodes_first(b: InputBatch):
-    num_reqs = b.num_reqs
-    while True:
-        # Find the first prompt index
-        first_prompt_index = None
-        for i in range(num_reqs):
-            if b.num_computed_tokens_cpu[i] < b.num_prompt_tokens[i]:
-                first_prompt_index = i
-                break
-        if first_prompt_index is None:
-            break
-
-        # Find the last decode index
-        last_decode_index = None
-        for i in reversed(range(num_reqs)):
-            if b.num_computed_tokens_cpu[i] >= b.num_prompt_tokens[i]:
-                last_decode_index = i
-                break
-        if last_decode_index is None:
-            break
-
-        # Sanity
-        assert first_prompt_index != last_decode_index
-
-        # Check if done
-        if first_prompt_index > last_decode_index:
-            break
-
-        # Swap
-        b.swap_states(first_prompt_index, last_decode_index)
-
-
 def get_target_layer_suffix_list(model_type) -> list[str]:
     # This sets the suffix for the hidden layer name, which is controlled by
     # VLLM_CONFIG_HIDDEN_LAYERS. The default suffix is "DecoderLayer," which is
@@ -1644,7 +1612,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             return self.vllm_config.model_config.hf_config.model_type
         return None
 
-    def _get_num_decodes(self) -> int:
+    def _get_num_decodes(self, scheduler_output: "SchedulerOutput") -> int:
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
         #TODO: remove later
@@ -1653,16 +1621,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         for i in range(num_reqs):
             req_id = self.input_batch.req_ids[i]
             assert req_id is not None
-
-            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
-            num_prompt_tokens = self.input_batch.num_prompt_tokens[i]
-
-            if num_computed_tokens < num_prompt_tokens and \
-                not self.is_decoder_only(req_id):
-                # This is prompt
+            if self._is_prompt(i, scheduler_output):
                 continue
             num_decodes += 1
         return num_decodes
+
+    def _is_prompt(self, req_idx: int, scheduler_output: "SchedulerOutput") -> bool:
+        req_id = self.input_batch.req_ids[req_idx]
+        num_computed_tokens = int(self.input_batch.num_computed_tokens_cpu[req_idx])
+        num_prompt_tokens = int(self.input_batch.num_prompt_tokens[req_idx])
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+        spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens.get(req_id)
+
+        num_decode_tokens = 1 if spec_decode_tokens is None else len(spec_decode_tokens) + 1
+        is_prompt = num_computed_tokens < num_prompt_tokens  # normal prompt
+        is_prompt = is_prompt or num_scheduled_tokens > num_decode_tokens  # maybe preempted prompt
+        is_prompt = is_prompt and not self.is_decoder_only(req_id)
+
+        return is_prompt
 
     def _get_prompts_and_decodes(
         self,
@@ -1708,7 +1684,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         requests = metadata.reqs_to_store | metadata.reqs_to_load
             else:
                 requests = scheduler_output.kv_connector_metadata.requests
-
         # Traverse decodes first
         decode_req_ids = []
         num_computed_tokens_decode = []
@@ -1722,19 +1697,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         self.input_batch.req_type[req_id] = requests_type[req_id]
                         break
 
-            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
-            num_prompt_tokens = self.input_batch.num_prompt_tokens[i]
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            if num_computed_tokens < num_prompt_tokens and \
-                not self.is_decoder_only(req_id):
-                # This is prompt
+            if self._is_prompt(i, scheduler_output):
                 break
 
-            # This is decode
             # NOTE(chendi): To support spec decode,
             # we don't assume num_scheduled_tokens == 1.
-
             decode_req_ids.append(req_id)
+            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
             num_computed_tokens_decode.append(int(num_computed_tokens + 1))
 
         if self.profiler.enabled:
@@ -1747,16 +1716,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             req_id = self.input_batch.req_ids[i]
             assert req_id is not None
 
-            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
-            num_prompt_tokens = self.input_batch.num_prompt_tokens[i]
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-
             # Must be prompt
-            assert num_computed_tokens < num_prompt_tokens
-            # NOTE(kzawora): In preempted sequences, num_output_tokens can be > 0, and still be a valid prefill
+            assert self._is_prompt(i, scheduler_output)
 
             prompt_req_ids.append(req_id)
-            prompt_scheduled_tokens.append(num_scheduled_tokens)
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            prompt_scheduled_tokens.append(int(num_scheduled_tokens))
 
         return PromptDecodeInfo(prompt_req_ids, decode_req_ids, prompt_scheduled_tokens)
 
@@ -3488,7 +3453,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         num_decodes = 0
         decode_index = None
         if self.use_async_scheduling:
-            num_decodes = self._get_num_decodes()
+            num_decodes = self._get_num_decodes(scheduler_output)
             decode_index = self._prepare_input_ids(scheduler_output, return_index=True)
             input_ids_hpu = self.input_ids_hpu
 
@@ -3807,6 +3772,37 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         attn_metadata = custom_tuple_replace(prefill_metadata, "TrimmedAttentionMetadata", attn_bias=attn_bias)
         return attn_metadata
 
+    def _ensure_decodes_first(self, scheduler_output: "SchedulerOutput"):
+        num_reqs = self.input_batch.num_reqs
+        while True:
+            # Find the first prompt index
+            first_prompt_index = None
+            for i in range(num_reqs):
+                if self._is_prompt(i, scheduler_output):
+                    first_prompt_index = i
+                    break
+            if first_prompt_index is None:
+                break
+
+            # Find the last decode index
+            last_decode_index = None
+            for i in reversed(range(num_reqs)):
+                if not self._is_prompt(i, scheduler_output):
+                    last_decode_index = i
+                    break
+            if last_decode_index is None:
+                break
+
+            # Sanity
+            assert first_prompt_index != last_decode_index
+
+            # Check if done
+            if first_prompt_index > last_decode_index:
+                break
+
+            # Swap
+            self.input_batch.swap_states(first_prompt_index, last_decode_index)
+
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         if self.scheduler_output is None:
@@ -3877,7 +3873,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         batch_changed = self.batch_changed
         # If necessary, swap decodes/prompts to have all decodes on the start
-        ensure_decodes_first(self.input_batch)
+        self._ensure_decodes_first(scheduler_output)
         # Prepare prompts/decodes info
         pd_info = self._get_prompts_and_decodes(scheduler_output)
         num_decodes = len(pd_info.decode_req_ids)
