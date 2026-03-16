@@ -408,27 +408,26 @@ _orig_default_moe_runner_init = DefaultMoERunner.__init__
 
 _orig_default_moe_runner_forward = DefaultMoERunner.forward
 
+# Apply patches
+# Ensure DefaultMoERunner keeps a reference to its layer for defensive redirects.
+_orig_default_moe_runner_init = DefaultMoERunner.__init__
+
+_orig_default_moe_runner_forward = DefaultMoERunner.forward
+
+def _patched_default_moe_runner_init(self, layer, *args, **kwargs):
+    self.layer = layer
+    vllm_config = getattr(layer, "vllm_config", None)
+    model_config = getattr(vllm_config, "model_config", None)
+    model_name = str(getattr(model_config, "model", "") or "")
+    self._is_qwen35 = "Qwen3.5" in model_name
+    return _orig_default_moe_runner_init(self, layer, *args, **kwargs)
 
 def _patched_default_moe_runner_forward(self, *args, **kwargs):
-    if self.quant_method is not None and hasattr(self.quant_method, "apply_monolithic"):
+    if getattr(self, "_is_qwen35", False):
         return _orig_default_moe_runner_forward(self, *args, **kwargs)
-
-    # fallback path
-    hidden_states, router_logits = args[:2]
-
-    shared_output, fused_output = self.forward_impl(
-        self.layer,
-        hidden_states,
-        router_logits,
-        *args[2:],
-        **kwargs,
-    )
-
-    if fused_output is None:
-        return shared_output
-
-    return fused_output
-
+    return patched_fused_moe_forward(self, *args, **kwargs)
+    
+DefaultMoERunner.__init__ = _patched_default_moe_runner_init
 
 DefaultMoERunner.forward = _patched_default_moe_runner_forward
 
