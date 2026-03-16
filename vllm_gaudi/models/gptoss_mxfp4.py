@@ -1,4 +1,4 @@
-from typing import Iterable
+from collections.abc import Iterable
 
 import torch
 from transformers import PretrainedConfig
@@ -14,10 +14,10 @@ from vllm.distributed import (
 from vllm.model_executor.models.utils import is_pp_missing_parameter
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-
 # Store original implementations before patching
 _original_normalize_quantization_config = ModelArchConfigConvertorBase._normalize_quantization_config
 _original_load_weights = GptOssModel.load_weights
+
 
 def _patched_normalize_quantization_config(self, config: PretrainedConfig):
     # Skip mxfp4 quantization to use custom loading logic for gpt_oss
@@ -29,14 +29,15 @@ def _patched_normalize_quantization_config(self, config: PretrainedConfig):
     # For all other models, use the original vLLM implementation
     return _original_normalize_quantization_config(self, config)
 
+
 def convert_moe_packed_tensors(
     blocks,
     scales,
     *,
     dtype: torch.dtype = torch.bfloat16,
-    # Large default chosen to process many rows per kernel launch and reduce overhead; 
+    # Large default chosen to process many rows per kernel launch and reduce overhead;
     # lower this if you need to limit peak memory usage.
-    rows_per_chunk: int = 32768 * 1024,  
+    rows_per_chunk: int = 32768 * 1024,
 ) -> torch.Tensor:
     """
     Convert the mxfp4 weights again, dequantizing and makes them compatible with the forward
@@ -141,7 +142,7 @@ def _load_weights_mxfp4_dequantize_hpu(
             if use_ep:
                 narrow_weight_scale = weight[ep_rank_start:ep_rank_end, ...]
             else:
-                narrow_weight_scale = weight[:, 2 * tp_rank_start : 2 * tp_rank_end, :]
+                narrow_weight_scale = weight[:, 2 * tp_rank_start:2 * tp_rank_end, :]
 
             narrow_weight_scale = narrow_weight_scale.contiguous()
 
@@ -158,7 +159,7 @@ def _load_weights_mxfp4_dequantize_hpu(
             if use_ep:
                 narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
             else:
-                narrow_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end, :, :]
+                narrow_weight = weight[:, 2 * tp_rank_start:2 * tp_rank_end, :, :]
             narrow_weight = narrow_weight.contiguous()
             block_weight_dict[name] = narrow_weight
             loaded_params.add(name)
@@ -168,7 +169,7 @@ def _load_weights_mxfp4_dequantize_hpu(
             if use_ep:
                 narrow_weight_scale = weight[ep_rank_start:ep_rank_end, ...]
             else:
-                narrow_weight_scale = weight[..., tp_rank_start//mxfp4_block:tp_rank_end//mxfp4_block]
+                narrow_weight_scale = weight[..., tp_rank_start // mxfp4_block:tp_rank_end // mxfp4_block]
             narrow_weight_scale = narrow_weight_scale.contiguous()
 
             # Read block weight
@@ -184,7 +185,7 @@ def _load_weights_mxfp4_dequantize_hpu(
             if use_ep:
                 narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
             else:
-                narrow_weight = weight[:, :, tp_rank_start//mxfp4_block:tp_rank_end//mxfp4_block, :]
+                narrow_weight = weight[:, :, tp_rank_start // mxfp4_block:tp_rank_end // mxfp4_block, :]
             narrow_weight = narrow_weight.contiguous()
             block_weight_dict[name] = narrow_weight
             loaded_params.add(name)
@@ -195,7 +196,7 @@ def _load_weights_mxfp4_dequantize_hpu(
             if use_ep:
                 narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
             else:
-                narrow_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end]
+                narrow_weight = weight[:, 2 * tp_rank_start:2 * tp_rank_end]
             narrow_weight = narrow_weight.contiguous()
 
             param = params_dict[name]
@@ -241,6 +242,7 @@ def _load_weights_mxfp4_dequantize_hpu(
             weight_loader(param, weight)
         loaded_params.add(name)
     return loaded_params
+
 
 def patched_load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
     # Check if this is gpt_oss model with mxfp4 quantization
