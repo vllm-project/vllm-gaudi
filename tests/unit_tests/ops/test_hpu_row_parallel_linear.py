@@ -16,6 +16,8 @@ import torch
 from unittest.mock import MagicMock, patch
 
 from vllm.model_executor.layers.linear import RowParallelLinear
+from vllm.model_executor.custom_op import op_registry_oot
+from vllm_gaudi.ops.hpu_row_parallel_linear import HPURowParallelLinear
 
 # Default test dimensions (small for speed)
 INPUT_SIZE = 256
@@ -34,6 +36,15 @@ def _mock_config(num_chunks=1, chunk_threshold=8192):
     return cfg
 
 
+def _ensure_registered():
+    """Ensure HPURowParallelLinear is registered as the OOT implementation.
+
+    Registration is now conditional on VLLM_ROW_PARALLEL_CHUNKS > 1
+    (see GAUDISW-247164), so tests must explicitly register when needed.
+    """
+    op_registry_oot[RowParallelLinear.__name__] = HPURowParallelLinear
+
+
 def _create_layer(num_chunks=1, chunk_threshold=8192, input_size=INPUT_SIZE, output_size=OUTPUT_SIZE, bias=False):
     """Create an HPURowParallelLinear with the given chunk settings.
 
@@ -41,11 +52,10 @@ def _create_layer(num_chunks=1, chunk_threshold=8192, input_size=INPUT_SIZE, out
     ``num_chunks`` and ``chunk_threshold`` without touching the
     global singleton.
 
-    HPURowParallelLinear is already registered via
-    ``@RowParallelLinear.register_oot`` at import time, so
-    ``RowParallelLinear(...)`` transparently returns an
-    ``HPURowParallelLinear`` instance.
+    Explicitly registers HPURowParallelLinear as the OOT implementation
+    since registration is now conditional on VLLM_ROW_PARALLEL_CHUNKS > 1.
     """
+    _ensure_registered()
     mock_cfg = _mock_config(num_chunks, chunk_threshold)
     with patch("vllm_gaudi.ops.hpu_row_parallel_linear.get_config", return_value=mock_cfg):
         layer = RowParallelLinear(
