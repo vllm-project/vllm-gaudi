@@ -3778,7 +3778,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # Find the first prompt index
             first_prompt_index = None
             for i in range(num_reqs):
-
                 if self._is_prompt(i, scheduler_output):
                     first_prompt_index = i
                     break
