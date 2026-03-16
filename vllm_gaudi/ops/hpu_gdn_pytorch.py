@@ -19,6 +19,161 @@ from vllm_gaudi.extension.logger import logger as init_logger
 logger = init_logger()
 
 
+def _chunk_precomputed_pipeline(
+    qf: torch.Tensor,       # [total_tokens, H, K]
+    kf: torch.Tensor,       # [total_tokens, H, K]
+    vf: torch.Tensor,       # [total_tokens, H, V]
+    g_cumsum: torch.Tensor,  # [total_tokens, H]
+    bf: torch.Tensor,       # [total_tokens, H]
+    init_state: torch.Tensor,  # [S, H, V, K]
+    seq_ranges: list[tuple[int, int]],
+    chunk_size: int,
+    scale: float,
+    H: int,
+    Kdim: int,
+    Vdim: int,
+    output_final_state: bool,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Optimized chunk pipeline with precomputed stages 2-4.
+
+    Stages 2-4 (dot product, triangular solve, u/w recomputation) are
+    independent across chunks and are computed for ALL chunks at once in
+    a single batched call.  Only stages 5-6 (state update and output)
+    require sequential processing due to inter-chunk state dependency.
+
+    This moves ~70% of the per-chunk compute out of the sequential loop,
+    critical for long sequences (e.g. 128k tokens = 1024 chunks).
+    """
+    num_seqs = len(seq_ranges)
+    device = qf.device
+    seq_len = seq_ranges[0][1] - seq_ranges[0][0]
+    num_chunks = (seq_len + chunk_size - 1) // chunk_size
+    S = num_seqs
+
+    # --- Gather per-sequence data into [S, seq_len, H, dim] blocks ---
+    q_seqs = qf.reshape(S, seq_len, H, Kdim)
+    k_seqs = kf.reshape(S, seq_len, H, Kdim)
+    v_seqs = vf.reshape(S, seq_len, H, Vdim)
+    g_seqs = g_cumsum.reshape(S, seq_len, H)
+    b_seqs = bf.reshape(S, seq_len, H)
+
+    # --- Reshape to [S, num_chunks, chunk_size, H, dim] ---
+    # Pad if seq_len not divisible by chunk_size.
+    padded_len = num_chunks * chunk_size
+    if padded_len > seq_len:
+        pad_len = padded_len - seq_len
+        q_seqs = torch.cat([q_seqs, torch.zeros(S, pad_len, H, Kdim, dtype=qf.dtype, device=device)], dim=1)
+        k_seqs = torch.cat([k_seqs, torch.zeros(S, pad_len, H, Kdim, dtype=kf.dtype, device=device)], dim=1)
+        v_seqs = torch.cat([v_seqs, torch.zeros(S, pad_len, H, Vdim, dtype=vf.dtype, device=device)], dim=1)
+        # Pad g_cumsum with the LAST VALID value (not zero).  Zero-padding
+        # causes exp(0 - g_valid) = exp(|g_valid|) which overflows to Inf
+        # when |g_valid| > ~88 (common with real GDN weights), producing
+        # NaN via 0*Inf in the coefficient matrix.  Replicating the last
+        # valid cumsum value keeps all exp differences bounded.
+        g_last_valid = g_seqs[:, -1:, :]  # [S, 1, H]
+        g_seqs = torch.cat([g_seqs, g_last_valid.expand(S, pad_len, H)], dim=1)
+        b_seqs = torch.cat([b_seqs, torch.zeros(S, pad_len, H, dtype=bf.dtype, device=device)], dim=1)
+
+    # [S, C, tc, H, dim] where C = num_chunks, tc = chunk_size
+    tc = chunk_size
+    q_chunks = q_seqs.reshape(S, num_chunks, tc, H, Kdim)
+    k_chunks = k_seqs.reshape(S, num_chunks, tc, H, Kdim)
+    v_chunks = v_seqs.reshape(S, num_chunks, tc, H, Vdim)
+    g_chunks = g_seqs.reshape(S, num_chunks, tc, H)
+    b_chunks = b_seqs.reshape(S, num_chunks, tc, H)
+
+    # ====================================================================
+    # Phase A: Precompute stages 2-4 for ALL chunks at once.
+    # Flatten (S, C) into batch dim → [S*C*H, tc, dim]
+    # ====================================================================
+    SC = S * num_chunks
+    # Merge S,C dims then permute H to batch: [S*C, tc, H, K] -> [S*C*H, tc, K]
+    k_flat = k_chunks.reshape(SC, tc, H, Kdim).permute(0, 2, 1, 3).reshape(SC * H, tc, Kdim)
+    v_flat = v_chunks.reshape(SC, tc, H, Vdim).permute(0, 2, 1, 3).reshape(SC * H, tc, Vdim)
+    g_flat = g_chunks.reshape(SC, tc, H).permute(0, 2, 1).reshape(SC * H, tc)
+    b_flat = b_chunks.reshape(SC, tc, H).permute(0, 2, 1).reshape(SC * H, tc)
+
+    eye = torch.eye(tc, dtype=torch.float32, device=device)
+
+    # Stage 2: chunk_scaled_dot_kkt — all S*C*H chunks at once
+    dot = torch.bmm(k_flat, k_flat.transpose(1, 2))  # [SC*H, tc, tc]
+    coeff = b_flat.unsqueeze(-1) * torch.exp(
+        g_flat.unsqueeze(-1) - g_flat.unsqueeze(-2)
+    )
+    a_lower = torch.tril(dot * coeff, diagonal=-1)
+    lmat = eye.unsqueeze(0) + a_lower
+
+    # Stage 3: solve_tril — all S*C*H at once (Neumann or forward-sub)
+    A_solve = _hpu_solve_lower_triangular_batched(
+        lmat, eye, use_vectorized=True,
+    )
+
+    # Stage 4: recompute u, w — all S*C*H at once
+    rhs_u = v_flat * b_flat.unsqueeze(-1)                          # [SC*H, tc, V]
+    rhs_w = k_flat * (b_flat * torch.exp(g_flat)).unsqueeze(-1)    # [SC*H, tc, K]
+    u_flat = torch.bmm(A_solve, rhs_u)                             # [SC*H, tc, V]
+    w_flat = torch.bmm(A_solve, rhs_w)                             # [SC*H, tc, K]
+
+    # Reshape precomputed results to [S, num_chunks, tc, H, dim]
+    u_all = u_flat.reshape(SC, H, tc, Vdim).permute(0, 2, 1, 3).reshape(S, num_chunks, tc, H, Vdim)
+    w_all = w_flat.reshape(SC, H, tc, Kdim).permute(0, 2, 1, 3).reshape(S, num_chunks, tc, H, Kdim)
+
+    # Also precompute q reshaped for stage 6: [S, num_chunks, tc, H, K]
+    q_all = q_chunks  # already [S, C, tc, H, K]
+
+    # ====================================================================
+    # Phase B: Sequential loop — stages 5-6 only (state-dependent).
+    # ====================================================================
+    states = init_state.clone()  # [S, H, V, K]
+    out_all = torch.zeros(S, num_chunks, tc, H, Vdim, dtype=torch.float32, device=device)
+
+    for ci in range(num_chunks):
+        # Fetch precomputed data for this chunk: [S, tc, H, dim]
+        u_c = u_all[:, ci]           # [S, tc, H, V]
+        w_c = w_all[:, ci]           # [S, tc, H, K]
+        k_c = k_chunks[:, ci]        # [S, tc, H, K]
+        g_c = g_chunks[:, ci]        # [S, tc, H]
+        q_c = q_all[:, ci]           # [S, tc, H, K]
+
+        # Stage 5: state update (batched across S)
+        h_start = states.clone()     # [S, H, V, K]
+        v_new_c = u_c - torch.einsum("sthk,shvk->sthv", w_c, h_start)
+
+        g_last = g_c[:, -1:, :]     # [S, 1, H]
+        decay = torch.exp(g_last - g_c)  # [S, tc, H]
+        val_state = v_new_c * decay.unsqueeze(-1)  # [S, tc, H, V]
+        states = (
+            h_start * torch.exp(g_last.permute(0, 2, 1)).unsqueeze(-1)
+            + torch.einsum("sthv,sthk->shvk", val_state, k_c)
+        )
+
+        # Stage 6: output computation — merge S*H for bmm
+        SH = S * H
+        q_sh = q_c.permute(0, 2, 1, 3).reshape(SH, tc, Kdim)       # [S*H, tc, K]
+        k_sh = k_c.permute(0, 2, 1, 3).reshape(SH, tc, Kdim)       # [S*H, tc, K]
+        v_new_sh = v_new_c.permute(0, 2, 1, 3).reshape(SH, tc, Vdim)  # [S*H, tc, V]
+        h_start_sh = h_start.reshape(SH, Vdim, Kdim)                # [S*H, V, K]
+        g_sh = g_c.permute(0, 2, 1).reshape(SH, tc)                 # [S*H, tc]
+
+        base = torch.bmm(q_sh, h_start_sh.transpose(1, 2))          # [S*H, tc, V]
+        base = base * torch.exp(g_sh).unsqueeze(-1)
+        attn = torch.bmm(q_sh, k_sh.transpose(1, 2))                # [S*H, tc, tc]
+        attn = attn * torch.exp(g_sh.unsqueeze(-1) - g_sh.unsqueeze(-2))
+        attn = torch.tril(attn)
+        out_sh = (base + torch.bmm(attn, v_new_sh)) * scale         # [S*H, tc, V]
+
+        out_all[:, ci] = out_sh.reshape(S, H, tc, Vdim).permute(0, 2, 1, 3)
+
+    # --- Scatter output back to flat [total_tokens, H, V] ---
+    out = out_all.reshape(S, padded_len, H, Vdim)[:, :seq_len, :, :].reshape(-1, H, Vdim)
+
+    final_state: torch.Tensor | None = None
+    if output_final_state:
+        final_state = states.to(init_state.dtype)
+
+    return out, final_state
+
+
 def _chunk_vectorized_body(
     q_chunk: torch.Tensor,   # [Tc, H, K]
     k_chunk: torch.Tensor,   # [Tc, H, K]
@@ -166,16 +321,85 @@ def _hpu_solve_lower_triangular_batched(
         )
     rhs_flat = rhs.reshape(-1, n, n)
 
-    # Row-wise forward substitution.
+    # --- Block forward substitution (numerically stable, fewer dispatches) ---
     # GDN always builds lmat = I + tril(…, diagonal=-1), so the diagonal
     # is guaranteed to be 1.0 — skip the division entirely.
-    # Row 0 has no off-diagonal entries in L, so x[0] = rhs[0] directly.
-    x = torch.zeros_like(rhs_flat)
-    x[:, 0, :] = rhs_flat[:, 0, :]
+    #
+    # Strategy: partition the n×n system into blocks of size `bs`.
+    #   Phase 1: extract all diagonal blocks and batch-invert them with a
+    #            small (bs-1)-iteration forward sub.  All blocks are
+    #            independent so they run in a single batched call.
+    #   Phase 2: outer loop of n/bs iterations.  Each iteration does one
+    #            inter-block BMM (large, efficient) + one block-inverse
+    #            application BMM.
+    # Total Python iterations: (bs - 1) + num_blocks  instead of  (n - 1).
+    # For n=128, bs=16: 15 + 8 = 23  vs  127  (~5.5× fewer dispatches).
+    _block_size = int(os.getenv("VLLM_GDN_SOLVE_BLOCK_SIZE", "16"))
+    bs = min(_block_size, n)
+    num_blocks = (n + bs - 1) // bs
+    batch = lflat.shape[0]
 
-    for i in range(1, n):
-        corr = torch.bmm(lflat[:, i:i + 1, :i], x[:, :i, :]).squeeze(1)
-        x[:, i, :] = rhs_flat[:, i, :] - corr
+    if num_blocks <= 2 or bs >= n:
+        # Fall back to naive row-by-row forward substitution for tiny n
+        # (no blocking benefit).  Solves L X = RHS one row at a time:
+        #   x[0] = rhs[0]          (diagonal is 1, no division needed)
+        #   x[i] = rhs[i] - L[i, :i] @ X[:i]   for i = 1..n-1
+        # This requires n-1 Python-level bmm dispatches, which is fine
+        # for small n but too slow for typical chunk sizes (64/128).
+        x = torch.zeros_like(rhs_flat)
+        x[:, 0, :] = rhs_flat[:, 0, :]
+        for i in range(1, n):
+            corr = torch.bmm(lflat[:, i:i + 1, :i], x[:, :i, :]).squeeze(1)
+            x[:, i, :] = rhs_flat[:, i, :] - corr
+        return x.reshape(lmat.shape)
+
+    # --- Phase 1: batch-invert all diagonal blocks ---
+    # Extract diagonal blocks into [num_blocks * batch, bs, bs].
+    # The last block may be smaller than bs; pad it to bs with identity.
+    diag_list: list[torch.Tensor] = []
+    for bi in range(num_blocks):
+        s = bi * bs
+        e = min(s + bs, n)
+        blk = lflat[:, s:e, s:e]                        # [batch, e-s, e-s]
+        if e - s < bs:
+            pad_blk = torch.eye(bs, dtype=lflat.dtype, device=lflat.device)
+            pad_blk = pad_blk.unsqueeze(0).expand(batch, -1, -1).clone()
+            pad_blk[:, :e - s, :e - s] = blk
+            diag_list.append(pad_blk)
+        else:
+            diag_list.append(blk)
+    diag_all = torch.cat(diag_list, dim=0)               # [num_blocks*batch, bs, bs]
+
+    # Small forward sub on the diagonal blocks (only bs-1 iterations).
+    eye_bs = torch.eye(bs, dtype=lflat.dtype, device=lflat.device)
+    rhs_bs = eye_bs.unsqueeze(0).expand(diag_all.shape[0], -1, -1)
+    xi = torch.zeros_like(rhs_bs)
+    xi[:, 0, :] = rhs_bs[:, 0, :]
+    for j in range(1, bs):
+        corr = torch.bmm(diag_all[:, j:j + 1, :j], xi[:, :j, :]).squeeze(1)
+        xi[:, j, :] = rhs_bs[:, j, :] - corr
+    # xi: [num_blocks*batch, bs, bs] — all block inverses
+    block_invs = xi.reshape(num_blocks, batch, bs, bs)
+
+    # --- Phase 2: blocked outer loop (num_blocks iterations) ---
+    x = torch.zeros_like(rhs_flat)
+    for bi in range(num_blocks):
+        s = bi * bs
+        e = min(s + bs, n)
+        actual_bs = e - s
+
+        rhs_block = rhs_flat[:, s:e, :]                  # [batch, actual_bs, n]
+        if s > 0:
+            # One large inter-block BMM replaces `actual_bs` small row BMMs.
+            corr = torch.bmm(lflat[:, s:e, :s], x[:, :s, :])
+            rhs_block = rhs_block - corr
+
+        # Apply pre-computed diagonal-block inverse.
+        inv_b = block_invs[bi]                            # [batch, bs, bs]
+        if actual_bs < bs:
+            x[:, s:e, :] = torch.bmm(inv_b[:, :actual_bs, :actual_bs], rhs_block)
+        else:
+            x[:, s:e, :] = torch.bmm(inv_b, rhs_block)
 
     return x.reshape(lmat.shape)
 
@@ -299,10 +523,6 @@ def hpu_fused_recurrent_gated_delta_rule(
     )
 
     if _all_single_token:
-        #logger.debug("libin debug hpu_fused_recurrent_gated_delta_rule: B=%d T=%d q=%s v=%s cu_seqlens=%s ssm_state_indices=%s",
-        #         q.shape[0], q.shape[1], q.shape, v.shape,
-        #         cu_seqlens.shape if cu_seqlens is not None else None,
-        #         ssm_state_indices.shape if ssm_state_indices is not None else None)
         num_seqs = cu_seqlens.shape[0] - 1 if cu_seqlens is not None else B
 
         if initial_state is None:
@@ -418,6 +638,7 @@ def _recurrent_general_path(
     num_state_indices = (
         int(state_indices_tensor.shape[0]) if state_indices_tensor is not None else 0
     )
+    # trip count = num_seqs (batch bucket); recompile per batch bucket
     for seq_id, (bos, eos) in enumerate(seq_ranges):
         if eos <= bos:
             continue
@@ -435,6 +656,9 @@ def _recurrent_general_path(
         else:
             h_state = state_work[seq_id]
 
+        # trip count = padded_seq_len per sequence (seq bucket); recompile per seq bucket, 
+        # worst one with 2k inputs, for loop 2k times
+        #TODO: vectorize this loop with a custom scan or by reshaping to [num_chunks, chunk_size, H] and doing a grouped cumsum with resets at chunk boundaries.
         for t in range(bos, eos):
             q_t = qf[t]
             k_t = kf[t]
@@ -475,6 +699,7 @@ def _recurrent_general_path(
 
     return out, final_state
 
+
 @torch._dynamo.disable
 def hpu_chunk_gated_delta_rule(
     q: torch.Tensor,
@@ -491,9 +716,8 @@ def hpu_chunk_gated_delta_rule(
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """PyTorch replacement for chunk_gated_delta_rule.
 
-    Runs the eager path with Python loops.  torch.compile dispatch to
-    _hpu_chunk_gated_delta_rule_compiled is disabled for now (re-enable
-    once torch.compile performance improves).
+    This path intentionally mirrors upstream prefill call semantics without
+    delegating to the fused recurrent helper.
     """
     # https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fla/ops/chunk_scaled_dot_kkt.py#L132
     B, T, H, Kdim = q.shape
@@ -543,13 +767,44 @@ def hpu_chunk_gated_delta_rule(
     # Upstream match: `chunk_local_cumsum` in fla/ops/cumsum.py.
     # Stage 1 computes per-chunk cumulative g in log-space.
     g_cumsum = torch.empty_like(gf)
-    for bos, eos in seq_ranges:
-        #TODO: vectorize this loop with a custom scan or by reshaping to [num_chunks, chunk_size, H] and doing a grouped cumsum with resets at chunk boundaries.
-        for cs in range(bos, eos, chunk_size):
-            ce = min(cs + chunk_size, eos)
-            # [Stage 1: chunk_local_cumsum] per-chunk prefix sum of g.
-            # Resets at each chunk boundary [cs, ce).
-            g_cumsum[cs:ce] = torch.cumsum(gf[cs:ce], dim=0)
+    _vectorize_loops = os.getenv("VLLM_GDN_VECTORIZE_LOOPS", "1") == "1"
+    if _vectorize_loops and num_seqs > 0:
+        # Vectorized path: reshape to [num_seqs, num_chunks, chunk_size, H]
+        # and do a single torch.cumsum(dim=2).
+        # Works because HPU bucketing guarantees all sequences have the same
+        # padded length, so seq_ranges are uniform strides in the flat buffer.
+        seq_len = seq_ranges[0][1] - seq_ranges[0][0]
+        num_chunks = (seq_len + chunk_size - 1) // chunk_size
+        total_tokens = num_seqs * seq_len
+        # Slice only the active tokens (ignore any trailing padding in gf).
+        g_active = gf[:total_tokens]  # [num_seqs * seq_len, H]
+        # Reshape: uniform strides → [num_seqs, num_chunks, chunk_size, H].
+        # If seq_len isn't divisible by chunk_size, pad the tail.
+        padded_len = num_chunks * chunk_size
+        if padded_len > seq_len:
+            pad = torch.zeros(num_seqs * (padded_len - seq_len), gf.shape[1],
+                              dtype=gf.dtype, device=gf.device)
+            # Interleave pad after each sequence's tokens: reshape, cat, reshape.
+            g_block = g_active.reshape(num_seqs, seq_len, -1)
+            pad_block = pad.reshape(num_seqs, padded_len - seq_len, -1)
+            g_block = torch.cat([g_block, pad_block], dim=1)  # [S, padded_len, H]
+        else:
+            g_block = g_active.reshape(num_seqs, seq_len, -1)
+        g_block = g_block.reshape(num_seqs, num_chunks, chunk_size, -1)
+        g_cumsum_block = torch.cumsum(g_block, dim=2)
+        # Flatten back and write into g_cumsum (trim padding).
+        g_cumsum[:total_tokens] = g_cumsum_block.reshape(
+            num_seqs, -1, gf.shape[1])[:, :seq_len, :].reshape(-1, gf.shape[1])
+    else:
+        # Original loop path.
+        # trip count = num_seqs (batch bucket); recompile per batch bucket
+        for bos, eos in seq_ranges:
+            # trip count = padded_seq_len / chunk_size (seq bucket); recompile per seq bucket
+            for cs in range(bos, eos, chunk_size):
+                ce = min(cs + chunk_size, eos)
+                # [Stage 1: chunk_local_cumsum] per-chunk prefix sum of g.
+                # Resets at each chunk boundary [cs, ce).
+                g_cumsum[cs:ce] = torch.cumsum(gf[cs:ce], dim=0)
 
     # Initial state layout: [num_seqs, H, V, K].
     if initial_state is None:
@@ -566,7 +821,7 @@ def hpu_chunk_gated_delta_rule(
             )
         init_state = initial_state.to(torch.float32)
 
-    out = torch.empty((qf.shape[0], H, Vdim), dtype=torch.float32, device=device)
+    out = torch.zeros((qf.shape[0], H, Vdim), dtype=torch.float32, device=device)
     final_state = torch.empty_like(init_state) if output_final_state else None
 
     # Upstream stage mapping (chunk.py::chunk_gated_delta_rule_fwd):
@@ -587,97 +842,129 @@ def hpu_chunk_gated_delta_rule(
     use_vectorized_chunk = (
         os.getenv("VLLM_GAUDI_GDN_CHUNK_VECTORIZED", "1") == "1"
     )
+    if torch.compiler.is_compiling():
+        use_vectorized_chunk = False
 
-    for seq_id, (bos, eos) in enumerate(seq_ranges):
-        if eos <= bos:
+    _vectorize_seq_loop = (
+        _vectorize_loops and use_vectorized_chunk and num_seqs > 0
+    )
+
+    if _vectorize_seq_loop:
+        # --- Precomputed pipeline: stages 2-4 batched, stages 5-6 sequential ---
+        total_active = num_seqs * (seq_ranges[0][1] - seq_ranges[0][0])
+        out_pre, fs_pre = _chunk_precomputed_pipeline(
+            qf=qf[:total_active],
+            kf=kf[:total_active],
+            vf=vf[:total_active],
+            g_cumsum=g_cumsum[:total_active],
+            bf=bf[:total_active],
+            init_state=init_state,
+            seq_ranges=seq_ranges,
+            chunk_size=chunk_size,
+            scale=scale,
+            H=H,
+            Kdim=Kdim,
+            Vdim=Vdim,
+            output_final_state=(final_state is not None),
+        )
+        out[:total_active] = out_pre
+        if final_state is not None and fs_pre is not None:
+            final_state.copy_(fs_pre)
+
+    else:
+        # --- Original per-sequence loop path ---
+        # trip count = num_seqs (batch bucket); recompile per batch bucket
+        for seq_id, (bos, eos) in enumerate(seq_ranges):
+            if eos <= bos:
+                if final_state is not None:
+                    final_state[seq_id] = init_state[seq_id]
+                continue
+
+            state = init_state[seq_id].clone()  # [H, V, K]
+            # trip count = padded_seq_len / chunk_size (seq bucket); recompile per seq bucket
+            for cs in range(bos, eos, chunk_size):
+                ce = min(cs + chunk_size, eos)
+                tc = ce - cs
+
+                q_chunk = qf[cs:ce]          # [Tc, H, K]
+                k_chunk = kf[cs:ce]          # [Tc, H, K]
+                v_chunk = vf[cs:ce]          # [Tc, H, V]
+                g_chunk = g_cumsum[cs:ce]    # [Tc, H]
+                beta_chunk = bf[cs:ce]       # [Tc, H]
+
+                if tc not in eye_cache:
+                    eye_cache[tc] = torch.eye(tc, dtype=torch.float32, device=device)
+
+                if use_vectorized_chunk:
+                    out[cs:ce], state = _chunk_vectorized_body(
+                        q_chunk, k_chunk, v_chunk, g_chunk, beta_chunk,
+                        state, eye_cache[tc], scale,
+                    )
+                else:
+                    # Per-head reference path (list accumulation for HPU compat).
+                    a_solve_list: list[torch.Tensor] = []
+                    for h in range(H):
+                        kh = k_chunk[:, h, :]
+                        bh = beta_chunk[:, h]
+                        gh = g_chunk[:, h]
+                        dot = kh @ kh.transpose(0, 1)
+                        coeff = bh[:, None] * torch.exp(gh[:, None] - gh[None, :])
+                        a_lower = torch.tril(dot * coeff, diagonal=-1)
+                        lmat = eye_cache[tc] + a_lower
+                        a_solve_h = _hpu_solve_lower_triangular_batched(
+                            lmat,
+                            eye_cache[tc],
+                            use_vectorized=False,
+                        )
+                        a_solve_list.append(a_solve_h.unsqueeze(0))
+                    A_solve = torch.cat(a_solve_list, dim=0)
+
+                    u_list: list[torch.Tensor] = []
+                    w_list: list[torch.Tensor] = []
+                    for h in range(H):
+                        rhs_u = v_chunk[:, h, :] * beta_chunk[:, h:h + 1]
+                        rhs_w = (
+                            k_chunk[:, h, :]
+                            * (beta_chunk[:, h] * torch.exp(g_chunk[:, h]))[:, None]
+                        )
+                        u_list.append((A_solve[h] @ rhs_u).unsqueeze(1))
+                        w_list.append((A_solve[h] @ rhs_w).unsqueeze(1))
+                    u_chunk = torch.cat(u_list, dim=1)
+                    w_chunk = torch.cat(w_list, dim=1)
+
+                    v_new_list: list[torch.Tensor] = []
+                    h_start = state.clone()
+                    for h in range(H):
+                        state_h = h_start[h]
+                        proj = w_chunk[:, h, :] @ state_h.transpose(0, 1)
+                        val_raw = u_chunk[:, h, :] - proj
+                        v_new_list.append(val_raw.unsqueeze(1))
+
+                        g_last = g_chunk[-1, h]
+                        val_state = val_raw * torch.exp(g_last - g_chunk[:, h])[:, None]
+                        state_h = state_h * torch.exp(g_last)
+                        state_h = state_h + val_state.transpose(0, 1) @ k_chunk[:, h, :]
+                        state[h] = state_h
+                    v_new_chunk = torch.cat(v_new_list, dim=1)
+
+                    out_list: list[torch.Tensor] = []
+                    for h in range(H):
+                        qh = q_chunk[:, h, :]
+                        kh = k_chunk[:, h, :]
+                        vh = v_new_chunk[:, h, :]
+                        hs = h_start[h]
+                        gh = g_chunk[:, h]
+
+                        base = qh @ hs.transpose(0, 1)
+                        base = base * torch.exp(gh)[:, None]
+                        attn = qh @ kh.transpose(0, 1)
+                        attn = attn * torch.exp(gh[:, None] - gh[None, :])
+                        attn = torch.tril(attn)
+                        out_list.append(((base + attn @ vh) * scale).unsqueeze(1))
+                    out[cs:ce] = torch.cat(out_list, dim=1)
+
             if final_state is not None:
-                final_state[seq_id] = init_state[seq_id]
-            continue
-
-        state = init_state[seq_id].clone()  # [H, V, K]
-        for cs in range(bos, eos, chunk_size):
-            ce = min(cs + chunk_size, eos)
-            tc = ce - cs
-
-            q_chunk = qf[cs:ce]          # [Tc, H, K]
-            k_chunk = kf[cs:ce]          # [Tc, H, K]
-            v_chunk = vf[cs:ce]          # [Tc, H, V]
-            g_chunk = g_cumsum[cs:ce]    # [Tc, H]
-            beta_chunk = bf[cs:ce]       # [Tc, H]
-
-            if tc not in eye_cache:
-                eye_cache[tc] = torch.eye(tc, dtype=torch.float32, device=device)
-
-            if use_vectorized_chunk:
-                out[cs:ce], state = _chunk_vectorized_body(
-                    q_chunk, k_chunk, v_chunk, g_chunk, beta_chunk,
-                    state, eye_cache[tc], scale,
-                )
-            else:
-                # Per-head reference path (list accumulation for HPU compat).
-                a_solve_list: list[torch.Tensor] = []
-                for h in range(H):
-                    kh = k_chunk[:, h, :]
-                    bh = beta_chunk[:, h]
-                    gh = g_chunk[:, h]
-                    dot = kh @ kh.transpose(0, 1)
-                    coeff = bh[:, None] * torch.exp(gh[:, None] - gh[None, :])
-                    a_lower = torch.tril(dot * coeff, diagonal=-1)
-                    lmat = eye_cache[tc] + a_lower
-                    a_solve_h = _hpu_solve_lower_triangular_batched(
-                        lmat,
-                        eye_cache[tc],
-                        use_vectorized=False,
-                    )
-                    a_solve_list.append(a_solve_h.unsqueeze(0))
-                A_solve = torch.cat(a_solve_list, dim=0)
-
-                u_list: list[torch.Tensor] = []
-                w_list: list[torch.Tensor] = []
-                for h in range(H):
-                    rhs_u = v_chunk[:, h, :] * beta_chunk[:, h:h + 1]
-                    rhs_w = (
-                        k_chunk[:, h, :]
-                        * (beta_chunk[:, h] * torch.exp(g_chunk[:, h]))[:, None]
-                    )
-                    u_list.append((A_solve[h] @ rhs_u).unsqueeze(1))
-                    w_list.append((A_solve[h] @ rhs_w).unsqueeze(1))
-                u_chunk = torch.cat(u_list, dim=1)
-                w_chunk = torch.cat(w_list, dim=1)
-
-                v_new_list: list[torch.Tensor] = []
-                h_start = state.clone()
-                for h in range(H):
-                    state_h = h_start[h]
-                    proj = w_chunk[:, h, :] @ state_h.transpose(0, 1)
-                    val_raw = u_chunk[:, h, :] - proj
-                    v_new_list.append(val_raw.unsqueeze(1))
-
-                    g_last = g_chunk[-1, h]
-                    val_state = val_raw * torch.exp(g_last - g_chunk[:, h])[:, None]
-                    state_h = state_h * torch.exp(g_last)
-                    state_h = state_h + val_state.transpose(0, 1) @ k_chunk[:, h, :]
-                    state[h] = state_h
-                v_new_chunk = torch.cat(v_new_list, dim=1)
-
-                out_list: list[torch.Tensor] = []
-                for h in range(H):
-                    qh = q_chunk[:, h, :]
-                    kh = k_chunk[:, h, :]
-                    vh = v_new_chunk[:, h, :]
-                    hs = h_start[h]
-                    gh = g_chunk[:, h]
-
-                    base = qh @ hs.transpose(0, 1)
-                    base = base * torch.exp(gh)[:, None]
-                    attn = qh @ kh.transpose(0, 1)
-                    attn = attn * torch.exp(gh[:, None] - gh[None, :])
-                    attn = torch.tril(attn)
-                    out_list.append(((base + attn @ vh) * scale).unsqueeze(1))
-                out[cs:ce] = torch.cat(out_list, dim=1)
-
-        if final_state is not None:
-            final_state[seq_id] = state
+                final_state[seq_id] = state
 
     out = out.to(q.dtype)
     if cu_seqlens is not None:
@@ -690,3 +977,4 @@ def hpu_chunk_gated_delta_rule(
     if initial_state is not None:
         final_state = final_state.to(initial_state.dtype)
     return out, final_state
+
