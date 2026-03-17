@@ -80,8 +80,12 @@ def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, sink, bat
                  batch2block_matmul_op, block2batch_matmul_op):
     # When fp32_softmax is enabled attn is left in fp32 after Q@K
     # We can return to native dtype after we renormalize and calculate the adjustments
-    if block_bias is not None and attn.dtype != block_bias.dtype:
-        block_bias = block_bias.to(dtype=attn.dtype)
+    if block_bias is not None:
+        if block_bias.dtype == torch.bool:
+            # Convert boolean mask (True=valid, False=masked) to additive bias (0.0/-inf)
+            block_bias = torch.zeros_like(block_bias, dtype=attn.dtype).masked_fill_(~block_bias, float('-inf'))
+        elif attn.dtype != block_bias.dtype:
+            block_bias = block_bias.to(dtype=attn.dtype)
     # TODO: w/a with 5D req as the block_softmax kernel does not support 4D attn tensor, which is used in e.g. Granite-3B
     if get_config().fused_block_softmax and get_config().fused_block_softmax_adjustment and attn.dim() == 5:
         attn, block_max, block_sums = torch.ops.hpu.block_softmax(attn, block_bias, block_groups)
