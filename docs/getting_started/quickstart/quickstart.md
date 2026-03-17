@@ -42,7 +42,7 @@ Follow these steps to run the vLLM server or launch benchmarks on Gaudi using Do
     git clone https://github.com/vllm-project/vllm-gaudi.git
     ```
 
-2. Check out the version of vllm-gaudi that matches your target release (example).
+2. Check out the version of `vllm-gaudi` that matches your target release.
 
     ```bash
     cd vllm-gaudi
