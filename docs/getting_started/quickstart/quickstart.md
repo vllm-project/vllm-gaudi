@@ -46,7 +46,9 @@ Follow these steps to run the vLLM server or launch benchmarks on Gaudi using Do
 
     ```bash
     cd vllm-gaudi
-    git checkout v0.16.0
+    # Replace <TAG_OR_BRANCH> with the tag or branch for your desired release.
+    # You can find available versions at: https://github.com/vllm-project/vllm-gaudi/releases
+    git checkout <TAG_OR_BRANCH>
     ```
 
 3. Navigate to the appropriate directory.
