@@ -301,6 +301,9 @@ run_gsm8k_granite_test() {
     echo "➡️ Testing GSM8K on granite-8b..."
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/granite-8b.yaml"
+    
+    VLLM_USE_BOOLEAN_MASK=true VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 ASYNC_SCHEDULING=1 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/granite-8b.yaml"
     echo "✅ Test with granite-8b passed."
 }
 
@@ -333,6 +336,9 @@ run_gsm8k_deepseek_test() {
     echo "➡️ Testing GSM8K on deepseek v2 lite..."
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml"
+
+    VLLM_USE_BOOLEAN_MASK=true VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml"
     echo "✅ GSM8K Test with deepseek v2 lite passed."
 }
 
@@ -350,7 +356,29 @@ run_gsm8k_qwen3_30b_test() {
     echo "➡️ Testing GSM8K on QWEN3-30B-A3B..."
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 TP_SIZE=2 \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/Qwen3-30B-A3B.yaml"
+
+    VLLM_USE_BOOLEAN_MASK=true VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 TP_SIZE=2 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/Qwen3-30B-A3B.yaml"
     echo "✅ Test with QWEN3-30B-A3B passed."
+}
+
+# GSM8K on Gemma3
+run_gsm8k_gemma3_test() {
+    echo "➡️ Testing GSM8K on gemma-3-4b-it..."
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/model_cards/gemma-3-4b-it.yaml"
+
+    VLLM_USE_BOOLEAN_MASK=true VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/model_cards/gemma-3-4b-it.yaml"
+    echo "✅ Test with gemma-3-4b-it passed."
+
+    echo "➡️ Testing gemma-3-27b-it..."
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/model_cards/gemma-3-27b-it.yaml"
+
+    VLLM_USE_BOOLEAN_MASK=true VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/model_cards/gemma-3-27b-it.yaml"
+    echo "✅ Test with gemma-3-27b-it passed."
 }
 
 
@@ -545,6 +573,7 @@ launch_all_tests() {
     run_gsm8k_deepseek_test
     #run_gsm8k_deepseek_unified_mla_test
     run_gsm8k_qwen3_30b_test
+    run_gsm8k_gemma3_test
     run_preemption_test
     run_spec_decode_ngram_test
     run_spec_decode_eagle3_test

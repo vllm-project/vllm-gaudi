@@ -1,0 +1,9 @@
+model_card:
+  model_name: google/gemma-3-27b-it
+  tasks: gsm8k
+  num_fewshot: 8
+  limit: 256
+
+metrics:
+  name: exact_match,strict-match
+  value: 0.85
