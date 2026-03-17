@@ -154,6 +154,7 @@ def test_ngram(is_enable, args, prompts, sampling_params, task_key, result_queue
 
 def test_eagle_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
     VLLM_CLS = LLM if prompts is not None else VLLM
+    # no local copy of meta-llama/Llama-3.1-8B-Instruct in /mnt/weka/data/huggingface-models/
     kwargs = {"model":"meta-llama/Llama-3.1-8B-Instruct"} if prompts is not None \
         else {"pretrained":"meta-llama/Llama-3.1-8B-Instruct","batch_size":"16"}
     try:
@@ -190,6 +191,7 @@ def test_eagle_model(is_enable, args, prompts, sampling_params, task_key, result
 
 def test_eagle3_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
     VLLM_CLS = LLM if prompts is not None else VLLM
+    # no local copy of meta-llama/Llama-3.1-8B-Instruct in /mnt/weka/data/huggingface-models/
     kwargs = {"model":"meta-llama/Llama-3.1-8B-Instruct",} if prompts is not None \
         else {"pretrained":"meta-llama/Llama-3.1-8B-Instruct","batch_size":"16"}
     try:

@@ -17,7 +17,7 @@ echo "Dependency installation complete."
 # Models to run
 MODELS=(
     "/mnt/weka/data/huggingface-models/qwen/Qwen3-0.6B"
-    "deepseek-ai/DeepSeek-V2-Lite-Chat"
+    "deepseek-ai/DeepSeek-V2-Lite-Chat"  # no local copy in /mnt/weka/data/huggingface-models/
 )
 #MODELS=(
 #	"meta-llama/Llama-3.1-8B"
