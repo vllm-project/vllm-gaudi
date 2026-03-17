@@ -314,10 +314,11 @@ class HPUCompressedTensorsW8A8Int8_BF16Fallback(CompressedTensorsScheme):
 
         weight_bf16 = (layer.weight.to(torch.float32) * layer.weight_scale).to(torch.bfloat16)
 
-        layer._parameters.pop("weight", None)
-        layer._parameters.pop("weight_scale", None)
+        layer.register_parameter("weight", None)
+        layer.register_parameter("weight_scale", None)
 
-        layer.weight = torch.nn.Parameter(weight_bf16, requires_grad=False)
+        weight = torch.nn.Parameter(weight_bf16, requires_grad=False)
+        layer.register_parameter("weight", weight)
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor, bias: Optional[torch.Tensor] = None):
 
