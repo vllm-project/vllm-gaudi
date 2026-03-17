@@ -51,7 +51,7 @@ Follow these steps to run the vLLM server or launch benchmarks on Gaudi using Do
     git checkout <TAG_OR_BRANCH>
     ```
 
-3. Navigate to the appropriate directory.
+3. Navigate to the `.cd/` directory in the cloned `vllm-gaudi` repository. This directory contains the Docker Compose files and helper scripts used in this quickstart.
 
     ```bash
     cd .cd/
