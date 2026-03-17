@@ -1572,17 +1572,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # For 2D padded batches, compute position in the
                 # flattened [batch_size * padded_seq_len] layout.
                 if padded_seq_len is not None:
-                    req_start_pos = batch_row * padded_seq_len + \
-                        start_pos - num_computed_tokens
+                    req_start_pos = (batch_row * padded_seq_len + start_pos - num_computed_tokens)
                 else:
-                    req_start_pos = req_start_idx + \
-                        start_pos - num_computed_tokens
+                    req_start_pos = (req_start_idx + start_pos - num_computed_tokens)
                 is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
                     = True
 
                 # Only whole mm items are processed
                 mm_embeds.append(mm_embeds_item)
-            req_start_idx += num_scheduled_tokens
+            if padded_seq_len is None:
+                req_start_idx += num_scheduled_tokens
 
         # Convert bool tensor to index tensor for merge embedding statically if optimized mm
         if self.uses_mrope:
@@ -1610,18 +1609,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self._execute_mm_encoder(scheduler_output, req_ids)
 
             # For 2D padded prefill batches (batch_size > 1), compute
-            # total tokens across the padded layout and pass padded_seq_len
-            # so _gather_mm_embeddings can map positions correctly.
+            # total token positions across the padded layout and pass
+            # padded_seq_len so _gather_mm_embeddings can map positions
+            # correctly.
             padded_seq_len = None
+            effective_total_tokens = total_num_scheduled_tokens
             if token_ids.ndim == 2 and token_ids.shape[0] > 1:
                 padded_seq_len = token_ids.shape[-1]
-                total_num_scheduled_tokens = (
-                    token_ids.shape[0] * token_ids.shape[1]
-                )
+                effective_total_tokens = (token_ids.shape[0] * token_ids.shape[1])
 
             mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output,
                                                                 req_ids,
-                                                                total_num_scheduled_tokens=total_num_scheduled_tokens,
+                                                                total_num_scheduled_tokens=effective_total_tokens,
                                                                 padded_seq_len=padded_seq_len)
             # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa
             # This may require moving multimodal input preps into _prepare_inputs,        # noqa
