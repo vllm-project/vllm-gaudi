@@ -204,15 +204,16 @@ class HPUBucketingManager():
                                                    self.max_num_seqs, self.max_num_prefill_seqs,
                                                    self.max_num_batched_tokens, self.block_size, self.num_hpu_blocks,
                                                    buckets_from_file, self.mamba_chunk_size)
-            # Safety cap for fallback: max ctx from prepared decode buckets.
-            # Prevents catastrophic allocations from corrupt batch data while
-            # allowing calc_fallback_value to handle moderate overflow.
-            self._fallback_max_ctx = max((ctx for _, _, ctx in self.decode_buckets), default=0)
             if self.num_speculative_tokens:
                 # The existing buckets are used as seed decode buckets
                 self.seed_decode_buckets = self.decode_buckets
                 # More buckets are added automatically for spec decode
                 self.decode_buckets = self.generate_spec_decode_buckets(self.decode_buckets)
+            # Safety cap for fallback: max ctx from ALL prepared decode buckets
+            # (including spec decode expansions).  Prevents catastrophic
+            # allocations from corrupt batch data while allowing
+            # calc_fallback_value to handle moderate overflow.
+            self._fallback_max_ctx = max((ctx for _, _, ctx in self.decode_buckets), default=0)
 
             self.log_generate_info(False)
         else:
@@ -246,8 +247,10 @@ class HPUBucketingManager():
             new_ctx = calc_fallback_value(ctx, self.fallback_blocks_base_step)
             # Safety cap: limit to max prepared decode bucket ctx to prevent
             # catastrophic graph compilation from corrupted batch data.
-            if self._fallback_max_ctx > 0:
-                new_ctx = min(new_ctx, self._fallback_max_ctx)
+            if self._fallback_max_ctx > 0 and new_ctx > self._fallback_max_ctx:
+                logger().warning(f"Fallback ctx {new_ctx} exceeds max prepared "
+                                 f"decode bucket ctx {self._fallback_max_ctx}, capping.")
+                new_ctx = self._fallback_max_ctx
         return (new_batch_size, new_seq_len, new_ctx)
 
     def find_prompt_bucket(self, batch_size, seq_len, ctx=0):
