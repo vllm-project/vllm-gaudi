@@ -569,6 +569,26 @@ jobs:
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
 
+  calibration_arg_parsing_tests:
+    needs: [pre_merge_hpu_test_build, discover_runner, retrieve_head_sha]
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    steps:
+      - name: Run calibration arg parsing tests
+        run: |
+          EXITCODE=1
+          CONTAINER_NAME="hpu-plugin-test-calibration-arg-parsing-${{ needs.retrieve_head_sha.outputs.head_sha }}"
+          remove_docker_containers() { docker rm -f $CONTAINER_NAME || true; }
+          trap 'remove_docker_containers; exit $EXITCODE;' EXIT
+          remove_docker_containers
+
+          echo "Running calibration arg parsing tests"
+          docker run --rm --name=$CONTAINER_NAME \
+             hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }} \
+            /bin/bash "/workspace/vllm-gaudi/tests/calibration_tests/test_calibrate_model_arg_parsing.sh"
+
+          EXITCODE=$?
+          echo "Test script exited with code: $EXITCODE"
+
   # Build-test production Dockerfiles when they are modified
   check_dockerfile_changes:
     needs: [retrieve_head_sha]
@@ -620,7 +640,7 @@ jobs:
 
   pre_merge_hpu_test:
     # --- UPDATED: Add discover_runner dependency ---
-    needs: [hpu_unit_tests, e2e, hpu_perf_tests, calibration_tests, discover_runner]
+    needs: [hpu_unit_tests, e2e, hpu_perf_tests, calibration_tests, calibration_arg_parsing_tests, discover_runner]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     # This job is required to pass for pre-merge CI. By itself it does nothing, and will only pass if all jobs specified in "needs" list pass.
@@ -650,7 +670,7 @@ jobs:
   cleanup_docker_image:
     name: Cleanup Docker Image
     if: always()
-    needs: [discover_runner, hpu_unit_tests, hpu_pd_tests, hpu_perf_tests, hpu_dp_tests, e2e, calibration_tests]
+    needs: [discover_runner, hpu_unit_tests, hpu_pd_tests, hpu_perf_tests, hpu_dp_tests, e2e, calibration_tests, calibration_arg_parsing_tests]
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Remove Docker image to free up space
