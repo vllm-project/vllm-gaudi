@@ -24,7 +24,8 @@ from vllm.distributed.kv_transfer import (
     get_kv_transfer_group,
     has_kv_transfer_group,
 )
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import (STR_DTYPE_TO_TORCH_DTYPE, set_random_seed)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec, MambaSpec)
 from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerOutput)
@@ -92,6 +93,7 @@ class HPUWorker(WorkerBase):
         self.model_sleeping = False
         self.kv_cache_sleeping = False
         self.kv_cache_config = None
+        self._pp_send_work: list = []
 
     def init_profiler(self):
         """Initialize the profiler."""
@@ -329,21 +331,58 @@ class HPUWorker(WorkerBase):
         return self.vllm_config.compilation_config.compilation_time
 
     def sample_tokens(self, grammar_output: "GrammarOutput|None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        return self.model_runner.sample_tokens(grammar_output)
+        output = self.model_runner.sample_tokens(grammar_output)
+
+        # For non-last PP ranks, sample_tokens returns IntermediateTensors
+        # from the model forward pass. Send them to the next pipeline stage.
+        if isinstance(output, IntermediateTensors):
+            assert not get_pp_group().is_last_rank
+            self._pp_send_work = get_pp_group().isend_tensor_dict(
+                output.tensors,
+                all_gather_group=get_tp_group(),
+            )
+            return None
+
+        return output
 
     @torch.inference_mode()
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | None:
+        # Ensure any previous non-blocking PP sends are complete.
+        if self._pp_send_work:
+            for handle in self._pp_send_work:
+                handle.wait()
+            self._pp_send_work = []
+
         if self.step_debug:
             self.step_debug(f'step={self.step}')
         if self.step_profiler and self.step == self.profile_steps[0]:
             self.step_profiler.start()
+
+        # For non-first PP ranks, initiate async receive of intermediate
+        # tensors from the previous pipeline stage before the forward pass.
+        intermediate_tensors = None
+        forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        if forward_pass and not get_pp_group().is_first_rank:
+            intermediate_tensors = get_pp_group().recv_tensor_dict(all_gather_group=get_tp_group(), )
+
         with track_graph_compile('HPUWorker.execute_model') \
                 if self.gc_track_recompiles \
                 else contextlib.nullcontext():
-            output = self.model_runner.execute_model(scheduler_output)
+            output = self.model_runner.execute_model(scheduler_output, intermediate_tensors=intermediate_tensors)
+
+        # If the output is IntermediateTensors, this is a non-last PP rank.
+        # Send the intermediate tensors to the next pipeline stage.
+        if isinstance(output, IntermediateTensors):
+            assert not get_pp_group().is_last_rank
+            self._pp_send_work = get_pp_group().isend_tensor_dict(
+                output.tensors,
+                all_gather_group=get_tp_group(),
+            )
+            output = None
+
         # TODO(woosuk): Send the output to the engine process.
         if self.step_profiler:
             if self.step >= self.profile_steps[0]:

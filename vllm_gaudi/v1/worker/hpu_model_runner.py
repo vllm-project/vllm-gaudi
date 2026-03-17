@@ -89,6 +89,7 @@ from vllm.v1.worker.utils import bind_kv_cache, add_kv_sharing_layers_to_kv_cach
 from vllm.v1.utils import CpuGpuBuffer
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
 from vllm.distributed.parallel_state import get_pp_group, get_dp_group
+from vllm.sequence import IntermediateTensors
 from vllm.model_executor.models.interfaces import (supports_eagle3, supports_transcription)
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
@@ -1005,6 +1006,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.scheduler_output: SchedulerOutput | None = None
         self.warmup_mode: bool = False
         self.batch_changed: bool = False
+        # Pre-allocated buffer for PP intermediate tensors
+        self.intermediate_tensors: IntermediateTensors | None = None
+        # Intermediate tensors received from previous PP stage
+        self._intermediate_tensors: IntermediateTensors | None = None
         # WA for chunked attention support
         self.model_has_chunked_attention = False
         self.is_causal = False
@@ -2958,7 +2963,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                lora_mask,
                                warmup_mode=False,
                                inputs_embeds=None,
-                               model_mm_kwargs=None):
+                               model_mm_kwargs=None,
+                               intermediate_tensors=None):
         # FORWARD.
         batch_size = token_ids.size(0)
         seq_len = self._seq_len(attn_metadata)
@@ -2995,7 +3001,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                inputs_embeds=inputs_embeds,
                                                model_mm_kwargs=model_mm_kwargs,
                                                lora_mask=lora_mask,
+                                               intermediate_tensors=intermediate_tensors,
                                                **additional_kwargs)
+
+        # For non-last PP ranks, the model returns IntermediateTensors
+        # instead of hidden states. Return them directly for forwarding
+        # to the next pipeline stage.
+        if not get_pp_group().is_last_rank:
+            return hidden_states
+
         # NOTE(kzawora): returning hidden_states is required in prompt logprobs
         # scenarios, as they will do logit processing on their own
         if self.use_aux_hidden_state_outputs:
@@ -3490,7 +3504,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def unified_execute_model(self,
                               scheduler_output: "SchedulerOutput",
                               grammar_output: "GrammarOutput" = None,
-                              warmup_mode: bool = False) -> ModelRunnerOutput:
+                              warmup_mode: bool = False) -> ModelRunnerOutput | IntermediateTensors:
 
         batch_changed = self.batch_changed
         with self.profiler.record_event('internal', 'prepare_unified_batch'):
@@ -3516,18 +3530,26 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:
             model_event_name = 'model_executable'
         with self.profiler.record_event('internal', model_event_name):
-            non_flattened_hidden_states, aux_hidden_states, hidden_states, logits_device = \
-                self._execute_model_generic(
-                    token_ids=batch.token_ids.unsqueeze(-1),
-                    position_ids=batch.token_positions.unsqueeze(-1),
-                    attn_metadata=batch.attn_metadata,
-                    logits_indices=batch.logits_indices,
-                    kv_caches=self.kv_caches,
-                    lora_logits_mask=None,
-                    lora_mask=None,
-                    inputs_embeds=inputs_embeds,
-                    model_mm_kwargs=model_mm_kwargs,
-                    warmup_mode=warmup_mode)
+            model_output = self._execute_model_generic(token_ids=batch.token_ids.unsqueeze(-1),
+                                                       position_ids=batch.token_positions.unsqueeze(-1),
+                                                       attn_metadata=batch.attn_metadata,
+                                                       logits_indices=batch.logits_indices,
+                                                       kv_caches=self.kv_caches,
+                                                       lora_logits_mask=None,
+                                                       lora_mask=None,
+                                                       inputs_embeds=inputs_embeds,
+                                                       model_mm_kwargs=model_mm_kwargs,
+                                                       warmup_mode=warmup_mode,
+                                                       intermediate_tensors=getattr(self, '_intermediate_tensors',
+                                                                                    None))
+        self._intermediate_tensors = None
+
+        # For non-last PP ranks, return IntermediateTensors directly
+        # to the worker for forwarding to the next pipeline stage.
+        if isinstance(model_output, IntermediateTensors):
+            return model_output
+
+        non_flattened_hidden_states, aux_hidden_states, hidden_states, logits_device = model_output
         selected_req_ids = [batch.req_ids_cpu[idx] for idx in batch.logits_groups_cpu.tolist()]
         htorch.core.mark_step()
         ##### Sampling Start #####
@@ -3658,7 +3680,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         warmup_mode: bool = False,
-    ) -> ModelRunnerOutput | None:
+        intermediate_tensors: IntermediateTensors | None = None,
+    ) -> ModelRunnerOutput | IntermediateTensors | None:
 
         self.run_defragmenter(scheduler_output, warmup_mode)
 
@@ -3722,6 +3745,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             )
             return pooled_output
 
+        # Store intermediate tensors from previous PP stage for use during
+        # the forward pass in sample_tokens.
+        self._intermediate_tensors = intermediate_tensors
         self.scheduler_output = scheduler_output
         self.warmup_mode = warmup_mode
         self.batch_changed = batch_changed
@@ -3804,7 +3830,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.input_batch.swap_states(first_prompt_index, last_decode_index)
 
     @torch.inference_mode()
-    def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
+    def sample_tokens(
+            self,
+            grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
         if self.scheduler_output is None:
             # Nothing to do (PP non-final rank case), output isn't used.
             return None  # noqa
@@ -3947,17 +3975,28 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self.profiler.start("internal", "prefill")
 
                 htorch.core.mark_step()
-                non_flattened_hidden_states, aux_hidden_states, \
-                    sample_hidden_states, logits_device = \
-                    self._execute_model_generic(
-                        token_ids, position_ids, attn_metadata, logits_indices,
-                        self.kv_caches,
-                        lora_logits_mask,
-                        lora_mask,
-                        inputs_embeds=inputs_embeds,
-                        model_mm_kwargs=model_mm_kwargs,
-                        warmup_mode=warmup_mode)
+                model_output = self._execute_model_generic(token_ids,
+                                                           position_ids,
+                                                           attn_metadata,
+                                                           logits_indices,
+                                                           self.kv_caches,
+                                                           lora_logits_mask,
+                                                           lora_mask,
+                                                           inputs_embeds=inputs_embeds,
+                                                           model_mm_kwargs=model_mm_kwargs,
+                                                           warmup_mode=warmup_mode,
+                                                           intermediate_tensors=getattr(
+                                                               self, '_intermediate_tensors', None))
+                self._intermediate_tensors = None
                 htorch.core.mark_step()
+
+                # For non-last PP ranks, the model returns IntermediateTensors.
+                # Return them to the worker for forwarding to the next stage.
+                if isinstance(model_output, IntermediateTensors):
+                    return model_output
+
+                non_flattened_hidden_states, aux_hidden_states, \
+                    sample_hidden_states, logits_device = model_output
                 non_flattened_hidden_states_prefills.append(non_flattened_hidden_states)
                 # Collect prefill hidden states for prompt logprobs.
                 # req_id is a list of request IDs in this prefill batch.
@@ -4004,17 +4043,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             for idx, (req_id, prompt_len, token_ids, position_ids, attn_metadata, logits_indices,
                       logits_requests) in enumerate(zip(*shallow_tuple(dummy_prefill_input_data_batches_across_dp))):
                 htorch.core.mark_step()
-                _, _, _, dummy_logits_device = \
-                self._execute_model_generic(
-                    token_ids,
-                    position_ids,
-                    attn_metadata,
-                    logits_indices,
-                    self.kv_caches,
-                    None,
-                    None,
-                    warmup_mode=warmup_mode)
+                dummy_output = self._execute_model_generic(token_ids,
+                                                           position_ids,
+                                                           attn_metadata,
+                                                           logits_indices,
+                                                           self.kv_caches,
+                                                           None,
+                                                           None,
+                                                           warmup_mode=warmup_mode)
                 htorch.core.mark_step()
+                if isinstance(dummy_output, IntermediateTensors):
+                    return dummy_output
 
         ######################### DECODES #########################
         # Decodes run as one single batch with [padded_decode_bs, 1]
@@ -4025,18 +4064,26 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.event_start = self.profiler.get_timestamp_us()
             self.profiler.start("internal", "decode")
             htorch.core.mark_step()
-            non_flattened_hidden_states, aux_hidden_states, \
-                sample_hidden_states, logits_device = \
-                    self._execute_model_generic(
-                decode_data.token_ids,
-                decode_data.position_ids,
-                decode_data.attn_metadata,
-                decode_data.logits_indices,
-                self.kv_caches,
-                lora_logits_mask,
-                lora_mask,
-                warmup_mode=warmup_mode)
+            model_output = self._execute_model_generic(decode_data.token_ids,
+                                                       decode_data.position_ids,
+                                                       decode_data.attn_metadata,
+                                                       decode_data.logits_indices,
+                                                       self.kv_caches,
+                                                       lora_logits_mask,
+                                                       lora_mask,
+                                                       warmup_mode=warmup_mode,
+                                                       intermediate_tensors=getattr(self, '_intermediate_tensors',
+                                                                                    None))
+            self._intermediate_tensors = None
             htorch.core.mark_step()
+
+            # For non-last PP ranks, the model returns IntermediateTensors.
+            # Return them to the worker for forwarding to the next stage.
+            if isinstance(model_output, IntermediateTensors):
+                return model_output
+
+            non_flattened_hidden_states, aux_hidden_states, \
+                sample_hidden_states, logits_device = model_output
 
             if self.use_structured_output:
                 logits_decode.append(logits_device[:num_decodes])
@@ -4098,15 +4145,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         elif dummy_decode_input_data_across_dp is not None:
             htorch.core.mark_step()
-            _, _, _, dummy_logits_device = self._execute_model_generic(dummy_decode_input_data_across_dp.token_ids,
-                                                                       dummy_decode_input_data_across_dp.position_ids,
-                                                                       dummy_decode_input_data_across_dp.attn_metadata,
-                                                                       dummy_decode_input_data_across_dp.logits_indices,
-                                                                       self.kv_caches,
-                                                                       None,
-                                                                       None,
-                                                                       warmup_mode=warmup_mode)
+            dummy_output = self._execute_model_generic(dummy_decode_input_data_across_dp.token_ids,
+                                                       dummy_decode_input_data_across_dp.position_ids,
+                                                       dummy_decode_input_data_across_dp.attn_metadata,
+                                                       dummy_decode_input_data_across_dp.logits_indices,
+                                                       self.kv_caches,
+                                                       None,
+                                                       None,
+                                                       warmup_mode=warmup_mode)
             htorch.core.mark_step()
+            if isinstance(dummy_output, IntermediateTensors):
+                return dummy_output
 
         if self.use_structured_output:
             # Scheduler places cached before prompt
