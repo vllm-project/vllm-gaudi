@@ -4544,9 +4544,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # only at the block level. _sync_shared_moe_gates()
                 # must be called after INC conversion to restore the
                 # reference.
-                mlp = getattr(layer, 'mlp', None)
+                mlp = getattr(layer, 'mlp', None) or getattr(layer, 'feed_forward', None)
                 if mlp is not None:
-                    block_gate = getattr(mlp, 'gate', None)
+                    block_gate = getattr(mlp, 'gate', None) or getattr(mlp, 'router', None)
                     experts = getattr(mlp, 'experts', None)
                     if (block_gate is not None and experts is not None
                             and getattr(experts, '_gate', None) is block_gate):
@@ -4576,10 +4576,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if not hasattr(model, "model"):
             return
         for layer in model.model.layers:
-            mlp = getattr(layer, 'mlp', None)
+            mlp = getattr(layer, 'mlp', None) or getattr(layer, 'feed_forward', None)
             if mlp is None:
                 continue
-            block_gate = getattr(mlp, 'gate', None)
+            block_gate = getattr(mlp, 'gate', None) or getattr(mlp, 'router', None)
             experts = getattr(mlp, 'experts', None)
             if block_gate is not None and experts is not None:
                 _sync_moe_kernel_flags(experts)
