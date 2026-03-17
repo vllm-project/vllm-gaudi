@@ -42,13 +42,20 @@ Follow these steps to run the vLLM server or launch benchmarks on Gaudi using Do
     git clone https://github.com/vllm-project/vllm-gaudi.git
     ```
 
-2. Navigate to the appropriate directory.
+2. Check out the version of vllm-gaudi that matches your target release (example).
 
     ```bash
-    cd vllm-gaudi/.cd/
+    cd vllm-gaudi
+    git checkout v0.16.0
     ```
 
-3. Select your preferred values of the following variables.
+3. Navigate to the appropriate directory.
+
+    ```bash
+    cd .cd/
+    ```
+
+4. Select your preferred values of the following variables.
 
     | **Variable**   | **Description**                                                                                                                                                              |
     | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -79,7 +86,7 @@ Follow these steps to run the vLLM server or launch benchmarks on Gaudi using Do
     | ibm-granite/granite-8b-code-instruct-4k   | 1                     |
     | ibm-granite/granite-20b-code-instruct-8k  | 1                     |
 
-4. Set the selected environment variables using the following example as a reference.
+5. Set the selected environment variables using the following example as a reference.
 
     ```bash
     MODEL="Qwen/Qwen2.5-14B-Instruct" \
@@ -87,7 +94,7 @@ Follow these steps to run the vLLM server or launch benchmarks on Gaudi using Do
     DOCKER_IMAGE="vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/vllm-plugin-{{ PT_VERSION }}:latest"
     ```
 
-5. Run the vLLM server using Docker Compose.
+6. Run the vLLM server using Docker Compose.
 
     ```bash
     docker compose up
