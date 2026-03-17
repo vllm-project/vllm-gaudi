@@ -83,25 +83,22 @@ def _depthwise_conv1d_tpc(
                          f" ({width}). Convolution is not defined for this configuration.")
     out_len = x.shape[2] - width + 1
 
-    # Upcast to float32 for accumulation when using reduced-precision dtypes
-    # (bfloat16 / float16).  This matches the behaviour of F.conv1d which
-    # internally accumulates in fp32.
+    # Accumulate in float32 for reduced-precision dtypes (bfloat16 / float16)
+    # to match F.conv1d behaviour.  Keep inputs in their original dtype so
+    # the multiplications stay in bf16 (avoiding large cast-induced graph
+    # changes on Gaudi), and only upcast the running sum.
     orig_dtype = x.dtype
     needs_upcast = orig_dtype in (torch.bfloat16, torch.float16)
-    if needs_upcast:
-        x = x.float()
-        weight = weight.float()
-        if bias is not None:
-            bias = bias.float()
 
     # Broadcast weight: (dim, width) -> (1, dim, 1) per kernel tap
     w = weight.unsqueeze(0)  # (1, dim, width)
-    out = x[:, :, :out_len] * w[:, :, 0:1]
+    out = (x[:, :, :out_len] * w[:, :, 0:1]).float() if needs_upcast else x[:, :, :out_len] * w[:, :, 0:1]
     for k in range(1, width):
-        out = out + x[:, :, k:k + out_len] * w[:, :, k:k + 1]
+        out = out + (x[:, :, k:k + out_len] *
+                     w[:, :, k:k + 1]).float() if needs_upcast else out + x[:, :, k:k + out_len] * w[:, :, k:k + 1]
 
     if bias is not None:
-        out = out + bias.unsqueeze(0).unsqueeze(-1)
+        out = out + (bias.float() if needs_upcast else bias).unsqueeze(0).unsqueeze(-1)
 
     if needs_upcast:
         out = out.to(orig_dtype)
