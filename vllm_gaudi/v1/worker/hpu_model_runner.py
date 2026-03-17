@@ -4368,8 +4368,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self.drafter.load_model(self.model.model)
                 if self.use_aux_hidden_state_outputs:
                     if supports_eagle3(self.model.model):
-                        self.model.model.set_aux_hidden_state_layers(
-                            self.model.model.get_eagle3_aux_hidden_state_layers())
+                        # Try new API name first (upstream >= v0.17.2),
+                        # fall back to old name for older vLLM versions.
+                        if hasattr(self.model.model, 'get_eagle3_default_aux_hidden_state_layers'):
+                            aux_layers = self.model.model.get_eagle3_default_aux_hidden_state_layers()
+                        else:
+                            aux_layers = self.model.model.get_eagle3_aux_hidden_state_layers()
+                        self.model.model.set_aux_hidden_state_layers(aux_layers)
                     else:
                         raise RuntimeError("Model does not support EAGLE3 interface but "
                                            "aux_hidden_state_outputs was requested")
