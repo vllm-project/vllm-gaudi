@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from typing import Callable
 
 import torch
-import torch.nn.functional as F
 # import habana_frameworks.torch.hpu as ht
 
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -53,10 +52,6 @@ def _ensure_query_start_loc(query_start_loc: torch.Tensor) -> torch.Tensor:
         raise ValueError("'query_start_loc' must be 1-D.")
     return query_start_loc.to(dtype=torch.int64)
 
-
-def _make_depthwise_weight(weight: torch.Tensor) -> torch.Tensor:
-    dim, width = weight.shape
-    return weight.contiguous().view(dim, 1, width)
 
 
 def _apply_activation(output: torch.Tensor, activation: str | None) -> torch.Tensor:
@@ -188,8 +183,6 @@ def hpu_causal_conv1d_fn(
         if has_initial_state is not None and has_initial_state.numel() != padded_batch:
             raise ValueError("'has_initial_state' must align with 'query_start_loc'.")
 
-    weight_dw = _make_depthwise_weight(weight_work)
-
     # Get cache indices
     if cache_indices is None:
         batch_cache_idx = torch.arange(padded_batch, device=x_work.device, dtype=torch.long)
@@ -217,10 +210,16 @@ def hpu_causal_conv1d_fn(
     end = qsl[-1]
     idx = torch.arange(state_len, device=x.device) + end
     new_state = seq_input.index_select(dim=1, index=idx)
+    
+    # Manual depthwise conv1d: replaces F.conv1d(groups=dim) which can
+    # trigger synStatus 26 in Synapse recipe compilation under FP8 TC.
+    # Loop is statically unrolled by torch.compile (width is a Python int).
+    seq_out = torch.zeros(dim, cu_seqlen, device=x_work.device, dtype=work_dtype)
+    for k in range(width):
+        seq_out = seq_out + seq_input[:, k:k + cu_seqlen] * weight_work[:, k:k + 1]
+    if bias_work is not None:
+        seq_out = seq_out + bias_work.unsqueeze(-1)
 
-    # Apply convolution
-    seq_input = seq_input.unsqueeze(0)
-    seq_out = F.conv1d(seq_input, weight_dw, bias=bias_work, groups=dim)
     seq_out = _apply_activation(seq_out, activation)
 
     # Update conv state
@@ -337,7 +336,6 @@ def hpu_causal_conv1d_fn_update(
         if has_initial_state is not None and has_initial_state.numel() != padded_batch:
             raise ValueError("'has_initial_state' must align with 'query_start_loc'.")
 
-    weight_dw = _make_depthwise_weight(weight_work)
     out = torch.zeros_like(x_work)
 
     # Get cache indices
@@ -352,11 +350,16 @@ def hpu_causal_conv1d_fn_update(
 
     seq_input = torch.cat([init_state, x_work], dim=2)
     new_state = seq_input[:, :, -state_len:]
-    seq_out = F.conv1d(seq_input, weight_dw, bias, groups=dim)
+
+    seq_out = torch.zeros_like(x_work)
+    for k in range(width):
+        seq_out = seq_out + seq_input[:, :, k:k + cu_seqlen] * weight_work[:, k:k + 1].unsqueeze(0)
+    if bias_work is not None:
+        seq_out = seq_out + bias_work.unsqueeze(0).unsqueeze(-1)
+
     seq_out = _apply_activation(seq_out, activation)
-    out = seq_out
 
     with torch.no_grad():
         conv_states[batch_cache_idx, -state_len:, :] = new_state.transpose(-1, -2)
 
-    return out.to(original_dtype)
+    return seq_out.to(original_dtype)
