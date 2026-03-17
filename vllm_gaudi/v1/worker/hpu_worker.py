@@ -366,7 +366,7 @@ class HPUWorker(WorkerBase):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
-            intermediate_tensors = get_pp_group().recv_tensor_dict(all_gather_group=get_tp_group(), )
+            intermediate_tensors = get_pp_group().recv_tensor_dict(all_gather_group=get_tp_group())
 
         with track_graph_compile('HPUWorker.execute_model') \
                 if self.gc_track_recompiles \

@@ -3540,8 +3540,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                        inputs_embeds=inputs_embeds,
                                                        model_mm_kwargs=model_mm_kwargs,
                                                        warmup_mode=warmup_mode,
-                                                       intermediate_tensors=getattr(self, '_intermediate_tensors',
-                                                                                    None))
+                                                       intermediate_tensors=self._intermediate_tensors)
         self._intermediate_tensors = None
 
         # For non-last PP ranks, return IntermediateTensors directly
@@ -3985,8 +3984,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                            inputs_embeds=inputs_embeds,
                                                            model_mm_kwargs=model_mm_kwargs,
                                                            warmup_mode=warmup_mode,
-                                                           intermediate_tensors=getattr(
-                                                               self, '_intermediate_tensors', None))
+                                                           intermediate_tensors=self._intermediate_tensors)
                 self._intermediate_tensors = None
                 htorch.core.mark_step()
 
@@ -4072,8 +4070,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                        lora_logits_mask,
                                                        lora_mask,
                                                        warmup_mode=warmup_mode,
-                                                       intermediate_tensors=getattr(self, '_intermediate_tensors',
-                                                                                    None))
+                                                       intermediate_tensors=self._intermediate_tensors)
             self._intermediate_tensors = None
             htorch.core.mark_step()
 
