@@ -76,7 +76,7 @@ def assert_scheduler_empty(scheduler: Scheduler):
 
 
 def create_vllm_config(
-    model: str = "facebook/opt-125m",
+    model: str = "/mnt/weka/data/huggingface-models/facebook/opt-125m",
     max_num_seqs: int = 16,
     max_num_batched_tokens: int = 64,
     block_size: int = 16,

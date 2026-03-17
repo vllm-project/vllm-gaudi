@@ -78,7 +78,7 @@ def generate_output(prompt: str, sampling_params: SamplingParams, llm: LLM):
 
 
 def main():
-    llm = LLM(model="Qwen/Qwen2.5-3B-Instruct", max_model_len=256)
+    llm = LLM(model="/mnt/weka/data/huggingface-models/qwen/Qwen2.5-3B-Instruct", max_model_len=256)
 
     choice_output = generate_output(prompt_choice, sampling_params_choice, llm)
     format_output("Structured outputs by Choice", choice_output)

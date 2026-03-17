@@ -1,4 +1,4 @@
-model_name: "Qwen/Qwen3-VL-32B-Instruct-FP8"
+model_name: "/mnt/weka/data/huggingface-models/qwen/Qwen3-VL-32B-Instruct-FP8"
 
 description: >
   Qwen3-VL 32B Instruct model (FP8) validated for image

@@ -18,7 +18,7 @@ Usage:
   VLLM_ENABLE_V1_MULTIPROCESSING=0 \
   python tests/full_tests/sleep_mode_model_swap.py \
     --model-a meta-llama/Llama-3.1-8B-Instruct \
-    --model-b Qwen/Qwen3-0.6B
+    --model-b /mnt/weka/data/huggingface-models/qwen/Qwen3-0.6B
 
   # With eager mode (skip torch.compile):
   VLLM_ENABLE_V1_MULTIPROCESSING=0 VLLM_SKIP_WARMUP=true \
@@ -253,7 +253,10 @@ def print_metrics_table(all_metrics):
 def main():
     parser = argparse.ArgumentParser(description="Sleep Mode Model Swapping Test")
     parser.add_argument("--model-a", type=str, default="meta-llama/Llama-3.1-8B-Instruct", help="First model to load")
-    parser.add_argument("--model-b", type=str, default="Qwen/Qwen3-0.6B", help="Second model to load (swap target)")
+    parser.add_argument("--model-b",
+                        type=str,
+                        default="/mnt/weka/data/huggingface-models/qwen/Qwen3-0.6B",
+                        help="Second model to load (swap target)")
     parser.add_argument("--enforce-eager",
                         action="store_true",
                         default=False,

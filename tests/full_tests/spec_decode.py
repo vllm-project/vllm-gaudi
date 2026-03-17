@@ -118,8 +118,8 @@ def create_error_result(e: Exception) -> dict:
 
 def test_ngram(is_enable, args, prompts, sampling_params, task_key, result_queue):
     VLLM_CLS = LLM if prompts is not None else VLLM
-    kwargs = {"model":"Qwen/Qwen3-4B",} if prompts is not None \
-        else {"pretrained":"Qwen/Qwen3-4B","batch_size":"16"}
+    kwargs = {"model":"/mnt/weka/data/huggingface-models/qwen/Qwen3-4B",} if prompts is not None \
+        else {"pretrained":"/mnt/weka/data/huggingface-models/qwen/Qwen3-4B","batch_size":"16"}
     try:
         if not is_enable:
             llm = VLLM_CLS(
@@ -203,7 +203,7 @@ def test_eagle3_model(is_enable, args, prompts, sampling_params, task_key, resul
             llm = VLLM_CLS(
                 **kwargs,
                 speculative_config={
-                    "model": "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
+                    "model": "/mnt/weka/data/huggingface-models/yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
                     "num_speculative_tokens": args.num_spec_tokens,
                     "method": "eagle3",
                 },
@@ -227,8 +227,8 @@ def test_eagle3_model(is_enable, args, prompts, sampling_params, task_key, resul
 
 def test_medusa_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
     VLLM_CLS = LLM if prompts is not None else VLLM
-    kwargs = {"model":"JackFram/llama-68m",} if prompts is not None \
-        else {"pretrained":"JackFram/llama-68m",}
+    kwargs = {"model":"/mnt/weka/data/huggingface-models/JackFram/llama-68m",} if prompts is not None \
+        else {"pretrained":"/mnt/weka/data/huggingface-models/JackFram/llama-68m",}
     try:
         if not is_enable:
             llm = VLLM_CLS(
@@ -240,7 +240,7 @@ def test_medusa_model(is_enable, args, prompts, sampling_params, task_key, resul
             llm = VLLM_CLS(
                 **kwargs,
                 speculative_config={
-                    "model": "abhigoyal/vllm-medusa-llama-68m-random",
+                    "model": "/mnt/weka/data/huggingface-models/abhigoyal/vllm-medusa-llama-68m-random",
                     "num_speculative_tokens": args.num_spec_tokens,
                 },
                 disable_log_stats=False,

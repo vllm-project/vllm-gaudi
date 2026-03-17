@@ -12,11 +12,11 @@ import os
 from vllm import LLM
 from vllm.lora.request import LoRARequest
 
-MODEL_PATH = "Qwen/Qwen3-0.6B"
+MODEL_PATH = "/mnt/weka/data/huggingface-models/qwen/Qwen3-0.6B"
 LORA_NAME_PATH_MAP = {
-    "Alice": "charent/self_cognition_Alice",
-    "Bob": "charent/self_cognition_Bob",
-    "Cat": "charent/self_cognition_Bob",  # same as Bob
+    "Alice": "/mnt/weka/data/huggingface-models/charent/self_cognition_Alice",
+    "Bob": "/mnt/weka/data/huggingface-models/charent/self_cognition_Bob",
+    "Cat": "/mnt/weka/data/huggingface-models/charent/self_cognition_Bob",  # same as Bob
 }
 
 LORA_NAME_ID_MAP = {}
