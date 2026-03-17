@@ -1,0 +1,16 @@
+model_name: "/mnt/weka/data/pytorch/Qwen/Qwen3.5-9B/"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.8
+  - name: "exact_match,flexible-extract"
+    value: 0.8
+limit: 48
+num_fewshot: 3
+max_num_seqs: 24
+max_model_len: 16384
+batch_size: 24
+dtype: "bfloat16"
+trust_remote_code: True
+model_args: "gpu_memory_utilization=0.6,reasoning_parser=qwen3,max_num_batched_tokens=4096"

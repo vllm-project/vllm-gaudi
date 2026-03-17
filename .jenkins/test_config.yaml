@@ -121,3 +121,16 @@ stages:
           cd .jenkins/vision && 
           PT_HPU_LAZY_MODE=1 VLLM_WEIGHT_LOAD_FORCE_SYNC=1 
           bash run-tests.sh -c configs/models-llama4-scout.txt -t 2
+      - name: gsm8k_qwen35_g3_tp1
+        flavor: g3
+        command: >-
+          # Qwen3.5 has dependency on newer transformers, which is not compatible with vllm's current version, 
+          # so we need to temporarily upgrade it for this test and then restore the original version after the test.
+          # Will be removed once vllm supports newer transformers
+          export OLD_TRANSFORMERS_VER=$(pip show transformers | grep Version | awk '{print $2}') &&
+          export OLD_HF_HUB_VER=$(pip show huggingface_hub | grep Version | awk '{print $2}') &&
+          pip install --upgrade transformers huggingface_hub --no-deps &&
+          cd .jenkins/lm-eval-harness &&
+          VLLM_FP32_SOFTMAX=true VLLM_CONTIGUOUS_PA=true VLLM_DEFRAG=true VLLM_USE_HYBRID_CACHE=true VLLM_USE_NAIVE_MAMBA_CACHE_SHARING=false  VLLM_GRAPH_RESERVED_MEM=0.4
+          bash run-tests.sh -c configs/models-qwen3.5.txt -t 1 ;
+          pip install transformers==$OLD_TRANSFORMERS_VER huggingface_hub==$OLD_HF_HUB_VER --no-deps
