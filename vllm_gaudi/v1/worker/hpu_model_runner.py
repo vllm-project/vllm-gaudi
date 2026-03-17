@@ -662,12 +662,11 @@ class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
             kwargs.pop('warmup_mode')
         input_ids = kwargs['input_ids']
         model_has_chunked_attention = kwargs.pop('model_has_chunked_attention', False)
-        if (not self.unified_attn) and ('attn_metadata' in kwargs and not self.pooling_model): 
+        if (not self.unified_attn) and ('attn_metadata' in kwargs and not self.pooling_model):
             kwargs['attn_metadata'] = self.metadata_processor.process_metadata(kwargs['attn_metadata'],
                                                                                input_ids.size(0), input_ids.size(1),
                                                                                input_ids.device, self.dtype,
                                                                                model_has_chunked_attention)
-                
         if self._rotary_prepare_cos_sin is not None:
             self._rotary_prepare_cos_sin(kwargs['positions'], recompute_cos_sin=self.recompute_cos_sin)
         attn_meta = kwargs.pop('attn_metadata', None)
@@ -690,7 +689,6 @@ class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
                                  num_tokens=self.dummy_num_input_tokens,
                                  num_tokens_across_dp=self.dummy_num_tokens_across_dp_cpu), set_hpu_dp_metadata(
                                      self.vllm_config, num_real_tokens):
-
             hidden_states = self.model(*args, **kwargs)
             if self._rotary_prepare_cos_sin is not None:
                 self._reset_rotary_cos_sin()
@@ -777,7 +775,6 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
     # input_hash(torch.tensor(123)) == input_hash(torch.tensor(321))
     # input_hash(123) != input_hash(321)
     # input_hash("abc") != input_hash("cba")
-
     attention_metadata = subtuple(metadata, 'TrimmedAttentionMetadata', [
         'attn_bias', 'seq_lens_tensor', 'context_lens_tensor', 'block_list', 'block_mapping', 'block_usage',
         'slot_mapping', 'is_prompt', 'block_size', 'block_groups', 'window_block_list', 'window_block_mapping',
@@ -786,9 +783,7 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
         'has_initial_states_p', 'last_chunk_indices_p', 'state_indices_tensor', 'query_start_loc', 'query_start_loc_p',
         'padding_mask_flat'
     ])
-  
     return attention_metadata
-
 
 
 def round_up(value: int, k: int):
@@ -914,7 +909,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Preferred Gaudi paged-attention kernel granularity.
         # Final kernel block size is selected per KV group during
         # initialize_kv_cache based on divisibility constraints.
-        self.attn_block_size = 128
+        self.attn_block_size = self.block_size
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         # Override settings when profiling a single prefill/decode
@@ -2394,18 +2389,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         context_blocks_t = async_h2d_copy(context_blocks, dtype=torch.int32).flatten() if target_blocks > 0 else None
 
         attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
-            seq_lens_tensor=query_lens,  
-            context_lens_tensor=context_lens,  
-            slot_mapping=token_slots,  
-            block_list=context_blocks_t,  
-            attn_bias=attn_bias,  
-            block_size=self.attn_block_size,  
-            prep_initial_states=prep_initial_states,  
-            has_initial_states_p=has_initial_states_p,  
-            last_chunk_indices_p=last_chunk_indices_p,  
-            state_indices_tensor=state_indices_tensor,  
-            query_start_loc=query_start_loc_p,  
-            padding_mask_flat=padding_mask_flat  
+            seq_lens_tensor=query_lens,
+            context_lens_tensor=context_lens,
+            slot_mapping=token_slots,
+            block_list=context_blocks_t,
+            attn_bias=attn_bias,
+            block_size=self.attn_block_size,
+            prep_initial_states=prep_initial_states,
+            has_initial_states_p=has_initial_states_p,
+            last_chunk_indices_p=last_chunk_indices_p,
+            state_indices_tensor=state_indices_tensor, 
+            query_start_loc=query_start_loc_p,
+            padding_mask_flat=padding_mask_flat
         )
         return PrefillInputData(request_ids=[req_ids],
                                 prompt_lens=[query_lens],
@@ -4797,12 +4792,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             context_lens_tensor = torch.zeros((bs, ), device=device, dtype=torch.int32)
 
             attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
-                seq_lens_tensor=seq_lens_tensor,  
-                context_lens_tensor=context_lens_tensor,  
-                slot_mapping=slot_mapping,  
-                block_list=None,  
-                attn_bias=None,  
-                block_size=self.block_size,  
+                seq_lens_tensor=seq_lens_tensor,
+                context_lens_tensor=context_lens_tensor,
+                slot_mapping=slot_mapping,
+                block_list=None,
+                attn_bias=None,
+                block_size=self.block_size,
             )
 
             with set_forward_context(attn_metadata, self.vllm_config):
@@ -5519,7 +5514,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         }
         width = height = None
         warmup_lists = []
-        '''
         for modality, (limit_value, get_options) in warmup_configs.items():
             if (mm_config and mm_config.get_limit_per_prompt(modality)
                     and self.mm_budget.mm_limits[modality] != limit_value):
@@ -5529,7 +5523,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if width is not None and height is not None:
                     warmup_lists.append((width, height))
                 break
-        '''
         if not is_batch_based and len(buckets) > 0:
             patch_size = int(self.get_patch_size_from_model())
             warmup_lists = warmup_lists + \

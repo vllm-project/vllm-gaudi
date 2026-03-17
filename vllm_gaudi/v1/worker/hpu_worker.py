@@ -336,7 +336,7 @@ class HPUWorker(WorkerBase):
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
-    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> float:
+    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
 
         # Init kv cache connector here, because it requires
@@ -360,17 +360,15 @@ class HPUWorker(WorkerBase):
         msg = ("Initializing cache engine "
                f"took {m.get_summary_string()}")
         logger.info(msg)
-        return self.compile_or_warm_up_model()
+        self.compile_or_warm_up_model()
 
     def compile_or_warm_up_model(self) -> float:
         # Don't run the warmup if the model is already warmed up
-        start_t = time.perf_counter()
         if not getattr(self.model_runner, 'graphed_buckets', None):
             self.model_runner.warmup_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
-        return time.perf_counter() - start_t
 
         return self.vllm_config.compilation_config.compilation_time
 

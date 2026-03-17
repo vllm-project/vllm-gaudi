@@ -53,11 +53,12 @@ class HpuMMEncoderAttention(MMEncoderAttention):
                                recompute_mode=True,
                                valid_sequence_lengths=None)
             else:
+                cu_seqlens_list = cu_seqlens.to("cpu").tolist()
                 outputs = []  
                 start_idx = 0  
                 # Iterate through sequence boundaries using tensor operations  
-                for i in range(len(cu_seqlens) - 1):  
-                    end_idx = cu_seqlens[i + 1]  
+                for i in range(len(cu_seqlens_list) - 1):  
+                    end_idx = cu_seqlens_list[i + 1]  
                       
                     # Extract chunks using tensor indexing  
                     q_i = query[:, :, start_idx:end_idx, :]  
@@ -76,7 +77,7 @@ class HpuMMEncoderAttention(MMEncoderAttention):
                                         recompute_mode=True,  
                                         valid_sequence_lengths=None)  
                     outputs.append(output_i)  
-                    start_idx = end_idx  
+                    start_idx = end_idx
                 out = torch.cat(outputs, dim=2)
                 return out.transpose(1, 2)
         else:

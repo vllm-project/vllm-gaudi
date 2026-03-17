@@ -317,7 +317,7 @@ def _hpu_solve_lower_triangular_batched(
             rhs = rhs.expand(batch_shape + (n, n))
     else:
         raise ValueError(
-            f"Unsupportedcd  RHS rank: rhs.ndim={rhs.ndim}, lmat.ndim={lmat.ndim}."
+            f"Unsupported RHS rank: rhs.ndim={rhs.ndim}, lmat.ndim={lmat.ndim}."
         )
     rhs_flat = rhs.reshape(-1, n, n)
 

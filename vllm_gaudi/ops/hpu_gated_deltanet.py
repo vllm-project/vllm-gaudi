@@ -196,7 +196,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         Core attention computation (called by custom op).
         """
         forward_context = get_forward_context()
-        attn_metadata: AttentionMetadata = forward_context.attn_metadata
+        attn_metadata = forward_context.attn_metadata
 
         if attn_metadata is None:
             # V1 profile run

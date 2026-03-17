@@ -76,43 +76,6 @@ def matmul_shape(lhs, rhs):
     return result
 
 
-def _is_fp8_dtype(dtype: torch.dtype) -> bool:
-    fp8_names = {
-        "float8_e4m3fn",
-        "float8_e4m3fnuz",
-        "float8_e5m2",
-        "float8_e5m2fnuz",
-    }
-    return str(dtype).split(".")[-1] in fp8_names
-
-
-def _select_compatible_block_size(
-    cache_rows: int,
-    requested_block_size: int,
-    cache_dtype: torch.dtype,
-    has_scales: bool = False,
-) -> int:
-    # Prefer Gaudi-native granularities when possible:
-    # BF16 cache: 128, FP8 cache: 256.
-    # Some hybrid layouts use model-specific block sizes in metadata/block
-    # tables; keep requested size when native size cannot be used safely.
-    use_fp8 = has_scales or _is_fp8_dtype(cache_dtype)
-    preferred = 256 if use_fp8 else 128
-
-    if cache_rows % preferred == 0 and requested_block_size == preferred:
-        return preferred
-    if cache_rows % requested_block_size == 0:
-        return requested_block_size
-    if cache_rows % preferred == 0:
-        return preferred
-
-    raise ValueError(
-        "Incompatible KV cache shape for Gaudi paged attention: "
-        f"cache_rows={cache_rows}, requested_block_size={requested_block_size}, "
-        f"preferred_block_size={preferred}."
-    )
-
-
 def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, sink, batch_size, matmul_av_op,
                  batch2block_matmul_op, block2batch_matmul_op):
     # When fp32_softmax is enabled attn is left in fp32 after Q@K
@@ -190,13 +153,6 @@ def flat_pa_mla(query, key_cache, value_cache, block_list, block_mapping, block_
     q_heads = query.size(1)
     kv_heads = key_cache.size(1)
 
-    block_size = _select_compatible_block_size(
-        key_cache.size(0),
-        block_size,
-        key_cache.dtype,
-        has_scales=False,
-    )
-
     query = batch2block(scale * query, block_mapping, batch2block_matmul_op).unsqueeze(-2)
     key = keys_fetch_func(key_cache.unflatten(0, (-1, block_size)), block_list)
     if value_cache is not None:
@@ -255,13 +211,6 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
     batch_size, _, hidden_size = query.shape
     _, kv_heads, head_size = key_cache.shape
     q_heads = hidden_size // head_size
-    block_size = _select_compatible_block_size(
-        key_cache.size(0),
-        block_size,
-        key_cache.dtype,
-        has_scales=(k_scales is not None or v_scales is not None),
-    )
-
     k_scales_uf = None
     v_scales_uf = None
     if k_scales is not None:
