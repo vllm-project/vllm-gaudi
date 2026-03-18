@@ -1046,6 +1046,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         lora_index = 0
 
         if self.lora_config:
+            # Build reverse lookup dict for O(1) lora index resolution
+            # instead of O(n) list.index() per lora_id
+            lora_id_to_index = {
+                v: idx
+                for idx, v in enumerate(self.lora_manager._adapter_manager.lora_index_to_id) if v != 0
+            }
             if is_prompt:
                 lora_mask = torch.zeros(
                     input_tokens.shape[0] * input_tokens.shape[1],
@@ -1061,11 +1067,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                   dtype=self.lora_config.lora_dtype)
                 logit_ones = torch.ones(1, self.lora_config.max_lora_rank, dtype=self.lora_config.lora_dtype)
 
-                for i in range(len(lora_ids)):
-                    if lora_ids[i] == 0:
+                for i, lora_id in enumerate(lora_ids):
+                    if lora_id == 0:
                         continue
-                    lora_index = self.lora_manager._adapter_manager.\
-                        lora_index_to_id.index(lora_ids[i])
+                    lora_index = lora_id_to_index[lora_id]
                     start_row = i * input_tokens.shape[1]
                     end_row = start_row + input_tokens.shape[1]
                     start_col = lora_index * self.lora_config.max_lora_rank
@@ -1079,11 +1084,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                         (self.lora_config.max_loras) * self.lora_config.max_lora_rank,
                                         dtype=self.lora_config.lora_dtype)
                 ones = torch.ones(1, self.lora_config.max_lora_rank, dtype=self.lora_config.lora_dtype)
-                for i in range(len(lora_ids)):
-                    if lora_ids[i] == 0:
+                for i, lora_id in enumerate(lora_ids):
+                    if lora_id == 0:
                         continue
-                    lora_index = self.lora_manager._adapter_manager.\
-                        lora_index_to_id.index(lora_ids[i])
+                    lora_index = lora_id_to_index[lora_id]
                     start_pos = lora_index * self.lora_config.max_lora_rank
                     end_pos = start_pos + self.lora_config.max_lora_rank
                     lora_mask[i, start_pos:end_pos] = ones
@@ -1691,11 +1695,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             req_id = self.input_batch.req_ids[i]
             assert req_id is not None
             # P case assigment
-            if requests is not None and req_id not in self.input_batch.req_type:
-                for request in requests:
-                    if request == req_id:
-                        self.input_batch.req_type[req_id] = requests_type[req_id]
-                        break
+            if requests is not None and req_id not in self.input_batch.req_type and req_id in requests:
+                self.input_batch.req_type[req_id] = requests_type[req_id]
 
             if self._is_prompt(i, scheduler_output):
                 break
@@ -1737,7 +1738,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         req_id_output_token_ids_lst = list(req_id_output_token_ids.items())
         if logits_reqs and len(req_id_output_token_ids_lst) > len(logits_reqs):
             # Merged prefill case: remove requests without logits
-            req_id_output_token_ids_lst = [r for r in req_id_output_token_ids_lst if r[0] in logits_reqs]
+            logits_reqs_set = set(logits_reqs)
+            req_id_output_token_ids_lst = [r for r in req_id_output_token_ids_lst if r[0] in logits_reqs_set]
         else:
             if pad_to is not None and len(req_id_output_token_ids_lst) > 0:
                 while len(req_id_output_token_ids_lst) < pad_to:
@@ -2216,7 +2218,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # Mark real tokens as True
             # query_lens has actual lengths (before padding)
             # contents.req_ids has actual number of requests (before padding)
-            for i in range(len(contents.req_ids)):
+            for i, _ in enumerate(contents.req_ids):
                 actual_len = query_lens[i]
                 padding_mask_cpu[i, :actual_len] = 1.0
 
@@ -2664,14 +2666,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             bonus_logits_indices = []
             target_logits_indices = []
             for batch_id, n_tokens in enumerate(num_sampled_tokens):
-                for i in range(n_tokens - 1):
-                    logits_indices.append(batch_id * max_num_sampled_tokens + i)
-                    target_logits_indices.append(batch_id * max_num_sampled_tokens + i)
-                bonus_logits_indices.append(batch_id * max_num_sampled_tokens + n_tokens - 1)
-                logits_indices.append(batch_id * max_num_sampled_tokens + n_tokens - 1)
-                if n_tokens < max_num_sampled_tokens:
-                    logits_indices.extend([-1] * (max_num_sampled_tokens - n_tokens))
-                    target_logits_indices.extend([-1] * (max_num_sampled_tokens - n_tokens))
+                base = batch_id * max_num_sampled_tokens
+                token_range = list(range(base, base + n_tokens - 1))
+                logits_indices.extend(token_range)
+                target_logits_indices.extend(token_range)
+                bonus_logits_indices.append(base + n_tokens - 1)
+                logits_indices.append(base + n_tokens - 1)
+                pad_count = max_num_sampled_tokens - n_tokens
+                if pad_count > 0:
+                    padding = [-1] * pad_count
+                    logits_indices.extend(padding)
+                    target_logits_indices.extend(padding)
             logits_indices = np.array(logits_indices, dtype=np.int32)
             bonus_logits_indices = np.array(bonus_logits_indices, dtype=np.int32)
             target_logits_indices = np.array(target_logits_indices, dtype=np.int32)
@@ -2882,15 +2887,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         ###############################################
 
         # Get the number of scheduled tokens for each request.
-        # TODO: The Python loop can be slow. Optimize.
-        num_scheduled_tokens = []
-        num_prompt_tokens = []
-        for idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
-            assert req_id is not None
-            seq_num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            seq_num_prompt_tokens = self.input_batch.num_prompt_tokens[idx]
-            num_scheduled_tokens.append(seq_num_scheduled_tokens)
-            num_prompt_tokens.append(seq_num_prompt_tokens)
+        req_ids_slice = self.input_batch.req_ids[:num_reqs]
+        num_scheduled_tokens_map = scheduler_output.num_scheduled_tokens
+        num_scheduled_tokens = [num_scheduled_tokens_map[req_id] for req_id in req_ids_slice]
         return (self._prepare_prefill_inputs(num_prefills, num_decodes, num_scheduled_tokens),
                 self._prepare_decode_inputs(num_decodes, num_scheduled_tokens, scheduler_output))
 
@@ -5125,18 +5124,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     idx += 1
 
             # make sure that all blocks are shared = in at least two decodes
+            # Use sets for O(1) membership checks
+            split_shared_blocks_sets = [set(lst) for lst in split_shared_blocks_ids]
             for i, block in enumerate(all_shared_blocks_ids):
                 target = (i + 1) % remaining_samples
-                if block not in split_shared_blocks_ids[target]:
+                if block not in split_shared_blocks_sets[target]:
                     split_shared_blocks_ids[target].append(block)
+                    split_shared_blocks_sets[target].add(block)
 
             # add unique id
             if unique_ctx_len > 0:
                 min_idx = min(range(remaining_samples), key=lambda j: len(split_shared_blocks_ids[j]))
                 split_shared_blocks_ids[min_idx].append(unique_block)
 
-            for i in range(len(split_shared_blocks_ids)):
-                if not split_shared_blocks_ids[i]:
+            for i, blocks in enumerate(split_shared_blocks_ids):
+                if not blocks:
                     if unique_block - i >= 0:
                         split_shared_blocks_ids[i] = [unique_block - i]
                     else:
