@@ -142,106 +142,13 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             pass
         elif is_prompt:
             # ========================================================
-            # Part 2a: Prefill — COMPILED where possible
+            # Part 2a: Prefill — eager fallback for accuracy debug
             # ========================================================
-            num_tokens_p = mixed_qkv.size(0)
-
-            # Padding mask for bucket-padded prefill
-            if padding_mask_flat is not None \
-                    and padding_mask_flat.numel() == num_tokens_p:
-                token_mask_flat = padding_mask_flat.view(-1, 1).to(
-                    dtype=mixed_qkv.dtype)
-                mixed_qkv = mixed_qkv * token_mask_flat
-                b = b * token_mask_flat
-                a = a * token_mask_flat
-            else:
-                token_mask_flat = None
-
-            # Gating (compiled)
-            g, beta = hpu_fused_gdn_gating(self.A_log, a, b, self.dt_bias)
-
-            # Build per-sequence padded cu_seqlens (compiled)
-            chunk_query_start_loc = query_start_loc
-            if state_indices is not None and token_mask_flat is not None:
-                num_rows = state_indices.numel()
-                padded_seq_len = num_tokens_p // num_rows
-                chunk_query_start_loc = torch.arange(
-                    0,
-                    (num_rows + 1) * padded_seq_len,
-                    padded_seq_len,
-                    device=mixed_qkv.device,
-                    dtype=query_start_loc.dtype
-                    if query_start_loc is not None else torch.int32,
-                )
-
-            # Conv1d prefill (compiled)
-            conv_weights = self.conv1d.weight.view(
-                self.conv1d.weight.size(0), self.conv1d.weight.size(2))
-            mixed_qkv_conv = hpu_causal_conv1d_fn(
-                x=mixed_qkv.transpose(0, 1),
-                weight=conv_weights,
-                bias=self.conv1d.bias,
-                activation=self.activation,
-                conv_states=conv_state,
-                has_initial_state=has_initial_state,
-                cache_indices=state_indices,
-                block_idx_first_scheduled_token=None,
-                block_idx_last_scheduled_token=None,
-                initial_state_idx=None,
-                query_start_loc=query_start_loc,
-                block_size_to_align=self.cache_config.mamba_block_size,
-                num_computed_tokens=None,
-                metadata=None,
-                is_prompt=True,
-            ).transpose(0, 1)
-
-            if token_mask_flat is not None:
-                mixed_qkv_conv = mixed_qkv_conv * token_mask_flat
-
-            # Rearrange to [1, T, H, D] (compiled)
-            query, key, value = self.rearrange_mixed_qkv(mixed_qkv_conv)
-
-            # Apply token mask to gating (compiled)
-            if token_mask_flat is not None:
-                token_mask_h = token_mask_flat.view(1, -1, 1).to(
-                    dtype=g.dtype)
-                g = g * token_mask_h
-                beta = beta * token_mask_h
-
-            # State gather (compiled)
-            initial_state = ssm_state[state_indices].contiguous()
-            initial_state[~has_initial_state.bool(), ...] = 0
-
-            # Chunk recurrence (direct call — bypasses CPU transfer)
-            prefill_num_seqs = state_indices.numel()
-            prefill_seq_len = num_tokens_p // prefill_num_seqs
-            core_attn_out_result, last_recurrent_state = \
-                hpu_chunk_gated_delta_rule(
-                    q=query,
-                    k=key,
-                    v=value,
-                    g=g,
-                    beta=beta,
-                    initial_state=initial_state,
-                    output_final_state=True,
-                    cu_seqlens=chunk_query_start_loc,
-                    use_qk_l2norm_in_kernel=True,
-                    chunk_size=self.mamba_chunk_size,
-                    prefill_num_seqs=prefill_num_seqs,
-                    prefill_seq_len=prefill_seq_len,
-                )
-
-            # State writeback (compiled)
-            ssm_state[state_indices] = last_recurrent_state.to(
-                device=ssm_state.device, dtype=ssm_state.dtype)
-
-            # Copy output (compiled)
-            non_spec_out = core_attn_out_result.squeeze(0)
-            if non_spec_out.shape[0] == core_attn_out.shape[0]:
-                core_attn_out.copy_(non_spec_out)
-            else:
-                n = min(non_spec_out.shape[0], core_attn_out.shape[0])
-                core_attn_out[:n] = non_spec_out[:n]
+            self._forward_prefill_eager(
+                mixed_qkv, b, a, core_attn_out,
+                conv_state, ssm_state, state_indices,
+                query_start_loc, has_initial_state, padding_mask_flat,
+            )
 
         else:
             # ========================================================

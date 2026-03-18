@@ -47,11 +47,6 @@ class HpuPlatform(Platform):
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: Optional[int] = None,
     ) -> str:
-        if hasattr(attn_selector_config, 'kv_cache_spec') and \
-            hasattr(attn_selector_config.kv_cache_spec, '__class__') and \
-            attn_selector_config.kv_cache_spec.__class__.__name__ == 'MambaSpec':
-            logger.info("Using GDN backend for Mamba models.")
-            return "vllm_gaudi.v1.attention.backends.gdn_attn.GDNAttentionBackend"
         if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on HPU.")
         elif get_config().unified_attn:
