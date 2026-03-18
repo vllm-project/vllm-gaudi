@@ -1,10 +1,33 @@
 import os
+import json
+import sys
+
 from vllm_gaudi.platform import HpuPlatform
+
+
+def _uses_lmcache_connector() -> bool:
+    """Check if lmcache is configured as the KV connector via CLI args."""
+    for i, arg in enumerate(sys.argv):
+        if arg == "--kv-transfer-config" and i + 1 < len(sys.argv):
+            try:
+                config = json.loads(sys.argv[i + 1])
+                connector = config.get("kv_connector", "")
+                return "LMCache" in connector
+            except (json.JSONDecodeError, TypeError):
+                return False
+    return False
 
 
 def register():
     """Register the HPU platform."""
     HpuPlatform.set_torch_compile()
+    # Monkey patch for LMCache
+    # LMCache requires PT_HPU_GPU_MIGRATION=1
+    # However, hooking torch.cuda.is_available() by
+    # migration introduces a lot of issues in LMCache + Gaudi
+    # Remove torch.cuda.is_available hook here as an alternative solution
+    if _uses_lmcache_connector():
+        HpuPlatform.remove_cuda_hooks()
     return "vllm_gaudi.platform.HpuPlatform"
 
 
