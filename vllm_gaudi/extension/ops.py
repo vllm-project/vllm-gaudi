@@ -1074,7 +1074,7 @@ class MoeFP8Matmul(torch.nn.Module):
 
     def set_weight(self, w: torch.Tensor):
         self.weight = w
-    
+
     def _post_process_weight(self):
         self.weight = torch.nn.Parameter(self.weight.data.t().contiguous(), requires_grad=False)
         htorch.core.mark_step()
@@ -1241,23 +1241,23 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
             # w2_input_scale should be List[Tensor] when static and fused
             w2_input_scale = [self.w2_input_scale[i] for i in experts_range]
             x_fp8 = torch.ops.hpu.cast_to_fp8_v2(x, 1.0 / x_scale, False, False, torch.float8_e4m3fn)[0]
-            final_hidden_states = torch.ops.hpu.mixture_of_experts(hidden_states=x_fp8,
-                                                                   expert_routing_table=topk_ids.to(torch.int64),
-                                                                   router_weights=topk_weights.to(x.dtype),
-                                                                   w12=w13_list,
-                                                                   w3=w2_list,
-                                                                   d_scale_hidden_states=x_scale,
-                                                                   d_scale_intermediate_hidden_states=self.w2_input_scale,
-                                                                   d_scale_w12=w13_weight_scale,
-                                                                   d_scale_w3=w2_weight_scale,
-                                                                   permuted_weights=False,
-                                                                   activation=activation,
-                                                                   experts_min=self.experts_min,
-                                                                   experts_max=self.experts_max,
-                                                                   **kwargs)
+            final_hidden_states = torch.ops.hpu.mixture_of_experts(
+                hidden_states=x_fp8,
+                expert_routing_table=topk_ids.to(torch.int64),
+                router_weights=topk_weights.to(x.dtype),
+                w12=w13_list,
+                w3=w2_list,
+                d_scale_hidden_states=x_scale,
+                d_scale_intermediate_hidden_states=self.w2_input_scale,
+                d_scale_w12=w13_weight_scale,
+                d_scale_w3=w2_weight_scale,
+                permuted_weights=False,
+                activation=activation,
+                experts_min=self.experts_min,
+                experts_max=self.experts_max,
+                **kwargs)
 
         return final_hidden_states
-
 
 
 # fp8
