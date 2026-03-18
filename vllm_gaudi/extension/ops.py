@@ -1041,10 +1041,18 @@ def fp8_channel_moe_prepare_weights(layer):
             layer.moe_op.w13_list[index].set_scale_inv_fp8(layer.moe_op.w13_list[index].scale_inv_fp8.reshape(
                 2, 1).repeat(1, layer.w13_weight.shape[1] // 2).flatten().clone())
 
+    del layer.w13_weight
+    del layer.w2_weight
+    setattr(layer, "w13_weight", None)
+    setattr(layer, "w2_weight", None)
     if hasattr(layer, "w13_input_scale"):
         layer.moe_op.w13_input_scale = layer.w13_input_scale
+        layer.moe_op.w13_input_scale_inv = 1.0 / layer.w13_input_scale
     if hasattr(layer, "w2_input_scale"):
-        layer.moe_op.w2_input_scale = layer.w2_input_scale
+        # Split the input scale for each expert to avoid explicit slice in MOE op
+        # which can cause performance regression.
+        w2_input_scale = [layer.w2_input_scale[i].clone() for i in range(len(layer.w2_input_scale))]
+        layer.moe_op.w2_input_scale = w2_input_scale
 
     htorch.core.mark_step()
     return layer
@@ -1066,9 +1074,13 @@ class MoeFP8Matmul(torch.nn.Module):
 
     def set_weight(self, w: torch.Tensor):
         self.weight = w
+    
+    def _post_process_weight(self):
+        self.weight = torch.nn.Parameter(self.weight.data.t().contiguous(), requires_grad=False)
+        htorch.core.mark_step()
 
     def set_scale_inv_fp8(self, scale_inv_fp8: torch.Tensor):
-        self.scale_inv_fp8 = scale_inv_fp8
+        self.scale_inv_fp8 = scale_inv_fp8.squeeze().clone()
 
     def set_high_precision(self, high_precision=torch.bfloat16):
         self.high_precision = high_precision
@@ -1190,6 +1202,7 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
         self.w2_list = torch.nn.ModuleList([MoeFP8Matmul() for _ in range(num_experts)])
         self.w13_input_scale = None
         self.w2_input_scale = None
+        self.w13_input_scale_inv = None
 
     def forward(
         self,
@@ -1203,10 +1216,10 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
         activation = _as_activation_str(activation)
         kwargs = self._get_extra_kwargs(tokens_num)
         experts_range = range(self.num_experts)
-        w13_list = [self.w13_list[i].weight.squeeze() for i in experts_range]
-        w2_list = [self.w2_list[i].weight.squeeze() for i in experts_range]
-        w13_weight_scale = [self.w13_list[i].scale_inv_fp8.squeeze() for i in experts_range]
-        w2_weight_scale = [self.w2_list[i].scale_inv_fp8.squeeze() for i in experts_range]
+        w13_list = [self.w13_list[i].weight for i in experts_range]
+        w2_list = [self.w2_list[i].weight for i in experts_range]
+        w13_weight_scale = [self.w13_list[i].scale_inv_fp8 for i in experts_range]
+        w2_weight_scale = [self.w2_list[i].scale_inv_fp8 for i in experts_range]
 
         if self.w13_input_scale is None:
             x_fp8, x_scale = dynamic_quant(x)
@@ -1218,7 +1231,7 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
                                                                    d_scale_hidden_states=x_scale,
                                                                    d_scale_w12=w13_weight_scale,
                                                                    d_scale_w3=w2_weight_scale,
-                                                                   permuted_weights=permuted_weights,
+                                                                   permuted_weights=False,
                                                                    activation=activation,
                                                                    experts_min=self.experts_min,
                                                                    experts_max=self.experts_max,
@@ -1234,16 +1247,17 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
                                                                    w12=w13_list,
                                                                    w3=w2_list,
                                                                    d_scale_hidden_states=x_scale,
-                                                                   d_scale_intermediate_hidden_states=w2_input_scale,
+                                                                   d_scale_intermediate_hidden_states=self.w2_input_scale,
                                                                    d_scale_w12=w13_weight_scale,
                                                                    d_scale_w3=w2_weight_scale,
-                                                                   permuted_weights=permuted_weights,
+                                                                   permuted_weights=False,
                                                                    activation=activation,
                                                                    experts_min=self.experts_min,
                                                                    experts_max=self.experts_max,
                                                                    **kwargs)
 
         return final_hidden_states
+
 
 
 # fp8
