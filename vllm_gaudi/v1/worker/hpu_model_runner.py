@@ -172,6 +172,33 @@ def _override_platform_device_type(device_type: str):
         current_platform.device_type = original
 
 
+def _move_remaining_tensors_to_device(model: torch.nn.Module, device: str) -> None:
+    """Move non-Parameter/non-buffer tensors left on the wrong device.
+
+    ``nn.Module.to()`` only traverses ``_parameters``, ``_buffers`` and
+    child ``_modules``.  Tensors stored as plain attributes or inside
+    Python lists/tuples (e.g. INC scale inverses, deepstack embeds,
+    dynamic-KV-quant range scalars) are invisible to it.  This helper
+    walks every module's ``__dict__`` and moves stray tensors in-place.
+    """
+    target_type = torch.device(device).type
+    moved = 0
+    for mod in model.modules():
+        for attr_name in list(mod.__dict__.keys()):
+            obj = mod.__dict__[attr_name]
+            if isinstance(obj, torch.Tensor) and obj.device.type != target_type:
+                mod.__dict__[attr_name] = obj.to(device)
+                moved += 1
+            elif isinstance(obj, list):
+                for i, item in enumerate(obj):
+                    if isinstance(item, torch.Tensor) \
+                            and item.device.type != target_type:
+                        obj[i] = item.to(device)
+                        moved += 1
+    if moved:
+        logger.info("Moved %d stray tensors to %s", moved, device)
+
+
 class BucketingFailedException(Exception):
     pass
 
@@ -4332,6 +4359,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     raise ValueError("Unknown quantization config mode,"
                                      "please validate quantization config file")
                 self._sync_shared_moe_gates()
+                if not is_fake_hpu():
+                    self.model = self.model.to("hpu")
+                    _move_remaining_tensors_to_device(self.model, "hpu")
+                    htorch.core.mark_step()
                 if not disable_mark_scales_as_const:
                     htcore.hpu_initialize(self.model, mark_only_scales_as_const=True)
             self.inc_initialized_successfully = True
@@ -4608,6 +4639,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         _apply_inc_patch()
         self._detached_moe_gates: set[int] = set()
         self._remove_duplicate_submodules()
+        # INC's PatchedMixtralMoE.maybe_all_reduce_tensor_model_parallel
+        # accesses use_pplx_kernels / use_deepep_ht_kernels /
+        # use_deepep_ll_kernels directly on the wrapped module. These
+        # attributes were removed from upstream vLLM FusedMoE (moved to
+        # moe_parallel_config). Add compatibility shims so INC doesn't
+        # crash.  On HPU none of these EP/pplx backends are used.
+        for mod in self.model.modules():
+            if isinstance(mod, FusedMoE):
+                if not hasattr(mod, "use_pplx_kernels"):
+                    mod.use_pplx_kernels = False
+                if not hasattr(mod, "use_deepep_ht_kernels"):
+                    mod.use_deepep_ht_kernels = False
+                if not hasattr(mod, "use_deepep_ll_kernels"):
+                    mod.use_deepep_ll_kernels = False
 
     def log_graph_warmup_summary(self, buckets, is_prompt, total_mem):
         phase = f'Graph/{"Prompt" if is_prompt else "Decode"}'
