@@ -286,7 +286,9 @@ def _hpu_solve_lower_triangular_batched(
     Returns:
         [..., N, N] inverse of lmat
     """
-    use_forward_sub = os.getenv("VLLM_GDN_USE_FORWARD_SUB", "1") == "1"
+    # Hardcoded to True (default). Was os.getenv("VLLM_GDN_USE_FORWARD_SUB", "1").
+    # os.getenv causes graph breaks under torch.compile.
+    use_forward_sub = True
 
     if not use_forward_sub:
         # --- Default: linalg path (accurate, not supported on HPU) ---
@@ -334,8 +336,8 @@ def _hpu_solve_lower_triangular_batched(
     #            application BMM.
     # Total Python iterations: (bs - 1) + num_blocks  instead of  (n - 1).
     # For n=128, bs=16: 15 + 8 = 23  vs  127  (~5.5× fewer dispatches).
-    _block_size = int(os.getenv("VLLM_GDN_SOLVE_BLOCK_SIZE", "16"))
-    bs = min(_block_size, n)
+    # Hardcoded to 16 (default). Was os.getenv("VLLM_GDN_SOLVE_BLOCK_SIZE", "16").
+    bs = min(16, n)
     num_blocks = (n + bs - 1) // bs
     batch = lflat.shape[0]
 
@@ -700,7 +702,6 @@ def _recurrent_general_path(
     return out, final_state
 
 
-@torch._dynamo.disable
 def hpu_chunk_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -713,11 +714,18 @@ def hpu_chunk_gated_delta_rule(
     cu_seqlens: torch.LongTensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     chunk_size: int = 64,
+    prefill_num_seqs: int | None = None,
+    prefill_seq_len: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """PyTorch replacement for chunk_gated_delta_rule.
 
     This path intentionally mirrors upstream prefill call semantics without
     delegating to the fused recurrent helper.
+
+    When ``prefill_num_seqs`` and ``prefill_seq_len`` are provided (both
+    Python ints), the function bypasses ``_materialize_seq_ranges`` (which
+    requires a device-to-host sync) and constructs uniform seq_ranges
+    directly.  This makes the function fully compilable with torch.compile.
     """
     # https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fla/ops/chunk_scaled_dot_kkt.py#L132
     B, T, H, Kdim = q.shape
@@ -726,7 +734,13 @@ def hpu_chunk_gated_delta_rule(
     if chunk_size <= 0:
         raise ValueError(f"chunk_size must be > 0, got {chunk_size}.")
 
-    if cu_seqlens is not None:
+    if prefill_num_seqs is not None and prefill_seq_len is not None:
+        # Compile-friendly path: uniform-length sequences (HPU bucketed).
+        # No CPU transfer needed.
+        num_seqs = prefill_num_seqs
+        seq_ranges = [(i * prefill_seq_len, (i + 1) * prefill_seq_len)
+                      for i in range(num_seqs)]
+    elif cu_seqlens is not None:
         if B != 1:
             raise ValueError("When cu_seqlens is used, expected batch size B=1.")
         seq_ranges = _materialize_seq_ranges(cu_seqlens, B * T)
@@ -767,8 +781,8 @@ def hpu_chunk_gated_delta_rule(
     # Upstream match: `chunk_local_cumsum` in fla/ops/cumsum.py.
     # Stage 1 computes per-chunk cumulative g in log-space.
     g_cumsum = torch.empty_like(gf)
-    _vectorize_loops = os.getenv("VLLM_GDN_VECTORIZE_LOOPS", "1") == "1"
-    if _vectorize_loops and num_seqs > 0:
+    # Hardcoded to True (default). Was os.getenv("VLLM_GDN_VECTORIZE_LOOPS", "1").
+    if num_seqs > 0:
         # Vectorized path: reshape to [num_seqs, num_chunks, chunk_size, H]
         # and do a single torch.cumsum(dim=2).
         # Works because HPU bucketing guarantees all sequences have the same
@@ -839,14 +853,11 @@ def hpu_chunk_gated_delta_rule(
     # Implemented below with PyTorch math to avoid Triton dependency.
     eye_cache: dict[int, torch.Tensor] = {}
     # Default vectorized path; set to 0 to use the current per-head path.
-    use_vectorized_chunk = (
-        os.getenv("VLLM_GAUDI_GDN_CHUNK_VECTORIZED", "1") == "1"
-    )
-    if torch.compiler.is_compiling():
-        use_vectorized_chunk = False
+    # Hardcoded to True (default). Was os.getenv("VLLM_GAUDI_GDN_CHUNK_VECTORIZED", "1").
+    use_vectorized_chunk = True
 
     _vectorize_seq_loop = (
-        _vectorize_loops and use_vectorized_chunk and num_seqs > 0
+        use_vectorized_chunk and num_seqs > 0
     )
 
     if _vectorize_seq_loop:
