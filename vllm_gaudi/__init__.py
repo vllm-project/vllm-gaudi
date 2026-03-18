@@ -59,7 +59,7 @@ def register():
     # migration introduces a lot of issues in LMCache + Gaudi
     # Remove torch.cuda.is_available hook here as an alternative solution
     if _uses_lmcache_connector():
-        HpuPlatform.remove_cuda_hooks()
+        HpuPlatform.adjust_cuda_hooks()
     return "vllm_gaudi.platform.HpuPlatform"
 
 
