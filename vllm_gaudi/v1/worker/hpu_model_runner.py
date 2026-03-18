@@ -5831,10 +5831,440 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         kv_caches: dict[str, torch.Tensor] = {}
         num_blocks = 0
         if self.use_hybrid_cache and self.num_mamba_layers > 0:
+            # Hybrid cache memory layout for models with both mamba and
+            # attention layers (e.g. Granite 4.0: 36 mamba2 + 4 attention).
+            #
+            # SHARED BACKING TENSORS (int8, one per position in the
+            # repeating pattern):
+            #   The KV cache manager groups layers so that each backing
+            #   tensor is shared by layers from EVERY group — typically
+            #   9 mamba layers + 1 attention layer.  All of them appear
+            #   in the same kv_cache_tensor.shared_by list.
+            #
+            #   Different kv_cache_groups get independent block tables,
+            #   so within a single backing tensor a block is used by
+            #   exactly ONE group at a time — no two layer types ever
+            #   read/write the same block simultaneously.
+            #
+            #   How each layer type interprets a page (block):
+            #
+            #   Mamba layers — strided views into byte sub-ranges:
+            #   ┌──────────────────────────────────────────────────────┐
+            #   │ conv_state: bytes [0, S0)           dtype=float32   │
+            #   │ ssm_state:  bytes [S0, S0+S1)       dtype=bfloat16  │
+            #   │ (unused):   bytes [S0+S1, page_size)                │
+            #   └──────────────────────────────────────────────────────┘
+            #   Verified: S0+S1 ≤ page_size (asserted below).
+            #
+            #   Attention layers — K+V data fills the full page:
+            #   ┌──────────────────────────────────────────────────────┐
+            #   │ K: block_size × num_kv_heads × head_size × dtype    │
+            #   │ V: block_size × num_kv_heads × head_size × dtype    │
+            #   │ K+V = page_size_bytes (by FullAttentionSpec definition)│
+            #   └──────────────────────────────────────────────────────┘
+            #   On GPU, the attention layer views the backing tensor
+            #   directly (K and V interleaved per block, with
+            #   _update_hybrid_attention_mamba_layout re-striding).
+            #   On HPU, K and V are created as strided views of the
+            #   backing tensor using torch.as_strided.  The slot stride
+            #   (dim-0 stride) is page_elements // block_size, so flat
+            #   slot indexing (index_copy_ with slot_mapping) maps each
+            #   slot to the correct page-aligned position.  K occupies
+            #   the first kv_elements per slot, V follows with a
+            #   storage_offset of kv_elements.  No separate allocation
+            #   is needed.
+            #
+            # HOW ONE BACKING TENSOR IS USED BY 9 MAMBA + 1 ATTENTION:
+            #
+            #   Upstream groups layers by spec type (MambaSpec, FullAttentionSpec),
+            #   then splits into sub-groups of equal size.  For Granite 4.0
+            #   (36 mamba2 + 4 attention, pattern [9 mamba2, 1 attn] × 4):
+            #
+            #     9 mamba groups (4 layers each, one per pattern repetition)
+            #     + 1 attention group (4 layers)
+            #     = 10 kv_cache_groups, each with group_size=4 layers.
+            #
+            #   get_kv_cache_config_from_groups creates group_size=4 backing
+            #   tensors.  Tensor i gets the i-th layer from EVERY group:
+            #
+            #     tensor[0].shared_by = [layer.0.mixer,  layer.1.mixer, ...,
+            #                            layer.8.mixer,  layer.9.self_attn]
+            #     tensor[1].shared_by = [layer.10.mixer, layer.11.mixer, ...,
+            #                            layer.18.mixer, layer.19.self_attn]
+            #     ...
+            #     tensor[3].shared_by = [layer.30.mixer, ..., layer.38.mixer,
+            #                            layer.39.self_attn]
+            #
+            #   Each of the 10 layers in a tensor belongs to a different group,
+            #   so each has its OWN block table.  The block allocator assigns
+            #   pages independently per group — no two groups ever share a page.
+            #
+            #   Runtime block assignment within tensor[0] (N pages total):
+            #
+            #   ┌────────┬────────┬────────┬────────┬────────┬────────┬───────┐
+            #   │ page 0 │ page 1 │ page 2 │ page 3 │ page 4 │ page 5 │ ...   │
+            #   │ (free) │ grp1   │ (free) │ grp9   │ (free) │ grp0   │       │
+            #   │        │ seq 0  │        │ seq 0  │        │ seq 0  │       │
+            #   └────────┴────────┴────────┴────────┴────────┴────────┴───────┘
+            #   grp0  = mamba group 0 → layer.0.mixer
+            #   grp1  = mamba group 1 → layer.1.mixer
+            #   ...
+            #   grp8  = mamba group 8 → layer.8.mixer
+            #   grp9  = attn  group  → layer.9.self_attn
+            #
+            #   PHYSICAL BYTE LAYOUT INSIDE ONE BACKING TENSOR:
+            #
+            #   All 9 mamba layers create IDENTICAL strided views over the
+            #   ENTIRE backing tensor — same storage_offset, same stride.
+            #   The strided view for each state (conv, ssm) spans every page
+            #   with stride = page_size_bytes / dtype_size elements:
+            #
+            #   Backing tensor (flat int8, total = N × P bytes, P=page_size):
+            #
+            #   byte: 0                 P               2P              3P
+            #         ├─── page 0 ──────┼─── page 1 ────┼─── page 2 ────┤ ...
+            #         │                 │                │               │
+            #   Mamba strided view (conv_state, storage_offset=0):
+            #         │[0, S0)          │[0, S0)         │[0, S0)        │
+            #         │ ▲ data if       │ ▲ data if      │ ▲ data if     │
+            #         │   assigned      │   assigned     │   assigned    │
+            #         │                 │                │               │
+            #   Mamba strided view (ssm_state, storage_offset=S0):
+            #         │[S0, S0+S1)      │[S0, S0+S1)     │[S0, S0+S1)   │
+            #         │ ▲ data if       │ ▲ data if      │ ▲ data if    │
+            #         │   assigned      │   assigned     │   assigned   │
+            #         │                 │                │              │
+            #         │[S0+S1, P)       │[S0+S1, P)      │[S0+S1, P)   │
+            #         │  (padding)      │  (padding)     │  (padding)   │
+            #         └─────────────────┴────────────────┴──────────────┘
+            #
+            #   S0 = conv_state bytes/page (e.g. conv_dim × (kernel-1) × 4B)
+            #   S1 = ssm_state bytes/page (e.g. num_heads × ssm_state_size × 2B)
+            #   P  = page_size_bytes (padded to match attention page size)
+            #   S0+S1 ≤ P (asserted below)
+            #
+            #   Every mamba layer sees the SAME view — conv_state and ssm_state
+            #   are at the same byte offsets in every page.  They never collide
+            #   because each layer's group has its own block table that assigns
+            #   disjoint pages.  At runtime, layer.X.mixer indexes into its
+            #   view with state_indices_tensor[cache_group_idx], which maps
+            #   to pages allocated only by that layer's group.
+            #
+            #   Example: which pages each group reads/writes at runtime:
+            #
+            #   Page:  │ 0     │ 1     │ 2     │ 3     │ 4     │ 5    │ ...
+            #   ───────┼───────┼───────┼───────┼───────┼───────┼──────┤
+            #   grp0   │       │       │       │       │       │ ████ │ layer.0.mixer
+            #   grp1   │       │ ████  │       │       │       │      │ layer.1.mixer
+            #   grp2   │       │       │       │       │       │      │ layer.2.mixer
+            #   ...    │       │       │       │       │       │      │
+            #   grp8   │       │       │       │       │       │      │ layer.8.mixer
+            #   grp9   │       │       │       │ ████  │       │      │ layer.9.self_attn
+            #          └───────┴───────┴───────┴───────┴───────┴──────┘
+            #   ████ = page assigned to that group for a particular sequence.
+            #   Each page is used by exactly one group at any time.
+            #
+            #   Bytes accessed inside an assigned page (P = page_size):
+            #
+            #   Mamba page (grp0-8):                Attention page (grp9):
+            #   ┌──────────────────────────────┐    ┌──────────────────────────────┐
+            #   │ byte 0          │             │    │ K+V viewed from backing      │
+            #   │  conv_state     │ S0 bytes    │    │ tensor via torch.as_strided  │
+            #   │  (float32)      │ (used)      │    │                              │
+            #   ├─────────────────┤             │    │ Per slot within page:        │
+            #   │ byte S0         │             │    │  K: kv_elements (used)       │
+            #   │  ssm_state      │ S1 bytes    │    │  V: kv_elements (used)       │
+            #   │  (bfloat16)     │ (used)      │    │  gap: slot_stride-2*kv_elem  │
+            #   ├─────────────────┤             │    │                              │
+            #   │ byte S0+S1      │             │    │ No separate allocation;      │
+            #   │  (padding)      │ P-S0-S1     │    │ index_copy_ works with       │
+            #   │                 │ (unused)    │    │ strided slot addressing      │
+            #   └──────────────────────────────┘    └──────────────────────────────┘
+            #
+            # CONCRETE EXAMPLE — Granite 4.0 (Mamba2, TP=1):
+            #
+            #   Model: 40 layers = 36 mamba2 + 4 attention
+            #     (GraniteMoeHybridForCausalLM)
+            #   Pattern: [9 mamba2, 1 attn] × 4
+            #   GraniteMoeHybridConfig defaults:
+            #     hidden_size=4096, mamba_expand=2, mamba_d_state=256,
+            #     mamba_d_conv=4, mamba_n_heads=128, mamba_d_head=64,
+            #     mamba_n_groups=1, num_kv_heads=32, head_size=128,
+            #     block_size=16, dtype=bfloat16
+            #
+            #   Mamba2 state shapes (per page):
+            #     conv_dim = intermediate + 2 × n_groups × d_state
+            #              = 8192 + 2 × 1 × 256 = 8704
+            #     conv_state: (3, 8704) dtype=float32
+            #       → 3 × 8704 × 4B = 104,448 B (S0)
+            #     ssm_state:  (128, 64, 256) dtype=bfloat16
+            #       → 128 × 64 × 256 × 2B = 4,194,304 B (S1)
+            #     total S0+S1 = 4,298,752 B (4.10 MiB)
+            #
+            #   Attention K+V (per page):
+            #     K = block_size × num_kv_heads × head_size × 2B
+            #       = 16 × 32 × 128 × 2 = 131,072 B
+            #     V = 16 × 32 × 128 × 2 = 131,072 B
+            #     K+V = 262,144 B (256 KiB)
+            #
+            #   page_size = max(S0+S1, K+V)
+            #             = max(4,298,752, 262,144) = 4,298,752 B (4.10 MiB)
+            #   (mamba2 states dominate — attention pages are padded up)
+            #
+            # NO-OVERLAP VERIFICATION — backing tensor is large enough:
+            #
+            #   The block allocator assigns each page to exactly ONE group,
+            #   so mamba and attention never write the same page.  Within
+            #   a page, different state tensors must not overlap:
+            #
+            #   CHECK 1: Mamba states within one page (no inter-state overlap)
+            #     conv_state occupies bytes [0, 104,448)
+            #     ssm_state  occupies bytes [104,448, 4,298,752)
+            #     Ranges are disjoint: 104,448 ≤ 104,448 ✓
+            #     Total = S0+S1 = 4,298,752 ≤ page_size = 4,298,752 ✓
+            #     (asserted at line ~6482 below)
+            #
+            #   CHECK 2: Attention K+V within one page
+            #     K data occupies bytes [0, 131,072)
+            #     V data occupies bytes [131,072, 262,144)
+            #     Ranges are disjoint: 131,072 ≤ 131,072 ✓
+            #     Total K+V = 262,144 ≤ page_size = 4,298,752 ✓
+            #     (asserted at line ~6431 below)
+            #
+            #   CHECK 3: Cross-type safety (mamba vs attention)
+            #     Different groups use disjoint page sets (block allocator) ✓
+            #     No two layer types ever read/write the same page ✓
+            #
+            #   RESULT: The backing tensor is large enough to keep both
+            #   mamba2 state (4,298,752 B) and attention K+V (262,144 B)
+            #   on HPU without any overlaps.
+            #
+            #   One page (4,298,752 bytes = 4.10 MiB):
+            #
+            #   MAMBA2 page:                    ATTENTION page:
+            #   byte 0                          byte 0
+            #   ┌────────────────────────┐      ┌───────────────────────────┐
+            #   │ conv_state (float32)   │      │ K+V data via as_strided   │
+            #   │ 104,448 B (2.4%)       │      │                           │
+            #   │ ▓▓                     │      │ Per slot (×16 per page):  │
+            #   ├────────────────────────┤      │  K: 4096 bf16 (8,192 B)   │
+            #   │ ssm_state (bfloat16)   │      │  V: 4096 bf16 (8,192 B)   │
+            #   │ 4,194,304 B (97.6%)    │      │  gap to next slot         │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │                           │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │ Total K+V used per page: │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │   262,144 B (6.1%)        │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │                           │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │ Strided views share the   │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │ backing tensor — no extra │
+            #   │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ │      │ allocation needed         │
+            #   ├────────────────────────┤      │                           │
+            #   │ (no padding; S0+S1=P)  │      │                           │
+            #   └────────────────────────┘      └───────────────────────────┘
+            #   byte 4,298,752                  byte 4,298,752
+            #
+            #   Backing tensor for tensor[0] with N blocks:
+            #     Size = N × 4,298,752 bytes (+ 1 dummy page)
+            #     Shared by: 9 mamba2 layers + 1 attention layer
+            #     Mamba2 uses 100% of bytes in its assigned pages
+            #     Attention uses strided views (K+V at page start)
+            #
+            #   HPU memory per tensor[i] (no overhead):
+            #     backing tensor:     N × 4,298,752 B
+            #     (K/V are strided views — no separate allocation)
+            #
+            #   Strided K/V layout within one attention page:
+            #
+            #     page_elements = page_size_bytes / dtype_size
+            #     slot_stride   = page_elements / block_size
+            #     kv_elements   = num_kv_heads × head_size
+            #
+            #     K = as_strided(backing.view(bf16),
+            #           size  = ((N+1)×16, 32, 128),
+            #           stride= (slot_stride, 128, 1),
+            #           offset= 0)
+            #
+            #     V = as_strided(backing.view(bf16),
+            #           size  = ((N+1)×16, 32, 128),
+            #           stride= (slot_stride, 128, 1),
+            #           offset= kv_elements)
+            #
+            #   For Granite 4.0: slot_stride = 2,149,376/16 = 134,336
+            #   K uses elements [0, 4096) per slot
+            #   V uses elements [4096, 8192) per slot
+            #   Gap to next slot: 134,336 - 8,192 = 126,144 elements
+            #   index_copy_ and index_select work with these strides.
+            #
+            # page_size_bytes is the same for all groups in hybrid models
+            # (HybridAttentionMambaModelConfig.verify_and_update_config pads
+            # mamba page size to match attention page size at startup)
+            page_size_bytes = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                # taking into account dummy block
-                size = (kv_cache_tensor.size + kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes)
-                tensor = torch.zeros(size // 2, dtype=torch.bfloat16, device=self.device)
+                # Taking into account dummy block (+1 page).
+                # Use int8 (byte-level) backing tensor to correctly support
+                # dtype reinterpretation via .view(dtype) for different layer
+                # types (attention and mamba may use different dtypes).
+                size = kv_cache_tensor.size + page_size_bytes
+                tensor = torch.zeros(size, dtype=torch.int8, device=self.device)
+                for layer_name in kv_cache_tensor.shared_by:
+                    kv_caches[layer_name] = tensor
+                logger.debug(
+                    "[Hybrid cache] Backing tensor: %d bytes "
+                    "(data=%d + dummy_page=%d), shared by: %s",
+                    size, kv_cache_tensor.size, page_size_bytes,
+                    kv_cache_tensor.shared_by)
+            for group in kv_cache_config.kv_cache_groups:
+                kv_cache_spec = group.kv_cache_spec
+                for layer_name in group.layer_names:
+                    kv_cache_spec = group.kv_cache_spec
+                    for kk in kv_cache_config.kv_cache_tensors:
+                        if layer_name in kk.shared_by:
+                            kv_cache_tensor_size = kk.size
+                            break
+                    num_blocks = \
+                        kv_cache_tensor_size // kv_cache_spec.page_size_bytes
+                    if isinstance(kv_cache_spec, FullAttentionSpec):
+                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
+                                                                              kv_cache_spec.num_kv_heads,
+                                                                              kv_cache_spec.head_size)
+                        # Create K and V as strided views of the backing
+                        # tensor (same approach as mamba layers).
+                        # Each page has room for K+V+padding.  K and V are
+                        # placed consecutively at the start of each page:
+                        #   K: kv_elements per slot × block_size slots
+                        #   V: kv_elements per slot × block_size slots
+                        # The slot stride (dim-0 stride) is
+                        #   page_elements // block_size
+                        # so that slot (block_id * block_size + offset)
+                        # maps to page block_id at the correct byte offset.
+                        raw_tensor = kv_caches[layer_name]
+                        dtype = kv_cache_spec.dtype
+                        dtype_size = dtype.itemsize
+                        block_size = kv_cache_spec.block_size
+                        num_kv_heads = kv_cache_spec.num_kv_heads
+                        head_size = kv_cache_spec.head_size
+                        kv_elements = num_kv_heads * head_size
+                        page_elements = page_size_bytes // dtype_size
+                        assert page_size_bytes % dtype_size == 0, (
+                            f"page_size_bytes ({page_size_bytes}) must be "
+                            f"divisible by dtype size ({dtype_size})")
+                        assert page_elements % block_size == 0, (
+                            f"page_elements ({page_elements}) must be "
+                            f"divisible by block_size ({block_size})")
+                        slot_stride = page_elements // block_size
+                        assert 2 * kv_elements <= slot_stride, (
+                            f"K+V elements per slot (2×{kv_elements}="
+                            f"{2*kv_elements}) exceeds slot stride "
+                            f"({slot_stride}); K and V data would overlap")
+                        num_slots = (num_blocks + 1) * block_size
+                        kc = torch.as_strided(
+                            raw_tensor.view(dtype),
+                            size=(num_slots, num_kv_heads, head_size),
+                            stride=(slot_stride, head_size, 1),
+                            storage_offset=0,
+                        )
+                        vc = torch.as_strided(
+                            raw_tensor.view(dtype),
+                            size=(num_slots, num_kv_heads, head_size),
+                            stride=(slot_stride, head_size, 1),
+                            storage_offset=kv_elements,
+                        )
+                        kv_caches[layer_name] = (kc, vc, None, None)
+                        logger.debug(
+                            "[Hybrid cache] Attention layer %s: "
+                            "K/V shape=%s, dtype=%s, num_blocks=%d, "
+                            "slot_stride=%d (page_elements=%d, "
+                            "block_size=%d); strided views of backing "
+                            "tensor (no separate allocation)",
+                            layer_name, kv_cache_shape,
+                            dtype, num_blocks,
+                            slot_stride, page_elements, block_size)
+                    elif isinstance(kv_cache_spec, MambaSpec):
+                        # This is almost the same as for gpu runner in vllm
+                        # only change is + 1 for dummy block
+                        raw_tensor = kv_caches[layer_name]
+                        state_tensors = []
+                        storage_offset_bytes = 0
+                        state_byte_ranges = []
+                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                            dtype_size = get_dtype_size(dtype)
+                            num_element_per_page = (kv_cache_spec.page_size_bytes // dtype_size)
+                            target_shape = (num_blocks + 1, *shape)
+                            stride = torch.empty(target_shape).stride()
+                            target_stride = (num_element_per_page, *stride[1:])
+                            assert storage_offset_bytes % dtype_size == 0
+                            tensor = torch.as_strided(
+                                raw_tensor.view(dtype),
+                                size=target_shape,
+                                stride=target_stride,
+                                storage_offset=storage_offset_bytes // dtype_size,
+                            )
+                            state_byte_ranges.append(
+                                (storage_offset_bytes,
+                                 storage_offset_bytes + stride[0] * dtype_size))
+                            state_tensors.append(tensor)
+                            storage_offset_bytes += stride[0] * dtype_size
+                        kv_caches[layer_name] = tuple(state_tensors)
+                        # Verify: all mamba states fit within one page.
+                        # storage_offset_bytes is the total bytes used per
+                        # block across all state tensors; it must not exceed
+                        # page_size to avoid overlapping the next block.
+                        assert storage_offset_bytes <= kv_cache_spec.page_size_bytes, (
+                            f"Mamba states for {layer_name} use "
+                            f"{storage_offset_bytes} bytes/block but "
+                            f"page_size is only "
+                            f"{kv_cache_spec.page_size_bytes} bytes")
+                        logger.debug(
+                            "[Hybrid cache] Mamba layer %s: "
+                            "%d state tensors, shapes=%s, dtypes=%s, "
+                            "num_blocks=%d, per-block byte ranges=%s "
+                            "(total %d bytes/block of %d page bytes)",
+                            layer_name, len(state_tensors),
+                            [tuple(s.shape) for s in state_tensors],
+                            [s.dtype for s in state_tensors],
+                            num_blocks, state_byte_ranges,
+                            storage_offset_bytes,
+                            kv_cache_spec.page_size_bytes)
+                    else:
+                        pass
+            # Log memory summary for hybrid cache
+            num_backing = len(kv_cache_config.kv_cache_tensors)
+            num_attn_layers = sum(
+                1 for g in kv_cache_config.kv_cache_groups
+                if isinstance(g.kv_cache_spec, FullAttentionSpec))
+            backing_total = sum(
+                t.size + page_size_bytes
+                for t in kv_cache_config.kv_cache_tensors)
+            budget = max(1, sum(
+                t.size for t in kv_cache_config.kv_cache_tensors))
+            logger.info(
+                "[Hybrid cache] HPU memory: %d backing tensors "
+                "(%d bytes), %d attention layers use strided views "
+                "(no separate allocation, 0%% overhead).  "
+                "Upstream budget: %d bytes.",
+                num_backing, backing_total,
+                num_attn_layers, budget)
+        elif self.use_naive_mamba_cache_sharing and self.num_mamba_layers > 0:
+            # Shared backing tensor approach: allocate a single int8 backing
+            # tensor per kv_cache_tensor (including +1 dummy page), then
+            # create strided views for both mamba and attention layers.
+            # Attention K/V are placed at the start of each page using
+            # torch.as_strided, with the same page stride as mamba.
+            page_size_bytes = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
+            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+                # Taking into account dummy block (+1 page).
+                # The +1 dummy page is needed for both mamba and attention:
+                #   - Mamba: _MAMBA_PAD_BLOCK_ID = -1 wraps to the last
+                #     element (index num_blocks).  Without +1, -1 would
+                #     wrap to num_blocks-1 (a real data block), corrupting
+                #     that sequence's state.
+                #   - Attention: _PAD_SLOT_ID = num_blocks * block_size
+                #     references the dummy block's first slot.
+                # Use int8 backing tensor to correctly support dtype
+                # reinterpretation via .view(dtype) for different layer
+                # types (mamba may use float32 for conv_state, bfloat16
+                # for ssm_state, etc.).
+                size = kv_cache_tensor.size + page_size_bytes
+                tensor = torch.zeros(size, dtype=torch.int8, device=self.device)
                 for layer_name in kv_cache_tensor.shared_by:
                     kv_caches[layer_name] = tensor
             for group in kv_cache_config.kv_cache_groups:
@@ -5851,13 +6281,45 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
-                        # here attn does not share kv cache tensor, so we create separate tensors
-                        kc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
-                        vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
+                        # Attention K/V as strided views of the backing
+                        # tensor (same page layout as mamba).
+                        raw_tensor = kv_caches[layer_name]
+                        dtype = kv_cache_spec.dtype
+                        dtype_size = dtype.itemsize
+                        block_size = kv_cache_spec.block_size
+                        num_kv_heads = kv_cache_spec.num_kv_heads
+                        head_size = kv_cache_spec.head_size
+                        kv_elements = num_kv_heads * head_size
+                        page_elements = page_size_bytes // dtype_size
+                        assert page_size_bytes % dtype_size == 0, (
+                            f"page_size_bytes ({page_size_bytes}) must be "
+                            f"divisible by dtype size ({dtype_size})")
+                        assert page_elements % block_size == 0, (
+                            f"page_elements ({page_elements}) must be "
+                            f"divisible by block_size ({block_size})")
+                        slot_stride = page_elements // block_size
+                        assert 2 * kv_elements <= slot_stride, (
+                            f"K+V elements per slot (2×{kv_elements}="
+                            f"{2*kv_elements}) exceeds slot stride "
+                            f"({slot_stride}); K and V data would overlap")
+                        num_slots = (num_blocks + 1) * block_size
+                        kc = torch.as_strided(
+                            raw_tensor.view(dtype),
+                            size=(num_slots, num_kv_heads, head_size),
+                            stride=(slot_stride, head_size, 1),
+                            storage_offset=0,
+                        )
+                        vc = torch.as_strided(
+                            raw_tensor.view(dtype),
+                            size=(num_slots, num_kv_heads, head_size),
+                            stride=(slot_stride, head_size, 1),
+                            storage_offset=kv_elements,
+                        )
                         kv_caches[layer_name] = (kc, vc, None, None)
                     elif isinstance(kv_cache_spec, MambaSpec):
-                        # This is almost the same as for gpu runner in vllm
-                        # only change is + 1 for dummy block
+                        # Mamba layers use strided views into the shared
+                        # backing tensor (matching upstream GPU approach).
+                        # +1 for dummy block used by _MAMBA_PAD_BLOCK_ID.
                         raw_tensor = kv_caches[layer_name]
                         state_tensors = []
                         storage_offset_bytes = 0
@@ -5869,7 +6331,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             target_stride = (num_element_per_page, *stride[1:])
                             assert storage_offset_bytes % dtype_size == 0
                             tensor = torch.as_strided(
-                                raw_tensor,
+                                raw_tensor.view(dtype),
                                 size=target_shape,
                                 stride=target_stride,
                                 storage_offset=storage_offset_bytes // dtype_size,
@@ -5877,44 +6339,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             state_tensors.append(tensor)
                             storage_offset_bytes += stride[0] * dtype_size
                         kv_caches[layer_name] = tuple(state_tensors)
-                    else:
-                        pass
-        elif self.use_naive_mamba_cache_sharing and self.num_mamba_layers > 0:
-            for group in kv_cache_config.kv_cache_groups:
-                kv_cache_spec = group.kv_cache_spec
-                for layer_name in group.layer_names:
-                    kv_cache_spec = group.kv_cache_spec
-                    for kk in kv_cache_config.kv_cache_tensors:
-                        if layer_name in kk.shared_by:
-                            kv_cache_tensor_size = kk.size
-                            break
-                    num_blocks = \
-                        kv_cache_tensor_size // kv_cache_spec.page_size_bytes
-                    if isinstance(kv_cache_spec, FullAttentionSpec):
-                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
-                                                                              kv_cache_spec.num_kv_heads,
-                                                                              kv_cache_spec.head_size)
-                        # here attn does not share kv cache tensor, so we create separate tensors
-                        kc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
-                        vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
-                        kv_caches[layer_name] = (kc, vc, None, None)
-                    elif isinstance(kv_cache_spec, MambaSpec):
-                        # skip if already created by another layer sharing the same kv cache tensor
-                        if layer_name in kv_caches:
-                            continue
-                        state_tensors = []
-                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                            target_shape = (num_blocks + 1, *shape)
-                            tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
-                            state_tensors.append(tensor)
-                        # find other layers sharing the same kv cache tensor and
-                        # populate all of them with the same tensor pair
-                        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                            if layer_name not in kv_cache_tensor.shared_by:
-                                continue
-                            for shared_layer in kv_cache_tensor.shared_by:
-                                kv_caches[shared_layer] = tuple(state_tensors)
-                            break
                     else:
                         pass
         else:  # non-hybrid scenario
