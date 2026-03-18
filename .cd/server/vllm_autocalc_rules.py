@@ -214,7 +214,8 @@ def calc_EST_GRAPH_RESERVE_MEM(ctx):
 
 
 def calc_VLLM_GRAPH_RESERVED_MEM(ctx):
-    return min(max(ctx['EST_GRAPH_RESERVE_MEM'], 0.01), 0.5)
+    # for Lazy (HPU Grpah mode) limit to 0.5, for Eager (Torch compile mode) limit to 0.1 (default)
+    return min(max(ctx['EST_GRAPH_RESERVE_MEM'], 0.01), 0.5 if ctx['PT_HPU_LAZY_MODE'] else 0.1)
 
 
 def calc_KV_CACHE_MEM(ctx):
