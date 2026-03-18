@@ -11,6 +11,7 @@ from vllm_gaudi.extension.debug import init_debug_logger
 
 import habana_frameworks.torch as htorch
 
+import bisect
 import torch
 import itertools
 from typing import Optional
@@ -25,7 +26,10 @@ class CacheSwapUtils(torch.nn.Module):
         self.enable_prefix_caching = get_config().prefix_caching
         self.kv_caches = tuple(kv_caches)
         self.block_slots = torch.arange(0, self.block_size, dtype=torch.long, device=kv_caches[0][0].device)
-        self.is_mla = all([cache[1] is None for cache in self.kv_caches])
+        self.is_mla = all(cache[1] is None for cache in self.kv_caches)
+        # Pre-compute cache lists to avoid list comprehension on every swap call
+        self._key_caches = [cache[0] for cache in self.kv_caches]
+        self._value_caches = [cache[1] for cache in self.kv_caches] if not self.is_mla else []
 
     def forward(self, srcs: torch.tensor, dsts: torch.tensor, caches: list[torch.tensor]):
         """ Internal method wrapped in HPU/t.compile graphs"""
@@ -52,11 +56,9 @@ class CacheSwapUtils(torch.nn.Module):
         dsts = pad_list(list(dsts), threshold, itertools.repeat(-1))
         srcs = torch.tensor(srcs, dtype=torch.long, device='cpu').to('hpu', non_blocking=True)
         dsts = torch.tensor(dsts, dtype=torch.long, device='cpu').to('hpu', non_blocking=True)
-        key_caches = [cache[0] for cache in self.kv_caches]
-        self(srcs, dsts, key_caches)
+        self(srcs, dsts, self._key_caches)
         if not self.is_mla:
-            value_caches = [cache[1] for cache in self.kv_caches]
-            self(srcs, dsts, value_caches)
+            self(srcs, dsts, self._value_caches)
 
 
 class OnlineDefragmenter:
@@ -113,13 +115,17 @@ class OnlineDefragmenter:
 
     def use_block(self, block_id: int):
         """ Increase ref-count for block_id """
-        num_refs = self.get_ref_count(block_id) + 1
-        self.set_ref_count(block_id, num_refs)
+        used = self.used_blocks
+        used[block_id] = used.get(block_id, 0) + 1
 
     def free_block(self, block_id: int):
         """ Decrease ref-count for block_id """
-        num_refs = self.get_ref_count(block_id) - 1
-        self.set_ref_count(block_id, num_refs)
+        used = self.used_blocks
+        new_count = used.get(block_id, 0) - 1
+        if new_count <= 0:
+            del used[block_id]
+        else:
+            used[block_id] = new_count
 
     def resolve(self, block_id: int) -> int:
         """ Apply block_id mapping """
@@ -149,17 +155,20 @@ class OnlineDefragmenter:
             total_finished = len(finished_reqs)
             if total_new_blocks > 0 or total_finished > 0:
                 self.debug(f'updating state: {total_new_blocks} new_blocks {total_finished} finished reqs')
+        resolve = self.resolve
         for req_id, blocks in new_blocks.items():
             if len(blocks) == 0:
                 continue
             self.req_blocks.setdefault(req_id, []).extend(blocks)
             self._extend_mapping_table(max(blocks))
             for b in blocks:
-                self.use_block(self.resolve(b))
+                self.use_block(resolve(b))
         for req_id in finished_reqs:
-            if req_id in self.req_blocks:  # this check is needed in case user cancels a request (Ctrl+C) before it is added to req_blocks
+            # This check is needed in case user cancels a request (Ctrl+C)
+            # before it is added to req_blocks
+            if req_id in self.req_blocks:
                 for b in self.req_blocks[req_id]:
-                    self.free_block(self.resolve(b))
+                    self.free_block(resolve(b))
                 del self.req_blocks[req_id]
 
     def free_blocks(self):
@@ -186,10 +195,11 @@ class OnlineDefragmenter:
             return
         free = self.free_blocks()
         used = sorted(self.used_blocks.keys(), reverse=True)
+        max_swaps = self.to_swap_pad_thresholds[-1]
 
         to_swap: list[tuple[int, int]] = []
         for used_block, free_block in zip(used, free):
-            if len(to_swap) == self.to_swap_pad_thresholds[-1] or free_block > used_block:
+            if len(to_swap) == max_swaps or free_block > used_block:
                 break
             assert used_block in self.used_blocks
             assert free_block not in self.used_blocks
@@ -203,11 +213,15 @@ class OnlineDefragmenter:
             self.update_mapping(orig_free_block, used_block)
 
         assert self.cache_utils is not None
-        to_swap_pad = next((x for x in self.to_swap_pad_thresholds if x >= len(to_swap)),
-                           self.to_swap_pad_thresholds[-1])
+        # Use bisect for O(log n) threshold lookup instead of linear scan
+        thresholds = self.to_swap_pad_thresholds
+        idx = bisect.bisect_left(thresholds, len(to_swap))
+        to_swap_pad = thresholds[idx] if idx < len(thresholds) else thresholds[-1]
         self.cache_utils.swap(to_swap, to_swap_pad)
         if self.debug:
             max_used = max(self.used_blocks.keys())
             num_used = len(self.used_blocks)
-            post_status = f'max_id_used={pre_max_used}->{max_used} num_used={num_used} swapped={len(to_swap)}/{to_swap_pad}'
+            swapped = f'{len(to_swap)}/{to_swap_pad}'
+            post_status = (f'max_id_used={pre_max_used}->{max_used}'
+                           f' num_used={num_used} swapped={swapped}')
             self.debug(f'defragmentation done {post_status}')
