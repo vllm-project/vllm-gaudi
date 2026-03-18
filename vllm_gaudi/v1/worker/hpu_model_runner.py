@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import collections
+import concurrent.futures
 import copy
 import contextlib
 from copy import deepcopy
@@ -8,6 +9,7 @@ from functools import partial, wraps
 import itertools
 import math
 import os
+import queue
 import sys
 import time
 from contextlib import suppress
@@ -4873,36 +4875,60 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         developer_settings = get_config().VLLM_DEVELOPER_MODE
         phase = 'Prompt' if is_prompt else 'Decode'
         desc = f'{phase} warmup processing: '
-        with tqdm(total=num_candidates, desc=desc, unit="item") as pbar:
-            for idx, (batch_size, seq_len, num_blocks) in enumerate(reversed(buckets)):
-                if seq_len > self.max_num_tokens:
-                    continue
-                # Graph memory usage is proportional to seq dimension in a batch
-                if is_prompt:
-                    batch_seq = batch_size * seq_len * num_blocks if num_blocks else batch_size * seq_len
-                else:
-                    batch_seq = batch_size
 
-                graphed_bucket = (batch_size, seq_len, num_blocks, is_prompt)
-                if graphed_bucket in self.graphed_buckets:
-                    continue
-                self.graphed_buckets.add(graphed_bucket)
-                if developer_settings:
-                    self.log_warmup(phase, idx, num_candidates, batch_size, seq_len, num_blocks)
-                prompt_cfg, decode_cfg = None, None
-                with HabanaMemoryProfiler() as mem_prof:
-                    if is_prompt:
-                        prompt_cfg = (batch_size, seq_len, num_blocks)
-                    else:
-                        decode_cfg = (batch_size, 1, num_blocks)
-                    self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
-                # TODO(kzawora): align_workers
-                used_mem = mem_prof.consumed_device_memory
-                total_mem += used_mem
-                total_batch_seq += batch_seq
+        # Collect eligible buckets and their configs for pipelined execution
+        eligible_buckets = []
+        for idx, (batch_size, seq_len, num_blocks) in enumerate(reversed(buckets)):
+            if seq_len > self.max_num_tokens:
+                continue
+            graphed_bucket = (batch_size, seq_len, num_blocks, is_prompt)
+            if graphed_bucket in self.graphed_buckets:
+                continue
+            self.graphed_buckets.add(graphed_bucket)
+            if is_prompt:
+                batch_seq = batch_size * seq_len * num_blocks if num_blocks else batch_size * seq_len
+                cfg = ((batch_size, seq_len, num_blocks), None)
+            else:
+                batch_seq = batch_size
+                cfg = (None, (batch_size, 1, num_blocks))
+            eligible_buckets.append((idx, batch_size, seq_len, num_blocks, batch_seq, cfg))
 
-                pbar.set_postfix_str(f"{idx}/{num_candidates}")
-                pbar.update(1)
+        if not eligible_buckets:
+            return total_mem, total_batch_seq, captured_all
+
+        # Pipeline: build next scenario on background thread while HPU
+        # executes current one
+        scenario_queue: queue.Queue = queue.Queue(maxsize=2)
+
+        def _build_ahead():
+            for _, _, _, _, _, (prompt_cfg, decode_cfg) in eligible_buckets:
+                scenario = self._build_dummy_scenario(prompt_cfg, decode_cfg)
+                scenario_queue.put(scenario)
+            scenario_queue.put(None)  # sentinel
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(_build_ahead)
+
+            with tqdm(total=len(eligible_buckets), desc=desc, unit="item") as pbar:
+                for bucket_idx, (idx, batch_size, seq_len, num_blocks,
+                                 batch_seq, _) in enumerate(eligible_buckets):
+                    if developer_settings:
+                        self.log_warmup(phase, idx, num_candidates,
+                                        batch_size, seq_len, num_blocks)
+                    scenario = scenario_queue.get()
+                    if scenario is None:
+                        break
+                    requests, scheduled_tokens = scenario
+                    with HabanaMemoryProfiler() as mem_prof:
+                        self._execute_dummy_scenario(requests,
+                                                     scheduled_tokens)
+                    # TODO(kzawora): align_workers
+                    used_mem = mem_prof.consumed_device_memory
+                    total_mem += used_mem
+                    total_batch_seq += batch_seq
+
+                    pbar.set_postfix_str(f"{bucket_idx}/{len(eligible_buckets)}")
+                    pbar.update(1)
 
         return total_mem, total_batch_seq, captured_all
 
@@ -4910,17 +4936,45 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         idx = 0
         num_candidates = len(buckets)
         developer_settings = get_config().VLLM_DEVELOPER_MODE
-        with tqdm(total=num_candidates, desc="Unified Attention warmup", unit="item") as pbar:
-            for idx, (query, shared_ctx, unique_ctx, is_causal) in enumerate(reversed(buckets)):
-                unified_cfg = (query, shared_ctx, unique_ctx, is_causal)
-                if unified_cfg in self.graphed_buckets:
-                    continue
-                self.graphed_buckets.add(unified_cfg)
-                if developer_settings:
-                    self.log_warmup("Unified CFG", idx, num_candidates, query, shared_ctx, unique_ctx, is_causal)
-                self._prepare_dummy_unified_scenario(unified_cfg)
-                pbar.set_postfix_str(f"{idx}/{num_candidates}")
-                pbar.update(1)
+
+        # Collect eligible buckets for pipelined execution
+        eligible_buckets = []
+        for idx, (query, shared_ctx, unique_ctx, is_causal) in enumerate(reversed(buckets)):
+            unified_cfg = (query, shared_ctx, unique_ctx, is_causal)
+            if unified_cfg in self.graphed_buckets:
+                continue
+            self.graphed_buckets.add(unified_cfg)
+            eligible_buckets.append((idx, unified_cfg))
+
+        if not eligible_buckets:
+            return
+
+        # Pipeline: build next scenario on background thread while HPU
+        # executes current one
+        scenario_queue: queue.Queue = queue.Queue(maxsize=2)
+
+        def _build_ahead():
+            for _, unified_cfg in eligible_buckets:
+                scenario = self._build_dummy_unified_scenario(unified_cfg)
+                scenario_queue.put(scenario)
+            scenario_queue.put(None)  # sentinel
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(_build_ahead)
+
+            with tqdm(total=len(eligible_buckets), desc="Unified Attention warmup", unit="item") as pbar:
+                for bucket_idx, (idx, unified_cfg) in enumerate(eligible_buckets):
+                    if developer_settings:
+                        query, shared_ctx, unique_ctx, is_causal = unified_cfg
+                        self.log_warmup("Unified CFG", idx, num_candidates,
+                                        query, shared_ctx, unique_ctx, is_causal)
+                    scenario = scenario_queue.get()
+                    if scenario is None:
+                        break
+                    requests, scheduled_tokens = scenario
+                    self._execute_dummy_scenario(requests, scheduled_tokens)
+                    pbar.set_postfix_str(f"{bucket_idx}/{len(eligible_buckets)}")
+                    pbar.update(1)
 
     def _add_dummy_request(self,
                            requests,
@@ -5059,7 +5113,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         ctx_list = ctx_list if len(ctx_list) > 0 else [0] * len(prompt_list)
         return prompt_list, ctx_list
 
-    def _prepare_dummy_unified_scenario(self, unified_cfg):
+    def _build_dummy_unified_scenario(self, unified_cfg):
+        """Build unified dummy requests (CPU-only, no HPU calls).
+
+        Returns (requests, scheduled_tokens) for later execution.
+        """
         requests: list[NewRequestData] = []
         scheduled_tokens: dict[str, int] = {}
 
@@ -5145,9 +5203,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             for request_blocks in split_shared_blocks_ids:
                 self._add_dummy_unified_request(requests, False, False, request_blocks, num_computed_tokens, 1,
                                                 scheduled_tokens)
+        return requests, scheduled_tokens
+
+    def _prepare_dummy_unified_scenario(self, unified_cfg):
+        requests, scheduled_tokens = self._build_dummy_unified_scenario(
+            unified_cfg)
         self._execute_dummy_scenario(requests, scheduled_tokens)
 
-    def _prepare_dummy_scenario(self, prompt_cfg, decode_cfg):
+    def _build_dummy_scenario(self, prompt_cfg, decode_cfg):
+        """Build dummy requests and scheduled tokens (CPU-only, no HPU calls).
+
+        Returns (requests, scheduled_tokens) for later execution.
+        """
         requests: list[NewRequestData] = []
         scheduled_tokens: dict[str, int] = {}
 
@@ -5197,6 +5264,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                         scheduled_tokens=1,
                                         is_prompt=False,
                                         block_id=block_id)
+        return requests, scheduled_tokens
+
+    def _prepare_dummy_scenario(self, prompt_cfg, decode_cfg):
+        requests, scheduled_tokens = self._build_dummy_scenario(
+            prompt_cfg, decode_cfg)
         self._execute_dummy_scenario(requests, scheduled_tokens)
 
     def _execute_dummy_scenario(self, requests, scheduled_tokens):
@@ -5381,29 +5453,97 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 continue
             phase = f'Graph/Multimodal({modality})'
             candidates = buckets if is_batch_based else warmup_lists
+
+            # Build work items list for pipeline
+            work_items = []
             for idx in range(len(candidates)):
                 if is_batch_based:
-                    image_args = candidates[idx]
-                    width = 896  # pixels as in gemma3 config
-                    height = 896  # pixels as in gemma3 config
+                    work_items.append((candidates[idx], 896, 896))
                 else:
-                    image_args = None
-                    width, height = candidates[idx]
-                batched_dummy_mm_inputs = self._get_mm_dummy_batch(modality,
-                                                                   image_args=image_args,
-                                                                   width=width,
-                                                                   height=height)
-                dummy_encoder_outputs = \
-                    self.model.embed_multimodal(
-                    **batched_dummy_mm_inputs)
-                if is_batch_based:
-                    sanity_check_mm_encoder_outputs(
-                        dummy_encoder_outputs,
-                        expected_num_items=candidates[idx],
-                    )
-                    self.graphed_buckets.add(candidates[idx])
-                self.log_warmup_multimodal(phase, idx, len(candidates), candidates[idx] if is_batch_based else 1, 0,
-                                           width, height)
+                    w, h = candidates[idx]
+                    work_items.append((None, w, h))
+
+            if not work_items:
+                continue
+
+            # Pipeline: prepare next MM batch on CPU while HPU
+            # processes current batch through vision encoder
+            scenario_queue = queue.Queue(maxsize=1)
+            total_cpu_time = 0.0
+            total_hpu_time = 0.0
+
+            def prepare_ahead(modality=modality, work_items=work_items):
+                nonlocal total_cpu_time
+                for image_args, w, h in work_items:
+                    cpu_start = time.perf_counter()
+                    batch = self._get_mm_dummy_batch(
+                        modality, image_args=image_args,
+                        width=w, height=h)
+                    cpu_elapsed = time.perf_counter() - cpu_start
+                    total_cpu_time += cpu_elapsed
+                    scenario_queue.put(batch)
+                scenario_queue.put(None)
+
+            # Use compile-only mode to skip HPU execution during
+            # warmup — only graph compilation is needed for recipe
+            # caching. Falls back to normal mode if first bucket fails.
+            use_compile_only = True
+            try:
+                import habana_frameworks.torch.internal.bridge_config \
+                    as bc
+            except ImportError:
+                use_compile_only = False
+                bc = None
+
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=1) as executor:
+                executor.submit(prepare_ahead)
+                idx = 0
+                while True:
+                    batched_dummy_mm_inputs = scenario_queue.get()
+                    if batched_dummy_mm_inputs is None:
+                        break
+                    hpu_start = time.perf_counter()
+                    if use_compile_only:
+                        try:
+                            with bc.env_setting(
+                                    "PT_COMPILE_ONLY_MODE", True):
+                                self.model.embed_multimodal(
+                                    **batched_dummy_mm_inputs)
+                        except Exception as e:
+                            logger.warning(
+                                "MM bucket %d/%d compile-only "
+                                "failed: %s. Falling back.",
+                                idx + 1, len(candidates), e)
+                            self.model.embed_multimodal(
+                                **batched_dummy_mm_inputs)
+                            if idx == 0:
+                                use_compile_only = False
+                    else:
+                        self.model.embed_multimodal(
+                            **batched_dummy_mm_inputs)
+                    elapsed = time.perf_counter() - hpu_start
+                    total_hpu_time += elapsed
+                    logger.info(
+                        "MM bucket %d/%d (%dx%d): %.2fs%s",
+                        idx + 1, len(candidates),
+                        work_items[idx][1], work_items[idx][2],
+                        elapsed,
+                        " [compile-only]" if use_compile_only else "")
+                    if is_batch_based:
+                        self.graphed_buckets.add(candidates[idx])
+                    self.log_warmup_multimodal(
+                        phase, idx, len(candidates),
+                        candidates[idx] if is_batch_based else 1, 0,
+                        work_items[idx][1], work_items[idx][2])
+                    idx += 1
+
+            logger.info(
+                "Multimodal warmup %s pipeline stats: "
+                "total_cpu_prep=%.1fs, total_hpu_exec=%.1fs, "
+                "buckets=%d",
+                modality, total_cpu_time, total_hpu_time,
+                len(work_items))
 
     def _maybe_profile_unified_attn(self):
         unified_cfg_str = os.environ.get('VLLM_PROFILE_UNIFIED', None)
@@ -5443,11 +5583,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 msg = (f"Multimodal bucket : {self.get_model().vision_bucket_manager.multimodal_buckets}")
                 logger.info(msg)
         else:
-            self.bucketing_manager.generate_prompt_buckets()
-            if not self.is_pooling_model:
-                self.bucketing_manager.generate_decode_buckets()
-            else:
-                self.bucketing_manager.decode_buckets = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                prompt_future = executor.submit(
+                    self.bucketing_manager.generate_prompt_buckets)
+                if not self.is_pooling_model:
+                    decode_future = executor.submit(
+                        self.bucketing_manager.generate_decode_buckets)
+                else:
+                    decode_future = None
+                prompt_future.result()
+                if decode_future is not None:
+                    decode_future.result()
+                else:
+                    self.bucketing_manager.decode_buckets = []
 
             if self.supports_mm_inputs:
                 # Delayed multimodal buckets during warmup until model is loaded.
@@ -5510,11 +5658,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         start_mem = HabanaMemoryProfiler.current_device_memory_usage()
         start_time = time.perf_counter()
 
-        # Most model's multimodal embedding has to be run without COMPILE ONLY mode.
-        if self.supports_mm_inputs:
-            self.warmup_multimodal_graphs(self.get_model().vision_bucket_manager.multimodal_buckets)
-
         compile_only_mode_context = functools.partial(bc.env_setting, "PT_COMPILE_ONLY_MODE", True)
+        # Multimodal warmup: compile vision encoder graphs for all
+        # expected image/video resolutions.
+        if self.supports_mm_inputs:
+            model = self.get_model()
+            mm_start = time.perf_counter()
+            self.warmup_multimodal_graphs(model.vision_bucket_manager.multimodal_buckets)
+            mm_elapsed = time.perf_counter() - mm_start
+            logger.info("Multimodal warmup took %.1fs", mm_elapsed)
         can_use_compile_only_mode = True
         try:
             with compile_only_mode_context():
