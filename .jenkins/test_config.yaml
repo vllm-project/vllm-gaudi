@@ -1,21 +1,15 @@
 # test_config.yaml
 #
 # Bundle optimization (based on build #482 actual timings):
-#   - 13 pods consolidated to 9 pods (62 cards total)
+#   - Original 23 pods consolidated to 8 pods (25 cards total)
+#   - Card sizes: g3=1, g3.s=2, g3.m=4, g3.l=8, g2.l=8
 #   - All bundles target ≤37min wall-clock
 #   - Tests grouped by flavor compatibility
 #
 stages:
   - name: first_stage
     steps:
-      # --- g3.m: PD tests (3 cards: PREFILLER_TP_SIZE=1, DECODER_TP_SIZE=2) ---
-      - name: pd_nixl_ucx_g3m
-        flavor: g3.m
-        command: >-
-          pip install lm-eval[api] &&
-          bash tests/full_tests/run_with_junit.sh pd_nixl_ucx
-          bash -c 'cd tests/unit_tests && ./run_accuracy_test.sh'
-      # --- g2.l: Gaudi2 tests (~12min) ---
+      # --- g2.l: Gaudi2 tests (~12min, 8 cards) ---
       #   cpu_offloading + spec_decode_ngram (g2 due to ua acc issue on g3)
       - name: e2e_g2_bundle
         flavor: g2.l
@@ -23,10 +17,14 @@ stages:
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_cpu_offloading_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_ngram_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_UA_spec_decode_ngram_test
-      # --- g3.s: TP=2 tests (~24min) ---
-      - name: e2e_tp2_bundle
-        flavor: g3.s
+      # --- g3.m: PD tests + TP=2 tests (~34min, 4 cards) ---
+      #   pd_nixl (~10m, needs 3 cards) + tp2 tests (~24m, need 2 cards)
+      - name: e2e_pd_tp2_bundle
+        flavor: g3.m
         command: >-
+          pip install lm-eval[api] &&
+          bash tests/full_tests/run_with_junit.sh pd_nixl_ucx
+          bash -c 'cd tests/unit_tests && ./run_accuracy_test.sh' &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_deepseek_v2_inc_dynamic_tp2_load_generate_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_qwen3_30b_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_tp2_load_generate_test &&
