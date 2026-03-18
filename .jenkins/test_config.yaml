@@ -15,8 +15,8 @@ stages:
         flavor: g2.l
         command: >-
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_cpu_offloading_test &&
-          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_ngram_test &&
-          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_UA_spec_decode_ngram_test
+          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_ngram_test &&
+          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_UA_spec_decode_ngram_test
       # --- g3.m: PD tests + TP=2 tests (~34min, 4 cards) ---
       #   pd_nixl (~10m, needs 3 cards) + tp2 tests (~24m, need 2 cards)
       - name: e2e_pd_tp2_bundle
