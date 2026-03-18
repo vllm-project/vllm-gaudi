@@ -6,7 +6,6 @@ from copy import deepcopy
 import functools
 from functools import partial, wraps
 import itertools
-import json
 import math
 import os
 import sys
@@ -324,38 +323,6 @@ def flatten(in_list):
 def gather_list(input, indices, v):
     """Gather values from input using indices"""
     return [input[i] if i is not None else v for i in indices]
-
-
-def ensure_decodes_first(b: InputBatch):
-    num_reqs = b.num_reqs
-    while True:
-        # Find the first prompt index
-        first_prompt_index = None
-        for i in range(num_reqs):
-            if b.num_computed_tokens_cpu[i] < b.num_prompt_tokens[i]:
-                first_prompt_index = i
-                break
-        if first_prompt_index is None:
-            break
-
-        # Find the last decode index
-        last_decode_index = None
-        for i in reversed(range(num_reqs)):
-            if b.num_computed_tokens_cpu[i] >= b.num_prompt_tokens[i]:
-                last_decode_index = i
-                break
-        if last_decode_index is None:
-            break
-
-        # Sanity
-        assert first_prompt_index != last_decode_index
-
-        # Check if done
-        if first_prompt_index > last_decode_index:
-            break
-
-        # Swap
-        b.swap_states(first_prompt_index, last_decode_index)
 
 
 def get_target_layer_suffix_list(model_type) -> list[str]:
@@ -1452,11 +1419,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # multiple modalities or a different modality than the previous one,
         # we process it separately to preserve item order.
 
-        # TODO (attafosu): Follow-up on the resolution to this.
-        # The ordering of the encoder outputs needs to match the request ids
-        # after fetching the embeddings.
-        # For now, we'll restrict mm support to just a single prefill at a time - # noqa E501
-        # Or that requests in the batch should have distinct modalities,
+        # NOTE: The encoder outputs are cached by mm_hash and fetched
+        # during _gather_mm_embeddings, so the ordering here does not need
+        # to match the request order in the prefill batch.
 
         # FIXME(ywang96): This is a hacky way to deal with multiple modalities
         # in the same batch while still being able to benefit from batching
@@ -1485,8 +1450,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             for output in curr_group_outputs:
                 encoder_outputs.append(output)
 
-        # FIXME (attafosu) Reorder the encoder outputs to match the request ids.
-        # This will be necessary after mm prefill batching constraints are removed # noqa E501
+        # NOTE: Encoder outputs are cached by mm_hash and fetched in
+        # _gather_mm_embeddings, so reordering is not necessary.
 
         # Cache the encoder outputs.
         for (mm_hash, pos_info), output in zip(
@@ -1516,6 +1481,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         req_ids: list[str],
         shift_computed_tokens: int = 0,
         total_num_scheduled_tokens: Optional[int] = None,
+        padded_seq_len: Optional[int] = None,
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
         total_num_scheduled_tokens = total_num_scheduled_tokens or scheduler_output.total_num_scheduled_tokens
 
@@ -1524,7 +1490,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         is_mm_embed[:total_num_scheduled_tokens] = False
 
         req_start_idx = 0
-        for req_id in req_ids:
+        for batch_row, req_id in enumerate(req_ids):
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             req_state = self.requests[req_id]
             num_computed_tokens = \
@@ -1569,13 +1535,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 sliced_output = encoder_output[start_idx:end_idx]
                 mm_embeds_item = sliced_output if is_embed is None else sliced_output[is_embed]
 
-                req_start_pos = req_start_idx + start_pos - num_computed_tokens
+                # For 2D padded batches, compute position in the
+                # flattened [batch_size * padded_seq_len] layout.
+                if padded_seq_len is not None:
+                    req_start_pos = (batch_row * padded_seq_len + start_pos - num_computed_tokens)
+                else:
+                    req_start_pos = (req_start_idx + start_pos - num_computed_tokens)
                 is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
                     = True
 
                 # Only whole mm items are processed
                 mm_embeds.append(mm_embeds_item)
-            req_start_idx += num_scheduled_tokens
+            if padded_seq_len is None:
+                req_start_idx += num_scheduled_tokens
 
         # Convert bool tensor to index tensor for merge embedding statically if optimized mm
         if self.uses_mrope:
@@ -1602,9 +1574,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             with self.profiler.record_event('internal', 'prepare_input_encoders'):
                 self._execute_mm_encoder(scheduler_output, req_ids)
 
+            # For 2D padded prefill batches (batch_size > 1), compute
+            # total token positions across the padded layout and pass
+            # padded_seq_len so _gather_mm_embeddings can map positions
+            # correctly.
+            padded_seq_len = None
+            effective_total_tokens = total_num_scheduled_tokens
+            if token_ids.ndim == 2 and token_ids.shape[0] > 1:
+                padded_seq_len = token_ids.shape[-1]
+                effective_total_tokens = (token_ids.shape[0] * token_ids.shape[1])
+
             mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output,
                                                                 req_ids,
-                                                                total_num_scheduled_tokens=total_num_scheduled_tokens)
+                                                                total_num_scheduled_tokens=effective_total_tokens,
+                                                                padded_seq_len=padded_seq_len)
             # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa
             # This may require moving multimodal input preps into _prepare_inputs,        # noqa
             # to avoid padding issues.
@@ -1645,7 +1628,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             return self.vllm_config.model_config.hf_config.model_type
         return None
 
-    def _get_num_decodes(self) -> int:
+    def _get_num_decodes(self, scheduler_output: "SchedulerOutput") -> int:
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
         #TODO: remove later
@@ -1654,16 +1637,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         for i in range(num_reqs):
             req_id = self.input_batch.req_ids[i]
             assert req_id is not None
-
-            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
-            num_prompt_tokens = self.input_batch.num_prompt_tokens[i]
-
-            if num_computed_tokens < num_prompt_tokens and \
-                not self.is_decoder_only(req_id):
-                # This is prompt
+            if self._is_prompt(i, scheduler_output):
                 continue
             num_decodes += 1
         return num_decodes
+
+    def _is_prompt(self, req_idx: int, scheduler_output: "SchedulerOutput") -> bool:
+        req_id = self.input_batch.req_ids[req_idx]
+        num_computed_tokens = int(self.input_batch.num_computed_tokens_cpu[req_idx])
+        num_prompt_tokens = int(self.input_batch.num_prompt_tokens[req_idx])
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+        spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens.get(req_id)
+
+        num_decode_tokens = 1 if spec_decode_tokens is None else len(spec_decode_tokens) + 1
+        is_prompt = num_computed_tokens < num_prompt_tokens  # normal prompt
+        is_prompt = is_prompt or num_scheduled_tokens > num_decode_tokens  # maybe preempted prompt
+        is_prompt = is_prompt and not self.is_decoder_only(req_id)
+
+        return is_prompt
 
     def _get_prompts_and_decodes(
         self,
@@ -1709,7 +1700,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         requests = metadata.reqs_to_store | metadata.reqs_to_load
             else:
                 requests = scheduler_output.kv_connector_metadata.requests
-
         # Traverse decodes first
         decode_req_ids = []
         num_computed_tokens_decode = []
@@ -1723,19 +1713,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         self.input_batch.req_type[req_id] = requests_type[req_id]
                         break
 
-            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
-            num_prompt_tokens = self.input_batch.num_prompt_tokens[i]
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            if num_computed_tokens < num_prompt_tokens and \
-                not self.is_decoder_only(req_id):
-                # This is prompt
+            if self._is_prompt(i, scheduler_output):
                 break
 
-            # This is decode
             # NOTE(chendi): To support spec decode,
             # we don't assume num_scheduled_tokens == 1.
-
             decode_req_ids.append(req_id)
+            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
             num_computed_tokens_decode.append(int(num_computed_tokens + 1))
 
         if self.profiler.enabled:
@@ -1748,16 +1732,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             req_id = self.input_batch.req_ids[i]
             assert req_id is not None
 
-            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
-            num_prompt_tokens = self.input_batch.num_prompt_tokens[i]
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-
             # Must be prompt
-            assert num_computed_tokens < num_prompt_tokens
-            # NOTE(kzawora): In preempted sequences, num_output_tokens can be > 0, and still be a valid prefill
+            assert self._is_prompt(i, scheduler_output)
 
             prompt_req_ids.append(req_id)
-            prompt_scheduled_tokens.append(num_scheduled_tokens)
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            prompt_scheduled_tokens.append(int(num_scheduled_tokens))
 
         return PromptDecodeInfo(prompt_req_ids, decode_req_ids, prompt_scheduled_tokens)
 
@@ -2058,6 +2038,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     num_output_logits = seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1
             else:
                 num_output_logits = max(0, seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1)
+            # Cap to scheduled tokens (needed when decode recomputation
+            # requests are routed through the prefill path).
+            num_output_logits = min(num_output_logits, seq_num_scheduled_tokens)
             logits_positions = list(range(seq_num_scheduled_tokens - num_output_logits, seq_num_scheduled_tokens))
 
             new_batch_contents = BatchContents(
@@ -3489,7 +3472,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         num_decodes = 0
         decode_index = None
         if self.use_async_scheduling:
-            num_decodes = self._get_num_decodes()
+            num_decodes = self._get_num_decodes(scheduler_output)
             decode_index = self._prepare_input_ids(scheduler_output, return_index=True)
             input_ids_hpu = self.input_ids_hpu
 
@@ -3808,6 +3791,37 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         attn_metadata = custom_tuple_replace(prefill_metadata, "TrimmedAttentionMetadata", attn_bias=attn_bias)
         return attn_metadata
 
+    def _ensure_decodes_first(self, scheduler_output: "SchedulerOutput"):
+        num_reqs = self.input_batch.num_reqs
+        while True:
+            # Find the first prompt index
+            first_prompt_index = None
+            for i in range(num_reqs):
+                if self._is_prompt(i, scheduler_output):
+                    first_prompt_index = i
+                    break
+            if first_prompt_index is None:
+                break
+
+            # Find the last decode index
+            last_decode_index = None
+            for i in reversed(range(num_reqs)):
+                if not self._is_prompt(i, scheduler_output):
+                    last_decode_index = i
+                    break
+            if last_decode_index is None:
+                break
+
+            # Sanity
+            assert first_prompt_index != last_decode_index
+
+            # Check if done
+            if first_prompt_index > last_decode_index:
+                break
+
+            # Swap
+            self.input_batch.swap_states(first_prompt_index, last_decode_index)
+
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         if self.scheduler_output is None:
@@ -3878,7 +3892,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         batch_changed = self.batch_changed
         # If necessary, swap decodes/prompts to have all decodes on the start
-        ensure_decodes_first(self.input_batch)
+        self._ensure_decodes_first(scheduler_output)
         # Prepare prompts/decodes info
         pd_info = self._get_prompts_and_decodes(scheduler_output)
         num_decodes = len(pd_info.decode_req_ids)
@@ -4414,12 +4428,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             torch._dynamo.config.force_parameter_static_shapes = False
             self.compile_config = HPUCompileConfig()
 
-            # Log HPU compilation configuration for TORCH_TRACE/tlparse
-            self.compile_config.log_hpu_compile_config(model_name=self.model_config.model)
-
-            # Initialize regional compilation counter
-            self._compiled_regions_count = 0
-
             if self.compile_config.regional_compilation:
                 self._compile_methods()
                 self.regional_compilation_layers_list = [RMSNorm, VocabParallelEmbedding]
@@ -4463,35 +4471,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             for children_name, children_module in module.named_children():
                 self._regional_compilation(children_module, module, children_name)
 
-    def _log_regional_compile_start(self, name: str, module, model):
-        """Log regional compilation start for TORCH_TRACE/tlparse"""
-
-        if not os.getenv("TORCH_TRACE"):
-            return
-        try:
-            from torch._logging._internal import trace_structured
-
-            self._compiled_regions_count += 1
-
-            trace_structured("artifact",
-                             metadata_fn=lambda: {
-                                 "name": "hpu_regional_compile_start",
-                                 "encoding": "json",
-                             },
-                             payload_fn=lambda: json.dumps({
-                                 "region_name": name,
-                                 "module_type": type(module).__name__,
-                                 "parent_module": type(model).__name__,
-                                 "compiled_regions": self._compiled_regions_count,
-                             }))
-        except (ImportError, Exception):
-            # If trace_structured not available or fails, silently skip
-            pass
-
     def _compile_region(self, model, name, module):
-        # Log regional compilation start for TORCH_TRACE/tlparse
-        self._log_regional_compile_start(name, module, model)
-
         module = self._compile(module)
         setattr_nested(model, name, module)
 
@@ -5069,7 +5049,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # Consider the token space for draft tokens to propose
             # The draft tokens for eagle consumes block table space
             num_lookahead_tokens += self.speculative_config.num_speculative_tokens
-        seq_lengths = [b * block_size - num_lookahead_tokens for b in blocks]
+        seq_lengths = [min(b * block_size - num_lookahead_tokens, self.max_model_len) for b in blocks]
         return seq_lengths
 
     def distribute_sum_evenly(self, total_sum, max_length):
@@ -5469,107 +5449,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             raise AssertionError(msg)
 
     @torch.inference_mode()
-    def _log_bucketing_config(self) -> None:
-        """Log HPU bucketing configuration for TORCH_TRACE/tlparse analysis.
-
-        This logs the bucketing strategy and generated buckets as a JSON artifact
-        that will be displayed in tlparse reports, helping debug bucketing behavior.
-        """
-        if not os.getenv("TORCH_TRACE"):
-            return
-
-        from torch._logging._internal import trace_structured
-
-        bucketing_data = {
-            "unified_attn": self.unified_attn,
-            "enable_bucketing": self.enable_bucketing,
-            "is_pooling_model": self.is_pooling_model,
-        }
-
-        if self.unified_attn:
-            bucketing_data["unified_buckets"] = [{
-                "batch_size": b[0],
-                "prompt_len": b[1],
-                "decode_len": b[2]
-            } for b in self.bucketing_manager.unified_buckets]
-            bucketing_data["num_unified_buckets"] = len(self.bucketing_manager.unified_buckets)
-        else:
-            bucketing_data["prompt_buckets"] = [{
-                "batch_size": b[0],
-                "prompt_len": b[1],
-                "decode_len": b[2]
-            } for b in self.bucketing_manager.prompt_buckets]
-            bucketing_data["num_prompt_buckets"] = len(self.bucketing_manager.prompt_buckets)
-
-            if not self.is_pooling_model:
-                bucketing_data["decode_buckets"] = [{
-                    "batch_size": b[0],
-                    "prompt_len": b[1],
-                    "decode_len": b[2]
-                } for b in self.bucketing_manager.decode_buckets]
-                bucketing_data["num_decode_buckets"] = len(self.bucketing_manager.decode_buckets)
-
-        # Add multimodal buckets if available
-        if self.supports_mm_inputs and hasattr(self.get_model(), 'vision_bucket_manager'):
-            vision_mgr = self.get_model().vision_bucket_manager
-            if hasattr(vision_mgr, 'multimodal_buckets'):
-                bucketing_data["multimodal_buckets"] = list(vision_mgr.multimodal_buckets)
-                bucketing_data["num_multimodal_buckets"] = len(vision_mgr.multimodal_buckets)
-
-        trace_structured("artifact",
-                         metadata_fn=lambda: {
-                             "name": "hpu_bucketing_config",
-                             "encoding": "json",
-                         },
-                         payload_fn=lambda: json.dumps(bucketing_data, indent=2))
-
-    @torch.inference_mode()
-    def _log_dynamo_cache_stats(self) -> None:
-        """Log PyTorch Dynamo cache statistics for TORCH_TRACE/tlparse analysis.
-
-        This helps diagnose compilation cache issues, recompilations, and cache
-        evictions that can cause performance problems during inference.
-        """
-        if not os.getenv("TORCH_TRACE"):
-            return
-
-        try:
-            import torch._dynamo.config as dynamo_config
-            from torch._dynamo.utils import counters
-            from torch._logging._internal import trace_structured
-
-            cache_stats = {
-                "dynamo_cache_size_limit": dynamo_config.cache_size_limit,
-            }
-
-            # Add recompilation limits (always included for diagnostics)
-            cache_stats["accumulated_recompile_limit"] = dynamo_config.accumulated_recompile_limit
-            cache_stats["recompile_limit"] = dynamo_config.recompile_limit
-
-            # Track actual compilations from Dynamo counters
-            # Note: counters["stats"]["unique_graphs"] counts all compilations including recompilations
-            total_compilations = counters["stats"].get("unique_graphs", 0)
-            cache_stats["total_compilations"] = total_compilations
-
-            # Calculate cache evictions (compilations that exceeded cache capacity during warmup)
-            cache_stats["dynamo_cache_evictions"] = max(0, total_compilations - cache_stats["dynamo_cache_size_limit"])
-
-            # Cache utilization percentage based on actual compilations
-            cache_stats["dynamo_cache_utilization_percentage"] = round(
-                (total_compilations / cache_stats["dynamo_cache_size_limit"]) *
-                100, 2) if cache_stats["dynamo_cache_size_limit"] > 0 else 0
-
-            trace_structured("artifact",
-                             metadata_fn=lambda: {
-                                 "name": "hpu_dynamo_cache_stats",
-                                 "encoding": "json",
-                             },
-                             payload_fn=lambda: json.dumps(cache_stats, indent=2))
-        except (ImportError, AttributeError, Exception):
-            # If we can't get cache stats, log a warning but don't fail
-            logger.warning("Could not log Dynamo cache stats.")
-
-    @torch.inference_mode()
     def warmup_model(self) -> None:
         if not self.enable_bucketing:
             return
@@ -5582,9 +5461,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self.get_model().vision_bucket_manager = HPUVisionBucketManager(get_config().model_type)
                 msg = (f"Multimodal bucket : {self.get_model().vision_bucket_manager.multimodal_buckets}")
                 logger.info(msg)
-
-            # Log unified bucketing configuration
-            self._log_bucketing_config()
         else:
             self.bucketing_manager.generate_prompt_buckets()
             if not self.is_pooling_model:
@@ -5598,9 +5474,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self.get_model().vision_bucket_manager = HPUVisionBucketManager(get_config().model_type)
                 msg = (f"Multimodal bucket : {self.get_model().vision_bucket_manager.multimodal_buckets}")
                 logger.info(msg)
-
-            # Log prompt/decode bucketing configuration
-            self._log_bucketing_config()
             if self.is_pooling_model:
                 max_bucket = self.bucketing_manager.prompt_buckets[-1][0]
             else:
@@ -5707,12 +5580,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         msg = (f"Warmup finished in {elapsed_time:.0f} secs, "
                f"allocated {format_bytes(end_mem - start_mem)} of device memory")
         logger.info(msg)
-
-        # Log Dynamo cache statistics for debugging cache issues
-        self._log_dynamo_cache_stats()
-
-        from .vllm_marker import emit_vllm_chrome_event
-        emit_vllm_chrome_event("Warmup End")
         self.profiler.end()
 
         if not (self.num_mamba_layers or self.unified_attn or self.is_pooling_model) \
