@@ -42,13 +42,22 @@ Follow these steps to run the vLLM server or launch benchmarks on Gaudi using Do
     git clone https://github.com/vllm-project/vllm-gaudi.git
     ```
 
-2. Navigate to the appropriate directory.
+2. Check out the version of `vllm-gaudi` that matches your target release.
 
     ```bash
-    cd vllm-gaudi/.cd/
+    cd vllm-gaudi
+    # Replace <TAG_OR_BRANCH> with the tag or branch for your desired release.
+    # You can find available versions at: https://github.com/vllm-project/vllm-gaudi/releases
+    git checkout <TAG_OR_BRANCH>
     ```
 
-3. Select your preferred values of the following variables.
+3. Navigate to the `.cd/` directory in the cloned `vllm-gaudi` repository. This directory contains the Docker Compose files and helper scripts used in this quickstart.
+
+    ```bash
+    cd .cd/
+    ```
+
+4. Select your preferred values of the following variables.
 
     | **Variable**   | **Description**                                                                                                                                                              |
     | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -79,7 +88,7 @@ Follow these steps to run the vLLM server or launch benchmarks on Gaudi using Do
     | ibm-granite/granite-8b-code-instruct-4k   | 1                     |
     | ibm-granite/granite-20b-code-instruct-8k  | 1                     |
 
-4. Set the selected environment variables using the following example as a reference.
+5. Set the selected environment variables using the following example as a reference.
 
     ```bash
     MODEL="Qwen/Qwen2.5-14B-Instruct" \
@@ -87,7 +96,7 @@ Follow these steps to run the vLLM server or launch benchmarks on Gaudi using Do
     DOCKER_IMAGE="vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/vllm-plugin-{{ PT_VERSION }}:latest"
     ```
 
-5. Run the vLLM server using Docker Compose.
+6. Run the vLLM server using Docker Compose.
 
     ```bash
     docker compose up
