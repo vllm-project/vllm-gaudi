@@ -16,7 +16,6 @@ from vllm_gaudi.utils import has_quant_config
 from vllm_gaudi.ops.hpu_fused_moe import _normalize_moe_activation
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
 
-from vllm.model_executor.kernels import linear as scaled_mm
 from vllm.model_executor.kernels.linear import _POSSIBLE_FP8_KERNELS
 from vllm.platforms import PlatformEnum
 from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (

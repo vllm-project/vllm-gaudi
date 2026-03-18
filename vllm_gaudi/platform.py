@@ -120,12 +120,8 @@ class HpuPlatform(Platform):
         # size (block_size * per-token KV bytes).  Without this the upstream
         # unify_kv_cache_spec_page_size() fails because the two page sizes
         # are not divisible.
-        if (
-            cache_config
-            and cache_config.block_size is not None
-            and vllm_config.model_config is not None
-            and vllm_config.model_config.is_hybrid
-        ):
+        if (cache_config and cache_config.block_size is not None and vllm_config.model_config is not None
+                and vllm_config.model_config.is_hybrid):
             # Ensure block_size is 128-aligned (should already be, but
             # guard against future callers that set odd sizes).
             original_block_size = cache_config.block_size
@@ -154,13 +150,10 @@ class HpuPlatform(Platform):
                     kv_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
                 num_kv_heads = model_config.get_num_kv_heads(parallel_config)
                 head_size = model_config.get_head_size()
-                attn_page = (2 * cache_config.block_size * num_kv_heads
-                             * head_size * get_dtype_size(kv_dtype))
+                attn_page = (2 * cache_config.block_size * num_kv_heads * head_size * get_dtype_size(kv_dtype))
                 if attn_page > 0 and cache_config.mamba_page_size_padded % attn_page != 0:
                     old_padded = cache_config.mamba_page_size_padded
-                    cache_config.mamba_page_size_padded = (
-                        ceil(old_padded / attn_page) * attn_page
-                    )
+                    cache_config.mamba_page_size_padded = (ceil(old_padded / attn_page) * attn_page)
                     logger.info(
                         "Rescaled mamba_page_size_padded from %d to %d "
                         "to align with HPU attention page size %d "

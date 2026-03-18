@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 """HPU-native PyTorch implementations for Qwen3.5 GDN ops.
 
 These implementations intentionally avoid Triton/CUDA-only kernels and run
@@ -12,7 +11,6 @@ Phase 1 scope:
 
 from __future__ import annotations
 
-import os
 import torch
 from vllm_gaudi.extension.logger import logger as init_logger
 
@@ -31,14 +29,14 @@ def hpu_chunk_gdr_preprocess(
     chunk_size: int,
     num_seqs: int,
     seq_len: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-           torch.Tensor, torch.Tensor, int, int, float, int, int, int]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int, float, int,
+           int, int]:
     """Preprocessing stage of chunk GDR: head repeat, l2norm, flatten, cumsum.
 
     Returns (qf, kf, vf, bf, g_cumsum, init_state,
              H, num_chunks, scale, Kdim, Vdim, S).
     """
-    B, T, H, Kdim = q.shape
+    _, _, H, Kdim = q.shape
     _, _, HV, Vdim = v.shape
     device = q.device
 
@@ -49,11 +47,10 @@ def hpu_chunk_gdr_preprocess(
             k = k.repeat_interleave(repeat, dim=2)
             H = HV
         else:
-            raise ValueError(
-                f"Unsupported head mapping: q/k heads={H}, value heads={HV}.")
+            raise ValueError(f"Unsupported head mapping: q/k heads={H}, value heads={HV}.")
 
     if scale is None:
-        scale = k.shape[-1] ** -0.5
+        scale = k.shape[-1]**-0.5
 
     if use_qk_l2norm_in_kernel:
         q = _l2norm_last_dim(q.to(torch.float32))
@@ -74,8 +71,7 @@ def hpu_chunk_gdr_preprocess(
     padded_len = num_chunks * chunk_size
     if padded_len > seq_len:
         g_block = g_active.reshape(S, seq_len, -1)
-        pad_block = torch.zeros(S, padded_len - seq_len, gf.shape[1],
-                                dtype=gf.dtype, device=device)
+        pad_block = torch.zeros(S, padded_len - seq_len, gf.shape[1], dtype=gf.dtype, device=device)
         g_block = torch.cat([g_block, pad_block], dim=1)
     else:
         g_block = g_active.reshape(S, seq_len, -1)
@@ -84,14 +80,12 @@ def hpu_chunk_gdr_preprocess(
     g_cumsum = g_cumsum_block.reshape(S, -1, gf.shape[1])[:, :seq_len, :].reshape(-1, gf.shape[1])
 
     if initial_state is None:
-        init_state = torch.zeros(
-            (S, H, Vdim, Kdim), dtype=torch.float32, device=device)
+        init_state = torch.zeros((S, H, Vdim, Kdim), dtype=torch.float32, device=device)
     else:
         init_state = initial_state.to(torch.float32)
 
-    return (qf[:total_tokens], kf[:total_tokens], vf[:total_tokens],
-            bf[:total_tokens], g_cumsum, init_state,
-            H, num_chunks, scale, Kdim, Vdim, S)
+    return (qf[:total_tokens], kf[:total_tokens], vf[:total_tokens], bf[:total_tokens], g_cumsum, init_state, H,
+            num_chunks, scale, Kdim, Vdim, S)
 
 
 def hpu_chunk_gdr_phase_a(
@@ -107,8 +101,7 @@ def hpu_chunk_gdr_phase_a(
     H: int,
     Kdim: int,
     Vdim: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor,
-           torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Phase A: batched stages 2-4 for ALL chunks at once.
 
     Returns (u_all, w_all, q_chunks, k_chunks, g_chunks).
@@ -150,8 +143,7 @@ def hpu_chunk_gdr_phase_a(
 
     # Stage 2: chunk_scaled_dot_kkt
     dot = torch.bmm(k_flat, k_flat.transpose(1, 2))
-    coeff = b_flat.unsqueeze(-1) * torch.exp(
-        g_flat.unsqueeze(-1) - g_flat.unsqueeze(-2))
+    coeff = b_flat.unsqueeze(-1) * torch.exp(g_flat.unsqueeze(-1) - g_flat.unsqueeze(-2))
     a_lower = torch.tril(dot * coeff, diagonal=-1)
     lmat = eye.unsqueeze(0) + a_lower
 
@@ -199,9 +191,17 @@ def hpu_chunk_gdr_phase_b(
 
     for ci in range(num_chunks):
         out_all[:, ci], states = _phase_b_step(
-            u_all[:, ci], w_all[:, ci], k_chunks[:, ci],
-            g_chunks[:, ci], q_chunks[:, ci], states,
-            scale, S, H, Kdim, Vdim,
+            u_all[:, ci],
+            w_all[:, ci],
+            k_chunks[:, ci],
+            g_chunks[:, ci],
+            q_chunks[:, ci],
+            states,
+            scale,
+            S,
+            H,
+            Kdim,
+            Vdim,
         )
 
     out = out_all.reshape(S, padded_len, H, Vdim)[:, :seq_len, :, :].reshape(-1, H, Vdim)
@@ -214,12 +214,12 @@ def hpu_chunk_gdr_phase_b(
 
 
 def _phase_b_step(
-    u_c: torch.Tensor,      # [S, tc, H, V]
-    w_c: torch.Tensor,      # [S, tc, H, K]
-    k_c: torch.Tensor,      # [S, tc, H, K]
-    g_c: torch.Tensor,      # [S, tc, H]
-    q_c: torch.Tensor,      # [S, tc, H, K]
-    states: torch.Tensor,   # [S, H, V, K]
+    u_c: torch.Tensor,  # [S, tc, H, V]
+    w_c: torch.Tensor,  # [S, tc, H, K]
+    k_c: torch.Tensor,  # [S, tc, H, K]
+    g_c: torch.Tensor,  # [S, tc, H]
+    q_c: torch.Tensor,  # [S, tc, H, K]
+    states: torch.Tensor,  # [S, H, V, K]
     scale: float,
     S: int,
     H: int,
@@ -236,16 +236,14 @@ def _phase_b_step(
     tc = g_c.shape[1]
 
     # Stage 5: state update (batched across S)
-    h_start = states.clone()     # [S, H, V, K]
+    h_start = states.clone()  # [S, H, V, K]
     v_new_c = u_c - torch.einsum("sthk,shvk->sthv", w_c, h_start)
 
-    g_last = g_c[:, -1:, :]     # [S, 1, H]
+    g_last = g_c[:, -1:, :]  # [S, 1, H]
     decay = torch.exp(g_last - g_c)  # [S, tc, H]
     val_state = v_new_c * decay.unsqueeze(-1)  # [S, tc, H, V]
-    new_states = (
-        h_start * torch.exp(g_last.permute(0, 2, 1)).unsqueeze(-1)
-        + torch.einsum("sthv,sthk->shvk", val_state, k_c)
-    )
+    new_states = (h_start * torch.exp(g_last.permute(0, 2, 1)).unsqueeze(-1) +
+                  torch.einsum("sthv,sthk->shvk", val_state, k_c))
 
     # Stage 6: output computation — merge S*H for bmm
     SH = S * H
@@ -267,11 +265,11 @@ def _phase_b_step(
 
 
 def _chunk_precomputed_pipeline(
-    qf: torch.Tensor,       # [total_tokens, H, K]
-    kf: torch.Tensor,       # [total_tokens, H, K]
-    vf: torch.Tensor,       # [total_tokens, H, V]
+    qf: torch.Tensor,  # [total_tokens, H, K]
+    kf: torch.Tensor,  # [total_tokens, H, K]
+    vf: torch.Tensor,  # [total_tokens, H, V]
     g_cumsum: torch.Tensor,  # [total_tokens, H]
-    bf: torch.Tensor,       # [total_tokens, H]
+    bf: torch.Tensor,  # [total_tokens, H]
     init_state: torch.Tensor,  # [S, H, V, K]
     seq_ranges: list[tuple[int, int]],
     chunk_size: int,
@@ -344,22 +342,22 @@ def _chunk_precomputed_pipeline(
 
     # Stage 2: chunk_scaled_dot_kkt — all S*C*H chunks at once
     dot = torch.bmm(k_flat, k_flat.transpose(1, 2))  # [SC*H, tc, tc]
-    coeff = b_flat.unsqueeze(-1) * torch.exp(
-        g_flat.unsqueeze(-1) - g_flat.unsqueeze(-2)
-    )
+    coeff = b_flat.unsqueeze(-1) * torch.exp(g_flat.unsqueeze(-1) - g_flat.unsqueeze(-2))
     a_lower = torch.tril(dot * coeff, diagonal=-1)
     lmat = eye.unsqueeze(0) + a_lower
 
     # Stage 3: solve_tril — all S*C*H at once (Neumann or forward-sub)
     A_solve = _hpu_solve_lower_triangular_batched(
-        lmat, eye, use_vectorized=True,
+        lmat,
+        eye,
+        use_vectorized=True,
     )
 
     # Stage 4: recompute u, w — all S*C*H at once
-    rhs_u = v_flat * b_flat.unsqueeze(-1)                          # [SC*H, tc, V]
-    rhs_w = k_flat * (b_flat * torch.exp(g_flat)).unsqueeze(-1)    # [SC*H, tc, K]
-    u_flat = torch.bmm(A_solve, rhs_u)                             # [SC*H, tc, V]
-    w_flat = torch.bmm(A_solve, rhs_w)                             # [SC*H, tc, K]
+    rhs_u = v_flat * b_flat.unsqueeze(-1)  # [SC*H, tc, V]
+    rhs_w = k_flat * (b_flat * torch.exp(g_flat)).unsqueeze(-1)  # [SC*H, tc, K]
+    u_flat = torch.bmm(A_solve, rhs_u)  # [SC*H, tc, V]
+    w_flat = torch.bmm(A_solve, rhs_w)  # [SC*H, tc, K]
 
     # Reshape precomputed results to [S, num_chunks, tc, H, dim]
     u_all = u_flat.reshape(SC, H, tc, Vdim).permute(0, 2, 1, 3).reshape(S, num_chunks, tc, H, Vdim)
@@ -376,9 +374,17 @@ def _chunk_precomputed_pipeline(
 
     for ci in range(num_chunks):
         out_all[:, ci], states = _phase_b_step(
-            u_all[:, ci], w_all[:, ci], k_chunks[:, ci],
-            g_chunks[:, ci], q_all[:, ci], states,
-            scale, S, H, Kdim, Vdim,
+            u_all[:, ci],
+            w_all[:, ci],
+            k_chunks[:, ci],
+            g_chunks[:, ci],
+            q_all[:, ci],
+            states,
+            scale,
+            S,
+            H,
+            Kdim,
+            Vdim,
         )
 
     # --- Scatter output back to flat [total_tokens, H, V] ---
@@ -392,31 +398,31 @@ def _chunk_precomputed_pipeline(
 
 
 def _chunk_vectorized_body(
-    q_chunk: torch.Tensor,   # [Tc, H, K]
-    k_chunk: torch.Tensor,   # [Tc, H, K]
-    v_chunk: torch.Tensor,   # [Tc, H, V]
-    g_chunk: torch.Tensor,   # [Tc, H]
-    beta_chunk: torch.Tensor,# [Tc, H]
-    state: torch.Tensor,     # [H, V, K]
-    eye: torch.Tensor,       # [Tc, Tc]
+    q_chunk: torch.Tensor,  # [Tc, H, K]
+    k_chunk: torch.Tensor,  # [Tc, H, K]
+    v_chunk: torch.Tensor,  # [Tc, H, V]
+    g_chunk: torch.Tensor,  # [Tc, H]
+    beta_chunk: torch.Tensor,  # [Tc, H]
+    state: torch.Tensor,  # [H, V, K]
+    eye: torch.Tensor,  # [Tc, Tc]
     scale: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compilable vectorized chunk body for hpu_chunk_gated_delta_rule.
 
     Returns (out_chunk [Tc, H, V], new_state [H, V, K]).
     """
-    k_h = k_chunk.permute(1, 0, 2).contiguous()      # [H, Tc, K]
-    g_h = g_chunk.transpose(0, 1).contiguous()        # [H, Tc]
+    k_h = k_chunk.permute(1, 0, 2).contiguous()  # [H, Tc, K]
+    g_h = g_chunk.transpose(0, 1).contiguous()  # [H, Tc]
     beta_h = beta_chunk.transpose(0, 1).contiguous()  # [H, Tc]
 
     dot = torch.bmm(k_h, k_h.transpose(1, 2))
-    coeff = beta_h.unsqueeze(-1) * torch.exp(
-        g_h.unsqueeze(-1) - g_h.unsqueeze(-2)
-    )
+    coeff = beta_h.unsqueeze(-1) * torch.exp(g_h.unsqueeze(-1) - g_h.unsqueeze(-2))
     a_lower = torch.tril(dot * coeff, diagonal=-1)
     lmat = eye.unsqueeze(0) + a_lower
     A_solve = _hpu_solve_lower_triangular_batched(
-        lmat, eye, use_vectorized=True,
+        lmat,
+        eye,
+        use_vectorized=True,
     )
 
     rhs_u = v_chunk.permute(1, 0, 2).contiguous() * beta_h.unsqueeze(-1)
@@ -434,10 +440,8 @@ def _chunk_vectorized_body(
     g_last_tc_h = g_chunk[-1:, :]  # [1, H]
     decay_tc_h = torch.exp(g_last_tc_h - g_chunk)
     val_state = v_new_chunk * decay_tc_h.reshape(tc, H, 1)
-    new_state = (
-        h_start * torch.exp(g_last_tc_h[0]).reshape(H, 1, 1)
-        + torch.einsum("thv,thk->hvk", val_state, k_chunk)
-    )
+    new_state = (h_start * torch.exp(g_last_tc_h[0]).reshape(H, 1, 1) +
+                 torch.einsum("thv,thk->hvk", val_state, k_chunk))
 
     q_h = q_chunk.permute(1, 0, 2).contiguous()
     v_new_h = v_new_chunk.permute(1, 0, 2).contiguous()
@@ -448,22 +452,22 @@ def _chunk_vectorized_body(
     g_h_r = g_h.reshape(H, 1, tc)
     attn_h = attn_h * torch.exp(g_h_l - g_h_r)
     attn_h = torch.tril(attn_h)
-    out_chunk = (
-        base_h + torch.bmm(attn_h, v_new_h)
-    ).permute(1, 0, 2) * scale
+    out_chunk = (base_h + torch.bmm(attn_h, v_new_h)).permute(1, 0, 2) * scale
 
     return out_chunk, new_state
 
 
 def _recurrent_timestep_body(
-    q_t: torch.Tensor,     # [H, K]
-    k_t: torch.Tensor,     # [H, K]
-    v_t: torch.Tensor,     # [HV, V]
-    g_t: torch.Tensor,     # [HV]
-    b_t: torch.Tensor,     # [HV]
-    h_state: torch.Tensor, # [HV, V, K]
+    q_t: torch.Tensor,  # [H, K]
+    k_t: torch.Tensor,  # [H, K]
+    v_t: torch.Tensor,  # [HV, V]
+    g_t: torch.Tensor,  # [HV]
+    b_t: torch.Tensor,  # [HV]
+    h_state: torch.Tensor,  # [HV, V, K]
     scale: float,
-    HV: int, H: int, Kdim: int,
+    HV: int,
+    H: int,
+    Kdim: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compilable per-timestep body for hpu_fused_recurrent_gated_delta_rule.
 
@@ -528,12 +532,13 @@ def _hpu_solve_lower_triangular_batched(
     result[:, 0, :] = eye[0, :].unsqueeze(0)
     for j in range(1, n):
         # result[:, j] = eye[j] - lflat[:, j, :j] @ result[:, :j]
-        prev = result[:, :j, :]                     # [B, j, N]
-        l_row = lflat[:, j:j+1, :j]                 # [B, 1, j]
-        correction = torch.bmm(l_row, prev)          # [B, 1, N]
-        result[:, j:j+1, :] = eye[j, :].unsqueeze(0).unsqueeze(0) - correction
+        prev = result[:, :j, :]  # [B, j, N]
+        l_row = lflat[:, j:j + 1, :j]  # [B, 1, j]
+        correction = torch.bmm(l_row, prev)  # [B, 1, N]
+        result[:, j:j + 1, :] = eye[j, :].unsqueeze(0).unsqueeze(0) - correction
 
     return result.reshape(lmat.shape)
+
 
 def _materialize_seq_ranges(cu_seqlens: torch.Tensor, total_tokens: int) -> list[tuple[int, int]]:
     """Convert cu_seqlens to safe [bos, eos) ranges on CPU.
@@ -623,7 +628,7 @@ def hpu_fused_recurrent_gated_delta_rule(
     if beta is None:
         beta = torch.ones_like(g)
     if scale is None:
-        scale = k.shape[-1] ** -0.5
+        scale = k.shape[-1]**-0.5
 
     # Shapes: q/k [B, T, H, K], v [B, T, HV, V], g/beta [B, T, HV]
     B, T, H, Kdim = q.shape
@@ -639,27 +644,22 @@ def hpu_fused_recurrent_gated_delta_rule(
             k = k.repeat_interleave(repeat, dim=2)
             H = HV
         else:
-            raise ValueError(
-                f"Unsupported head mapping in hpu_fused_recurrent_gated_delta_rule: "
-                f"q/k heads={H}, value heads={HV}. Expected HV % H == 0."
-            )
+            raise ValueError(f"Unsupported head mapping in hpu_fused_recurrent_gated_delta_rule: "
+                             f"q/k heads={H}, value heads={HV}. Expected HV % H == 0.")
 
     # --- Vectorized decode fast path (shape-only detection) ---
     # Detect all-single-token decode from shapes alone — NO device-to-host
     # sync and NO _materialize_seq_ranges call needed.
     #   (a) cu_seqlens has N+1 entries and T == N  → N seqs, 1 token each
     #   (b) cu_seqlens is None and T == 1          → B seqs, 1 token each
-    _all_single_token = (
-        (cu_seqlens is not None and B == 1 and cu_seqlens.shape[0] - 1 == T)
-        or (cu_seqlens is None and T == 1)
-    )
+    _all_single_token = ((cu_seqlens is not None and B == 1 and cu_seqlens.shape[0] - 1 == T)
+                         or (cu_seqlens is None and T == 1))
 
     if _all_single_token:
         num_seqs = cu_seqlens.shape[0] - 1 if cu_seqlens is not None else B
 
         if initial_state is None:
-            final_state = torch.zeros(
-                (num_seqs, HV, Vdim, Kdim), dtype=torch.float32, device=device)
+            final_state = torch.zeros((num_seqs, HV, Vdim, Kdim), dtype=torch.float32, device=device)
         else:
             final_state = initial_state if inplace_final_state else initial_state.clone()
 
@@ -678,37 +678,48 @@ def hpu_fused_recurrent_gated_delta_rule(
         # Use index_select / index_copy_ instead of advanced indexing for
         # better HPU graph performance (no implicit copies or graph breaks).
         if ssm_state_indices is not None:
-            sidx = ssm_state_indices.reshape(-1).to(
-                dtype=torch.long, device=device)
+            sidx = ssm_state_indices.reshape(-1).to(dtype=torch.long, device=device)
             h_batch = final_state.index_select(0, sidx).to(torch.float32)
         else:
             sidx = torch.arange(num_seqs, dtype=torch.long, device=device)
             h_batch = final_state.index_select(0, sidx).to(torch.float32)
 
         # Vectorized recurrent step — all N sequences in one pass.
-        q_s = qf * scale                                              # [N, H, K]
-        h_batch = h_batch * torch.exp(gf).unsqueeze(-1).unsqueeze(-1) # [N, HV, V, K]
-        k_exp = kf.unsqueeze(2)                                       # [N, H, 1, K]
-        proj = torch.sum(h_batch * k_exp, dim=-1)                     # [N, HV, V]
-        v_new = (vf - proj) * bf.unsqueeze(-1)                        # [N, HV, V]
-        h_batch = h_batch + v_new.unsqueeze(-1) * k_exp               # [N, HV, V, K]
-        out_batch = torch.sum(h_batch * q_s.unsqueeze(2), dim=-1)     # [N, HV, V]
+        q_s = qf * scale  # [N, H, K]
+        h_batch = h_batch * torch.exp(gf).unsqueeze(-1).unsqueeze(-1)  # [N, HV, V, K]
+        k_exp = kf.unsqueeze(2)  # [N, H, 1, K]
+        proj = torch.sum(h_batch * k_exp, dim=-1)  # [N, HV, V]
+        v_new = (vf - proj) * bf.unsqueeze(-1)  # [N, HV, V]
+        h_batch = h_batch + v_new.unsqueeze(-1) * k_exp  # [N, HV, V, K]
+        out_batch = torch.sum(h_batch * q_s.unsqueeze(2), dim=-1)  # [N, HV, V]
 
         # Scatter ONLY the N modified states back — no full-buffer round-trip.
         final_state.index_copy_(0, sidx, h_batch.to(final_state.dtype))
 
         out_result = out_batch.to(v.dtype)
-        if cu_seqlens is not None:
-            out_result = out_result.unsqueeze(0)
-        else:
-            out_result = out_result.view(B, T, HV, Vdim)
+        out_result = out_result.unsqueeze(0) if cu_seqlens is not None else out_result.view(B, T, HV, Vdim)
         return out_result, final_state
 
     # --- General (multi-token) fallback path ---
     return _recurrent_general_path(
-        q, k, v, g, beta, scale, initial_state, inplace_final_state,
-        cu_seqlens, ssm_state_indices, use_qk_l2norm_in_kernel,
-        B, T, H, HV, Kdim, Vdim, device,
+        q,
+        k,
+        v,
+        g,
+        beta,
+        scale,
+        initial_state,
+        inplace_final_state,
+        cu_seqlens,
+        ssm_state_indices,
+        use_qk_l2norm_in_kernel,
+        B,
+        T,
+        H,
+        HV,
+        Kdim,
+        Vdim,
+        device,
     )
 
 
@@ -725,7 +736,12 @@ def _recurrent_general_path(
     cu_seqlens: torch.LongTensor | None,
     ssm_state_indices: torch.Tensor | None,
     use_qk_l2norm_in_kernel: bool,
-    B: int, T: int, H: int, HV: int, Kdim: int, Vdim: int,
+    B: int,
+    T: int,
+    H: int,
+    HV: int,
+    Kdim: int,
+    Vdim: int,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """General multi-token recurrent path (Python loops, dynamo-disabled)."""
@@ -762,14 +778,9 @@ def _recurrent_general_path(
             dtype=torch.long,
             device=state_work.device,
         )
-        state_indices_valid = (
-            (state_indices_tensor >= 0)
-            & (state_indices_tensor < state_work.shape[0])
-        )
+        state_indices_valid = ((state_indices_tensor >= 0) & (state_indices_tensor < state_work.shape[0]))
 
-    num_state_indices = (
-        int(state_indices_tensor.shape[0]) if state_indices_tensor is not None else 0
-    )
+    num_state_indices = (int(state_indices_tensor.shape[0]) if state_indices_tensor is not None else 0)
     # trip count = num_seqs (batch bucket); recompile per batch bucket
     for seq_id, (bos, eos) in enumerate(seq_ranges):
         if eos <= bos:
@@ -788,9 +799,10 @@ def _recurrent_general_path(
         else:
             h_state = state_work[seq_id]
 
-        # trip count = padded_seq_len per sequence (seq bucket); recompile per seq bucket, 
+        # trip count = padded_seq_len per sequence (seq bucket); recompile per seq bucket,
         # worst one with 2k inputs, for loop 2k times
-        #TODO: vectorize this loop with a custom scan or by reshaping to [num_chunks, chunk_size, H] and doing a grouped cumsum with resets at chunk boundaries.
+        #TODO: vectorize this loop with a custom scan or by reshaping to
+        # [num_chunks, chunk_size, H] and doing a grouped cumsum with resets at chunk boundaries.
         for t in range(bos, eos):
             q_t = qf[t]
             k_t = kf[t]
@@ -803,8 +815,16 @@ def _recurrent_general_path(
                 k_t = _l2norm_last_dim(k_t)
 
             out_t, h_state = _recurrent_timestep_body(
-                q_t, k_t, v_t, g_t, b_t, h_state,
-                scale, HV, H, Kdim,
+                q_t,
+                k_t,
+                v_t,
+                g_t,
+                b_t,
+                h_state,
+                scale,
+                HV,
+                H,
+                Kdim,
             )
             out[t] = out_t
 
@@ -824,10 +844,7 @@ def _recurrent_general_path(
     final_state.copy_(state_work.to(final_state.dtype))
     out = out.to(v.dtype)
 
-    if cu_seqlens is not None:
-        out = out.unsqueeze(0)
-    else:
-        out = out.view(B, T, HV, Vdim)
+    out = out.unsqueeze(0) if cu_seqlens is not None else out.view(B, T, HV, Vdim)
 
     return out, final_state
 
@@ -867,31 +884,50 @@ def hpu_chunk_gated_delta_rule(
     # ---- Compile-friendly 3-stage path (HPU bucketed prefill) ----
     if prefill_num_seqs is not None and prefill_seq_len is not None \
             and prefill_num_seqs > 0:
-        (qf, kf, vf, bf, g_cumsum, init_state,
-         H_c, num_chunks, scale_c, Kdim_c, Vdim_c,
+        (qf, kf, vf, bf, g_cumsum, init_state, H_c, num_chunks, scale_c, Kdim_c, Vdim_c,
          S_c) = hpu_chunk_gdr_preprocess(
-            q=q, k=k, v=v, g=g, beta=beta,
-            scale=scale,
-            initial_state=initial_state,
-            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-            chunk_size=chunk_size,
-            num_seqs=prefill_num_seqs,
-            seq_len=prefill_seq_len,
-        )
+             q=q,
+             k=k,
+             v=v,
+             g=g,
+             beta=beta,
+             scale=scale,
+             initial_state=initial_state,
+             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+             chunk_size=chunk_size,
+             num_seqs=prefill_num_seqs,
+             seq_len=prefill_seq_len,
+         )
 
         u_all, w_all, q_chunks, k_chunks, g_chunks = hpu_chunk_gdr_phase_a(
-            qf, kf, vf, bf, g_cumsum,
+            qf,
+            kf,
+            vf,
+            bf,
+            g_cumsum,
             seq_len=prefill_seq_len,
             chunk_size=chunk_size,
-            S=S_c, num_chunks=num_chunks,
-            H=H_c, Kdim=Kdim_c, Vdim=Vdim_c,
+            S=S_c,
+            num_chunks=num_chunks,
+            H=H_c,
+            Kdim=Kdim_c,
+            Vdim=Vdim_c,
         )
 
         out, final_state = hpu_chunk_gdr_phase_b(
-            u_all, w_all, q_chunks, k_chunks, g_chunks,
-            init_state, scale_c,
-            S=S_c, num_chunks=num_chunks, seq_len=prefill_seq_len,
-            H=H_c, Kdim=Kdim_c, Vdim=Vdim_c,
+            u_all,
+            w_all,
+            q_chunks,
+            k_chunks,
+            g_chunks,
+            init_state,
+            scale_c,
+            S=S_c,
+            num_chunks=num_chunks,
+            seq_len=prefill_seq_len,
+            H=H_c,
+            Kdim=Kdim_c,
+            Vdim=Vdim_c,
             output_final_state=output_final_state,
         )
 
@@ -918,13 +954,11 @@ def hpu_chunk_gated_delta_rule(
             k = k.repeat_interleave(repeat, dim=2)
             H = HV
         else:
-            raise ValueError(
-                "Unsupported head mapping in hpu_chunk_gated_delta_rule: "
-                f"q/k heads={H}, value heads={HV}. Expected HV % H == 0."
-            )
+            raise ValueError("Unsupported head mapping in hpu_chunk_gated_delta_rule: "
+                             f"q/k heads={H}, value heads={HV}. Expected HV % H == 0.")
 
     if scale is None:
-        scale = k.shape[-1] ** -0.5
+        scale = k.shape[-1]**-0.5
 
     # Match upstream ChunkGatedDeltaRuleFunction behavior: normalize full
     # q/k tensors before the core chunk pipeline.
@@ -957,8 +991,7 @@ def hpu_chunk_gated_delta_rule(
         # If seq_len isn't divisible by chunk_size, pad the tail.
         padded_len = num_chunks * chunk_size
         if padded_len > seq_len:
-            pad = torch.zeros(num_seqs * (padded_len - seq_len), gf.shape[1],
-                              dtype=gf.dtype, device=gf.device)
+            pad = torch.zeros(num_seqs * (padded_len - seq_len), gf.shape[1], dtype=gf.dtype, device=gf.device)
             # Interleave pad after each sequence's tokens: reshape, cat, reshape.
             g_block = g_active.reshape(num_seqs, seq_len, -1)
             pad_block = pad.reshape(num_seqs, padded_len - seq_len, -1)
@@ -968,8 +1001,8 @@ def hpu_chunk_gated_delta_rule(
         g_block = g_block.reshape(num_seqs, num_chunks, chunk_size, -1)
         g_cumsum_block = torch.cumsum(g_block, dim=2)
         # Flatten back and write into g_cumsum (trim padding).
-        g_cumsum[:total_tokens] = g_cumsum_block.reshape(
-            num_seqs, -1, gf.shape[1])[:, :seq_len, :].reshape(-1, gf.shape[1])
+        g_cumsum[:total_tokens] = g_cumsum_block.reshape(num_seqs, -1,
+                                                         gf.shape[1])[:, :seq_len, :].reshape(-1, gf.shape[1])
     else:
         # Original loop path.
         # trip count = num_seqs (batch bucket); recompile per batch bucket
@@ -990,10 +1023,8 @@ def hpu_chunk_gated_delta_rule(
         )
     else:
         if initial_state.shape[0] != num_seqs:
-            raise ValueError(
-                "The number of initial states is expected to equal the number "
-                f"of input sequences ({num_seqs}), got {initial_state.shape[0]}."
-            )
+            raise ValueError("The number of initial states is expected to equal the number "
+                             f"of input sequences ({num_seqs}), got {initial_state.shape[0]}.")
         init_state = initial_state.to(torch.float32)
 
     out = torch.zeros((qf.shape[0], H, Vdim), dtype=torch.float32, device=device)
@@ -1017,9 +1048,7 @@ def hpu_chunk_gated_delta_rule(
     # Hardcoded to True (default). Was os.getenv("VLLM_GAUDI_GDN_CHUNK_VECTORIZED", "1").
     use_vectorized_chunk = True
 
-    _vectorize_seq_loop = (
-        use_vectorized_chunk and num_seqs > 0
-    )
+    _vectorize_seq_loop = (use_vectorized_chunk and num_seqs > 0)
 
     if _vectorize_seq_loop:
         # --- Precomputed pipeline: stages 2-4 batched, stages 5-6 sequential ---
@@ -1058,19 +1087,25 @@ def hpu_chunk_gated_delta_rule(
                 ce = min(cs + chunk_size, eos)
                 tc = ce - cs
 
-                q_chunk = qf[cs:ce]          # [Tc, H, K]
-                k_chunk = kf[cs:ce]          # [Tc, H, K]
-                v_chunk = vf[cs:ce]          # [Tc, H, V]
-                g_chunk = g_cumsum[cs:ce]    # [Tc, H]
-                beta_chunk = bf[cs:ce]       # [Tc, H]
+                q_chunk = qf[cs:ce]  # [Tc, H, K]
+                k_chunk = kf[cs:ce]  # [Tc, H, K]
+                v_chunk = vf[cs:ce]  # [Tc, H, V]
+                g_chunk = g_cumsum[cs:ce]  # [Tc, H]
+                beta_chunk = bf[cs:ce]  # [Tc, H]
 
                 if tc not in eye_cache:
                     eye_cache[tc] = torch.eye(tc, dtype=torch.float32, device=device)
 
                 if use_vectorized_chunk:
                     out[cs:ce], state = _chunk_vectorized_body(
-                        q_chunk, k_chunk, v_chunk, g_chunk, beta_chunk,
-                        state, eye_cache[tc], scale,
+                        q_chunk,
+                        k_chunk,
+                        v_chunk,
+                        g_chunk,
+                        beta_chunk,
+                        state,
+                        eye_cache[tc],
+                        scale,
                     )
                 else:
                     # Per-head reference path (list accumulation for HPU compat).
@@ -1095,10 +1130,7 @@ def hpu_chunk_gated_delta_rule(
                     w_list: list[torch.Tensor] = []
                     for h in range(H):
                         rhs_u = v_chunk[:, h, :] * beta_chunk[:, h:h + 1]
-                        rhs_w = (
-                            k_chunk[:, h, :]
-                            * (beta_chunk[:, h] * torch.exp(g_chunk[:, h]))[:, None]
-                        )
+                        rhs_w = (k_chunk[:, h, :] * (beta_chunk[:, h] * torch.exp(g_chunk[:, h]))[:, None])
                         u_list.append((A_solve[h] @ rhs_u).unsqueeze(1))
                         w_list.append((A_solve[h] @ rhs_w).unsqueeze(1))
                     u_chunk = torch.cat(u_list, dim=1)
@@ -1139,14 +1171,10 @@ def hpu_chunk_gated_delta_rule(
                 final_state[seq_id] = state
 
     out = out.to(q.dtype)
-    if cu_seqlens is not None:
-        out = out.unsqueeze(0)
-    else:
-        out = out.view(B, T, H, Vdim)
+    out = out.unsqueeze(0) if cu_seqlens is not None else out.view(B, T, H, Vdim)
 
     if final_state is None:
         return out, None
     if initial_state is not None:
         final_state = final_state.to(initial_state.dtype)
     return out, final_state
-

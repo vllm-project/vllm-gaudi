@@ -18,7 +18,6 @@ import lm_eval
 import numpy
 import yaml
 
-import vllm
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 RTOL = 0.06

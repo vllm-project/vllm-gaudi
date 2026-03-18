@@ -4,7 +4,6 @@ import contextlib
 import gc
 import math
 import os
-import time
 import queue
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Optional
@@ -296,25 +295,20 @@ class HPUWorker(WorkerBase):
         # that fit the HPU separate-allocation model.
         # NOTE: Only applies to GDN/linear_attention; standard Mamba2 + ATN
         # uses the raw shared buffer path and is left unchanged.
-        has_attn = any(isinstance(s, FullAttentionSpec)
-                       for s in kv_cache_spec.values())
-        has_gdn = any(isinstance(s, MambaSpec)
-                      and s.mamba_type in ("gdn_attention", "linear_attention")
-                      for s in kv_cache_spec.values())
+        has_attn = any(isinstance(s, FullAttentionSpec) for s in kv_cache_spec.values())
+        has_gdn = any(
+            isinstance(s, MambaSpec) and s.mamba_type in ("gdn_attention", "linear_attention")
+            for s in kv_cache_spec.values())
         if has_attn and has_gdn:
             # All specs share the same padded page_size_bytes after
             # HybridAttentionMambaModelConfig unification.
             padded_page = next(iter(kv_cache_spec.values())).page_size_bytes
             # Compute real (unpadded) page size for each spec type.
-            real_attn = next(
-                s.real_page_size_bytes for s in kv_cache_spec.values()
-                if isinstance(s, FullAttentionSpec))
+            real_attn = next(s.real_page_size_bytes for s in kv_cache_spec.values() if isinstance(s, FullAttentionSpec))
             real_mamba = next(
-                sum(math.prod(sh) * get_dtype_size(dt)
-                    for sh, dt in zip(s.shapes, s.dtypes))
+                sum(math.prod(sh) * get_dtype_size(dt) for sh, dt in zip(s.shapes, s.dtypes))
                 for s in kv_cache_spec.values()
-                if isinstance(s, MambaSpec)
-                and s.mamba_type in ("gdn_attention", "linear_attention"))
+                if isinstance(s, MambaSpec) and s.mamba_type in ("gdn_attention", "linear_attention"))
             total_real = real_attn + real_mamba
             if total_real > padded_page:
                 factor = padded_page / total_real
@@ -323,11 +317,8 @@ class HPUWorker(WorkerBase):
                     "HPU hybrid cache: reducing available KV cache "
                     "memory by %.1f%% (factor=%.3f) for separate "
                     "per-spec allocations (padded_page=%s, "
-                    "real_attn=%s, real_mamba=%s).",
-                    (1 - factor) * 100, factor,
-                    format_bytes(padded_page),
-                    format_bytes(real_attn),
-                    format_bytes(real_mamba))
+                    "real_attn=%s, real_mamba=%s).", (1 - factor) * 100, factor, format_bytes(padded_page),
+                    format_bytes(real_attn), format_bytes(real_mamba))
                 available = adjusted
 
         return available

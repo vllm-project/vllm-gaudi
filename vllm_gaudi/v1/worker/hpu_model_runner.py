@@ -403,8 +403,10 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
     if isinstance(model, HpuModelAdapter):
         model = model.model
 
-    mamba_like_arch = ["GraniteMoeHybridForCausalLM", "Qwen3_5MoeForConditionalGeneration", "Qwen3_5ForConditionalGeneration"]
-    if not any(arch in getattr(model.config, 'architectures', []) for arch in mamba_like_arch):  
+    mamba_like_arch = [
+        "GraniteMoeHybridForCausalLM", "Qwen3_5MoeForConditionalGeneration", "Qwen3_5ForConditionalGeneration"
+    ]
+    if not any(arch in getattr(model.config, 'architectures', []) for arch in mamba_like_arch):
         return
     mamba_like_layer = ['.mixer', '.linear_attn']
 
@@ -420,6 +422,7 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
             if layers is not None:
                 return layers[idx]
         return None
+
     # Iterate through all KV cache groups
     for group_idx, kv_group in enumerate(kv_cache_config.kv_cache_groups):
         # kv_group.layer_names contains strings like "model.layers.5.mixer"
@@ -437,8 +440,7 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
             elif 'linear_attn' in layer_name:
                 layer = _get_decoder_layer_by_idx(model, layer_idx)
                 if layer is not None and hasattr(layer, "linear_attn"):
-                    layer.linear_attn.cache_group_idx = torch.tensor(
-                        group_idx, dtype=torch.long, device="hpu")
+                    layer.linear_attn.cache_group_idx = torch.tensor(group_idx, dtype=torch.long, device="hpu")
 
 
 def maybe_set_chunked_attention_layers(model_runner):
@@ -473,14 +475,8 @@ def patch_qwen3_next_attention_for_hpu():
         #
         # Keep prompt/prefill on the original upstream path to avoid
         # impacting compile-heavy prompt/MoE cases.
-        is_decode_like = (
-            hidden_states is not None
-            and output is not None
-            and hidden_states.dim() == 3
-            and output.dim() == 3
-            and hidden_states.shape[1] == 1
-            and output.shape[1] == 1
-        )
+        is_decode_like = (hidden_states is not None and output is not None and hidden_states.dim() == 3
+                          and output.dim() == 3 and hidden_states.shape[1] == 1 and output.shape[1] == 1)
 
         if not is_decode_like:
             return orig_forward(self, positions, output, hidden_states)
@@ -489,9 +485,7 @@ def patch_qwen3_next_attention_for_hpu():
 
         gate = None
         if self.attn_output_gate:
-            q_gate, k, v = qkv.split(
-                [self.q_size * 2, self.kv_size, self.kv_size], dim=-1
-            )
+            q_gate, k, v = qkv.split([self.q_size * 2, self.kv_size, self.kv_size], dim=-1)
             orig_shape = q_gate.shape[:-1]
             q_gate = q_gate.view(*orig_shape, self.num_heads, -1)
             q, gate = torch.chunk(q_gate, 2, dim=-1)
@@ -499,16 +493,10 @@ def patch_qwen3_next_attention_for_hpu():
             q = q.reshape(*orig_shape, -1)
             gate = gate.reshape(*orig_shape, -1)
         else:
-            q, k, v = qkv.split(
-                [self.q_size, self.kv_size, self.kv_size], dim=-1
-            )
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view(
-            -1, self.num_heads * self.head_dim
-        )
-        k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view(
-            -1, self.num_kv_heads * self.head_dim
-        )
+        q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view(-1, self.num_heads * self.head_dim)
+        k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view(-1, self.num_kv_heads * self.head_dim)
 
         q, k = self.rotary_emb(positions, q, k)
 
@@ -517,6 +505,7 @@ def patch_qwen3_next_attention_for_hpu():
         attn_output_2d = attn_output.view(-1, attn_output.shape[-1])
 
         if self.attn_output_gate:
+            assert gate is not None
             gate_2d = torch.sigmoid(gate).view(-1, gate.shape[-1])
             attn_output_2d = attn_output_2d * gate_2d
 
@@ -534,10 +523,12 @@ def patch_qwen3_next_attention_for_hpu():
     qwen3_next.Qwen3NextAttention.forward = _forward_hpu_patched
     qwen3_next.Qwen3NextAttention._gaudi_multibatch_decode_patch = True
 
+
 def apply_model_specific_patches(model_runner):
     """The function applies model-specific monkey patches."""
     maybe_set_chunked_attention_layers(model_runner)
     patch_llama4_get_attn_scale(model_runner.model)
+
 
 def apply_model_patches_before_load(model_runner):
     import vllm.model_executor.models.qwen3_5 as qwen3_5
@@ -975,32 +966,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         mamba_like = ["mamba", "linear_attention"]
         self.num_mamba_like_layers = self.model_config.get_num_layers_by_block_type(self.parallel_config, "mamba")
-        
-        self.num_mamba_like_layers = sum(  
-            self.model_config.get_num_layers_by_block_type(self.parallel_config, block_type)   
-            for block_type in mamba_like  
-        )
+
+        self.num_mamba_like_layers = sum(
+            self.model_config.get_num_layers_by_block_type(self.parallel_config, block_type)
+            for block_type in mamba_like)
 
         hf_text_config = self.model_config.hf_text_config
-        self.mamba_chunk_size_is_explicit = (
-            self.num_mamba_like_layers > 0
-            and (
-                getattr(hf_text_config, "mamba_chunk_size", None) is not None
-                or getattr(hf_text_config, "chunk_size", None) is not None
-            )
-        )
+        self.mamba_chunk_size_is_explicit = (self.num_mamba_like_layers > 0
+                                             and (getattr(hf_text_config, "mamba_chunk_size", None) is not None
+                                                  or getattr(hf_text_config, "chunk_size", None) is not None))
 
         # For HPU GDN, use configured chunk size when explicitly provided;
         # otherwise default to 128 to match bucket alignment.
         if self.num_mamba_like_layers > 0:
-            self.mamba_chunk_size = (
-                self.model_config.get_mamba_chunk_size()
-                if self.mamba_chunk_size_is_explicit
-                else 128
-            )
+            self.mamba_chunk_size = (self.model_config.get_mamba_chunk_size()
+                                     if self.mamba_chunk_size_is_explicit else 128)
         else:
             self.mamba_chunk_size = 0
-       
+
         self.use_hybrid_cache = os.getenv('VLLM_USE_HYBRID_CACHE', 'false').strip().lower() in ("1", "true")
         self.use_naive_mamba_cache_sharing = os.getenv('VLLM_USE_NAIVE_MAMBA_CACHE_SHARING',
                                                        'true').strip().lower() in ("1", "true")
@@ -1917,8 +1900,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         block_size = self.attn_block_size if block_size is None else block_size
         last_block_usage = [slot[0] % block_size + 1 for slot in slot_mapping]
         block_groups = [[i] * len(bt) for i, bt in enumerate(block_tables)]
-        block_usage = [[block_size] * (len(bt) - 1) + [lbu] for bt, lbu in zip(block_tables, last_block_usage)
-                       if bt]
+        block_usage = [[block_size] * (len(bt) - 1) + [lbu] for bt, lbu in zip(block_tables, last_block_usage) if bt]
         block_list = flatten(block_tables)
         block_groups = flatten(block_groups)
         block_usage = flatten(block_usage)
@@ -2404,20 +2386,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         context_blocks_t: Optional[torch.tensor]
         context_blocks_t = async_h2d_copy(context_blocks, dtype=torch.int32).flatten() if target_blocks > 0 else None
 
-        attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
-            seq_lens_tensor=query_lens,
-            context_lens_tensor=context_lens,
-            slot_mapping=token_slots,
-            block_list=context_blocks_t,
-            attn_bias=attn_bias,
-            block_size=self.attn_block_size,
-            prep_initial_states=prep_initial_states,
-            has_initial_states_p=has_initial_states_p,
-            last_chunk_indices_p=last_chunk_indices_p,
-            state_indices_tensor=state_indices_tensor, 
-            query_start_loc=query_start_loc_p,
-            padding_mask_flat=padding_mask_flat
-        )
+        attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(seq_lens_tensor=query_lens,
+                                                                     context_lens_tensor=context_lens,
+                                                                     slot_mapping=token_slots,
+                                                                     block_list=context_blocks_t,
+                                                                     attn_bias=attn_bias,
+                                                                     block_size=self.attn_block_size,
+                                                                     prep_initial_states=prep_initial_states,
+                                                                     has_initial_states_p=has_initial_states_p,
+                                                                     last_chunk_indices_p=last_chunk_indices_p,
+                                                                     state_indices_tensor=state_indices_tensor,
+                                                                     query_start_loc=query_start_loc_p,
+                                                                     padding_mask_flat=padding_mask_flat)
         return PrefillInputData(request_ids=[req_ids],
                                 prompt_lens=[query_lens],
                                 token_ids=[token_ids],
@@ -2567,8 +2547,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # to compute this.
         block_number = torch.ones((padded_batch_size, num_tokens), dtype=torch.int32) * self._PAD_BLOCK_ID
         block_number[:num_decodes] = torch.gather(input=block_table_cpu_tensor,
-                              dim=1,
-                              index=(index // decode_block_size))
+                                                  dim=1,
+                                                  index=(index // decode_block_size))
         block_number.apply_(self.defragmenter.resolve)
 
         block_offsets = padded_index % decode_block_size
@@ -5115,7 +5095,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         block_ids = [[block_id] *
                      (round_up(total_tokens_for_blocks, g.kv_cache_spec.block_size) // g.kv_cache_spec.block_size)
                      for g in self.kv_cache_config.kv_cache_groups] if self.num_mamba_like_layers > 0 else [[block_id] *
-                                                                                                       num_blocks]
+                                                                                                            num_blocks]
         if self.is_pooling_model:
             model = cast(VllmModelForPooling, self.get_model())
             if hasattr(self.model_config, 'task') and self.model_config.task is not None:
@@ -5961,8 +5941,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             kernel_idx += 1
 
         selected_attn_kernel_sizes = [
-            kernel_block_size_by_gid[gid]
-            for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups)
+            kernel_block_size_by_gid[gid] for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups)
             if isinstance(kv_cache_group.kv_cache_spec, FullAttentionSpec)
         ]
         if selected_attn_kernel_sizes:
@@ -6028,8 +6007,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         kv_cache_tensor_size // kv_cache_spec.page_size_bytes
                     if isinstance(kv_cache_spec, FullAttentionSpec):
                         attn_kernel_block_size = kernel_block_size_by_gid[group_idx]
-                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1,
-                                                                              attn_kernel_block_size,
+                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, attn_kernel_block_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
                         # here attn does not share kv cache tensor, so we create separate tensors
@@ -6065,7 +6043,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         state_tensors = []
                         for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
                             numel_per_block = math.prod(shape)
-                            elem_size = raw.element_size()
                             target_dtype_size = get_dtype_size(dtype)
                             # view raw bf16 buffer as target dtype
                             raw_view = raw.view(dtype) if dtype != raw.dtype else raw
@@ -6080,8 +6057,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             stride_block = page_numel
                             full_stride = (stride_block, *stride_inner)
                             storage_offset = offset // target_dtype_size
-                            t = torch.as_strided(
-                                raw_view, target_shape, full_stride, storage_offset)
+                            t = torch.as_strided(raw_view, target_shape, full_stride, storage_offset)
                             state_tensors.append(t)
                             offset += numel_per_block * target_dtype_size
                         kv_caches[layer_name] = tuple(state_tensors)

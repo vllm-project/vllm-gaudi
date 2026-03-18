@@ -53,7 +53,6 @@ def _ensure_query_start_loc(query_start_loc: torch.Tensor) -> torch.Tensor:
     return query_start_loc.to(dtype=torch.int64)
 
 
-
 def _apply_activation(output: torch.Tensor, activation: str | None) -> torch.Tensor:
     if activation in {"silu", "swish"}:
         return torch.nn.functional.silu(output)
@@ -210,7 +209,7 @@ def hpu_causal_conv1d_fn(
     end = qsl[-1]
     idx = torch.arange(state_len, device=x.device) + end
     new_state = seq_input.index_select(dim=1, index=idx)
-    
+
     # Manual depthwise conv1d: replaces F.conv1d(groups=dim) which can
     # trigger synStatus 26 in Synapse recipe compilation under FP8 TC.
     # Loop is statically unrolled by torch.compile (width is a Python int).
@@ -335,8 +334,6 @@ def hpu_causal_conv1d_fn_update(
             raise ValueError("'cache_indices' must align with the batch dimension implied by 'query_start_loc'.")
         if has_initial_state is not None and has_initial_state.numel() != padded_batch:
             raise ValueError("'has_initial_state' must align with 'query_start_loc'.")
-
-    out = torch.zeros_like(x_work)
 
     # Get cache indices
     if cache_indices is None:

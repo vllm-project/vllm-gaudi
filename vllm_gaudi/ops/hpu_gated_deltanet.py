@@ -6,12 +6,12 @@ from vllm.distributed import tensor_model_parallel_all_gather
 
 from vllm.forward_context import get_forward_context
 
-
 from vllm_gaudi.ops.causal_conv1d_pytorch import (
     hpu_causal_conv1d_fn,
     hpu_causal_conv1d_update,
 )
 from vllm_gaudi.ops.hpu_gdn_pytorch import (
+    hpu_chunk_gdr_phase_b,
     hpu_chunk_gated_delta_rule,
     hpu_fused_gdn_gating,
     hpu_fused_recurrent_gated_delta_rule,
@@ -28,14 +28,10 @@ def _hpu_qwen3next_sparse_moe_forward(self, hidden_states: torch.Tensor) -> torc
         hidden_states = sequence_parallel_chunk(hidden_states)
 
     if self.experts.is_internal_router:
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=hidden_states
-        )
+        final_hidden_states = self.experts(hidden_states=hidden_states, router_logits=hidden_states)
     else:
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
-        )
+        final_hidden_states = self.experts(hidden_states=hidden_states, router_logits=router_logits)
 
     if self.shared_expert is not None:
         final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
@@ -44,9 +40,7 @@ def _hpu_qwen3next_sparse_moe_forward(self, hidden_states: torch.Tensor) -> torc
         final_hidden_states = tensor_model_parallel_all_gather(final_hidden_states, 0)
         final_hidden_states = final_hidden_states[:num_tokens]
     elif self.tp_size > 1:
-        final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
-            final_hidden_states
-        )
+        final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
 
     return final_hidden_states.reshape(orig_shape)
 
@@ -57,6 +51,7 @@ if not getattr(Qwen3NextSparseMoeBlock, "_hpu_shape_patch_applied", False):
 
 
 class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Assigned by model runner per KV cache group for hybrid GDN models.
@@ -66,18 +61,10 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         # Use configured chunk size when explicitly set; otherwise default to
         # 128 to match HPU prompt bucket alignment.
         hf_text_config = getattr(self.model_config, "hf_text_config", None)
-        has_explicit_chunk_size = (
-            hf_text_config is not None
-            and (
-                getattr(hf_text_config, "mamba_chunk_size", None) is not None
-                or getattr(hf_text_config, "chunk_size", None) is not None
-            )
-        )
-        self.mamba_chunk_size = (
-            self.model_config.get_mamba_chunk_size()
-            if has_explicit_chunk_size
-            else 128
-        )
+        has_explicit_chunk_size = (hf_text_config is not None
+                                   and (getattr(hf_text_config, "mamba_chunk_size", None) is not None
+                                        or getattr(hf_text_config, "chunk_size", None) is not None))
+        self.mamba_chunk_size = (self.model_config.get_mamba_chunk_size() if has_explicit_chunk_size else 128)
 
     def rearrange_mixed_qkv(self, mixed_qkv):
         """Pure-torch override — avoids einops + map/lambda graph breaks."""
@@ -114,10 +101,8 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         # ============================================================
         # Metadata extraction — dynamo graph-breaks naturally here
         # ============================================================
-        (is_prompt, conv_state, ssm_state, state_indices,
-         query_start_loc, has_initial_state, padding_mask_flat,
-         num_decodes, mamba_block_size,
-         prefill_num_seqs, prefill_seq_len,
+        (is_prompt, conv_state, ssm_state, state_indices, query_start_loc, has_initial_state, padding_mask_flat,
+         num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len,
          initial_state) = self._extract_metadata(num_tokens)
 
         # ============================================================
@@ -148,20 +133,17 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             # ========================================================
             if padding_mask_flat is not None \
                     and padding_mask_flat.numel() == num_tokens:
-                token_mask_flat = padding_mask_flat.view(-1, 1).to(
-                    dtype=mixed_qkv.dtype)
+                token_mask_flat = padding_mask_flat.view(-1, 1).to(dtype=mixed_qkv.dtype)
                 mixed_qkv = mixed_qkv * token_mask_flat
                 b = b * token_mask_flat
                 a = a * token_mask_flat
             else:
                 token_mask_flat = None
 
-            g, beta = hpu_fused_gdn_gating(
-                self.A_log, a, b, self.dt_bias)
+            g, beta = hpu_fused_gdn_gating(self.A_log, a, b, self.dt_bias)
 
             # Causal conv1d (prefill path)
-            conv_weights = self.conv1d.weight.view(
-                self.conv1d.weight.size(0), self.conv1d.weight.size(2))
+            conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
             mixed_qkv_conv = hpu_causal_conv1d_fn(
                 x=mixed_qkv.transpose(0, 1),
                 weight=conv_weights,
@@ -188,14 +170,17 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
             # Apply token mask to gating
             if token_mask_flat is not None:
-                token_mask_h = token_mask_flat.view(1, -1, 1).to(
-                    dtype=g.dtype)
+                token_mask_h = token_mask_flat.view(1, -1, 1).to(dtype=g.dtype)
                 g = g * token_mask_h
                 beta = beta * token_mask_h
 
             # ---- Chunk recurrence (COMPILED via 3-stage split) ----
             core_attn_out_result, final_state = hpu_chunk_gated_delta_rule(
-                q=query, k=key, v=value, g=g, beta=beta,
+                q=query,
+                k=key,
+                v=value,
+                g=g,
+                beta=beta,
                 initial_state=initial_state,
                 output_final_state=True,
                 use_qk_l2norm_in_kernel=True,
@@ -205,10 +190,9 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             )
 
             # Write back cache
-            ssm_state.index_copy_(
-                0, state_indices,
-                final_state.to(device=ssm_state.device,
-                               dtype=ssm_state.dtype))
+            assert final_state is not None
+
+            ssm_state.index_copy_(0, state_indices, final_state.to(device=ssm_state.device, dtype=ssm_state.dtype))
 
             # Copy output
             non_spec_out = core_attn_out_result.squeeze(0)
@@ -219,20 +203,17 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             # Part 2b: Decode — COMPILED (all pure tensor ops)
             # ========================================================
             # Gating
-            g, beta = hpu_fused_gdn_gating(
-                self.A_log, a, b, self.dt_bias)
+            g, beta = hpu_fused_gdn_gating(self.A_log, a, b, self.dt_bias)
 
             # Conv1d update
-            conv_weights = self.conv1d.weight.view(
-                self.conv1d.weight.size(0), self.conv1d.weight.size(2))
+            conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
             mixed_qkv_conv = hpu_causal_conv1d_update(
                 x=mixed_qkv,
                 conv_state=conv_state,
                 weight=conv_weights,
                 bias=self.conv1d.bias,
                 activation=self.activation,
-                conv_state_indices=state_indices[:num_decodes]
-                if state_indices is not None else state_indices,
+                conv_state_indices=state_indices[:num_decodes] if state_indices is not None else state_indices,
                 block_idx_last_scheduled_token=None,
                 initial_state_idx=None,
                 query_start_loc=query_start_loc,
@@ -251,8 +232,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 beta=beta,
                 initial_state=ssm_state,
                 inplace_final_state=True,
-                cu_seqlens=query_start_loc[:num_decodes + 1]
-                if query_start_loc is not None else None,
+                cu_seqlens=query_start_loc[:num_decodes + 1] if query_start_loc is not None else None,
                 ssm_state_indices=state_indices,
                 use_qk_l2norm_in_kernel=True,
             )
@@ -284,6 +264,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         if non_spec_state_indices_tensor is not None \
                 and non_spec_state_indices_tensor.dim() > 1:
             cache_group_idx = self.cache_group_idx
+            assert cache_group_idx is not None
             non_spec_state_indices_tensor = \
                 non_spec_state_indices_tensor.index_select(
                     0, cache_group_idx.view(1)
@@ -301,8 +282,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
-            return (False, None, None, None, None, None, None, 0, 0,
-                    0, 0, None)
+            return (False, None, None, None, None, None, None, 0, 0, 0, 0, None)
 
         is_prompt = bool(getattr(attn_metadata, "is_prompt", False))
         state_indices = self._resolve_state_indices(attn_metadata)
@@ -316,11 +296,8 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         padding_mask_flat = getattr(attn_metadata, "padding_mask_flat", None)
 
         if not is_prompt:
-            num_decodes = (
-                state_indices.numel() if state_indices is not None
-                else (query_start_loc.numel() - 1
-                      if query_start_loc is not None
-                      else num_tokens))
+            num_decodes = (state_indices.numel() if state_indices is not None else
+                           (query_start_loc.numel() - 1 if query_start_loc is not None else num_tokens))
         else:
             num_decodes = 0
 
@@ -337,33 +314,52 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             if has_initial_state is not None:
                 initial_state[~has_initial_state.bool(), ...] = 0
 
-        return (is_prompt, conv_state, ssm_state, state_indices,
-                query_start_loc, has_initial_state, padding_mask_flat,
-                num_decodes, mamba_block_size,
-                prefill_num_seqs, prefill_seq_len, initial_state)
+        return (is_prompt, conv_state, ssm_state, state_indices, query_start_loc, has_initial_state, padding_mask_flat,
+                num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state)
 
     @torch._dynamo.disable
     def _forward_prefill_phase_b_only(
         self,
-        u_all, w_all, q_chunks, k_chunks, g_chunks,
-        init_state, scale_c,
-        S_c, num_chunks, seq_len,
-        H_c, Kdim_c, Vdim_c,
-        core_attn_out, ssm_state, state_indices,
+        u_all,
+        w_all,
+        q_chunks,
+        k_chunks,
+        g_chunks,
+        init_state,
+        scale_c,
+        S_c,
+        num_chunks,
+        seq_len,
+        H_c,
+        Kdim_c,
+        Vdim_c,
+        core_attn_out,
+        ssm_state,
+        state_indices,
     ) -> None:
         """Phase B only (eager). Phase A is now compiled."""
         # Phase B: sequential loop stages 5-6
         out, final_state = hpu_chunk_gdr_phase_b(
-            u_all, w_all, q_chunks, k_chunks, g_chunks,
-            init_state, scale_c,
-            S=S_c, num_chunks=num_chunks, seq_len=seq_len,
-            H=H_c, Kdim=Kdim_c, Vdim=Vdim_c,
+            u_all,
+            w_all,
+            q_chunks,
+            k_chunks,
+            g_chunks,
+            init_state,
+            scale_c,
+            S=S_c,
+            num_chunks=num_chunks,
+            seq_len=seq_len,
+            H=H_c,
+            Kdim=Kdim_c,
+            Vdim=Vdim_c,
             output_final_state=True,
         )
 
         # Write back cache
-        ssm_state[state_indices] = final_state.to(
-            device=ssm_state.device, dtype=ssm_state.dtype)
+        assert final_state is not None
+
+        ssm_state[state_indices] = final_state.to(device=ssm_state.device, dtype=ssm_state.dtype)
 
         # Copy output — out is [total_tokens, H, V], need [T, H, V]
         out_squeezed = out.to(core_attn_out.dtype)
@@ -403,13 +399,15 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             use_qk_l2norm_in_kernel=True,
             chunk_size=self.mamba_chunk_size,
             prefill_num_seqs=int(state_indices.numel()),
-            prefill_seq_len=query.shape[1] // int(state_indices.numel())
-            if int(state_indices.numel()) > 0 else 0,
+            prefill_seq_len=query.shape[1] // int(state_indices.numel()) if int(state_indices.numel()) > 0 else 0,
         )
 
         # Write back cache
+        assert last_recurrent_state is not None
+
         ssm_state[state_indices] = last_recurrent_state.to(
-            device=ssm_state.device, dtype=ssm_state.dtype,
+            device=ssm_state.device,
+            dtype=ssm_state.dtype,
         )
 
         # Copy output
@@ -447,14 +445,11 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 (num_rows + 1) * padded_seq_len,
                 padded_seq_len,
                 device=mixed_qkv.device,
-                dtype=query_start_loc.dtype
-                if query_start_loc is not None else torch.int32,
+                dtype=query_start_loc.dtype if query_start_loc is not None else torch.int32,
             )
 
         # 1. Causal conv1d (prefill path)
-        conv_weights = self.conv1d.weight.view(
-            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
-        )
+        conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
         mamba_block_size = self.cache_config.mamba_block_size
 
         mixed_qkv_conv = hpu_causal_conv1d_fn(
@@ -505,8 +500,11 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         )
 
         # 5. Write back cache
+        assert last_recurrent_state is not None
+
         ssm_state[state_indices] = last_recurrent_state.to(
-            device=ssm_state.device, dtype=ssm_state.dtype,
+            device=ssm_state.device,
+            dtype=ssm_state.dtype,
         )
 
         # 6. Copy output
@@ -537,8 +535,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         # Padding mask for bucket-padded prefill
         if padding_mask_flat is not None \
                 and padding_mask_flat.numel() == num_tokens:
-            token_mask_flat = padding_mask_flat.view(-1, 1).to(
-                dtype=mixed_qkv.dtype)
+            token_mask_flat = padding_mask_flat.view(-1, 1).to(dtype=mixed_qkv.dtype)
             mixed_qkv = mixed_qkv * token_mask_flat
             b = b * token_mask_flat
             a = a * token_mask_flat
@@ -558,14 +555,11 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 (num_rows + 1) * padded_seq_len,
                 padded_seq_len,
                 device=mixed_qkv.device,
-                dtype=query_start_loc.dtype
-                if query_start_loc is not None else torch.int32,
+                dtype=query_start_loc.dtype if query_start_loc is not None else torch.int32,
             )
 
         # 1. Causal conv1d (prefill path)
-        conv_weights = self.conv1d.weight.view(
-            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
-        )
+        conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
         mamba_block_size = self.cache_config.mamba_block_size
 
         mixed_qkv_conv = hpu_causal_conv1d_fn(
@@ -616,8 +610,11 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         )
 
         # 5. Write back cache
+        assert last_recurrent_state is not None
+
         ssm_state[state_indices] = last_recurrent_state.to(
-            device=ssm_state.device, dtype=ssm_state.dtype,
+            device=ssm_state.device,
+            dtype=ssm_state.dtype,
         )
 
         # 6. Copy output
