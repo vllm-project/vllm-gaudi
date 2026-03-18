@@ -4502,10 +4502,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def _use_graphs(self):
         return not self.model_config.enforce_eager
 
-    def _remove_duplicate_submodules(self):
+    def _get_model_layers(self):
+        """Return the decoder layers from the model, handling both
+        standard (model.model.layers) and multimodal
+        (model.language_model.model.layers) layouts."""
         model = self.get_model()
-        if hasattr(model, "model"):
-            for layer in self.get_model().model.layers:
+        inner = getattr(model, 'model', None)
+        if inner is None:
+            inner = getattr(model, 'language_model', None)
+            if inner is not None:
+                inner = getattr(inner, 'model', None)
+        if inner is None or not hasattr(inner, 'layers'):
+            return None
+        return inner.layers
+
+    def _remove_duplicate_submodules(self):
+        layers = self._get_model_layers()
+        if layers is not None:
+            for layer in layers:
                 if not hasattr(layer, "self_attn"):
                     continue
                 self_attn = layer.self_attn
@@ -4572,10 +4586,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             ):
                 setattr(module, name, bool(getattr(moe_config, name, False)))
 
-        model = self.get_model()
-        if not hasattr(model, "model"):
+        layers = self._get_model_layers()
+        if layers is None:
             return
-        for layer in model.model.layers:
+        for layer in layers:
             mlp = getattr(layer, 'mlp', None) or getattr(layer, 'feed_forward', None)
             if mlp is None:
                 continue
