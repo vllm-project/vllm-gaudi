@@ -6,13 +6,45 @@ from vllm_gaudi.platform import HpuPlatform
 
 
 def _uses_lmcache_connector() -> bool:
-    """Check if lmcache is configured as the KV connector via CLI args."""
+    """Check if lmcache is configured as the KV connector.
+
+    Detection is based on:
+    - Environment variables (for programmatic usage), and
+    - CLI args (for command-line usage via --kv-transfer-config).
+    """
+
+    def _is_lmcache_connector(connector_value: str) -> bool:
+        """Return True if the given connector string represents an LMCache connector."""
+        if not isinstance(connector_value, str):
+            return False
+        return "LMCache" in connector_value
+
+    # 1. Check env var that may mirror --kv-transfer-config JSON.
+    #    This supports programmatic workflows that configure KVTransferConfig
+    #    and then expose it via environment instead of CLI.
+    env_kv_config = os.getenv("VLLM_KV_TRANSFER_CONFIG")
+    if env_kv_config:
+        try:
+            config = json.loads(env_kv_config)
+            connector = config.get("kv_connector", "")
+            if _is_lmcache_connector(connector):
+                return True
+        except (json.JSONDecodeError, TypeError):
+            # Fall through to other detection mechanisms.
+            pass
+
+    # 2. Check a simple env var that may directly specify the connector name.
+    env_kv_connector = os.getenv("VLLM_KV_CONNECTOR")
+    if env_kv_connector and _is_lmcache_connector(env_kv_connector):
+        return True
+
+    # 3. Fallback: inspect CLI args for --kv-transfer-config as before.
     for i, arg in enumerate(sys.argv):
         if arg == "--kv-transfer-config" and i + 1 < len(sys.argv):
             try:
                 config = json.loads(sys.argv[i + 1])
                 connector = config.get("kv_connector", "")
-                return "LMCache" in connector
+                return _is_lmcache_connector(connector)
             except (json.JSONDecodeError, TypeError):
                 return False
     return False
