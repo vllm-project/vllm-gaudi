@@ -2,6 +2,13 @@ import torch
 import torch.nn.functional as F
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 
+# Cache for cu_seqlens → lens conversion to avoid repeated
+# .tolist() D2H syncs across attention layers (each sync ~0.35s).
+# A single vision encoder forward pass calls _forward_sdpa 27+ times
+# with the SAME cu_seqlens tensor — caching saves ~9s per bucket.
+_lens_cache_id = None
+_lens_cache_val = None
+
 
 @MMEncoderAttention.register_oot()
 class HpuMMEncoderAttention(MMEncoderAttention):
@@ -17,6 +24,7 @@ class HpuMMEncoderAttention(MMEncoderAttention):
         (batch_size x seq_len x hidden_size) or
         (batch_size x seq_len x num_heads x head_size)
         """
+        global _lens_cache_id, _lens_cache_val
         bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
 
@@ -53,7 +61,33 @@ class HpuMMEncoderAttention(MMEncoderAttention):
                                recompute_mode=True,
                                valid_sequence_lengths=None)
             else:
-                lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+                # Cache .tolist() result: all layers in one forward
+                # pass share the same cu_seqlens tensor object.
+                _cid = id(cu_seqlens)
+                if _lens_cache_id != _cid:
+                    _lens_cache_id = _cid
+                    _lens_cache_val = (
+                        cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+                lens = _lens_cache_val
+
+                # Handle padded tensors: if query is padded to a
+                # bucket size, the split dims won't match cu_seqlens.
+                # Add the padding remainder as an extra chunk.
+                seq_dim = query.shape[2]
+                total_len = sum(lens)
+                if total_len < seq_dim:
+                    lens = lens + [seq_dim - total_len]
+                elif total_len > seq_dim:
+                    # Truncate lens to fit (shouldn't happen normally)
+                    adjusted = []
+                    remaining = seq_dim
+                    for l in lens:
+                        if remaining <= 0:
+                            break
+                        adjusted.append(min(l, remaining))
+                        remaining -= adjusted[-1]
+                    lens = adjusted
+
                 q_chunks = torch.split(query, lens, dim=2)
                 k_chunks = torch.split(key, lens, dim=2)
                 v_chunks = torch.split(value, lens, dim=2)
