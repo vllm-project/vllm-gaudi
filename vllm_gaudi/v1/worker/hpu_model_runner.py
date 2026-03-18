@@ -4284,6 +4284,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         return model_runner_output
 
+    def _post_process_module(self, model: torch.nn.Module) -> None:
+        cnt_post_process = 0
+        def _invoke_callback(module: torch.nn.Module) -> None:
+            if hasattr(module, "_post_process_weight") and callable(getattr(module, "_post_process_weight")):
+                nonlocal cnt_post_process
+                cnt_post_process += 1
+                module._post_process_weight()  # type: ignore[attr-defined]
+        model.apply(_invoke_callback)
+        if cnt_post_process > 0:
+            logger.info("Invoked _post_process_weight for %d modules.", cnt_post_process)
+
     @with_thread_limits()
     def load_model(self) -> None:
         import habana_frameworks.torch.core as htcore
@@ -4333,6 +4344,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             logger.info("Preparing model with INC took %.4f GB", self.model_memory_usage / float(2**30))
         elif not is_fake_hpu():
             self.model = self.model.to("hpu")
+            self._post_process_module(self.model)
             htcore.mark_step()
 
         apply_model_specific_patches(self)
