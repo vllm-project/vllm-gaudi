@@ -4285,12 +4285,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         return model_runner_output
 
     def _post_process_module(self, model: torch.nn.Module) -> None:
+        # Recursively invoke _post_process_weight for all submodules that have it.
         cnt_post_process = 0
+
         def _invoke_callback(module: torch.nn.Module) -> None:
-            if hasattr(module, "_post_process_weight") and callable(getattr(module, "_post_process_weight")):
+            if hasattr(module, "_post_process_weight") and callable(module._post_process_weight):
                 nonlocal cnt_post_process
                 cnt_post_process += 1
                 module._post_process_weight()  # type: ignore[attr-defined]
+
         model.apply(_invoke_callback)
         if cnt_post_process > 0:
             logger.info("Invoked _post_process_weight for %d modules.", cnt_post_process)
