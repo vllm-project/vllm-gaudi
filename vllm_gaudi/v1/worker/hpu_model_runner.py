@@ -1605,7 +1605,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Convert bool tensor to index tensor for merge embedding statically if optimized mm
 
         # Qwen3.5 expects a bool multimodal mask here; avoid converting it to index form.
-        arches = getattr(getattr(self.model_config, "hf_config", None), "architectures", None) or []
+        model_config = getattr(self, "model_config", None)
+        if model_config is None:
+            vllm_config = getattr(self, "vllm_config", None)
+            model_config = getattr(vllm_config, "model_config", None)
+
+        arches = getattr(getattr(model_config, "hf_config", None), "architectures", None) or []
         is_qwen35 = any("Qwen3_5" in arch for arch in arches)
 
         if self.uses_mrope and not is_qwen35:
