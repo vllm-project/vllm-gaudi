@@ -4302,15 +4302,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     def _post_process_module(self, model: torch.nn.Module) -> None:
         # Recursively invoke _post_process_weight for all submodules that have it.
+        # NOTE: We cannot use model.apply() here because some layers (e.g.
+        # LoRA's base_linear) override apply() as a forward-pass method,
+        # which would incorrectly treat the callback as a tensor input.
+        # Instead we use model.modules() which yields all submodules without
+        # calling any overridden apply() method.
         cnt_post_process = 0
-
-        def _invoke_callback(module: torch.nn.Module) -> None:
+        for module in model.modules():
             if hasattr(module, "_post_process_weight") and callable(module._post_process_weight):
-                nonlocal cnt_post_process
                 cnt_post_process += 1
                 module._post_process_weight()  # type: ignore[attr-defined]
-
-        model.apply(_invoke_callback)
         if cnt_post_process > 0:
             logger.info("Invoked _post_process_weight for %d modules.", cnt_post_process)
 
