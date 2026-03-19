@@ -5983,7 +5983,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         raw_tensor = kv_caches[layer_name]
                         dtype = kv_cache_spec.dtype
                         kv_elements = kv_cache_spec.num_kv_heads * kv_cache_spec.head_size
-                        page_elements = page_size_bytes // dtype.itemsize
+                        page_elements = kv_cache_spec.page_size_bytes // dtype.itemsize
                         slot_stride = page_elements // kv_cache_spec.block_size
                         num_slots = (num_blocks + 1) * kv_cache_spec.block_size
                         kc = torch.as_strided(
