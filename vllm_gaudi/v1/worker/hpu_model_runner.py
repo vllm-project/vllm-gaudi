@@ -2932,8 +2932,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if not seen and not warmup_mode:
                 logger.warning(
                     "Configuration: (query, shared_blocks, unique_blocks) %s, (%s) was not warmed-up! "
-                    "This will trigger runtime graph compilation.",
-                    cfg, 'causal' if is_causal else 'not causal')
+                    "This will trigger runtime graph compilation.", cfg, 'causal' if is_causal else 'not causal')
         else:
             phase = "prompt" if attn_metadata.is_prompt else "decode"
             cfg = (phase, batch_size, seq_len, num_blocks)
@@ -2942,9 +2941,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             seen = cfg in self.seen_configs
             self.seen_configs.add(cfg)
             if not seen and not warmup_mode:
-                logger.warning(
-                    "Configuration: %s was not warmed-up! "
-                    "This will trigger runtime graph compilation.", cfg)
+                logger.warning("Configuration: %s was not warmed-up! "
+                               "This will trigger runtime graph compilation.", cfg)
 
     def _get_unified_config(self, attn_metadata, logits_indices):
         has_causal = 'c' if attn_metadata.causal_bias is not None else '-'
@@ -5622,10 +5620,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     # runtime recompilation when chunked prefill creates
                     # mixed batches.
                     if not self.is_pooling_model:
-                        self.warmup_mixed_graphs(
-                            self.bucketing_manager.prompt_buckets,
-                            self.bucketing_manager.decode_buckets,
-                            kv_caches)
+                        self.warmup_mixed_graphs(self.bucketing_manager.prompt_buckets,
+                                                 self.bucketing_manager.decode_buckets, kv_caches)
 
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
