@@ -19,13 +19,17 @@ from typing import Optional
 class CacheSwapUtils(torch.nn.Module):
     """ KV-cache swapping utilities """
 
-    def __init__(self, kv_caches: tuple[tuple[torch.tensor, torch.tensor]], block_size: int):
+    def __init__(self,
+                 kv_caches: tuple[tuple[torch.tensor, torch.tensor]],
+                 block_size: int,
+                 attn_ids: Optional[list[int]] = None):
         super().__init__()
         self.block_size = block_size
         self.enable_prefix_caching = get_config().prefix_caching
         self.kv_caches = tuple(kv_caches)
         self.block_slots = torch.arange(0, self.block_size, dtype=torch.long, device=kv_caches[0][0].device)
         self.is_mla = all([cache[1] is None for cache in self.kv_caches])
+        self.attn_ids = attn_ids
 
     def forward(self, srcs: torch.tensor, dsts: torch.tensor, caches: list[torch.tensor]):
         """ Internal method wrapped in HPU/t.compile graphs"""
@@ -52,10 +56,12 @@ class CacheSwapUtils(torch.nn.Module):
         dsts = pad_list(list(dsts), threshold, itertools.repeat(-1))
         srcs = torch.tensor(srcs, dtype=torch.long, device='cpu').to('hpu', non_blocking=True)
         dsts = torch.tensor(dsts, dtype=torch.long, device='cpu').to('hpu', non_blocking=True)
-        key_caches = [cache[0] for cache in self.kv_caches]
+        caches_to_swap = [cache for idx, cache in enumerate(self.kv_caches)
+                          if idx in self.attn_ids] if self.attn_ids else self.kv_caches
+        key_caches = [cache[0] for cache in caches_to_swap]
         self(srcs, dsts, key_caches)
         if not self.is_mla:
-            value_caches = [cache[1] for cache in self.kv_caches]
+            value_caches = [cache[1] for cache in caches_to_swap]
             self(srcs, dsts, value_caches)
 
 
@@ -75,9 +81,12 @@ class OnlineDefragmenter:
         self.cache_utils: Optional[CacheSwapUtils] = None
         self.debug = init_debug_logger('defrag')
 
-    def initialize(self, kv_caches: tuple[tuple[torch.tensor, torch.tensor]], block_size: int):
+    def initialize(self,
+                   kv_caches: tuple[tuple[torch.tensor, torch.tensor]],
+                   block_size: int,
+                   attn_ids: Optional[list[int]] = None):
         """ Initialize defragmenter with required data """
-        self.cache_utils = CacheSwapUtils(kv_caches, block_size)
+        self.cache_utils = CacheSwapUtils(kv_caches, block_size, attn_ids)
         if self.graphed:
             config = get_config()
             if config.bridge_mode == 'lazy':

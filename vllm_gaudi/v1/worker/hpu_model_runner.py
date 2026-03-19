@@ -3481,10 +3481,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     @torch.inference_mode()
     def run_defragmenter(self, scheduler_output: "SchedulerOutput", warmup_mode: bool = False):
         if self.defragmenter.enabled and self.kv_caches and not warmup_mode:
-            new = {req.req_id: flatten(req.block_ids) for req in scheduler_output.scheduled_new_reqs if req.block_ids}
+            attn_group_id = self._get_attention_group_id_for_hybrid()
+            new = {
+                req.req_id: req.block_ids[attn_group_id]
+                for req in scheduler_output.scheduled_new_reqs if req.block_ids
+            }
             #TODO: Add support for preempted blocks
             cached = {
-                req_id: flatten(new_block_ids)
+                req_id: new_block_ids[attn_group_id]
                 for req_id, new_block_ids in zip(scheduler_output.scheduled_cached_reqs.req_ids,
                                                  scheduler_output.scheduled_cached_reqs.new_block_ids) if new_block_ids
             }
@@ -5657,7 +5661,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                   self.vllm_config.model_config.logits_processors),
                 )
         if not self.is_pooling_model:
-            self.defragmenter.initialize(self.kv_caches, self.block_size)
+            self.defragmenter.initialize(self.kv_caches, self.block_size, self.attn_cache_ids)
         # Profiling
         if self.unified_attn:
             self._maybe_profile_unified_attn()
@@ -5758,7 +5762,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # and re-initialize it.
         if not self.is_pooling_model:
             self.defragmenter = OnlineDefragmenter()
-            self.defragmenter.initialize(self.kv_caches, self.block_size)
+            self.defragmenter.initialize(self.kv_caches, self.block_size, self.attn_cache_ids)
 
     def shutdown_inc(self, suppress=suppress, finalize_calibration=finalize_calibration):
         global shutdown_inc_called
@@ -6163,6 +6167,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 kv_caches[layer_name] = kv_caches[target_layer_name]
         assert layer_names == set(kv_caches.keys()), "Some layers are not correctly initialized"
         bind_kv_cache(kv_caches, self.vllm_config.compilation_config.static_forward_context, self.kv_caches)
+
+        # Identify attention layers that need KV cache.
+        # If `layer_types` is provided in the model config, use it to exclude non-attention layers.
+        non_attn_layer_names = {'mamba'}
+        layer_types = getattr(self.model_config.hf_config, 'layer_types', None)
+        if layer_types is not None:
+            self.attn_cache_ids = [i for i, layer in enumerate(layer_types) if layer not in non_attn_layer_names]
+        else:
+            self.attn_cache_ids = []
 
         if self.enable_bucketing:
             self.bucketing_manager.num_hpu_blocks = num_blocks
