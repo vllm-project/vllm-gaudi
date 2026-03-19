@@ -2608,7 +2608,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         out_indices = []
 
         # Reorder the bitmask to match the order of the requests in the batch.
-        sorted_bitmask = np.zeros_like(grammar_bitmask, shape=(logits.shape[0], grammar_bitmask.shape[1]))
+        sorted_bitmask = np.full(shape=(logits.shape[0], grammar_bitmask.shape[1]),
+                                 fill_value=-1,
+                                 dtype=grammar_bitmask.dtype)
         cumulative_index = 0
 
         for req_id in scheduler_output.structured_output_request_ids:
@@ -2624,7 +2626,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # If the grammar bitmask and the logits have the same shape
         # we don't need to pass indices to the kernel,
         # since the bitmask is already aligned with the logits.
-        skip_out_indices = grammar_bitmask.shape[0] == logits.shape[0]
+        skip_out_indices = len(out_indices) == logits.shape[0]
 
         # Serialization of np.ndarray is much more efficient than a tensor,
         # so we receive it in that format.
