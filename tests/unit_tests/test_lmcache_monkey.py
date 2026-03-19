@@ -33,14 +33,14 @@ def _load_init_module():
     mock_platform = MagicMock()
     # Ensure the platform mock is available as a module attribute
     platform_mod = ModuleType(_MOCK_PLATFORM_MODULE)
-    platform_mod.HpuPlatform = mock_platform
+    platform_mod.HpuPlatform = mock_platform  # type: ignore[attr-defined]
 
     with patch.dict(sys.modules, {_MOCK_PLATFORM_MODULE: platform_mod}):
         # Remove cached vllm_gaudi so importlib reloads __init__.py
         sys.modules.pop("vllm_gaudi", None)
         mod = importlib.import_module("vllm_gaudi")
         # Patch in the mock so register() sees it
-        mod.HpuPlatform = mock_platform
+        mod.HpuPlatform = mock_platform  # type: ignore[attr-defined]
         return mod, mock_platform
 
 
