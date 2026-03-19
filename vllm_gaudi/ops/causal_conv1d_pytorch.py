@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from typing import Callable
 
 import torch
-import torch.nn.functional as F
 # import habana_frameworks.torch.hpu as ht
 
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -54,15 +53,57 @@ def _ensure_query_start_loc(query_start_loc: torch.Tensor) -> torch.Tensor:
     return query_start_loc.to(dtype=torch.int64)
 
 
-def _make_depthwise_weight(weight: torch.Tensor) -> torch.Tensor:
-    dim, width = weight.shape
-    return weight.contiguous().view(dim, 1, width)
-
-
 def _apply_activation(output: torch.Tensor, activation: str | None) -> torch.Tensor:
     if activation in {"silu", "swish"}:
         return torch.nn.functional.silu(output)
     return output
+
+
+def _depthwise_conv1d_tpc(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Depthwise 1-D convolution using element-wise TPC ops only.
+
+    Equivalent to::
+
+        F.conv1d(x, weight.unsqueeze(1), bias, groups=x.shape[1])
+
+    For the small kernel widths used by Mamba models (typically 4) this
+    avoids dispatching an MME ``spatial_convolution`` whose ``input1``
+    weight-transpose creates a TPC stall that prevents TPC/MME
+    pipelining on Gaudi.
+    """
+    # x:      (batch, dim, L)
+    # weight: (dim, width)
+    width = weight.shape[1]
+    if x.shape[2] < width:
+        raise ValueError(f"Input length ({x.shape[2]}) is smaller than kernel width"
+                         f" ({width}). Convolution is not defined for this configuration.")
+    out_len = x.shape[2] - width + 1
+
+    # Accumulate in float32 for reduced-precision dtypes (bfloat16 / float16)
+    # to match F.conv1d behaviour.  Keep inputs in their original dtype so
+    # the multiplications stay in bf16 (avoiding large cast-induced graph
+    # changes on Gaudi), and only upcast the running sum.
+    orig_dtype = x.dtype
+    needs_upcast = orig_dtype in (torch.bfloat16, torch.float16)
+
+    # Broadcast weight: (dim, width) -> (1, dim, 1) per kernel tap
+    w = weight.unsqueeze(0)  # (1, dim, width)
+    out = (x[:, :, :out_len] * w[:, :, 0:1]).float() if needs_upcast else x[:, :, :out_len] * w[:, :, 0:1]
+    for k in range(1, width):
+        out = out + (x[:, :, k:k + out_len] *
+                     w[:, :, k:k + 1]).float() if needs_upcast else out + x[:, :, k:k + out_len] * w[:, :, k:k + 1]
+
+    if bias is not None:
+        out = out + (bias.float() if needs_upcast else bias).unsqueeze(0).unsqueeze(-1)
+
+    if needs_upcast:
+        out = out.to(orig_dtype)
+
+    return out
 
 
 def _flatten_inputs_for_update(
@@ -188,8 +229,6 @@ def hpu_causal_conv1d_fn(
         if has_initial_state is not None and has_initial_state.numel() != padded_batch:
             raise ValueError("'has_initial_state' must align with 'query_start_loc'.")
 
-    weight_dw = _make_depthwise_weight(weight_work)
-
     # Get cache indices
     if cache_indices is None:
         batch_cache_idx = torch.arange(padded_batch, device=x_work.device, dtype=torch.long)
@@ -218,9 +257,11 @@ def hpu_causal_conv1d_fn(
     idx = torch.arange(state_len, device=x.device) + end
     new_state = seq_input.index_select(dim=1, index=idx)
 
-    # Apply convolution
+    # Apply depthwise convolution using element-wise TPC ops.
+    # This avoids the MME spatial_convolution input1 weight-transpose
+    # that would otherwise stall TPC/MME pipelining on Gaudi.
     seq_input = seq_input.unsqueeze(0)
-    seq_out = F.conv1d(seq_input, weight_dw, bias=bias_work, groups=dim)
+    seq_out = _depthwise_conv1d_tpc(seq_input, weight_work, bias_work)
     seq_out = _apply_activation(seq_out, activation)
 
     # Update conv state
@@ -337,7 +378,6 @@ def hpu_causal_conv1d_fn_update(
         if has_initial_state is not None and has_initial_state.numel() != padded_batch:
             raise ValueError("'has_initial_state' must align with 'query_start_loc'.")
 
-    weight_dw = _make_depthwise_weight(weight_work)
     out = torch.zeros_like(x_work)
 
     # Get cache indices
@@ -352,7 +392,9 @@ def hpu_causal_conv1d_fn_update(
 
     seq_input = torch.cat([init_state, x_work], dim=2)
     new_state = seq_input[:, :, -state_len:]
-    seq_out = F.conv1d(seq_input, weight_dw, bias, groups=dim)
+    # Use element-wise TPC depthwise conv to avoid the MME
+    # spatial_convolution input1 weight-transpose stall.
+    seq_out = _depthwise_conv1d_tpc(seq_input, weight_work, bias_work)
     seq_out = _apply_activation(seq_out, activation)
     out = seq_out
 
