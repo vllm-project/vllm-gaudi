@@ -1760,13 +1760,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         return sampling_metadata
 
     def get_habana_paged_attn_buffers(self, block_tables, slot_mapping, batch_size):
-        last_block_usage = [slot[0] % self.block_size + 1 for slot in slot_mapping]
+        block_size = self.block_size
+        last_block_usage = [slot[0] % block_size + 1 for slot in slot_mapping]
         block_groups = [[i] * len(bt) for i, bt in enumerate(block_tables)]
-        block_usage = [[self.block_size] * (len(bt) - 1) + [lbu] for bt, lbu in zip(block_tables, last_block_usage)
-                       if bt]
-        block_list = flatten(block_tables)
-        block_groups = flatten(block_groups)
-        block_usage = flatten(block_usage)
+        block_usage = [[block_size] * (len(bt) - 1) + [lbu] for bt, lbu in zip(block_tables, last_block_usage) if bt]
+        chain = itertools.chain.from_iterable
+        block_list = list(chain(block_tables))
+        block_groups = list(chain(block_groups))
+        block_usage = list(chain(block_usage))
         assert len(block_list) == len(block_groups)
         assert len(block_list) == len(block_usage)
 
@@ -1796,7 +1797,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             def padding_fn(tensor, pad_value):
                 return pad_list(tensor, block_bucket_size, itertools.repeat(pad_value))
 
-        block_list = padding_fn(block_list, self._PAD_BLOCK_ID)
+        _PAD_BLOCK_ID = self._PAD_BLOCK_ID
+        block_list = padding_fn(block_list, _PAD_BLOCK_ID)
         block_groups = padding_fn(block_groups, -1)
         block_usage = padding_fn(block_usage, 1)
 
@@ -1993,24 +1995,26 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         block_table_cpu_tensor = self.input_batch.block_table[
             self._get_attention_group_id_for_hybrid()].get_cpu_tensor()
         all_batch_contents = [BatchContents()]
+        input_batch = self.input_batch
+        block_size = self.block_size
+        defragmenter_resolve = self.defragmenter.resolve
 
         for batch_idx in range(num_decodes, num_reqs):
-            req_id = self.input_batch.req_ids[batch_idx]
-            seq_num_computed_tokens = self.input_batch.num_computed_tokens_cpu[batch_idx]
+            req_id = input_batch.req_ids[batch_idx]
+            seq_num_computed_tokens = input_batch.num_computed_tokens_cpu[batch_idx]
             seq_num_scheduled_tokens = num_scheduled_tokens[batch_idx]
 
-            token_ids = self.input_batch.token_ids_cpu[batch_idx, seq_num_computed_tokens:seq_num_computed_tokens +
-                                                       seq_num_scheduled_tokens].tolist()
+            token_ids = input_batch.token_ids_cpu[batch_idx, seq_num_computed_tokens:seq_num_computed_tokens +
+                                                  seq_num_scheduled_tokens].tolist()
 
-            num_blocks = round_up(seq_num_computed_tokens + seq_num_scheduled_tokens,
-                                  self.block_size) // self.block_size
+            num_blocks = round_up(seq_num_computed_tokens + seq_num_scheduled_tokens, block_size) // block_size
             blocks = block_table_cpu_tensor[batch_idx, :num_blocks].tolist()
             if not warmup:
-                blocks = [self.defragmenter.resolve(b) for b in blocks]
+                blocks = [defragmenter_resolve(b) for b in blocks]
             #NOTE(kzawora): In non-preemption scenario,
-            # self.input_batch.num_prompt_tokens[batch_idx] == self.input_batch.num_tokens[batch_idx].
+            # input_batch.num_prompt_tokens[batch_idx] == input_batch.num_tokens[batch_idx].
             # In preemption scenario num_tokens will also include the tokens emitted before preemption
-            num_prompt_tokens = self.input_batch.num_prompt_tokens[batch_idx]
+            num_prompt_tokens = input_batch.num_prompt_tokens[batch_idx]
             if self.use_async_scheduling or self.use_structured_output:
                 # NOTE(tianmu-li): align behavior of incomplete prompt with gpu_model_runner
                 # Always have at least 1 logit when using async scheduling
@@ -2317,7 +2321,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # NOTE(kzawora): the +1 is what causes this entire thing to work,
         # as in the paged attention, we don't fetch just the context from cache,
         # but also kvs for the current token
-        num_blocks = np.ceil((context_lens + 1) / self.block_size).astype(np.int32).tolist()
+        block_size = self.block_size
+        num_blocks = np.ceil((context_lens + 1) / block_size).astype(np.int32).tolist()
 
         num_tokens_per_req = num_scheduled_tokens[:num_decodes]
         num_tokens = max(num_tokens_per_req)
@@ -2407,17 +2412,30 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # The "slot" is the "physical index" of a token in the KV cache.
         # Look up the block_idx in the block table (logical<>physical map)
         # to compute this.
-        block_number = torch.ones((padded_batch_size, num_tokens), dtype=torch.int32) * self._PAD_BLOCK_ID
-        block_number[:num_decodes] = torch.gather(input=block_table_cpu_tensor, dim=1, index=(index // self.block_size))
-        block_number.apply_(self.defragmenter.resolve)
+        _PAD_BLOCK_ID = self._PAD_BLOCK_ID
+        block_number = torch.ones((padded_batch_size, num_tokens), dtype=torch.int32) * _PAD_BLOCK_ID
+        block_number[:num_decodes] = torch.gather(input=block_table_cpu_tensor, dim=1, index=(index // block_size))
+        defragmenter = self.defragmenter
+        if defragmenter.enabled and len(defragmenter.fwd_mapping_table) > 0:
+            mapping = torch.tensor(defragmenter.fwd_mapping_table, dtype=torch.int32)
+            # Clamp values to valid range for the lookup table
+            clamped = block_number.clamp(0, len(mapping) - 1)
+            # Only apply mapping where block_number is within table range
+            in_range = block_number < len(mapping)
+            block_number = torch.where(in_range & (block_number >= 0), mapping[clamped], block_number)
 
-        block_offsets = padded_index % self.block_size
-        slot_mapping = block_number * self.block_size + block_offsets
+        block_offsets = padded_index % block_size
+        slot_mapping = block_number * block_size + block_offsets
         # set an out of range value for the padding tokens so that they
         # are ignored when inserting into the KV cache.
         slot_mapping = slot_mapping[:padded_batch_size]
-        dummy_slots = itertools.cycle(range(self._PAD_SLOT_ID, self._PAD_SLOT_ID + self.block_size))
-        slot_mapping[num_decodes:].apply_(lambda _, ds=dummy_slots: next(ds))
+        _PAD_SLOT_ID = self._PAD_SLOT_ID
+        # Vectorized dummy slot assignment for padding rows
+        if num_decodes < padded_batch_size:
+            pad_rows = padded_batch_size - num_decodes
+            pad_cols = num_tokens
+            dummy_base = torch.arange(pad_rows * pad_cols, dtype=torch.int32)
+            slot_mapping[num_decodes:] = _PAD_SLOT_ID + (dummy_base % block_size).reshape(pad_rows, pad_cols)
 
         #####################################
         # NOTE(Chendi): Since we can't actually do num_tokens = 2,
@@ -3446,8 +3464,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         all_token_ids = self.input_batch.token_ids_cpu_tensor[:num_reqs, :max_seq]
         # TODO: check if it's safe to always slice on first dim
         block_table = self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs, :max_blocks].clone().to(torch.int64)
-        if self.defragmenter.enabled:
-            block_table.apply_(self.defragmenter.resolve)
+        if self.defragmenter.enabled and len(self.defragmenter.fwd_mapping_table) > 0:
+            mapping = torch.tensor(self.defragmenter.fwd_mapping_table, dtype=torch.int64)
+            clamped = block_table.clamp(0, len(mapping) - 1)
+            in_range = block_table < len(mapping)
+            block_table = torch.where(in_range & (block_table >= 0), mapping[clamped], block_table)
         input_ids_hpu = None
         num_decodes = 0
         decode_index = None
