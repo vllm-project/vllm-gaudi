@@ -5863,6 +5863,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             stride=(slot_stride, kv_cache_spec.head_size, 1),
                             storage_offset=kv_elements,
                         )
+                        kv_caches[layer_name] = (kc, vc, None, None)
                     elif isinstance(kv_cache_spec, MambaSpec):
                         # This is almost the same as for gpu runner in vllm
                         # only change is + 1 for dummy block
