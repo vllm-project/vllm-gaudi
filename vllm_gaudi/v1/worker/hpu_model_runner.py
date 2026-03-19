@@ -5857,13 +5857,22 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         assert page_elements % kv_cache_spec.block_size == 0, \
                             (f"page_elements ({page_elements}) must be divisible by "
                              f"block_size ({kv_cache_spec.block_size})")
+                        # Element stride between consecutive token slots in
+                        # the interleaved layout; each slot holds K then V
+                        # (2 * kv_elements) sequentially within the stride.
                         slot_stride = page_elements // kv_cache_spec.block_size
                         assert slot_stride >= 2 * kv_elements, \
                             (f"slot_stride ({slot_stride}) must be >= 2 * kv_elements "
                              f"({2 * kv_elements}) to hold both K and V")
                         num_slots = (num_blocks + 1) * kv_cache_spec.block_size
-                        # Reinterpret the raw bfloat16 buffer as the target dtype
+                        # Reinterpret the raw bfloat16 buffer as the target
+                        # cache dtype (e.g. bfloat16 → float8_e4m3fn) so
+                        # that strides and offsets are in target-dtype
+                        # elements.
                         typed_tensor = raw_tensor.view(dtype)
+                        # The V view's last accessed element is at offset
+                        # (num_slots-1)*slot_stride + 2*kv_elements - 1,
+                        # so we need at least that many + 1 elements.
                         required_elements = (num_slots - 1) * slot_stride + kv_elements * 2
                         assert typed_tensor.numel() >= required_elements, \
                             (f"Backing storage ({typed_tensor.numel()} elements) too small "
