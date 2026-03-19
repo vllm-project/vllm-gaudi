@@ -360,10 +360,12 @@ def get_handlers(
     attn_backends: dict[str, type[AttentionBackend]],
 ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
     if not self._handlers:
+        assert len(self.gpu_block_size) == 1
+        gpu_block_size = self.gpu_block_size[0]
         self._handlers = CpuGpuOffloadingHandlers(
             attn_backends=attn_backends,
-            gpu_block_size=self.gpu_block_size,
-            cpu_block_size=self.offloaded_block_size,
+            gpu_block_size=gpu_block_size,
+            cpu_block_size=gpu_block_size * self.block_size_factor,
             num_cpu_blocks=self.num_blocks,
             gpu_caches=kv_caches,
         )
