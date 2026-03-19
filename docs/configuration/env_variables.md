@@ -94,3 +94,9 @@ and warm-up. Recommended settings for this case are:
 
 !!! note
     If the model config specifies a high `max_model_len`, set it to the sum of `input_tokens` and `output_tokens`, rounded up to a multiple of `block_size` according to actual requirements.
+
+## Additional Performance Tuning Parameters for the Attention Kernel
+
+| Parameter name                           | Description                                                                                  | Default value                              |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `VLLM_USE_BOOLEAN_MASK`                  | Use boolean attention mask instead of float ones.                                            | `False`                                    |
