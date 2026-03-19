@@ -5343,7 +5343,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 "video": VideoDummyOptions(count=count, num_frames=num_frames, width=width, height=height)
             }
         else:
-            raise NotImplementedError(f"Modality '{modality}' is not supported")
+            logger.warning_once(
+                "Modality '%s' is not supported in _get_mm_dummy_batch, "
+                "returning empty dummy batch.", modality)
+            return {}
 
         dummy_mm_inputs = MultiModalRegistry().get_dummy_mm_inputs(self.model_config_copy, mm_counts={modality: count})
 
@@ -5396,7 +5399,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
         for modality, max_items in self.mm_budget.mm_limits.items():
             if modality == 'image' and not is_image_warmup or modality == 'video' \
-                and not is_video_warmup:
+                    and not is_video_warmup:
+                continue
+            if modality not in ('image', 'video'):
+                logger.warning_once(
+                    "Modality '%s' is not supported for multimodal warmup, skipping.",
+                    modality)
                 continue
             phase = f'Graph/Multimodal({modality})'
             candidates = buckets if is_batch_based else warmup_lists
