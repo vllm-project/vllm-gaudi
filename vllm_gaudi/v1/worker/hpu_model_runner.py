@@ -4389,7 +4389,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if self.use_aux_hidden_state_outputs:
                     if supports_eagle3(self.model.model):
                         self.model.model.set_aux_hidden_state_layers(
-                            self.model.model.get_eagle3_aux_hidden_state_layers())
+                            self.model.model.get_eagle3_default_aux_hidden_state_layers())
                     else:
                         raise RuntimeError("Model does not support EAGLE3 interface but "
                                            "aux_hidden_state_outputs was requested")
