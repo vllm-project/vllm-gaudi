@@ -1047,7 +1047,6 @@ def fp8_channel_moe_prepare_weights(layer):
     setattr(layer, "w2_weight", None)
     if hasattr(layer, "w13_input_scale") and layer.w13_input_scale is not None:
         layer.moe_op.w13_input_scale = layer.w13_input_scale
-        layer.moe_op.w13_input_scale_inv = 1.0 / layer.w13_input_scale
     if hasattr(layer, "w2_input_scale"):
         # Split the input scale for each expert to avoid explicit slice in MOE op
         # which can cause performance regression.
@@ -1202,7 +1201,6 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
         self.w2_list = torch.nn.ModuleList([MoeFP8Matmul() for _ in range(num_experts)])
         self.w13_input_scale = None
         self.w2_input_scale = None
-        self.w13_input_scale_inv = None
 
     def forward(
         self,
