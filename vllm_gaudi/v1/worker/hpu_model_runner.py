@@ -2978,6 +2978,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                warmup_mode=False,
                                inputs_embeds=None,
                                model_mm_kwargs=None):
+        # For multimodal models (e.g. gemma-3n), the model's forward method
+        # may require inputs_embeds even during decode. Compute basic token
+        # embeddings when inputs_embeds is not provided.
+        if inputs_embeds is None and self.supports_mm_inputs:
+            inputs_embeds = self.model.embed_input_ids(token_ids)
         # FORWARD.
         batch_size = token_ids.size(0)
         seq_len = self._seq_len(attn_metadata)
@@ -5394,7 +5399,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             patch_size = int(self.get_patch_size_from_model())
             warmup_lists = warmup_lists + \
                 vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
+        supported_warmup_modalities = {'image', 'video'}
         for modality, max_items in self.mm_budget.mm_limits.items():
+            if modality not in supported_warmup_modalities:
+                logger.warning("Skipping warmup for unsupported modality: %s", modality)
+                continue
             if modality == 'image' and not is_image_warmup or modality == 'video' \
                 and not is_video_warmup:
                 continue

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 import torch
 import habana_frameworks.torch  # noqa: F401
@@ -645,3 +647,69 @@ def test_model_torch_regional_compilation(default_vllm_config: None, dist_init, 
     assert_compilation(model, "lm_head", VocabParallelEmbedding)
     assert_compilation(model, "model.decoder.final_layer_norm", LayerNorm)
     assert_compilation(model, "model.decoder.embed_tokens", VocabParallelEmbedding)
+
+
+class TestWarmupMultimodalAudioSkip:
+    """Test that warmup_multimodal_graphs skips unsupported modalities like audio."""
+
+    def test_get_mm_dummy_batch_rejects_audio(self):
+        """Verify _get_mm_dummy_batch raises NotImplementedError for 'audio' modality."""
+        runner = MagicMock(spec=HPUModelRunner)
+        runner.mm_budget = MagicMock()
+        model_mock = MagicMock()
+        model_mock.vision_bucket_manager.is_batch_based = True
+        runner.get_model = MagicMock(return_value=model_mock)
+        runner.model_config = MagicMock()
+        # Call the real method on the mock
+        with pytest.raises(NotImplementedError, match="audio"):
+            HPUModelRunner._get_mm_dummy_batch(
+                runner, modality='audio', image_args=1, width=896, height=896)
+
+    def test_warmup_multimodal_skips_audio(self):
+        """Verify warmup_multimodal_graphs skips 'audio' modality without error."""
+        runner = MagicMock(spec=HPUModelRunner)
+        runner.supports_mm_inputs = True
+        runner.vllm_config = MagicMock()
+        runner.mm_registry = MagicMock()
+
+        # Setup model with vision bucket manager
+        model_mock = MagicMock()
+        model_mock.vision_bucket_manager.is_batch_based = True
+        model_mock.vision_bucket_manager.multimodal_buckets = [1, 2, 4]
+        runner.get_model = MagicMock(return_value=model_mock)
+
+        # Setup mm_budget with image + audio modalities (like gemma-3n)
+        mm_budget_mock = MagicMock()
+        mm_budget_mock.mm_limits = {'image': 1, 'audio': 1}
+        runner.mm_budget = None  # Will be set by the method
+
+        mm_config_mock = MagicMock()
+        mm_config_mock.get_limit_per_prompt.return_value = MagicMock(
+            width=896, height=896, count=1)
+        runner.model_config = MagicMock()
+        runner.model_config.get_multimodal_config.return_value = mm_config_mock
+
+        # Patch MultiModalBudget to return our mock
+        with patch(
+            'vllm.multimodal.encoder_budget.MultiModalBudget',
+            return_value=mm_budget_mock,
+        ):
+            # _get_mm_dummy_batch should only be called for 'image', never for 'audio'
+            runner._get_mm_dummy_batch = MagicMock(
+                return_value={'pixel_values': torch.zeros(1, 3, 896, 896)})
+            runner.log_warmup_multimodal = MagicMock()
+            runner.graphed_buckets = set()
+            runner.device = DEVICE
+            runner.pin_memory = False
+            runner.get_patch_size_from_model = MagicMock(return_value=14)
+
+            # Call the real method
+            HPUModelRunner.warmup_multimodal_graphs(runner, buckets=[1, 2, 4])
+
+            # Verify _get_mm_dummy_batch was called only for 'image', not 'audio'
+            for call in runner._get_mm_dummy_batch.call_args_list:
+                assert call.kwargs.get(
+                    'modality',
+                    call.args[0] if call.args else None,
+                ) != 'audio', \
+                    "_get_mm_dummy_batch should not be called for 'audio' modality"
