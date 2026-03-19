@@ -239,7 +239,7 @@ class HpuMiniMaxM2Attention(nn.Module):
             D=None,
             out_dtype=torch.bfloat16,
             A_scale_inv=input_scale,
-            B_scale_inv=weight_scale,
+            B_scale_inv=weight_scale.squeeze(),
             bias=None,
             accumulate=False,
         )
