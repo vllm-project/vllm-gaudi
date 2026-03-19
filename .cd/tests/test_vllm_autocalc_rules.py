@@ -228,9 +228,10 @@ def test_calc_EST_GRAPH_RESERVE_MEM():
     assert rules.calc_EST_GRAPH_RESERVE_MEM(ctx) == expected
 
 
-def test_calc_VLLM_GRAPH_RESERVED_MEM():
-    ctx = {'EST_GRAPH_RESERVE_MEM': 0.3}
-    expected = min(max(0.3, 0.01), 0.5)
+@pytest.mark.parametrize("lazy", [1, 0])
+def test_calc_VLLM_GRAPH_RESERVED_MEM(lazy):
+    ctx = {'EST_GRAPH_RESERVE_MEM': 0.3, 'PT_HPU_LAZY_MODE': lazy}
+    expected = min(max(0.3, 0.01), 0.5 if lazy else 0.1)
     assert rules.calc_VLLM_GRAPH_RESERVED_MEM(ctx) == expected
 
 

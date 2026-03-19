@@ -1435,11 +1435,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # multiple modalities or a different modality than the previous one,
         # we process it separately to preserve item order.
 
-        # TODO (attafosu): Follow-up on the resolution to this.
-        # The ordering of the encoder outputs needs to match the request ids
-        # after fetching the embeddings.
-        # For now, we'll restrict mm support to just a single prefill at a time - # noqa E501
-        # Or that requests in the batch should have distinct modalities,
+        # NOTE: The encoder outputs are cached by mm_hash and fetched
+        # during _gather_mm_embeddings, so the ordering here does not need
+        # to match the request order in the prefill batch.
 
         # FIXME(ywang96): This is a hacky way to deal with multiple modalities
         # in the same batch while still being able to benefit from batching
@@ -1468,8 +1466,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             for output in curr_group_outputs:
                 encoder_outputs.append(output)
 
-        # FIXME (attafosu) Reorder the encoder outputs to match the request ids.
-        # This will be necessary after mm prefill batching constraints are removed # noqa E501
+        # NOTE: Encoder outputs are cached by mm_hash and fetched in
+        # _gather_mm_embeddings, so reordering is not necessary.
 
         # Cache the encoder outputs.
         for (mm_hash, pos_info), output in zip(
@@ -1499,6 +1497,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         req_ids: list[str],
         shift_computed_tokens: int = 0,
         total_num_scheduled_tokens: Optional[int] = None,
+        padded_seq_len: Optional[int] = None,
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
         total_num_scheduled_tokens = total_num_scheduled_tokens or scheduler_output.total_num_scheduled_tokens
 
@@ -1507,7 +1506,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         is_mm_embed[:total_num_scheduled_tokens] = False
 
         req_start_idx = 0
-        for req_id in req_ids:
+        for batch_row, req_id in enumerate(req_ids):
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             req_state = self.requests[req_id]
             num_computed_tokens = \
@@ -1552,13 +1551,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 sliced_output = encoder_output[start_idx:end_idx]
                 mm_embeds_item = sliced_output if is_embed is None else sliced_output[is_embed]
 
-                req_start_pos = req_start_idx + start_pos - num_computed_tokens
+                # For 2D padded batches, compute position in the
+                # flattened [batch_size * padded_seq_len] layout.
+                if padded_seq_len is not None:
+                    req_start_pos = (batch_row * padded_seq_len + start_pos - num_computed_tokens)
+                else:
+                    req_start_pos = (req_start_idx + start_pos - num_computed_tokens)
                 is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
                     = True
 
                 # Only whole mm items are processed
                 mm_embeds.append(mm_embeds_item)
-            req_start_idx += num_scheduled_tokens
+            if padded_seq_len is None:
+                req_start_idx += num_scheduled_tokens
 
         # Convert bool tensor to index tensor for merge embedding statically if optimized mm
         if self.uses_mrope:
@@ -1585,9 +1590,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             with self.profiler.record_event('internal', 'prepare_input_encoders'):
                 self._execute_mm_encoder(scheduler_output, req_ids)
 
+            # For 2D padded prefill batches (batch_size > 1), compute
+            # total token positions across the padded layout and pass
+            # padded_seq_len so _gather_mm_embeddings can map positions
+            # correctly.
+            padded_seq_len = None
+            effective_total_tokens = total_num_scheduled_tokens
+            if token_ids.ndim == 2 and token_ids.shape[0] > 1:
+                padded_seq_len = token_ids.shape[-1]
+                effective_total_tokens = (token_ids.shape[0] * token_ids.shape[1])
+
             mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output,
                                                                 req_ids,
-                                                                total_num_scheduled_tokens=total_num_scheduled_tokens)
+                                                                total_num_scheduled_tokens=effective_total_tokens,
+                                                                padded_seq_len=padded_seq_len)
             # TODO: Only get embeddings for valid token_ids. Ignore token_ids[<pad_idxs>] # noqa
             # This may require moving multimodal input preps into _prepare_inputs,        # noqa
             # to avoid padding issues.
@@ -2038,6 +2054,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     num_output_logits = seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1
             else:
                 num_output_logits = max(0, seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1)
+            # Cap to scheduled tokens (needed when decode recomputation
+            # requests are routed through the prefill path).
+            num_output_logits = min(num_output_logits, seq_num_scheduled_tokens)
             logits_positions = list(range(seq_num_scheduled_tokens - num_output_logits, seq_num_scheduled_tokens))
 
             new_batch_contents = BatchContents(
@@ -4386,7 +4405,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if self.use_aux_hidden_state_outputs:
                     if supports_eagle3(self.model.model):
                         self.model.model.set_aux_hidden_state_layers(
-                            self.model.model.get_eagle3_aux_hidden_state_layers())
+                            self.model.model.get_eagle3_default_aux_hidden_state_layers())
                     else:
                         raise RuntimeError("Model does not support EAGLE3 interface but "
                                            "aux_hidden_state_outputs was requested")
@@ -5046,7 +5065,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # Consider the token space for draft tokens to propose
             # The draft tokens for eagle consumes block table space
             num_lookahead_tokens += self.speculative_config.num_speculative_tokens
-        seq_lengths = [b * block_size - num_lookahead_tokens for b in blocks]
+        seq_lengths = [min(b * block_size - num_lookahead_tokens, self.max_model_len) for b in blocks]
         return seq_lengths
 
     def distribute_sum_evenly(self, total_sum, max_length):

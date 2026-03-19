@@ -24,7 +24,7 @@ printf "\nvllm serve $MODEL --block-size $BLOCK_SIZE --dtype $DTYPE \
 --max-model-len $MAX_MODEL_LEN --gpu-memory-utilization $GPU_MEM_UTILIZATION \
 --max-num-seqs $MAX_NUM_SEQS --generation-config vllm \
 --max-num-batched-tokens $MAX_NUM_BATCHED_TOKENS \
---disable-log-requests $EXTRA_ARGS"
+$EXTRA_ARGS"
 printf "\n-----------------------------------------------------------------------------------\n"
 
 ## Start server
@@ -38,5 +38,5 @@ vllm serve $MODEL \
         --max-num-seqs $MAX_NUM_SEQS \
         --generation-config vllm \
         --max-num-batched-tokens $MAX_NUM_BATCHED_TOKENS \
-        --disable-log-requests ${EXTRA_ARGS} \
+        ${EXTRA_ARGS} \
 2>&1 | stdbuf -o0 -e0 tr '\r' '\n' | tee -a  logs/vllm_server.log
