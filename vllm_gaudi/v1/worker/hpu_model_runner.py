@@ -2930,8 +2930,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             seen = cfg in self.seen_configs
             self.seen_configs.add(cfg)
             if not seen and not warmup_mode:
-                logger.warning("Configuration: (query, shared_blocks, unique_blocks) %s, (%s) was not warmed-up!", \
-                               cfg, 'causal' if is_causal else 'not causal')
+                logger.warning(
+                    "Configuration: (query, shared_blocks, unique_blocks) %s, (%s) was not warmed-up! "
+                    "This will trigger runtime graph compilation.",
+                    cfg, 'causal' if is_causal else 'not causal')
         else:
             phase = "prompt" if attn_metadata.is_prompt else "decode"
             cfg = (phase, batch_size, seq_len, num_blocks)
@@ -2940,7 +2942,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             seen = cfg in self.seen_configs
             self.seen_configs.add(cfg)
             if not seen and not warmup_mode:
-                logger.warning("Configuration: %s was not warmed-up!", cfg)
+                logger.warning(
+                    "Configuration: %s was not warmed-up! "
+                    "This will trigger runtime graph compilation.", cfg)
 
     def _get_unified_config(self, attn_metadata, logits_indices):
         has_causal = 'c' if attn_metadata.causal_bias is not None else '-'
@@ -4925,6 +4929,50 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         return total_mem, total_batch_seq, captured_all
 
+    def warmup_mixed_graphs(self, prompt_buckets, decode_buckets, kv_caches):
+        """Warm up mixed (prefill + decode) batch scenarios.
+
+        During real inference with chunked prefill enabled, the scheduler
+        often produces batches containing both prefill and decode requests.
+        Individual bucket warmup doesn't cover the graph state produced
+        when both decode and prefill forward passes execute within the
+        same sample_tokens() cycle. Pre-compiling representative mixed
+        scenarios prevents costly runtime graph compilation on the first
+        mixed batch.
+        """
+        if not prompt_buckets or not decode_buckets:
+            return
+
+        # Buckets are sorted ascending by (bs, seq_len, num_blocks).
+        # Pick smallest prompt bucket for minimal overhead.
+        smallest_prompt = prompt_buckets[0]
+
+        # Pick representative decode buckets at different batch sizes
+        decode_sample_indices = {0}
+        if len(decode_buckets) > 1:
+            decode_sample_indices.add(len(decode_buckets) // 2)
+        if len(decode_buckets) > 2:
+            decode_sample_indices.add(len(decode_buckets) - 1)
+
+        mixed_scenarios = []
+        for idx in sorted(decode_sample_indices):
+            db = decode_buckets[idx]
+            if smallest_prompt[0] + db[0] <= self.max_num_seqs:
+                mixed_scenarios.append((smallest_prompt, db))
+
+        if not mixed_scenarios:
+            return
+
+        logger.info("Mixed batch warmup: %d scenarios", len(mixed_scenarios))
+        desc = 'Mixed batch warmup: '
+        with tqdm(total=len(mixed_scenarios), desc=desc, unit="item") as pbar:
+            for prompt_bucket, decode_bucket in mixed_scenarios:
+                prompt_cfg = prompt_bucket
+                decode_cfg = (decode_bucket[0], 1, decode_bucket[2])
+                with HabanaMemoryProfiler() as _mem_prof:
+                    self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
+                pbar.update(1)
+
     def warmup_unified_graphs(self, buckets, kv_cache):
         idx = 0
         num_candidates = len(buckets)
@@ -5569,6 +5617,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                           self.warmup_graphs(
                               self.bucketing_manager.decode_buckets, False, kv_caches)
                         self.log_graph_warmup_summary(self.bucketing_manager.decode_buckets, False, mem_post_decode)
+
+                    # Warmup mixed (prefill+decode) scenarios to avoid
+                    # runtime recompilation when chunked prefill creates
+                    # mixed batches.
+                    if not self.is_pooling_model:
+                        self.warmup_mixed_graphs(
+                            self.bucketing_manager.prompt_buckets,
+                            self.bucketing_manager.decode_buckets,
+                            kv_caches)
 
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
