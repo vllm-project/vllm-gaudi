@@ -23,6 +23,7 @@
 # limitations under the License.
 """Inference-only MiniMaxM2 model."""
 
+import os
 from collections.abc import Iterable
 from typing import Any
 
@@ -33,12 +34,15 @@ from transformers import PretrainedConfig
 from vllm.model_executor.layers.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.distributed import (get_pp_group, get_tensor_model_parallel_world_size, tensor_model_parallel_all_reduce)
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_gather,
+                              tensor_model_parallel_all_reduce)
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01RMSNormTP
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear, ReplicatedLinear, RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01RMSNormTP
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (ParallelLMHead, VocabParallelEmbedding)
@@ -134,44 +138,85 @@ class HpuMiniMaxM2Attention(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        self.full_replicated_attn = os.environ.get("VLLM_MINIMAX_FULL_REPLICATED_ATTN", "true").lower() == "true"
         self.hidden_size = hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
+        self.tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
-        assert self.total_num_heads % tp_size == 0
-        self.num_heads = self.total_num_heads // tp_size
+        assert self.total_num_heads % self.tp_size == 0
+        self.num_heads = self.total_num_heads // self.tp_size
         self.total_num_kv_heads = num_kv_heads
-        if self.total_num_kv_heads >= tp_size:
+        if self.total_num_kv_heads >= self.tp_size:
             # Number of KV heads is greater than TP size, so we partition
             # the KV heads across multiple tensor parallel GPUs.
-            assert self.total_num_kv_heads % tp_size == 0
+            assert self.total_num_kv_heads % self.tp_size == 0
         else:
             # Number of KV heads is less than TP size, so we replicate
             # the KV heads across multiple tensor parallel GPUs.
-            assert tp_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+            assert self.tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // self.tp_size)
         self.head_dim = head_dim or (hidden_size // self.total_num_heads)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
 
-        self.qkv_proj = QKVParallelLinear(
-            hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=qkv_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
-        )
+        if self.full_replicated_attn:
+            self.qkv_proj = QKVParallelLinear(
+                hidden_size,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                bias=qkv_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+            self.q_proj = ReplicatedLinear(
+                hidden_size,
+                self.head_dim * self.total_num_heads,
+                bias=qkv_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.q_proj",
+            )
+            self.k_proj = ReplicatedLinear(
+                hidden_size,
+                self.head_dim * self.total_num_kv_heads,
+                bias=qkv_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.k_proj",
+            )
+            self.v_proj = ReplicatedLinear(
+                hidden_size,
+                self.head_dim * self.total_num_kv_heads,
+                bias=qkv_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.v_proj",
+            )
 
-        self.o_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim,
-            hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.o_proj",
-        )
+            self.o_proj = ReplicatedLinear(
+                self.total_num_heads * self.head_dim,
+                hidden_size,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.o_proj",
+            )
+        else:
+            self.qkv_proj = QKVParallelLinear(
+                hidden_size,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                bias=qkv_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+
+            self.o_proj = RowParallelLinear(
+                self.total_num_heads * self.head_dim,
+                hidden_size,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.o_proj",
+            )
 
         if (rope_parameters is not None and "partial_rotary_factor" not in rope_parameters):
             rope_parameters["partial_rotary_factor"] = rotary_dim / self.head_dim
@@ -181,27 +226,77 @@ class HpuMiniMaxM2Attention(nn.Module):
             rope_parameters=rope_parameters,
         )
         self.attn = Attention(
-            self.num_heads,
+            self.total_num_heads if self.full_replicated_attn else self.num_heads,
             self.head_dim,
             self.scaling,
-            num_kv_heads=self.num_kv_heads,
+            num_kv_heads=self.total_num_kv_heads if self.full_replicated_attn else self.num_kv_heads,
             per_layer_sliding_window=attn_window_size,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
 
-        self.q_norm = MiniMaxText01RMSNormTP(self.head_dim * self.total_num_heads, eps=rms_norm_eps)
-        self.k_norm = MiniMaxText01RMSNormTP(self.head_dim * self.total_num_kv_heads, eps=rms_norm_eps)
+        if self.full_replicated_attn:
+            self.q_norm = RMSNorm(self.head_dim * self.total_num_heads, eps=rms_norm_eps)
+            self.k_norm = RMSNorm(self.head_dim * self.total_num_kv_heads, eps=rms_norm_eps)
+            self.q_norm_tp = MiniMaxText01RMSNormTP(self.head_dim * self.total_num_heads, eps=rms_norm_eps)
+            self.k_norm_tp = MiniMaxText01RMSNormTP(self.head_dim * self.total_num_kv_heads, eps=rms_norm_eps)
+        else:
+            self.q_norm = MiniMaxText01RMSNormTP(self.head_dim * self.total_num_heads, eps=rms_norm_eps)
+            self.k_norm = MiniMaxText01RMSNormTP(self.head_dim * self.total_num_kv_heads, eps=rms_norm_eps)
+
+    def _is_prefill_phase(self) -> bool:
+        if not self.full_replicated_attn:
+            return True
+        try:
+            attn_metadata = get_forward_context().attn_metadata
+            if isinstance(attn_metadata, dict):
+                metadata_dict = attn_metadata
+                attn_metadata = metadata_dict.get(self.attn.layer_name)
+                if attn_metadata is None and len(metadata_dict) > 0:
+                    attn_metadata = next(iter(metadata_dict.values()))
+            if attn_metadata is not None and hasattr(attn_metadata, "is_prompt"):
+                return bool(attn_metadata.is_prompt)
+        except Exception:
+            pass
+        return True
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = MiniMaxText01RMSNormTP.forward_qk(self.q_norm, self.k_norm, q.contiguous(), k.contiguous())
+        if self.full_replicated_attn:
+            if self._is_prefill_phase():
+                qkv, _ = self.qkv_proj(hidden_states)
+                q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+                q, k = MiniMaxText01RMSNormTP.forward_qk(self.q_norm_tp, self.k_norm_tp, q.contiguous(), k.contiguous())
+                if self.tp_size > 1:
+                    q = tensor_model_parallel_all_gather(q.contiguous())
+                    k = tensor_model_parallel_all_gather(k.contiguous())
+                    v = tensor_model_parallel_all_gather(v.contiguous())
+            else:
+                input_is_2d = hidden_states.dim() == 2
+                if input_is_2d:
+                    seq = hidden_states.shape[0]
+                    hidden_states = hidden_states.view(1, seq, self.hidden_size)
+
+                q, _ = self.q_proj(hidden_states)
+                k, _ = self.k_proj(hidden_states)
+                v, _ = self.v_proj(hidden_states)
+
+                q = self.q_norm(q)
+                k = self.k_norm(k)
+
+                if input_is_2d:
+                    q = q.squeeze(0)
+                    k = k.squeeze(0)
+                    v = v.squeeze(0)
+        else:
+            qkv, _ = self.qkv_proj(hidden_states)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q, k = MiniMaxText01RMSNormTP.forward_qk(self.q_norm, self.k_norm, q.contiguous(), k.contiguous())
+
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -356,7 +451,8 @@ class HpuMiniMaxM2Model(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
+        full_replicated_attn = os.environ.get("VLLM_MINIMAX_FULL_REPLICATED_ATTN", "true").lower() == "true"
+        stacked_params_mapping = [] if full_replicated_attn else [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
@@ -376,6 +472,23 @@ class HpuMiniMaxM2Model(nn.Module):
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
+
+            if full_replicated_attn and ("mlp.experts." not in name):
+                for param_name, weight_name, shard_id in (("qkv_proj", "q_proj", "q"),
+                                                          ("qkv_proj", "k_proj", "k"),
+                                                          ("qkv_proj", "v_proj", "v")):
+                    if weight_name not in name:
+                        continue
+                    mapped_name = name.replace(weight_name, param_name)
+                    if mapped_name.endswith(".bias") and mapped_name not in params_dict:
+                        continue
+                    if is_pp_missing_parameter(mapped_name, self):
+                        continue
+                    if mapped_name in params_dict:
+                        param = params_dict[mapped_name]
+                        weight_loader = param.weight_loader
+                        weight_loader(param, loaded_weight, shard_id)
+                    break
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
@@ -442,13 +555,13 @@ class HpuMiniMaxM2Model(nn.Module):
 
 
 class HpuMiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
-    packed_modules_mapping = {
+    packed_modules_mapping = ({
         "qkv_proj": [
             "q_proj",
             "k_proj",
             "v_proj",
         ],
-    }
+    } if os.environ.get("VLLM_MINIMAX_FULL_REPLICATED_ATTN", "true").lower() != "true" else {})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
