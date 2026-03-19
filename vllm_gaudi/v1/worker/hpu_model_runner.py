@@ -1856,6 +1856,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self.bucketing_manager.find_decode_bucket(batch_size,
                                                           actual_blocks_needed)[2]
             block_bucket_size += self.get_dp_padding(block_bucket_size)
+            block_bucket_size = max(block_bucket_size, actual_blocks_needed)
 
             indices: list[Any]
             indices = [None] * block_bucket_size
@@ -4587,11 +4588,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             return True
 
         # Auto-detect: split when num_experts >= 200
-        hf_config = getattr(self.model_config, 'hf_text_config',
-                            getattr(self.model_config, 'hf_config', None))
+        hf_config = getattr(self.model_config, 'hf_text_config', getattr(self.model_config, 'hf_config', None))
         if hf_config is not None:
-            num_experts = getattr(hf_config, 'num_experts',
-                                  getattr(hf_config, 'num_local_experts', 0))
+            num_experts = getattr(hf_config, 'num_experts', getattr(hf_config, 'num_local_experts', 0))
             if num_experts >= 200:
                 return True
 

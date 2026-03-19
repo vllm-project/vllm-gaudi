@@ -192,7 +192,8 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             # Write back cache
             assert final_state is not None
 
-            ssm_state.index_copy_(0, state_indices, final_state.to(device=ssm_state.device, dtype=ssm_state.dtype))
+            ssm_state.index_copy_(0, state_indices.long(), final_state.to(device=ssm_state.device,
+                                                                          dtype=ssm_state.dtype))
 
             # Copy output
             non_spec_out = core_attn_out_result.squeeze(0)
