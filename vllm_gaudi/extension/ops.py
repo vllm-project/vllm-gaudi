@@ -1047,7 +1047,7 @@ def fp8_channel_moe_prepare_weights(layer):
     setattr(layer, "w2_weight", None)
     if hasattr(layer, "w13_input_scale") and layer.w13_input_scale is not None:
         layer.moe_op.w13_input_scale = layer.w13_input_scale
-    if hasattr(layer, "w2_input_scale"):
+    if hasattr(layer, "w2_input_scale") and layer.w2_input_scale is not None:
         # Split the input scale for each expert to avoid explicit slice in MOE op
         # which can cause performance regression.
         w2_input_scale = [layer.w2_input_scale[i].clone() for i in range(len(layer.w2_input_scale))]
