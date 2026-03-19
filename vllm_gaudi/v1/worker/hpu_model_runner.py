@@ -491,6 +491,36 @@ def apply_model_specific_patches(model_runner):
     _init_mamba_split_weights(model_runner.model)
 
 
+def compute_prefix_caching_block_indices(num_reqs: int, num_computed_tokens, num_scheduled_tokens,
+                                         mamba_block_size: int,
+                                         device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+    num_computed_tokens = torch.tensor(num_computed_tokens, dtype=torch.int32)
+    num_scheduled_tokens = torch.tensor(num_scheduled_tokens, dtype=torch.int32)
+
+    if num_computed_tokens.numel() > num_reqs:
+        num_computed_tokens = num_computed_tokens[:num_reqs]
+    if num_scheduled_tokens.numel() > num_reqs:
+        num_scheduled_tokens = num_scheduled_tokens[:num_reqs]
+
+    # Block index of the last computed token
+    block_idx_last_computed_token = cdiv(num_computed_tokens, mamba_block_size) - 1
+    # which is <= block index for the first scheduled token
+    block_idx_first_scheduled_token = (cdiv(num_computed_tokens + 1, mamba_block_size) - 1)
+    # which is <= block index of the last scheduled token
+    block_idx_last_scheduled_token = (cdiv(num_computed_tokens + num_scheduled_tokens, mamba_block_size) - 1)
+    # -1 in case it's non-computed and causes later issues with indexing
+    block_idx_last_computed_token = torch.clamp(block_idx_last_computed_token, min=0)
+    # -1 in the case we have a padded request (0 seq-len)
+    block_idx_last_scheduled_token = torch.clamp(block_idx_last_scheduled_token, min=0)
+
+    return (
+        block_idx_last_computed_token,
+        block_idx_first_scheduled_token,
+        block_idx_last_scheduled_token,
+    )
+
+
 class HpuKVConnectorModelRunnerMixin(KVConnectorModelRunnerMixin):
 
     def __init__(self):
@@ -725,8 +755,9 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
         'slot_mapping', 'is_prompt', 'block_size', 'block_groups', 'window_block_list', 'window_block_mapping',
         'window_block_usage', 'window_block_groups', 'window_attn_bias', 'chunked_block_mapping', 'chunked_attn_bias',
         'chunked_block_list', 'chunked_block_usage', 'chunked_block_groups', 'prep_initial_states',
-        'has_initial_states_p', 'last_chunk_indices_p', 'state_indices_tensor', 'query_start_loc', 'query_start_loc_p',
-        'padding_mask_flat'
+        'has_initial_states_p', 'last_chunk_indices_p', 'load_indices_tensor', 'store_indices_tensor',
+        'query_start_loc', 'query_start_loc_p', 'padding_mask_flat', 'blocks_caching_range',
+        'mamba_chunks_to_block_mapping', 'seqlens_offsets_for_blocks'
     ])
     return attention_metadata
 
@@ -1078,6 +1109,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         new_bucket = self.bucketing_manager.find_unified_bucket(query_len, shared_blocks, unique_blocks, is_causal)
         return (new_bucket[0], new_bucket[1], new_bucket[2], self.max_num_seqs)
+
+    def prepare_mamba_state_idxs(self, req_indices, block_table_offsets, target_bs):
+        num_indices = len(req_indices)
+        all_state_indices_cpu = []
+        for group_idx in range(len(self.input_batch.block_table.block_tables)):
+            block_table_cpu_tensor = self.input_batch.block_table[group_idx].get_cpu_tensor()
+            state_indices_cpu = block_table_cpu_tensor[req_indices, block_table_offsets].clone()
+
+            if num_indices < target_bs:
+                padding = torch.full((target_bs - num_indices, ),
+                                     self._MAMBA_PAD_BLOCK_ID,
+                                     dtype=torch.int32,
+                                     device='cpu')
+                state_indices_cpu = torch.cat([state_indices_cpu, padding])
+
+            all_state_indices_cpu.append(state_indices_cpu)
+
+        return torch.stack(all_state_indices_cpu, dim=0)  # Shape: [num_groups, target_bs]
 
     def create_lora_mask(self, input_tokens: torch.Tensor, lora_ids: list[int], is_prompt: bool):
         '''
@@ -2234,29 +2283,96 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             assert nphysical_chunks > 0, (f"target_seq={target_seq} must be >= chunk_size={chunk_size}")
             last_chunk_indices = [nphysical_chunks - 1 for _ in range(len(contents.req_ids))]
 
-            num_prefill_reqs = len(contents.req_ids)
-            all_state_indices_cpu = []
-            for group_idx in range(len(self.input_batch.block_table.block_tables)):
-                block_table_cpu_tensor = self.input_batch.block_table[group_idx].get_cpu_tensor()
+            mamba_block_size = self.cache_config.mamba_block_size
+            (block_idx_last_computed_token_cpu,
+             block_idx_first_scheduled_token_cpu,
+             block_idx_last_scheduled_token_cpu) = \
+                compute_prefix_caching_block_indices(
+                    len(contents.req_ids),
+                    context_lens,
+                    query_lens,
+                    mamba_block_size,
+                    self.device
+                )
 
-                state_indices_cpu = torch.zeros(num_prefill_reqs, dtype=torch.int32)
+            req_indices = [self.input_batch.req_id_to_index[req_id] for req_id in contents.req_ids]
+            if self.use_prefix_caching:
+                load_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_computed_token_cpu,
+                                                                       target_bs)
+                store_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_scheduled_token_cpu,
+                                                                        target_bs)
+            else:
+                zeros = [0] * len(req_indices)
+                load_state_indices_cpu = store_state_indices_cpu = \
+                    self.prepare_mamba_state_idxs(req_indices, zeros, target_bs)
 
-                for i, req_id in enumerate(contents.req_ids):
-                    req_idx = self.input_batch.req_id_to_index[req_id]
-                    # Get the first block for this request (same logic as decode)
-                    first_block = block_table_cpu_tensor[req_idx, 0]
-                    state_indices_cpu[i] = first_block
+            if self.use_prefix_caching:
+                assert len(contents.req_ids) == 1
+                assert mamba_block_size % self.mamba_chunk_size == 0
+                assert context_lens[0] % self.mamba_chunk_size == 0
 
-                if num_prefill_reqs < target_bs:
-                    padding = torch.full((target_bs - num_prefill_reqs, ),
-                                         self._MAMBA_PAD_BLOCK_ID,
-                                         dtype=torch.int32,
-                                         device='cpu')
-                    state_indices_cpu = torch.cat([state_indices_cpu, padding])
+                chunk_stride = mamba_block_size // self.mamba_chunk_size
+                # Max mamba blocks to cache for this bucket (upper bound)
+                max_cached_blocks = cdiv(target_seq, mamba_block_size) + 1
 
-                all_state_indices_cpu.append(state_indices_cpu)
+                # chunk_offset: scheduled-chunk index of the last chunk
+                # of the first block to cache. Block boundaries fall at
+                # absolute chunk (block+1)*chunk_stride-1; subtract the
+                # first scheduled absolute chunk to get the local index.
+                first_sched_chunk_abs = context_lens[0] // self.mamba_chunk_size
+                first_block = block_idx_first_scheduled_token_cpu[0].item()
+                chunk_offset = (first_block + 1) * chunk_stride - 1 - first_sched_chunk_abs
 
-            all_state_indices_cpu = torch.stack(all_state_indices_cpu, dim=0)  # Shape: [num_groups, target_bs]
+                all_blocks_caching_ranges_cpu = []
+                all_mamba_chunks_to_block_mappings_cpu = []
+                for group_idx in range(len(self.input_batch.block_table.block_tables)):
+                    block_table_cpu_tensor = self.input_batch.block_table[group_idx].get_cpu_tensor()
+                    first = block_idx_first_scheduled_token_cpu[0]
+                    last = block_idx_last_scheduled_token_cpu[0]
+                    blocks_caching_range = block_table_cpu_tensor[req_indices[0], first:last + 1].clone()
+                    n_blocks = blocks_caching_range.shape[0]
+
+                    # Compute scheduled-chunk index for each block's last chunk;
+                    # clamp so partial last block maps to the last physical chunk.
+                    chunk_indices = torch.arange(n_blocks, dtype=torch.int64) * chunk_stride + chunk_offset
+                    chunk_indices = torch.clamp(chunk_indices, max=nphysical_chunks - 1)
+
+                    mamba_chunks_to_block_mapping_cpu = torch.full((nphysical_chunks, ),
+                                                                   self._MAMBA_PAD_BLOCK_ID,
+                                                                   dtype=torch.int32,
+                                                                   device='cpu')
+                    mamba_chunks_to_block_mapping_cpu[chunk_indices] = blocks_caching_range
+
+                    # Pad blocks_caching_range to fixed size for stable graph shapes
+                    bcr_padded = torch.full((max_cached_blocks, ),
+                                            self._MAMBA_PAD_BLOCK_ID,
+                                            dtype=torch.int32,
+                                            device='cpu')
+                    bcr_padded[:n_blocks] = blocks_caching_range
+
+                    all_blocks_caching_ranges_cpu.append(bcr_padded)
+                    all_mamba_chunks_to_block_mappings_cpu.append(mamba_chunks_to_block_mapping_cpu)
+
+                all_blocks_caching_ranges_cpu = torch.stack(all_blocks_caching_ranges_cpu, dim=0)
+                all_mamba_chunks_to_block_mappings_cpu = torch.stack(all_mamba_chunks_to_block_mappings_cpu, dim=0)
+
+                computed_tokens = context_lens[0]
+                scheduled_tokens = query_lens[0]
+                # Offsets index into seq_input = [init_state | scheduled_tokens],
+                # so they must be relative to the scheduled portion, not absolute.
+                offset = mamba_block_size - computed_tokens % mamba_block_size
+                seqlens_offsets_for_blocks_cpu = []
+                while offset < scheduled_tokens:
+                    seqlens_offsets_for_blocks_cpu.append(offset)
+                    offset += mamba_block_size
+                seqlens_offsets_for_blocks_cpu.append(scheduled_tokens)
+                # Pad to fixed size for stable graph shapes
+                pad_val = seqlens_offsets_for_blocks_cpu[-1]
+                while len(seqlens_offsets_for_blocks_cpu) < max_cached_blocks:
+                    seqlens_offsets_for_blocks_cpu.append(pad_val)
+                seqlens_offsets_for_blocks_cpu = torch.tensor(seqlens_offsets_for_blocks_cpu,
+                                                              dtype=torch.int32,
+                                                              device='cpu')
 
             # CREATE PADDING MASK HERE using target_bs and target_seq
             # Create mask on CPU: [target_bs, target_seq]
@@ -2276,7 +2392,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # Flatten to [target_bs * target_seq, 1] for easy multiplication
             padding_mask_flat_cpu = padding_mask_cpu.view(-1, 1)
 
-            state_indices_tensor = async_h2d_copy(all_state_indices_cpu, device=self.device)
+            load_indices_tensor = async_h2d_copy(load_state_indices_cpu, device=self.device)
+            store_indices_tensor = async_h2d_copy(store_state_indices_cpu, device=self.device)
 
             has_initial_states_p = async_h2d_copy(has_initial_states_cpu, dtype=torch.int32)
             last_chunk_indices_p = async_h2d_copy(last_chunk_indices, dtype=torch.int32)
@@ -2284,13 +2401,27 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             padding_mask_flat = async_h2d_copy(padding_mask_flat_cpu, device=self.device)
             query_start_loc_p = async_h2d_copy(query_start_loc_p_cpu, dtype=torch.int32)
 
+            if self.use_prefix_caching:
+                blocks_caching_range = async_h2d_copy(all_blocks_caching_ranges_cpu, device=self.device)
+                mamba_chunks_to_block_mapping = async_h2d_copy(all_mamba_chunks_to_block_mappings_cpu,
+                                                               device=self.device)
+                seqlens_offsets_for_blocks = async_h2d_copy(seqlens_offsets_for_blocks_cpu, device=self.device)
+            else:
+                blocks_caching_range = None
+                mamba_chunks_to_block_mapping = None
+                seqlens_offsets_for_blocks = None
+
         else:
             prep_initial_states = None
-            state_indices_tensor = None
+            load_indices_tensor = None
+            store_indices_tensor = None
             has_initial_states_p = None
             last_chunk_indices_p = None
             padding_mask_flat = None
             query_start_loc_p = None
+            blocks_caching_range = None
+            seqlens_offsets_for_blocks = None
+            mamba_chunks_to_block_mapping = None
 
         query_lens = async_h2d_copy(query_lens, dtype=torch.int32)
         token_ids = async_h2d_copy(token_ids, dtype=torch.int32)
@@ -2301,18 +2432,23 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         context_blocks_t: Optional[torch.tensor]
         context_blocks_t = async_h2d_copy(context_blocks, dtype=torch.int32).flatten() if target_blocks > 0 else None
 
-        attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(seq_lens_tensor=query_lens,
-                                                                     context_lens_tensor=context_lens,
-                                                                     slot_mapping=token_slots,
-                                                                     block_list=context_blocks_t,
-                                                                     attn_bias=attn_bias,
-                                                                     block_size=self.block_size,
-                                                                     prep_initial_states=prep_initial_states,
-                                                                     has_initial_states_p=has_initial_states_p,
-                                                                     last_chunk_indices_p=last_chunk_indices_p,
-                                                                     state_indices_tensor=state_indices_tensor,
-                                                                     query_start_loc=query_start_loc_p,
-                                                                     padding_mask_flat=padding_mask_flat)
+        attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
+            seq_lens_tensor=query_lens,
+            context_lens_tensor=context_lens,
+            slot_mapping=token_slots,
+            block_list=context_blocks_t,
+            attn_bias=attn_bias,
+            block_size=self.block_size,
+            prep_initial_states=prep_initial_states,
+            has_initial_states_p=has_initial_states_p,
+            last_chunk_indices_p=last_chunk_indices_p,
+            load_indices_tensor=load_indices_tensor,
+            store_indices_tensor=store_indices_tensor,
+            query_start_loc=query_start_loc_p,
+            padding_mask_flat=padding_mask_flat,
+            blocks_caching_range=blocks_caching_range,
+            mamba_chunks_to_block_mapping=mamba_chunks_to_block_mapping,
+            seqlens_offsets_for_blocks=seqlens_offsets_for_blocks)
         return PrefillInputData(request_ids=[req_ids],
                                 prompt_lens=[query_lens],
                                 token_ids=[token_ids],
@@ -2539,20 +2675,28 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     padded_batch_size * num_tokens)
 
         if self.num_mamba_layers > 0:
-            all_state_indices_cpu = []
-            for group_idx in range(len(self.input_batch.block_table.block_tables)):
-                block_table_cpu_tensor = self.input_batch.block_table[group_idx].get_cpu_tensor()
-                state_indices_cpu = block_table_cpu_tensor[:num_decodes, 0].clone()
-                if num_decodes < padded_batch_size:
-                    padding = torch.full((padded_batch_size - num_decodes, ),
-                                         self._MAMBA_PAD_BLOCK_ID,
-                                         dtype=torch.int32,
-                                         device='cpu')
-                    state_indices_cpu = torch.cat([state_indices_cpu, padding])
+            mamba_block_size = self.cache_config.mamba_block_size
+            (block_idx_last_computed_token_cpu,
+             block_idx_first_scheduled_token_cpu,
+             block_idx_last_scheduled_token_cpu) = \
+                compute_prefix_caching_block_indices(
+                    num_decodes,
+                    context_lens,
+                    num_scheduled_tokens,
+                    mamba_block_size,
+                    self.device
+                )
 
-                all_state_indices_cpu.append(state_indices_cpu)
-
-            all_state_indices_cpu = torch.stack(all_state_indices_cpu, dim=0)  # Shape: [num_groups, target_bs]
+            req_indices = list(range(num_decodes))
+            if self.use_prefix_caching:
+                load_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_computed_token_cpu,
+                                                                       padded_batch_size)
+                store_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_scheduled_token_cpu,
+                                                                        padded_batch_size)
+            else:
+                zeros = [0] * len(req_indices)
+                load_state_indices_cpu = store_state_indices_cpu = \
+                    self.prepare_mamba_state_idxs(req_indices, zeros, padded_batch_size)
 
             seq_lens_cpu = torch.tensor(num_tokens_per_req, dtype=torch.int32, device='cpu', pin_memory=self.pin_memory)
 
@@ -2563,12 +2707,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             query_start_loc_p_cpu[1:] = torch.cumsum(seq_lens_cpu.clone().to(dtype=torch.int32), dim=0)
 
             seq_lens_tensor = async_h2d_copy(seq_lens_cpu, device=self.device)
-            state_indices_tensor = async_h2d_copy(all_state_indices_cpu, device=self.device)
+            load_indices_tensor = async_h2d_copy(load_state_indices_cpu, device=self.device)
+            store_indices_tensor = async_h2d_copy(store_state_indices_cpu, device=self.device)
             query_start_loc_p = async_h2d_copy(query_start_loc_p_cpu, dtype=torch.int32)
 
         else:
             seq_lens_tensor = None
-            state_indices_tensor = None
+            load_indices_tensor = None
+            store_indices_tensor = None
             query_start_loc_p = None
 
         # CPU<>HPU sync *should not* happen here.
@@ -2631,7 +2777,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             chunked_block_list=chunked_block_list_device,
             chunked_block_usage=chunked_block_usage_device,
             chunked_block_groups=chunked_block_groups_device,
-            state_indices_tensor=state_indices_tensor,
+            load_indices_tensor=load_indices_tensor,
+            store_indices_tensor=store_indices_tensor,
             seq_lens_tensor=seq_lens_tensor,
             query_start_loc=query_start_loc_p,
         )
