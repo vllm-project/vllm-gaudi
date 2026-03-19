@@ -244,6 +244,36 @@ class HpuMiniMaxM2Attention(nn.Module):
             accumulate=False,
         )
 
+    # This path is used to reduce number of all_reduce calls.
+    # When RMSNorm is initialized but we want to apply TP to qk,
+    # it is better to combine qk tensors and perform one all_reduce
+    def rmsnorm_qk(
+        self,
+        q_norm: "RMSNorm",
+        k_norm: "RMSNorm",
+        q: torch.Tensor,
+        k: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        qnorm_slice = q_norm.hidden_size // self.tp_size
+        knorm_slice = k_norm.hidden_size // self.tp_size
+        s, e = self.tp_rank, self.tp_rank + 1
+        qnorm_weight = q_norm.weight[s * qnorm_slice:e * qnorm_slice]
+        knorm_weight = k_norm.weight[s * knorm_slice:e * knorm_slice]
+        orig_dtype = q.dtype
+        q = q.to(torch.float32)
+        k = k.to(torch.float32)
+        q_var = q.pow(2).mean(dim=-1).unsqueeze(1)
+        k_var = k.pow(2).mean(dim=-1).unsqueeze(1)
+        if self.tp_size > 1:
+            qk_var = torch.cat([q_var, k_var], dim=1)
+            qk_var = tensor_model_parallel_all_reduce(qk_var) / self.tp_size
+            q_var, k_var = qk_var.chunk(2, dim=1)
+        q = q * torch.rsqrt(q_var.transpose(-1, -2) + q_norm.variance_epsilon) * qnorm_weight
+        k = k * torch.rsqrt(k_var.transpose(-1, -2) + k_norm.variance_epsilon) * knorm_weight
+        q = q.to(orig_dtype)
+        k = k.to(orig_dtype)
+        return q, k
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -255,10 +285,10 @@ class HpuMiniMaxM2Attention(nn.Module):
             seq = orig_shape[-2]
             x = hidden_states.reshape(-1, self.hidden_size)
             x_fp8 = torch.ops.hpu.cast_to_fp8_v2(x, 1.0 / self.q_proj.input_scale, False, False, torch.float8_e4m3fn)[0]
-            qweight_slice = self.q_proj.weight.size(1) // self.tp_size
-            kweight_slice = self.k_proj.weight.size(1) // self.tp_size
 
             if bs * seq > self.adaptive_norm_tp_thld:
+                qweight_slice = self.q_proj.weight.size(1) // self.tp_size
+                kweight_slice = self.k_proj.weight.size(1) // self.tp_size
                 s = self.tp_rank
                 e = self.tp_rank + 1
                 W_Q = self.q_proj.weight.transpose(0, 1)[ \
@@ -285,7 +315,7 @@ class HpuMiniMaxM2Attention(nn.Module):
                                weight_scale=S_V).reshape(bs, seq, -1)
 
             if bs * seq > self.adaptive_norm_tp_thld:
-                q, k = RMSNorm.forward_qk(self.q_norm, self.k_norm, q.contiguous(), k.contiguous())
+                q, k = self.rmsnorm_qk(self.q_norm, self.k_norm, q.contiguous(), k.contiguous())
             else:
                 q = self.q_norm(q)
                 k = self.k_norm(k)
