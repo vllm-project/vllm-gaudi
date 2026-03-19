@@ -5915,6 +5915,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
                         )
 
+    @torch.inference_mode()
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
