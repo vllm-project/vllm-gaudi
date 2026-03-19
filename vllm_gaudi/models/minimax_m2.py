@@ -158,7 +158,7 @@ class HpuMiniMaxM2Attention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
 
-        self.adaptive_norm_tp = get_config().adaptive_norm_tp
+        self.adaptive_norm_tp = get_config().adaptive_norm_tp and self.tp_size > 1
         self.adaptive_norm_tp_thld = get_config().adaptive_norm_tp_thld
 
         if self.adaptive_norm_tp:
