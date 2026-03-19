@@ -142,7 +142,7 @@ def get_features():
               All(VersionRange(">=1.24.0.460"), MinPackageVersion("neural_compressor_pt", "3.7")),
               env_var_type=boolean),
         Value('use_hpu_aligned_scale', False, env_var='HPU_ALIGNED_SCALE', env_var_type=boolean),
-        Value('adaptive_norm_tp', False, env_var='VLLM_ADAPTIVE_NORM_TP', env_var_type=boolean),
+        Value('adaptive_norm_tp', ModelType('minimax_m2'), env_var='VLLM_ADAPTIVE_NORM_TP', env_var_type=boolean),
         Value('adaptive_norm_tp_thld', 256, env_var='VLLM_ADAPTIVE_NORM_TP_THLD', env_var_type=int),
     ]
     return split_values_and_flags(features)
