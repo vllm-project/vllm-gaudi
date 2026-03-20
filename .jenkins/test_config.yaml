@@ -134,3 +134,4 @@ stages:
           VLLM_FUSED_BLOCK_SOFTMAX_ADJUSTMENT=False VLLM_CONTIGUOUS_PA=true VLLM_DEFRAG=true VLLM_USE_HYBRID_CACHE=true VLLM_USE_NAIVE_MAMBA_CACHE_SHARING=false  VLLM_GRAPH_RESERVED_MEM=0.4
           bash run-tests.sh -c configs/models-qwen3.5.txt -t 1 ;
           pip install transformers==$OLD_TRANSFORMERS_VER huggingface_hub==$OLD_HF_HUB_VER --no-deps
+

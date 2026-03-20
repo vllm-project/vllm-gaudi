@@ -14,3 +14,4 @@ batch_size: 4
 dtype: "bfloat16"
 trust_remote_code: True
 model_args: "gpu_memory_utilization=0.6,reasoning_parser=qwen3,max_num_batched_tokens=4096"
+
