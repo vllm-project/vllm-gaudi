@@ -5448,6 +5448,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         assert self.mm_budget is not None
         num_frames = 100
         count = 1
+        mm_options = None
         if self.get_model().vision_bucket_manager.is_batch_based:
             batch = image_args
         else:
@@ -5514,6 +5515,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             warmup_lists = warmup_lists + \
                 vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
         for modality, max_items in self.mm_budget.mm_limits.items():
+            # Skip audio warmup temporarily to unblock qwen omni multimodal models
+            if modality == 'audio':
+                continue
             if modality == 'image' and not is_image_warmup or modality == 'video' \
                 and not is_video_warmup:
                 continue
