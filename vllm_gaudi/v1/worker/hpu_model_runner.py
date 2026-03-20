@@ -63,7 +63,7 @@ from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingType
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_map_leaves
 from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy, getattr_nested, setattr_nested)
@@ -867,9 +867,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         self.num_mamba_layers = self.model_config.get_num_layers_by_block_type(self.parallel_config, "mamba")
         self.mamba_chunk_size = self.model_config.get_mamba_chunk_size() if self.num_mamba_layers > 0 else 0
-        self.use_hybrid_cache = os.getenv('VLLM_USE_HYBRID_CACHE', 'false').strip().lower() in ("1", "true")
-        self.use_naive_mamba_cache_sharing = os.getenv('VLLM_USE_NAIVE_MAMBA_CACHE_SHARING',
-                                                       'true').strip().lower() in ("1", "true")
 
         # Lazy initialization
         # self.model: nn.Module  # set after load_model
@@ -5756,34 +5753,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         for attn_groups in self.attn_groups:
             yield from attn_groups
 
-    def _update_hybrid_attention_mamba_layout(self, kv_caches: dict[str, torch.Tensor]) -> None:
-        """
-        Update the layout of attention layers from (2, num_blocks, ...) to
-        (num_blocks, 2, ...).
-
-        Args:
-            kv_caches: The KV cache buffer of each layer.
-        """
-
-        for group in self._kv_cache_spec_attn_group_iterator():
-            kv_cache_spec = group.kv_cache_spec
-            for layer_name in group.layer_names:
-                kv_cache = kv_caches[layer_name]
-                if isinstance(kv_cache_spec, AttentionSpec):
-                    # kv_cache is a tuple: (key_cache, value_cache, key_scales, value_scales)
-                    key_cache = kv_cache[0] if isinstance(kv_cache, (tuple, list)) else kv_cache
-                    # TODO: check if this scenario is even possible
-                    if hasattr(key_cache, 'shape') and key_cache.shape[0] == 2:
-                        print(f'{layer_name} kv_cache shape {kv_cache.shape}')
-                        assert kv_cache.shape[1] != 2, ("Fail to determine whether the layout is "
-                                                        "(2, num_blocks, ...) or (num_blocks, 2, ...) for "
-                                                        f"a tensor of shape {kv_cache.shape}")
-                        hidden_size = kv_cache.shape[2:].numel()
-                        kv_cache.as_strided_(
-                            size=kv_cache.shape,
-                            stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
-                        )
-
+    @torch.inference_mode()
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -5830,13 +5800,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         kv_caches: dict[str, torch.Tensor] = {}
         num_blocks = 0
-        if self.use_hybrid_cache and self.num_mamba_layers > 0:
-            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                # taking into account dummy block
-                size = (kv_cache_tensor.size + kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes)
-                tensor = torch.zeros(size // 2, dtype=torch.bfloat16, device=self.device)
-                for layer_name in kv_cache_tensor.shared_by:
-                    kv_caches[layer_name] = tensor
+        if self.num_mamba_layers > 0:
+            # Hybrid mamba+attention path: allocate separate tensors for each
+            # layer to avoid as_strided aliasing that degrades torch.compile
+            # performance. Mamba layers sharing the same KV cache tensor will
+            # share the same state tensor objects.
             for group in kv_cache_config.kv_cache_groups:
                 kv_cache_spec = group.kv_cache_spec
                 for layer_name in group.layer_names:
@@ -5851,50 +5819,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
-                        # here attn does not share kv cache tensor, so we create separate tensors
-                        kc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
-                        vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
-                        kv_caches[layer_name] = (kc, vc, None, None)
-                    elif isinstance(kv_cache_spec, MambaSpec):
-                        # This is almost the same as for gpu runner in vllm
-                        # only change is + 1 for dummy block
-                        raw_tensor = kv_caches[layer_name]
-                        state_tensors = []
-                        storage_offset_bytes = 0
-                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                            dtype_size = get_dtype_size(dtype)
-                            num_element_per_page = (kv_cache_spec.page_size_bytes // dtype_size)
-                            target_shape = (num_blocks + 1, *shape)
-                            stride = torch.empty(target_shape).stride()
-                            target_stride = (num_element_per_page, *stride[1:])
-                            assert storage_offset_bytes % dtype_size == 0
-                            tensor = torch.as_strided(
-                                raw_tensor,
-                                size=target_shape,
-                                stride=target_stride,
-                                storage_offset=storage_offset_bytes // dtype_size,
-                            )
-                            state_tensors.append(tensor)
-                            storage_offset_bytes += stride[0] * dtype_size
-                        kv_caches[layer_name] = tuple(state_tensors)
-                    else:
-                        pass
-        elif self.use_naive_mamba_cache_sharing and self.num_mamba_layers > 0:
-            for group in kv_cache_config.kv_cache_groups:
-                kv_cache_spec = group.kv_cache_spec
-                for layer_name in group.layer_names:
-                    kv_cache_spec = group.kv_cache_spec
-                    for kk in kv_cache_config.kv_cache_tensors:
-                        if layer_name in kk.shared_by:
-                            kv_cache_tensor_size = kk.size
-                            break
-                    num_blocks = \
-                        kv_cache_tensor_size // kv_cache_spec.page_size_bytes
-                    if isinstance(kv_cache_spec, FullAttentionSpec):
-                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
-                                                                              kv_cache_spec.num_kv_heads,
-                                                                              kv_cache_spec.head_size)
-                        # here attn does not share kv cache tensor, so we create separate tensors
                         kc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         kv_caches[layer_name] = (kc, vc, None, None)
@@ -5917,7 +5841,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             break
                     else:
                         pass
-        else:  # non-hybrid scenario
+        else:  # no mamba layers
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
                 for layer_name in kv_cache_tensor.shared_by:
                     # Get the correct spec for this layer
@@ -6018,9 +5942,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                                  self.block_size, dtype, self.profiler)
             logger.info("Allocating unified persistent batch took %.4f GB of host memory",
                         m.consumed_host_memory / float(2**30))
-        # TODO: check if this one is needed; for now seems that not
-        # if has_mamba:
-        #     self._update_hybrid_attention_mamba_layout(kv_caches)
 
         htorch.hpu.synchronize()
 
