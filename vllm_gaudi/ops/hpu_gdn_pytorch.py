@@ -211,14 +211,36 @@ def hpu_chunk_gdr_phase_b(
     """
     if _USE_LEGACY_PHASE_B:
         return _hpu_chunk_gdr_phase_b_legacy(
-            u_all, w_all, q_chunks, k_chunks, g_chunks,
-            init_state, scale, S, num_chunks, seq_len,
-            H, Kdim, Vdim, output_final_state,
+            u_all,
+            w_all,
+            q_chunks,
+            k_chunks,
+            g_chunks,
+            init_state,
+            scale,
+            S,
+            num_chunks,
+            seq_len,
+            H,
+            Kdim,
+            Vdim,
+            output_final_state,
         )
     return _hpu_chunk_gdr_phase_b_optimized(
-        u_all, w_all, q_chunks, k_chunks, g_chunks,
-        init_state, scale, S, num_chunks, seq_len,
-        H, Kdim, Vdim, output_final_state,
+        u_all,
+        w_all,
+        q_chunks,
+        k_chunks,
+        g_chunks,
+        init_state,
+        scale,
+        S,
+        num_chunks,
+        seq_len,
+        H,
+        Kdim,
+        Vdim,
+        output_final_state,
     )
 
 
@@ -269,7 +291,7 @@ def _hpu_chunk_gdr_phase_b_optimized(
     A = torch.tril(A * pair_decay)
 
     core_h = torch.matmul(A, u_h) * scale  # [S,C,H,tc,V]
-    Q = q_h * g_exp.unsqueeze(-1)          # [S,C,H,tc,K]
+    Q = q_h * g_exp.unsqueeze(-1)  # [S,C,H,tc,K]
     C_h = (Q - torch.matmul(A, w_h)) * scale  # [S,C,H,tc,K]
 
     # State decomposition:
@@ -835,9 +857,25 @@ def hpu_chunk_gated_delta_rule(
 
     # ---- Legacy paths (cu_seqlens / non-bucketed) ----
     return _hpu_chunk_gated_delta_rule_legacy(
-        q, k, v, g, beta, scale, initial_state, output_final_state,
-        cu_seqlens, use_qk_l2norm_in_kernel, chunk_size, neumann_iters,
-        B, T, H, HV, Kdim, Vdim, device,
+        q,
+        k,
+        v,
+        g,
+        beta,
+        scale,
+        initial_state,
+        output_final_state,
+        cu_seqlens,
+        use_qk_l2norm_in_kernel,
+        chunk_size,
+        neumann_iters,
+        B,
+        T,
+        H,
+        HV,
+        Kdim,
+        Vdim,
+        device,
     )
 
 
