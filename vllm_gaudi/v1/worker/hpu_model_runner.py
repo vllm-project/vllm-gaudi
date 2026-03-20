@@ -5808,7 +5808,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             for group in kv_cache_config.kv_cache_groups:
                 kv_cache_spec = group.kv_cache_spec
                 for layer_name in group.layer_names:
-                    kv_cache_spec = group.kv_cache_spec
                     for kk in kv_cache_config.kv_cache_tensors:
                         if layer_name in kk.shared_by:
                             kv_cache_tensor_size = kk.size
