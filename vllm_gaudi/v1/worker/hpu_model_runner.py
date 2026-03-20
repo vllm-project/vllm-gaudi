@@ -5801,10 +5801,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         kv_caches: dict[str, torch.Tensor] = {}
         num_blocks = 0
         if self.num_mamba_layers > 0:
-            # Hybrid mamba+attention path: allocate separate tensors for each
-            # layer to avoid as_strided aliasing that degrades torch.compile
-            # performance. Mamba layers sharing the same KV cache tensor will
-            # share the same state tensor objects.
+            # Hybrid mamba+attention path: use a single combined allocation
+            # for K and V with standard indexing ([0]/[1]) to create
+            # non-overlapping contiguous views. This avoids as_strided
+            # aliasing that degrades torch.compile while keeping the same
+            # memory footprint as a single-buffer approach.
+            # Mamba layers sharing the same KV cache tensor will share
+            # the same state tensor objects.
             for group in kv_cache_config.kv_cache_groups:
                 kv_cache_spec = group.kv_cache_spec
                 for layer_name in group.layer_names:
@@ -5818,8 +5821,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
-                        kc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
-                        vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
+                        # Single allocation for both K and V; standard indexing
+                        # creates contiguous non-overlapping views that
+                        # torch.compile can reason about (unlike as_strided).
+                        kv_combined = torch.zeros(2, *kv_cache_shape,
+                                                  dtype=kv_cache_spec.dtype, device=self.device)
+                        kc = kv_combined[0]
+                        vc = kv_combined[1]
                         kv_caches[layer_name] = (kc, vc, None, None)
                     elif isinstance(kv_cache_spec, MambaSpec):
                         # skip if already created by another layer sharing the same kv cache tensor
