@@ -42,12 +42,17 @@ from vllm.v1.kv_offload.worker.worker import (
     TransferSpec,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+)
+from vllm.v1.structured_output import StructuredOutputManager
 
 from .utils import (
     EOS_TOKEN_ID,
     create_request_compatible_with_signature,
     create_model_runner_output,
-    create_scheduler,
     create_vllm_config,
 )
 
@@ -160,8 +165,34 @@ class RequestRunner:
             },
         )
 
-        self.scheduler: Scheduler = create_scheduler(vllm_config, num_blocks=num_gpu_blocks)
-        self.worker_connector = OffloadingConnector(vllm_config, KVConnectorRole.WORKER)
+        block_size = vllm_config.cache_config.block_size
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_gpu_blocks,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                )
+            ],
+        )
+        vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.num_kv_groups = len(kv_cache_config.kv_cache_groups)
+        scheduler_cls = (AsyncScheduler if vllm_config.scheduler_config.async_scheduling else Scheduler)
+        self.scheduler = scheduler_cls(
+            vllm_config=vllm_config,
+            kv_cache_config=kv_cache_config,
+            log_stats=True,
+            structured_output_manager=StructuredOutputManager(vllm_config),
+            block_size=block_size,
+        )
+
+        self.worker_connector = OffloadingConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
 
         # register worker kv_caches to enable OffloadingWorker creations
         self.worker_connector.register_cross_layers_kv_cache(
