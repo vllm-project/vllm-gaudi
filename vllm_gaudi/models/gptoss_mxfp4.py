@@ -40,7 +40,7 @@ def convert_moe_packed_tensors(
     rows_per_chunk: int = 32768 * 1024,
 ) -> torch.Tensor:
     """
-    Convert the mxfp4 weights again, dequantizing and makes them compatible with the forward
+    Convert the mxfp4 weights, dequantize and make them compatible with the forward
     pass of GPT_OSS.
     """
     import math
@@ -98,9 +98,9 @@ def convert_moe_packed_tensors(
         torch.ldexp(sub, exp, out=sub)
         del idx_lo, idx_hi, blk, exp, sub
 
-    out = out.reshape(*prefix_shape, G, B * 2).view(*prefix_shape, G * B * 2)
+    out = out.reshape(*prefix_shape, G *B * 2).contiguous()
     del blocks, scales, lut
-    return out.transpose(1, 2).contiguous()
+    return out
 
 
 def _load_weights_mxfp4_dequantize_hpu(
@@ -151,7 +151,7 @@ def _load_weights_mxfp4_dequantize_hpu(
             block_weight = block_weight_dict[block_name]
             param = params_dict[block_name]
 
-            weight = convert_moe_packed_tensors(block_weight, narrow_weight_scale).permute(0, 2, 1).contiguous()
+            weight = convert_moe_packed_tensors(block_weight, narrow_weight_scale)
             param[:, :2 * (tp_rank_end - tp_rank_start), :] = weight
             loaded_params.add(name)
             continue
@@ -177,7 +177,7 @@ def _load_weights_mxfp4_dequantize_hpu(
             block_weight = block_weight_dict[block_name]
             param = params_dict[block_name]
 
-            weight = convert_moe_packed_tensors(block_weight, narrow_weight_scale).permute(0, 2, 1).contiguous()
+            weight = convert_moe_packed_tensors(block_weight, narrow_weight_scale)
             param[:, :, :(tp_rank_end - tp_rank_start)] = weight
             loaded_params.add(name)
             continue
