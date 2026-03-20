@@ -343,7 +343,7 @@ class HpuQwen3OmniMoeThinkerForConditionalGeneration(
         thinker_config = vllm_config.model_config.hf_config.thinker_config
         quant_config = vllm_config.quant_config
 
-        upgraded_count = upgrade_qwen3_moe_blocks_inplace(self.language_model)
+        upgrade_qwen3_moe_blocks_inplace(self.language_model)
 
         self.audio_tower = Qwen3OmniMoeAudioEncoderStaticShape(thinker_config.audio_config)
 
@@ -434,10 +434,9 @@ class HpuQwen3OmniMoeThinkerForConditionalGeneration(
         )
 
     def _get_deepstack_input_embeds(self, num_tokens: int):
-        if hasattr(self, "deepstack_input_embeds") and self.deepstack_input_embeds is not None:
-            if len(self.deepstack_input_embeds) > 0:
-                if self.deepstack_input_embeds[0].device.type == "meta":
-                    return None
+        if (hasattr(self, "deepstack_input_embeds") and self.deepstack_input_embeds is not None
+                and len(self.deepstack_input_embeds) > 0 and self.deepstack_input_embeds[0].device.type == "meta"):
+            return None
 
         res = super()._get_deepstack_input_embeds(num_tokens)
 
