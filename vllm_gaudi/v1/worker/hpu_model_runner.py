@@ -469,10 +469,26 @@ def maybe_set_chunked_attention_layers(model_runner):
             pass
 
 
+def _init_mamba_split_weights(model):
+    """Eagerly split in_proj weights for HPUMambaMixer2 layers.
+
+    _init_split_weights() clones weight slices so F.linear sees
+    independent contiguous tensors.  This MUST happen before warmup
+    because PT_COMPILE_ONLY_MODE compiles recipes without executing
+    them, so .clone() would produce uninitialised tensors if called
+    during warmup.
+    """
+    from vllm_gaudi.ops.hpu_mamba_mixer2 import HPUMambaMixer2
+    for module in model.modules():
+        if isinstance(module, HPUMambaMixer2) and not module._split_weights_ready:
+            module._init_split_weights()
+
+
 def apply_model_specific_patches(model_runner):
     """The function applies model-specific monkey patches."""
     maybe_set_chunked_attention_layers(model_runner)
     patch_llama4_get_attn_scale(model_runner.model)
+    _init_mamba_split_weights(model_runner.model)
 
 
 class HpuKVConnectorModelRunnerMixin(KVConnectorModelRunnerMixin):
@@ -4506,10 +4522,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def _use_graphs(self):
         return not self.model_config.enforce_eager
 
-    def _remove_duplicate_submodules(self):
+    def _get_model_layers(self):
+        """Return the decoder layers from the model, handling both
+        standard (model.model.layers) and multimodal
+        (model.language_model.model.layers) layouts."""
         model = self.get_model()
-        if hasattr(model, "model"):
-            for layer in self.get_model().model.layers:
+        inner = getattr(model, 'model', None)
+        if inner is None:
+            inner = getattr(model, 'language_model', None)
+            if inner is not None:
+                inner = getattr(inner, 'model', None)
+        if inner is None or not hasattr(inner, 'layers'):
+            return None
+        return inner.layers
+
+    def _remove_duplicate_submodules(self):
+        layers = self._get_model_layers()
+        if layers is not None:
+            for layer in layers:
                 if not hasattr(layer, "self_attn"):
                     continue
                 self_attn = layer.self_attn
@@ -4548,9 +4578,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # only at the block level. _sync_shared_moe_gates()
                 # must be called after INC conversion to restore the
                 # reference.
-                mlp = getattr(layer, 'mlp', None)
+                mlp = getattr(layer, 'mlp', None) or getattr(layer, 'feed_forward', None)
                 if mlp is not None:
-                    block_gate = getattr(mlp, 'gate', None)
+                    block_gate = getattr(mlp, 'gate', None) or getattr(mlp, 'router', None)
                     experts = getattr(mlp, 'experts', None)
                     if (block_gate is not None and experts is not None
                             and getattr(experts, '_gate', None) is block_gate):
@@ -4576,14 +4606,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             ):
                 setattr(module, name, bool(getattr(moe_config, name, False)))
 
-        model = self.get_model()
-        if not hasattr(model, "model"):
+        layers = self._get_model_layers()
+        if layers is None:
             return
-        for layer in model.model.layers:
-            mlp = getattr(layer, 'mlp', None)
+        for layer in layers:
+            mlp = getattr(layer, 'mlp', None) or getattr(layer, 'feed_forward', None)
             if mlp is None:
                 continue
-            block_gate = getattr(mlp, 'gate', None)
+            block_gate = getattr(mlp, 'gate', None) or getattr(mlp, 'router', None)
             experts = getattr(mlp, 'experts', None)
             if block_gate is not None and experts is not None:
                 _sync_moe_kernel_flags(experts)

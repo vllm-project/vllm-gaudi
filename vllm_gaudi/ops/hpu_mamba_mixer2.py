@@ -5,6 +5,7 @@
 # Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/mamba_mixer2.py
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from vllm.v1.attention.backend import AttentionMetadata
@@ -169,6 +170,8 @@ class HPUMambaMixer2(MambaMixer2):
         self.num_heads = num_heads
         self.n_groups = n_groups
 
+        self.num_spec = get_current_vllm_config().num_speculative_tokens
+
         self.groups_ssm_state_size = self.n_groups * self.ssm_state_size
         self.conv_dim = intermediate_size + 2 * self.groups_ssm_state_size
 
@@ -259,6 +262,8 @@ class HPUMambaMixer2(MambaMixer2):
         self.tped_conv_size = self.conv_dim // self.tp_size
         self.tped_dt_size = self.num_heads // self.tp_size
 
+        self._split_weights_ready = False
+
         self.split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
             hidden_states_B_C,
             [
@@ -276,12 +281,21 @@ class HPUMambaMixer2(MambaMixer2):
     ):
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
-        # 1. Gated MLP's linear projection
-        projected_states, _ = self.in_proj(hidden_states)
-        if mup_vector is not None:
-            projected_states = projected_states * mup_vector
+        # 1. Split in_proj into two GEMMs for TPC/MME pipelining.
+        #    GEMM 1 (states: x,B,C,dt) is dispatched to the MME first;
+        #    GEMM 2 (gate) is dispatched second.  The Gaudi runtime can
+        #    overlap GEMM 2 on the MME with conv+SSM TPC work that
+        #    depends only on GEMM 1.
+        states_proj = F.linear(hidden_states, self._states_weight, self._states_bias)
 
-        # 2. Prepare inputs for conv + SSM
+        gate = F.linear(hidden_states, self._gate_weight, self._gate_bias)
+
+        if mup_vector is not None:
+            gate_size = self.tped_intermediate_size
+            states_proj = states_proj * mup_vector[gate_size:]
+            gate = gate * mup_vector[:gate_size]
+
+        # 2. Prepare output buffer for conv + SSM
         ssm_output = torch.empty(
             [
                 hidden_states.shape[0],
@@ -291,19 +305,10 @@ class HPUMambaMixer2(MambaMixer2):
             device=hidden_states.device,
         )
 
-        # 3. conv + SSM
-        # (split `projected_states` into hidden_states_B_C, dt in the custom op to
-        # ensure it is not treated as an intermediate tensor by torch compile)
-        self.conv_ssm_forward(
-            projected_states,
-            ssm_output,
-        )
+        # 3. conv + SSM on TPC — overlaps with GEMM 2 on MME
+        self.conv_ssm_forward(states_proj, ssm_output)
 
-        # 4. gated MLP
-        # GatedRMSNorm internally applying SiLU to the gate
-        # SiLU is applied internally before normalization, unlike standard
-        # norm usage
-        gate = projected_states[..., :self.tped_intermediate_size]
+        # 4. gated MLP (needs both gate from GEMM 2 and ssm_output)
         hidden_states_varlen = self.norm(ssm_output, gate)
 
         # 5. Final linear projection
@@ -316,13 +321,43 @@ class HPUMambaMixer2(MambaMixer2):
 
         return output
 
+    # ------------------------------------------------------------------
+    # Pre-clone weight slices as standalone contiguous tensors so that
+    # F.linear sees them as independent parameters.  The Habana bridge
+    # recognises F.linear and maps it to an optimised MME recipe that
+    # does NOT require a separate TPC transpose of the weight, unlike
+    # a raw torch.mm or a non-contiguous view.
+    #
+    # Must be called AFTER checkpoint weights have been loaded into
+    # self.in_proj.weight and BEFORE PT_COMPILE_ONLY_MODE warmup,
+    # because .clone() does not copy data in compile-only mode.
+    # Called from apply_model_specific_patches() in hpu_model_runner.
+    # ------------------------------------------------------------------
+    def _init_split_weights(self):
+        gate_size = self.tped_intermediate_size
+        w = self.in_proj.weight  # [total_out, hidden_size]
+        b = self.in_proj.bias  # [total_out] or None
+
+        self._states_weight = w[gate_size:].clone()  # [states_out, hidden]
+        self._gate_weight = w[:gate_size].clone()  # [gate_out, hidden]
+
+        if b is not None:
+            self._states_bias = b[gate_size:].clone()
+            self._gate_bias = b[:gate_size].clone()
+        else:
+            self._states_bias = None
+            self._gate_bias = None
+
+        self._split_weights_ready = True
+
     def conv_ssm_forward(
         self,
-        projected_states: torch.Tensor,
+        states_proj: torch.Tensor,
         output: torch.Tensor,
     ):
+        # states_proj contains [x, B, C, dt] (gate already split off).
         hidden_states_B_C, dt = torch.split(
-            projected_states[..., self.tped_intermediate_size:],
+            states_proj,
             [self.tped_conv_size, self.tped_dt_size],
             dim=-1,
         )
