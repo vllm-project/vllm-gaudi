@@ -899,6 +899,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:
             self.max_encoder_len = 0
 
+        # Cache model-family checks used in hot paths.
+        # Qwen3.5 variants use model_type values like:
+        #   qwen3_5, qwen3_5_text, qwen3_5_moe, qwen3_5_moe_text
+        model_type = self._get_model_type() or ""
+        self._requires_bool_mm_mask_for_merge = model_type.startswith("qwen3_5")
+
         mamba_like = ["mamba", "linear_attention"]
 
         self.num_mamba_like_layers = sum(
@@ -1603,16 +1609,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         # Convert bool tensor to index tensor for merge embedding statically if optimized mm
 
-        # Qwen3.5 expects a bool multimodal mask here; avoid converting it to index form.
-        model_config = getattr(self, "model_config", None)
-        if model_config is None:
-            vllm_config = getattr(self, "vllm_config", None)
-            model_config = getattr(vllm_config, "model_config", None)
-
-        arches = getattr(getattr(model_config, "hf_config", None), "architectures", None) or []
-        is_qwen35 = any("Qwen3_5" in arch for arch in arches)
-
-        if self.uses_mrope and not is_qwen35:
+        # Qwen3.5 multimodal merge path requires a boolean placeholder mask.
+        # Converting the mask to index form here can break placeholder-to-embedding
+        # alignment for Qwen3.5, so keep bool form for that model family.
+        if self.uses_mrope and not self._requires_bool_mm_mask_for_merge:
             is_mm_embed_index = torch.nonzero(is_mm_embed[:total_num_scheduled_tokens], as_tuple=True)[0]
             # Bounds validation on CPU
             if len(is_mm_embed_index) > 0 and is_mm_embed_index.max() >= total_num_scheduled_tokens:
