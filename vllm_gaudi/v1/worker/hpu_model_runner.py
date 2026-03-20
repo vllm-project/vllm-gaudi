@@ -3257,7 +3257,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         out_indices = []
 
         # Reorder the bitmask to match the order of the requests in the batch.
-        sorted_bitmask = np.zeros_like(grammar_bitmask, shape=(logits.shape[0], grammar_bitmask.shape[1]))
+        sorted_bitmask = np.full(shape=(logits.shape[0], grammar_bitmask.shape[1]),
+                                 fill_value=-1,
+                                 dtype=grammar_bitmask.dtype)
         cumulative_index = 0
 
         for req_id in grammar_output.structured_output_request_ids:
@@ -3275,7 +3277,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # If the grammar bitmask and the logits have the same shape
         # we don't need to pass indices to the kernel,
         # since the bitmask is already aligned with the logits.
-        skip_out_indices = grammar_bitmask.shape[0] == logits.shape[0]
+        skip_out_indices = len(out_indices) == logits.shape[0]
 
         index_tensor = None
         if not skip_out_indices:
@@ -3307,7 +3309,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             grammar_bitmask.to("cpu"),
             indices=out_indices if not skip_out_indices else None,
         )'''
-        xgr_cpu.apply_token_bitmask_inplace_cpu(logits_cpu, grammar_bitmask.to("cpu"), indices=index_tensor)
+        xgr_cpu.apply_token_bitmask_inplace_cpu(logits_cpu,
+                                                grammar_bitmask.to("cpu"),
+                                                indices=out_indices if not skip_out_indices else None)
         logits.copy_(logits_cpu.to(self.device, non_blocking=True).to(logits.dtype))
 
     def _configure_lora(self, input, requests, req_ids, is_prompt):
