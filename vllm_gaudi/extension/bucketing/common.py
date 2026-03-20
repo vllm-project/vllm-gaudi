@@ -70,7 +70,7 @@ class HPUBucketingManager():
         self.mamba_chunk_size = mamba_chunk_size
         self.initialized = True
         self.fallback_bs_base_step = 2
-        self.fallback_seq_base_step = 32
+        self.fallback_seq_base_step = max(32, mamba_chunk_size)
         self.fallback_blocks_base_step = 32
 
         self.use_sliding_window = get_config().PT_HPU_SDPA_QKV_SLICE_MODE_FWD
