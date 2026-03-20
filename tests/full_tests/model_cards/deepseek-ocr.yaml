@@ -1,0 +1,16 @@
+model_name: "deepseek-ai/DeepSeek-OCR"
+
+description: >
+  Deepseek OCR model validated for image multimodal
+  inference using vLLM built-in test assets.
+
+test_config:
+  - modality: image
+    extra_engine_args:
+      max_model_len: 8192
+      mm_processor_kwargs:
+        min_pixels: 784
+        max_pixels: 1003520
+    input_data_config:
+      num_prompts: 4
+      media_source: default

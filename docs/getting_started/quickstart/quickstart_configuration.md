@@ -29,13 +29,14 @@ The following table lists the available variables:
 | `VLLM_DECODE_BS_BUCKET_STEP`    | Sets the batch size step for decode operations, impacting how decode batches are grouped. |
 | `VLLM_PROMPT_BS_BUCKET_STEP`    | Adjusts the batch size step for prompt processing.                                        |
 | `VLLM_PROMPT_SEQ_BUCKET_STEP`   | Controls the step size for prompt sequence allocation.                                    |
+| `EXTRA_ARGS`                    | Additional vLLM serve args for the server bringup e.g., " --served-model-name model_name" |
 
 Set the preferred variable when running the vLLM server using Docker Compose, as presented in the following example:
 
 ```bash
 MODEL="Qwen/Qwen2.5-14B-Instruct" \
 HF_TOKEN="<your huggingface token>" \
-DOCKER_IMAGE="vault.habana.ai/gaudi-docker/|Version|/ubuntu24.04/habanalabs/vllm-installer-|PT_VERSION|:latest" \
+DOCKER_IMAGE="vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/vllm-plugin-{{ PT_VERSION }}:latest" \
 TENSOR_PARALLEL_SIZE=1 \
 MAX_MODEL_LEN=2048 \
 docker compose up
@@ -53,13 +54,14 @@ The following table lists the available variables:
 | `OUTPUT_TOK`  | Number of output tokens to generate per prompt.    |
 | `CON_REQ`     | Number of concurrent requests during benchmarking. |
 | `NUM_PROMPTS` | Total number of prompts to use in the benchmark.   |
+| `EXTRA_BENCH_ARGS`| Additional vLLM bench args e.g., " --tokenizer-mode hf"|
 
 Set the preferred variable when running the vLLM server using Docker Compose, as presented in the following example:
 
 ```bash
 MODEL="Qwen/Qwen2.5-14B-Instruct" \
 HF_TOKEN="<your huggingface token>" \
-DOCKER_IMAGE="vault.habana.ai/gaudi-docker/|Version|/ubuntu24.04/habanalabs/vllm-installer-|PT_VERSION|:latest" \
+DOCKER_IMAGE="vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/vllm-plugin-{{ PT_VERSION }}:latest" \
 INPUT_TOK=128 \
 OUTPUT_TOK=128 \
 CON_REQ=16 \
@@ -76,7 +78,7 @@ This configuration allows you to launch the vLLM server and benchmark together. 
 ```bash
 MODEL="Qwen/Qwen2.5-14B-Instruct" \
 HF_TOKEN="<your huggingface token>" \
-DOCKER_IMAGE="vault.habana.ai/gaudi-docker/|Version|/ubuntu24.04/habanalabs/vllm-installer-|PT_VERSION|:latest" \
+DOCKER_IMAGE="vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/vllm-plugin-{{ PT_VERSION }}:latest" \
 TENSOR_PARALLEL_SIZE=1 \
 MAX_MODEL_LEN=2048 \
 INPUT_TOK=128 \
@@ -136,3 +138,101 @@ docker run -it --rm \
 ```
 
 This method provides full flexibility over how the vLLM server is executed within the container.
+
+## Dry Run to create vLLM sever and client command line
+
+Set environment variable **DRY_RUN=1**  
+DRY_RUN env var set to 1 create a copy of vllm-server.sh or vllm-benchmark.sh command line file on the host machine, without launching the server or the client.
+
+Example - Docker Compose
+
+```bash
+MODEL="Qwen/Qwen2.5-14B-Instruct" \
+HF_TOKEN="<your huggingface token>" \
+DOCKER_IMAGE="vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/vllm-installer-{{ PT_VERSION }}:latest" \
+TENSOR_PARALLEL_SIZE=1 \
+MAX_MODEL_LEN=2048 \
+DRY_RUN=1 \
+docker compose up
+```
+
+Example - Docker Run
+
+```bash
+docker run -it --rm \
+    -e MODEL=$MODEL \
+    -e HF_TOKEN=$HF_TOKEN \
+    -e http_proxy=$http_proxy \
+    -e https_proxy=$https_proxy \
+    -e no_proxy=$no_proxy \
+    --cap-add=sys_nice \
+    --ipc=host \
+    --runtime=habana \
+    -e HABANA_VISIBLE_DEVICES=all \
+    -p 8000:8000 \
+    -e DRY_RUN=1 \
+    -v /tmp:/local \
+    --name vllm-server \
+    <docker image name>
+```
+
+!!! note
+    While launching the vLLM server using Docker Run command for Dry Run, make sure to mount `/tmp` directory as `-v /tmp:/local`. If user has write access to NFS, mount `-v ${PWD}:/local` instead of `-v /tmp:/local`.
+    The command line files are saved at `/tmp` or `PWD` i.e. in the mounted volume directory.
+
+## Save vLLM sever and client log files
+
+If vLLM server is launched using Docker Compose command, the log files are saved at `/tmp` by default.
+
+If vLLM server is launched using Docker Run command, the user can save the log files by mounting `/tmp` as `-v /tmp:/root/scripts/logs`. If user has write access to NFS, mount `-v ${PWD}:/root/scripts/logs` instead of `-v /tmp:/root/scripts/logs`.
+
+## Create multiple vLLM services using Docker Compose
+
+Set environment variables **HOST_PORT** and **COMPOSE_PROJECT_NAME**  
+Example
+
+```bash
+MODEL="Qwen/Qwen2.5-14B-Instruct" \
+HF_TOKEN="<your huggingface token>" \
+DOCKER_IMAGE="vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/vllm-installer-{{ PT_VERSION }}:latest" \
+TENSOR_PARALLEL_SIZE=1 \
+MAX_MODEL_LEN=2048 \
+HOST_PORT=9000 \
+COMPOSE_PROJECT_NAME=serv1 \
+docker compose up
+```
+
+!!! note
+    The default values, when these vars not set, are `HOST_PORT=8000` and `COMPOSE_PROJECT_NAME=cd`.
+
+## Pinning CPU Cores for Memory Access Coherence
+
+To improve memory-access coherence and release CPUs to other CPU-only workloads, such as vLLM serving with Llama3 8B, you can pin CPU cores based on different CPU Non-Uniform Memory Access (NUMA) nodes using the automatically generated `docker-compose.override.yml` file. The following procedure explains the process.
+
+The Xeon processors currently validated for this setup are: Intel Xeon 6960P and Intel Xeon PLATINUM 8568Y+.
+
+1. Install the required python libraries.
+
+    ```bash
+    pip install -r vllm-gaudi/.cd/server/cpu_binding/requirements_cpu_binding.txt
+    ```
+
+2. Pin CPU cores using the `docker-compose.override.yml` file.
+
+    ```bash
+    export MODEL="Qwen/Qwen2.5-14B-Instruct"
+    export HF_TOKEN="<your huggingface token>"
+    export DOCKER_IMAGE="<docker image url>"
+    python3 server/cpu_binding/generate_cpu_binding_from_csv.py --settings server/cpu_binding/cpu_binding_gnr.csv --output ./docker-compose.override.yml
+    docker compose --profile benchmark up
+    ```
+
+3. Specify the service name in `docker-compose.override.yml` to bind idle CPUs to another service, such as `vllm-cpu-service`, as in the following example:
+
+    ```bash
+    export MODEL="Qwen/Qwen2.5-14B-Instruct"
+    export HF_TOKEN="<your huggingface token>"
+    export DOCKER_IMAGE="<docker image url>"
+    python3 server/cpu_binding/generate_cpu_binding_from_csv.py --settings server/cpu_binding/cpu_binding_gnr.csv --output ./docker-compose.override.yml --cpuservice vllm-cpu-service
+    docker compose --profile benchmark -f docker-compose.yml -f docker-compose.vllm-cpu-service.yml -f docker-compose.override.yml up
+    ```

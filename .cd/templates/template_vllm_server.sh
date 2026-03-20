@@ -2,9 +2,30 @@
 
 #@VARS
 
+if [ $PT_HPU_LAZY_MODE -eq 0 ]; then
+    printf "\nEager bridge exports\n"
+    export PT_ENABLE_INT64_SUPPORT=0
+    export PT_HPU_ENABLE_EAGER_CACHE=true
+fi
+
+if [ "$VLLM_CONTIGUOUS_PA" = "True" ]; then # Checks if using contigous pa
+    EXTRA_ARGS+=" --no-enable-prefix-caching"
+fi
+
 if [ $ASYNC_SCHEDULING -gt 0 ]; then # Checks if using async scheduling
     EXTRA_ARGS+=" --async_scheduling"
 fi
+
+## Executing command print
+
+printf "\n---------------------Starting vLLM server with the command-------------------------"
+printf "\nvllm serve $MODEL --block-size $BLOCK_SIZE --dtype $DTYPE \
+--tensor-parallel-size $TENSOR_PARALLEL_SIZE --download_dir $HF_HOME \
+--max-model-len $MAX_MODEL_LEN --gpu-memory-utilization $GPU_MEM_UTILIZATION \
+--max-num-seqs $MAX_NUM_SEQS --generation-config vllm \
+--max-num-batched-tokens $MAX_NUM_BATCHED_TOKENS \
+$EXTRA_ARGS"
+printf "\n-----------------------------------------------------------------------------------\n"
 
 ## Start server
 vllm serve $MODEL \
@@ -16,6 +37,6 @@ vllm serve $MODEL \
         --gpu-memory-utilization $GPU_MEM_UTILIZATION \
         --max-num-seqs $MAX_NUM_SEQS \
         --generation-config vllm \
-        --max_num_batched_tokens $MAX_NUM_BATCHED_TOKENS \
-        --disable-log-requests ${EXTRA_ARGS} \
-2>&1 | tee -a  logs/vllm_server.log
+        --max-num-batched-tokens $MAX_NUM_BATCHED_TOKENS \
+        ${EXTRA_ARGS} \
+2>&1 | stdbuf -o0 -e0 tr '\r' '\n' | tee -a  logs/vllm_server.log

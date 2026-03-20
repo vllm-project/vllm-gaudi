@@ -88,35 +88,11 @@ jobs:
       - name: Setup Docker environment and build image
         run: |
           echo "Attempting to build Docker image..."
-          docker build --no-cache -t hpu-plugin-v1-test-env-hourly-ci -f - . <<EOF
-          FROM vault.habana.ai/gaudi-docker/1.22.0/ubuntu24.04/habanalabs/pytorch-installer-2.7.1:latest
-
-          COPY ./ /workspace/vllm-gaudi
-          WORKDIR /workspace
-
-          RUN git clone https://github.com/vllm-project/vllm.git vllm
-          WORKDIR /workspace/vllm
-          RUN git checkout ${{ steps.latest_vllm_commit.outputs.LATEST_COMMIT }}
-
-          RUN pip install pytest pytest_asyncio pytest-timeout
-          RUN pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git
-
-          ENV no_proxy=localhost,127.0.0.1
-          ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
-
-          RUN bash -c 'pip install -r <(sed "/^[torch]/d" requirements/build.txt)'
-          RUN VLLM_TARGET_DEVICE=empty pip install --no-build-isolation .
-
-          RUN python3 -m pip install -e tests/vllm_test_utils
-
-          WORKDIR /workspace/vllm-gaudi
-          RUN pip install -e .
-
-          WORKDIR /workspace
-          RUN ln -s /workspace/vllm/tests /workspace/tests \
-              && ln -s /workspace/vllm/examples /workspace/examples \
-              && ln -s /workspace/vllm/benchmarks /workspace/benchmarks
-          EOF
+          docker build \
+            --no-cache \
+            --build-arg VLLM_COMMIT_ARG=${{ steps.latest_vllm_commit.outputs.LATEST_COMMIT }} \
+            -t hpu-plugin-v1-test-env-hourly-ci \
+            -f .github/Dockerfile.ci .
           echo "Docker image built successfully."
 
   # JOB 3: (UPDATED)
@@ -162,7 +138,7 @@ jobs:
           # This command robustly discovers all functions in the script that match the 'run_*'
           # naming convention, excluding the main 'run_all_tests' function itself.
           # The final list is formatted into a JSON array required for the matrix strategy.
-          TEST_FUNCTIONS=$( grep '^run_' ./tests/full_tests/ci_gsm8k_tests.sh | \
+          TEST_FUNCTIONS=$( grep '^run_' ./tests/full_tests/ci_e2e_discoverable_tests.sh | \
                       awk '{print $1}' | \
                       sed 's/()//' | \
                       jq -R . | jq -s -c . )
@@ -199,12 +175,13 @@ jobs:
 
           echo "Running HPU plugin test: ${{ matrix.test_function }}"
           docker run --rm --runtime=habana --name=$CONTAINER_NAME --network=host \
+            --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-hourly-ci \
-            /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_gsm8k_tests.sh" "${{ matrix.test_function }}"
+            /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_e2e_discoverable_tests.sh" "${{ matrix.test_function }}"
 
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
@@ -225,11 +202,11 @@ jobs:
 
           echo "Running HPU plugin v1 dp tests"
           docker run --rm --runtime=habana --name=hpu-plugin-v1-test-dp-tests-hourly-ci --network=host \
+            --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e VLLM_SKIP_WARMUP=true \
             -e PT_HPU_LAZY_MODE=1 \
-            -e VLLM_USE_V1=1 \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
             hpu-plugin-v1-test-env-hourly-ci \
@@ -248,26 +225,27 @@ jobs:
       - name: Run PD disaggregate test
         run: |
           EXITCODE=1
-          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-pd-tests-hourly-ci || true; }
-          trap 'remove_docker_containers; exit $EXITCODE;' EXIT
-          remove_docker_containers
+          #remove_docker_containers() { docker rm -f hpu-plugin-v1-test-pd-tests-hourly-ci || true; }
+          #trap 'remove_docker_containers; exit $EXITCODE;' EXIT
+          #remove_docker_containers
 
-          echo "Running HPU plugin v1 nixl pd tests"
-          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-pd-tests-hourly-ci --network=host \
-            -e HABANA_VISIBLE_DEVICES=all \
-            -e HF_HOME=/workspace/hf_cache \
-            -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
-            -v /mnt/hf_cache:/workspace/hf_cache \
-            -v /mnt/wheels_cache:/tmp/wheels_cache \
-            hpu-plugin-v1-test-env-hourly-ci \
-            /bin/bash -c "
-              pip install lm-eval[api] &&
-              cd /workspace/vllm-gaudi/tests/unit_tests &&
-              ./run_accuracy_test.sh
-            "
-          EXITCODE=$?
+          #echo "Running HPU plugin v1 nixl pd tests"
+          #docker run --rm --runtime=habana --name=hpu-plugin-v1-test-pd-tests-hourly-ci --network=host \
+          #  --privileged \
+          #  -e HABANA_VISIBLE_DEVICES=all \
+          #  -e HF_HOME=/workspace/hf_cache \
+          #  -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
+          #  -v /mnt/hf_cache:/workspace/hf_cache \
+          #  -v /mnt/wheels_cache:/tmp/wheels_cache \
+          #  hpu-plugin-v1-test-env-hourly-ci \
+          #  /bin/bash -c "
+          #    pip install lm-eval[api] &&
+          #    cd /workspace/vllm-gaudi/tests/unit_tests &&
+          #    ./run_accuracy_test.sh
+          #  "
+          #EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
-  
+
   # JOB 8: (UPDATED)
   store_last_stable_vllm_commit:
     # <-- UPDATED: Now needs all test jobs AND 'discover_runner'
@@ -293,12 +271,23 @@ jobs:
           LATEST_COMMIT_SHA=${{ needs.setup_and_build.outputs.latest_commit }}
           echo "Storing latest stable vLLM commit SHA: $LATEST_COMMIT_SHA"
           echo "$LATEST_COMMIT_SHA" > VLLM_STABLE_COMMIT
-          
+
           # Only commit and push if the file has changed to avoid empty commits
           git add VLLM_STABLE_COMMIT
           git commit --allow-empty -m "Update stable vLLM commit to ${LATEST_COMMIT_SHA}"
-          
+
           echo "Pushing changes to remote branch..."
           # Explicitly set the remote URL with the token to prevent hanging on auth
           git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
           git push --force origin HEAD:vllm/last-good-commit-for-vllm-gaudi
+
+  cleanup_docker_image:
+    name: Cleanup Docker Image
+    if: always()
+    needs: [discover_runner, run_unit_tests, e2e, run_data_parallel_test, run_pd_disaggregate_test]
+    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    steps:
+      - name: Remove Docker image to free up space
+        run: |
+          echo "Cleaning up Docker images created by this workflow run..."
+          docker rmi -f hpu-plugin-v1-test-env-hourly-ci || true

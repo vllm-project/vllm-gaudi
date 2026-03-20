@@ -5,7 +5,7 @@
 </p>
 
 <h2 align="center">
-Welcome to vLLM x Intel Gaudi
+vLLM Hardware Plugin for Intel® Gaudi®
 </h2>
 
 <p align="center">
@@ -14,29 +14,29 @@ Welcome to vLLM x Intel Gaudi
 
 ---
 *Latest News* 🔥
+- [2026/03] Version 0.16.0 is now available, built on [vLLM 0.16.0](https://github.com/vllm-project/vllm/releases/tag/v0.16.0) and fully compatible with [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
 
-- [2025/06] We are introduced an early developer preview of the vLLM Gaudi Plugin and is not yet intended for general use. For a more stable experience, consider using the [HabanaAI/vllm-fork](https://github.com/HabanaAI/vllm-fork) or the in-tree Gaudi implementation available in [vllm-project/vllm](https://github.com/vllm-project/vllm).
+  This release introduces validated support and critical stability fixes for Qwen3-VL models leveraging HPUMMEncoderAttention. Performance and stability were improved through backported Mamba architecture optimizations, Docker and UBI infrastructure enhancements, and a forced CPU loading mechanism for INC quantization to prevent OOM errors.
+
+- [2026/02] Version 0.15.1 is now available, built on [vLLM 0.15.1](https://github.com/vllm-project/vllm/releases/tag/v0.15.1) and fully compatible with [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
+
+  This release introduces validated support for Granite 4.0-h and Qwen3-VL (dense and MoE variants) on Intel Gaudi 3, alongside significant Llama 4 stability fixes. It also features major prefill performance improvements via full chunked prefill attention, FlashAttention online merge, b2b matmul operations, and KV cache sharing. Additionally, this version adds HPU ops for Mamba/SSM architectures to enable hybrid models, and introduces new support for ModelOpt FP8 quantization.
+
+- [2026/02] Version 0.14.1 is now available, built on [vLLM 0.14.1](https://github.com/vllm-project/vllm/releases/tag/v0.14.1) and fully compatible with [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html). It introduces support for Granite 4.0h and Qwen 3 VL models.
+
+- [2026/01] Version 0.13.0 is now available, built on [vLLM 0.13.0](https://github.com/vllm-project/vllm/releases/tag/v0.13.0) and fully compatible with [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html). It introduces experimental dynamic quantization for MatMul and KV‑cache operations to improve performance and also supports additional models.
 
 ---
 
 ## About
-vLLM Gaudi plugin (vllm-gaudi) integrates Intel Gaudi accelerators with vLLM to optimize large language model inference.
 
-This plugin follows the [[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162) and [[RFC]: Enhancing vLLM Plugin Architecture](https://github.com/vllm-project/vllm/issues/19161) principles, providing a modular interface for Intel Gaudi hardware.
-
-Learn more: 🚀 [vLLM Plugin System Overview](https://vllm-gaudi.readthedocs.io/en/latest/design/plugin_system.html)
+The vLLM Hardware Plugin for Intel® Gaudi® integrates [Intel® Gaudi® AI accelerators](https://docs.habana.ai/en/latest/index.html) with [vLLM](https://docs.vllm.ai/en/latest/) to optimize large language model inference. It follows the [[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162) and [[RFC]: Enhancing vLLM Plugin Architecture](https://github.com/vllm-project/vllm/issues/19161) principles, providing a modular interface for Intel® Gaudi® hardware. For more information, see the [Plugin System](https://vllm-gaudi.readthedocs.io/en/latest/dev_guide/plugin_system.html) document.
 
 ## Getting Started
-0. Preparation of the Setup
 
-    To set up the execution environment, please follow the instructions in the [Gaudi Installation Guide](https://docs.habana.ai/en/latest/Installation_Guide/index.html).
-    To achieve the best performance on HPU, please follow the methods outlined in the
-    [Optimizing Training Platform Guide](https://docs.habana.ai/en/latest/PyTorch/Model_Optimization_PyTorch/Optimization_in_Training_Platform.html).
+1. [Set up](https://docs.habana.ai/en/latest/Installation_Guide/index.html) your execution environment. Additionally, to achieve the best performance on HPU, follow the methods outlined in the [Optimizing Training Platform Guide](https://docs.habana.ai/en/latest/PyTorch/Model_Optimization_PyTorch/Optimization_in_Training_Platform.html).
 
-1. Get Last good commit on vllm
-   NOTE: vllm-gaudi is always follow latest vllm commit, however, vllm upstream
-   API update may crash vllm-gaudi, this commit saved is verified with vllm-gaudi
-   in a hourly basis
+2. Get the last verified vLLM commit. While vLLM Hardware Plugin for Intel® Gaudi® follows the latest vLLM commits, upstream API updates may introduce compatibility issues. The saved commit has been thoroughly validated.
 
     ```bash
     git clone https://github.com/vllm-project/vllm-gaudi
@@ -45,7 +45,7 @@ Learn more: 🚀 [vLLM Plugin System Overview](https://vllm-gaudi.readthedocs.io
     cd ..
     ```
 
-2. Install vLLM with `pip` or [from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source):
+3. Install vLLM using `pip` or [build it from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source):
 
     ```bash
     # Build vLLM from source for empty platform, reusing existing torch installation
@@ -57,7 +57,7 @@ Learn more: 🚀 [vLLM Plugin System Overview](https://vllm-gaudi.readthedocs.io
     cd ..
     ```
 
-3. Install vLLM-Gaudi from source:
+4. Install vLLM Hardware Plugin for Intel® Gaudi® from source:
 
     ```bash
     cd vllm-gaudi
@@ -65,7 +65,7 @@ Learn more: 🚀 [vLLM Plugin System Overview](https://vllm-gaudi.readthedocs.io
     cd ..
     ```
 
-4. To uncover all installation methods, sucha as NixL, follow the  [link](https://vllm-gaudi.readthedocs.io/en/latest/getting_started/installation.html)
+    To see all the available installation methods, such as NIXL, see the [Installation](https://vllm-gaudi.readthedocs.io/en/latest/getting_started/installation.html) guide.
 
 ## Contributing
 
@@ -74,8 +74,5 @@ We welcome and value any contributions and collaborations.
 ## Contact Us
 
 <!-- --8<-- [start:contact-us] -->
-- For technical questions and feature requests, please use GitHub [Issues](https://github.com/vllm-project/vllm-gaudi/issues)
-- For discussing with fellow users, please use the [vLLM Forum](https://discuss.vllm.ai)
-- For coordinating contributions and development, please use [Slack](https://slack.vllm.ai)
-- For security disclosures, please use GitHub's [Security Advisories](https://github.com/vllm-project/vllm/security/advisories) feature
+- For technical questions and feature requests, please use GitHub [Issues](https://github.com/vllm-project/vllm-gaudi/issues).
 <!-- --8<-- [end:contact-us] -->

@@ -79,14 +79,16 @@ def register_ops():
     import vllm_gaudi.v1.sample.hpu_rejection_sampler  # noqa: F401
     import vllm_gaudi.distributed.kv_transfer.kv_connector.v1.hpu_nixl_connector  # noqa: F401
     import vllm_gaudi.ops.hpu_fused_moe  # noqa: F401
+    import vllm_gaudi.ops.hpu_grouped_topk_router  # noqa: F401
     import vllm_gaudi.ops.hpu_layernorm  # noqa: F401
     import vllm_gaudi.ops.hpu_lora  # noqa: F401
+    import vllm_gaudi.ops.hpu_mamba_mixer2  # noqa: F401
     import vllm_gaudi.ops.hpu_rotary_embedding  # noqa: F401
     import vllm_gaudi.ops.hpu_compressed_tensors  # noqa: F401
     import vllm_gaudi.ops.hpu_fp8  # noqa: F401
     import vllm_gaudi.ops.hpu_gptq  # noqa: F401
     import vllm_gaudi.ops.hpu_awq  # noqa: F401
-    import vllm_gaudi.ops.hpu_multihead_attn  # noqa: F401
+    import vllm_gaudi.ops.hpu_mm_encoder_attention  # noqa: F401
 ```
 
 These custom operations are imported (not called) to register them with vLLM’s operation registry so they can be used across the inference pipeline.

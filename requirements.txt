@@ -3,4 +3,5 @@ ray>=2.48.0
 pandas>=2.2.3
 numba>=0.58.0
 numpy>=1.26.0
-transformers>=4.1,<4.56.0
+transformers>= 4.56.0, <5
+kaldi-native-fbank >= 1.18.7

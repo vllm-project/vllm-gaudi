@@ -85,7 +85,7 @@ def set_vllm_config(cfg):
 def _get_vllm_engine_version(_):
     try:
         import vllm.envs as envs
-        return 'v1' if envs.VLLM_USE_V1 else 'v0'
+        return 'v1'
     except ImportError:
         logger().info("vllm module not installed, returning 'unknown' for engine version")
         return 'unknown'
@@ -100,7 +100,7 @@ def VllmValue(name, env_var_type, depend=None):
     if depend is not None:
         return Value(name, env_var_type=env_var_type, dependencies=depend)
     global _VLLM_VALUES
-    return Value(name, lambda _: _VLLM_VALUES[name], env_var_type=env_var_type)
+    return Value(name, lambda _: _VLLM_VALUES.get(name), env_var_type=env_var_type)
 
 
 def get_environment():

@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARG DOCKER_URL=vault.habana.ai/gaudi-docker
-ARG VERSION=1.22.0
+ARG VERSION=1.23.0
 ARG BASE_NAME=ubuntu24.04
-ARG PT_VERSION=2.7.1
+ARG PT_VERSION=2.9.0
 ARG REVISION=latest
 ARG REPO_TYPE=habanalabs
 
@@ -13,6 +13,7 @@ FROM ${DOCKER_URL}/${VERSION}/${BASE_NAME}/${REPO_TYPE}/pytorch-installer-${PT_V
 ARG VLLM_GAUDI_COMMIT=main
 # VLLM_COMMIT can be overridden by user, defaults to last compatible version
 ARG VLLM_COMMIT=
+ARG PT_VERSION
 
 ENV OMPI_MCA_btl_vader_single_copy_mechanism=none
 
@@ -53,7 +54,10 @@ RUN mkdir -p $VLLM_PLUGIN_PATH && \
     git checkout $VLLM_GAUDI_COMMIT && \
     VLLM_TARGET_DEVICE=hpu && pip install -v $VLLM_PLUGIN_PATH --no-build-isolation
 
+# Install torchaudio (CPU wheel, matching PyTorch version in base image)
+# torchaudio is imported from upstream vLLM code (e.g. via Ovis model registration)
 RUN pip install datasets && \
-    pip install pandas
+    pip install pandas && \
+    pip install --no-deps --extra-index-url https://download.pytorch.org/whl/cpu torchaudio==${PT_VERSION}
 
 ENTRYPOINT ["/bin/bash"]

@@ -153,7 +153,6 @@ if __name__ == "__main__":
         model=args.model,
         dtype=torch.bfloat16,
         enforce_eager=args.enforce_eager,
-        quantization="fp8" if args.block_quant else "inc",
         max_num_seqs=args.batch_size,
         tensor_parallel_size=args.tensor_parallel_size,
         max_model_len=args.max_model_len,
@@ -191,7 +190,3 @@ if __name__ == "__main__":
             sampling_params=sampling_params,
             prompt_token_ids=prompt_token_ids,
         )
-
-    # Skip shutdown when VLLM_USE_V1 is set to "1"
-    if not os.environ.get("VLLM_USE_V1") or os.environ.get("VLLM_USE_V1") != "1":
-        llm.llm_engine.model_executor.shutdown()

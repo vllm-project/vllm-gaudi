@@ -9,7 +9,7 @@ from vllm_gaudi.utils import HPUCompileConfig
 from safetensors import safe_open
 
 
-def test_gptq_linear_method(dist_init):
+def test_gptq_linear_method(default_vllm_config: None, dist_init):
     config = {"bits": 4, "group_size": 128, "desc_act": False, "lm_head": False}
     oot_quant_config = GPTQHPUConfig.from_config(config)
 

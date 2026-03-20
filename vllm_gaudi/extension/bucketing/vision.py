@@ -11,10 +11,39 @@ MULTIMODAL_CONFIG = {
     },
 
     # Pixel-based models
+    'ovis': {
+        'is_batch_based': False,
+        'buckets': [1600, 3136, 4096, 6400]
+    },
     'ovis2.5': {
         'is_batch_based': False,
         'buckets': [784, 1600, 3136, 4096, 6400, 7744, 9216, 12544]
-    }
+    },
+    'qwen2_5_vl': {
+        'is_batch_based': False,
+        'buckets': [1600, 3136, 4096, 6400, 7744, 9216, 12544]
+    },
+    'qwen3_vl': {
+        'is_batch_based': False,
+        # patches per image
+        'buckets': [196, 256, 441, 480, 576, 900, 1156]
+    },
+    'ernie4_5_moe_vl': {
+        'is_batch_based': False,
+        'buckets': [1600, 3136, 4096, 6400, 7744, 9216, 12544]
+    },
+    'pixtral': {
+        'is_batch_based': False,
+        'buckets': [512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 131076]
+    },
+    'mistral3': {
+        'is_batch_based': False,
+        'buckets': [512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 131076]
+    },
+    'deepseek_ocr': {
+        'is_batch_based': False,
+        'buckets': [1600, 2048, 3072, 6144, 8192, 131076]
+    },
 }
 
 
@@ -23,12 +52,15 @@ class HPUVisionBucketManager:
     This class is used to bucket image tokens
     '''
 
-    def __init__(self, model_name, is_batch_based=True):
+    def __init__(self, model_name, is_batch_based=None):
         config = self._get_multimodal_config(model_name)
 
         self.is_batch_based = is_batch_based if is_batch_based is not None else config['is_batch_based']
 
+        self.qwen2_5_vl = 'qwen2_5_vl' in model_name.lower()
+
         envvar = os.environ.get('VLLM_MULTIMODAL_BUCKETS', "")
+
         if envvar == 'None':
             self.multimodal_buckets = None
         else:
@@ -48,7 +80,7 @@ class HPUVisionBucketManager:
                 return config
 
         # Default config
-        logger.info("MultiModal bucket config file for {model_name} not found.")
+        logger.info(f"MultiModal bucket config file for {model_name} not found.")
         return {'is_batch_based': True, 'buckets': [1, 2, 4, 8]}
 
     def _process_buckets(self, buckets):
@@ -75,15 +107,16 @@ class HPUVisionBucketManager:
         return None
 
     def find_padding(self, h_orig, w_orig, desired_patches):
+        merge_size = 2
         best_pad_h, best_pad_w = 0, 0
         if desired_patches % h_orig == 0:
             best_pad_h = 0
             w_factor = desired_patches // h_orig
-            best_pad_w = w_factor - w_orig if (w_factor > w_orig and w_factor % 2 == 0) else 0
+            best_pad_w = w_factor - w_orig if (w_factor > w_orig and w_factor % merge_size == 0) else 0
         elif desired_patches % w_orig == 0:
             best_pad_w = 0
             h_factor = desired_patches // w_orig
-            best_pad_h = h_factor - h_orig if (h_factor > h_orig and h_factor % 2 == 0) else 0
+            best_pad_h = h_factor - h_orig if (h_factor > h_orig and h_factor % merge_size == 0) else 0
         elif desired_patches % h_orig != 0 and desired_patches % w_orig != 0:
             if h_orig > w_orig:
                 w_factor = self.find_factor(desired_patches, w_orig)
@@ -106,9 +139,6 @@ class HPUVisionBucketManager:
         return best_pad_h, best_pad_w
 
     def pad_multimodal_data(self, pixel_values, image_grid_thw):
-
-        import pdb
-        pdb.set_trace()
         desired_number_of_pixels = self.get_multimodal_bucket(pixel_values.shape[0])
         padding_len = desired_number_of_pixels - pixel_values.shape[0]
         if padding_len <= 0:
@@ -156,3 +186,28 @@ class HPUVisionBucketManager:
 
     def __repr__(self):
         return str(self.multimodal_buckets)
+
+    def bucket_to_image_resolution(self, patch_size: int = 14):
+        """
+        Calculate image resolution by first determining height from target_patches,
+        then deriving width from aspect ratio.
+        """
+        aspect_ratios = [
+            (1, 1),  # 1:1 square
+            (4, 3),  # 4:3 landscape
+            (3, 4),  # 3:4 portrait
+            (16, 9),  # 16:9 widescreen
+            (9, 16),  # 9:16 portrait
+        ]
+        merge_size = 2  # Qwen2.5/3VL spatial_merge_size
+        resolution_list = []
+        for target_patches in self.multimodal_buckets:
+            for (ratio_w, ratio_h) in aspect_ratios:
+                grid_h = int(target_patches**0.5)
+                height = grid_h * patch_size
+                width = int(height * ratio_w / ratio_h)
+                grid_w = width // patch_size
+                if grid_w * grid_h // merge_size != 0:
+                    grid_w = ((grid_w + merge_size - 1) // merge_size) * merge_size
+                resolution_list.append((grid_w * patch_size, height))
+        return resolution_list

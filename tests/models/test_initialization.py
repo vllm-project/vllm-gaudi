@@ -7,7 +7,6 @@ import pytest
 from transformers import PretrainedConfig
 
 from vllm import LLM
-from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
 from vllm.v1.engine.core import EngineCore as V1EngineCore
@@ -54,11 +53,6 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
 
         return hf_config
 
-    # Avoid calling model.forward()
-    def _initialize_kv_caches_v0(self) -> None:
-        self.cache_config.num_gpu_blocks = 0
-        self.cache_config.num_cpu_blocks = 0
-
     def _initialize_kv_caches_v1(self, vllm_config):
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
         scheduler_kv_cache_config = get_kv_cache_configs(
@@ -70,10 +64,7 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
         # gpu_blocks (> 0), cpu_blocks, scheduler_kv_cache_config
         return 1, 0, scheduler_kv_cache_config
 
-    with (patch.object(V0LLMEngine, "_initialize_kv_caches", _initialize_kv_caches_v0),
-          patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1), monkeypatch.context() as m):
-        if model_info.v0_only:
-            m.setenv("VLLM_USE_V1", "0")
+    with (patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1)):
         LLM(
             model_info.default,
             tokenizer=model_info.tokenizer,

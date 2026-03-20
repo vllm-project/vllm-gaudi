@@ -1,9 +1,10 @@
-mkdocs
+mkdocs<2.0.0
 mkdocs-api-autonav
 mkdocs-material
 mkdocstrings-python
 mkdocs-gen-files
 mkdocs-awesome-nav
+mkdocs-macros-plugin
 python-markdown-math
 regex
 ruff

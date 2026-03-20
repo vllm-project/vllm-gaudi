@@ -1,0 +1,7 @@
+model_name: "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+test_config:                                # List of test configurations. - modality is test for <modality>
+  - modality: image                         # modality (currently supports image and video)
+    extra_engine_args: {}
+    input_data_config:                      # Configuration for the input data
+      num_prompts: 4                        # Number of samples to run
+      media_source: default                 # Source of the data to load

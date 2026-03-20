@@ -34,14 +34,9 @@ if __name__ == "__main__":
         tensor_parallel_size=args.tensor_parallel_size,
         enforce_eager=args.enforce_eager,
         dtype=torch.bfloat16,
-        quantization="fp8" if args.block_quant else "inc",
         kv_cache_dtype="fp8_inc",
         max_model_len=128,
         trust_remote_code=True,
         distributed_executor_backend=args.distributed_executor_backend,
         enable_expert_parallel=args.expert_parallel,
     )
-
-    # Skip shutdown when VLLM_USE_V1 is set to "1"
-    if not os.environ.get("VLLM_USE_V1") or os.environ.get("VLLM_USE_V1") != "1":
-        llm.llm_engine.model_executor.shutdown()

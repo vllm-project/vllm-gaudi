@@ -25,6 +25,7 @@ IS_STRIDED = [False, True]
 @pytest.mark.parametrize("device", DEVICE)
 @pytest.mark.parametrize("strided_input", IS_STRIDED)
 def test_rms_norm(
+    default_vllm_config: None,
     num_tokens: int,
     hidden_size: int,
     add_residual: bool,
