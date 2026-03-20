@@ -5801,13 +5801,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         kv_caches: dict[str, torch.Tensor] = {}
         num_blocks = 0
         if self.num_mamba_layers > 0:
-            # Hybrid mamba+attention path: use a single combined allocation
-            # for K and V with standard indexing ([0]/[1]) to create
-            # non-overlapping contiguous views. This avoids as_strided
-            # aliasing that degrades torch.compile while keeping the same
-            # memory footprint as a single-buffer approach.
-            # Mamba layers sharing the same KV cache tensor will share
-            # the same state tensor objects.
+            # Hybrid mamba+attention path: allocate separate tensors for
+            # attention (K/V) and mamba (state) layers to avoid as_strided
+            # aliasing that degrades torch.compile performance on HPU.
+            #
+            # In hybrid models, kv_cache_tensors may be shared between an
+            # attention layer and a mamba layer (shared_by includes both).
+            # The mamba sharing loop must NOT overwrite attention entries
+            # already set — otherwise attention would receive mamba state
+            # tensors, causing data corruption.
             for group in kv_cache_config.kv_cache_groups:
                 kv_cache_spec = group.kv_cache_spec
                 for layer_name in group.layer_names:
@@ -5838,13 +5840,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             target_shape = (num_blocks + 1, *shape)
                             tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
                             state_tensors.append(tensor)
-                        # find other layers sharing the same kv cache tensor and
-                        # populate all of them with the same tensor pair
+                        # Find other mamba layers sharing the same kv cache
+                        # tensor and populate them with the same state tensors.
+                        # Guard: do not overwrite entries already set by
+                        # attention layers (shared_by may include both
+                        # attention and mamba layer names).
                         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
                             if layer_name not in kv_cache_tensor.shared_by:
                                 continue
                             for shared_layer in kv_cache_tensor.shared_by:
-                                kv_caches[shared_layer] = tuple(state_tensors)
+                                if shared_layer not in kv_caches:
+                                    kv_caches[shared_layer] = tuple(state_tensors)
                             break
                     else:
                         pass
