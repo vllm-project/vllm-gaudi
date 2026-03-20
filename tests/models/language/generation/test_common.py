@@ -57,6 +57,8 @@ def launch_lm_eval(eval_config):
         kwargs['fewshot_as_multiturn'] = eval_config['fewshot_as_multiturn']
     if 'apply_chat_template' in eval_config:
         kwargs['apply_chat_template'] = eval_config['apply_chat_template']
+    if eval_config.get('max_gen_toks') is not None:
+        kwargs['gen_kwargs'] = f"max_gen_toks={eval_config['max_gen_toks']}"
     llm = VLLM(**model_args)
     results = lm_eval.simple_evaluate(model=llm,
                                       tasks=[task],
