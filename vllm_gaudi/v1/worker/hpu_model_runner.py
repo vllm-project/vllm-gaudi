@@ -63,7 +63,7 @@ from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingType
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_map_leaves
 from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy, getattr_nested, setattr_nested)
@@ -5801,18 +5801,31 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         kv_caches: dict[str, torch.Tensor] = {}
         num_blocks = 0
         if self.num_mamba_layers > 0:
-            # Hybrid mamba+attention path: allocate separate tensors for
-            # attention (K/V) and mamba (state) layers to avoid as_strided
-            # aliasing that degrades torch.compile performance on HPU.
+            # Hybrid mamba+attention path: allocate a single raw tensor per
+            # kv_cache_tensor, then create typed views for both attention
+            # (K/V) and mamba (state) layers. This respects the memory
+            # budget while avoiding as_strided aliasing that degrades
+            # torch.compile performance on HPU.
             #
-            # In hybrid models, kv_cache_tensors may be shared between an
-            # attention layer and a mamba layer (shared_by includes both).
-            # The mamba sharing loop must NOT overwrite attention entries
-            # already set — otherwise attention would receive mamba state
-            # tensors, causing data corruption.
+            # Attention K/V views and mamba state views overlap in the raw
+            # tensor. This is safe because the block manager never assigns
+            # the same block to both attention and mamba simultaneously.
+            page_size = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
+
+            # Step 1: Allocate one raw tensor per kv_cache_tensor
+            raw_tensors: dict[str, torch.Tensor] = {}
+            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+                # +page_size for the dummy block
+                total_bytes = kv_cache_tensor.size + page_size
+                raw = torch.zeros(total_bytes, dtype=torch.int8, device=self.device)
+                for layer_name in kv_cache_tensor.shared_by:
+                    raw_tensors[layer_name] = raw
+
+            # Step 2: Create typed views for each layer
             for group in kv_cache_config.kv_cache_groups:
                 kv_cache_spec = group.kv_cache_spec
                 for layer_name in group.layer_names:
+                    raw = raw_tensors[layer_name]
                     for kk in kv_cache_config.kv_cache_tensors:
                         if layer_name in kk.shared_by:
                             kv_cache_tensor_size = kk.size
@@ -5823,28 +5836,38 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
-                        # Single allocation for both K and V; standard indexing
-                        # creates contiguous non-overlapping views that
-                        # torch.compile can reason about (unlike as_strided).
-                        kv_combined = torch.zeros(2, *kv_cache_shape,
-                                                  dtype=kv_cache_spec.dtype, device=self.device)
-                        kc = kv_combined[0]
-                        vc = kv_combined[1]
+                        dtype = kv_cache_spec.dtype
+                        # View raw int8 tensor as the attention dtype, then
+                        # split into K and V: non-overlapping contiguous halves.
+                        typed = raw.view(dtype)
+                        k_elements = math.prod(kv_cache_shape)
+                        assert len(typed) >= 2 * k_elements, \
+                            f"Raw tensor too small: need {2 * k_elements} elements, have {len(typed)}"
+                        kc = typed[:k_elements].view(kv_cache_shape)
+                        vc = typed[k_elements:2 * k_elements].view(kv_cache_shape)
                         kv_caches[layer_name] = (kc, vc, None, None)
                     elif isinstance(kv_cache_spec, MambaSpec):
                         # skip if already created by another layer sharing the same kv cache tensor
                         if layer_name in kv_caches:
                             continue
                         state_tensors = []
+                        offset_bytes = 0
                         for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                            dtype_size = get_dtype_size(dtype)
                             target_shape = (num_blocks + 1, *shape)
-                            tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
-                            state_tensors.append(tensor)
-                        # Find other mamba layers sharing the same kv cache
-                        # tensor and populate them with the same state tensors.
-                        # Guard: do not overwrite entries already set by
-                        # attention layers (shared_by may include both
-                        # attention and mamba layer names).
+                            num_elements = math.prod(target_shape)
+                            num_bytes = num_elements * dtype_size
+                            assert offset_bytes % dtype_size == 0, \
+                                f"Byte offset {offset_bytes} not aligned for dtype {dtype} (size {dtype_size})"
+                            assert offset_bytes + num_bytes <= len(raw), \
+                                f"Mamba state exceeds raw tensor: need {offset_bytes + num_bytes}, have {len(raw)}"
+                            # int8 → target dtype → reshape
+                            state = raw[offset_bytes:offset_bytes + num_bytes].view(dtype).view(target_shape)
+                            state_tensors.append(state)
+                            offset_bytes += num_bytes
+                        # Share state tensors with other mamba layers in the
+                        # same kv_cache_tensor. Guard: do not overwrite
+                        # attention entries already set by the attention path.
                         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
                             if layer_name not in kv_cache_tensor.shared_by:
                                 continue
