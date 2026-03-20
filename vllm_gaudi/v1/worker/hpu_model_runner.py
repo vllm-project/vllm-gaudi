@@ -4246,12 +4246,22 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     for m in duplicate_mods:
                         if hasattr(self_attn, m) and hasattr(mla_attn, m):
                             delattr(self_attn, m)
-                    if hasattr(mla_attn, "mla_attn") and hasattr(mla_attn.mla_attn, "impl"):
-                        mla_impl = mla_attn.mla_attn.impl
+                    inner_mla_attn = getattr(mla_attn, "mla_attn", None)
+                    if inner_mla_attn is not None:
+                        # Keep a single canonical owner for shared MLA projections.
+                        # INC builds parent maps from module references; duplicate
+                        # owners can make alias paths win over the execution path.
+                        canonical_mla_owner = getattr(inner_mla_attn, "impl", None)
+                        if canonical_mla_owner is None:
+                            canonical_mla_owner = inner_mla_attn
+
                         duplicate_mods = ["kv_b_proj"]
                         for m in duplicate_mods:
-                            if hasattr(mla_attn, m) and hasattr(mla_impl, m):
+                            if hasattr(mla_attn, m) and hasattr(canonical_mla_owner, m):
                                 delattr(mla_attn, m)
+                            if (inner_mla_attn is not canonical_mla_owner and hasattr(inner_mla_attn, m)
+                                    and hasattr(canonical_mla_owner, m)):
+                                delattr(inner_mla_attn, m)
 
                 # Remove duplicate gate from SharedFusedMoE.
                 # Models like Qwen3MoE, DeepSeek-V2, etc. pass the

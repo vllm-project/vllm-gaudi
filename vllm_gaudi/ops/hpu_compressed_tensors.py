@@ -398,13 +398,14 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
             topk_weights = topk_weights.to(x.dtype)
         topk_ids = topk_ids.view(*x.shape[:-1], -1)
         topk_weights = topk_weights.view(*x.shape[:-1], -1)
+        activation = getattr(layer.activation, "value", layer.activation)
 
         output = layer.moe_op(
             x,
             topk_ids.to(torch.int64),
             topk_weights.to(x.dtype),
             permuted_weights=True,
-            activation=layer.activation,
+            activation=activation,
         )
         return output.view(*input_shape)
 
@@ -809,13 +810,14 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
             topk_weights = topk_weights.to(x.dtype)
         topk_ids = topk_ids.view(*x.shape[:-1], -1)
         topk_weights = topk_weights.view(*x.shape[:-1], -1)
+        activation = getattr(layer.activation, "value", layer.activation)
 
         output = layer.moe_op(
             x,
             topk_ids.to(torch.int64),
             topk_weights.to(x.dtype),
             permuted_weights=False,
-            activation=layer.activation,
+            activation=activation,
         )
         return output.view(*input_shape)
 
