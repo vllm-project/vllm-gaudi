@@ -8,7 +8,7 @@ tasks:
     value: 0.75
 limit: 12
 num_fewshot: 3
-max_num_seqs: 24
+max_num_seqs: 4
 max_model_len: 16384
 batch_size: 4
 dtype: "bfloat16"
