@@ -4618,7 +4618,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         prompt_cfg = (batch_size, seq_len, num_blocks)
                     else:
                         decode_cfg = (batch_size, 1, num_blocks)
-                    self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
+                    # Sampler kernels are warmed up separately in warmup_sampler.
+                    # Avoid redundant decode-time sampling here to reduce
+                    # allocator pressure during graph warmup.
+                    self._prepare_dummy_scenario(prompt_cfg, decode_cfg, run_sampling=is_prompt)
                 # TODO(kzawora): align_workers
                 used_mem = mem_prof.consumed_device_memory
                 total_mem += used_mem
@@ -4736,7 +4739,95 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         ctx_list = ctx_list if len(ctx_list) > 0 else [0] * len(prompt_list)
         return prompt_list, ctx_list
 
-    def _prepare_dummy_scenario(self, prompt_cfg, decode_cfg):
+    def _prepare_dummy_unified_scenario(self, unified_cfg):
+        requests: list[NewRequestData] = []
+        scheduled_tokens: dict[str, int] = {}
+
+        query_len, shared_ctx_len, unique_ctx_len, is_causal = unified_cfg
+        num_computed_tokens = (shared_ctx_len + unique_ctx_len) * self.block_size
+
+        if is_causal:
+            decode_reqs_query = []
+            decode_reqs_blocks = []
+            prompt_reqs_query = []
+            prompt_reqs_blocks: list = []
+
+            all_shared_blocks_ids = [block for block in range(shared_ctx_len)]
+            unique_block = unique_ctx_len - 1
+            # do not use unique block id
+            if unique_block in all_shared_blocks_ids:
+                all_shared_blocks_ids.remove(unique_ctx_len - 1)
+                all_shared_blocks_ids.append(shared_ctx_len + 1)
+
+            #add unique
+            if unique_ctx_len > 0:
+                decode_reqs_query.append(1)
+                decode_reqs_blocks.append([unique_ctx_len - 1])
+            prompts_number = self.max_num_seqs - len(decode_reqs_query)
+            remaining_query = query_len - sum(decode_reqs_query)
+
+            q, r = divmod(remaining_query, prompts_number)
+            prompt_reqs_query = [q + (1 if i < r else 0) for i in range(prompts_number)]
+            prompt_reqs_blocks = [[] for _ in range(len(prompt_reqs_query))]
+            for idx, query in enumerate(prompt_reqs_query):
+                available_space_for_ctx = math.floor((self.max_model_len - query) // self.block_size)
+                if len(all_shared_blocks_ids) >= available_space_for_ctx:
+                    prompt_reqs_blocks[idx] = all_shared_blocks_ids[:available_space_for_ctx]
+                    del all_shared_blocks_ids[:available_space_for_ctx]
+                else:
+                    prompt_reqs_blocks[idx] = all_shared_blocks_ids
+                    break
+            if unique_ctx_len > 0:
+                self._add_dummy_unified_request(requests, False, True, [unique_ctx_len - 1], num_computed_tokens, 1,
+                                                scheduled_tokens)
+
+            for query, blocks in zip(prompt_reqs_query, prompt_reqs_blocks):
+                self._add_dummy_unified_request(requests, True, False, blocks, num_computed_tokens, query,
+                                                scheduled_tokens)
+        else:
+            remaining_samples = query_len
+            base = shared_ctx_len // remaining_samples
+            remain = shared_ctx_len % remaining_samples
+            all_shared_blocks_ids = [block for block in range(shared_ctx_len)]
+            unique_block = unique_ctx_len - 1
+            # do not use unique block id
+            if unique_block in all_shared_blocks_ids:
+                all_shared_blocks_ids.remove(unique_ctx_len - 1)
+                all_shared_blocks_ids.append(shared_ctx_len + 1)
+
+            # distribute evenly across sublists
+            split_shared_blocks_ids: list[list[int]] = [[] for _ in range(remaining_samples)]
+            idx = 0
+            for i in range(remaining_samples):
+                size = base + (1 if i < remain else 0)
+                for _ in range(size):
+                    split_shared_blocks_ids[i].append(all_shared_blocks_ids[idx])
+                    idx += 1
+
+            # make sure that all blocks are shared = in at least two decodes
+            for i, block in enumerate(all_shared_blocks_ids):
+                target = (i + 1) % remaining_samples
+                if block not in split_shared_blocks_ids[target]:
+                    split_shared_blocks_ids[target].append(block)
+
+            # add unique id
+            if unique_ctx_len > 0:
+                min_idx = min(range(remaining_samples), key=lambda j: len(split_shared_blocks_ids[j]))
+                split_shared_blocks_ids[min_idx].append(unique_block)
+
+            for i in range(len(split_shared_blocks_ids)):
+                if not split_shared_blocks_ids[i]:
+                    if unique_block - i >= 0:
+                        split_shared_blocks_ids[i] = [unique_block - i]
+                    else:
+                        split_shared_blocks_ids[i] = [all_shared_blocks_ids[0]]
+
+            for request_blocks in split_shared_blocks_ids:
+                self._add_dummy_unified_request(requests, False, False, request_blocks, num_computed_tokens, 1,
+                                                scheduled_tokens)
+        self._execute_dummy_scenario(requests, scheduled_tokens)
+
+    def _prepare_dummy_scenario(self, prompt_cfg, decode_cfg, run_sampling=True):
         requests: list[NewRequestData] = []
         scheduled_tokens: dict[str, int] = {}
 
@@ -4786,9 +4877,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                         scheduled_tokens=1,
                                         is_prompt=False,
                                         block_id=block_id)
-        self._execute_dummy_scenario(requests, scheduled_tokens)
+        self._execute_dummy_scenario(requests, scheduled_tokens, run_sampling=run_sampling)
 
-    def _execute_dummy_scenario(self, requests, scheduled_tokens):
+    def _execute_dummy_scenario(self, requests, scheduled_tokens, run_sampling=True):
         from vllm.v1.core.sched.output import (SchedulerOutput, CachedRequestData)
 
         sched_output = SchedulerOutput(
@@ -4814,7 +4905,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             free_encoder_mm_hashes=[],
         )
         self.execute_model(sched_output, warmup_mode=True)
-        self.sample_tokens(None)
+        if run_sampling:
+            self.sample_tokens(None)
         self.execute_model(cleanup, warmup_mode=True)
 
     def _generate_profiling(self, prompt_cfg, decode_cfg):
@@ -5069,15 +5161,41 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     self.defragmenter.warmup()
 
                 # TODO(kzawora): align_workers
-                mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
-                    self.warmup_graphs(
-                        self.bucketing_manager.prompt_buckets, True, kv_caches)
-                self.log_graph_warmup_summary(self.bucketing_manager.prompt_buckets, True, mem_post_prompt)
-                if not self.is_pooling_model:
-                    mem_post_decode, decode_batch_seq, decode_captured_all = \
-                      self.warmup_graphs(
-                          self.bucketing_manager.decode_buckets, False, kv_caches)
-                    self.log_graph_warmup_summary(self.bucketing_manager.decode_buckets, False, mem_post_decode)
+                if self.unified_attn:
+                    self.warmup_unified_graphs(self.bucketing_manager.unified_buckets, kv_caches)
+                else:
+                    mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
+                        self.warmup_graphs(
+                            self.bucketing_manager.prompt_buckets, True, kv_caches)
+                    self.log_graph_warmup_summary(self.bucketing_manager.prompt_buckets, True, mem_post_prompt)
+                    if not self.is_pooling_model:
+                        # Keep full decode buckets for runtime lookup/fallback,
+                        # but honor configured warmup cap for decode graph capture.
+                        decode_warmup_buckets = self.bucketing_manager.decode_buckets
+                        decode_warmup_max = os.environ.get("VLLM_DECODE_BLOCK_BUCKET_MAX")
+                        if decode_warmup_max is not None and get_config().use_contiguous_pa:
+                            with suppress(ValueError):
+                                decode_warmup_max_int = int(decode_warmup_max)
+                                num_hpu_blocks = self.bucketing_manager.num_hpu_blocks
+                                if num_hpu_blocks is not None and num_hpu_blocks > decode_warmup_max_int:
+                                    filtered_decode_buckets = [
+                                        b for b in decode_warmup_buckets if b[2] != num_hpu_blocks
+                                    ]
+                                    if filtered_decode_buckets and \
+                                            len(filtered_decode_buckets) != len(decode_warmup_buckets):
+                                        logger.info(
+                                            "Skipping contiguous-PA max-block decode warmup "
+                                            "buckets (num_blocks=%s > VLLM_DECODE_BLOCK_BUCKET_MAX=%s): %d -> %d",
+                                            num_hpu_blocks,
+                                            decode_warmup_max_int,
+                                            len(decode_warmup_buckets),
+                                            len(filtered_decode_buckets),
+                                        )
+                                        decode_warmup_buckets = filtered_decode_buckets
+                        mem_post_decode, decode_batch_seq, decode_captured_all = \
+                          self.warmup_graphs(
+                              decode_warmup_buckets, False, kv_caches)
+                        self.log_graph_warmup_summary(decode_warmup_buckets, False, mem_post_decode)
 
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
