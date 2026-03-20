@@ -63,6 +63,3 @@ def patch_qwen3_next_attention_for_hpu() -> None:
     cls.forward = _forward_hpu_patched
     cls._gaudi_multibatch_decode_patch = True
     cls._gaudi_multibatch_decode_orig_forward = orig_forward
-
-    qwen3_next.Qwen3NextAttention.forward = _forward_hpu_patched
-    qwen3_next.Qwen3NextAttention._gaudi_multibatch_decode_patch = True

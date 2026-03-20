@@ -900,7 +900,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.max_encoder_len = 0
 
         mamba_like = ["mamba", "linear_attention"]
-        self.num_mamba_like_layers = self.model_config.get_num_layers_by_block_type(self.parallel_config, "mamba")
 
         self.num_mamba_like_layers = sum(
             self.model_config.get_num_layers_by_block_type(self.parallel_config, block_type)
