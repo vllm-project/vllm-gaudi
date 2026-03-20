@@ -110,8 +110,11 @@ class HpuPlatform(Platform):
 
         # NOTE(kzawora): default block size for Gaudi should be 128
         # smaller sizes still work, but very inefficiently
+        # For hybrid models, avoid changing block_size if already set
         cache_config = vllm_config.cache_config
-        if not cache_config.user_specified_block_size:
+        model_config = vllm_config.model_config
+        is_hybrid = model_config is not None and model_config.is_hybrid
+        if not cache_config.user_specified_block_size and (not is_hybrid or cache_config.block_size is None):
             cache_config.block_size = 128
         if (parallel_config.distributed_executor_backend in ['mp', 'uni']
                 and envs.VLLM_WORKER_MULTIPROC_METHOD == 'fork'):
