@@ -23,10 +23,10 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-
 # ---------------------------------------------------------------------------
 # Helpers to (re)import the module under test with controlled env vars
 # ---------------------------------------------------------------------------
+
 
 def _import_gdn(env_overrides: dict[str, str] | None = None):
     """Import (or re-import) hpu_gdn_pytorch with env overrides.
@@ -75,6 +75,7 @@ def gdn_bf16():
 # Random tensor generators (seeded for reproducibility)
 # ---------------------------------------------------------------------------
 
+
 def _make_gdn_inputs(
     B: int = 1,
     T: int = 64,
@@ -111,6 +112,7 @@ def _make_lower_triangular(n: int, batch: int = 4, *, seed: int = 0):
 # 1. Triangular solver tests
 # ===================================================================
 
+
 class TestSolveLowerTriangularBatched:
     """Tests for _hpu_solve_lower_triangular_batched."""
 
@@ -120,10 +122,16 @@ class TestSolveLowerTriangularBatched:
         lmat, eye = _make_lower_triangular(n, batch=8)
 
         inv_neumann = gdn._hpu_solve_lower_triangular_batched(
-            lmat, eye, use_vectorized=True, neumann_iters=14,
+            lmat,
+            eye,
+            use_vectorized=True,
+            neumann_iters=14,
         )
         inv_exact = gdn_exact._hpu_solve_lower_triangular_batched(
-            lmat, eye, use_vectorized=True, neumann_iters=14,
+            lmat,
+            eye,
+            use_vectorized=True,
+            neumann_iters=14,
         )
         torch.testing.assert_close(inv_neumann, inv_exact, atol=1e-3, rtol=1e-3)
 
@@ -133,7 +141,10 @@ class TestSolveLowerTriangularBatched:
         lmat, eye = _make_lower_triangular(n, batch=4)
 
         inv = gdn_exact._hpu_solve_lower_triangular_batched(
-            lmat, eye, use_vectorized=True, neumann_iters=14,
+            lmat,
+            eye,
+            use_vectorized=True,
+            neumann_iters=14,
         )
         product = torch.bmm(lmat, inv)
         expected = eye.unsqueeze(0).expand_as(product)
@@ -145,7 +156,10 @@ class TestSolveLowerTriangularBatched:
         lmat, eye = _make_lower_triangular(n, batch=4, seed=7)
 
         inv = gdn._hpu_solve_lower_triangular_batched(
-            lmat, eye, use_vectorized=True, neumann_iters=14,
+            lmat,
+            eye,
+            use_vectorized=True,
+            neumann_iters=14,
         )
         product = torch.bmm(lmat, inv)
         expected = eye.unsqueeze(0).expand_as(product)
@@ -160,7 +174,10 @@ class TestSolveLowerTriangularBatched:
         residuals = []
         for iters in [2, 6, 14, 30]:
             inv = gdn._hpu_solve_lower_triangular_batched(
-                lmat, eye, use_vectorized=True, neumann_iters=iters,
+                lmat,
+                eye,
+                use_vectorized=True,
+                neumann_iters=iters,
             )
             product = torch.bmm(lmat, inv)
             residual = (product - eye.unsqueeze(0)).abs().max().item()
@@ -168,8 +185,10 @@ class TestSolveLowerTriangularBatched:
 
         # Residuals should be monotonically non-increasing
         for i in range(1, len(residuals)):
-            assert residuals[i] <= residuals[i - 1] + 1e-7, \
-                f"Residual increased: iters {[2,6,14,30][i-1]}→{[2,6,14,30][i]}: {residuals[i-1]:.6f}→{residuals[i]:.6f}"
+            iter_steps = [2, 6, 14, 30]
+            assert residuals[i] <= residuals[i - 1] + 1e-7, ("Residual increased: "
+                                                             f"iters {iter_steps[i - 1]}->{iter_steps[i]}: "
+                                                             f"{residuals[i - 1]:.6f}->{residuals[i]:.6f}")
 
     def test_identity_input(self, gdn):
         """Inverse of identity matrix is identity."""
@@ -178,7 +197,10 @@ class TestSolveLowerTriangularBatched:
         lmat = eye.unsqueeze(0).expand(3, -1, -1).contiguous()
 
         inv = gdn._hpu_solve_lower_triangular_batched(
-            lmat, eye, use_vectorized=True, neumann_iters=14,
+            lmat,
+            eye,
+            use_vectorized=True,
+            neumann_iters=14,
         )
         torch.testing.assert_close(inv, lmat, atol=1e-6, rtol=1e-6)
 
@@ -188,7 +210,10 @@ class TestSolveLowerTriangularBatched:
         eye = torch.eye(4)
         with pytest.raises(ValueError, match="square matrix"):
             gdn._hpu_solve_lower_triangular_batched(
-                lmat, eye, use_vectorized=True, neumann_iters=14,
+                lmat,
+                eye,
+                use_vectorized=True,
+                neumann_iters=14,
             )
 
     def test_invalid_neumann_iters_raises(self, gdn):
@@ -197,7 +222,10 @@ class TestSolveLowerTriangularBatched:
         lmat, eye = _make_lower_triangular(n, batch=1)
         with pytest.raises(ValueError, match="neumann_iters"):
             gdn._hpu_solve_lower_triangular_batched(
-                lmat, eye, use_vectorized=True, neumann_iters=0,
+                lmat,
+                eye,
+                use_vectorized=True,
+                neumann_iters=0,
             )
 
     def test_chunk_size_128(self, gdn, gdn_exact):
@@ -206,10 +234,16 @@ class TestSolveLowerTriangularBatched:
         lmat, eye = _make_lower_triangular(n, batch=2, seed=99)
 
         inv_neumann = gdn._hpu_solve_lower_triangular_batched(
-            lmat, eye, use_vectorized=True, neumann_iters=14,
+            lmat,
+            eye,
+            use_vectorized=True,
+            neumann_iters=14,
         )
         inv_exact = gdn_exact._hpu_solve_lower_triangular_batched(
-            lmat, eye, use_vectorized=True, neumann_iters=14,
+            lmat,
+            eye,
+            use_vectorized=True,
+            neumann_iters=14,
         )
         # With n=128 and moderate entries, Neumann may have larger error
         residual = (inv_neumann - inv_exact).abs().max().item()
@@ -219,6 +253,7 @@ class TestSolveLowerTriangularBatched:
 # ===================================================================
 # 2. Gating function test
 # ===================================================================
+
 
 class TestFusedGdnGating:
     """Tests for hpu_fused_gdn_gating."""
@@ -273,6 +308,7 @@ class TestFusedGdnGating:
 # 3. Recurrent path tests
 # ===================================================================
 
+
 class TestFusedRecurrentGatedDeltaRule:
     """Tests for hpu_fused_recurrent_gated_delta_rule."""
 
@@ -284,7 +320,11 @@ class TestFusedRecurrentGatedDeltaRule:
         init_state_copy = init_state.clone()
 
         out, final_state = gdn.hpu_fused_recurrent_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             initial_state=init_state,
         )
         assert out.shape == (B, T, HV, V)
@@ -307,7 +347,11 @@ class TestFusedRecurrentGatedDeltaRule:
         init_state = torch.zeros(N, HV, V, K)
 
         out, final_state = gdn.hpu_fused_recurrent_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             initial_state=init_state,
             cu_seqlens=cu_seqlens,
         )
@@ -320,7 +364,11 @@ class TestFusedRecurrentGatedDeltaRule:
         q, k, v, g, beta = _make_gdn_inputs(B, T, H, HV, K, V, seed=7)
 
         out, final_state = gdn.hpu_fused_recurrent_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
         )
         assert out.shape == (B, T, HV, V)
         assert not torch.allclose(out, torch.zeros_like(out), atol=1e-8)
@@ -335,7 +383,11 @@ class TestFusedRecurrentGatedDeltaRule:
         beta = torch.sigmoid(torch.randn(B, T, HV))
 
         out, final_state = gdn.hpu_fused_recurrent_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
         )
         assert out.shape == (B, T, HV, V)
 
@@ -358,19 +410,31 @@ class TestFusedRecurrentGatedDeltaRule:
 
         # Full run (inplace_final_state=False so we get an independent copy)
         out_full, state_full = gdn.hpu_fused_recurrent_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             inplace_final_state=False,
         )
 
         # Two-part run
         out_1, state_1 = gdn.hpu_fused_recurrent_gated_delta_rule(
-            q[:, :4], k[:, :4], v[:, :4], g[:, :4], beta[:, :4],
+            q[:, :4],
+            k[:, :4],
+            v[:, :4],
+            g[:, :4],
+            beta[:, :4],
             inplace_final_state=False,
         )
         # Recompute g for second half: g is cumulative within chunks,
         # but the recurrent path uses raw g values per token.
         out_2, state_2 = gdn.hpu_fused_recurrent_gated_delta_rule(
-            q[:, 4:], k[:, 4:], v[:, 4:], g[:, 4:], beta[:, 4:],
+            q[:, 4:],
+            k[:, 4:],
+            v[:, 4:],
+            g[:, 4:],
+            beta[:, 4:],
             initial_state=state_1,
             inplace_final_state=False,
         )
@@ -393,7 +457,11 @@ class TestFusedRecurrentGatedDeltaRule:
         ssm_idx = torch.tensor([2, 0, 4], dtype=torch.long)
 
         out, final_state = gdn.hpu_fused_recurrent_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             initial_state=init_state,
             cu_seqlens=cu_seqlens,
             ssm_state_indices=ssm_idx,
@@ -406,6 +474,7 @@ class TestFusedRecurrentGatedDeltaRule:
 # 4. Chunk GDR pipeline tests
 # ===================================================================
 
+
 class TestChunkGatedDeltaRule:
     """Tests for hpu_chunk_gated_delta_rule (prefill path)."""
 
@@ -414,7 +483,11 @@ class TestChunkGatedDeltaRule:
         B, T, H, K, HV, V = 1, 64, 2, 8, 2, 8
         q, k, v, g, beta = _make_gdn_inputs(B, T, H, HV, K, V, **kwargs)
         return gdn_mod.hpu_chunk_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             chunk_size=chunk_size,
             output_final_state=True,
             prefill_num_seqs=B,
@@ -439,7 +512,11 @@ class TestChunkGatedDeltaRule:
         q, k, v, g, beta = _make_gdn_inputs(B, T, H, HV, K, V, seed=77)
 
         out_chunk, state_chunk = gdn.hpu_chunk_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             chunk_size=16,
             output_final_state=True,
             prefill_num_seqs=B,
@@ -447,12 +524,18 @@ class TestChunkGatedDeltaRule:
             neumann_iters=14,
         )
         out_recurrent, state_recurrent = gdn.hpu_fused_recurrent_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
         )
 
         # Outputs should agree within moderate tolerance (Neumann approx)
         cos_sim = F.cosine_similarity(
-            out_chunk.reshape(-1), out_recurrent.reshape(-1), dim=0,
+            out_chunk.reshape(-1),
+            out_recurrent.reshape(-1),
+            dim=0,
         )
         assert cos_sim > 0.9, f"Chunk vs recurrent cosine similarity too low: {cos_sim:.4f}"
 
@@ -462,7 +545,11 @@ class TestChunkGatedDeltaRule:
         q, k, v, g, beta = _make_gdn_inputs(B, T, H, HV, K, V, seed=77)
 
         out_chunk, state_chunk = gdn_exact.hpu_chunk_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             chunk_size=16,
             output_final_state=True,
             prefill_num_seqs=B,
@@ -470,7 +557,11 @@ class TestChunkGatedDeltaRule:
             neumann_iters=14,
         )
         out_recurrent, state_recurrent = gdn_exact.hpu_fused_recurrent_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
         )
 
         torch.testing.assert_close(out_chunk, out_recurrent, atol=1e-3, rtol=1e-3)
@@ -482,7 +573,11 @@ class TestChunkGatedDeltaRule:
         q, k, v, g, beta = _make_gdn_inputs(B, T, H, HV, K, V, seed=11)
 
         out, state = gdn.hpu_chunk_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             chunk_size=32,
             output_final_state=True,
             prefill_num_seqs=B,
@@ -499,7 +594,11 @@ class TestChunkGatedDeltaRule:
         q, k, v, g, beta = _make_gdn_inputs(S, T, H, HV, K, V, seed=55)
 
         out, state = gdn.hpu_chunk_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             chunk_size=16,
             output_final_state=True,
             prefill_num_seqs=S,
@@ -515,7 +614,11 @@ class TestChunkGatedDeltaRule:
         q, k, v, g, beta = _make_gdn_inputs(B, T, H, HV, K, V, seed=33)
 
         out_zero, _ = gdn.hpu_chunk_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             chunk_size=16,
             prefill_num_seqs=B,
             prefill_seq_len=T,
@@ -524,7 +627,11 @@ class TestChunkGatedDeltaRule:
 
         init_state = torch.randn(B, HV, V, K) * 0.1
         out_nonzero, _ = gdn.hpu_chunk_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             initial_state=init_state,
             chunk_size=16,
             prefill_num_seqs=B,
@@ -545,7 +652,11 @@ class TestChunkGatedDeltaRule:
         beta = torch.sigmoid(torch.randn(B, T, HV))
 
         out, state = gdn.hpu_chunk_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             chunk_size=16,
             output_final_state=True,
             prefill_num_seqs=B,
@@ -561,7 +672,12 @@ class TestChunkGatedDeltaRule:
         q, k, v, g, beta = _make_gdn_inputs(B, T, H, HV, K, V)
         with pytest.raises(ValueError, match="chunk_size"):
             gdn.hpu_chunk_gated_delta_rule(
-                q, k, v, g, beta, chunk_size=0,
+                q,
+                k,
+                v,
+                g,
+                beta,
+                chunk_size=0,
             )
 
     def test_invalid_neumann_iters_raises(self, gdn):
@@ -570,7 +686,11 @@ class TestChunkGatedDeltaRule:
         q, k, v, g, beta = _make_gdn_inputs(B, T, H, HV, K, V)
         with pytest.raises(ValueError, match="neumann_iters"):
             gdn.hpu_chunk_gated_delta_rule(
-                q, k, v, g, beta,
+                q,
+                k,
+                v,
+                g,
+                beta,
                 chunk_size=16,
                 neumann_iters=0,
                 prefill_num_seqs=1,
@@ -581,6 +701,7 @@ class TestChunkGatedDeltaRule:
 # ===================================================================
 # 5. Environment variable toggle tests
 # ===================================================================
+
 
 class TestEnvVarToggles:
     """Verify that environment variable toggles change behavior."""
@@ -604,23 +725,25 @@ class TestEnvVarToggles:
     def test_compute_fp32_flag(self):
         """VLLM_GDN_COMPUTE_FP32=1 should set dtype to float32."""
         mod = _import_gdn({"VLLM_GDN_COMPUTE_FP32": "1"})
-        assert mod._GDN_COMPUTE_DTYPE == torch.float32
+        assert torch.float32 == mod._GDN_COMPUTE_DTYPE
 
         mod = _import_gdn({"VLLM_GDN_COMPUTE_FP32": "0"})
-        assert mod._GDN_COMPUTE_DTYPE == torch.bfloat16
+        assert torch.bfloat16 == mod._GDN_COMPUTE_DTYPE
 
     def test_legacy_vs_optimized_phase_b_agreement(self):
         """Legacy and optimized phase B should produce similar results."""
         B, T, H, K, HV, V = 1, 32, 2, 8, 2, 8
         q, k, v, g, beta = _make_gdn_inputs(B, T, H, HV, K, V, seed=88)
 
-        gdn_opt = _import_gdn({"VLLM_GDN_LEGACY_PHASE_B": "0",
-                                "VLLM_GDN_EXACT_SOLVE": "1"})
-        gdn_leg = _import_gdn({"VLLM_GDN_LEGACY_PHASE_B": "1",
-                                "VLLM_GDN_EXACT_SOLVE": "1"})
+        gdn_opt = _import_gdn({"VLLM_GDN_LEGACY_PHASE_B": "0", "VLLM_GDN_EXACT_SOLVE": "1"})
+        gdn_leg = _import_gdn({"VLLM_GDN_LEGACY_PHASE_B": "1", "VLLM_GDN_EXACT_SOLVE": "1"})
 
         out_opt, state_opt = gdn_opt.hpu_chunk_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             chunk_size=16,
             output_final_state=True,
             prefill_num_seqs=B,
@@ -628,7 +751,11 @@ class TestEnvVarToggles:
             neumann_iters=14,
         )
         out_leg, state_leg = gdn_leg.hpu_chunk_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             chunk_size=16,
             output_final_state=True,
             prefill_num_seqs=B,
@@ -646,7 +773,11 @@ class TestEnvVarToggles:
         q, k, v, g, beta = _make_gdn_inputs(B, T, H, HV, K, V, seed=44)
 
         out, state = mod.hpu_fused_recurrent_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
         )
         assert not torch.isnan(out).any(), "NaN in bf16 recurrent output"
         assert not torch.isinf(out).any(), "Inf in bf16 recurrent output"
@@ -655,6 +786,7 @@ class TestEnvVarToggles:
 # ===================================================================
 # 6. Preprocessing and helpers
 # ===================================================================
+
 
 class TestPreprocessAndHelpers:
     """Tests for hpu_chunk_gdr_preprocess and helper functions."""
@@ -678,7 +810,11 @@ class TestPreprocessAndHelpers:
         q, k, v, g, beta = _make_gdn_inputs(B, T, H, HV, K, V)
 
         result = gdn.hpu_chunk_gdr_preprocess(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             scale=None,
             initial_state=None,
             use_qk_l2norm_in_kernel=False,
@@ -709,7 +845,11 @@ class TestPreprocessAndHelpers:
         beta = torch.ones(B, T, HV)
 
         result = gdn.hpu_chunk_gdr_preprocess(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             scale=1.0,
             initial_state=None,
             use_qk_l2norm_in_kernel=False,
@@ -742,6 +882,7 @@ class TestPreprocessAndHelpers:
 # 7. Legacy chunk pipeline (cu_seqlens / non-bucketed path)
 # ===================================================================
 
+
 class TestLegacyChunkPipeline:
     """Tests for the legacy chunk path (cu_seqlens, non-bucketed)."""
 
@@ -757,7 +898,11 @@ class TestLegacyChunkPipeline:
         cu_seqlens = torch.tensor([0, 16, 32], dtype=torch.long)
 
         out, state = gdn.hpu_chunk_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             chunk_size=8,
             output_final_state=True,
             cu_seqlens=cu_seqlens,
@@ -778,7 +923,11 @@ class TestLegacyChunkPipeline:
         cu_seqlens = torch.tensor([0, 10, 20, 30], dtype=torch.long)
 
         out, state = gdn.hpu_chunk_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             chunk_size=8,
             output_final_state=True,
             cu_seqlens=cu_seqlens,
@@ -792,6 +941,7 @@ class TestLegacyChunkPipeline:
 # 8. Phase A / Phase B integration
 # ===================================================================
 
+
 class TestPhaseAPhaseB:
     """Test the 3-stage pipeline (preprocess → phase A → phase B)."""
 
@@ -802,7 +952,11 @@ class TestPhaseAPhaseB:
         chunk_size = 32
 
         result = gdn.hpu_chunk_gdr_preprocess(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             scale=None,
             initial_state=None,
             use_qk_l2norm_in_kernel=False,
@@ -813,10 +967,18 @@ class TestPhaseAPhaseB:
         qf, kf, vf, bf, g_cumsum, init_state, H_out, num_chunks, scale, Kdim, Vdim, S = result
 
         u_all, w_all, q_chunks, k_chunks, g_chunks = gdn.hpu_chunk_gdr_phase_a(
-            qf, kf, vf, bf, g_cumsum,
-            seq_len=T, chunk_size=chunk_size,
-            S=S, num_chunks=num_chunks,
-            H=H_out, Kdim=Kdim, Vdim=Vdim,
+            qf,
+            kf,
+            vf,
+            bf,
+            g_cumsum,
+            seq_len=T,
+            chunk_size=chunk_size,
+            S=S,
+            num_chunks=num_chunks,
+            H=H_out,
+            Kdim=Kdim,
+            Vdim=Vdim,
             neumann_iters=14,
         )
 
@@ -832,7 +994,11 @@ class TestPhaseAPhaseB:
         q, k, v, g, beta = _make_gdn_inputs(B, T, H, HV, K, V, seed=999)
 
         out, state = gdn.hpu_chunk_gated_delta_rule(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             chunk_size=64,
             output_final_state=True,
             prefill_num_seqs=B,
