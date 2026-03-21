@@ -252,7 +252,7 @@ def hpu_causal_conv1d_fn(
 
         # Scatter all updates at once
         conv_states[blocks_caching_range, -state_len:, :] = new_states.transpose(-1, -2)
-    if not enable_prefix_caching:
+    else:
         end = qsl[-1]
         idx = torch.arange(state_len, device=x.device) + end
         new_state = seq_input.index_select(dim=1, index=idx)
@@ -373,7 +373,6 @@ def hpu_causal_conv1d_fn_update(
     seq_out = _apply_activation(seq_out, activation)
     out = seq_out
 
-    with torch.no_grad():
-        conv_states[store_cache_indices, -state_len:, :] = new_state.transpose(-1, -2)
+    conv_states[store_cache_indices, -state_len:, :] = new_state.transpose(-1, -2)
 
     return out.to(original_dtype)
