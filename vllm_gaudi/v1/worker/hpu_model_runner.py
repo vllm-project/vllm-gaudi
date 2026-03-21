@@ -37,7 +37,6 @@ from vllm_gaudi.extension.unified_batch import create_unified_batch, prepare_uni
 from vllm_gaudi.extension.utils import align_and_pad, pad_list, with_default
 from vllm_gaudi.extension.debug import init_debug_logger
 from vllm_gaudi.v1.worker.hpu_dp_utils import set_hpu_dp_metadata
-from vllm_gaudi.ops.qwen3_next_attention_patch import patch_qwen3_next_attention_for_hpu
 
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.model_executor.layers.attention import Attention
@@ -463,13 +462,6 @@ def apply_model_specific_patches(model_runner):
     """The function applies model-specific monkey patches."""
     maybe_set_chunked_attention_layers(model_runner)
     patch_llama4_get_attn_scale(model_runner.model)
-
-
-def apply_model_patches_before_load(model_runner):
-    import vllm.model_executor.models.qwen3_5 as qwen3_5
-    from vllm_gaudi.ops.hpu_gated_deltanet import HPUQwen3_5GatedDeltaNet
-    qwen3_5.Qwen3_5GatedDeltaNet = HPUQwen3_5GatedDeltaNet
-    patch_qwen3_next_attention_for_hpu()
 
 
 class HpuKVConnectorModelRunnerMixin(KVConnectorModelRunnerMixin):
@@ -4382,7 +4374,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         import habana_frameworks.torch.core as htcore
         if self._is_quant_with_inc() or self.model_config.quantization == 'fp8':
             htcore.hpu_inference_set_env()
-        apply_model_patches_before_load(self)
         logger.info("Starting to load model %s...", self.model_config.model)
         with HabanaMemoryProfiler() as m:  # noqa: SIM117
             # When load_config.device differs from the platform device (e.g.
