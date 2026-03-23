@@ -4988,7 +4988,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 pbar.update(1)
 
     def _hot_replay_representative_shapes(self):
-        """Re-execute representative graph shapes on HPU hardware.
+        """Re-execute all compiled graph shapes on HPU hardware.
 
         When PT_COMPILE_ONLY_MODE is used during warmup, graph recipes
         are compiled but never actually run.  The first real execution
@@ -4996,45 +4996,31 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         recipe into HPU compute engines, allocate device memory for
         intermediates, and populate the graph-replay cache.
 
-        This method selects a small set of shapes that are most likely
-        to be hit during early serving and forces their first execution
-        during warmup, so the penalty is not paid on live requests.
+        This method replays all compiled prompt and decode shapes
+        outside compile-only mode so the first-execution penalty is
+        paid during warmup rather than on live requests.
         """
         prompt_buckets = self.bucketing_manager.prompt_buckets
         decode_buckets = self.bucketing_manager.decode_buckets
 
-        hot_shapes: list[tuple] = []  # (prompt_cfg | None, decode_cfg | None)
-
-        # Smallest prompt bucket — the most common prefill shape when
-        # VLLM_PROMPT_BS_BUCKET_MAX=1.
-        if prompt_buckets:
-            hot_shapes.append((prompt_buckets[0], None))
-
-        # Smallest standalone decode — first real decode step hits this.
-        if decode_buckets:
-            db = decode_buckets[0]
-            hot_shapes.append((None, (db[0], 1, db[2])))
-
-        # A representative decode bucket near the middle.
-        if decode_buckets and len(decode_buckets) > 1:
-            mid = len(decode_buckets) // 2
-            hot_shapes.append((None, (decode_buckets[mid][0], 1,
-                                      decode_buckets[mid][2])))
-
-        # One mixed scenario (smallest prompt + smallest decode).
-        if prompt_buckets and decode_buckets:
-            db = decode_buckets[0]
-            if prompt_buckets[0][0] + db[0] <= self.max_num_seqs:
-                hot_shapes.append((prompt_buckets[0],
-                                   (db[0], 1, db[2])))
-
-        if not hot_shapes:
+        total = len(prompt_buckets) + len(decode_buckets)
+        if total == 0:
             return
 
-        logger.info("Hot replay: executing %d representative shapes "
-                    "on HPU", len(hot_shapes))
-        for prompt_cfg, decode_cfg in hot_shapes:
-            self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
+        logger.info("Hot replay: executing %d shapes on HPU "
+                    "(%d prompt, %d decode)",
+                    total, len(prompt_buckets), len(decode_buckets))
+        desc = "Hot replay: "
+        with tqdm(total=total, desc=desc, unit="item") as pbar:
+            for bucket in prompt_buckets:
+                self._prepare_dummy_scenario(bucket, None)
+                pbar.update(1)
+
+            for bucket in decode_buckets:
+                decode_cfg = (bucket[0], 1, bucket[2])
+                self._prepare_dummy_scenario(None, decode_cfg)
+                pbar.update(1)
+
         torch.hpu.synchronize()
         logger.info("Hot replay finished")
 
