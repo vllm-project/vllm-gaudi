@@ -238,6 +238,14 @@ class HpuPlatform(Platform):
                 os.environ['FUSER_ENABLE_MULTI_THREADED_INVOCATIONS'] = '1'
 
     @classmethod
+    def adjust_cuda_hooks(cls) -> None:
+        torch.cuda.is_available = lambda: False
+        # hpu.get_device_properties implementation is weird
+        # cuda.get_device_properties implementation is correct
+        # replace hpu.get_device_properties with cuda.get_device_properties
+        torch.hpu.get_device_properties = torch.cuda.get_device_properties
+
+    @classmethod
     def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str, model_config: ModelConfig) -> bool:
         return kv_cache_dtype == "fp8_inc"
 
