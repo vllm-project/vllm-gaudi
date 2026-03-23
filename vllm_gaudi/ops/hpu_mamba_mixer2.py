@@ -234,17 +234,6 @@ class HPUMambaMixer2(MambaMixer2):
 
         self.norm = Mixer2RMSNormGated(intermediate_size, n_groups, self.use_rms_norm, eps=rms_norm_eps)
 
-        # - get hidden_states, B and C after depthwise convolution.
-        self.split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
-            hidden_states_B_C,
-            [
-                self.intermediate_size // self.tp_size,
-                self.groups_ssm_state_size // self.tp_size,
-                self.groups_ssm_state_size // self.tp_size,
-            ],
-            dim=-1,
-        )
-
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -256,20 +245,30 @@ class HPUMambaMixer2(MambaMixer2):
         self.cache_config = cache_config
         self.prefix = prefix
 
-        # Pre-compute sizes for forward pass
+        # Pre-compute sizes for forward pass to avoid repeated division
         self.tped_intermediate_size = self.intermediate_size // self.tp_size
         self.tped_conv_size = self.conv_dim // self.tp_size
         self.tped_dt_size = self.num_heads // self.tp_size
+        self.tped_n_groups = self.n_groups // self.tp_size
+        self.tped_groups_ssm_state_size = self.groups_ssm_state_size // self.tp_size
 
+        # Pre-compute split sizes as a tuple to avoid list recreation per call
+        self._split_sizes = (
+            self.tped_intermediate_size,
+            self.tped_groups_ssm_state_size,
+            self.tped_groups_ssm_state_size,
+        )
+
+        # - get hidden_states, B and C after depthwise convolution.
         self.split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
             hidden_states_B_C,
-            [
-                self.tped_intermediate_size,
-                self.groups_ssm_state_size // self.tp_size,
-                self.groups_ssm_state_size // self.tp_size,
-            ],
+            self._split_sizes,
             dim=-1,
         )
+
+        # Cache the selective state update implementation to avoid
+        # factory call and closure creation on every decode step
+        self.hpu_selective_state_update = get_selective_state_update_impl()
 
     def forward(
         self,
@@ -287,7 +286,7 @@ class HPUMambaMixer2(MambaMixer2):
         ssm_output = torch.empty(
             [
                 hidden_states.shape[0],
-                (self.num_heads // self.tp_size) * self.head_dim,
+                self.tped_intermediate_size,
             ],
             dtype=hidden_states.dtype,
             device=hidden_states.device,
@@ -422,11 +421,11 @@ class HPUMambaMixer2(MambaMixer2):
 
             # NOTE: final output is an in-place update of out tensor
             varlen_states = hpu_mamba_chunk_scan_combined_varlen(
-                hidden_states_p.view(hidden_states_p.shape[0], self.num_heads // self.tp_size, self.head_dim),
+                hidden_states_p.view(hidden_states_p.shape[0], self.tped_dt_size, self.head_dim),
                 dt,
                 self.A,
-                B_p.view(B_p.shape[0], self.n_groups // self.tp_size, -1),
-                C_p.view(C_p.shape[0], self.n_groups // self.tp_size, -1),
+                B_p.view(B_p.shape[0], self.tped_n_groups, -1),
+                C_p.view(C_p.shape[0], self.tped_n_groups, -1),
                 chunk_size=chunk_size,
                 D=self.D,
                 z=None,
@@ -462,22 +461,19 @@ class HPUMambaMixer2(MambaMixer2):
             hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(hidden_states_B_C)
 
             # 3. State Space Model sequence transformation
-            n_groups = self.n_groups // self.tp_size
-            A_d = (self.A[:, None, ...][:, :, None].expand(-1, self.head_dim,
-                                                           self.ssm_state_size).to(dtype=torch.float32))
+            A_d = self.A[:, None, None].expand(-1, self.head_dim, self.ssm_state_size).to(dtype=torch.float32)
             dt = dt[:, :, None].expand(-1, -1, self.head_dim)
-            dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
-            D_d = self.D[:, None, ...].expand(-1, self.head_dim)
-            B_d = B_d.view(-1, n_groups, B_d.shape[1] // n_groups)
-            C_d = C_d.view(-1, n_groups, C_d.shape[1] // n_groups)
-            hidden_states_d = hidden_states_d.view(-1, self.num_heads // self.tp_size, self.head_dim)
+            dt_bias = self.dt_bias[:, None].expand(-1, self.head_dim)
+            D_d = self.D[:, None].expand(-1, self.head_dim)
+            B_d = B_d.view(-1, self.tped_n_groups, B_d.shape[1] // self.tped_n_groups)
+            C_d = C_d.view(-1, self.tped_n_groups, C_d.shape[1] // self.tped_n_groups)
+            hidden_states_d = hidden_states_d.view(-1, self.tped_dt_size, self.head_dim)
 
             # - the hidden is reshaped into (bs, num_heads, head_dim)
             # - mamba_cache_params.ssm_state's slots will be selected
             #   using state_indices_tensor
             # NOTE: final output is an in-place update of out tensor
-            hpu_selective_state_update = get_selective_state_update_impl()
-            hpu_selective_state_update(
+            self.hpu_selective_state_update(
                 ssm_state,
                 hidden_states_d,
                 dt,

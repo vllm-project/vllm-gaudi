@@ -637,14 +637,13 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
         activation = _as_activation_str(activation)
         kwargs = self._get_extra_kwargs(tokens_num)
         # pre-processing for custom op inputs
-        experts_range = range(self.num_experts)
-        w1_list = [self.w13_list[i].weight.squeeze() for i in experts_range]
-        w2_list = [self.w2_list[i].weight.squeeze() for i in experts_range]
+        w1_list = [m.weight.squeeze() for m in self.w13_list]
+        w2_list = [m.weight.squeeze() for m in self.w2_list]
 
         if self.moe_n_slice == 1:
             if self.bias is not None:
-                w1_bias_list = [self.w13_list[i].bias.squeeze() for i in experts_range]
-                w2_bias_list = [self.w2_list[i].bias.squeeze() for i in experts_range]
+                w1_bias_list = [m.bias.squeeze() for m in self.w13_list]
+                w2_bias_list = [m.bias.squeeze() for m in self.w2_list]
                 return torch.ops.hpu.mixture_of_experts.bias_fused_weights(hidden_states=hidden_states,
                                                                            expert_routing_table=expert_routing_table,
                                                                            router_weights=router_weights,
@@ -666,14 +665,16 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
                                                         experts_min=self.experts_min,
                                                         experts_max=self.experts_max,
                                                         **kwargs)
+        # Hoist bias list computation out of the slicing loop
+        if self.bias is not None:
+            w1_bias_list = [m.bias.squeeze() for m in self.w13_list]
+            w2_bias_list = [m.bias.squeeze() for m in self.w2_list]
         for i in range(self.moe_n_slice):
             w1_list_slice = w1_list[i * self.num_expert_per_group:(i + 1) * self.num_expert_per_group]
             w2_list_slice = w2_list[i * self.num_expert_per_group:(i + 1) * self.num_expert_per_group]
             min_expert = self.experts_min + i * self.num_expert_per_group
             max_expert = min_expert + self.num_expert_per_group - 1
             if self.bias is not None:
-                w1_bias_list = [self.w13_list[i].bias.squeeze() for i in experts_range]
-                w2_bias_list = [self.w2_list[i].bias.squeeze() for i in experts_range]
                 w1_bias_list_slice = w1_bias_list[i * self.num_expert_per_group:(i + 1) * self.num_expert_per_group]
                 w2_bias_list_slice = w2_bias_list[i * self.num_expert_per_group:(i + 1) * self.num_expert_per_group]
                 slice_final_hidden_states = torch.ops.hpu.mixture_of_experts.bias_fused_weights(
@@ -991,60 +992,69 @@ def fp8_block_moe_prepare_weights(layer, force_channel_fp8=False):
         layer.w2_weight_scale_inv = torch.nn.Parameter(w2_weight_scale_inv, requires_grad=False)
         return fp8_channel_moe_prepare_weights(layer)
 
-    for index in range(layer.moe_op.num_experts):
-        layer.moe_op.w13_list[index].set_weight(layer.w13_weight[index])
-        layer.moe_op.w13_list[index].set_scale_inv_fp8(layer.w13_weight_scale_inv[index])
-        layer.moe_op.w13_list[index].set_weight_block_size(layer.quant_config.weight_block_size)
+    moe_op = layer.moe_op
+    block_size = layer.quant_config.weight_block_size
+    for index in range(moe_op.num_experts):
+        w13_entry = moe_op.w13_list[index]
+        w2_entry = moe_op.w2_list[index]
 
-        layer.moe_op.w2_list[index].set_weight(layer.w2_weight[index])
-        layer.moe_op.w2_list[index].set_scale_inv_fp8(layer.w2_weight_scale_inv[index])
-        layer.moe_op.w2_list[index].set_weight_block_size(layer.quant_config.weight_block_size)
+        w13_entry.set_weight(layer.w13_weight[index])
+        w13_entry.set_scale_inv_fp8(layer.w13_weight_scale_inv[index])
+        w13_entry.set_weight_block_size(block_size)
+
+        w2_entry.set_weight(layer.w2_weight[index])
+        w2_entry.set_scale_inv_fp8(layer.w2_weight_scale_inv[index])
+        w2_entry.set_weight_block_size(block_size)
     htorch.core.mark_step()
     return layer
 
 
 def fp8_channel_moe_prepare_weights(layer):
-    for index in range(layer.moe_op.num_experts):
-        layer.moe_op.w13_list[index].set_weight(layer.w13_weight[index])
-        if hasattr(layer, "w13_weight_scale_inv"):
-            layer.moe_op.w13_list[index].set_scale_inv_fp8(layer.w13_weight_scale_inv[index])
-        elif hasattr(layer, "w13_weight_scale"):
-            weight_scale_inv = layer.w13_weight_scale[index]
-            layer.moe_op.w13_list[index].set_scale_inv_fp8(weight_scale_inv)
+    moe_op = layer.moe_op
+    has_w13_scale_inv = hasattr(layer, "w13_weight_scale_inv")
+    has_w13_scale = hasattr(layer, "w13_weight_scale")
+    has_w2_scale_inv = hasattr(layer, "w2_weight_scale_inv")
+    has_w2_scale = hasattr(layer, "w2_weight_scale")
+    for index in range(moe_op.num_experts):
+        w13_entry = moe_op.w13_list[index]
+        w2_entry = moe_op.w2_list[index]
+
+        w13_entry.set_weight(layer.w13_weight[index])
+        if has_w13_scale_inv:
+            w13_entry.set_scale_inv_fp8(layer.w13_weight_scale_inv[index])
+        elif has_w13_scale:
+            w13_entry.set_scale_inv_fp8(layer.w13_weight_scale[index])
         else:
             weight_scale_inv = torch.ones(layer.w13_weight[index].shape[:-1],
                                           dtype=torch.bfloat16,
                                           device=layer.w13_weight[index].device)
-            layer.moe_op.w13_list[index].set_scale_inv_fp8(weight_scale_inv)
+            w13_entry.set_scale_inv_fp8(weight_scale_inv)
 
-        layer.moe_op.w2_list[index].set_weight(layer.w2_weight[index])
-        if hasattr(layer, "w2_weight_scale_inv"):
-            layer.moe_op.w2_list[index].set_scale_inv_fp8(layer.w2_weight_scale_inv[index])
-        elif hasattr(layer, "w2_weight_scale"):
-            weight_scale_inv = layer.w2_weight_scale[index]
-            layer.moe_op.w2_list[index].set_scale_inv_fp8(weight_scale_inv)
+        w2_entry.set_weight(layer.w2_weight[index])
+        if has_w2_scale_inv:
+            w2_entry.set_scale_inv_fp8(layer.w2_weight_scale_inv[index])
+        elif has_w2_scale:
+            w2_entry.set_scale_inv_fp8(layer.w2_weight_scale[index])
         else:
             weight_scale_inv = torch.ones(layer.w2_weight[index].shape[:-1],
                                           dtype=torch.bfloat16,
                                           device=layer.w2_weight[index].device)
-            layer.moe_op.w2_list[index].set_scale_inv_fp8(weight_scale_inv)
+            w2_entry.set_scale_inv_fp8(weight_scale_inv)
 
-        if len(layer.moe_op.w2_list[index].scale_inv_fp8.shape) == 0 and len(
-                layer.moe_op.w13_list[index].scale_inv_fp8.shape) == 1:
-            layer.moe_op.w2_list[index].set_scale_inv_fp8(layer.moe_op.w2_list[index].scale_inv_fp8.repeat(
-                layer.w2_weight.shape[1]).flatten().clone())
+        if len(w2_entry.scale_inv_fp8.shape) == 0 and len(w13_entry.scale_inv_fp8.shape) == 1:
+            w2_entry.set_scale_inv_fp8(w2_entry.scale_inv_fp8.repeat(layer.w2_weight.shape[1]).flatten().clone())
             '''
                 When weight scale is per tensor quantized, w1 and w3 are combined so the shape of their weight scales become [2],
                 but MoE requires [2 * out_channels], so it has to be reshaped as [2, 1],
                 and repeated to [2, out_channels] and then flattened to [2 * out_channels].
                 '''
-            layer.moe_op.w13_list[index].set_scale_inv_fp8(layer.moe_op.w13_list[index].scale_inv_fp8.reshape(
-                2, 1).repeat(1, layer.w13_weight.shape[1] // 2).flatten().clone())
+            w13_entry.set_scale_inv_fp8(
+                w13_entry.scale_inv_fp8.reshape(2, 1).repeat(1, layer.w13_weight.shape[1] // 2).flatten().clone())
 
     if hasattr(layer, "w13_input_scale"):
-        layer.moe_op.w13_input_scale = layer.w13_input_scale
+        moe_op.w13_input_scale = layer.w13_input_scale
     if hasattr(layer, "w2_input_scale"):
-        layer.moe_op.w2_input_scale = layer.w2_input_scale
+        moe_op.w2_input_scale = layer.w2_input_scale
 
     htorch.core.mark_step()
     return layer
@@ -1136,11 +1146,8 @@ class VllmMixtureOfExpertsOpFP8(VllmMixtureOfExpertsOpBase):
         tokens_num, _ = x.shape
         activation = _as_activation_str(activation)
         kwargs = self._get_extra_kwargs(tokens_num)
-        w13_list = []
-        w2_list = []
-        for j in range(self.num_experts):
-            w13_list.append(self.w13_list[j].get_dequant_weight())
-            w2_list.append(self.w2_list[j].get_dequant_weight())
+        w13_list = [m.get_dequant_weight() for m in self.w13_list]
+        w2_list = [m.get_dequant_weight() for m in self.w2_list]
         htorch.core.mark_step()
 
         if self.moe_n_slice == 1:
@@ -1202,11 +1209,10 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
         tokens_num, _ = x.shape
         activation = _as_activation_str(activation)
         kwargs = self._get_extra_kwargs(tokens_num)
-        experts_range = range(self.num_experts)
-        w13_list = [self.w13_list[i].weight.squeeze() for i in experts_range]
-        w2_list = [self.w2_list[i].weight.squeeze() for i in experts_range]
-        w13_weight_scale = [self.w13_list[i].scale_inv_fp8.squeeze() for i in experts_range]
-        w2_weight_scale = [self.w2_list[i].scale_inv_fp8.squeeze() for i in experts_range]
+        w13_list = [m.weight.squeeze() for m in self.w13_list]
+        w2_list = [m.weight.squeeze() for m in self.w2_list]
+        w13_weight_scale = [m.scale_inv_fp8.squeeze() for m in self.w13_list]
+        w2_weight_scale = [m.scale_inv_fp8.squeeze() for m in self.w2_list]
 
         if self.w13_input_scale is None:
             x_fp8, x_scale = dynamic_quant(x)
@@ -1226,7 +1232,7 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
         else:
             x_scale = self.w13_input_scale.data
             # w2_input_scale should be List[Tensor] when static and fused
-            w2_input_scale = [self.w2_input_scale[i] for i in experts_range]
+            w2_input_scale = list(self.w2_input_scale[:self.num_experts])
             x_fp8 = torch.ops.hpu.cast_to_fp8_v2(x, 1.0 / x_scale, False, False, torch.float8_e4m3fn)[0]
             final_hidden_states = torch.ops.hpu.mixture_of_experts(hidden_states=x_fp8,
                                                                    expert_routing_table=topk_ids.to(torch.int64),
@@ -1408,11 +1414,8 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
         activation="silu",
     ):
         activation = _as_activation_str(activation)
-        w13_list = []
-        w2_list = []
-        for j in range(self.num_experts):
-            w13_list.append(self.w13_list[j].get_dequant_weight())
-            w2_list.append(self.w2_list[j].get_dequant_weight())
+        w13_list = [m.get_dequant_weight() for m in self.w13_list]
+        w2_list = [m.get_dequant_weight() for m in self.w2_list]
         htorch.core.mark_step()
 
         if self.moe_n_slice == 1:

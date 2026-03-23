@@ -83,9 +83,10 @@ class HPUWorker(WorkerBase):
         else:
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
 
-        self.gc_track_recompiles = get_config().track_graph_compilation and not get_config().high_level_profiler_enabled
+        config = get_config()
+        self.gc_track_recompiles = config.track_graph_compilation and not config.high_level_profiler_enabled
         self.step = 0
-        self.profile_steps = get_config().VLLM_PROFILE_STEPS
+        self.profile_steps = config.VLLM_PROFILE_STEPS
         self.step_profiler = setup_step_profiler(self.profile_steps)
         self.step_debug = init_debug_logger('steps')
 
@@ -180,11 +181,13 @@ class HPUWorker(WorkerBase):
         kv_caches: dict[str, torch.Tensor] = {}
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
         single_kv_block_size_bytes = 0
+        use_mla = self.model_config.use_mla
+        model_runner = self.model_runner
         for layer_name, layer_spec in kv_cache_spec.items():
             if isinstance(layer_spec, FullAttentionSpec):
                 dtype = layer_spec.dtype
                 if dtype == torch.float8_e4m3fn and os.environ.get('QUANT_CONFIG', None) is not None and \
-                    os.environ.get('VLLM_DYNAMIC_KV_QUANT', None) is not None and not self.model_config.use_mla:
+                    os.environ.get('VLLM_DYNAMIC_KV_QUANT', None) is not None and not use_mla:
                     create_dynamic_scales = True
                 else:
                     create_dynamic_scales = False
@@ -195,13 +198,12 @@ class HPUWorker(WorkerBase):
                 num_kv_heads = layer_spec.num_kv_heads
                 head_size = layer_spec.head_size
 
-                kv_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(num_blocks, block_size, num_kv_heads,
-                                                                                   head_size)
+                kv_cache_shape = model_runner.attn_backend.get_kv_cache_shape(num_blocks, block_size, num_kv_heads,
+                                                                              head_size)
                 kv_scales_shape = kv_cache_shape[:-1] + (1, )
 
                 hpu_k_cache = torch.zeros(kv_cache_shape, dtype=dtype, device='hpu')
-                hpu_v_cache = None if self.model_config.use_mla else torch.zeros(
-                    kv_cache_shape, dtype=dtype, device='hpu')
+                hpu_v_cache = None if use_mla else torch.zeros(kv_cache_shape, dtype=dtype, device='hpu')
 
                 hpu_k_scales = torch.ones(kv_scales_shape, dtype=torch.bfloat16,
                                           device='hpu') if create_dynamic_scales else None
@@ -237,18 +239,17 @@ class HPUWorker(WorkerBase):
         runner_kv_caches: list[torch.Tensor] = []
         bind_kv_cache(kv_caches, self.vllm_config.compilation_config.static_forward_context, runner_kv_caches)
 
-        if self.model_runner.unified_attn:
+        if model_runner.unified_attn:
             # Create unified attention persistent context for profiling
             from vllm_gaudi.extension.unified_batch import UnifiedBatchPersistentContext
-            self.model_runner.unified_attn_persistent_ctx = UnifiedBatchPersistentContext(
-                self.model_runner.max_num_batched_tokens, 0, 0, self.model_runner.block_size, dtype,
-                self.model_runner.profiler)
+            model_runner.unified_attn_persistent_ctx = UnifiedBatchPersistentContext(
+                model_runner.max_num_batched_tokens, 0, 0, model_runner.block_size, dtype, model_runner.profiler)
 
         if is_fake_hpu():
             fake_hpu_cache_alloc = 4 * 2**30  # take 4 GiB flat on fake hpu
             return fake_hpu_cache_alloc
         with HabanaMemoryProfiler() as m:
-            self.model_runner.profile_run(initialize_only=True)
+            model_runner.profile_run(initialize_only=True)
             torch.hpu.synchronize()
         msg = ("Model profiling run "
                f"took {m.get_summary_string()}")
@@ -260,16 +261,16 @@ class HPUWorker(WorkerBase):
         graph_reserved_mem = (float(os.environ.get('VLLM_GRAPH_RESERVED_MEM', '0.1'))
                               if not self.model_config.enforce_eager else 0)
         graph_headroom = 1 - graph_reserved_mem
-        available_hpu_memory = free_hpu_memory * \
-            self.cache_config.gpu_memory_utilization
-        hpu_memory_margin = free_hpu_memory * (1 - self.cache_config.gpu_memory_utilization)
-        self.model_runner.mem_margin = hpu_memory_margin
+        gpu_memory_utilization = self.cache_config.gpu_memory_utilization
+        available_hpu_memory = free_hpu_memory * gpu_memory_utilization
+        hpu_memory_margin = free_hpu_memory * (1 - gpu_memory_utilization)
+        model_runner.mem_margin = hpu_memory_margin
         cache_size_bytes = available_hpu_memory * graph_headroom
         graph_headroom_bytes = available_hpu_memory * (1 - graph_headroom)
         dummy_block_headroom = single_kv_block_size_bytes
         msg = (f"Free device memory: {format_bytes(free_hpu_memory)}, "
                f"{format_bytes(available_hpu_memory)} usable "
-               f"(gpu_memory_utilization={self.cache_config.gpu_memory_utilization}),"
+               f"(gpu_memory_utilization={gpu_memory_utilization}),"
                f" {format_bytes(graph_headroom_bytes)} reserved for HPUGraphs "
                f"(VLLM_GRAPH_RESERVED_MEM={graph_reserved_mem}), "
                f"{format_bytes(dummy_block_headroom)} reserved for KV cache dummy "
@@ -280,13 +281,17 @@ class HPUWorker(WorkerBase):
 
         # Clear the dummy KV cache to free up memory
         kv_caches = {}
-        forward_context = self.vllm_config.compilation_config.static_forward_context
-        for layer_name in forward_context:
-            forward_context[layer_name].kv_cache = None
+        self._clear_forward_context_kv_caches()
         runner_kv_caches = []
         gc.collect()
 
         return cache_size_bytes - dummy_block_headroom
+
+    def _clear_forward_context_kv_caches(self):
+        """Clear KV cache references from the static forward context."""
+        forward_context = self.vllm_config.compilation_config.static_forward_context
+        for layer_name in forward_context:
+            forward_context[layer_name].kv_cache = None
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -306,12 +311,13 @@ class HPUWorker(WorkerBase):
             self.kv_cache_config = kv_cache_config
             self.model_runner.initialize_kv_cache(kv_cache_config)
             torch.hpu.synchronize()
-        if len(self.model_runner.kv_caches) > 0:
+        model_runner = self.model_runner
+        if len(model_runner.kv_caches) > 0:
             msg = (f"Usable num_blocks: {kv_cache_config.num_blocks}, "
                    f"actual allocated num_blocks: "
-                   f"{self.model_runner.kv_caches[0][0].shape[0]} "
-                   f"(_PAD_BLOCK_ID={self.model_runner._PAD_BLOCK_ID}, "
-                   f"_PAD_SLOT_ID={self.model_runner._PAD_SLOT_ID})")
+                   f"{model_runner.kv_caches[0][0].shape[0]} "
+                   f"(_PAD_BLOCK_ID={model_runner._PAD_BLOCK_ID}, "
+                   f"_PAD_SLOT_ID={model_runner._PAD_SLOT_ID})")
             logger.info(msg)
         msg = ("Initializing cache engine "
                f"took {m.get_summary_string()}")
@@ -336,23 +342,25 @@ class HPUWorker(WorkerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | None:
+        step = self.step
         if self.step_debug:
-            self.step_debug(f'step={self.step}')
-        if self.step_profiler and self.step == self.profile_steps[0]:
-            self.step_profiler.start()
+            self.step_debug(f'step={step}')
+        step_profiler = self.step_profiler
+        if step_profiler and step == self.profile_steps[0]:
+            step_profiler.start()
         with track_graph_compile('HPUWorker.execute_model') \
                 if self.gc_track_recompiles \
                 else contextlib.nullcontext():
             output = self.model_runner.execute_model(scheduler_output)
         # TODO(woosuk): Send the output to the engine process.
-        if self.step_profiler:
-            if self.step >= self.profile_steps[0]:
-                self.step_profiler.step()
-            if self.step == self.profile_steps[1]:
-                self.step_profiler.stop()
+        if step_profiler:
+            if step >= self.profile_steps[0]:
+                step_profiler.step()
+            if step == self.profile_steps[1]:
+                step_profiler.stop()
                 self.step_profiler = None
                 raise RuntimeError('Step profiling finished!')
-        self.step += 1
+        self.step = step + 1
         # NOTE(Harish): removed "if self.rank == 0 else None" for KV_connector enabling with TP>1
         # referred to Gpu Model Runner, KV connector aggregation expects valid output from all ranks
         return output
@@ -425,9 +433,7 @@ class HPUWorker(WorkerBase):
             with HabanaMemoryProfiler() as m:
                 self.model_runner.defragmenter.cache_utils.kv_caches = None
                 self.model_runner.kv_caches = []
-                forward_context = self.vllm_config.compilation_config.static_forward_context
-                for layer_name in forward_context:
-                    forward_context[layer_name].kv_cache = None
+                self._clear_forward_context_kv_caches()
                 gc.collect()
                 torch.hpu.synchronize()
             msg = f"Discarding KV cache for sleep mode took {m.get_summary_string()}"

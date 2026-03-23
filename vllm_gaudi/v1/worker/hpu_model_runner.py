@@ -1046,6 +1046,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         lora_index = 0
 
         if self.lora_config:
+            # Build reverse lookup dict for O(1) lora index resolution
+            # instead of O(n) list.index() per lora_id
+            lora_id_to_index = {
+                v: idx
+                for idx, v in enumerate(self.lora_manager._adapter_manager.lora_index_to_id) if v != 0
+            }
             if is_prompt:
                 lora_mask = torch.zeros(
                     input_tokens.shape[0] * input_tokens.shape[1],
@@ -1061,11 +1067,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                   dtype=self.lora_config.lora_dtype)
                 logit_ones = torch.ones(1, self.lora_config.max_lora_rank, dtype=self.lora_config.lora_dtype)
 
-                for i in range(len(lora_ids)):
-                    if lora_ids[i] == 0:
+                for i, lora_id in enumerate(lora_ids):
+                    if lora_id == 0:
                         continue
-                    lora_index = self.lora_manager._adapter_manager.\
-                        lora_index_to_id.index(lora_ids[i])
+                    lora_index = lora_id_to_index[lora_id]
                     start_row = i * input_tokens.shape[1]
                     end_row = start_row + input_tokens.shape[1]
                     start_col = lora_index * self.lora_config.max_lora_rank
@@ -1079,11 +1084,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                         (self.lora_config.max_loras) * self.lora_config.max_lora_rank,
                                         dtype=self.lora_config.lora_dtype)
                 ones = torch.ones(1, self.lora_config.max_lora_rank, dtype=self.lora_config.lora_dtype)
-                for i in range(len(lora_ids)):
-                    if lora_ids[i] == 0:
+                for i, lora_id in enumerate(lora_ids):
+                    if lora_id == 0:
                         continue
-                    lora_index = self.lora_manager._adapter_manager.\
-                        lora_index_to_id.index(lora_ids[i])
+                    lora_index = lora_id_to_index[lora_id]
                     start_pos = lora_index * self.lora_config.max_lora_rank
                     end_pos = start_pos + self.lora_config.max_lora_rank
                     lora_mask[i, start_pos:end_pos] = ones
@@ -1707,11 +1711,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             req_id = self.input_batch.req_ids[i]
             assert req_id is not None
             # P case assigment
-            if requests is not None and req_id not in self.input_batch.req_type:
-                for request in requests:
-                    if request == req_id:
-                        self.input_batch.req_type[req_id] = requests_type[req_id]
-                        break
+            if requests is not None and req_id not in self.input_batch.req_type and req_id in requests:
+                self.input_batch.req_type[req_id] = requests_type[req_id]
 
             if self._is_prompt(i, scheduler_output):
                 break
@@ -1753,7 +1754,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         req_id_output_token_ids_lst = list(req_id_output_token_ids.items())
         if logits_reqs and len(req_id_output_token_ids_lst) > len(logits_reqs):
             # Merged prefill case: remove requests without logits
-            req_id_output_token_ids_lst = [r for r in req_id_output_token_ids_lst if r[0] in logits_reqs]
+            logits_reqs_set = set(logits_reqs)
+            req_id_output_token_ids_lst = [r for r in req_id_output_token_ids_lst if r[0] in logits_reqs_set]
         else:
             if pad_to is not None and len(req_id_output_token_ids_lst) > 0:
                 while len(req_id_output_token_ids_lst) < pad_to:
@@ -1774,13 +1776,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         return sampling_metadata
 
     def get_habana_paged_attn_buffers(self, block_tables, slot_mapping, batch_size):
-        last_block_usage = [slot[0] % self.block_size + 1 for slot in slot_mapping]
+        block_size = self.block_size
+        last_block_usage = [slot[0] % block_size + 1 for slot in slot_mapping]
         block_groups = [[i] * len(bt) for i, bt in enumerate(block_tables)]
-        block_usage = [[self.block_size] * (len(bt) - 1) + [lbu] for bt, lbu in zip(block_tables, last_block_usage)
-                       if bt]
-        block_list = flatten(block_tables)
-        block_groups = flatten(block_groups)
-        block_usage = flatten(block_usage)
+        block_usage = [[block_size] * (len(bt) - 1) + [lbu] for bt, lbu in zip(block_tables, last_block_usage) if bt]
+        chain = itertools.chain.from_iterable
+        block_list = list(chain(block_tables))
+        block_groups = list(chain(block_groups))
+        block_usage = list(chain(block_usage))
         assert len(block_list) == len(block_groups)
         assert len(block_list) == len(block_usage)
 
@@ -1810,7 +1813,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             def padding_fn(tensor, pad_value):
                 return pad_list(tensor, block_bucket_size, itertools.repeat(pad_value))
 
-        block_list = padding_fn(block_list, self._PAD_BLOCK_ID)
+        _PAD_BLOCK_ID = self._PAD_BLOCK_ID
+        block_list = padding_fn(block_list, _PAD_BLOCK_ID)
         block_groups = padding_fn(block_groups, -1)
         block_usage = padding_fn(block_usage, 1)
 
@@ -2007,24 +2011,26 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         block_table_cpu_tensor = self.input_batch.block_table[
             self._get_attention_group_id_for_hybrid()].get_cpu_tensor()
         all_batch_contents = [BatchContents()]
+        input_batch = self.input_batch
+        block_size = self.block_size
+        defragmenter_resolve = self.defragmenter.resolve
 
         for batch_idx in range(num_decodes, num_reqs):
-            req_id = self.input_batch.req_ids[batch_idx]
-            seq_num_computed_tokens = self.input_batch.num_computed_tokens_cpu[batch_idx]
+            req_id = input_batch.req_ids[batch_idx]
+            seq_num_computed_tokens = input_batch.num_computed_tokens_cpu[batch_idx]
             seq_num_scheduled_tokens = num_scheduled_tokens[batch_idx]
 
-            token_ids = self.input_batch.token_ids_cpu[batch_idx, seq_num_computed_tokens:seq_num_computed_tokens +
-                                                       seq_num_scheduled_tokens].tolist()
+            token_ids = input_batch.token_ids_cpu[batch_idx, seq_num_computed_tokens:seq_num_computed_tokens +
+                                                  seq_num_scheduled_tokens].tolist()
 
-            num_blocks = round_up(seq_num_computed_tokens + seq_num_scheduled_tokens,
-                                  self.block_size) // self.block_size
+            num_blocks = round_up(seq_num_computed_tokens + seq_num_scheduled_tokens, block_size) // block_size
             blocks = block_table_cpu_tensor[batch_idx, :num_blocks].tolist()
             if not warmup:
-                blocks = [self.defragmenter.resolve(b) for b in blocks]
+                blocks = [defragmenter_resolve(b) for b in blocks]
             #NOTE(kzawora): In non-preemption scenario,
-            # self.input_batch.num_prompt_tokens[batch_idx] == self.input_batch.num_tokens[batch_idx].
+            # input_batch.num_prompt_tokens[batch_idx] == input_batch.num_tokens[batch_idx].
             # In preemption scenario num_tokens will also include the tokens emitted before preemption
-            num_prompt_tokens = self.input_batch.num_prompt_tokens[batch_idx]
+            num_prompt_tokens = input_batch.num_prompt_tokens[batch_idx]
             if self.use_async_scheduling or self.use_structured_output:
                 # NOTE(tianmu-li): align behavior of incomplete prompt with gpu_model_runner
                 # Always have at least 1 logit when using async scheduling
@@ -2235,7 +2241,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # Mark real tokens as True
             # query_lens has actual lengths (before padding)
             # contents.req_ids has actual number of requests (before padding)
-            for i in range(len(contents.req_ids)):
+            for i, _ in enumerate(contents.req_ids):
                 actual_len = query_lens[i]
                 padding_mask_cpu[i, :actual_len] = 1.0
 
@@ -2334,7 +2340,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # NOTE(kzawora): the +1 is what causes this entire thing to work,
         # as in the paged attention, we don't fetch just the context from cache,
         # but also kvs for the current token
-        num_blocks = np.ceil((context_lens + 1) / self.block_size).astype(np.int32).tolist()
+        block_size = self.block_size
+        num_blocks = np.ceil((context_lens + 1) / block_size).astype(np.int32).tolist()
 
         num_tokens_per_req = num_scheduled_tokens[:num_decodes]
         num_tokens = max(num_tokens_per_req)
@@ -2424,17 +2431,30 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # The "slot" is the "physical index" of a token in the KV cache.
         # Look up the block_idx in the block table (logical<>physical map)
         # to compute this.
-        block_number = torch.ones((padded_batch_size, num_tokens), dtype=torch.int32) * self._PAD_BLOCK_ID
-        block_number[:num_decodes] = torch.gather(input=block_table_cpu_tensor, dim=1, index=(index // self.block_size))
-        block_number.apply_(self.defragmenter.resolve)
+        _PAD_BLOCK_ID = self._PAD_BLOCK_ID
+        block_number = torch.ones((padded_batch_size, num_tokens), dtype=torch.int32) * _PAD_BLOCK_ID
+        block_number[:num_decodes] = torch.gather(input=block_table_cpu_tensor, dim=1, index=(index // block_size))
+        defragmenter = self.defragmenter
+        if defragmenter.enabled and len(defragmenter.fwd_mapping_table) > 0:
+            mapping = torch.tensor(defragmenter.fwd_mapping_table, dtype=torch.int32)
+            # Clamp values to valid range for the lookup table
+            clamped = block_number.clamp(0, len(mapping) - 1)
+            # Only apply mapping where block_number is within table range
+            in_range = block_number < len(mapping)
+            block_number = torch.where(in_range & (block_number >= 0), mapping[clamped], block_number)
 
-        block_offsets = padded_index % self.block_size
-        slot_mapping = block_number * self.block_size + block_offsets
+        block_offsets = padded_index % block_size
+        slot_mapping = block_number * block_size + block_offsets
         # set an out of range value for the padding tokens so that they
         # are ignored when inserting into the KV cache.
         slot_mapping = slot_mapping[:padded_batch_size]
-        dummy_slots = itertools.cycle(range(self._PAD_SLOT_ID, self._PAD_SLOT_ID + self.block_size))
-        slot_mapping[num_decodes:].apply_(lambda _, ds=dummy_slots: next(ds))
+        _PAD_SLOT_ID = self._PAD_SLOT_ID
+        # Vectorized dummy slot assignment for padding rows
+        if num_decodes < padded_batch_size:
+            pad_rows = padded_batch_size - num_decodes
+            pad_cols = num_tokens
+            dummy_base = torch.arange(pad_rows * pad_cols, dtype=torch.int32)
+            slot_mapping[num_decodes:] = _PAD_SLOT_ID + (dummy_base % block_size).reshape(pad_rows, pad_cols)
 
         #####################################
         # NOTE(Chendi): Since we can't actually do num_tokens = 2,
@@ -2683,14 +2703,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             bonus_logits_indices = []
             target_logits_indices = []
             for batch_id, n_tokens in enumerate(num_sampled_tokens):
-                for i in range(n_tokens - 1):
-                    logits_indices.append(batch_id * max_num_sampled_tokens + i)
-                    target_logits_indices.append(batch_id * max_num_sampled_tokens + i)
-                bonus_logits_indices.append(batch_id * max_num_sampled_tokens + n_tokens - 1)
-                logits_indices.append(batch_id * max_num_sampled_tokens + n_tokens - 1)
-                if n_tokens < max_num_sampled_tokens:
-                    logits_indices.extend([-1] * (max_num_sampled_tokens - n_tokens))
-                    target_logits_indices.extend([-1] * (max_num_sampled_tokens - n_tokens))
+                base = batch_id * max_num_sampled_tokens
+                token_range = list(range(base, base + n_tokens - 1))
+                logits_indices.extend(token_range)
+                target_logits_indices.extend(token_range)
+                bonus_logits_indices.append(base + n_tokens - 1)
+                logits_indices.append(base + n_tokens - 1)
+                pad_count = max_num_sampled_tokens - n_tokens
+                if pad_count > 0:
+                    padding = [-1] * pad_count
+                    logits_indices.extend(padding)
+                    target_logits_indices.extend(padding)
             logits_indices = np.array(logits_indices, dtype=np.int32)
             bonus_logits_indices = np.array(bonus_logits_indices, dtype=np.int32)
             target_logits_indices = np.array(target_logits_indices, dtype=np.int32)
@@ -2901,15 +2924,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         ###############################################
 
         # Get the number of scheduled tokens for each request.
-        # TODO: The Python loop can be slow. Optimize.
-        num_scheduled_tokens = []
-        num_prompt_tokens = []
-        for idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
-            assert req_id is not None
-            seq_num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            seq_num_prompt_tokens = self.input_batch.num_prompt_tokens[idx]
-            num_scheduled_tokens.append(seq_num_scheduled_tokens)
-            num_prompt_tokens.append(seq_num_prompt_tokens)
+        req_ids_slice = self.input_batch.req_ids[:num_reqs]
+        num_scheduled_tokens_map = scheduler_output.num_scheduled_tokens
+        num_scheduled_tokens = [num_scheduled_tokens_map[req_id] for req_id in req_ids_slice]
         return (self._prepare_prefill_inputs(num_prefills, num_decodes, num_scheduled_tokens),
                 self._prepare_decode_inputs(num_decodes, num_scheduled_tokens, scheduler_output))
 
@@ -3468,8 +3485,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         all_token_ids = self.input_batch.token_ids_cpu_tensor[:num_reqs, :max_seq]
         # TODO: check if it's safe to always slice on first dim
         block_table = self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs, :max_blocks].clone().to(torch.int64)
-        if self.defragmenter.enabled:
-            block_table.apply_(self.defragmenter.resolve)
+        if self.defragmenter.enabled and len(self.defragmenter.fwd_mapping_table) > 0:
+            mapping = torch.tensor(self.defragmenter.fwd_mapping_table, dtype=torch.int64)
+            clamped = block_table.clamp(0, len(mapping) - 1)
+            in_range = block_table < len(mapping)
+            block_table = torch.where(in_range & (block_table >= 0), mapping[clamped], block_table)
         input_ids_hpu = None
         num_decodes = 0
         decode_index = None
@@ -5146,18 +5166,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     idx += 1
 
             # make sure that all blocks are shared = in at least two decodes
+            # Use sets for O(1) membership checks
+            split_shared_blocks_sets = [set(lst) for lst in split_shared_blocks_ids]
             for i, block in enumerate(all_shared_blocks_ids):
                 target = (i + 1) % remaining_samples
-                if block not in split_shared_blocks_ids[target]:
+                if block not in split_shared_blocks_sets[target]:
                     split_shared_blocks_ids[target].append(block)
+                    split_shared_blocks_sets[target].add(block)
 
             # add unique id
             if unique_ctx_len > 0:
                 min_idx = min(range(remaining_samples), key=lambda j: len(split_shared_blocks_ids[j]))
                 split_shared_blocks_ids[min_idx].append(unique_block)
 
-            for i in range(len(split_shared_blocks_ids)):
-                if not split_shared_blocks_ids[i]:
+            for i, blocks in enumerate(split_shared_blocks_ids):
+                if not blocks:
                     if unique_block - i >= 0:
                         split_shared_blocks_ids[i] = [unique_block - i]
                     else:
