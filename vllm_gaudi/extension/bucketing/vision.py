@@ -44,6 +44,11 @@ MULTIMODAL_CONFIG = {
         'is_batch_based': False,
         'buckets': [1600, 2048, 3072, 6144, 8192, 131076]
     },
+    'qwen3_5': {
+        'is_batch_based': False,
+        # patches per image
+        'buckets': [196, 256, 441, 480, 576, 900, 1156]
+    },
 }
 
 
