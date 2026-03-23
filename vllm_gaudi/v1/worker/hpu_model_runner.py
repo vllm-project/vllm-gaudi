@@ -2038,6 +2038,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     num_output_logits = seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1
             else:
                 num_output_logits = max(0, seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1)
+            # Cap to scheduled tokens (needed when decode recomputation
+            # requests are routed through the prefill path).
+            num_output_logits = min(num_output_logits, seq_num_scheduled_tokens)
             logits_positions = list(range(seq_num_scheduled_tokens - num_output_logits, seq_num_scheduled_tokens))
 
             new_batch_contents = BatchContents(
@@ -3220,7 +3223,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         out_indices = []
 
         # Reorder the bitmask to match the order of the requests in the batch.
-        sorted_bitmask = np.zeros_like(grammar_bitmask, shape=(logits.shape[0], grammar_bitmask.shape[1]))
+        sorted_bitmask = np.full(shape=(logits.shape[0], grammar_bitmask.shape[1]),
+                                 fill_value=-1,
+                                 dtype=grammar_bitmask.dtype)
         cumulative_index = 0
 
         for req_id in grammar_output.structured_output_request_ids:
@@ -3238,7 +3243,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # If the grammar bitmask and the logits have the same shape
         # we don't need to pass indices to the kernel,
         # since the bitmask is already aligned with the logits.
-        skip_out_indices = grammar_bitmask.shape[0] == logits.shape[0]
+        skip_out_indices = len(out_indices) == logits.shape[0]
 
         index_tensor = None
         if not skip_out_indices:
@@ -4386,7 +4391,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if self.use_aux_hidden_state_outputs:
                     if supports_eagle3(self.model.model):
                         self.model.model.set_aux_hidden_state_layers(
-                            self.model.model.get_eagle3_aux_hidden_state_layers())
+                            self.model.model.get_eagle3_default_aux_hidden_state_layers())
                     else:
                         raise RuntimeError("Model does not support EAGLE3 interface but "
                                            "aux_hidden_state_outputs was requested")
@@ -5046,7 +5051,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # Consider the token space for draft tokens to propose
             # The draft tokens for eagle consumes block table space
             num_lookahead_tokens += self.speculative_config.num_speculative_tokens
-        seq_lengths = [b * block_size - num_lookahead_tokens for b in blocks]
+        seq_lengths = [min(b * block_size - num_lookahead_tokens, self.max_model_len) for b in blocks]
         return seq_lengths
 
     def distribute_sum_evenly(self, total_sum, max_length):

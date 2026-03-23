@@ -354,7 +354,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         if isinstance(k_cache, tuple):
             k_cache = k_cache[0]  # Use only key_cache for MLA
         query = torch.cat([q_nope, q_pe], dim=-1)
-        key_cache = k_cache.unsqueeze(1)
+        key_cache = k_cache.unsqueeze(1) if k_cache is not None else None
         value_cache = None
         output = HPUPagedAttention.forward_decode(query=query,
                                                   key_cache=key_cache,
@@ -583,7 +583,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
             if key.dtype == torch.float32 and key.dtype != key_cache.dtype:
                 key = key.to(key_cache.dtype)
-            if key.dtype == torch.float32 and value.dtype != value_cache.dtype:
+            if value.dtype == torch.float32 and value.dtype != value_cache.dtype:
                 value = value.to(value_cache.dtype)
             if query.dtype != key.dtype:
                 query = query.to(key.dtype)
