@@ -76,7 +76,9 @@ def async_h2d_update(source: torch.Tensor, dest: torch.Tensor, indices: list[int
         indices: List of row indices in dest to update
         device: Target device
     """
-    dest[indices] = source[indices].to(device, non_blocking=True)
+    idx = torch.tensor(indices, dtype=torch.long, device=device)
+    vals = source[indices].to(device, non_blocking=True)
+    dest.index_copy_(0, idx, vals)
 
 
 def getattr_nested(obj: Any, name: str, *default: Any) -> Any:
