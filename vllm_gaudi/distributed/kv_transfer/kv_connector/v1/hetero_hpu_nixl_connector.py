@@ -565,7 +565,6 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
     logger.debug("Detected attention backend %s", self.backend_name)
     logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
 
-    self.compat_hash = compute_nixl_compatibility_hash(self.vllm_config, self.backend_name)
     self.enforce_compat_hash = self.kv_transfer_config.get_from_extra_config("enforce_handshake_compat", True)
     self.kv_cache_layout_on_save = self.kv_cache_layout
     self.block_size_on_save = self.block_size
@@ -592,6 +591,8 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
         total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
         attn_backend=backend,
     )
+    self.compat_hash = compute_nixl_compatibility_hash(self.vllm_config, self.backend_name,
+                                                       self.kv_topo.cross_layers_blocks)
     self._physical_blocks_per_logical_kv_block = 1
 
 
