@@ -37,7 +37,7 @@ Homepage = "https://github.com/vllm-project/vllm-gaudi"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["vllm_gaudi"]
+include = ["vllm_gaudi*"]
 
 [tool.yapf]
 column_limit = 120
