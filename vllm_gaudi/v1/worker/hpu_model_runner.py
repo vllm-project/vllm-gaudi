@@ -4485,10 +4485,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def _use_graphs(self):
         return not self.model_config.enforce_eager
 
-    def _remove_duplicate_submodules(self):
+    def _get_model_layers(self):
+        """Return the decoder layers from the model, handling both
+        standard (model.model.layers) and multimodal
+        (model.language_model.model.layers) layouts."""
         model = self.get_model()
-        if hasattr(model, "model"):
-            for layer in self.get_model().model.layers:
+        inner = getattr(model, 'model', None)
+        if inner is None:
+            inner = getattr(model, 'language_model', None)
+            if inner is not None:
+                inner = getattr(inner, 'model', None)
+        if inner is None or not hasattr(inner, 'layers'):
+            return None
+        return inner.layers
+
+    def _remove_duplicate_submodules(self):
+        layers = self._get_model_layers()
+        if layers is not None:
+            for layer in layers:
                 if not hasattr(layer, "self_attn"):
                     continue
                 self_attn = layer.self_attn
@@ -4527,9 +4541,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # only at the block level. _sync_shared_moe_gates()
                 # must be called after INC conversion to restore the
                 # reference.
-                mlp = getattr(layer, 'mlp', None)
+                mlp = getattr(layer, 'mlp', None) or getattr(layer, 'feed_forward', None)
                 if mlp is not None:
-                    block_gate = getattr(mlp, 'gate', None)
+                    block_gate = getattr(mlp, 'gate', None) or getattr(mlp, 'router', None)
                     experts = getattr(mlp, 'experts', None)
                     if (block_gate is not None and experts is not None
                             and getattr(experts, '_gate', None) is block_gate):
@@ -4549,14 +4563,26 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         _remove_duplicate_submodules are restored; experts whose
         _gate was originally None are left unchanged.
         """
-        model = self.get_model()
-        if not hasattr(model, "model"):
+
+        def _sync_moe_kernel_flags(module: torch.nn.Module):
+            moe_config = getattr(module, "moe_config", None)
+            for name in (
+                    "use_pplx_kernels",
+                    "use_deepep_ht_kernels",
+                    "use_deepep_ll_kernels",
+                    "use_mori_kernels",
+                    "use_fi_all2allv_kernels",
+            ):
+                setattr(module, name, bool(getattr(moe_config, name, False)))
+
+        layers = self._get_model_layers()
+        if layers is None:
             return
-        for layer in model.model.layers:
-            mlp = getattr(layer, 'mlp', None)
+        for layer in layers:
+            mlp = getattr(layer, 'mlp', None) or getattr(layer, 'feed_forward', None)
             if mlp is None:
                 continue
-            block_gate = getattr(mlp, 'gate', None)
+            block_gate = getattr(mlp, 'gate', None) or getattr(mlp, 'router', None)
             experts = getattr(mlp, 'experts', None)
             if (block_gate is not None and experts is not None and id(experts) in self._detached_moe_gates):
                 experts._gate = block_gate
