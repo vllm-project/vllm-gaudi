@@ -113,6 +113,56 @@ class HpuPlatform(Platform):
         cache_config = vllm_config.cache_config
         if not cache_config.user_specified_block_size:
             cache_config.block_size = 128
+        # Hybrid GDN/Mamba models: upstream HybridAttentionMambaModelConfig
+        # already ran and computed block_size / mamba_page_size_padded for
+        # GPU.  HPU overrode block_size to 128 above, so we must re-align
+        # mamba_page_size_padded to be a multiple of the HPU attention page
+        # size (block_size * per-token KV bytes).  Without this the upstream
+        # unify_kv_cache_spec_page_size() fails because the two page sizes
+        # are not divisible.
+        if (cache_config and cache_config.block_size is not None and vllm_config.model_config is not None
+                and vllm_config.model_config.is_hybrid):
+            # Ensure block_size is 128-aligned (should already be, but
+            # guard against future callers that set odd sizes).
+            original_block_size = cache_config.block_size
+            aligned_block_size = ((original_block_size + 127) // 128) * 128
+            if aligned_block_size != original_block_size:
+                logger.warning(
+                    "Padding hybrid cache block_size from %d to %d to satisfy "
+                    "Gaudi 128-token kernel alignment.",
+                    original_block_size,
+                    aligned_block_size,
+                )
+                cache_config.block_size = aligned_block_size
+                if cache_config.mamba_cache_mode == "align":
+                    cache_config.mamba_block_size = aligned_block_size
+
+            # Recompute mamba_page_size_padded so it is a multiple of
+            # the HPU attention page size.
+            if cache_config.mamba_page_size_padded is not None:
+                from vllm.utils.torch_utils import get_dtype_size
+                from math import ceil
+                model_config = vllm_config.model_config
+                if cache_config.cache_dtype == "auto":
+                    kv_dtype = model_config.dtype
+                else:
+                    from vllm.config.model import STR_DTYPE_TO_TORCH_DTYPE
+                    kv_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+                num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+                head_size = model_config.get_head_size()
+                attn_page = (2 * cache_config.block_size * num_kv_heads * head_size * get_dtype_size(kv_dtype))
+                if attn_page > 0 and cache_config.mamba_page_size_padded % attn_page != 0:
+                    old_padded = cache_config.mamba_page_size_padded
+                    cache_config.mamba_page_size_padded = (ceil(old_padded / attn_page) * attn_page)
+                    logger.info(
+                        "Rescaled mamba_page_size_padded from %d to %d "
+                        "to align with HPU attention page size %d "
+                        "(block_size=%d).",
+                        old_padded,
+                        cache_config.mamba_page_size_padded,
+                        attn_page,
+                        cache_config.block_size,
+                    )
         if (parallel_config.distributed_executor_backend in ['mp', 'uni']
                 and envs.VLLM_WORKER_MULTIPROC_METHOD == 'fork'):
             if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD", None) is not None:
@@ -148,8 +198,6 @@ class HpuPlatform(Platform):
             logger.info("[HPU] Forcing CompilationMode.NONE "
                         "compilation mode")
             compilation_config.mode = CompilationMode.NONE
-
-        print(f"========={compilation_config.custom_ops=}===========")
 
         # Force CPU loading for INC quantization to prevent OOM during weight loading.
         # INC FP8 quantization requires weights to be loaded to CPU first, then
