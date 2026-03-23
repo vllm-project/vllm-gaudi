@@ -4987,6 +4987,57 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 pbar.set_postfix_str(f"{idx}/{num_candidates}")
                 pbar.update(1)
 
+    def _hot_replay_representative_shapes(self):
+        """Re-execute representative graph shapes on HPU hardware.
+
+        When PT_COMPILE_ONLY_MODE is used during warmup, graph recipes
+        are compiled but never actually run.  The first real execution
+        of each recipe is significantly slower because it must load the
+        recipe into HPU compute engines, allocate device memory for
+        intermediates, and populate the graph-replay cache.
+
+        This method selects a small set of shapes that are most likely
+        to be hit during early serving and forces their first execution
+        during warmup, so the penalty is not paid on live requests.
+        """
+        prompt_buckets = self.bucketing_manager.prompt_buckets
+        decode_buckets = self.bucketing_manager.decode_buckets
+
+        hot_shapes: list[tuple] = []  # (prompt_cfg | None, decode_cfg | None)
+
+        # Smallest prompt bucket — the most common prefill shape when
+        # VLLM_PROMPT_BS_BUCKET_MAX=1.
+        if prompt_buckets:
+            hot_shapes.append((prompt_buckets[0], None))
+
+        # Smallest standalone decode — first real decode step hits this.
+        if decode_buckets:
+            db = decode_buckets[0]
+            hot_shapes.append((None, (db[0], 1, db[2])))
+
+        # A representative decode bucket near the middle.
+        if decode_buckets and len(decode_buckets) > 1:
+            mid = len(decode_buckets) // 2
+            hot_shapes.append((None, (decode_buckets[mid][0], 1,
+                                      decode_buckets[mid][2])))
+
+        # One mixed scenario (smallest prompt + smallest decode).
+        if prompt_buckets and decode_buckets:
+            db = decode_buckets[0]
+            if prompt_buckets[0][0] + db[0] <= self.max_num_seqs:
+                hot_shapes.append((prompt_buckets[0],
+                                   (db[0], 1, db[2])))
+
+        if not hot_shapes:
+            return
+
+        logger.info("Hot replay: executing %d representative shapes "
+                    "on HPU", len(hot_shapes))
+        for prompt_cfg, decode_cfg in hot_shapes:
+            self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
+        torch.hpu.synchronize()
+        logger.info("Hot replay finished")
+
     def _add_dummy_request(self,
                            requests,
                            num_scheduled_tokens,
@@ -5622,6 +5673,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     if not self.is_pooling_model:
                         self.warmup_mixed_graphs(self.bucketing_manager.prompt_buckets,
                                                  self.bucketing_manager.decode_buckets, kv_caches)
+
+        # Hot replay: when PT_COMPILE_ONLY_MODE was used, graph recipes
+        # were compiled but never executed on HPU hardware.  The first
+        # real execution of each recipe incurs a significant "first
+        # replay" penalty (loading recipe into HPU engines, allocating
+        # device memory for intermediates, populating the graph replay
+        # cache).  Re-executing a few representative shapes here—outside
+        # compile-only mode—pays that cost during warmup.
+        if can_use_compile_only_mode and not self.model_config.enforce_eager \
+                and not self.is_pooling_model and not self.unified_attn:
+            self._hot_replay_representative_shapes()
 
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
