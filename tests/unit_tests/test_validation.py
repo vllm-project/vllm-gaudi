@@ -103,8 +103,8 @@ class TestRegex:
         assert "doesn't match" in result
 
     def test_partial_match_still_valid(self):
-        """re.match anchors at start, so partial match at start should pass."""
-        assert regex(r"\d+")("123abc") is None  # matches at start
+        """re.match anchors at start; a prefix match of digits is valid."""
+        assert regex(r"\d+")("123abc") is None
 
 
 # ── skip_validation ──────────────────────────────────────────────────────

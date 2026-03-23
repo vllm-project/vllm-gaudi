@@ -116,7 +116,8 @@ class TestForceChannelFP8:
 class TestHeteroKVLayout:
 
     def test_default_is_true(self):
-        """Default env value is 'false' which maps to True (in 0/false list)."""
+        """Default env value is 'false', which appears in the ('0', 'false')
+        check list, so the variable evaluates to True."""
         envs = _reload_envs()
         assert envs.VLLM_HPU_HETERO_KV_LAYOUT is True
 

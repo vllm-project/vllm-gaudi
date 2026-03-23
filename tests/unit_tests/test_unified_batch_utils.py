@@ -14,7 +14,9 @@ import pytest
 
 # ── Copied pure functions for isolated testing ───────────────────────────
 # These are exact copies of the functions from unified_batch.py to test
-# without requiring HPU imports.
+# without requiring HPU imports. The source module has deep dependency
+# chains (habana_frameworks, vllm internals) that prevent direct import.
+# NOTE: If the source functions change, these copies must be updated too.
 
 def mask_to_bias(mask: np.ndarray, dtype: np.dtype, bias_placeholder: np.ndarray = None) -> np.ndarray:
     """Convert attn mask to attn bias"""

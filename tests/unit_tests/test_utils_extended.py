@@ -26,7 +26,9 @@ if "habana_frameworks" not in sys.modules:
 
 # ── Copied pure functions for isolated testing ───────────────────────────
 # These are exact copies of the functions from vllm_gaudi/utils.py to test
-# without requiring HPU imports.
+# without requiring HPU imports. The source module imports from vllm.config
+# and habana_frameworks which prevent direct import in this environment.
+# NOTE: If the source functions change, these copies must be updated too.
 
 def is_fake_hpu() -> bool:
     return os.environ.get('VLLM_USE_FAKE_HPU', '0') != '0'
