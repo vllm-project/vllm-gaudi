@@ -234,6 +234,17 @@ def hpu_causal_conv1d_fn(
         # Ensure cache_indices is on the correct device
         batch_cache_idx = cache_indices.to(x_work.device) if cache_indices.device != x_work.device else cache_indices
 
+    # HPU bucketing pads the batch with state_indices == -1
+    # (PAD_SLOT_ID).  Replace negative indices with 0 for safe
+    # gathering.  Padding slots are masked out below via
+    # has_initial_state or query-length checks.
+    # Route any -1 padding indices to a garbage slot (last entry in
+    # conv_states), consistent with the decode path.
+    garbage_slot_pf = conv_states.shape[0] - 1
+    safe_cache_idx_prefill = torch.where(batch_cache_idx >= 0, batch_cache_idx,
+                                          torch.full_like(batch_cache_idx, garbage_slot_pf))
+    valid_mask_prefill = batch_cache_idx >= 0
+
     # Batched path — HPU bucketed prefill pads all sequences to the same
     # length, so we can reshape to (B, dim, L) and process all sequences in
     # one shot without any device-to-host syncs.
@@ -245,13 +256,15 @@ def hpu_causal_conv1d_fn(
 
         # Gather init states for all sequences at once: (B, state_len, dim) -> (B, dim, state_len)
         if has_initial_state is not None:
-            raw_states = conv_states.index_select(0, batch_cache_idx)[:, -state_len:, :].transpose(-1, -2)
+            raw_states = conv_states.index_select(0, safe_cache_idx_prefill)[:, -state_len:, :].transpose(-1, -2)
             # has_initial_state may have fewer elements than padded_batch;
             # pad with False (0) so the mask broadcasts correctly.
             his = has_initial_state
             if his.numel() < padded_batch:
                 his = torch.nn.functional.pad(his, (0, padded_batch - his.numel()), value=0)
             mask = his[:padded_batch].reshape(-1, 1, 1).to(dtype=raw_states.dtype)
+            # Also mask out padding slots to avoid reading stale state.
+            mask = mask * valid_mask_prefill.reshape(-1, 1, 1).to(dtype=mask.dtype)
             init_states = raw_states * mask
         else:
             init_states = torch.zeros(padded_batch, dim, state_len, device=x_work.device, dtype=work_dtype)
@@ -259,8 +272,15 @@ def hpu_causal_conv1d_fn(
         # Prepend state and convolve: (B, dim, state_len + L)
         seq_input = torch.cat([init_states, x_batch], dim=2)
 
-        # Save new states: last state_len columns per sequence
-        new_states = seq_input[:, :, -state_len:]  # (B, dim, state_len)
+        # Gather new states from the ACTUAL end of each sequence, not
+        # the padded end.  Without this, sequences shorter than
+        # seq_len_each get their conv_state overwritten with zeros
+        # (from the padding region), corrupting subsequent decode steps.
+        actual_qlens = (qsl[1:padded_batch + 1] - qsl[:padded_batch]).clamp(min=0)
+        col_offsets = torch.arange(state_len, device=x_work.device, dtype=torch.int64)
+        col_indices = actual_qlens.unsqueeze(-1).to(torch.int64) + col_offsets.unsqueeze(0)
+        col_indices = col_indices.unsqueeze(1).expand(-1, dim, -1)
+        new_states = torch.gather(seq_input, 2, col_indices)  # [B, dim, state_len]
 
         # Batched manual depthwise conv1d — loop over kernel width
         # (statically unrolled by torch.compile since width is a Python int)
@@ -273,9 +293,15 @@ def hpu_causal_conv1d_fn(
         # (B, dim, L) -> (dim, B, L) -> (dim, B*L)
         seq_out = seq_out_batch.permute(1, 0, 2).reshape(dim, cu_seqlen)
 
-        # Update conv states for all sequences at once
+        # Write back conv states.  Only update sequences with real
+        # tokens (actual_qlen > 0) to preserve existing state for
+        # padding slots.  Garbage slot absorbs padding writes harmlessly.
         with torch.no_grad():
-            conv_states[batch_cache_idx, -state_len:, :] = new_states.transpose(-1, -2)
+            update_mask = (actual_qlens > 0).view(-1, 1, 1)
+            new_states_t = new_states.transpose(-1, -2)  # [B, state_len, dim]
+            existing_states = conv_states.index_select(0, safe_cache_idx_prefill)[:, -state_len:, :]
+            conv_states[safe_cache_idx_prefill, -state_len:, :] = torch.where(
+                update_mask, new_states_t, existing_states)
 
     else:
         # Fallback: variable-length sequences — per-sequence loop
@@ -286,9 +312,12 @@ def hpu_causal_conv1d_fn(
             seq_len_b = seq_end - seq_start
             if seq_len_b <= 0:
                 continue
+            # Skip padding slots with invalid cache indices.
+            if not valid_mask_prefill[b]:
+                continue
 
             seq_x_b = x_work[:, seq_start:seq_end]
-            cache_idx_b = batch_cache_idx[b:b + 1]
+            cache_idx_b = safe_cache_idx_prefill[b:b + 1]
 
             if has_initial_state is not None:
                 raw_state_b = conv_states[cache_idx_b, -state_len:, :].transpose(-1, -2).squeeze(0)
@@ -432,7 +461,16 @@ def hpu_causal_conv1d_fn_update(
         # Ensure cache_indices is on the correct device
         batch_cache_idx = cache_indices.to(x_work.device) if cache_indices.device != x_work.device else cache_indices
 
-    init_state = conv_states[batch_cache_idx, -state_len:, :]
+    # HPU bucketing pads the batch with state_indices == -1
+    # (PAD_SLOT_ID).  Route padding to a *garbage slot* (last entry
+    # in the conv_states tensor, unused by any real request).
+    # Use torch.remainder (not torch.where) — HPU torch.compile
+    # silently miscompiles torch.where on integer tensors.
+    # remainder(-1, N) == N-1, remainder(valid, N) == valid.
+    num_conv_slots = conv_states.shape[0]
+    safe_cache_idx = torch.remainder(batch_cache_idx, num_conv_slots)
+
+    init_state = conv_states[safe_cache_idx, -state_len:, :]
     init_state = init_state.transpose(-1, -2)
 
     seq_input = torch.cat([init_state, x_work], dim=2)
@@ -444,6 +482,6 @@ def hpu_causal_conv1d_fn_update(
     out = seq_out
 
     with torch.no_grad():
-        conv_states[batch_cache_idx, -state_len:, :] = new_state.transpose(-1, -2)
+        conv_states[safe_cache_idx, -state_len:, :] = new_state.transpose(-1, -2)
 
     return out.to(original_dtype)

@@ -512,6 +512,10 @@ def hpu_fused_gdn_gating(
     beta_out = torch.sigmoid(b.to(torch.float32)).to(b.dtype)
     return g.unsqueeze(0), beta_out.unsqueeze(0)
 
+@torch._dynamo.disable
+def _eager_read_state(state: torch.Tensor, idx: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """Eager-only state read — isolates index_select from compiled graph."""
+    return state.index_select(0, idx).to(dtype)
 
 def hpu_fused_recurrent_gated_delta_rule(
     q: torch.Tensor,
@@ -575,6 +579,17 @@ def hpu_fused_recurrent_gated_delta_rule(
         else:
             final_state = initial_state if inplace_final_state else initial_state.clone()
 
+        # Compute state indices and read state eagerly BEFORE reshapes,
+        # so the graph break from _eager_read_state comes first.
+        if ssm_state_indices is not None:
+            sidx_raw = ssm_state_indices.reshape(-1).to(dtype=torch.long, device=device)
+            num_slots = final_state.shape[0]
+            sidx = torch.remainder(sidx_raw, num_slots)
+        else:
+            sidx = torch.arange(num_seqs, dtype=torch.long, device=device)
+
+        h_batch = _eager_read_state(final_state, sidx, _GDN_COMPUTE_DTYPE)
+
         # Flatten token axis.
         # Compute dtype controlled by VLLM_GDN_COMPUTE_FP32 env var (default: bf16)
         qf = q.reshape(-1, H, Kdim).to(_GDN_COMPUTE_DTYPE)
@@ -587,30 +602,21 @@ def hpu_fused_recurrent_gated_delta_rule(
             qf = _l2norm_last_dim(qf)
             kf = _l2norm_last_dim(kf)
 
-        # Gather ONLY the N active states to fp32 — avoids full-buffer copy.
-        # Use index_select / index_copy_ instead of advanced indexing for
-        # better HPU graph performance (no implicit copies or graph breaks).
-        if ssm_state_indices is not None:
-            sidx = ssm_state_indices.reshape(-1).to(dtype=torch.long, device=device)
-            h_batch = final_state.index_select(0, sidx).to(_GDN_COMPUTE_DTYPE)
-        else:
-            sidx = torch.arange(num_seqs, dtype=torch.long, device=device)
-            h_batch = final_state.index_select(0, sidx).to(_GDN_COMPUTE_DTYPE)
+        out_full = torch.zeros(num_seqs, HV, Vdim, dtype=v.dtype, device=device)
 
-        # Vectorized recurrent step — all N sequences in one pass.
-        q_s = qf * scale  # [N, H, K]
-        h_batch = h_batch * torch.exp(gf).to(_GDN_COMPUTE_DTYPE).unsqueeze(-1).unsqueeze(-1)  # [N, HV, V, K]
+        # Inline compute (no separate function boundary for this test).
+        q_s = qf * scale
+        h_batch = h_batch * torch.exp(gf).to(h_batch.dtype).unsqueeze(-1).unsqueeze(-1)
+        proj = torch.matmul(h_batch, kf.unsqueeze(-1)).squeeze(-1)
+        v_new = (vf - proj) * bf.unsqueeze(-1)
+        h_batch = h_batch + v_new.unsqueeze(-1) * kf.unsqueeze(2)
+        out_batch = torch.matmul(h_batch, q_s.unsqueeze(-1)).squeeze(-1)
 
-        proj = torch.matmul(h_batch, kf.unsqueeze(-1)).squeeze(-1)  # [N, HV, V]
-        v_new = (vf - proj) * bf.unsqueeze(-1)  # [N, HV, V]
-        h_batch = h_batch + v_new.unsqueeze(-1) * kf.unsqueeze(2)  # [N, HV, V, K]
-        out_batch = torch.matmul(h_batch, q_s.unsqueeze(-1)).squeeze(-1)  # [N, HV, V]
-
-        # Scatter ONLY the N modified states back — no full-buffer round-trip.
+        # Direct index_copy_ (no eager wrapper for this test).
         final_state.index_copy_(0, sidx, h_batch.to(final_state.dtype))
+        out_full = out_batch.to(v.dtype)
 
-        out_result = out_batch.to(v.dtype)
-        out_result = out_result.unsqueeze(0) if cu_seqlens is not None else out_result.view(B, T, HV, Vdim)
+        out_result = out_full.unsqueeze(0) if cu_seqlens is not None else out_full.view(B, T, HV, Vdim)
         return out_result, final_state
 
     # --- General (multi-token) fallback path ---

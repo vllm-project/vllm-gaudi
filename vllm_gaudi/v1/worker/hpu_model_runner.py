@@ -2270,7 +2270,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 num_computed_tokens_p_cpu[i] = self.input_batch.num_computed_tokens_cpu[req_idx]
 
             has_initial_states_cpu = num_computed_tokens_p_cpu > 0
-            # Print types and shapes
+            # Pad to target_bs so that padding entries are properly
+            # zeroed when used to mask initial_state in _extract_metadata.
+            if len(has_initial_states_cpu) < target_bs:
+                pad_his = torch.zeros(target_bs - len(has_initial_states_cpu),
+                                      dtype=has_initial_states_cpu.dtype)
+                has_initial_states_cpu = torch.cat([has_initial_states_cpu, pad_his])
             prep_initial_states = torch.any(has_initial_states_cpu)
 
             # The code below carefully constructs the chunks such that:
