@@ -5022,6 +5022,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 pbar.update(1)
 
         torch.hpu.synchronize()
+
+        # Run a few shapes through the full pipeline (warmup_mode=False)
+        # to exercise defragmenter, KV connector, and other paths
+        # that are skipped during warmup_mode=True execution.
+        logger.info("Hot replay: exercising full pipeline paths...")
+        if prompt_buckets:
+            self._prepare_dummy_scenario(
+                prompt_buckets[0], None, warmup_mode=False)
+        if decode_buckets:
+            decode_cfg = (decode_buckets[0][0], 1, decode_buckets[0][2])
+            self._prepare_dummy_scenario(
+                None, decode_cfg, warmup_mode=False)
+        torch.hpu.synchronize()
         logger.info("Hot replay finished")
 
     def _add_dummy_request(self,
@@ -5249,7 +5262,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                 scheduled_tokens)
         self._execute_dummy_scenario(requests, scheduled_tokens)
 
-    def _prepare_dummy_scenario(self, prompt_cfg, decode_cfg):
+    def _prepare_dummy_scenario(self, prompt_cfg, decode_cfg,
+                                warmup_mode=True):
         requests: list[NewRequestData] = []
         scheduled_tokens: dict[str, int] = {}
 
@@ -5299,9 +5313,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                         scheduled_tokens=1,
                                         is_prompt=False,
                                         block_id=block_id)
-        self._execute_dummy_scenario(requests, scheduled_tokens)
+        self._execute_dummy_scenario(requests, scheduled_tokens,
+                                       warmup_mode=warmup_mode)
 
-    def _execute_dummy_scenario(self, requests, scheduled_tokens):
+    def _execute_dummy_scenario(self, requests, scheduled_tokens,
+                               warmup_mode=True):
         from vllm.v1.core.sched.output import (SchedulerOutput, CachedRequestData)
 
         sched_output = SchedulerOutput(
@@ -5326,9 +5342,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             finished_req_ids=set(req.req_id for req in requests),
             free_encoder_mm_hashes=[],
         )
-        self.execute_model(sched_output, warmup_mode=True)
+        self.execute_model(sched_output, warmup_mode=warmup_mode)
         self.sample_tokens(None)
-        self.execute_model(cleanup, warmup_mode=True)
+        self.execute_model(cleanup, warmup_mode=warmup_mode)
 
     def _generate_unified_profiling(self, unified_cfgs):
         steps = 3
