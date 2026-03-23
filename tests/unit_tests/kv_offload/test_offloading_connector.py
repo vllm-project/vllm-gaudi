@@ -240,6 +240,7 @@ class RequestRunner:
             no_compile_layers={},
             attn_metadata={},
             slot_mapping={},
+            virtual_engine=0,
         )
 
     def new_request(self, token_ids: list[int]):
