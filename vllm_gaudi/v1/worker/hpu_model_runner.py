@@ -2089,9 +2089,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         token_ids = contents.token_ids
         req_ids = contents.req_ids
         query_lens = [len(tids) for tids in contents.token_ids]
-        if self.profiler.enabled:
-            self.profiler_counter_helper.capture_prompt_seq_stats(query_lens)
         context_lens = contents.context_lens
+        if self.profiler.enabled:
+            self.profiler_counter_helper.capture_prompt_seq_stats(query_lens, context_lens)
 
         token_positions = [list(range(cl, cl + ql)) for cl, ql in zip(context_lens, query_lens)]
 
@@ -4012,6 +4012,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     counters = self.profiler_counter_helper.get_counter_dict(cache_config=self.cache_config,
                                                                              duration=event_end - self.event_start,
                                                                              seq_len=self._seq_len(attn_metadata),
+                                                                             ctx_blocks=self._num_blocks(attn_metadata),
                                                                              batch_size_padded=token_ids.size(0),
                                                                              real_batch_size=len(req_id),
                                                                              prompt_batch_idx=idx,
@@ -4110,6 +4111,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     cache_config=self.cache_config,
                     duration=event_end - self.event_start,
                     seq_len=self._seq_len(decode_data.attn_metadata),
+                    ctx_blocks=self._num_blocks(decode_data.attn_metadata),
                     batch_size_padded= \
                         decode_data.token_ids.size(0), # type: ignore
                     real_batch_size=decode_data.num_decodes,
