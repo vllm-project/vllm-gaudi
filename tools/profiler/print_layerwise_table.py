@@ -29,32 +29,35 @@ def flatten_entries(entry_cls, profile_dict: dict):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--json-trace",
-                        type=str,
-                        required=True,
-                        help="json trace file output by "
-                        "examples/offline_inference/profiling.py")
-    parser.add_argument("--phase",
-                        type=str,
-                        required=True,
-                        help="The phase to print the table for. This is either"
-                        "prefill or decode_n, where n is the decode step "
-                        "number")
-    parser.add_argument("--table",
-                        type=str,
-                        choices=["summary", "model"],
-                        default="summary",
-                        help="Which table to print, the summary table or the "
-                        "layerwise model table")
+    parser.add_argument(
+        "--json-trace",
+        type=str,
+        required=True,
+        help="json trace file output by examples/offline_inference/profiling.py",
+    )
+    parser.add_argument(
+        "--phase",
+        type=str,
+        required=True,
+        help="The phase to print the table for. This is eitherprefill or decode_n, where n is the decode step number",
+    )
+    parser.add_argument(
+        "--table",
+        type=str,
+        choices=["summary", "model"],
+        default="summary",
+        help="Which table to print, the summary table or the layerwise model table",
+    )
 
     args = parser.parse_args()
 
     with open(args.json_trace) as f:
         profile_data = json.load(f)
 
-    assert args.phase in profile_data, \
-       (f"Cannot find phase {args.phase} in profile data. Choose one among"
-        f'{[x for x in profile_data.keys() if "prefill" in x or "decode" in x]}') #noqa
+    assert args.phase in profile_data, (
+        f"Cannot find phase {args.phase} in profile data. Choose one among"
+        f"{[x for x in profile_data.keys() if 'prefill' in x or 'decode' in x]}"
+    )  # noqa
 
     if args.table == "summary":
         entries_and_depths = flatten_entries(SummaryStatsEntry, profile_data[args.phase]["summary_stats"])

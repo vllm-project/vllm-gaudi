@@ -12,14 +12,25 @@ from vllm.logger import init_logger
 from vllm.distributed import parallel_state
 
 from transformers import BatchFeature
-from vllm.transformers_utils.processor import (cached_image_processor_from_config)
+from vllm.transformers_utils.processor import cached_image_processor_from_config
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLVisionConfig
 
 from vllm.model_executor.models.qwen2_5_vl import (
-    Qwen2_5_VisionAttention, Qwen2_5_VisionBlock, Qwen2_5_VisionTransformer, Qwen2_5_VLDummyInputsBuilder,
-    Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLMultiModalProcessor, Qwen2_5_VLProcessingInfo, Qwen2_5_VLVideoInputs,
-    Qwen2_5_VLImageInputs, Qwen2_5_VLImageEmbeddingInputs, Qwen2_5_VLImagePixelInputs, Qwen2_5_VLVideoEmbeddingInputs,
-    Qwen2_5_VLVideoPixelInputs, Qwen2_5_VLProcessor)
+    Qwen2_5_VisionAttention,
+    Qwen2_5_VisionBlock,
+    Qwen2_5_VisionTransformer,
+    Qwen2_5_VLDummyInputsBuilder,
+    Qwen2_5_VLForConditionalGeneration,
+    Qwen2_5_VLMultiModalProcessor,
+    Qwen2_5_VLProcessingInfo,
+    Qwen2_5_VLVideoInputs,
+    Qwen2_5_VLImageInputs,
+    Qwen2_5_VLImageEmbeddingInputs,
+    Qwen2_5_VLImagePixelInputs,
+    Qwen2_5_VLVideoEmbeddingInputs,
+    Qwen2_5_VLVideoPixelInputs,
+    Qwen2_5_VLProcessor,
+)
 
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 
@@ -30,7 +41,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
-from vllm.model_executor.models.utils import (maybe_prefix, cast_overflow_tensors)
+from vllm.model_executor.models.utils import maybe_prefix, cast_overflow_tensors
 
 from vllm.multimodal.inputs import MultiModalFieldConfig
 
@@ -41,7 +52,6 @@ logger = init_logger(__name__)
 
 
 class AttentionLongSequence:
-
     @staticmethod
     def forward(q, k, v, mask, q_block_size, softmax_mode):
         """
@@ -49,7 +59,7 @@ class AttentionLongSequence:
         """
         q_len = q.size(-2)
         assert q_len % q_block_size == 0
-        q_tiles = (q_len // q_block_size)
+        q_tiles = q_len // q_block_size
         attn_output = torch.zeros_like(q)
 
         for i in range(q_tiles):
@@ -65,10 +75,7 @@ class AttentionLongSequence:
 
 
 class HPU_Attention:
-
-    softmax_mode = 'fp32' if \
-        os.environ.get('VLLM_FP32_SOFTMAX_VISION', 'false').lower() \
-            in ['true', '1'] else 'None'
+    softmax_mode = "fp32" if os.environ.get("VLLM_FP32_SOFTMAX_VISION", "false").lower() in ["true", "1"] else "None"
 
     @classmethod
     def forward(cls, q, k, v, mask, cu_seqlens, q_block_size=64):
@@ -84,8 +91,9 @@ class HPU_Attention:
 
 def create_block_diagonal_attention_mask(indices):
     max_size = indices[-1]
-    range_to_max_for_each_img = torch.arange(max_size,
-                                             device=indices.device).unsqueeze(0).repeat(indices.shape[0] - 1, 1)
+    range_to_max_for_each_img = (
+        torch.arange(max_size, device=indices.device).unsqueeze(0).repeat(indices.shape[0] - 1, 1)
+    )
     lesser = range_to_max_for_each_img < indices[1:].unsqueeze(1)
     greater_eq = range_to_max_for_each_img >= indices[:-1].unsqueeze(1)
     range_indices = torch.logical_and(lesser, greater_eq).float()
@@ -94,16 +102,17 @@ def create_block_diagonal_attention_mask(indices):
         log_msg = "einsum running on CPU :" + str(range_indices.shape)
         logger.info(log_msg)
         range_indices = range_indices.to("cpu")
-        res = torch.einsum('bi,bj->ij', range_indices, range_indices)
+        res = torch.einsum("bi,bj->ij", range_indices, range_indices)
         res = res.to("hpu")
     else:
-        res = torch.einsum('bi,bj->ij', range_indices, range_indices)
+        res = torch.einsum("bi,bj->ij", range_indices, range_indices)
     return res.bool()
 
 
 def all_gather_interleave(local_tensor, hidden_size: int, tp_size: int):
     """All-gather the input tensor interleavely across model parallel group."""
     import torch.distributed as dist
+
     gathered_tensors = [torch.zeros_like(local_tensor) for _ in range(tp_size)]
     dist.all_gather(gathered_tensors, local_tensor, group=parallel_state.get_tp_group().device_group)
 
@@ -114,7 +123,6 @@ def all_gather_interleave(local_tensor, hidden_size: int, tp_size: int):
 
 
 class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
-
     def __init__(
         self,
         embed_dim: int,
@@ -134,13 +142,13 @@ class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
 
     def forward(
-            self,
-            x: torch.Tensor,
-            cu_seqlens: torch.Tensor,
-            rotary_pos_emb_cos: torch.Tensor,
-            rotary_pos_emb_sin: torch.Tensor,
-            attn_mask: Optional[torch.Tensor] = None,  # Only used for HPU
-            max_seqlen: Optional[int] = None,  # Only used for Flash Attention
+        self,
+        x: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor,
+        rotary_pos_emb_sin: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,  # Only used for HPU
+        max_seqlen: Optional[int] = None,  # Only used for Flash Attention
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -179,7 +187,6 @@ class HPUQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
 
 
 class HPUQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
-
     def __init__(
         self,
         dim: int,
@@ -208,20 +215,22 @@ class HPUQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
         )
 
     def forward(
-            self,
-            x: torch.Tensor,
-            rotary_pos_emb_cos: torch.Tensor,
-            rotary_pos_emb_sin: torch.Tensor,
-            cu_seqlens: Optional[torch.Tensor] = None,
-            max_seqlen: Optional[int] = None,  # Only used for Flash Attention
-            seqlens: Optional[list[int]] = None,  # Only used for xFormers
-            attn_mask: Optional[torch.Tensor] = None,  # Only used for HPU
+        self,
+        x: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor,
+        rotary_pos_emb_sin: torch.Tensor,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        max_seqlen: Optional[int] = None,  # Only used for Flash Attention
+        seqlens: Optional[list[int]] = None,  # Only used for xFormers
+        attn_mask: Optional[torch.Tensor] = None,  # Only used for HPU
     ) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x),
-                          cu_seqlens=cu_seqlens,
-                          rotary_pos_emb_cos=rotary_pos_emb_cos,
-                          rotary_pos_emb_sin=rotary_pos_emb_sin,
-                          attn_mask=attn_mask)
+        x = x + self.attn(
+            self.norm1(x),
+            cu_seqlens=cu_seqlens,
+            rotary_pos_emb_cos=rotary_pos_emb_cos,
+            rotary_pos_emb_sin=rotary_pos_emb_sin,
+            attn_mask=attn_mask,
+        )
 
         x = x + self.mlp(self.norm2(x))
         return x
@@ -259,17 +268,20 @@ class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
         from vllm.compilation.backends import set_model_tag
 
         with set_model_tag("Qwen2_5_VisionBlock"):
-            self.blocks = nn.ModuleList([
-                HPUQwen2_5_VisionBlock(
-                    dim=self.hidden_size,
-                    num_heads=self.num_heads,
-                    mlp_hidden_dim=vision_config.intermediate_size,
-                    act_fn=get_act_and_mul_fn(vision_config.hidden_act),
-                    norm_layer=norm_layer,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.blocks.{layer_idx}",
-                ) for layer_idx in range(depth)
-            ])
+            self.blocks = nn.ModuleList(
+                [
+                    HPUQwen2_5_VisionBlock(
+                        dim=self.hidden_size,
+                        num_heads=self.num_heads,
+                        mlp_hidden_dim=vision_config.intermediate_size,
+                        act_fn=get_act_and_mul_fn(vision_config.hidden_act),
+                        norm_layer=norm_layer,
+                        quant_config=quant_config,
+                        prefix=f"{prefix}.blocks.{layer_idx}",
+                    )
+                    for layer_idx in range(depth)
+                ]
+            )
 
     def pre_attn(self, x: torch.Tensor, grid_thw: torch.Tensor):
         # patchify
@@ -299,9 +311,9 @@ class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
             ) = self.get_rope_by_thw(t, h, w)
 
             window_index.append(window_index_thw + window_index_id)
-            window_index_id += (t * llm_h * llm_w)
+            window_index_id += t * llm_h * llm_w
 
-            cu_seqlens_window_thw = (cu_seqlens_window_thw + cu_window_seqlens_last)
+            cu_seqlens_window_thw = cu_seqlens_window_thw + cu_window_seqlens_last
             cu_window_seqlens_last = cu_seqlens_window_thw[-1]
             cu_window_seqlens.append(cu_seqlens_window_thw)
 
@@ -337,9 +349,15 @@ class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
             window_index,
         )
 
-    def forward(self, hidden_states: torch.Tensor, rotary_pos_emb_cos: torch.Tensor, rotary_pos_emb_sin: torch.Tensor,
-                padding_attn_mask_window: torch.Tensor, padding_attn_mask_full: torch.Tensor,
-                cu_seqlens: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor,
+        rotary_pos_emb_sin: torch.Tensor,
+        padding_attn_mask_window: torch.Tensor,
+        padding_attn_mask_full: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+    ) -> torch.Tensor:
         hidden_states = hidden_states.unsqueeze(1)
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
@@ -384,22 +402,19 @@ class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
             img_shape = grid_thw[img_idx, :].unsqueeze(0)
             curr_img_size = img_shape.prod()
 
-            pixel_values_curr_img = pixel_values[offset:offset + curr_img_size, :]
+            pixel_values_curr_img = pixel_values[offset : offset + curr_img_size, :]
 
             offset += curr_img_size
             # pre-attention block
-            hidden_states, rot_pos_emb_cos, rot_pos_emb_sin, \
-                cu_seqlens, cu_window_seqlens, window_index = self.pre_attn(
-                    pixel_values_curr_img, img_shape)
+            hidden_states, rot_pos_emb_cos, rot_pos_emb_sin, cu_seqlens, cu_window_seqlens, window_index = (
+                self.pre_attn(pixel_values_curr_img, img_shape)
+            )
 
             # add padding
             bucket_size = vision_buckets.get_multimodal_bucket(curr_img_size)
             num_pad_tokens = bucket_size - curr_img_size
             if num_pad_tokens > 0:
-                logger_msg = "Padding current image size " \
-                    + str(curr_img_size.item()) \
-                    + " to " \
-                    + str(bucket_size)
+                logger_msg = "Padding current image size " + str(curr_img_size.item()) + " to " + str(bucket_size)
                 logger.info(logger_msg)
                 cu_seqlens = F.pad(cu_seqlens, (0, 1), "constant", bucket_size)
                 cu_window_seqlens = F.pad(cu_window_seqlens, (0, 1), "constant", bucket_size)
@@ -408,7 +423,8 @@ class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
                     rot_pos_emb_cos,  # [seq, dim]
                     (0, 0, 0, num_pad_tokens),
                     "constant",
-                    0.0)
+                    0.0,
+                )
             rot_pos_emb_sin = F.pad(rot_pos_emb_sin, (0, 0, 0, num_pad_tokens), "constant", 0.0)
 
             padding_attn_mask_full = create_block_diagonal_attention_mask(cu_seqlens)
@@ -416,12 +432,14 @@ class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
 
             # static part
             htcore.mark_step()
-            hidden_states = self.forward(hidden_states,
-                                         rotary_pos_emb_cos=rot_pos_emb_cos,
-                                         rotary_pos_emb_sin=rot_pos_emb_sin,
-                                         padding_attn_mask_window=padding_attn_mask_window,
-                                         padding_attn_mask_full=padding_attn_mask_full,
-                                         cu_seqlens=cu_seqlens)
+            hidden_states = self.forward(
+                hidden_states,
+                rotary_pos_emb_cos=rot_pos_emb_cos,
+                rotary_pos_emb_sin=rot_pos_emb_sin,
+                padding_attn_mask_window=padding_attn_mask_window,
+                padding_attn_mask_full=padding_attn_mask_full,
+                cu_seqlens=cu_seqlens,
+            )
             htcore.mark_step()
 
             # remove padding
@@ -436,7 +454,6 @@ class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
 
 
 class HPUQwen2_5_VLProcessingInfo(Qwen2_5_VLProcessingInfo):
-
     def get_hf_processor(
         self,
         *,
@@ -459,7 +476,6 @@ class HPUQwen2_5_VLProcessingInfo(Qwen2_5_VLProcessingInfo):
 
 
 class HPUQwen2_5_VLMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -477,7 +493,6 @@ class HPUQwen2_5_VLMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
     dummy_inputs=Qwen2_5_VLDummyInputsBuilder,
 )
 class HpuQwen2_5_VLForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -502,23 +517,21 @@ class HpuQwen2_5_VLForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
             image_grid_thw = self._validate_and_reshape_mm_tensor(image_grid_thw, "image grid_thw")
 
             if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image pixel values. "
-                                 f"Got type: {type(pixel_values)}")
+                raise ValueError(f"Incorrect type of image pixel values. Got type: {type(pixel_values)}")
 
-            return Qwen2_5_VLImagePixelInputs(type="pixel_values",
-                                              pixel_values=pixel_values,
-                                              image_grid_thw=image_grid_thw)
+            return Qwen2_5_VLImagePixelInputs(
+                type="pixel_values", pixel_values=pixel_values, image_grid_thw=image_grid_thw
+            )
 
         if image_embeds is not None:
             image_embeds = self._validate_and_reshape_mm_tensor(image_embeds, "image embeds")
             image_grid_thw = self._validate_and_reshape_mm_tensor(image_grid_thw, "image grid_thw")
 
             if not isinstance(image_embeds, torch.Tensor):
-                raise ValueError("Incorrect type of image embeddings. "
-                                 f"Got type: {type(image_embeds)}")
-            return Qwen2_5_VLImageEmbeddingInputs(type="image_embeds",
-                                                  image_embeds=image_embeds,
-                                                  image_grid_thw=image_grid_thw)
+                raise ValueError(f"Incorrect type of image embeddings. Got type: {type(image_embeds)}")
+            return Qwen2_5_VLImageEmbeddingInputs(
+                type="image_embeds", image_embeds=image_embeds, image_grid_thw=image_grid_thw
+            )
 
     def _parse_and_validate_video_input_v1(self, **kwargs: object) -> Optional[Qwen2_5_VLVideoInputs]:
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
@@ -530,7 +543,6 @@ class HpuQwen2_5_VLForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
             return None
 
         if pixel_values_videos is not None:
-
             return Qwen2_5_VLVideoPixelInputs(
                 type="pixel_values_videos",
                 pixel_values_videos=pixel_values_videos,
@@ -543,11 +555,10 @@ class HpuQwen2_5_VLForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
             video_grid_thw = self._validate_and_reshape_mm_tensor(video_grid_thw, "video grid_thw")
 
             if not isinstance(video_embeds, torch.Tensor):
-                raise ValueError("Incorrect type of video embeddings. "
-                                 f"Got type: {type(video_embeds)}")
-            return Qwen2_5_VLVideoEmbeddingInputs(type="video_embeds",
-                                                  video_embeds=video_embeds,
-                                                  video_grid_thw=video_grid_thw)
+                raise ValueError(f"Incorrect type of video embeddings. Got type: {type(video_embeds)}")
+            return Qwen2_5_VLVideoEmbeddingInputs(
+                type="video_embeds", video_embeds=video_embeds, video_grid_thw=video_grid_thw
+            )
 
     def _process_image_input(self, image_input: Qwen2_5_VLImageInputs) -> tuple[torch.Tensor, ...]:
 

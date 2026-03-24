@@ -18,19 +18,19 @@ def find_measurement_path(measurement, measurements_dir_path, group_size):
     measurement_card = "_" + measurement + "_" + str(group_size)
     for measurement_file in os.listdir(measurements_dir_path):
         filename = os.fsdecode(measurement_file)
-        if (not filename.endswith(".json") or "_mod_list" in filename or measurement_card not in filename):
+        if not filename.endswith(".json") or "_mod_list" in filename or measurement_card not in filename:
             continue
         if "MAXABS" not in filename:
             return os.path.join(measurements_dir_path, measurement_file)
 
 
 def is_fused_moe_op(node_name):
-    return ("moe" in node_name.lower() and ".w13_list" not in node_name and ".w2_list" not in node_name)
+    return "moe" in node_name.lower() and ".w13_list" not in node_name and ".w2_list" not in node_name
 
 
 def is_moe_experts(node_name):
     # model.layers.3.mlp.experts.moe_op.w13_list.0
-    return ("moe" in node_name.lower() and (".w13_list" in node_name or ".w2_list" in node_name))
+    return "moe" in node_name.lower() and (".w13_list" in node_name or ".w2_list" in node_name)
 
 
 def get_expert_id(node_name):
@@ -73,11 +73,14 @@ def expand_measurements(
         js = json.load(f)
         measurements_jsons.append(js["Nodes"])
     # New json file name
-    new_json_name = (find_measurement_path(measurement_group[0], measurements_dir_path,
-                                           groups_size).split("/")[-1].replace(
-                                               "_" + measurement_group[0] + "_" + str(groups_size),
-                                               "_" + str(local_rank) + "_" + str(world_size),
-                                           ))
+    new_json_name = (
+        find_measurement_path(measurement_group[0], measurements_dir_path, groups_size)
+        .split("/")[-1]
+        .replace(
+            "_" + measurement_group[0] + "_" + str(groups_size),
+            "_" + str(local_rank) + "_" + str(world_size),
+        )
+    )
     logger.info(
         "Generating new json file: %s with local_rank %d and world_size %d",
         new_json_name,
@@ -111,7 +114,8 @@ def expand_measurements(
                 node_res_experts_intermediate_amax = node_res[1:]
                 num_intermediate_amax = len(node_res_experts_intermediate_amax)
                 assert num_intermediate_amax == total_experts, (
-                    f"the number of intermediate amax should be {total_experts}, but got {num_intermediate_amax}")
+                    f"the number of intermediate amax should be {total_experts}, but got {num_intermediate_amax}"
+                )
                 ep_size = world_size
                 ep_rank = local_rank
                 num_local_experts = total_experts // ep_size
@@ -119,11 +123,11 @@ def expand_measurements(
                 expert_end_index = expert_start_index + num_local_experts
                 node_intermediate_amax = node_res_experts_intermediate_amax[expert_start_index:expert_end_index]
                 assert len(node_intermediate_amax) == num_local_experts, (
-                    f"len(node_intermediate_amax) should be {num_local_experts}, but got {len(node_intermediate_amax)}")
+                    f"len(node_intermediate_amax) should be {num_local_experts}, but got {len(node_intermediate_amax)}"
+                )
                 max_outputs = [node_res_output, *node_intermediate_amax]
                 logger.debug(
-                    "Selecting %d outputs for %s "
-                    "ep_rank %d with expert_start_index %d and expert_end_index %d",
+                    "Selecting %d outputs for %s ep_rank %d with expert_start_index %d and expert_end_index %d",
                     len(max_outputs),
                     node_name,
                     ep_rank,
@@ -150,7 +154,7 @@ def expand_measurements(
         layers[layer]["inputs"] = [np.array(x) for x in dlayer["inputs"]]
         if dlayer.get("outputs") is not None:
             layers[layer]["outputs"] = [np.array(x) for x in dlayer["outputs"]]
-        if (dlayer.get("params") is not None and dlayer["params"].get("weight") is not None):
+        if dlayer.get("params") is not None and dlayer["params"].get("weight") is not None:
             layers[layer]["params"] = {}
             layers[layer]["params"]["weight"] = np.array(dlayer["params"]["weight"])
     df = {

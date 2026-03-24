@@ -20,9 +20,9 @@ def rejection_sample_pytorch(
     """
     Performs vectorized rejection sampling on a batch of token sequences.
 
-    This function compares draft tokens to target tokens and accepts them up to 
-    the first mismatch. If an entire sequence of draft tokens is accepted, a 
-    bonus token is appended. This version handles variable numbers of draft 
+    This function compares draft tokens to target tokens and accepts them up to
+    the first mismatch. If an entire sequence of draft tokens is accepted, a
+    bonus token is appended. This version handles variable numbers of draft
     tokens per sequence.
 
     The current HPU implementation of spec decode will flatten the num_draft_tokens
@@ -41,7 +41,7 @@ def rejection_sample_pytorch(
         num_draft_tokens: list[int]: List of number draft tokens for each sequence.
             Shape: (num_seqs)
         cu_num_draft_tokens (torch.Tensor): The cumulative sum of the number of
-            draft tokens for each request. Used to determine actual sequence 
+            draft tokens for each request. Used to determine actual sequence
             lengths. Shape: (num_seqs,)
 
     Returns:
@@ -64,8 +64,9 @@ def rejection_sample_pytorch(
 
     # 2. Calculate the number of draft tokens for each sequence from the
     # cumulative sum
-    start_indices = torch.cat((torch.tensor([0], device=device,
-                                            dtype=cu_num_draft_tokens.dtype), cu_num_draft_tokens[:-1]))
+    start_indices = torch.cat(
+        (torch.tensor([0], device=device, dtype=cu_num_draft_tokens.dtype), cu_num_draft_tokens[:-1])
+    )
     num_draft_tokens_per_seq = cu_num_draft_tokens - start_indices
 
     # 3. Find the first mismatch, ignoring padding tokens
@@ -73,7 +74,7 @@ def rejection_sample_pytorch(
     pos = torch.arange(max_draft_tokens, device=device)
     valid_token_mask = pos < num_draft_tokens_per_seq.unsqueeze(-1)
 
-    matches = (padded_draft_token_ids == padded_target_token_ids)
+    matches = padded_draft_token_ids == padded_target_token_ids
 
     mismatches = ~matches
     any_mismatch = mismatches.any(dim=1)
@@ -84,7 +85,7 @@ def rejection_sample_pytorch(
     # 4. Determine the number of accepted tokens for each sequence
     # If a mismatch occurs, we accept tokens up to and including the mismatch.
     # If no mismatch, accept all *actual* draft tokens.
-    num_accepted = ((first_mismatch_idx + 1) * any_mismatch + num_draft_tokens_per_seq * (~any_mismatch))
+    num_accepted = (first_mismatch_idx + 1) * any_mismatch + num_draft_tokens_per_seq * (~any_mismatch)
 
     # 5. Create the output tensor by masking the target tokens
     # Initialize the output tensor with the padding value.
@@ -145,8 +146,9 @@ def rejection_sample(
     # Rejection sampling for greedy sampling requests.
 
     target_argmax = target_probs.argmax(dim=-1)
-    output_token_ids = rejection_sample_pytorch(draft_token_ids, target_argmax, bonus_token_ids, num_draft_tokens,
-                                                cu_num_draft_tokens)
+    output_token_ids = rejection_sample_pytorch(
+        draft_token_ids, target_argmax, bonus_token_ids, num_draft_tokens, cu_num_draft_tokens
+    )
     return output_token_ids
 
 

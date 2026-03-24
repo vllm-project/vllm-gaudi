@@ -37,7 +37,7 @@ class GaudiTopology:
         |   0  HL-325L             N/A  | 0000:97:00.0     N/A | ...
         """
         cards = []
-        pattern = re.compile(r'^\|\s*(\d+)\s+([A-Z0-9-]+)\s+N/A\s+\|\s*([0-9a-fA-F:.]+)\s+N/A\s*\|')
+        pattern = re.compile(r"^\|\s*(\d+)\s+([A-Z0-9-]+)\s+N/A\s+\|\s*([0-9a-fA-F:.]+)\s+N/A\s*\|")
         for line in text.splitlines():
             match = pattern.match(line)
             if not match:

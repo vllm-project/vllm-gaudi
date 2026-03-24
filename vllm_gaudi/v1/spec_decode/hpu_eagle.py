@@ -10,7 +10,6 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 
 class HpuEagleProposer(EagleProposer):
-
     def propose(
         self,
         # [virtual_batch_size, seq_len]
@@ -32,9 +31,7 @@ class HpuEagleProposer(EagleProposer):
 
         if self.method == "eagle3":
             assert isinstance(self.model.model, Eagle3LlamaForCausalLM)
-            target_hidden_states = \
-                self.model.model.combine_hidden_states(
-                    target_hidden_states)
+            target_hidden_states = self.model.model.combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
         ret_hidden_states = self.model(
@@ -141,8 +138,7 @@ class HpuEagleProposer(EagleProposer):
         sampled_token_ids: list[list[int]],
     ):
         assert spec_decode_metadata is not None
-        num_draft_tokens = \
-            spec_decode_metadata.num_draft_tokens
+        num_draft_tokens = spec_decode_metadata.num_draft_tokens
         max_num_draft_tokens = max(num_draft_tokens)
 
         num_picked_token_indices = []
@@ -167,12 +163,13 @@ class HpuEagleProposer(EagleProposer):
         return common_attn_metadata, hidden_states_indices, last_token_indices
 
     def prepare_attn_metadata(
-            self,
-            # [num_seq, total_blocks]
-            block_table_cpu_tensor,
-            # CPU tensor: [batch_size]
-            positions,
-            model_runner):
+        self,
+        # [num_seq, total_blocks]
+        block_table_cpu_tensor,
+        # CPU tensor: [batch_size]
+        positions,
+        model_runner,
+    ):
         # Prepare attn metadata on CPU. (Improve for pure HPU based attn metadata preparation)
         block_size = model_runner.block_size
         batch_size = positions.shape[0]
@@ -215,12 +212,9 @@ class HpuEagleProposer(EagleProposer):
         # Slot mapping needs to be int64 (long) type
         slot_mapping = slot_mapping.to(torch.int64)
 
-        block_list, block_groups, block_usage = \
-            model_runner.get_habana_paged_attn_buffers(
-                block_tables_list,
-                slot_mapping.tolist(),
-                batch_size
-            )
+        block_list, block_groups, block_usage = model_runner.get_habana_paged_attn_buffers(
+            block_tables_list, slot_mapping.tolist(), batch_size
+        )
 
         block_list_device = async_h2d_copy(block_list, device=self.device)
         block_usage_device = async_h2d_copy(block_usage, device=self.device)

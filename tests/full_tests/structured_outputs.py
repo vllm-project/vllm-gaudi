@@ -29,9 +29,11 @@ sampling_params_regex = SamplingParams(
     stop=["\n"],
     max_tokens=MAX_TOKENS,
 )
-prompt_regex = ("Generate an email address for Alan Turing, who works in Enigma."
-                "End in .com and new line. Example result:"
-                "alan.turing@enigma.com\n")
+prompt_regex = (
+    "Generate an email address for Alan Turing, who works in Enigma."
+    "End in .com and new line. Example result:"
+    "alan.turing@enigma.com\n"
+)
 
 
 # Structured outputs by JSON using Pydantic schema
@@ -51,8 +53,7 @@ class CarDescription(BaseModel):
 json_schema = CarDescription.model_json_schema()
 structured_outputs_params_json = StructuredOutputsParams(json=json_schema)
 sampling_params_json = SamplingParams(structured_outputs=structured_outputs_params_json, max_tokens=MAX_TOKENS)
-prompt_json = ("Generate a JSON with the brand, model and car_type of "
-               "the most iconic car from the 90's")
+prompt_json = "Generate a JSON with the brand, model and car_type of the most iconic car from the 90's"
 
 # Structured outputs by Grammar
 simplified_sql_grammar = """
@@ -65,7 +66,7 @@ number ::= "1 " | "2 "
 """
 structured_outputs_params_grammar = StructuredOutputsParams(grammar=simplified_sql_grammar)
 sampling_params_grammar = SamplingParams(structured_outputs=structured_outputs_params_grammar, max_tokens=MAX_TOKENS)
-prompt_grammar = ("Generate an SQL query to show the 'username' and 'email' from the 'users' table.")
+prompt_grammar = "Generate an SQL query to show the 'username' and 'email' from the 'users' table."
 
 
 def format_output(title: str, output: str):
@@ -99,6 +100,7 @@ if __name__ == "__main__":
     except Exception:
         import os
         import traceback
+
         print("An error occurred during generation:")
         traceback.print_exc()
         os._exit(1)

@@ -13,7 +13,6 @@ def padding_gen():
 
 
 class TestAlignAndPad:
-
     @staticmethod
     def _materialize_rows(rows):
         out = []
@@ -110,7 +109,6 @@ class _Root:
 
 
 class TestGetattrNested:
-
     def test_single_level(self):
         root = _Root()
         assert getattr_nested(root, "flat") == "flat_value"
@@ -158,7 +156,6 @@ class TestGetattrNested:
 
 
 class TestSetattrNested:
-
     def test_single_level(self):
         root = _Root()
         setattr_nested(root, "flat", "new_value")

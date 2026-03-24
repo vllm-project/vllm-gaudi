@@ -9,16 +9,28 @@ from typing import NamedTuple
 from utils import temporary_op_registry_oot, register_op
 from transformers.models.auto.configuration_auto import AutoConfig
 from vllm_gaudi.utils import HPUCompileConfig
-from vllm_gaudi.ops.hpu_rotary_embedding import (HPURotaryEmbedding, HPULinearScalingRotaryEmbedding,
-                                                 HPUDynamicNTKScalingRotaryEmbedding, HPUYaRNScalingRotaryEmbedding,
-                                                 HPUDeepseekScalingRotaryEmbedding, HPULlama3RotaryEmbedding,
-                                                 HPUPhi3LongRoPEScaledRotaryEmbedding, HPULlama4VisionRotaryEmbedding,
-                                                 HPUMRotaryEmbedding)
-from vllm.model_executor.layers.rotary_embedding import (RotaryEmbedding, LinearScalingRotaryEmbedding,
-                                                         DynamicNTKScalingRotaryEmbedding, YaRNScalingRotaryEmbedding,
-                                                         DeepseekScalingRotaryEmbedding, Llama3RotaryEmbedding,
-                                                         Phi3LongRoPEScaledRotaryEmbedding, Llama4VisionRotaryEmbedding,
-                                                         MRotaryEmbedding)
+from vllm_gaudi.ops.hpu_rotary_embedding import (
+    HPURotaryEmbedding,
+    HPULinearScalingRotaryEmbedding,
+    HPUDynamicNTKScalingRotaryEmbedding,
+    HPUYaRNScalingRotaryEmbedding,
+    HPUDeepseekScalingRotaryEmbedding,
+    HPULlama3RotaryEmbedding,
+    HPUPhi3LongRoPEScaledRotaryEmbedding,
+    HPULlama4VisionRotaryEmbedding,
+    HPUMRotaryEmbedding,
+)
+from vllm.model_executor.layers.rotary_embedding import (
+    RotaryEmbedding,
+    LinearScalingRotaryEmbedding,
+    DynamicNTKScalingRotaryEmbedding,
+    YaRNScalingRotaryEmbedding,
+    DeepseekScalingRotaryEmbedding,
+    Llama3RotaryEmbedding,
+    Phi3LongRoPEScaledRotaryEmbedding,
+    Llama4VisionRotaryEmbedding,
+    MRotaryEmbedding,
+)
 
 # General settings
 HIDDEN_SIZES = [4096]
@@ -34,7 +46,7 @@ SCALING_FACTORS_WITH_LIST = [1.0, 2.0, 4.0, 8.0, [2.0, 4.0]]
 # Vision model settings
 IMAGE_SIZE = 336
 PATCH_SIZE = 14
-VISION_MAX_POSITION_EMBEDDINGS = [(IMAGE_SIZE // PATCH_SIZE)**2]
+VISION_MAX_POSITION_EMBEDDINGS = [(IMAGE_SIZE // PATCH_SIZE) ** 2]
 VISION_SEQ_LENGTHS = [x + 1 for x in VISION_MAX_POSITION_EMBEDDINGS]
 
 
@@ -42,18 +54,20 @@ class RotaryData(NamedTuple):
     """
     Data structure for rotary embedding test parameters.
     """
+
     cls: nn.Module
     dtype: torch.dtype
     device: str
 
 
-def run_rotary_embedding_test(native_rotary_data: RotaryData, oot_rotary_data: RotaryData, seq_length: int,
-                              hidden_size: int, **kwargs) -> None:
+def run_rotary_embedding_test(
+    native_rotary_data: RotaryData, oot_rotary_data: RotaryData, seq_length: int, hidden_size: int, **kwargs
+) -> None:
     """
     Common code for running rotary embedding tests. It compares output of
     native operator and out-of-tree custom operator. It allows to
-    specify separate device for native operator and custom operator, 
-    because for example native Llama4VisionRotaryEmbedding cannot be 
+    specify separate device for native operator and custom operator,
+    because for example native Llama4VisionRotaryEmbedding cannot be
     used on hpu as it uses complex datatype. The same applies to dtype.
     """
     with temporary_op_registry_oot():
@@ -61,8 +75,9 @@ def run_rotary_embedding_test(native_rotary_data: RotaryData, oot_rotary_data: R
         with torch.device(native_rotary_data.device):
             kwargs["dtype"] = native_rotary_data.dtype
             native_rotary_embedding = native_rotary_data.cls(**kwargs)
-            assert isinstance(native_rotary_embedding,
-                              native_rotary_data.cls) and not isinstance(native_rotary_embedding, oot_rotary_data.cls)
+            assert isinstance(native_rotary_embedding, native_rotary_data.cls) and not isinstance(
+                native_rotary_embedding, oot_rotary_data.cls
+            )
 
         # Prepare oot RotaryEmbedding module
         with torch.device(oot_rotary_data.device):
@@ -70,17 +85,17 @@ def run_rotary_embedding_test(native_rotary_data: RotaryData, oot_rotary_data: R
             kwargs["dtype"] = oot_rotary_data.dtype
             oot_rotary_embedding = native_rotary_data.cls(**kwargs)  # Use native as it was registered above
             assert isinstance(oot_rotary_embedding, native_rotary_data.cls) and isinstance(
-                oot_rotary_embedding, oot_rotary_data.cls)
+                oot_rotary_embedding, oot_rotary_data.cls
+            )
 
             if not htorch.utils.internal.is_lazy():
                 compile_config = HPUCompileConfig()
                 oot_rotary_embedding = torch.compile(oot_rotary_embedding, **compile_config.get_compile_args())
 
         # Prepare input data
-        positions = torch.randint(high=seq_length,
-                                  size=(1, seq_length),
-                                  dtype=torch.int32,
-                                  device=native_rotary_data.device)
+        positions = torch.randint(
+            high=seq_length, size=(1, seq_length), dtype=torch.int32, device=native_rotary_data.device
+        )
         query = torch.randn(1, seq_length, hidden_size, dtype=torch.bfloat16, device=native_rotary_data.device)
         key = torch.randn(1, seq_length, hidden_size, dtype=torch.bfloat16, device=native_rotary_data.device)
         if native_rotary_data.cls in (Llama4VisionRotaryEmbedding, DeepseekScalingRotaryEmbedding):
@@ -89,9 +104,9 @@ def run_rotary_embedding_test(native_rotary_data: RotaryData, oot_rotary_data: R
 
         # Execute layers
         with torch.device(native_rotary_data.device):
-            if native_rotary_data.cls in (Llama4VisionRotaryEmbedding, ):
+            if native_rotary_data.cls in (Llama4VisionRotaryEmbedding,):
                 ref_query_out, ref_key_out = native_rotary_embedding(query, key)
-            elif native_rotary_data.cls in (MRotaryEmbedding, ):
+            elif native_rotary_data.cls in (MRotaryEmbedding,):
                 ref_query_out, ref_key_out = native_rotary_embedding(positions.flatten(), query, key)
             else:
                 ref_query_out, ref_key_out = native_rotary_embedding(positions, query, key)
@@ -102,7 +117,7 @@ def run_rotary_embedding_test(native_rotary_data: RotaryData, oot_rotary_data: R
             key = key.to(oot_rotary_data.device)
 
         with torch.device(oot_rotary_data.device):
-            if native_rotary_data.cls in (Llama4VisionRotaryEmbedding, ):
+            if native_rotary_data.cls in (Llama4VisionRotaryEmbedding,):
                 query_out, key_out = oot_rotary_embedding(query, key)
             else:
                 query_out, key_out = oot_rotary_embedding(positions, query, key)
@@ -300,7 +315,7 @@ def test_llama3_rotary_embedding(
         "scaling_factor": scaling_factor,
         "low_freq_factor": 1.0,
         "high_freq_factor": 4.0,
-        "orig_max_position": 8192
+        "orig_max_position": 8192,
     }
     native_rotary_data = RotaryData(cls=Llama3RotaryEmbedding, dtype=torch.bfloat16, device="hpu")
     oot_rotary_data = RotaryData(cls=HPULlama3RotaryEmbedding, dtype=torch.bfloat16, device="hpu")
@@ -392,7 +407,7 @@ def test_m_rotary_embedding(
         "max_position_embeddings": max_position_embeddings,
         "base": base,
         "is_neox_style": is_neox_style,
-        "mrope_section": [rotary_dim // 2]
+        "mrope_section": [rotary_dim // 2],
     }
     native_rotary_data = RotaryData(cls=MRotaryEmbedding, dtype=torch.bfloat16, device="hpu")
     oot_rotary_data = RotaryData(cls=HPUMRotaryEmbedding, dtype=torch.bfloat16, device="hpu")

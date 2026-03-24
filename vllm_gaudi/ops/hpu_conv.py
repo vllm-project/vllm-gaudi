@@ -5,7 +5,6 @@ from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
 
 @Conv2dLayer.register_oot
 class HPUConv2dLayer(Conv2dLayer):
-
     def _forward_mulmat(self, x: torch.Tensor) -> torch.Tensor:
         assert x.dim() == 4
         B, C, H, W = x.shape
@@ -13,8 +12,8 @@ class HPUConv2dLayer(Conv2dLayer):
         H, W = H // K1, W // K2
 
         # TODO: HPU doesn't support unfold, implement with view,reshape.
-        #x = x.unfold(2, K1, K1).unfold(3, K2, K2)
-        #x = x.permute(0, 2, 3, 1, 4, 5).reshape(-1, self.input_size)
+        # x = x.unfold(2, K1, K1).unfold(3, K2, K2)
+        # x = x.permute(0, 2, 3, 1, 4, 5).reshape(-1, self.input_size)
         x = x.view(B, C, H, K1, W, K2)
         x = x.permute(0, 2, 4, 1, 3, 5).reshape(-1, self.input_size)  # [B*H*W, C*K1*K2]
 

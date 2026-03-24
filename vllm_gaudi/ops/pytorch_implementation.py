@@ -4,13 +4,9 @@ import torch
 import torch.nn.functional as F
 
 
-def new_chunk_cumsum(dt,
-                     A,
-                     chunk_size,
-                     dt_bias=None,
-                     dt_softplus=False,
-                     dt_limit=(0.0, float("inf")),
-                     padding_mask=None):
+def new_chunk_cumsum(
+    dt, A, chunk_size, dt_bias=None, dt_softplus=False, dt_limit=(0.0, float("inf")), padding_mask=None
+):
     """
     Arguments:
         dt: Tensor - (seqlen, nheads)
@@ -31,7 +27,7 @@ def new_chunk_cumsum(dt,
 
     dt = dt.float()
     if dt_bias is not None:
-        assert dt_bias.shape == (nheads, )
+        assert dt_bias.shape == (nheads,)
         dt += dt_bias.view(1, nheads).float()
 
     if dt_softplus:
@@ -105,13 +101,18 @@ def new_chunk_scan(cb, x_chunked, dt_t, dA_cumsum_t, C, states, output, D=None, 
     mm_dtype = x_chunked.dtype
 
     x_chunked = x_chunked.transpose(1, 2)
-    C = (C.view(nchunks, chunk_size, ngroups, 1, dstate).expand(nchunks, chunk_size, ngroups, nheads_ngroups_ratio,
-                                                                dstate).reshape(nchunks, chunk_size, nheads,
-                                                                                dstate).transpose(1, 2))
+    C = (
+        C.view(nchunks, chunk_size, ngroups, 1, dstate)
+        .expand(nchunks, chunk_size, ngroups, nheads_ngroups_ratio, dstate)
+        .reshape(nchunks, chunk_size, nheads, dstate)
+        .transpose(1, 2)
+    )
 
-    cb = (cb.view(nchunks, ngroups, 1, chunk_size,
-                  chunk_size).expand(nchunks, ngroups, nheads_ngroups_ratio, chunk_size,
-                                     chunk_size).reshape(nchunks, nheads, chunk_size, chunk_size))
+    cb = (
+        cb.view(nchunks, ngroups, 1, chunk_size, chunk_size)
+        .expand(nchunks, ngroups, nheads_ngroups_ratio, chunk_size, chunk_size)
+        .reshape(nchunks, nheads, chunk_size, chunk_size)
+    )
     states = states.float()
     init = torch.zeros_like(states[:1]) if initial_states is None else initial_states.float()
     prev_states = torch.cat([init, states[:-1]], dim=0)
@@ -225,17 +226,9 @@ def new_ssd_bmm(a, b, chunk_size, causal=False, output_dtype=None):
 
 # Based on https://github.com/state-spaces/mamba/blob/95d8aba8a8c75aedcaa6143713b11e745e7cd0d9/mamba_ssm/ops/triton/selective_state_update.py#L219
 # Added support for softplus threshold which is applied by default in the triton kernel.
-def selective_state_update_ref(state,
-                               x,
-                               dt,
-                               A,
-                               B,
-                               C,
-                               D=None,
-                               z=None,
-                               dt_bias=None,
-                               dt_softplus=False,
-                               softplus_thres=20.0):
+def selective_state_update_ref(
+    state, x, dt, A, B, C, D=None, z=None, dt_bias=None, dt_softplus=False, softplus_thres=20.0
+):
     """
     Argument:
         state: (batch, dim, dstate) or (batch, nheads, dim, dstate)

@@ -4,6 +4,7 @@ This example shows how to use vLLM for running offline inference with
 multi-image input on vision language models for text generation,
 using the chat template defined by the model.
 """
+
 import os
 
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -19,9 +20,7 @@ IMAGE_LIMIT = 1
 def run_generate(args):
     config_template_bf16 = {
         "model_name": "REPLACE_ME",
-        "lm_eval_kwargs": {
-            "batch_size": "auto"
-        },
+        "lm_eval_kwargs": {"batch_size": "auto"},
         "vllm_kwargs": {
             "pretrained": "REPLACE_ME",
             "max_num_seqs": 128,
@@ -33,11 +32,12 @@ def run_generate(args):
         },
     }
     config_template_fp8 = {
-        **config_template_bf16, "vllm_kwargs": {
+        **config_template_bf16,
+        "vllm_kwargs": {
             **config_template_bf16["vllm_kwargs"],
             "quantization": args.quantization,
             "kv_cache_dtype": args.kv_cache_dtype,
-        }
+        },
     }
     config_template_vision_fp8 = {
         **config_template_fp8,
@@ -86,11 +86,13 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = FlexibleArgumentParser(description='Demo on using vLLM for offline inference with '
-                                    'vision language models that support multi-image input for text '
-                                    'generation')
-    parser.add_argument('--model-path', '-p', type=str, default="", help='Huggingface model path')
-    parser.add_argument('--expert-parallel', action='store_true', help='Whether to use expert parallel')
+    parser = FlexibleArgumentParser(
+        description="Demo on using vLLM for offline inference with "
+        "vision language models that support multi-image input for text "
+        "generation"
+    )
+    parser.add_argument("--model-path", "-p", type=str, default="", help="Huggingface model path")
+    parser.add_argument("--expert-parallel", action="store_true", help="Whether to use expert parallel")
     parser = AsyncEngineArgs.add_cli_args(parser)
 
     args = parser.parse_args()

@@ -33,25 +33,30 @@ from transformers import PretrainedConfig
 from vllm.model_executor.layers.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.distributed import (get_pp_group, get_tensor_model_parallel_world_size, tensor_model_parallel_all_reduce)
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size, tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01RMSNormTP
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (QKVParallelLinear, ReplicatedLinear, RowParallelLinear)
+from vllm.model_executor.layers.linear import QKVParallelLinear, ReplicatedLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.vocab_parallel_embedding import (ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import (default_weight_loader, maybe_remap_kv_scale_name)
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
 from vllm.sequence import IntermediateTensors
 
-from vllm.model_executor.models.interfaces import (SupportsPP, SupportsLoRA)
-from vllm.model_executor.models.utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
-                                              make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
+from vllm.model_executor.models.interfaces import SupportsPP, SupportsLoRA
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
+    is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory,
+    make_layers,
+    maybe_prefix,
+)
 
 
 class HpuMiniMaxM2MoE(nn.Module):
-
     def __init__(
         self,
         config: PretrainedConfig,
@@ -62,12 +67,13 @@ class HpuMiniMaxM2MoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
 
         if self.tp_size > config.num_local_experts:
-            raise ValueError(f"Tensor parallel size {self.tp_size} is greater than "
-                             f"the number of experts {config.num_local_experts}.")
+            raise ValueError(
+                f"Tensor parallel size {self.tp_size} is greater than the number of experts {config.num_local_experts}."
+            )
         self.use_routing_bias = getattr(config, "use_routing_bias", False)
         if self.use_routing_bias:
             self.e_score_correction_bias = nn.Parameter(torch.empty(config.num_local_experts, dtype=torch.float32))
-            self.e_score_correction_bias.weight_loader = (HpuMiniMaxM2MoE.ebias_weight_loader)
+            self.e_score_correction_bias.weight_loader = HpuMiniMaxM2MoE.ebias_weight_loader
         else:
             self.e_score_correction_bias = None
 
@@ -116,7 +122,6 @@ class HpuMiniMaxM2MoE(nn.Module):
 
 
 class HpuMiniMaxM2Attention(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
@@ -173,7 +178,7 @@ class HpuMiniMaxM2Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        if (rope_parameters is not None and "partial_rotary_factor" not in rope_parameters):
+        if rope_parameters is not None and "partial_rotary_factor" not in rope_parameters:
             rope_parameters["partial_rotary_factor"] = rotary_dim / self.head_dim
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -209,7 +214,6 @@ class HpuMiniMaxM2Attention(nn.Module):
 
 
 class HpuMiniMaxM2DecoderLayer(nn.Module):
-
     def __init__(
         self,
         config: PretrainedConfig,
@@ -317,8 +321,9 @@ class HpuMiniMaxM2Model(nn.Module):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states", "residual"],
-                                                                                       config.hidden_size)
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -338,7 +343,7 @@ class HpuMiniMaxM2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in self.layers[self.start_layer : self.end_layer]:
             hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
@@ -464,7 +469,7 @@ class HpuMiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = (self.model.make_empty_intermediate_tensors)
+        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)

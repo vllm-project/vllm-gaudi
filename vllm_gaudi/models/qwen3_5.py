@@ -15,7 +15,6 @@ from vllm_gaudi.ops.hpu_gdn_pytorch import (
 
 
 class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # cache_group_idx: set later by model runner for hybrid cache
@@ -25,9 +24,11 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         # mamba_chunk_size: use explicit config value or default to 128
         # for HPU bucket alignment.
         hf_text_config = getattr(self.model_config, "hf_text_config", None)
-        has_explicit = (hf_text_config is not None and (getattr(hf_text_config, "mamba_chunk_size", None) is not None
-                                                        or getattr(hf_text_config, "chunk_size", None) is not None))
-        self.mamba_chunk_size = (self.model_config.get_mamba_chunk_size() if has_explicit else 128)
+        has_explicit = hf_text_config is not None and (
+            getattr(hf_text_config, "mamba_chunk_size", None) is not None
+            or getattr(hf_text_config, "chunk_size", None) is not None
+        )
+        self.mamba_chunk_size = self.model_config.get_mamba_chunk_size() if has_explicit else 128
 
     def rearrange_mixed_qkv(self, mixed_qkv):
         """Pure-torch rearrange – avoids einops graph breaks on HPU."""
@@ -79,12 +80,15 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         padding_mask_flat = getattr(attn_metadata, "padding_mask_flat", None)
 
         if not is_prompt:
-            num_decodes = (state_indices.numel() if state_indices is not None else
-                           (query_start_loc.numel() - 1 if query_start_loc is not None else num_tokens))
+            num_decodes = (
+                state_indices.numel()
+                if state_indices is not None
+                else (query_start_loc.numel() - 1 if query_start_loc is not None else num_tokens)
+            )
         else:
             num_decodes = 0
 
-        mamba_block_size = (self.cache_config.mamba_block_size if is_prompt else 0)
+        mamba_block_size = self.cache_config.mamba_block_size if is_prompt else 0
 
         # Prefill-specific metadata (Python ints for torch.compile)
         prefill_num_seqs = 0
@@ -92,13 +96,25 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         initial_state = None
         if is_prompt and state_indices is not None:
             prefill_num_seqs = int(state_indices.numel())
-            prefill_seq_len = (num_tokens // prefill_num_seqs if prefill_num_seqs > 0 else 0)
+            prefill_seq_len = num_tokens // prefill_num_seqs if prefill_num_seqs > 0 else 0
             initial_state = ssm_state[state_indices].contiguous()
             if has_initial_state is not None:
                 initial_state[~has_initial_state.bool(), ...] = 0
 
-        return (is_prompt, conv_state, ssm_state, state_indices, query_start_loc, has_initial_state, padding_mask_flat,
-                num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state)
+        return (
+            is_prompt,
+            conv_state,
+            ssm_state,
+            state_indices,
+            query_start_loc,
+            has_initial_state,
+            padding_mask_flat,
+            num_decodes,
+            mamba_block_size,
+            prefill_num_seqs,
+            prefill_seq_len,
+            initial_state,
+        )
 
     def forward(
         self,
@@ -115,9 +131,20 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         num_tokens = hidden_states.size(0)
 
         # === Metadata extraction (natural graph break) ===============
-        (is_prompt, conv_state, ssm_state, state_indices, query_start_loc, has_initial_state, padding_mask_flat,
-         num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len,
-         initial_state) = self._extract_metadata(num_tokens)
+        (
+            is_prompt,
+            conv_state,
+            ssm_state,
+            state_indices,
+            query_start_loc,
+            has_initial_state,
+            padding_mask_flat,
+            num_decodes,
+            mamba_block_size,
+            prefill_num_seqs,
+            prefill_seq_len,
+            initial_state,
+        ) = self._extract_metadata(num_tokens)
 
         # === Part 1: Input Projection ================================
         mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
@@ -141,7 +168,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             pass
         elif is_prompt:
             # === Part 2a: Prefill ====================================
-            if (padding_mask_flat is not None and padding_mask_flat.numel() == num_tokens):
+            if padding_mask_flat is not None and padding_mask_flat.numel() == num_tokens:
                 token_mask_flat = padding_mask_flat.view(-1, 1).to(dtype=mixed_qkv.dtype)
                 mixed_qkv = mixed_qkv * token_mask_flat
                 b = b * token_mask_flat
@@ -180,23 +207,27 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 g = g * token_mask_h
                 beta = beta * token_mask_h
 
-            core_attn_out_result, final_state = \
-                hpu_chunk_gated_delta_rule(
-                    q=query, k=key, v=value, g=g, beta=beta,
-                    initial_state=initial_state,
-                    output_final_state=True,
-                    use_qk_l2norm_in_kernel=True,
-                    chunk_size=self.mamba_chunk_size,
-                    prefill_num_seqs=prefill_num_seqs,
-                    prefill_seq_len=prefill_seq_len,
-                )
+            core_attn_out_result, final_state = hpu_chunk_gated_delta_rule(
+                q=query,
+                k=key,
+                v=value,
+                g=g,
+                beta=beta,
+                initial_state=initial_state,
+                output_final_state=True,
+                use_qk_l2norm_in_kernel=True,
+                chunk_size=self.mamba_chunk_size,
+                prefill_num_seqs=prefill_num_seqs,
+                prefill_seq_len=prefill_seq_len,
+            )
 
             assert final_state is not None
-            ssm_state.index_copy_(0, state_indices.long(), final_state.to(device=ssm_state.device,
-                                                                          dtype=ssm_state.dtype))
+            ssm_state.index_copy_(
+                0, state_indices.long(), final_state.to(device=ssm_state.device, dtype=ssm_state.dtype)
+            )
 
             non_spec_out = core_attn_out_result.squeeze(0)
-            core_attn_out[:non_spec_out.shape[0]] = non_spec_out
+            core_attn_out[: non_spec_out.shape[0]] = non_spec_out
 
         else:
             # === Part 2b: Decode =====================================
@@ -218,17 +249,18 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
             query, key, value = self.rearrange_mixed_qkv(mixed_qkv_conv)
 
-            core_attn_out_result, _ = \
-                hpu_fused_recurrent_gated_delta_rule(
-                    q=query, k=key, v=value, g=g, beta=beta,
-                    initial_state=ssm_state,
-                    inplace_final_state=True,
-                    cu_seqlens=(
-                        query_start_loc[:num_decodes + 1]
-                        if query_start_loc is not None else None),
-                    ssm_state_indices=state_indices,
-                    use_qk_l2norm_in_kernel=True,
-                )
+            core_attn_out_result, _ = hpu_fused_recurrent_gated_delta_rule(
+                q=query,
+                k=key,
+                v=value,
+                g=g,
+                beta=beta,
+                initial_state=ssm_state,
+                inplace_final_state=True,
+                cu_seqlens=(query_start_loc[: num_decodes + 1] if query_start_loc is not None else None),
+                ssm_state_indices=state_indices,
+                use_qk_l2norm_in_kernel=True,
+            )
 
             non_spec_out = core_attn_out_result.squeeze(0)
             if non_spec_out.shape[0] == core_attn_out.shape[0]:

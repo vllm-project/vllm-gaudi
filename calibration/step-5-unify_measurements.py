@@ -15,7 +15,7 @@ def find_measurement_path(measurement, measurements_dir_path, scales, group_size
     measurment_card = "_" + measurement + "_" + str(group_size)
     for measurment_file in os.listdir(measurements_dir_path):
         filename = os.fsdecode(measurment_file)
-        if (not filename.endswith(".json") or "_mod_list" in filename or measurment_card not in filename):
+        if not filename.endswith(".json") or "_mod_list" in filename or measurment_card not in filename:
             continue
         if scales:
             if "MAXABS" in filename:
@@ -26,11 +26,11 @@ def find_measurement_path(measurement, measurements_dir_path, scales, group_size
 
 
 def is_fused_moe_op(node_name):
-    return ("moe" in node_name.lower() and ".w13_list" not in node_name and ".w2_list" not in node_name)
+    return "moe" in node_name.lower() and ".w13_list" not in node_name and ".w2_list" not in node_name
 
 
 def is_moe_experts(node_name):
-    return ("moe" in node_name.lower() and (".w13_list" in node_name or ".w2_list" in node_name))
+    return "moe" in node_name.lower() and (".w13_list" in node_name or ".w2_list" in node_name)
 
 
 def get_expert_id(node_name):
@@ -56,14 +56,16 @@ def get_local_expert_num(data):
     return expert_id + 1
 
 
-def unify_measurements(measurement_group,
-                       measurements_dir_path,
-                       output_path,
-                       groups_size,
-                       groups_num,
-                       group_index,
-                       scales=False,
-                       use_ep=False):
+def unify_measurements(
+    measurement_group,
+    measurements_dir_path,
+    output_path,
+    groups_size,
+    groups_num,
+    group_index,
+    scales=False,
+    use_ep=False,
+):
     measurements_paths = []
     group_name = ""
 
@@ -75,8 +77,7 @@ def unify_measurements(measurement_group,
         group_name += measurement
 
     if len(measurements_paths) == 0:
-        print("Error: invalid measurement paths. No *.json files or no "
-              "*mod_list.json files.")
+        print("Error: invalid measurement paths. No *.json files or no *mod_list.json files.")
         return
 
     # save all the jsons content in the given measurement group
@@ -218,28 +219,25 @@ def unify_measurements(measurement_group,
 
 
 def parse_args(args):
-    parser = argparse.ArgumentParser(description="Run the measurements parser",
-                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("-m",
-                        "--measurements",
-                        type=str,
-                        help="path to the directory of the measurements that will be "
-                        "unified")
+    parser = argparse.ArgumentParser(
+        description="Run the measurements parser", formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument(
+        "-m", "--measurements", type=str, help="path to the directory of the measurements that will be unified"
+    )
     parser.add_argument("-r", "--rank", type=int, help="rank of unified measurements")
     parser.add_argument(
         "-o",
         "--out",
         type=str,
         default=os.getcwd(),
-        help="path to the directory where the unified measurements will be "
-        "written",
+        help="path to the directory where the unified measurements will be written",
     )
     parser.add_argument(
         "-u",
         "--use_expert_paral",
         action="store_true",
-        help="unify original measurement results based on expert parallelism "
-        "rules",
+        help="unify original measurement results based on expert parallelism rules",
     )
     parser.add_argument(
         "-s",
@@ -258,8 +256,8 @@ def prepare_group_list(measurements_path, rank):
         if matched:
             total_rank = int(matched.group(3))
             assert (rank < total_rank) and (total_rank % rank) == 0, (
-                f"Original total_rank {total_rank} should be larger than your "
-                f"target rank {rank} and be divisible by it")
+                f"Original total_rank {total_rank} should be larger than your target rank {rank} and be divisible by it"
+            )
             group_size = total_rank // rank
             group_list = [[str(i * group_size + j) for j in range(group_size)] for i in range(rank)]
             print("Card grouping list >> {}".format(group_list))
@@ -286,18 +284,23 @@ def main(args):
                 num_jsons_scales += 1
             elif "mod_list" not in path:
                 num_jsons_drange += 1
-    assert (os.path.isdir(measurements_path) and (num_jsons_drange % len(groups)) == 0
-            and (num_jsons_scales % len(groups)) == 0)
+    assert (
+        os.path.isdir(measurements_path)
+        and (num_jsons_drange % len(groups)) == 0
+        and (num_jsons_scales % len(groups)) == 0
+    )
 
     for group_index, group in enumerate(groups):
-        unify_measurements(group,
-                           measurements_path,
-                           output_path,
-                           num_jsons_drange,
-                           len(groups),
-                           group_index,
-                           scales=False,
-                           use_ep=args.use_expert_paral)
+        unify_measurements(
+            group,
+            measurements_path,
+            output_path,
+            num_jsons_drange,
+            len(groups),
+            group_index,
+            scales=False,
+            use_ep=args.use_expert_paral,
+        )
         if not args.skip_unify_scales:
             unify_measurements(
                 group,

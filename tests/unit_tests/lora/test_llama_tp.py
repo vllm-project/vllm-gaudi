@@ -55,7 +55,9 @@ def do_sample(
                 lora_id,
                 lora_path,
                 tensorizer_config_dict=tensorizer_config_dict,
-            ) if lora_id else None,
+            )
+            if lora_id
+            else None,
         )
     else:
         outputs = llm.generate(
@@ -76,20 +78,26 @@ def do_sample(
 def generate_and_test(llm, llama32_lora_files, tensorizer_config_dict: dict | None = None):
     print("lora adapter created")
     print("lora 1")
-    assert (do_sample(
-        llm,
-        llama32_lora_files,
-        tensorizer_config_dict=tensorizer_config_dict,
-        lora_id=1,
-    ) == EXPECTED_LORA_OUTPUT)
+    assert (
+        do_sample(
+            llm,
+            llama32_lora_files,
+            tensorizer_config_dict=tensorizer_config_dict,
+            lora_id=1,
+        )
+        == EXPECTED_LORA_OUTPUT
+    )
 
     print("lora 2")
-    assert (do_sample(
-        llm,
-        llama32_lora_files,
-        tensorizer_config_dict=tensorizer_config_dict,
-        lora_id=2,
-    ) == EXPECTED_LORA_OUTPUT)
+    assert (
+        do_sample(
+            llm,
+            llama32_lora_files,
+            tensorizer_config_dict=tensorizer_config_dict,
+            lora_id=2,
+        )
+        == EXPECTED_LORA_OUTPUT
+    )
 
     print("removing lora")
 
@@ -102,7 +110,7 @@ def test_llama_lora(llama32_lora_files):
         max_num_seqs=7,
         max_model_len=1024,
         max_loras=4,
-        dtype='bfloat16',
+        dtype="bfloat16",
         hf_token=os.environ.get("HF_TOKEN"),
     )
     generate_and_test(llm, llama32_lora_files)

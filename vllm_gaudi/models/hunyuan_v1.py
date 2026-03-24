@@ -3,13 +3,14 @@ from torch import nn
 from typing import Optional
 
 from vllm.config import VllmConfig
-from vllm.model_executor.models.hunyuan_v1 import (HunYuanAttention, HunYuanDenseV1ForCausalLM as
-                                                   _HunYuanDenseV1ForCausalLM, HunYuanMoEV1ForCausalLM as
-                                                   _HunYuanMoEV1ForCausalLM)
+from vllm.model_executor.models.hunyuan_v1 import (
+    HunYuanAttention,
+    HunYuanDenseV1ForCausalLM as _HunYuanDenseV1ForCausalLM,
+    HunYuanMoEV1ForCausalLM as _HunYuanMoEV1ForCausalLM,
+)
 
 
 class HpuHunYuanAttention(HunYuanAttention):
-
     def forward(
         self,
         positions: torch.Tensor,
@@ -33,20 +34,17 @@ class HpuHunYuanAttention(HunYuanAttention):
 
 def _patch_hunyuan_attention(model: nn.Module):
     for layer in model.model.layers:
-        if isinstance(layer.self_attn, HunYuanAttention) and \
-           not isinstance(layer.self_attn, HpuHunYuanAttention):
+        if isinstance(layer.self_attn, HunYuanAttention) and not isinstance(layer.self_attn, HpuHunYuanAttention):
             layer.self_attn.__class__ = HpuHunYuanAttention
 
 
 class HpuHunYuanDenseV1ForCausalLM(_HunYuanDenseV1ForCausalLM):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         _patch_hunyuan_attention(self)
 
 
 class HpuHunYuanMoEV1ForCausalLM(_HunYuanMoEV1ForCausalLM):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         _patch_hunyuan_attention(self)

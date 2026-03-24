@@ -1,5 +1,5 @@
 from vllm.config import VllmConfig
-from vllm.model_executor.models.dots_ocr import (DotsOCRForCausalLM, DotsOCRProcessingInfo, DotsOCRDummyInputsBuilder)
+from vllm.model_executor.models.dots_ocr import DotsOCRForCausalLM, DotsOCRProcessingInfo, DotsOCRDummyInputsBuilder
 from vllm.model_executor.models.qwen2_vl import Qwen2VLMultiModalProcessor
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
@@ -10,6 +10,5 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
     dummy_inputs=DotsOCRDummyInputsBuilder,
 )
 class HpuDotsOCRForCausalLM(DotsOCRForCausalLM):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)

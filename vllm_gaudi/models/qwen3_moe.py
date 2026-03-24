@@ -2,7 +2,8 @@ import torch
 from torch import nn
 
 from vllm.model_executor.models.qwen3_moe import (
-    Qwen3MoeSparseMoeBlock as UpstreamQwen3MoeSparseMoeBlock, )
+    Qwen3MoeSparseMoeBlock as UpstreamQwen3MoeSparseMoeBlock,
+)
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.distributed import tensor_model_parallel_all_gather
 
@@ -32,8 +33,9 @@ class HpuQwen3MoeSparseMoeBlock(UpstreamQwen3MoeSparseMoeBlock):
 
         if isinstance(experts_out, tuple):
             if len(experts_out) != 2:
-                raise RuntimeError(f"unexpected experts() tuple length={len(experts_out)}; "
-                                   "expected (shared_out, fused_out).")
+                raise RuntimeError(
+                    f"unexpected experts() tuple length={len(experts_out)}; expected (shared_out, fused_out)."
+                )
             shared_out, fused_out = experts_out
             if fused_out is None:
                 raise RuntimeError("experts() returned fused_out=None")

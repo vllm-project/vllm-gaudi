@@ -14,12 +14,13 @@ import torch
 
 # Check environment variable
 _USE_PYTORCH = os.environ.get("VLLM_MAMBA_USE_PYTORCH", "0") == "1"
-_USE_SELECTIVE_STATE_UPDATE_REF = os.environ.get("VLLM_MAMBA_USE_SELECTIVE_STATE_UPDATE_REF_PT",
-                                                 "1") == "1"  #selective_state_update_ref
+_USE_SELECTIVE_STATE_UPDATE_REF = (
+    os.environ.get("VLLM_MAMBA_USE_SELECTIVE_STATE_UPDATE_REF_PT", "1") == "1"
+)  # selective_state_update_ref
 
 
 def _use_pytorch_runtime():
-    """Check at runtime whether to use PyTorch implementation.  
+    """Check at runtime whether to use PyTorch implementation.
     This allows torch.compile to respect the environment variable."""
     return os.environ.get("VLLM_MAMBA_USE_PYTORCH", "0") == "1"
 
@@ -36,12 +37,12 @@ def use_pytorch_selective_state_update_ref() -> bool:
 def get_selective_state_update_impl():
     """
     Returns the selective state update implementation.
-    
+
     PyTorch version signature:
-        selective_state_update_ref(state, x, dt, A, B, C, D=None, z=None, 
+        selective_state_update_ref(state, x, dt, A, B, C, D=None, z=None,
                                    dt_bias=None, dt_softplus=False)
         Returns: output tensor
-        
+
     """
     # Import both implementations
     from .pytorch_implementation import selective_state_update_ref
@@ -50,21 +51,24 @@ def get_selective_state_update_impl():
     pytorch_wrapped = _wrap_selective_state_update_ref(selective_state_update_ref)
 
     # Return a runtime dispatcher
-    def dispatcher(state,
-                   x,
-                   dt,
-                   A,
-                   B,
-                   C,
-                   D=None,
-                   z=None,
-                   dt_bias=None,
-                   dt_softplus=False,
-                   state_batch_indices=None,
-                   dst_state_batch_indices=None,
-                   out=None):
-        return pytorch_wrapped(state, x, dt, A, B, C, D, z, dt_bias, dt_softplus, state_batch_indices,
-                               dst_state_batch_indices, out)
+    def dispatcher(
+        state,
+        x,
+        dt,
+        A,
+        B,
+        C,
+        D=None,
+        z=None,
+        dt_bias=None,
+        dt_softplus=False,
+        state_batch_indices=None,
+        dst_state_batch_indices=None,
+        out=None,
+    ):
+        return pytorch_wrapped(
+            state, x, dt, A, B, C, D, z, dt_bias, dt_softplus, state_batch_indices, dst_state_batch_indices, out
+        )
 
     return dispatcher
 
@@ -72,19 +76,21 @@ def get_selective_state_update_impl():
 def _wrap_selective_state_update_ref(selective_state_update_ref_fn):
     """Wrapper to adapt PyTorch selective_state_update_ref to match Triton API."""
 
-    def wrapped(state,
-                x,
-                dt,
-                A,
-                B,
-                C,
-                D=None,
-                z=None,
-                dt_bias=None,
-                dt_softplus=False,
-                state_batch_indices=None,
-                dst_state_batch_indices=None,
-                out=None):
+    def wrapped(
+        state,
+        x,
+        dt,
+        A,
+        B,
+        C,
+        D=None,
+        z=None,
+        dt_bias=None,
+        dt_softplus=False,
+        state_batch_indices=None,
+        dst_state_batch_indices=None,
+        out=None,
+    ):
         # PyTorch ref version doesn't support the batch indices parameters
         # These are used in Triton for selective state updates with batching
         if state_batch_indices is not None or dst_state_batch_indices is not None:
@@ -106,16 +112,9 @@ def _wrap_selective_state_update_ref(selective_state_update_ref_fn):
             selected_state = state[state_batch_indices].clone()
 
             # Run the update
-            result = selective_state_update_ref_fn(selected_state,
-                                                   x,
-                                                   dt,
-                                                   A,
-                                                   B,
-                                                   C,
-                                                   D=D,
-                                                   z=z,
-                                                   dt_bias=dt_bias,
-                                                   dt_softplus=dt_softplus)
+            result = selective_state_update_ref_fn(
+                selected_state, x, dt, A, B, C, D=D, z=z, dt_bias=dt_bias, dt_softplus=dt_softplus
+            )
 
             # Write back the updated states
             state[dst_state_batch_indices] = selected_state
@@ -128,16 +127,9 @@ def _wrap_selective_state_update_ref(selective_state_update_ref_fn):
                 return result
         else:
             # No batch indices, use the simple path
-            result = selective_state_update_ref_fn(state,
-                                                   x,
-                                                   dt,
-                                                   A,
-                                                   B,
-                                                   C,
-                                                   D=D,
-                                                   z=z,
-                                                   dt_bias=dt_bias,
-                                                   dt_softplus=dt_softplus)
+            result = selective_state_update_ref_fn(
+                state, x, dt, A, B, C, D=D, z=z, dt_bias=dt_bias, dt_softplus=dt_softplus
+            )
 
             # If out is provided, copy result into it (to match Triton's in-place behavior)
             if out is not None:

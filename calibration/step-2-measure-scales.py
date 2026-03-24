@@ -56,8 +56,10 @@ def get_dataset(args):
         num_samples=512,
         least_tokens=1024,
     ):
-        print(f"Loading {num_samples} samples with at least {least_tokens} tokens "
-              f"from {dataset_name} for model {model_name}...")
+        print(
+            f"Loading {num_samples} samples with at least {least_tokens} tokens "
+            f"from {dataset_name} for model {model_name}..."
+        )
         from datasets import load_dataset
         from tqdm import tqdm
         import transformers
@@ -94,6 +96,7 @@ def get_dataset(args):
         )
     except (OSError, ValueError, RuntimeError, ImportError, ConnectionError, FileNotFoundError) as e:
         import sys
+
         sys.exit(f"Failed to load prompts from dataset {args.dataset}. Error: {e}")
     prompt_token_ids = get_prompt_token_ids(args.model, prompts, least_tokens)
     print(f"Got {len(prompts)} prompts, length of first prompt: {len(prompt_token_ids[0])}.")
@@ -141,9 +144,8 @@ if __name__ == "__main__":
         "--distributed-executor-backend",
         choices=["mp", "ray"],
         default="mp",
-        help=
-        "For single node calibration use the default multiprocessing backend. " \
-        "For multi-node calibration use ray backend"
+        help="For single node calibration use the default multiprocessing backend. "
+        "For multi-node calibration use ray backend",
     )
 
     args = parser.parse_args()
@@ -166,8 +168,11 @@ if __name__ == "__main__":
     if not args.auto_process_dataset:
         input_batch = []
         dataset_len = len(calibration_ds)
-        batch_num = dataset_len // args.batch_size if dataset_len % args.batch_size == 0 else (dataset_len //
-                                                                                               args.batch_size) + 1
+        batch_num = (
+            dataset_len // args.batch_size
+            if dataset_len % args.batch_size == 0
+            else (dataset_len // args.batch_size) + 1
+        )
         batch_done = 0
         for i, (_, row) in enumerate(calibration_ds.iterrows()):
             input_batch.append(row["input"])
@@ -176,8 +181,10 @@ if __name__ == "__main__":
                 generate_responses(llm, input_batch, args)
                 t_end = time.perf_counter()
                 batch_done += 1
-                print(f"Batch finished: {i}/{calibration_ds.shape[0]} samples done; ETA: "
-                      f"{int((t_end - t_start) * (batch_num - batch_done) // 60)} min")
+                print(
+                    f"Batch finished: {i}/{calibration_ds.shape[0]} samples done; ETA: "
+                    f"{int((t_end - t_start) * (batch_num - batch_done) // 60)} min"
+                )
                 input_batch = []
         generate_responses(llm, input_batch, args)
         print(f"Last batch finished: {i + 1}/{calibration_ds.shape[0]} samples done")

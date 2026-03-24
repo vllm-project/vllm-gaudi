@@ -18,17 +18,20 @@ logger = init_logger()
 class PROMPT_DATA:
     _questions = {
         "image": [
-            "What is the most prominent object in this image?", "Describe the scene in the image.",
-            "What is the weather like in the image?", "Write a short poem about this image."
+            "What is the most prominent object in this image?",
+            "Describe the scene in the image.",
+            "What is the weather like in the image?",
+            "Write a short poem about this image.",
         ],
         "multi_image": [
             "Compare and contrast these images. What are the similarities and differences?",
             "Tell a story that connects all these images together.",
             "What common themes do you see across these images?",
-            "Describe the progression or sequence shown in these images.", "Which image stands out the most and why?",
-            "What emotions or moods are conveyed by these images collectively?"
+            "Describe the progression or sequence shown in these images.",
+            "Which image stands out the most and why?",
+            "What emotions or moods are conveyed by these images collectively?",
         ],
-        "video": ["Describe this video", "Which movie would you associate this video with?"]
+        "video": ["Describe this video", "Which movie would you associate this video with?"],
     }
 
     def __post_init__(self):
@@ -65,11 +68,14 @@ class PROMPT_DATA:
                     converted_img = convert_image_mode(img, "RGB")
                     images.append(converted_img)
                     loaded_count += 1
-                    logger.info("Successfully loaded ImageAsset: %(asset_name)s (Size: %(size)s)",
-                                dict(asset_name=asset_name, size=converted_img.size))
+                    logger.info(
+                        "Successfully loaded ImageAsset: %(asset_name)s (Size: %(size)s)",
+                        dict(asset_name=asset_name, size=converted_img.size),
+                    )
                 except Exception as e:
-                    logger.warning("Failed to load ImageAsset '%(asset_name)s': %(e)s", dict(asset_name=asset_name,
-                                                                                             e=e))
+                    logger.warning(
+                        "Failed to load ImageAsset '%(asset_name)s': %(e)s", dict(asset_name=asset_name, e=e)
+                    )
                     continue
 
         elif isinstance(source, list):
@@ -95,13 +101,15 @@ class PROMPT_DATA:
         else:
             raise ValueError(f"Unsupported modality: {modality}")
 
-    def get_prompts(self,
-                    model_name: str = "",
-                    modality: str = "image",
-                    media_source: str = "default",
-                    num_prompts: int = 1,
-                    num_images: int = 1,
-                    skip_vision_data=False):
+    def get_prompts(
+        self,
+        model_name: str = "",
+        modality: str = "image",
+        media_source: str = "default",
+        num_prompts: int = 1,
+        num_images: int = 1,
+        skip_vision_data=False,
+    ):
 
         # Handle multi-image modality
         if modality == "multi_image" or modality == "image":
@@ -109,15 +117,19 @@ class PROMPT_DATA:
         elif modality == "video":
             pholder = "<video>" if "gemma" in model_name.lower() else "<|video_pad|>"
         else:
-            raise ValueError(f"Unsupported modality: {modality}."
-                             " Supported modality: [image, video, multi_image]")
+            raise ValueError(f"Unsupported modality: {modality}. Supported modality: [image, video, multi_image]")
 
         questions = self._questions[modality]
 
-        prompts = [("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-                    f"<|im_start|>user\n<|vision_start|>{pholder}<|vision_end|>"
-                    f"{question}<|im_end|>\n"
-                    "<|im_start|>assistant\n") for question in questions]
+        prompts = [
+            (
+                "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+                f"<|im_start|>user\n<|vision_start|>{pholder}<|vision_end|>"
+                f"{question}<|im_end|>\n"
+                "<|im_start|>assistant\n"
+            )
+            for question in questions
+        ]
 
         data = self._get_data(modality, media_source)
 
@@ -129,19 +141,25 @@ class PROMPT_DATA:
                     "multi_modal_data": {
                         "image": data  # Pass list of images
                     },
-                } if not skip_vision_data else {
+                }
+                if not skip_vision_data
+                else {
                     "prompt": questions[i % len(questions)],
-                } for i in range(num_prompts)
+                }
+                for i in range(num_prompts)
             ]
         else:
-            inputs = [{
-                "prompt": prompts[i % len(prompts)],
-                "multi_modal_data": {
-                    modality: data
-                },
-            } if not skip_vision_data else {
-                "prompt": questions[i % len(questions)],
-            } for i in range(num_prompts)]
+            inputs = [
+                {
+                    "prompt": prompts[i % len(prompts)],
+                    "multi_modal_data": {modality: data},
+                }
+                if not skip_vision_data
+                else {
+                    "prompt": questions[i % len(questions)],
+                }
+                for i in range(num_prompts)
+            ]
 
         return inputs
 
@@ -208,17 +226,22 @@ def start_test(model_card_path: str):
                 "input_data_config: %(input_data_config)s\n"
                 "extra_engine_args: %(extra_engine_args)s\n"
                 "================================================",
-                dict(modality=modality, input_data_config=input_data_config, extra_engine_args=extra_engine_args))
+                dict(modality=modality, input_data_config=input_data_config, extra_engine_args=extra_engine_args),
+            )
 
             data = PROMPT_DATA()
-            inputs = data.get_prompts(model_name=model_name,
-                                      modality=modality,
-                                      media_source=media_source,
-                                      num_prompts=num_prompts,
-                                      num_images=num_images)
+            inputs = data.get_prompts(
+                model_name=model_name,
+                modality=modality,
+                media_source=media_source,
+                num_prompts=num_prompts,
+                num_images=num_images,
+            )
 
-            logger.info("*** Questions for modality %(modality)s: %(questions)s",
-                        dict(modality=modality, questions=data._questions[modality]))
+            logger.info(
+                "*** Questions for modality %(modality)s: %(questions)s",
+                dict(modality=modality, questions=data._questions[modality]),
+            )
             responses = run_model(model_name, inputs, modality, **extra_engine_args)
             for response in responses:
                 print(f"{response.outputs[0].text}")
@@ -241,6 +264,7 @@ if __name__ == "__main__":
     except Exception:
         import os
         import traceback
+
         print("An error occurred during generation:")
         traceback.print_exc()
         os._exit(1)

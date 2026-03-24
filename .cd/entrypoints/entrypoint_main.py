@@ -23,9 +23,9 @@ class EntrypointMain:
         self.config_name = config_name
         self.config_envs = {}
         if (self.config_file is not None) ^ (self.config_name is not None):
-            print("[ERROR] Both --config-file and --config-name must be "
-                  "provided together, or neither.",
-                  file=sys.stderr)
+            print(
+                "[ERROR] Both --config-file and --config-name must be provided together, or neither.", file=sys.stderr
+            )
             sys.exit(1)
 
     def _load_env_from_defaults(self):
@@ -36,8 +36,7 @@ class EntrypointMain:
         If no section matches, loads nothing.
         If the file does not exist, it returns an empty dictionary.
         """
-        defaults_file = ("server/server_defaults.yaml"
-                         if self.mode == "server" else "benchmark/benchmark_defaults.yaml")
+        defaults_file = "server/server_defaults.yaml" if self.mode == "server" else "benchmark/benchmark_defaults.yaml"
         try:
             with open(defaults_file) as f:
                 config = yaml.safe_load(f)
@@ -45,23 +44,26 @@ class EntrypointMain:
                 for section_name, section in config.items():
                     if section_name.startswith("model_") and isinstance(section, dict):
                         models = section.get("MODELS", [])
-                        if (isinstance(models, list) and self.config_envs.get("MODEL") in models):
+                        if isinstance(models, list) and self.config_envs.get("MODEL") in models:
                             env_vars = {k: v for k, v in section.items() if k != "MODELS"}
                             self.config_envs.update(env_vars)
-                            print(f"[INFO] Loaded default configuration section "
-                                  f"'{section_name}' for model "
-                                  f"'{self.config_envs.get('MODEL')}' from file: "
-                                  f"{defaults_file}")
+                            print(
+                                f"[INFO] Loaded default configuration section "
+                                f"'{section_name}' for model "
+                                f"'{self.config_envs.get('MODEL')}' from file: "
+                                f"{defaults_file}"
+                            )
                             for key, value in env_vars.items():
                                 print(f"    {key}: {value}")
                             found = True
                 if not found:
-                    print(f"[WARNING] No defaults section found for model "
-                          f"'{self.config_envs.get('MODEL')}' in "
-                          f"'{defaults_file}'.")
+                    print(
+                        f"[WARNING] No defaults section found for model "
+                        f"'{self.config_envs.get('MODEL')}' in "
+                        f"'{defaults_file}'."
+                    )
         except FileNotFoundError:
-            print(f"[WARNING] Defaults file '{defaults_file}' not found. "
-                  "No defaults loaded.")
+            print(f"[WARNING] Defaults file '{defaults_file}' not found. No defaults loaded.")
         except Exception as e:
             print(
                 f"[ERROR] Failed to load defaults: {e}",
@@ -92,8 +94,7 @@ class EntrypointMain:
                         file=sys.stderr,
                     )
                     sys.exit(1)
-                print(f"[INFO] Loaded configuration section "
-                      f"'{self.config_name}' from file: {self.config_file}")
+                print(f"[INFO] Loaded configuration section '{self.config_name}' from file: {self.config_file}")
                 for key, value in section.items():
                     print(f"    {key}: {value}")
                 return section
@@ -129,8 +130,7 @@ class EntrypointMain:
                     if key:
                         env_vars.append(key)
         except FileNotFoundError:
-            print(f"[WARNING] .env file '{env_file}' not found. "
-                  "No user-defined variables loaded from .env.")
+            print(f"[WARNING] .env file '{env_file}' not found. No user-defined variables loaded from .env.")
 
         # For each variable, if present in environment, update config_envs
         for param in env_vars:
@@ -139,19 +139,18 @@ class EntrypointMain:
                     self.config_envs[param] = eval(os.environ[param])
                 except Exception:
                     self.config_envs[param] = os.environ[param]
-                print(f"[INFO] Overwriting {param} with value from environment: "
-                      f"{self.config_envs[param]}")
+                print(f"[INFO] Overwriting {param} with value from environment: {self.config_envs[param]}")
         if not env_vars:
             print(f"[WARNING] No variables loaded from '{env_file}'.")
 
     def run(self):
 
         if self.mode == "test":
-            print("[INFO] Test mode: keeping container active. "
-                  "Press Ctrl+C to exit.")
+            print("[INFO] Test mode: keeping container active. Press Ctrl+C to exit.")
             try:
                 while True:
                     import time
+
                     time.sleep(60)
             except KeyboardInterrupt:
                 print("Exiting test mode.")
@@ -202,8 +201,7 @@ class EntrypointMain:
                 log_dir="logs",
             ).create_and_run()
         else:
-            print(f"[ERROR] Unknown mode '{self.mode}'. Use 'server', "
-                  "'benchmark' or 'test'.")
+            print(f"[ERROR] Unknown mode '{self.mode}'. Use 'server', 'benchmark' or 'test'.")
             sys.exit(1)
 
 

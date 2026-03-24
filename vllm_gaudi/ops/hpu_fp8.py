@@ -7,10 +7,9 @@ from torch.nn.parameter import Parameter
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
 from vllm.model_executor.layers.quantization import fp8
-from vllm.model_executor.layers.quantization.fp8 import (Fp8LinearMethod as OrigFp8LinearMethod, Fp8MoEMethod,
-                                                         Fp8Config)
+from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod as OrigFp8LinearMethod, Fp8MoEMethod, Fp8Config
 import vllm_gaudi.extension.ops as hpu_ops
-from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel, VllmMixtureOfExpertsOpFP8)
+from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpFP8PerChannel, VllmMixtureOfExpertsOpFP8
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.utils import has_quant_config
 from vllm_gaudi.ops.hpu_fused_moe import _normalize_moe_activation
@@ -25,14 +24,12 @@ from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
 
 
 class HPUPerTensorTorchFP8ScaledMMLinearKernel(PerTensorTorchFP8ScaledMMLinearKernel):
-
     @classmethod
     def is_supported(cls, compute_capability: int | None = None) -> tuple[bool, str | None]:
         return True, None
 
 
 class HPUChannelWiseTorchFP8ScaledMMLinearKernel(ChannelWiseTorchFP8ScaledMMLinearKernel):
-
     @classmethod
     def is_supported(cls, compute_capability: int | None = None) -> tuple[bool, str | None]:
         return True, None
@@ -46,10 +43,9 @@ if PlatformEnum.OOT not in _POSSIBLE_FP8_KERNELS:
 
 
 class Fp8LinearMethod(OrigFp8LinearMethod):
-
     def create_weights(self, *args, **kwargs) -> None:
         if hpu_ops.is_hpu_gaudi2:
-            kwargs['weight_loader'] = hpu_ops.gaudi_weight_wrapper(kwargs.get('weight_loader'))
+            kwargs["weight_loader"] = hpu_ops.gaudi_weight_wrapper(kwargs.get("weight_loader"))
         super().create_weights(*args, **kwargs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -85,7 +81,7 @@ class Fp8LinearMethod(OrigFp8LinearMethod):
         # Update layer with new values.
         layer.weight = Parameter(weight.data, requires_grad=False)
         layer.weight_scale = Parameter(weight_scale.data, requires_grad=False)
-        layer.input_scale = (Parameter(input_scale, requires_grad=False) if input_scale is not None else None)
+        layer.input_scale = Parameter(input_scale, requires_grad=False) if input_scale is not None else None
 
     def apply(self, layer: torch.nn.Module, x: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         if self.block_quant:
@@ -100,14 +96,16 @@ class Fp8LinearMethod(OrigFp8LinearMethod):
             )
 
         weight_scale = layer.weight_scale.transpose(0, 1) if layer.weight_scale.dim() > 1 else layer.weight_scale
-        input_scale = getattr(layer, 'input_scale', None)
+        input_scale = getattr(layer, "input_scale", None)
         input_2d = x.view(-1, x.shape[-1])
-        output = hpu_ops.apply_fp8_linear_hpu(input=input_2d,
-                                              weight=layer.weight,
-                                              weight_scale=weight_scale,
-                                              input_scale=input_scale,
-                                              bias=bias,
-                                              trans_B=False)
+        output = hpu_ops.apply_fp8_linear_hpu(
+            input=input_2d,
+            weight=layer.weight,
+            weight_scale=weight_scale,
+            input_scale=input_scale,
+            bias=bias,
+            trans_B=False,
+        )
         return output.view(*x.shape[:-1], -1)
 
     def dequant_fp8_weight(self, layer) -> torch.Tensor:
@@ -125,7 +123,6 @@ class Fp8LinearMethod(OrigFp8LinearMethod):
 
 
 class HPUFp8MoEMethod(Fp8MoEMethod):
-
     def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
         super().__init__(quant_config, layer)
 
@@ -144,8 +141,8 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
 
     def create_weights(self, *args, **kwargs) -> None:
         if hpu_ops.is_hpu_gaudi2:
-            kwargs['weight_loader'] = hpu_ops.gaudi_weight_wrapper(kwargs.get('weight_loader'))
-        kwargs['weight_loader'] = hpu_ops.synced_weight_loader(kwargs.get('weight_loader'))
+            kwargs["weight_loader"] = hpu_ops.gaudi_weight_wrapper(kwargs.get("weight_loader"))
+        kwargs["weight_loader"] = hpu_ops.synced_weight_loader(kwargs.get("weight_loader"))
         super().create_weights(*args, **kwargs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -178,9 +175,8 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
             layer = hpu_ops.fp8_block_moe_prepare_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
         else:
             if self.quant_config.activation_scheme == "static":
-                if (layer.w13_input_scale is None or layer.w2_input_scale is None):
-                    raise ValueError("QuantConfig has static quantization, but found "
-                                     "activation scales are None.")
+                if layer.w13_input_scale is None or layer.w2_input_scale is None:
+                    raise ValueError("QuantConfig has static quantization, but found activation scales are None.")
                 layer.w13_input_scale = torch.nn.Parameter(layer.w13_input_scale.max(), requires_grad=False)
             layer = hpu_ops.fp8_channel_moe_prepare_weights(layer)
 
@@ -198,6 +194,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
             topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
         else:
             import torch.nn.functional as F
+
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
             topk_weights, topk_ids = torch.topk(topk_weights, layer.top_k, dim=-1)
             topk_weights /= topk_weights.sum(dim=-1, keepdim=True)

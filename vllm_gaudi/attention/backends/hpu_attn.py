@@ -13,26 +13,35 @@ import torch
 import vllm_gaudi.extension.kernels as kernels
 import vllm_gaudi.extension.ops as ops
 from vllm_gaudi.extension.runtime import get_config
-from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, B2BMatmul, ModuleFusedSDPA, ModuleFP8FusedSDPA, Softmax,
-                                        VLLMFP8KVCache, VLLMKVCache)
+from vllm_gaudi.extension.utils import (
+    FP8Matmul,
+    Matmul,
+    B2BMatmul,
+    ModuleFusedSDPA,
+    ModuleFP8FusedSDPA,
+    Softmax,
+    VLLMFP8KVCache,
+    VLLMKVCache,
+)
 
-from vllm.v1.attention.backend import (AttentionBackend, AttentionImpl, AttentionLayer, AttentionMetadata,
-                                       AttentionType)
-from vllm.model_executor.layers.attention.mla_attention import (MLACommonImpl)
-from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention, HPUPagedAttentionMetadata,
-                                                     HPUPagedAttentionMetadataBuilder)
+from vllm.v1.attention.backend import AttentionBackend, AttentionImpl, AttentionLayer, AttentionMetadata, AttentionType
+from vllm.model_executor.layers.attention.mla_attention import MLACommonImpl
+from vllm_gaudi.attention.ops.hpu_paged_attn import (
+    HPUPagedAttention,
+    HPUPagedAttentionMetadata,
+    HPUPagedAttentionMetadataBuilder,
+)
 
 from vllm_gaudi.extension.logger import logger as init_logger
-from vllm_gaudi.extension.unified import (unified_attn, unified_mla, HPUUnifiedAttentionMetadata)
+from vllm_gaudi.extension.unified import unified_attn, unified_mla, HPUUnifiedAttentionMetadata
 from vllm.model_executor.layers.linear import ColumnParallelLinear
-from vllm.v1.attention.backends.registry import (register_backend, AttentionBackendEnum)
+from vllm.v1.attention.backends.registry import register_backend, AttentionBackendEnum
 from vllm._aiter_ops import rocm_aiter_ops
 
 logger = init_logger()
 
 
 class HPUAttentionBackend(AttentionBackend):
-
     @staticmethod
     def get_name() -> str:
         raise NotImplementedError()
@@ -76,7 +85,6 @@ class HPUAttentionBackend(AttentionBackend):
 
 @register_backend(AttentionBackendEnum.CUSTOM, "HPU_MLA")
 class HPUMLAAttentionBackend(HPUAttentionBackend):
-
     @staticmethod
     def get_name() -> str:
         return "CUSTOM"
@@ -101,7 +109,6 @@ class HPUMLAAttentionBackend(HPUAttentionBackend):
 
 @register_backend(AttentionBackendEnum.CUSTOM, "HPU_UA")
 class HPUUnifiedAttentionBackend(HPUAttentionBackend):
-
     @staticmethod
     def get_name() -> str:
         return "CUSTOM"
@@ -117,7 +124,6 @@ class HPUUnifiedAttentionBackend(HPUAttentionBackend):
 
 @register_backend(AttentionBackendEnum.CUSTOM, "HPU_UNIFIED_MLA")
 class HPUUnifiedMLABackend(HPUAttentionBackend):
-
     @staticmethod
     def get_name() -> str:
         return "CUSTOM"
@@ -145,6 +151,7 @@ class HPUUnifiedMLABackend(HPUAttentionBackend):
 @dataclass
 class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     """Metadata for HPUAttentionbackend."""
+
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
@@ -188,7 +195,6 @@ class HPUMLAMetadata(HPUAttentionMetadata, AttentionMetadata):
 
 
 class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
-
     def __init__(
         self,
         num_heads: int,
@@ -229,27 +235,22 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         self.kv_b_proj = kv_b_proj
 
         # NOTE(kzawora): restore this once https://github.com/vllm-project/vllm/pull/25385 is merged
-        #MLACommonImpl.__init__(self, num_heads, head_size, scale, num_kv_heads, alibi_slopes, sliding_window,
+        # MLACommonImpl.__init__(self, num_heads, head_size, scale, num_kv_heads, alibi_slopes, sliding_window,
         #                       kv_cache_dtype, logits_soft_cap, attn_type, kv_sharing_target_layer_name, **kwargs)
 
-        self.enable_fp8_attn = kv_cache_dtype == 'fp8_inc' and os.environ.get('QUANT_CONFIG', None) is None
-        self.matmul_qk = Matmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
+        self.enable_fp8_attn = kv_cache_dtype == "fp8_inc" and os.environ.get("QUANT_CONFIG", None) is None
+        self.matmul_qk = Matmul() if not self.enable_fp8_attn else FP8Matmul()
         self.softmax = Softmax()
-        self.matmul_av = Matmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
-        self.batch2block_matmul = B2BMatmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
-        self.block2batch_matmul = B2BMatmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
-        self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn \
-            else VLLMFP8KVCache()
+        self.matmul_av = Matmul() if not self.enable_fp8_attn else FP8Matmul()
+        self.batch2block_matmul = B2BMatmul() if not self.enable_fp8_attn else FP8Matmul()
+        self.block2batch_matmul = B2BMatmul() if not self.enable_fp8_attn else FP8Matmul()
+        self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn else VLLMFP8KVCache()
         HPUFusedSDPA = kernels.fsdpa()
-        self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
-            else ModuleFusedSDPA(HPUFusedSDPA)
+        self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None else ModuleFusedSDPA(HPUFusedSDPA)
 
         try:
             from habana_frameworks.torch.hpex.kernels import fp8_fused_sdpa
+
             if self.enable_fp8_attn:
                 self.fused_scaled_dot_product_attention = ModuleFP8FusedSDPA(fp8_fused_sdpa)
         except ImportError:
@@ -257,33 +258,36 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
 
         self.use_merged_prefill = get_config().merged_prefill
         self.prefill_impl = get_config().prompt_attn_impl
-        assert self.prefill_impl != 'fsdpa_impl' or alibi_slopes is None, \
-            'Prefill with FusedSDPA not supported with alibi slopes!'
+        assert self.prefill_impl != "fsdpa_impl" or alibi_slopes is None, (
+            "Prefill with FusedSDPA not supported with alibi slopes!"
+        )
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
         # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
-        self.is_aiter_triton_fp4_bmm_enabled = (rocm_aiter_ops.is_fp4bmm_enabled()
-                                                and self.kv_b_proj.weight.dtype == torch.bfloat16)
+        self.is_aiter_triton_fp4_bmm_enabled = (
+            rocm_aiter_ops.is_fp4bmm_enabled() and self.kv_b_proj.weight.dtype == torch.bfloat16
+        )
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
-            raise NotImplementedError("HPUMLAImpl does not support one of the following: "
-                                      "alibi_slopes, sliding_window, "
-                                      "logits_soft_cap")
+            raise NotImplementedError(
+                "HPUMLAImpl does not support one of the following: alibi_slopes, sliding_window, logits_soft_cap"
+            )
 
         if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "TritonMLAImpl")
+            raise NotImplementedError(
+                "Encoder self-attention and encoder/decoder cross-attention are not implemented for TritonMLAImpl"
+            )
         self.sinks = sinks
         if sinks is not None:
-            assert sinks.shape[0] == num_heads, ("Sinks must have the same number of heads as the number of "
-                                                 f"heads in the layer. Sinks shape: {sinks.shape}, "
-                                                 f"num_heads: {num_heads}.")
+            assert sinks.shape[0] == num_heads, (
+                "Sinks must have the same number of heads as the number of "
+                f"heads in the layer. Sinks shape: {sinks.shape}, "
+                f"num_heads: {num_heads}."
+            )
 
     def forward_mha(  # type: ignore
-            self, q: torch.Tensor, latent_vec_k: torch.Tensor, k_cache: torch.Tensor,
-            attn_metadata: HPUAttentionMetadata) -> torch.Tensor:
+        self, q: torch.Tensor, latent_vec_k: torch.Tensor, k_cache: torch.Tensor, attn_metadata: HPUAttentionMetadata
+    ) -> torch.Tensor:
 
         ##### get prefix cache #####
         if attn_metadata.block_list is not None:
@@ -291,8 +295,9 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
             # Patch for vllm-gaudi kv_cache tuple format.
             if isinstance(k_cache, tuple):
                 k_cache = k_cache[0]  # Use only key_cache for MLA
-            past = self.latent_cache_k.fetch_from_cache(k_cache.unflatten(0, (-1, attn_metadata.block_size)),
-                                                        attn_metadata.block_list)
+            past = self.latent_cache_k.fetch_from_cache(
+                k_cache.unflatten(0, (-1, attn_metadata.block_size)), attn_metadata.block_list
+            )
             past = past.view(-1, past.shape[-1])
             current = torch.concat((past, current), dim=0)
             latent_vec_k = current
@@ -301,16 +306,13 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         k_c_normed, k_pe = latent_vec_k.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
 
-        kv_nope = self.kv_b_proj(k_c_normed)[0]\
-            .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
-        k_nope, v = kv_nope\
-            .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        kv_nope = self.kv_b_proj(k_c_normed)[0].view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
         if not self.use_merged_prefill:
-            assert attn_metadata.seq_lens_tensor is not None, \
-                "seq_lens_tensor must be provided for prefill attention"
+            assert attn_metadata.seq_lens_tensor is not None, "seq_lens_tensor must be provided for prefill attention"
             batch_size = attn_metadata.seq_lens_tensor.shape[0]
         else:
             batch_size = 1
@@ -325,53 +327,58 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         else:
             v_padded = v
 
-        output = ops.prompt_attention(impl=self.prefill_impl,
-                                      query=q,
-                                      key=k,
-                                      value=v_padded,
-                                      is_causal=True,
-                                      attn_bias=attn_metadata.attn_bias,
-                                      position_bias=None,
-                                      valid_seq_lengths=attn_metadata.seq_lens_tensor,
-                                      scale=self.scale,
-                                      matmul_qk_op=self.matmul_qk,
-                                      softmax_op=self.softmax,
-                                      matmul_av_op=self.matmul_av,
-                                      keys_fetch_func=self.latent_cache_k.fetch_from_cache,
-                                      values_fetch_func=None,
-                                      fsdpa_op=self.fused_scaled_dot_product_attention)
+        output = ops.prompt_attention(
+            impl=self.prefill_impl,
+            query=q,
+            key=k,
+            value=v_padded,
+            is_causal=True,
+            attn_bias=attn_metadata.attn_bias,
+            position_bias=None,
+            valid_seq_lengths=attn_metadata.seq_lens_tensor,
+            scale=self.scale,
+            matmul_qk_op=self.matmul_qk,
+            softmax_op=self.softmax,
+            matmul_av_op=self.matmul_av,
+            keys_fetch_func=self.latent_cache_k.fetch_from_cache,
+            values_fetch_func=None,
+            fsdpa_op=self.fused_scaled_dot_product_attention,
+        )
         # remove padding
-        output = output.view(batch_size, -1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]
+        output = output.view(batch_size, -1, self.num_heads, q.shape[-1])[..., : v.shape[-1]]
 
         return output.reshape(-1, self.num_heads * v.shape[-1])
 
     def forward_mqa(  # type: ignore
-            self, q_nope: torch.Tensor, q_pe: torch.Tensor, k_cache: torch.Tensor,
-            attn_metadata: HPUAttentionMetadata) -> torch.Tensor:
+        self, q_nope: torch.Tensor, q_pe: torch.Tensor, k_cache: torch.Tensor, attn_metadata: HPUAttentionMetadata
+    ) -> torch.Tensor:
         if k_cache is not None and isinstance(k_cache, tuple):
-            key_cache, value_cache, k_scales, v_scales = \
-                HPUPagedAttention.split_kv_cache(k_cache, self.num_kv_heads, self.head_size)
+            key_cache, value_cache, k_scales, v_scales = HPUPagedAttention.split_kv_cache(
+                k_cache, self.num_kv_heads, self.head_size
+            )
         if isinstance(k_cache, tuple):
             k_cache = k_cache[0]  # Use only key_cache for MLA
         query = torch.cat([q_nope, q_pe], dim=-1)
         key_cache = k_cache.unsqueeze(1) if k_cache is not None else None
         value_cache = None
-        output = HPUPagedAttention.forward_decode(query=query,
-                                                  key_cache=key_cache,
-                                                  value_cache=value_cache,
-                                                  block_list=attn_metadata.block_list,
-                                                  block_mapping=attn_metadata.block_mapping,
-                                                  block_bias=attn_metadata.attn_bias,
-                                                  block_groups=attn_metadata.block_groups,
-                                                  block_size=attn_metadata.block_size,
-                                                  scale=self.scale,
-                                                  matmul_qk_op=self.matmul_qk,
-                                                  matmul_av_op=self.matmul_av,
-                                                  batch2block_matmul_op=self.batch2block_matmul,
-                                                  block2batch_matmul_op=self.block2batch_matmul,
-                                                  keys_fetch_func=self.latent_cache_k.fetch_from_cache,
-                                                  values_fetch_func=None,
-                                                  kv_lora_rank=self.kv_lora_rank)
+        output = HPUPagedAttention.forward_decode(
+            query=query,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            block_list=attn_metadata.block_list,
+            block_mapping=attn_metadata.block_mapping,
+            block_bias=attn_metadata.attn_bias,
+            block_groups=attn_metadata.block_groups,
+            block_size=attn_metadata.block_size,
+            scale=self.scale,
+            matmul_qk_op=self.matmul_qk,
+            matmul_av_op=self.matmul_av,
+            batch2block_matmul_op=self.batch2block_matmul,
+            block2batch_matmul_op=self.block2batch_matmul,
+            keys_fetch_func=self.latent_cache_k.fetch_from_cache,
+            values_fetch_func=None,
+            kv_lora_rank=self.kv_lora_rank,
+        )
         return output
 
     # NOTE(Xinyu): Make the loaded weight contiguous to avoid the transpose
@@ -433,42 +440,35 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         super(AttentionImpl, self).__init__()
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         if kv_sharing_target_layer_name is not None:
-            logger.info("[KV sharing] HPUAttentionImpl initialized with kv_sharing_target_layer_name: %s",
-                        self.kv_sharing_target_layer_name)
+            logger.info(
+                "[KV sharing] HPUAttentionImpl initialized with kv_sharing_target_layer_name: %s",
+                self.kv_sharing_target_layer_name,
+            )
         if use_irope:
-            logger.warning_once("Using irope in HPU is not supported yet, it will fall back "
-                                "to global attention for long context.")
-        self.enable_fp8_attn = kv_cache_dtype == 'fp8_inc' and os.environ.get('QUANT_CONFIG', None) is None
+            logger.warning_once(
+                "Using irope in HPU is not supported yet, it will fall back to global attention for long context."
+            )
+        self.enable_fp8_attn = kv_cache_dtype == "fp8_inc" and os.environ.get("QUANT_CONFIG", None) is None
         self.kv_cache_dtype = kv_cache_dtype
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
-        self.matmul_qk = Matmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
+        self.matmul_qk = Matmul() if not self.enable_fp8_attn else FP8Matmul()
         self.softmax = Softmax()
-        self.matmul_av = Matmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
-        self.batch2block_matmul = B2BMatmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
-        self.block2batch_matmul = B2BMatmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
-        self.k_cache = VLLMKVCache() if not self.enable_fp8_attn \
-            else VLLMFP8KVCache()
-        self.v_cache = VLLMKVCache(is_v_cache=True) if not self.enable_fp8_attn \
-            else VLLMFP8KVCache()
+        self.matmul_av = Matmul() if not self.enable_fp8_attn else FP8Matmul()
+        self.batch2block_matmul = B2BMatmul() if not self.enable_fp8_attn else FP8Matmul()
+        self.block2batch_matmul = B2BMatmul() if not self.enable_fp8_attn else FP8Matmul()
+        self.k_cache = VLLMKVCache() if not self.enable_fp8_attn else VLLMFP8KVCache()
+        self.v_cache = VLLMKVCache(is_v_cache=True) if not self.enable_fp8_attn else VLLMFP8KVCache()
         HPUFusedSDPA = kernels.fsdpa()
-        self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
-            else ModuleFusedSDPA(HPUFusedSDPA)
+        self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None else ModuleFusedSDPA(HPUFusedSDPA)
         self.prefill_impl = get_config().prompt_attn_impl
         self.use_contiguous_pa = get_config().use_contiguous_pa
         self.use_merged_prefill = get_config().merged_prefill
         if alibi_slopes is not None:
-            assert self.prefill_impl != 'flex_impl', \
-                'Prefill with Flex Attention not supported with alibi slopes!'
-            assert self.prefill_impl != 'fsdpa_impl', \
-                'Prefill with FusedSDPA not supported with alibi slopes!'
-            assert self.use_contiguous_pa, \
-                'Non-contiguous PA not supported with alibi slopes!'
+            assert self.prefill_impl != "flex_impl", "Prefill with Flex Attention not supported with alibi slopes!"
+            assert self.prefill_impl != "fsdpa_impl", "Prefill with FusedSDPA not supported with alibi slopes!"
+            assert self.use_contiguous_pa, "Non-contiguous PA not supported with alibi slopes!"
 
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.sliding_window = sliding_window
@@ -476,8 +476,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         self.prev_attn = None
         self.alibi_slopes = None
         if alibi_slopes is not None:
-            slope_tensor_dtype = torch.float32 if \
-                get_config().fp32_alibi_biases else torch.bfloat16
+            slope_tensor_dtype = torch.float32 if get_config().fp32_alibi_biases else torch.bfloat16
             alibi_slopes_tensor = torch.tensor(alibi_slopes, dtype=slope_tensor_dtype)
             self.alibi_slopes = alibi_slopes_tensor
 
@@ -486,20 +485,25 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
 
         supported_head_sizes = HPUPagedAttention.get_supported_head_sizes()
         if head_size not in supported_head_sizes:
-            raise ValueError(f"Head size {head_size} is not supported by PagedAttention. "
-                             f"Supported head sizes are: {supported_head_sizes}.")
+            raise ValueError(
+                f"Head size {head_size} is not supported by PagedAttention. "
+                f"Supported head sizes are: {supported_head_sizes}."
+            )
 
         self.attn_type = attn_type
-        if (self.attn_type != AttentionType.DECODER and self.attn_type != AttentionType.ENCODER_DECODER
-                and self.attn_type != AttentionType.ENCODER_ONLY):
-            raise NotImplementedError("Encoder self-attention "
-                                      "is not implemented for "
-                                      "HPUAttentionImpl")
+        if (
+            self.attn_type != AttentionType.DECODER
+            and self.attn_type != AttentionType.ENCODER_DECODER
+            and self.attn_type != AttentionType.ENCODER_ONLY
+        ):
+            raise NotImplementedError("Encoder self-attention is not implemented for HPUAttentionImpl")
         self.sinks = sinks
         if sinks is not None:
-            assert sinks.shape[0] == num_heads, ("Sinks must have the same number of heads as the number of "
-                                                 f"heads in the layer. Sinks shape: {sinks.shape}, "
-                                                 f"num_heads: {num_heads}.")
+            assert sinks.shape[0] == num_heads, (
+                "Sinks must have the same number of heads as the number of "
+                f"heads in the layer. Sinks shape: {sinks.shape}, "
+                f"num_heads: {num_heads}."
+            )
 
         self.is_chunked_attention = False
 
@@ -560,8 +564,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             if attn_metadata.seq_lens_tensor is not None:
                 batch_size = attn_metadata.seq_lens_tensor.shape[0] if not self.use_merged_prefill else 1
             else:
-                assert attn_metadata.block_mapping is not None, \
-                    "seq_lens_tensor must be provided for attention"
+                assert attn_metadata.block_mapping is not None, "seq_lens_tensor must be provided for attention"
                 batch_size = attn_metadata.block_mapping.shape[1]
             num_tokens, hidden_size = query.shape
             seq_len = num_tokens // batch_size
@@ -579,8 +582,9 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         k_scales = None
         v_scales = None
         if kv_cache is not None and isinstance(kv_cache, tuple):
-            key_cache, value_cache, k_scales, v_scales = \
-                HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
+            key_cache, value_cache, k_scales, v_scales = HPUPagedAttention.split_kv_cache(
+                kv_cache, self.num_kv_heads, self.head_size
+            )
             if key.dtype == torch.float32 and key.dtype != key_cache.dtype:
                 key = key.to(key_cache.dtype)
             if value.dtype == torch.float32 and value.dtype != value_cache.dtype:
@@ -591,18 +595,22 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 # Reshape the input keys and values and store them in the cache.
                 # If kv_cache is not provided, the new key and value tensors are
                 # not cached. This happens during the initial memory profiling run.
-                key_cache = self.k_cache(key,
-                                         key_cache,
-                                         slot_mapping,
-                                         scales=k_scales,
-                                         block_size=attn_metadata.block_size,
-                                         is_prompt=attn_metadata.is_prompt)
-                value_cache = self.v_cache(value,
-                                           value_cache,
-                                           slot_mapping,
-                                           scales=v_scales,
-                                           block_size=attn_metadata.block_size,
-                                           is_prompt=attn_metadata.is_prompt)
+                key_cache = self.k_cache(
+                    key,
+                    key_cache,
+                    slot_mapping,
+                    scales=k_scales,
+                    block_size=attn_metadata.block_size,
+                    is_prompt=attn_metadata.is_prompt,
+                )
+                value_cache = self.v_cache(
+                    value,
+                    value_cache,
+                    slot_mapping,
+                    scales=v_scales,
+                    block_size=attn_metadata.block_size,
+                    is_prompt=attn_metadata.is_prompt,
+                )
 
         if attn_metadata.is_prompt:
             # Prompt run.
@@ -612,11 +620,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             attn_bias = attn_metadata.attn_bias
             position_bias = None
             # If we have alibi_slopes, incorporate them with
-            if (attn_metadata.block_list is None and self.prompt_position_bias is not None
-                    and self.alibi_slopes is not None):
-                assert attn_bias is not None, \
-                        'attn_bias must be set before calling ' \
-                        'model.forward with alibi biases'
+            if (
+                attn_metadata.block_list is None
+                and self.prompt_position_bias is not None
+                and self.alibi_slopes is not None
+            ):
+                assert attn_bias is not None, "attn_bias must be set before calling model.forward with alibi biases"
                 slice_1_size = attn_bias.size(-2)
                 slice_2_size = attn_bias.size(-1)
                 if self.max_seq_len >= max(slice_1_size, slice_2_size):
@@ -632,44 +641,47 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                         dtype=self.alibi_slopes.dtype,
                     )
 
-            block_list = attn_metadata.block_list if attn_metadata \
-                and attn_metadata.block_list is not None else None
+            block_list = attn_metadata.block_list if attn_metadata and attn_metadata.block_list is not None else None
 
-            common_args = self.common_attention_args(block_list, key_cache, value_cache, attn_metadata.block_size,
-                                                     k_scales, v_scales)
+            common_args = self.common_attention_args(
+                block_list, key_cache, value_cache, attn_metadata.block_size, k_scales, v_scales
+            )
 
             if self.sliding_window:
-                if hasattr(attn_metadata, 'window_attn_bias') and attn_metadata.window_attn_bias is not None:
+                if hasattr(attn_metadata, "window_attn_bias") and attn_metadata.window_attn_bias is not None:
                     attn_bias = attn_metadata.window_attn_bias
                 else:
                     attn_bias = None
                     window_size = (self.sliding_window, 0)
-                    common_args['window_size'] = window_size
-            if self.is_chunked_attention and \
-                hasattr(attn_metadata, 'chunked_attn_bias') and attn_metadata.chunked_attn_bias is not None:
+                    common_args["window_size"] = window_size
+            if (
+                self.is_chunked_attention
+                and hasattr(attn_metadata, "chunked_attn_bias")
+                and attn_metadata.chunked_attn_bias is not None
+            ):
                 attn_bias = attn_metadata.chunked_attn_bias
 
-            out = ops.prompt_attention(impl=self.prefill_impl,
-                                       query=query.view(query_shape),
-                                       key=key.view(kv_shape),
-                                       value=value.view(kv_shape),
-                                       is_causal=True,
-                                       attn_bias=attn_bias,
-                                       position_bias=position_bias,
-                                       valid_seq_lengths=attn_metadata.seq_lens_tensor,
-                                       **common_args)
+            out = ops.prompt_attention(
+                impl=self.prefill_impl,
+                query=query.view(query_shape),
+                key=key.view(kv_shape),
+                value=value.view(kv_shape),
+                is_causal=True,
+                attn_bias=attn_bias,
+                position_bias=position_bias,
+                valid_seq_lengths=attn_metadata.seq_lens_tensor,
+                **common_args,
+            )
 
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
             # Decoding run.
-            if self.sliding_window and \
-                attn_metadata.window_block_list is not None:
+            if self.sliding_window and attn_metadata.window_block_list is not None:
                 block_list = attn_metadata.window_block_list
                 block_groups = attn_metadata.window_block_groups
                 block_mapping = attn_metadata.window_block_mapping
                 attn_bias = attn_metadata.window_attn_bias
-            elif self.is_chunked_attention and \
-                attn_metadata.chunked_block_list is not None:
+            elif self.is_chunked_attention and attn_metadata.chunked_block_list is not None:
                 block_list = attn_metadata.chunked_block_list
                 block_groups = attn_metadata.chunked_block_groups
                 block_mapping = attn_metadata.chunked_block_mapping
@@ -681,7 +693,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 attn_bias = attn_metadata.attn_bias
 
             self.position_bias = None
-            alibi_blocks = getattr(attn_metadata, 'alibi_blocks', None)
+            alibi_blocks = getattr(attn_metadata, "alibi_blocks", None)
             if self.alibi_slopes is not None and alibi_blocks is not None:
                 if self.prev_attn is not None:
                     self.position_bias = self.prev_attn.position_bias
@@ -693,41 +705,39 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                         dtype=self.alibi_slopes.dtype,
                     )
 
-            output = HPUPagedAttention.forward_decode(query=query,
-                                                      block_mapping=block_mapping,
-                                                      block_bias=attn_bias,
-                                                      block_groups=block_groups,
-                                                      position_bias=self.position_bias,
-                                                      **self.common_attention_args(block_list, key_cache, value_cache,
-                                                                                   attn_metadata.block_size, k_scales,
-                                                                                   v_scales))
+            output = HPUPagedAttention.forward_decode(
+                query=query,
+                block_mapping=block_mapping,
+                block_bias=attn_bias,
+                block_groups=block_groups,
+                position_bias=self.position_bias,
+                **self.common_attention_args(
+                    block_list, key_cache, value_cache, attn_metadata.block_size, k_scales, v_scales
+                ),
+            )
 
         return output.view(*output_shape)
 
-    def common_attention_args(self,
-                              block_list=None,
-                              key_cache=None,
-                              value_cache=None,
-                              block_size=None,
-                              k_scales=None,
-                              v_scales=None):
+    def common_attention_args(
+        self, block_list=None, key_cache=None, value_cache=None, block_size=None, k_scales=None, v_scales=None
+    ):
         return {
-            'scale': self.scale,
-            'matmul_qk_op': self.matmul_qk,
-            'matmul_av_op': self.matmul_av,
-            'batch2block_matmul_op': self.batch2block_matmul,
-            'block2batch_matmul_op': self.block2batch_matmul,
-            'fsdpa_op': self.fused_scaled_dot_product_attention,
-            'keys_fetch_func': self.k_cache.fetch_from_cache,
-            'values_fetch_func': self.v_cache.fetch_from_cache,
-            'softmax_op': self.softmax,
-            'block_list': block_list,
-            'key_cache': key_cache,
-            'value_cache': value_cache,
-            'block_size': block_size,
+            "scale": self.scale,
+            "matmul_qk_op": self.matmul_qk,
+            "matmul_av_op": self.matmul_av,
+            "batch2block_matmul_op": self.batch2block_matmul,
+            "block2batch_matmul_op": self.block2batch_matmul,
+            "fsdpa_op": self.fused_scaled_dot_product_attention,
+            "keys_fetch_func": self.k_cache.fetch_from_cache,
+            "values_fetch_func": self.v_cache.fetch_from_cache,
+            "softmax_op": self.softmax,
+            "block_list": block_list,
+            "key_cache": key_cache,
+            "value_cache": value_cache,
+            "block_size": block_size,
             "sinks": self.sinks,
-            'k_scales': k_scales,
-            'v_scales': v_scales,
+            "k_scales": k_scales,
+            "v_scales": v_scales,
         }
 
     def forward_encoder_decoder(
@@ -757,7 +767,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             batch_size = attn_metadata.num_prefills
             batched_tokens, _ = query.shape
             batched_kv_tokens, _, _ = key.shape
-            assert batch_size > 0, ("In prefill stage the num_prefills should be > 0")
+            assert batch_size > 0, "In prefill stage the num_prefills should be > 0"
             assert batched_tokens % batch_size == 0
             assert batched_kv_tokens % batch_size == 0
             seq_len = batched_tokens // batch_size
@@ -770,27 +780,33 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         else:
             assert value is None
 
-        cross_slot_mapping = attn_metadata.cross_slot_mapping.flatten(
-        ) if attn_metadata.cross_slot_mapping is not None else None
+        cross_slot_mapping = (
+            attn_metadata.cross_slot_mapping.flatten() if attn_metadata.cross_slot_mapping is not None else None
+        )
         if kv_cache is not None and isinstance(kv_cache, tuple):
-            key_cache, value_cache, k_scales, v_scales = \
-                HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
+            key_cache, value_cache, k_scales, v_scales = HPUPagedAttention.split_kv_cache(
+                kv_cache, self.num_kv_heads, self.head_size
+            )
 
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-            key_cache = self.k_cache(key,
-                                     key_cache,
-                                     cross_slot_mapping,
-                                     scales=k_scales,
-                                     block_size=attn_metadata.block_size,
-                                     is_prompt=attn_metadata.is_prompt)
-            value_cache = self.v_cache(value,
-                                       value_cache,
-                                       cross_slot_mapping,
-                                       scales=v_scales,
-                                       block_size=attn_metadata.block_size,
-                                       is_prompt=attn_metadata.is_prompt)
+            key_cache = self.k_cache(
+                key,
+                key_cache,
+                cross_slot_mapping,
+                scales=k_scales,
+                block_size=attn_metadata.block_size,
+                is_prompt=attn_metadata.is_prompt,
+            )
+            value_cache = self.v_cache(
+                value,
+                value_cache,
+                cross_slot_mapping,
+                scales=v_scales,
+                block_size=attn_metadata.block_size,
+                is_prompt=attn_metadata.is_prompt,
+            )
 
         if attn_metadata.is_prompt:
             # Prompt run.
@@ -798,13 +814,15 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
 
             query_shape = (batch_size, -1, self.num_heads, self.head_size)
             kv_shape = (batch_size, -1, self.num_kv_heads, self.head_size)
-            out = ops.prompt_attention(impl=self.prefill_impl,
-                                       query=query.view(query_shape),
-                                       key=key.view(kv_shape),
-                                       value=value.view(kv_shape),
-                                       attn_bias=None,
-                                       is_causal=False,
-                                       **self.common_attention_args())
+            out = ops.prompt_attention(
+                impl=self.prefill_impl,
+                query=query.view(query_shape),
+                key=key.view(kv_shape),
+                value=value.view(kv_shape),
+                attn_bias=None,
+                is_causal=False,
+                **self.common_attention_args(),
+            )
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
             # Enc/dec cross-attention KVs match encoder sequence length;
@@ -814,14 +832,16 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             block_groups = attn_metadata.cross_block_groups
             attn_bias = attn_metadata.cross_attn_bias
             # Decoding run.
-            output = HPUPagedAttention.forward_decode(query=query,
-                                                      block_mapping=block_mapping,
-                                                      block_bias=attn_bias,
-                                                      block_groups=block_groups,
-                                                      position_bias=None,
-                                                      **self.common_attention_args(block_list, key_cache, value_cache,
-                                                                                   attn_metadata.block_size, k_scales,
-                                                                                   v_scales))
+            output = HPUPagedAttention.forward_decode(
+                query=query,
+                block_mapping=block_mapping,
+                block_bias=attn_bias,
+                block_groups=block_groups,
+                position_bias=None,
+                **self.common_attention_args(
+                    block_list, key_cache, value_cache, attn_metadata.block_size, k_scales, v_scales
+                ),
+            )
         # Reshape the output tensor.
         return output.view(batch_size, -1, hidden_size)
 
@@ -849,7 +869,7 @@ def _make_prompt_alibi_bias(
     bias = torch.arange(seq_len, dtype=dtype, device=alibi_slopes.device)
     bias = bias[None, :] - bias[:, None]  # Shape: [seq_len, seq_len]
 
-    #padded_len = (seq_len + 7) // 8 * 8
+    # padded_len = (seq_len + 7) // 8 * 8
     num_heads = alibi_slopes.shape[0]
     per_head_bias = torch.empty(
         1,
@@ -906,7 +926,6 @@ def _make_decode_alibi_bias(
 
 
 class HPUUnifiedAttentionImpl(AttentionImpl, torch.nn.Module):
-
     def __init__(
         self,
         num_heads: int,
@@ -925,25 +944,28 @@ class HPUUnifiedAttentionImpl(AttentionImpl, torch.nn.Module):
 
         supported_head_sizes = HPUPagedAttention.get_supported_head_sizes()
         if head_size not in supported_head_sizes:
-            raise ValueError(f"Head size {head_size} is not supported by PagedAttention. "
-                             f"Supported head sizes are: {supported_head_sizes}.")
+            raise ValueError(
+                f"Head size {head_size} is not supported by PagedAttention. "
+                f"Supported head sizes are: {supported_head_sizes}."
+            )
 
         unsupported_features = {
-            'KV sharing': kv_sharing_target_layer_name is not None,
-            'Alibi': alibi_slopes is not None,
-            'Sliding window': sliding_window is not None,
-            'non-GQA attention': num_kv_heads is None,
-            'Encoder attn': attn_type != AttentionType.DECODER,
-            'fp32 softmax': get_config().fp32_softmax,
+            "KV sharing": kv_sharing_target_layer_name is not None,
+            "Alibi": alibi_slopes is not None,
+            "Sliding window": sliding_window is not None,
+            "non-GQA attention": num_kv_heads is None,
+            "Encoder attn": attn_type != AttentionType.DECODER,
+            "fp32 softmax": get_config().fp32_softmax,
         }
         for feature, check in unsupported_features.items():
             if check:
-                raise NotImplementedError(feature + ' is not implemented for HPU unified attn')
+                raise NotImplementedError(feature + " is not implemented for HPU unified attn")
 
         if use_irope:
-            logger.warning_once("Using irope in HPU is not supported yet, it will fall back "
-                                "to global attention for long context.")
-        self.enable_fp8_attn = kv_cache_dtype == 'fp8_inc' and os.environ.get('QUANT_CONFIG', None) is None
+            logger.warning_once(
+                "Using irope in HPU is not supported yet, it will fall back to global attention for long context."
+            )
+        self.enable_fp8_attn = kv_cache_dtype == "fp8_inc" and os.environ.get("QUANT_CONFIG", None) is None
         self.kv_cache_dtype = kv_cache_dtype
         self.num_heads = num_heads
         self.head_size = head_size
@@ -951,10 +973,8 @@ class HPUUnifiedAttentionImpl(AttentionImpl, torch.nn.Module):
         self.num_kv_heads = num_kv_heads
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-        self.k_cache = VLLMKVCache() if not self.enable_fp8_attn \
-            else VLLMFP8KVCache()
-        self.v_cache = VLLMKVCache() if not self.enable_fp8_attn \
-            else VLLMFP8KVCache()
+        self.k_cache = VLLMKVCache() if not self.enable_fp8_attn else VLLMFP8KVCache()
+        self.v_cache = VLLMKVCache() if not self.enable_fp8_attn else VLLMFP8KVCache()
 
     def forward(
         self,
@@ -975,16 +995,12 @@ class HPUUnifiedAttentionImpl(AttentionImpl, torch.nn.Module):
         query = query.unflatten(-1, (-1, self.head_size))
         key = key.unflatten(-1, (-1, self.head_size))
         value = value.unflatten(-1, (-1, self.head_size))
-        key_cache = self.k_cache(key,
-                                 key_cache,
-                                 attn_metadata.slot_mapping,
-                                 scales=k_scales,
-                                 block_size=attn_metadata.block_size)
-        value_cache = self.v_cache(value,
-                                   value_cache,
-                                   attn_metadata.slot_mapping,
-                                   scales=v_scales,
-                                   block_size=attn_metadata.block_size)
+        key_cache = self.k_cache(
+            key, key_cache, attn_metadata.slot_mapping, scales=k_scales, block_size=attn_metadata.block_size
+        )
+        value_cache = self.v_cache(
+            value, value_cache, attn_metadata.slot_mapping, scales=v_scales, block_size=attn_metadata.block_size
+        )
         output = unified_attn(
             query=query,
             key=key,
@@ -1000,29 +1016,29 @@ class HPUUnifiedAttentionImpl(AttentionImpl, torch.nn.Module):
 
 class HPUUnifiedMLAImpl(MLACommonImpl[HPUUnifiedAttentionMetadata], torch.nn.Module):
     """Unified MLA (Multi-head Latent Attention) implementation for HPU.
-    
+
     MLA compresses KV pairs into a shared latent space to reduce memory usage.
     Instead of caching [num_heads, head_dim] per token, MLA caches a single
     latent vector of size kv_lora_rank (~512 dims) that's shared across heads.
-    
+
     Compared to "standard" attention:
     - Standard: Each head has its own K/V cache [num_heads, kv_head_dim]
     - MLA: Shared latent cache [kv_lora_rank] + projection matrices W_UV/W_UK_T
-    
-    In terms of getting this thing working with unified attention - we implement 
+
+    In terms of getting this thing working with unified attention - we implement
     two computation paths simultaneously within a single unified_mla forward pass:
     1. Causal (fresh tokens) - used by unified_attn's causal path:
         - "Compute Friendly Approach" from mla/common.py
-        - Expand latent KV → full attention with uncompressed Q 
-    2. Cached (prefix/decode) - used by unified_attn's shared and unique paths: 
+        - Expand latent KV → full attention with uncompressed Q
+    2. Cached (prefix/decode) - used by unified_attn's shared and unique paths:
         - "Data-Movement Friendly Approach" from mla/common.py
         - Project Q to latent space → attention in compressed space
-         
+
     Both paths use W_UV to project latent attention output → full V dimension.
     Weights W_UV and W_UK_T are initialized in process_weights_after_loading()
     by parent MLACommonImpl from kv_b_proj weights.
-    
-    With that, we don't need to split the batch into separate prefill/decode passes, 
+
+    With that, we don't need to split the batch into separate prefill/decode passes,
     and just handle everything in one go.
     """
 
@@ -1053,22 +1069,24 @@ class HPUUnifiedMLAImpl(MLACommonImpl[HPUUnifiedAttentionMetadata], torch.nn.Mod
 
         supported_head_sizes = HPUUnifiedMLAImpl.get_supported_head_sizes()
         if head_size not in supported_head_sizes:
-            raise ValueError(f"Head size {head_size} is not supported by PagedAttention. "
-                             f"Supported head sizes are: {supported_head_sizes}.")
+            raise ValueError(
+                f"Head size {head_size} is not supported by PagedAttention. "
+                f"Supported head sizes are: {supported_head_sizes}."
+            )
 
         unsupported_features = {
-            'KV sharing': kv_sharing_target_layer_name is not None,
-            'Alibi': alibi_slopes is not None,
-            'Sliding window': sliding_window is not None,
-            'non-GQA attention': num_kv_heads is None,
-            'Encoder attn': attn_type != AttentionType.DECODER,
-            'fp32 softmax': get_config().fp32_softmax,
+            "KV sharing": kv_sharing_target_layer_name is not None,
+            "Alibi": alibi_slopes is not None,
+            "Sliding window": sliding_window is not None,
+            "non-GQA attention": num_kv_heads is None,
+            "Encoder attn": attn_type != AttentionType.DECODER,
+            "fp32 softmax": get_config().fp32_softmax,
         }
         for feature, check in unsupported_features.items():
             if check:
-                raise NotImplementedError(feature + ' is not implemented for HPU unified attn')
+                raise NotImplementedError(feature + " is not implemented for HPU unified attn")
 
-        self.enable_fp8_attn = kv_cache_dtype == 'fp8_inc' and os.environ.get('QUANT_CONFIG', None) is None
+        self.enable_fp8_attn = kv_cache_dtype == "fp8_inc" and os.environ.get("QUANT_CONFIG", None) is None
         self.kv_cache_dtype = kv_cache_dtype
         self.num_heads = num_heads
         self.head_size = head_size
@@ -1086,8 +1104,7 @@ class HPUUnifiedMLAImpl(MLACommonImpl[HPUUnifiedAttentionMetadata], torch.nn.Mod
         self.use_online_merge = get_config().unified_attn_online_merge
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-        self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn \
-            else VLLMFP8KVCache()
+        self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn else VLLMFP8KVCache()
         self.is_aiter_triton_fp8_bmm_enabled = False
         self.is_aiter_triton_fp4_bmm_enabled = False
 
@@ -1102,23 +1119,23 @@ class HPUUnifiedMLAImpl(MLACommonImpl[HPUUnifiedAttentionMetadata], torch.nn.Mod
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass for unified MLA attention.
-        
+
         Prepares inputs for two possible attention paths:
         - Causal: Fresh tokens → expand K, full-dimensional attention, compute-friendly
         - Cached (shared + unique): Cached tokens → project Q to latent, compressed attention, memory-friendly
-        
+
         Both can be active in same forward pass (e.g., cached prefix + new tokens).
         unified_mla handles the routing based on which inputs are non-None.
-        
-        NOTE(kzawora): As always, shared part is tricky and could be optimized further. 
-        A hybrid approach might be worth investigating, where cached tokens go through 
+
+        NOTE(kzawora): As always, shared part is tricky and could be optimized further.
+        A hybrid approach might be worth investigating, where cached tokens go through
         the cached part, and fresh tokens go through the causal part.
         """
 
         if output is not None:
             raise NotImplementedError("output is not yet supported for HPUUnifiedMLAImpl")
 
-        if not hasattr(self, 'W_UV'):
+        if not hasattr(self, "W_UV"):
             raise RuntimeError("W_UV not initialized! process_weights_after_loading() may not have been called.")
         expected_shape = (self.num_heads, self.kv_lora_rank, self.v_head_dim)
         if self.W_UV.shape != expected_shape:
@@ -1144,8 +1161,9 @@ class HPUUnifiedMLAImpl(MLACommonImpl[HPUUnifiedAttentionMetadata], torch.nn.Mod
             # kv_b_proj expands latent → [k_nope, v] but we only need k_nope here
             # V stays compressed! unified_mla will apply W_UV projection later
             # Shape: [tokens, kv_lora_rank] → [tokens, num_heads, qk_nope_head_dim + v_head_dim]
-            kv_nope = self.kv_b_proj(k_c_normed_causal)[0]\
-                .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+            kv_nope = self.kv_b_proj(k_c_normed_causal)[0].view(
+                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+            )
             k_nope, _ = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
             # Shape: [tokens, num_heads, qk_head_dim] = [k_nope, k_pe]
@@ -1187,7 +1205,8 @@ class HPUUnifiedMLAImpl(MLACommonImpl[HPUUnifiedAttentionMetadata], torch.nn.Mod
             scale=self.scale,
             metadata=attn_metadata,
             w_uv=self.W_UV,  # Projects latent attention output → full V dimension
-            query_latent=q_latent)
+            query_latent=q_latent,
+        )
 
         return result.reshape(-1, self.num_heads * self.v_head_dim)
 

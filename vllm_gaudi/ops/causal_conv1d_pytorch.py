@@ -79,8 +79,10 @@ def _depthwise_conv1d_tpc(
     # weight: (dim, width)
     width = weight.shape[1]
     if x.shape[2] < width:
-        raise ValueError(f"Input length ({x.shape[2]}) is smaller than kernel width"
-                         f" ({width}). Convolution is not defined for this configuration.")
+        raise ValueError(
+            f"Input length ({x.shape[2]}) is smaller than kernel width"
+            f" ({width}). Convolution is not defined for this configuration."
+        )
     out_len = x.shape[2] - width + 1
 
     # Accumulate in float32 for reduced-precision dtypes (bfloat16 / float16)
@@ -94,8 +96,11 @@ def _depthwise_conv1d_tpc(
     w = weight.unsqueeze(0)  # (1, dim, width)
     out = (x[:, :, :out_len] * w[:, :, 0:1]).float() if needs_upcast else x[:, :, :out_len] * w[:, :, 0:1]
     for k in range(1, width):
-        out = out + (x[:, :, k:k + out_len] *
-                     w[:, :, k:k + 1]).float() if needs_upcast else out + x[:, :, k:k + out_len] * w[:, :, k:k + 1]
+        out = (
+            out + (x[:, :, k : k + out_len] * w[:, :, k : k + 1]).float()
+            if needs_upcast
+            else out + x[:, :, k : k + out_len] * w[:, :, k : k + 1]
+        )
 
     if bias is not None:
         out = out + (bias.float() if needs_upcast else bias).unsqueeze(0).unsqueeze(-1)
@@ -183,12 +188,15 @@ def hpu_causal_conv1d_fn(
     validate_data: bool = False,
     is_prompt: bool = True,
 ):
-    if any(ptr is not None for ptr in (
+    if any(
+        ptr is not None
+        for ptr in (
             block_idx_first_scheduled_token,
             block_idx_last_scheduled_token,
             initial_state_idx,
             num_computed_tokens,
-    )):
+        )
+    ):
         raise NotImplementedError("Prefix caching metadata is not supported in the PyTorch reference implementation.")
 
     activation = _normalize_activation(activation)
@@ -220,7 +228,7 @@ def hpu_causal_conv1d_fn(
             raise ValueError("'x' must be 2-D (dim, cu_seq_len).")
         if weight_work.shape != (dim, width):
             raise ValueError("'weight' must have shape (dim, width).")
-        if bias_work is not None and bias_work.shape != (dim, ):
+        if bias_work is not None and bias_work.shape != (dim,):
             raise ValueError("'bias' must match the feature dimension.")
         if not ((x_work.stride(0) == 1) or (x_work.stride(1) == 1)):
             raise ValueError("Input tensor must be in channel-last or channel-first memory layout.")
@@ -244,8 +252,11 @@ def hpu_causal_conv1d_fn(
 
     # Get init_state for all batch
     if has_initial_state is not None:
-        init_state = torch.where(has_initial_state, conv_states[batch_cache_idx, -state_len:, :],
-                                 torch.zeros(padded_batch, state_len, dim, device=x_work.device, dtype=work_dtype))
+        init_state = torch.where(
+            has_initial_state,
+            conv_states[batch_cache_idx, -state_len:, :],
+            torch.zeros(padded_batch, state_len, dim, device=x_work.device, dtype=work_dtype),
+        )
     else:
         init_state = torch.zeros(padded_batch, state_len, dim, device=x_work.device, dtype=work_dtype)
     init_state = init_state.transpose(-1, -2)
@@ -334,12 +345,15 @@ def hpu_causal_conv1d_fn_update(
     validate_data: bool = False,
     is_prompt: bool = True,
 ):
-    if any(ptr is not None for ptr in (
+    if any(
+        ptr is not None
+        for ptr in (
             block_idx_first_scheduled_token,
             block_idx_last_scheduled_token,
             initial_state_idx,
             num_computed_tokens,
-    )):
+        )
+    ):
         raise NotImplementedError("Prefix caching metadata is not supported in the PyTorch reference implementation.")
 
     activation = _normalize_activation(activation)
@@ -369,7 +383,7 @@ def hpu_causal_conv1d_fn_update(
             raise ValueError("'x' must be 2-D (dim, cu_seq_len).")
         if weight_work.shape != (dim, width):
             raise ValueError("'weight' must have shape (dim, width).")
-        if bias_work is not None and bias_work.shape != (dim, ):
+        if bias_work is not None and bias_work.shape != (dim,):
             raise ValueError("'bias' must match the feature dimension.")
         if not ((x_work.stride(0) == 1) or (x_work.stride(1) == 1)):
             raise ValueError("Input tensor must be in channel-last or channel-first memory layout.")

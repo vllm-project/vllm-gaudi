@@ -46,7 +46,6 @@ from vllm_gaudi.ops.ops_selector import get_selective_state_update_impl
 # Adapted from vllm.model_executor.layers.mamba.mamba_mixer2.Mixer2RMSNormGated
 @Mixer2RMSNormGated.register_oot
 class HPUMixer2RMSNormGated(Mixer2RMSNormGated):
-
     def __init__(
         self,
         full_hidden_size: int,
@@ -71,7 +70,7 @@ class HPUMixer2RMSNormGated(Mixer2RMSNormGated):
         else:
             # Avoid checkpoint mismatch by skipping unused parameter
             self.register_parameter("weight", None)
-        assert self.full_hidden_size % self.tp_size == 0, ("Tensor parallel world size must divide hidden size.")
+        assert self.full_hidden_size % self.tp_size == 0, "Tensor parallel world size must divide hidden size."
 
     def forward_oot(
         self,
@@ -128,7 +127,6 @@ class HPUMixer2RMSNormGated(Mixer2RMSNormGated):
 # Adapted from vllm.model_executor.layers.mamba.mamba_mixer2.MambaMixer2
 @MambaMixer2.register_oot
 class HPUMambaMixer2(MambaMixer2):
-
     def __init__(
         self,
         hidden_size: int,
@@ -152,11 +150,11 @@ class HPUMambaMixer2(MambaMixer2):
 
         self.tp_size = get_tensor_model_parallel_world_size()
 
-        assert num_heads % self.tp_size == 0, ("Tensor parallel world size must divide num heads.")
+        assert num_heads % self.tp_size == 0, "Tensor parallel world size must divide num heads."
 
-        assert (n_groups %
-                self.tp_size) == 0 or n_groups == 1, ("If tensor parallel world size does not divide num_groups, "
-                                                      "then num_groups must equal 1.")
+        assert (n_groups % self.tp_size) == 0 or n_groups == 1, (
+            "If tensor parallel world size does not divide num_groups, then num_groups must equal 1."
+        )
 
         assert n_groups % self.tp_size == 0
 
@@ -210,10 +208,12 @@ class HPUMambaMixer2(MambaMixer2):
 
         # - these are TPed by heads to reduce the size of the
         #   temporal shape
-        self.A = nn.Parameter(torch.empty(
-            divide(num_heads, self.tp_size),
-            dtype=torch.float32,
-        ))
+        self.A = nn.Parameter(
+            torch.empty(
+                divide(num_heads, self.tp_size),
+                dtype=torch.float32,
+            )
+        )
         self.D = nn.Parameter(torch.ones(num_heads // self.tp_size))
         self.dt_bias = nn.Parameter(torch.ones(num_heads // self.tp_size))
         self.use_rms_norm = use_rms_norm
@@ -305,7 +305,7 @@ class HPUMambaMixer2(MambaMixer2):
         # GatedRMSNorm internally applying SiLU to the gate
         # SiLU is applied internally before normalization, unlike standard
         # norm usage
-        gate = projected_states[..., :self.tped_intermediate_size]
+        gate = projected_states[..., : self.tped_intermediate_size]
         hidden_states_varlen = self.norm(ssm_output, gate)
 
         # 5. Final linear projection
@@ -324,7 +324,7 @@ class HPUMambaMixer2(MambaMixer2):
         output: torch.Tensor,
     ):
         hidden_states_B_C, dt = torch.split(
-            projected_states[..., self.tped_intermediate_size:],
+            projected_states[..., self.tped_intermediate_size :],
             [self.tped_conv_size, self.tped_dt_size],
             dim=-1,
         )
@@ -463,8 +463,9 @@ class HPUMambaMixer2(MambaMixer2):
 
             # 3. State Space Model sequence transformation
             n_groups = self.n_groups // self.tp_size
-            A_d = (self.A[:, None, ...][:, :, None].expand(-1, self.head_dim,
-                                                           self.ssm_state_size).to(dtype=torch.float32))
+            A_d = (
+                self.A[:, None, ...][:, :, None].expand(-1, self.head_dim, self.ssm_state_size).to(dtype=torch.float32)
+            )
             dt = dt[:, :, None].expand(-1, -1, self.head_dim)
             dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
             D_d = self.D[:, None, ...].expand(-1, self.head_dim)

@@ -27,33 +27,37 @@ DEVICE = current_platform.device_type
 SEED = 42
 
 
-def _create_sampling_params(temperature: float = 0,
-                            top_k: int = -1,
-                            top_p: float = 1,
-                            min_p: float = 0,
-                            presence_penalty: float = 0,
-                            repetition_penalty: float = 1,
-                            frequency_penalty: float = 0,
-                            min_tokens: int = 0,
-                            seed: Optional[int] = None) -> SamplingParams:
-    '''Create sampling parameters for text generation.
-    Refer to: 
-    https://docs.vllm.ai/en/stable/api/vllm/sampling_params.html#vllm.sampling_params.SamplingParams 
-    for params'''
-    return SamplingParams(temperature=temperature,
-                          top_k=top_k,
-                          top_p=top_p,
-                          min_p=min_p,
-                          presence_penalty=presence_penalty,
-                          repetition_penalty=repetition_penalty,
-                          frequency_penalty=frequency_penalty,
-                          min_tokens=min_tokens,
-                          seed=seed)
+def _create_sampling_params(
+    temperature: float = 0,
+    top_k: int = -1,
+    top_p: float = 1,
+    min_p: float = 0,
+    presence_penalty: float = 0,
+    repetition_penalty: float = 1,
+    frequency_penalty: float = 0,
+    min_tokens: int = 0,
+    seed: Optional[int] = None,
+) -> SamplingParams:
+    """Create sampling parameters for text generation.
+    Refer to:
+    https://docs.vllm.ai/en/stable/api/vllm/sampling_params.html#vllm.sampling_params.SamplingParams
+    for params"""
+    return SamplingParams(
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        min_p=min_p,
+        presence_penalty=presence_penalty,
+        repetition_penalty=repetition_penalty,
+        frequency_penalty=frequency_penalty,
+        min_tokens=min_tokens,
+        seed=seed,
+    )
 
 
-def _construct_cached_request_state(req_id_suffix: int,
-                                    sampling_params: SamplingParams,
-                                    generator: Optional[torch.Generator] = None) -> CachedRequestState:
+def _construct_cached_request_state(
+    req_id_suffix: int, sampling_params: SamplingParams, generator: Optional[torch.Generator] = None
+) -> CachedRequestState:
     prompt_token_ids = [np.random.randint(0, VOCAB_SIZE) for _ in range(np.random.randint(0, MAX_PROMPT_SIZE))]
     output_token_ids = [np.random.randint(0, VOCAB_SIZE) for _ in range(np.random.randint(0, NUM_OUTPUT_TOKENS))]
     return CachedRequestState(
@@ -62,7 +66,7 @@ def _construct_cached_request_state(req_id_suffix: int,
         sampling_params=sampling_params,
         pooling_params=None,
         mm_features=[],
-        block_ids=([], ),
+        block_ids=([],),
         generator=generator,
         num_computed_tokens=len(output_token_ids),
         output_token_ids=output_token_ids,
@@ -77,9 +81,9 @@ def _create_logits(batch_size: int, init_value: float = 1e-2) -> torch.Tensor:
     return logits
 
 
-def _prepare_metadata(batch_size: int,
-                      sampling_params: SamplingParams,
-                      is_seeded_random: bool = False) -> SamplingMetadata:
+def _prepare_metadata(
+    batch_size: int, sampling_params: SamplingParams, is_seeded_random: bool = False
+) -> SamplingMetadata:
     input_batch: InputBatch = InputBatch(
         max_num_reqs=batch_size,
         max_model_len=1024,
@@ -231,9 +235,10 @@ def test_sampler_top_p_top_k_min_p(batch_size: int, top_k: int, top_p: float, mi
 
     # only in top_k we know how many samples we can expect
     if top_p == 1 and min_p == 0:
-        assert top_k*batch_size <= no_of_nonzero_probs_to_sample, \
-            f'''Expected at least {top_k*batch_size} non-zero probabilities, 
-                got {no_of_nonzero_probs_to_sample}'''
+        assert (
+            top_k * batch_size <= no_of_nonzero_probs_to_sample
+        ), f"""Expected at least {top_k * batch_size} non-zero probabilities, 
+                got {no_of_nonzero_probs_to_sample}"""
 
     # Change [[0, 1023], [0, 1024], [1, 1022], ...]
     # to a [[1023, 1024], [1022, 1023], ...]
@@ -243,6 +248,7 @@ def test_sampler_top_p_top_k_min_p(batch_size: int, top_k: int, top_p: float, mi
         expected_nonzero_idx[prompt_no].append(idx)
 
     for i in range(len(expected_nonzero_idx)):
-        assert sampled_ids[i] in expected_nonzero_idx[i], \
-            f'''Expected sampled token ids to be in {expected_nonzero_idx[i]}, 
-                got {sampled_ids[i]}'''
+        assert (
+            sampled_ids[i] in expected_nonzero_idx[i]
+        ), f"""Expected sampled token ids to be in {expected_nonzero_idx[i]}, 
+                got {sampled_ids[i]}"""

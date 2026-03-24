@@ -73,28 +73,30 @@ PROMPTS = generate_prompts(100)
 
 
 def print_outputs(model_name, outputs):
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  Model: {model_name}")
     print(f"  Total prompts: {len(outputs)}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     # Show first 3 and last 2 outputs
     first = list(range(min(3, len(outputs))))
     last = list(range(max(len(outputs) - 2, 3), len(outputs)))
     show_indices = first + last
     for i in show_indices:
         output = outputs[i]
-        prompt = output.prompt[:50] + ('...' if len(output.prompt) > 50 else '')
-        generated_text = output.outputs[0].text[:80] + ('...' if len(output.outputs[0].text) > 80 else '')
-        print(f"  [{i+1:3d}] Prompt: {prompt!r}")
+        prompt = output.prompt[:50] + ("..." if len(output.prompt) > 50 else "")
+        generated_text = output.outputs[0].text[:80] + ("..." if len(output.outputs[0].text) > 80 else "")
+        print(f"  [{i + 1:3d}] Prompt: {prompt!r}")
         print(f"        Output: {generated_text!r}")
         if i == min(2, len(outputs) - 1) and len(outputs) > 5:
             print(f"        ... ({len(outputs) - 5} more prompts) ...")
     # Stats
     total_output_tokens = sum(len(o.outputs[0].token_ids) for o in outputs)
     avg_output_len = total_output_tokens / len(outputs)
-    print(f"  Summary: {len(outputs)} prompts, "
-          f"{total_output_tokens} total output tokens, "
-          f"{avg_output_len:.1f} avg tokens/prompt")
+    print(
+        f"  Summary: {len(outputs)} prompts, "
+        f"{total_output_tokens} total output tokens, "
+        f"{avg_output_len:.1f} avg tokens/prompt"
+    )
 
 
 def get_model_runner(llm):
@@ -110,8 +112,9 @@ def assert_model_device(model_runner, target_device):
     if model_runner:
         params_devices = list(set([p.device for p in model_runner.model.parameters()]))
         assert len(params_devices) == 1, f"Expected all params on one device, got {params_devices}"
-        assert params_devices[0].type == target_device, \
+        assert params_devices[0].type == target_device, (
             f"Expected device '{target_device}', got '{params_devices[0].type}'"
+        )
         print(f"  ✓ Model parameters on {target_device}")
 
 
@@ -138,14 +141,11 @@ def generate(llm, model_name):
     outputs = llm.generate(PROMPTS)
     gen_time = time.time() - start
     print_outputs(model_name, outputs)
-    assert len(outputs) == len(PROMPTS), \
-        f"Expected {len(PROMPTS)} outputs, got {len(outputs)}"
+    assert len(outputs) == len(PROMPTS), f"Expected {len(PROMPTS)} outputs, got {len(outputs)}"
     empty_count = sum(1 for o in outputs if len(o.outputs[0].text) == 0)
-    assert empty_count == 0, \
-        f"{empty_count} prompts produced empty output"
+    assert empty_count == 0, f"{empty_count} prompts produced empty output"
     total_tokens = sum(len(o.outputs[0].token_ids) for o in outputs)
-    print(f"  ✓ All {len(PROMPTS)} prompts generated "
-          f"successfully ({gen_time:.2f}s)")
+    print(f"  ✓ All {len(PROMPTS)} prompts generated successfully ({gen_time:.2f}s)")
     return outputs, {"gen_time_s": gen_time, "total_tokens": total_tokens}
 
 
@@ -167,8 +167,7 @@ def sleep_model(llm, model_name):
     freed_bytes = -m.consumed_device_memory
     freed_gib = freed_bytes / (1024**3)
     print(f"  Device memory freed: {freed_gib:.2f} GiB")
-    assert freed_bytes > 1 * 1024 * 1024 * 1024, \
-        f"Expected at least 1 GiB freed, got {freed_gib:.2f} GiB"
+    assert freed_bytes > 1 * 1024 * 1024 * 1024, f"Expected at least 1 GiB freed, got {freed_gib:.2f} GiB"
     print(f"  ✓ Sleep successful, {freed_gib:.2f} GiB freed")
     return {"sleep_time_s": elapsed, "freed_gib": freed_gib}
 
@@ -189,6 +188,7 @@ def destroy_model(llm, model_name):
             model_runner = get_model_runner(llm)
             if model_runner and model_runner.model is not None:
                 import torch
+
                 for param in model_runner.model.parameters():
                     param.data = torch.empty(0)
         except Exception:
@@ -199,12 +199,14 @@ def destroy_model(llm, model_name):
         # Return freed memory to OS (Linux)
         try:
             import ctypes
+
             libc = ctypes.CDLL("libc.so.6")
             libc.malloc_trim(0)
         except Exception:
             pass
         try:
             import torch
+
             torch.hpu.synchronize()
         except Exception:
             pass
@@ -217,36 +219,42 @@ def destroy_model(llm, model_name):
 
 def print_metrics_table(all_metrics):
     """Print a summary table of per-phase metrics."""
-    hdr = (f"{'Phase':>5}  {'Model':<45}  "
-           f"{'Load(s)':>7}  {'Gen(s)':>7}  "
-           f"{'Sleep(s)':>8}  {'Del(s)':>7}  "
-           f"{'Freed(GiB)':>10}  {'Tokens':>7}")
+    hdr = (
+        f"{'Phase':>5}  {'Model':<45}  "
+        f"{'Load(s)':>7}  {'Gen(s)':>7}  "
+        f"{'Sleep(s)':>8}  {'Del(s)':>7}  "
+        f"{'Freed(GiB)':>10}  {'Tokens':>7}"
+    )
     sep = "-" * len(hdr)
     print(f"\n{sep}")
     print(hdr)
     print(sep)
     for m in all_metrics:
-        print(f"{m['phase']:>5}  "
-              f"{m['model']:<45}  "
-              f"{m['load_time_s']:>7.2f}  "
-              f"{m['gen_time_s']:>7.2f}  "
-              f"{m['sleep_time_s']:>8.2f}  "
-              f"{m['destroy_time_s']:>7.2f}  "
-              f"{m['freed_gib']:>10.2f}  "
-              f"{m['total_tokens']:>7}")
+        print(
+            f"{m['phase']:>5}  "
+            f"{m['model']:<45}  "
+            f"{m['load_time_s']:>7.2f}  "
+            f"{m['gen_time_s']:>7.2f}  "
+            f"{m['sleep_time_s']:>8.2f}  "
+            f"{m['destroy_time_s']:>7.2f}  "
+            f"{m['freed_gib']:>10.2f}  "
+            f"{m['total_tokens']:>7}"
+        )
     print(sep)
     n = len(all_metrics)
     avg = {
         k: sum(m[k] for m in all_metrics) / n
-        for k in ('load_time_s', 'gen_time_s', 'sleep_time_s', 'destroy_time_s', 'freed_gib', 'total_tokens')
+        for k in ("load_time_s", "gen_time_s", "sleep_time_s", "destroy_time_s", "freed_gib", "total_tokens")
     }
-    print(f"{'AVG':>5}  {'':<45}  "
-          f"{avg['load_time_s']:>7.2f}  "
-          f"{avg['gen_time_s']:>7.2f}  "
-          f"{avg['sleep_time_s']:>8.2f}  "
-          f"{avg['destroy_time_s']:>7.2f}  "
-          f"{avg['freed_gib']:>10.2f}  "
-          f"{avg['total_tokens']:>7.0f}")
+    print(
+        f"{'AVG':>5}  {'':<45}  "
+        f"{avg['load_time_s']:>7.2f}  "
+        f"{avg['gen_time_s']:>7.2f}  "
+        f"{avg['sleep_time_s']:>8.2f}  "
+        f"{avg['destroy_time_s']:>7.2f}  "
+        f"{avg['freed_gib']:>10.2f}  "
+        f"{avg['total_tokens']:>7.0f}"
+    )
     print(sep)
 
 
@@ -254,10 +262,9 @@ def main():
     parser = argparse.ArgumentParser(description="Sleep Mode Model Swapping Test")
     parser.add_argument("--model-a", type=str, default="meta-llama/Llama-3.1-8B-Instruct", help="First model to load")
     parser.add_argument("--model-b", type=str, default="Qwen/Qwen3-0.6B", help="Second model to load (swap target)")
-    parser.add_argument("--enforce-eager",
-                        action="store_true",
-                        default=False,
-                        help="Enforce eager mode (disables torch.compile)")
+    parser.add_argument(
+        "--enforce-eager", action="store_true", default=False, help="Enforce eager mode (disables torch.compile)"
+    )
     parser.add_argument("--phases", type=int, default=10, help="Number of swap phases (default: 10)")
     parser.add_argument("--max-model-len", type=int, default=4096, help="Maximum model context length (default: 4096)")
     args = parser.parse_args()
@@ -268,10 +275,8 @@ def main():
     # Validate environment
     multiproc = os.getenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
     if multiproc != "0":
-        print("WARNING: VLLM_ENABLE_V1_MULTIPROCESSING"
-              " is not set to 0.")
-        print("  Set VLLM_ENABLE_V1_MULTIPROCESSING=0"
-              " for device assertions")
+        print("WARNING: VLLM_ENABLE_V1_MULTIPROCESSING is not set to 0.")
+        print("  Set VLLM_ENABLE_V1_MULTIPROCESSING=0 for device assertions")
 
     print("=" * 60)
     print("  SLEEP MODE MODEL SWAPPING TEST")
@@ -292,8 +297,7 @@ def main():
         label = "A" if (phase - 1) % 2 == 0 else "B"
 
         print("\n" + "=" * 60)
-        print(f"  PHASE {phase}/{num_phases}: "
-              f"Model {label} -- Load, Generate, Sleep")
+        print(f"  PHASE {phase}/{num_phases}: Model {label} -- Load, Generate, Sleep")
         print("=" * 60)
 
         llm, load_m = load_model(model_name, args.enforce_eager, args.max_model_len)
@@ -331,8 +335,7 @@ def main():
     print(f"  ✓ {num_phases} phases completed")
     print(f"  ✓ Model A ({args.model_a})")
     print(f"  ✓ Model B ({args.model_b})")
-    print("  ✓ Full sleep-swap-wake cycle "
-          "validated on Gaudi")
+    print("  ✓ Full sleep-swap-wake cycle validated on Gaudi")
     print("=" * 60)
 
 
@@ -341,6 +344,7 @@ if __name__ == "__main__":
         main()
     except Exception:
         import traceback
+
         print("\n" + "=" * 60)
         print("  TEST FAILED ✗")
         print("=" * 60)

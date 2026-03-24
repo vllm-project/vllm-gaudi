@@ -10,8 +10,13 @@
 
 import torch
 
-from .pytorch_implementation import (new_chunk_cumsum, new_chunk_scan, new_chunk_state, new_ssd_bmm,
-                                     new_ssd_state_passing)
+from .pytorch_implementation import (
+    new_chunk_cumsum,
+    new_chunk_scan,
+    new_chunk_state,
+    new_ssd_bmm,
+    new_ssd_state_passing,
+)
 
 
 def is_int_pow_2(n):
@@ -19,23 +24,23 @@ def is_int_pow_2(n):
 
 
 def _mamba_chunk_scan_combined_fwd(
-        x,
-        dt,
-        A,
-        B,
-        C,
-        chunk_size,
-        out,
-        D=None,
-        z=None,
-        dt_bias=None,
-        initial_states=None,
-        cu_seqlens=None,
-        last_chunk_indices=None,
-        dt_softplus=False,
-        dt_limit=(0.0, float("inf")),
-        state_dtype=None,
-        padding_mask=None,
+    x,
+    dt,
+    A,
+    B,
+    C,
+    chunk_size,
+    out,
+    D=None,
+    z=None,
+    dt_bias=None,
+    initial_states=None,
+    cu_seqlens=None,
+    last_chunk_indices=None,
+    dt_softplus=False,
+    dt_limit=(0.0, float("inf")),
+    state_dtype=None,
+    padding_mask=None,
 ):
     assert is_int_pow_2(chunk_size), "chunk_size must be integer power of 2"
     seqlen, nheads, headdim = x.shape
@@ -43,19 +48,19 @@ def _mamba_chunk_scan_combined_fwd(
     assert nheads % ngroups == 0
     assert B.shape == (seqlen, ngroups, dstate)
     assert dt.shape == (seqlen, nheads)
-    assert A.shape == (nheads, )
+    assert A.shape == (nheads,)
     assert C.shape == B.shape
     if z is not None:
         assert z.shape == x.shape
     if D is not None:
-        assert D.shape == (nheads, headdim) or D.shape == (nheads, )
+        assert D.shape == (nheads, headdim) or D.shape == (nheads,)
     if B.stride(-1) != 1:
         B = B.contiguous()
     if C.stride(-1) != 1:
         C = C.contiguous()
-    if (x.stride(-1) != 1 and x.stride(0) != 1):  # Either M or K dimension should be contiguous
+    if x.stride(-1) != 1 and x.stride(0) != 1:  # Either M or K dimension should be contiguous
         x = x.contiguous()
-    if (z is not None and z.stride(-1) != 1 and z.stride(0) != 1):  # Either M or K dimension should be contiguous
+    if z is not None and z.stride(-1) != 1 and z.stride(0) != 1:  # Either M or K dimension should be contiguous
         z = z.contiguous()
     if D is not None and D.stride(-1) != 1:
         D = D.contiguous()
@@ -90,8 +95,11 @@ def _mamba_chunk_scan_combined_fwd(
     dt_t = dt.transpose(0, 1)  # (nchunks, nheads, chunk_size)
     dA_cumsum_t = dA_cumsum.transpose(0, 1)  # (nchunks, nheads, chunk_size)
     x_chunked = x.view(nchunks, chunk_size, nheads, headdim)
-    B_expanded = B.view(nchunks, chunk_size, ngroups, 1, dstate).expand(-1, -1, -1, nheads_ngroups_ratio,
-                                                                        -1).reshape(nchunks, chunk_size, nheads, dstate)
+    B_expanded = (
+        B.view(nchunks, chunk_size, ngroups, 1, dstate)
+        .expand(-1, -1, -1, nheads_ngroups_ratio, -1)
+        .reshape(nchunks, chunk_size, nheads, dstate)
+    )
 
     # 2. Compute the state for each intra-chunk
     # (right term of low-rank factorization of off-diagonal blocks; B terms)
@@ -104,7 +112,8 @@ def _mamba_chunk_scan_combined_fwd(
         states.flatten(-2),
         dA_cumsum,  # (nheads, nchunks, chunk_size)
         initial_states=initial_states.flatten(-2)
-        if initial_states is not None else None,  # (batch, nheads, headdim*dstate)
+        if initial_states is not None
+        else None,  # (batch, nheads, headdim*dstate)
         out_dtype=state_dtype if state_dtype is not None else C.dtype,
     )
     states = states.view(states.shape[0], states.shape[1], -1, dstate)
@@ -136,23 +145,23 @@ def _mamba_chunk_scan_combined_fwd(
 
 
 def hpu_mamba_chunk_scan_combined_varlen(
-        x,
-        dt,
-        A,
-        B,
-        C,
-        chunk_size,
-        cu_seqlens,
-        last_chunk_indices,
-        out,
-        D=None,
-        z=None,
-        dt_bias=None,
-        initial_states=None,
-        dt_softplus=False,
-        dt_limit=(0.0, float("inf")),
-        state_dtype=None,
-        padding_mask=None,
+    x,
+    dt,
+    A,
+    B,
+    C,
+    chunk_size,
+    cu_seqlens,
+    last_chunk_indices,
+    out,
+    D=None,
+    z=None,
+    dt_bias=None,
+    initial_states=None,
+    dt_softplus=False,
+    dt_limit=(0.0, float("inf")),
+    state_dtype=None,
+    padding_mask=None,
 ):
     """
     Argument:

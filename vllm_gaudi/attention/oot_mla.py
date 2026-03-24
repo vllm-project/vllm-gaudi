@@ -9,37 +9,29 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm_gaudi.extension.utils import VLLMKVCache
-from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, B2BMatmul, ModuleFusedSDPA, Softmax, VLLMFP8KVCache)
+from vllm_gaudi.extension.utils import FP8Matmul, Matmul, B2BMatmul, ModuleFusedSDPA, Softmax, VLLMFP8KVCache
 from vllm_gaudi.extension.unified import HPUUnifiedAttentionMetadata
 import vllm_gaudi.extension.kernels as kernels
 from vllm.forward_context import ForwardContext, get_forward_context
 
 
 class HPUMLAAttention(MLAAttention):
-
     scale: float
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.enable_fp8_attn = self.kv_cache_dtype == 'fp8_inc' and os.environ.get('QUANT_CONFIG', None) is None
+        self.enable_fp8_attn = self.kv_cache_dtype == "fp8_inc" and os.environ.get("QUANT_CONFIG", None) is None
         self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn else VLLMFP8KVCache()
         self.scale = float(self.scale)
-        self.matmul_qk = Matmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
+        self.matmul_qk = Matmul() if not self.enable_fp8_attn else FP8Matmul()
         self.softmax = Softmax()
-        self.matmul_av = Matmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
-        self.batch2block_matmul = B2BMatmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
-        self.block2batch_matmul = B2BMatmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
-        self.k_cache = VLLMKVCache() if not self.enable_fp8_attn \
-            else VLLMFP8KVCache()
-        self.v_cache = VLLMKVCache(is_v_cache=True) if not self.enable_fp8_attn \
-            else VLLMFP8KVCache()
+        self.matmul_av = Matmul() if not self.enable_fp8_attn else FP8Matmul()
+        self.batch2block_matmul = B2BMatmul() if not self.enable_fp8_attn else FP8Matmul()
+        self.block2batch_matmul = B2BMatmul() if not self.enable_fp8_attn else FP8Matmul()
+        self.k_cache = VLLMKVCache() if not self.enable_fp8_attn else VLLMFP8KVCache()
+        self.v_cache = VLLMKVCache(is_v_cache=True) if not self.enable_fp8_attn else VLLMFP8KVCache()
         HPUFusedSDPA = kernels.fsdpa()
-        self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
-            else ModuleFusedSDPA(HPUFusedSDPA)
+        self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None else ModuleFusedSDPA(HPUFusedSDPA)
 
     def forward(
         self,
@@ -57,19 +49,19 @@ class HPUMLAAttention(MLAAttention):
             if isinstance(attn_metadata, dict):
                 attn_metadata = attn_metadata[self.layer_name]
             self_kv_cache = self.kv_cache[0]
-            #slot_mapping = forward_context.slot_mapping
+            # slot_mapping = forward_context.slot_mapping
 
-            #assert isinstance(slot_mapping, dict), (
+            # assert isinstance(slot_mapping, dict), (
             #    f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
-            #)
-            #self.impl.do_kv_cache_update(
+            # )
+            # self.impl.do_kv_cache_update(
             #    kv_c_normed,
             #    k_pe,
             #    self_kv_cache,
             #    slot_mapping.get(self.layer_name),
             #    self.kv_cache_dtype,
             #    self._k_scale,
-            #)
+            # )
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 self.forward_impl(
@@ -158,7 +150,7 @@ class HPUMLAAttention(MLAAttention):
     # during each graph execution
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         MLAAttention.process_weights_after_loading(self, act_dtype)
-        #super(MLAAttention, self).process_weights_after_loading(act_dtype)
+        # super(MLAAttention, self).process_weights_after_loading(act_dtype)
         self.W_UV: torch.Tensor = self.W_UV.contiguous()
         self.W_UK_T: torch.Tensor = self.W_UK_T.contiguous()
 
@@ -176,7 +168,6 @@ class HPUMLAAttention(MLAAttention):
 
 @PluggableLayer.register_oot(name="MultiHeadLatentAttentionWrapper")
 class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
-
     def __init__(
         self,
         hidden_size: int,

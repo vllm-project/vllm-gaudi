@@ -46,7 +46,8 @@ def patched_attention_forward(
             query, _ = self.query_quant(query, self._q_scale)
 
     assert self.attn_backend.forward_includes_kv_cache_update, (
-        "Split KV cache update not supported when output tensor not provided.")
+        "Split KV cache update not supported when output tensor not provided."
+    )
 
     # direct call
     forward_context: ForwardContext = get_forward_context()

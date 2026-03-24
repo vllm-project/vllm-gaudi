@@ -10,18 +10,14 @@ def minimal_config(tmp_path):
     varlist_conf = tmp_path / "tmp.env"
     model_def_settings = tmp_path / "settings_vllm.csv"
 
-    defaults.write_text("hw_defaults:\n"
-                        "  DEVICE_NAME: TEST_DEVICE\n"
-                        "  HPU_MEM: {TEST_DEVICE: 96}\n"
-                        "  DTYPE: bfloat16\n")
-    varlist_conf.write_text("MODEL\n"
-                            "PT_HPU_LAZY_MODE\n")
+    defaults.write_text("hw_defaults:\n  DEVICE_NAME: TEST_DEVICE\n  HPU_MEM: {TEST_DEVICE: 96}\n  DTYPE: bfloat16\n")
+    varlist_conf.write_text("MODEL\nPT_HPU_LAZY_MODE\n")
     model_def_settings.write_text("MODEL,PARAM1\nTEST_MODEL,123\n")
 
     return {
         "defaults_path": str(defaults),
         "varlist_conf_path": str(varlist_conf),
-        "model_def_settings_path": str(model_def_settings)
+        "model_def_settings_path": str(model_def_settings),
     }
 
 

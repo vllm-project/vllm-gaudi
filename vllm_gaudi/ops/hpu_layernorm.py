@@ -1,18 +1,17 @@
 from typing import Optional, Union
 import torch
-from vllm.model_executor.layers.layernorm import \
-    RMSNorm
+from vllm.model_executor.layers.layernorm import RMSNorm
 
 
 @RMSNorm.register_oot
 class HPURMSNorm(RMSNorm):
-
     def forward_oot(
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         from vllm_gaudi.extension.kernels import rms_norm
+
         HPUFusedRMSNorm = rms_norm()
         if residual is not None:
             orig_shape = x.shape

@@ -15,7 +15,7 @@ from safetensors import safe_open
 
 def test_fp8_linear_method(default_vllm_config: None, dist_init, monkeypatch):
     monkeypatch.setenv("VLLM_HPU_FORCE_CHANNEL_FP8", "0")
-    config = {'activation_scheme': 'dynamic', 'fmt': 'e4m3', 'quant_method': 'fp8', 'weight_block_size': [128, 128]}
+    config = {"activation_scheme": "dynamic", "fmt": "e4m3", "quant_method": "fp8", "weight_block_size": [128, 128]}
     oot_quant_config = Fp8Config.from_config(config)
 
     # Prepare linear layer with oot Fp8LinearMethod
@@ -52,11 +52,11 @@ def test_fp8_linear_method(default_vllm_config: None, dist_init, monkeypatch):
 def test_fp8_moe_method(default_vllm_config: None, dist_init, monkeypatch):
     monkeypatch.setenv("VLLM_HPU_FORCE_CHANNEL_FP8", "0")
     config = {
-        'activation_scheme': 'dynamic',
-        'modules_to_not_convert': [],
-        'fmt': 'e4m3',
-        'quant_method': 'fp8',
-        'weight_block_size': [128, 128]
+        "activation_scheme": "dynamic",
+        "modules_to_not_convert": [],
+        "fmt": "e4m3",
+        "quant_method": "fp8",
+        "weight_block_size": [128, 128],
     }
     oot_quant_config = Fp8Config.from_config(config)
 

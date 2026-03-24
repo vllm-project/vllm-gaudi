@@ -32,14 +32,8 @@ LORA_TEST_EXPECTED = [
 
 def format_chatml_messages(prompt: str):
     return [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant."
-        },
-        {
-            "role": "user",
-            "content": prompt
-        },
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": prompt},
     ]
 
 
@@ -65,7 +59,7 @@ def test_multiple_lora_requests():
         max_model_len=512,
         gpu_memory_utilization=0.5,
         enforce_eager=True,
-        dtype='bfloat16',
+        dtype="bfloat16",
         hf_token=os.environ.get("HF_TOKEN"),
     )
     PROMPTS = ["Hello, my name is"] * 2

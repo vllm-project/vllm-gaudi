@@ -61,7 +61,7 @@ def main(args: dict):
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
         print("-" * 50)
 
-    #os._exit(0)
+    # os._exit(0)
 
 
 if __name__ == "__main__":
@@ -71,6 +71,7 @@ if __name__ == "__main__":
         main(args)
     except Exception:
         import traceback
+
         print("An error occurred during generation:")
         traceback.print_exc()
         os._exit(1)

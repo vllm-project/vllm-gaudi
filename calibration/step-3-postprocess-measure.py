@@ -10,7 +10,7 @@ import numpy as np
 
 
 def fix_cache_inputs(json_data, args):
-    layer_indexes = set([int(key.split('.')[2]) for key in json_data['Nodes'] if key.startswith('model.layers.')])
+    layer_indexes = set([int(key.split(".")[2]) for key in json_data["Nodes"] if key.startswith("model.layers.")])
     for layer_index in range(len(layer_indexes)):
         matmul_av_input = None
         v_cache_input = None
@@ -24,35 +24,35 @@ def fix_cache_inputs(json_data, args):
             attn_name = "mla_attn.mla_attn"
             k_cache_name = "latent_cache_k"
 
-        matmul_av_key = f'model.layers.{layer_index}.self_attn.{attn_name}.impl.matmul_av'
-        v_cache_key = f'model.layers.{layer_index}.self_attn.{attn_name}.impl.{v_cache_name}'
-        matmul_qk_key = f'model.layers.{layer_index}.self_attn.{attn_name}.impl.matmul_qk'
-        k_cache_key = f'model.layers.{layer_index}.self_attn.{attn_name}.impl.{k_cache_name}'
+        matmul_av_key = f"model.layers.{layer_index}.self_attn.{attn_name}.impl.matmul_av"
+        v_cache_key = f"model.layers.{layer_index}.self_attn.{attn_name}.impl.{v_cache_name}"
+        matmul_qk_key = f"model.layers.{layer_index}.self_attn.{attn_name}.impl.matmul_qk"
+        k_cache_key = f"model.layers.{layer_index}.self_attn.{attn_name}.impl.{k_cache_name}"
 
-        matmul_av_input = json_data['Nodes'].get(matmul_av_key, {}).get('inputs', [None, None])[1]
-        v_cache_input = json_data['Nodes'].get(v_cache_key, {}).get('inputs', [None])[0]
-        matmul_qk_input = json_data['Nodes'].get(matmul_qk_key, {}).get('inputs', [None, None])[1]
-        k_cache_input = json_data['Nodes'].get(k_cache_key, {}).get('inputs', [None])[0]
+        matmul_av_input = json_data["Nodes"].get(matmul_av_key, {}).get("inputs", [None, None])[1]
+        v_cache_input = json_data["Nodes"].get(v_cache_key, {}).get("inputs", [None])[0]
+        matmul_qk_input = json_data["Nodes"].get(matmul_qk_key, {}).get("inputs", [None, None])[1]
+        k_cache_input = json_data["Nodes"].get(k_cache_key, {}).get("inputs", [None])[0]
 
         if matmul_av_input != v_cache_input:
             if args.deepseek:
                 # For deepseek, there is one tensor for k_cache and v_cache
-                json_data['Nodes'][matmul_av_key]['inputs'][1] = k_cache_input
+                json_data["Nodes"][matmul_av_key]["inputs"][1] = k_cache_input
             else:
-                json_data['Nodes'][matmul_av_key]['inputs'][1] = v_cache_input
+                json_data["Nodes"][matmul_av_key]["inputs"][1] = v_cache_input
         if matmul_qk_input != k_cache_input:
-            json_data['Nodes'][matmul_qk_key]['inputs'][1] = k_cache_input
+            json_data["Nodes"][matmul_qk_key]["inputs"][1] = k_cache_input
 
     return json_data
 
 
 def parse_args(args):
-    parser = argparse.ArgumentParser(description="Run the measurements parser",
-                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("-m",
-                        "--measurements",
-                        type=str,
-                        help="full path to the directory of the measurements that should be fixed")
+    parser = argparse.ArgumentParser(
+        description="Run the measurements parser", formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument(
+        "-m", "--measurements", type=str, help="full path to the directory of the measurements that should be fixed"
+    )
     parser.add_argument(
         "-o",
         "--out",
@@ -77,19 +77,25 @@ def main(args):
     measurements_path = args.measurements
     measurements_paths = os.listdir(measurements_path)
     measurements_paths_ranges = [
-        measurement_path for measurement_path in measurements_paths if measurement_path.endswith(".json")
-        and 'MAXABS_HW' not in measurement_path and "mod_list" not in measurement_path
+        measurement_path
+        for measurement_path in measurements_paths
+        if measurement_path.endswith(".json")
+        and "MAXABS_HW" not in measurement_path
+        and "mod_list" not in measurement_path
     ]
     measurements_paths_scales = [
-        measurement_path for measurement_path in measurements_paths
-        if measurement_path.endswith(".json") and 'MAXABS_HW' in measurement_path and "mod_list" not in measurement_path
+        measurement_path
+        for measurement_path in measurements_paths
+        if measurement_path.endswith(".json") and "MAXABS_HW" in measurement_path and "mod_list" not in measurement_path
     ]
     print(measurements_paths_ranges)
     print(measurements_paths_scales)
     for measurement in measurements_paths_ranges + measurements_paths_scales:
         fixed_json_path = os.path.join(output_path, f"{measurement.split(os.sep)[-1]}")
-        with open(fixed_json_path, "w") as fixed_json_file, \
-             open(os.path.join(measurements_path, measurement)) as json_file:
+        with (
+            open(fixed_json_path, "w") as fixed_json_file,
+            open(os.path.join(measurements_path, measurement)) as json_file,
+        ):
             data_to_fix = json.load(json_file)
             fixed_data = fix_cache_inputs(data_to_fix, args)
             json.dump(fixed_data, fixed_json_file)

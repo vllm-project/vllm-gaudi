@@ -1,7 +1,7 @@
 import torch
 from vllm.multimodal import NestedTensors
 from vllm.model_executor.models import utils
-from vllm.model_executor.models.utils import (_embedding_count_expression, _flatten_embeddings)
+from vllm.model_executor.models.utils import _embedding_count_expression, _flatten_embeddings
 
 
 # TODO: Replaced masked_scatter with torch.where to avoid HPU performance issues
@@ -24,6 +24,7 @@ def _merge_multimodal_embeddings(
         return inputs_embeds
 
     import habana_frameworks.torch.core as htcore
+
     htcore.mark_step()
 
     mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
@@ -50,8 +51,10 @@ def _merge_multimodal_embeddings(
         if num_actual_tokens != num_expected_tokens:
             expr = _embedding_count_expression(multimodal_embeddings)
 
-            raise ValueError(f"Attempted to assign {expr} = {num_actual_tokens} "
-                             f"multimodal tokens to {num_expected_tokens} placeholders") from e
+            raise ValueError(
+                f"Attempted to assign {expr} = {num_actual_tokens} "
+                f"multimodal tokens to {num_expected_tokens} placeholders"
+            ) from e
 
         raise ValueError("Error during masked scatter operation") from e
 

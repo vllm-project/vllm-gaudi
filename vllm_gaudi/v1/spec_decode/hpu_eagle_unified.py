@@ -13,7 +13,6 @@ logger = init_logger()
 
 
 class HpuEagleProposer(EagleProposer):
-
     def propose(
         self,
         # [num_tokens]
@@ -35,17 +34,15 @@ class HpuEagleProposer(EagleProposer):
 
         if self.method == "eagle3":
             assert isinstance(self.model.model, Eagle3LlamaForCausalLM)
-            target_hidden_states = \
-                self.model.model.combine_hidden_states(
-                    target_hidden_states)
+            target_hidden_states = self.model.model.combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
-        self.input_ids[:num_tokens - 1] = target_token_ids[1:]
+        self.input_ids[: num_tokens - 1] = target_token_ids[1:]
         # Replace the last token with the next token.
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
         self.input_ids[last_token_indices] = next_token_ids
 
-        #print(f"{self.input_ids[:num_tokens]}, {target_token_ids}")
+        # print(f"{self.input_ids[:num_tokens]}, {target_token_ids}")
 
         ret_hidden_states = self.model(
             input_ids=self.input_ids[:num_tokens].unsqueeze(-1),
@@ -101,14 +98,14 @@ class HpuEagleProposer(EagleProposer):
         spec_decode_metadata = unified_data.spec_decode_metadata
         num_draft_tokens = spec_decode_metadata.num_draft_tokens
         query_start_loc_cpu = unified_data.query_start_loc_cpu
-        #seq_lens_cpu = unified_data.seq_lens_cpu
+        # seq_lens_cpu = unified_data.seq_lens_cpu
         num_rejected_tokens = [
             n + 1 - len(sampled_token_ids[i]) if n > 0 else 0 for i, n in enumerate(num_draft_tokens)
         ]
         num_rejected_tokens = torch.tensor(num_rejected_tokens, dtype=torch.int32)
 
         device = self.device
-        #new_seq_lens_cpu = seq_lens_cpu - num_rejected_tokens
+        # new_seq_lens_cpu = seq_lens_cpu - num_rejected_tokens
 
         # [0, q1, q1 + q2, q1 + q2 + q3] -> [q1, q2, q3]
         new_query_len_per_req = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
@@ -135,7 +132,7 @@ class HpuEagleProposer(EagleProposer):
         # [0, 1, 2, 3, 4, 5, 6, 7, 8] ->
         # [0, 1, 0, 1, 2, 3, 0, 1, 2]
         #  _r1_  ____r2____  ___r3__
-        token_offests = (self.token_arange_np[:total_num_tokens] - new_query_start_locs_expanded)
+        token_offests = self.token_arange_np[:total_num_tokens] - new_query_start_locs_expanded
 
         # Expand starting positions to match token pattern
         # [0, q1, q1 + q2] ->
@@ -149,7 +146,7 @@ class HpuEagleProposer(EagleProposer):
         token_indices_np = token_offests + old_query_start_locs_expanded
         token_indices = torch.from_numpy(token_indices_np).to(device, non_blocking=True)
 
-        #last_token_indices = (new_query_start_loc_cpu[1:] - 1).to(device, non_blocking=True)
+        # last_token_indices = (new_query_start_loc_cpu[1:] - 1).to(device, non_blocking=True)
         last_token_indices_with_draft = query_start_loc_cpu[1:] - 1
         last_token_indices_remove_rejected = last_token_indices_with_draft - num_rejected_tokens
         last_token_indices = (last_token_indices_remove_rejected).to(device, non_blocking=True)

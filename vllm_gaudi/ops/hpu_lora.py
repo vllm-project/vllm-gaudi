@@ -7,7 +7,6 @@ from typing import Optional
 
 
 class HPUVocabParallelEmbeddingWithLoRA(VocabParallelEmbeddingWithLoRA):
-
     @property
     def quant_method(self):
         """Delegate quant_method access to the base layer."""
@@ -36,10 +35,9 @@ class HPUVocabParallelEmbeddingWithLoRA(VocabParallelEmbeddingWithLoRA):
                 -1,
             )
 
-        lora_output: Optional[torch.Tensor] = self.punica_wrapper.add_lora_embedding(full_output,
-                                                                                     full_lora_a_embeddings,
-                                                                                     self.lora_b_stacked,
-                                                                                     add_input=True)
+        lora_output: Optional[torch.Tensor] = self.punica_wrapper.add_lora_embedding(
+            full_output, full_lora_a_embeddings, self.lora_b_stacked, add_input=True
+        )
 
         if not current_platform.can_update_inplace():
             full_output = lora_output

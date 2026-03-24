@@ -1,15 +1,19 @@
 import torch
 from vllm.config import VllmConfig
-from vllm.model_executor.models.gemma3_mm import (Gemma3ForConditionalGeneration, Gemma3MultiModalProcessor,
-                                                  Gemma3ProcessingInfo, Gemma3DummyInputsBuilder, Gemma3ImageInputs)
+from vllm.model_executor.models.gemma3_mm import (
+    Gemma3ForConditionalGeneration,
+    Gemma3MultiModalProcessor,
+    Gemma3ProcessingInfo,
+    Gemma3DummyInputsBuilder,
+    Gemma3ImageInputs,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 
-@MULTIMODAL_REGISTRY.register_processor(Gemma3MultiModalProcessor,
-                                        info=Gemma3ProcessingInfo,
-                                        dummy_inputs=Gemma3DummyInputsBuilder)
+@MULTIMODAL_REGISTRY.register_processor(
+    Gemma3MultiModalProcessor, info=Gemma3ProcessingInfo, dummy_inputs=Gemma3DummyInputsBuilder
+)
 class HpuGemma3ForConditionalGeneration(Gemma3ForConditionalGeneration):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -19,9 +23,10 @@ class HpuGemma3ForConditionalGeneration(Gemma3ForConditionalGeneration):
         pixel_values = image_input["pixel_values"]
         num_patches = image_input["num_patches"]
 
-        if hasattr(self, 'vision_bucket_manager'):
-            batch_breakdown = self.vision_bucket_manager.greedy_plan(pixel_values.shape[0],
-                                                                     self.vision_bucket_manager.multimodal_buckets)
+        if hasattr(self, "vision_bucket_manager"):
+            batch_breakdown = self.vision_bucket_manager.greedy_plan(
+                pixel_values.shape[0], self.vision_bucket_manager.multimodal_buckets
+            )
             start_idx = 0
             image_embeds_multibatches = []
 
