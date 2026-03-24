@@ -512,6 +512,7 @@ def hpu_fused_gdn_gating(
     beta_out = torch.sigmoid(b.to(torch.float32)).to(b.dtype)
     return g.unsqueeze(0), beta_out.unsqueeze(0)
 
+
 def hpu_fused_recurrent_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,

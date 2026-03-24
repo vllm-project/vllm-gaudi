@@ -458,7 +458,7 @@ class HPUWorker(WorkerBase):
             logger.warning("KV cache has not been initialized yet, skipping discarding it")
         else:
             with HabanaMemoryProfiler() as m:
-                self.model_runner.defragmenter.cache_utils.kv_caches = None
+                self.model_runner.defragmenter = None
                 self.model_runner.kv_caches = []
                 forward_context = self.vllm_config.compilation_config.static_forward_context
                 for layer_name in forward_context:
@@ -506,8 +506,8 @@ class HPUWorker(WorkerBase):
             else:
                 with HabanaMemoryProfiler() as m:
                     self.model_runner.initialize_kv_cache(self.kv_cache_config)
-                    self.model_runner.defragmenter = OnlineDefragmenter()
-                    self.model_runner.defragmenter.initialize(self.model_runner.kv_caches, self.model_runner.block_size)
+                    self.model_runner.defragmenter = OnlineDefragmenter(self.model_runner.kv_caches,
+                                                                        self.model_runner.block_size)
                     gc.collect()
                     torch.hpu.synchronize()
                 msg = f"Waking up KV cache, reinitializing it took {m.get_summary_string()}"
