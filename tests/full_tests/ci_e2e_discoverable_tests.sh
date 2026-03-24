@@ -297,22 +297,10 @@ run_llama3_70b_inc_dynamic_quant_test() {
 #   tests/models/language/generation/test_common.py
 
 # GSM8K on granite-4.0-h
-run_gsm8k_granite_4_test() {
-    echo "➡️ Testing GSM8K on granite-4-h..."
-    VLLM_EXPONENTIAL_BUCKETING=false \
-    VLLM_PROMPT_QUERY_BUCKET_MIN=256 \
-    VLLM_PROMPT_QUERY_BUCKET_MAX=4096 \
-    VLLM_PROMPT_QUERY_BUCKET_STEP=256 \
-    VLLM_DECODE_BS_BUCKET_MIN=16 \
-    VLLM_DECODE_BS_BUCKET_STEP=16 \
-    VLLM_DECODE_BS_BUCKET_MAX=16 \
-    VLLM_CONTIGUOUS_PA=true \
-    VLLM_SKIP_WARMUP=true \
-    ENABLE_APC=false \
-    ASYNC_SCHEDULING=true \
-    TP_SIZE=1 \
-    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/granite-4-h-small.yaml"
-    echo "✅ Test with granite-4-h passed."
+run_load_generate_granite_4_h_test() {
+    echo "➡️ Testing basic model with vllm-hpu plugin v1..."
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model ibm-granite/granite-4.0-h-small
+    echo "✅ Test with basic model passed."
 }
 
 # GSM8K on granite-8b
