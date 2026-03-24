@@ -296,12 +296,6 @@ run_llama3_70b_inc_dynamic_quant_test() {
 # If the score is below the threshold, the test will fail. For implementation details see:
 #   tests/models/language/generation/test_common.py
 
-# GSM8K on granite-4.0-h
-run_load_generate_granite_4_h_test() {
-    echo "➡️ Testing basic model with vllm-hpu plugin v1..."
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model ibm-granite/granite-4.0-h-small
-    echo "✅ Test with basic model passed."
-}
 
 # GSM8K on granite-8b
 run_gsm8k_granite_test() {
@@ -468,6 +462,10 @@ run_structured_output_test() {
     HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/structured_outputs.py"
     HABANA_VISIBLE_DEVICES=all VLLM_MERGED_PREFILL=True VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/structured_outputs.py"
     echo "✅ Test with structured outputs passed."
+}
+
+run_bodge_granite_4_h_test(){
+    python -u ./tests/full_tests/granite_4h_sever_test.py
 }
 
 # --- Utility Functions ---
