@@ -11,7 +11,6 @@ import habana_frameworks.torch as htorch
 import numpy as np
 import numpy.typing as npt
 import math
-import json
 
 T = TypeVar("T")
 U = TypeVar("U")
@@ -77,7 +76,9 @@ def async_h2d_update(source: torch.Tensor, dest: torch.Tensor, indices: list[int
         indices: List of row indices in dest to update
         device: Target device
     """
-    dest[indices] = source[indices].to(device, non_blocking=True)
+    idx = torch.tensor(indices, dtype=torch.long, device=device)
+    vals = source[indices].to(device, non_blocking=True)
+    dest.index_copy_(0, idx, vals)
 
 
 def getattr_nested(obj: Any, name: str, *default: Any) -> Any:
@@ -286,47 +287,6 @@ class HPUCompileConfig:
             return {'backend': 'hpu_backend', 'fullgraph': self.fullgraph, 'options': {"force_static_compile": True}}
         else:
             return {'backend': 'hpu_backend', 'fullgraph': self.fullgraph, 'dynamic': False}
-
-    def log_hpu_compile_config(self, model_name: str = "unknown") -> None:
-        """
-        Log HPU compilation configuration for TORCH_TRACE/tlparse analysis.
-        
-        This creates an artifact in the trace that shows the HPU-specific
-        compilation settings, making it easier to debug and compare different
-        compilation configurations.
-        
-        Args:
-            model_name: Name of the model being compiled
-        """
-        if not os.getenv("TORCH_TRACE"):
-            return
-        try:
-            from torch._logging._internal import trace_structured
-        except ImportError:
-            # torch._logging._internal not available, skip logging
-            return
-
-        compile_args = self.get_compile_args()
-
-        # Build configuration dict with HPU-specific details
-        config = {
-            "model": model_name,
-            "backend": compile_args.get("backend", "hpu_backend"),
-            "fullgraph": self.fullgraph,
-            "dynamic": self.dynamic,
-            "regional_compilation": self.regional_compilation,
-        }
-
-        # Add options if present
-        if "options" in compile_args:
-            config["options"] = compile_args["options"]
-
-        trace_structured("artifact",
-                         metadata_fn=lambda: {
-                             "name": "hpu_compilation_config",
-                             "encoding": "json",
-                         },
-                         payload_fn=lambda: json.dumps(config, indent=2))
 
 
 _async_sched_module.AsyncScheduler = HPUAsyncScheduler

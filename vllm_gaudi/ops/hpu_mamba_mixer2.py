@@ -169,6 +169,8 @@ class HPUMambaMixer2(MambaMixer2):
         self.num_heads = num_heads
         self.n_groups = n_groups
 
+        self.num_spec = get_current_vllm_config().num_speculative_tokens
+
         self.groups_ssm_state_size = self.n_groups * self.ssm_state_size
         self.conv_dim = intermediate_size + 2 * self.groups_ssm_state_size
 
@@ -338,7 +340,7 @@ class HPUMambaMixer2(MambaMixer2):
         mamba_block_size = self.cache_config.mamba_block_size
         assert not self.cache_config.enable_prefix_caching
         if attn_metadata is not None:
-            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+            self_kv_cache = self.kv_cache[0]
             # conv_state = (..., dim, width-1) yet contiguous along 'dim'
             conv_state = self_kv_cache[0]
             ssm_state = self_kv_cache[1]

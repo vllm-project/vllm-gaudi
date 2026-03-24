@@ -3,6 +3,8 @@
 
 from typing import Union
 
+import os
+
 import torch
 from torch.nn.parameter import Parameter
 from vllm.model_executor.layers.linear import RowParallelLinear
@@ -13,8 +15,29 @@ from vllm.distributed import (
 from vllm.distributed.parallel_state import get_tp_group
 from vllm_gaudi.extension.runtime import get_config
 
+_registered = False
 
-@RowParallelLinear.register_oot
+
+def register():
+    """Conditionally register HPURowParallelLinear as OOT replacement.
+
+    Only registers when VLLM_ROW_PARALLEL_CHUNKS > 1, avoiding memory
+    overhead from unconditional layer replacement (GAUDISW-247164).
+    """
+    global _registered
+    if _registered:
+        return
+    _registered = True
+
+    env_value = os.environ.get('VLLM_ROW_PARALLEL_CHUNKS', '1')
+    try:
+        num_chunks = int(env_value)
+    except ValueError:
+        num_chunks = 1
+    if num_chunks > 1:
+        RowParallelLinear.register_oot(HPURowParallelLinear)
+
+
 class HPURowParallelLinear(RowParallelLinear):
     """HPU-optimized RowParallelLinear implementation.
     
