@@ -58,7 +58,8 @@ class HPUBucketingManager():
                    max_num_batched_tokens,
                    max_model_len,
                    num_speculative_tokens=0,
-                   mamba_chunk_size=0):
+                   mamba_chunk_size=0,
+                   mamba_chunk_size_is_explicit=False):
         self.max_num_seqs = max_num_seqs
         self.max_num_prefill_seqs = max_num_prefill_seqs
         self.block_size = block_size
@@ -68,6 +69,7 @@ class HPUBucketingManager():
         self.max_model_len = max_model_len
         self.num_speculative_tokens = num_speculative_tokens
         self.mamba_chunk_size = mamba_chunk_size
+        self.mamba_chunk_size_is_explicit = mamba_chunk_size_is_explicit
         self.initialized = True
         self.fallback_bs_base_step = 2
         self.fallback_seq_base_step = 32
@@ -161,7 +163,8 @@ class HPUBucketingManager():
             self.prompt_buckets = generate_buckets(bs_range, query_range, ctx_range, True, self.max_model_len,
                                                    self.max_num_seqs, self.max_num_prefill_seqs,
                                                    self.max_num_batched_tokens, self.block_size, self.num_hpu_blocks,
-                                                   buckets_from_file, self.mamba_chunk_size)
+                                                   buckets_from_file, self.mamba_chunk_size,
+                                                   self.mamba_chunk_size_is_explicit)
             self.log_generate_info(True)
             if self.use_sliding_window:
                 self.prompt_buckets = [
@@ -203,7 +206,8 @@ class HPUBucketingManager():
             self.decode_buckets = generate_buckets(bs_range, query_range, ctx_range, False, self.max_model_len,
                                                    self.max_num_seqs, self.max_num_prefill_seqs,
                                                    self.max_num_batched_tokens, self.block_size, self.num_hpu_blocks,
-                                                   buckets_from_file, self.mamba_chunk_size)
+                                                   buckets_from_file, self.mamba_chunk_size,
+                                                   self.mamba_chunk_size_is_explicit)
             if self.num_speculative_tokens:
                 # The existing buckets are used as seed decode buckets
                 self.seed_decode_buckets = self.decode_buckets
@@ -364,11 +368,12 @@ def generate_buckets(bs_range,
                      block_size,
                      max_blocks,
                      file_buckets=None,
-                     mamba_chunk_size=0):
+                     mamba_chunk_size=0,
+                     mamba_chunk_size_is_explicit=False):
     use_merged_prefill = get_config().merged_prefill
     use_contiguous_pa = get_config().use_contiguous_pa
 
-    if is_prompt and mamba_chunk_size > 0:
+    if is_prompt and mamba_chunk_size > 0 and mamba_chunk_size_is_explicit:
         query_range = [math.ceil(query / mamba_chunk_size) * mamba_chunk_size for query in query_range]
 
     def expand_to_neighbor_buckets(bs_idx, bs_range, ctx_idx, ctx_range, max_num_batched_tokens):

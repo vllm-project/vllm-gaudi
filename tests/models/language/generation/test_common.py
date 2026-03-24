@@ -18,6 +18,8 @@ def launch_lm_eval(eval_config):
     kv_cache_dtype = os.environ.get('KV_CACHE_DTYPE', None)
     task = eval_config.get('tasks', 'gsm8k')
     async_scheduling = os.environ.get('ASYNC_SCHEDULING', 'False').lower() in ['true', '1']
+    max_model_len = eval_config.get('max_model_len', 4096)
+    batch_size = eval_config.get('batch_size', 'auto')
     model_args = {
         'pretrained': eval_config['model_name'],
         'tensor_parallel_size': tp_size,
@@ -26,16 +28,23 @@ def launch_lm_eval(eval_config):
         'enable_prefix_caching': enable_apc,
         'add_bos_token': True,
         'dtype': dtype,
-        'max_model_len': 4096,
+        'max_model_len': max_model_len,
         'max_num_seqs': max_num_seqs,
         'trust_remote_code': trust_remote_code,
-        'batch_size': 'auto',
+        'batch_size': batch_size,
         'enable_expert_parallel': eval_config.get('enable_expert_parallel', False),
         'chat_template_args': eval_config.get('chat_template_args', {}),
         'seed': eval_config.get('seed', 42),
     }
     if kv_cache_dtype is not None:
         model_args['kv_cache_dtype'] = kv_cache_dtype
+
+    if eval_config.get('gpu_memory_utilization') is not None:
+        model_args['gpu_memory_utilization'] = eval_config['gpu_memory_utilization']
+    if eval_config.get('reasoning_parser') is not None:
+        model_args['reasoning_parser'] = eval_config['reasoning_parser']
+    if eval_config.get('max_num_batched_tokens') is not None:
+        model_args['max_num_batched_tokens'] = eval_config['max_num_batched_tokens']
 
     if eval_config.get("inc"):
         assert os.environ.get('QUANT_CONFIG', None), "must set QUANT_CONFIG environment variable for using INC"
@@ -48,6 +57,8 @@ def launch_lm_eval(eval_config):
         kwargs['fewshot_as_multiturn'] = eval_config['fewshot_as_multiturn']
     if 'apply_chat_template' in eval_config:
         kwargs['apply_chat_template'] = eval_config['apply_chat_template']
+    if eval_config.get('max_gen_toks') is not None:
+        kwargs['gen_kwargs'] = f"max_gen_toks={eval_config['max_gen_toks']}"
     llm = VLLM(**model_args)
     results = lm_eval.simple_evaluate(model=llm,
                                       tasks=[task],
