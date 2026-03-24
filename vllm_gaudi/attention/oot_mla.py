@@ -10,7 +10,7 @@ from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm_gaudi.extension.utils import VLLMKVCache
 from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, B2BMatmul, ModuleFusedSDPA, Softmax, VLLMFP8KVCache)
-from vllm_gaudi.extension.unified import HPUUnifiedAttentionMetadata
+from vllm_gaudi.attention.backends.hpu_attn import HPUMLAMetadata
 import vllm_gaudi.extension.kernels as kernels
 from vllm.forward_context import ForwardContext, get_forward_context
 
@@ -114,10 +114,10 @@ class HPUMLAAttention(MLAAttention):
     def forward_impl(
         self,
         q: torch.Tensor,
-        k_c_normed: torch.Tensor,  # key in unified attn
-        k_pe: torch.Tensor,  # value in unified attn
+        k_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: "HPUUnifiedAttentionMetadata",
+        attn_metadata: "HPUMLAMetadata",
         output: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
