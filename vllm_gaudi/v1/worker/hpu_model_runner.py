@@ -492,8 +492,7 @@ def apply_model_specific_patches(model_runner):
 
 
 def compute_prefix_caching_block_indices(num_reqs: int, num_computed_tokens, num_scheduled_tokens,
-                                         mamba_block_size: int,
-                                         device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                                         mamba_block_size: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
     num_computed_tokens = torch.tensor(num_computed_tokens, dtype=torch.int32)
     num_scheduled_tokens = torch.tensor(num_scheduled_tokens, dtype=torch.int32)
@@ -2291,8 +2290,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     len(contents.req_ids),
                     context_lens,
                     query_lens,
-                    mamba_block_size,
-                    self.device
+                    mamba_block_size
                 )
 
             req_indices = [self.input_batch.req_id_to_index[req_id] for req_id in contents.req_ids]
@@ -2683,8 +2681,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     num_decodes,
                     context_lens,
                     num_scheduled_tokens,
-                    mamba_block_size,
-                    self.device
+                    mamba_block_size
                 )
 
             req_indices = list(range(num_decodes))
