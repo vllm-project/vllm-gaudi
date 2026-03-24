@@ -62,3 +62,11 @@ granite_8b_code_instruct_4k:
 granite_20b_code_instruct_8k:
   MODEL: ibm-granite/granite-20b-code-instruct-8k
   TENSOR_PARALLEL_SIZE: 1
+
+gpt_oss_20b:
+  MODEL: ibm-granite/gpt-oss-20b
+  TENSOR_PARALLEL_SIZE: 1
+
+gpt_oss_120b:
+  MODEL: ibm-granite/gpt-oss-120b
+  TENSOR_PARALLEL_SIZE: 4

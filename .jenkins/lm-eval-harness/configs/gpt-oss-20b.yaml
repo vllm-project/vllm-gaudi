@@ -1,0 +1,12 @@
+model_name: "/mnt/weka/data/pytorch/gpt-oss/gpt-oss-20b"
+tasks:
+- name: "gsm8k_cot"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.55
+  - name: "exact_match,flexible-extract"
+    value: 0.57
+limit: 250
+num_fewshot: 8
+dtype: "bfloat16"
+trust_remote_code: true

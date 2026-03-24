@@ -55,3 +55,9 @@ granite_20b_code_instruct_8k:
    
 bielik_4.5b_v3_instruct:
   MODEL: speakleash/Bielik-4.5B-v3.0-Instruct
+
+gpt_oss_20b:
+  MODEL: ibm-granite/gpt-oss-20b
+
+gpt_oss_120b:
+  MODEL: ibm-granite/gpt-oss-120b
