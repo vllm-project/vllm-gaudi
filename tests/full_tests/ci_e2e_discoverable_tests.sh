@@ -464,8 +464,8 @@ run_structured_output_test() {
     echo "✅ Test with structured outputs passed."
 }
 
-run_bodge_granite_4_h_test(){
-    python -u ./tests/full_tests/granite_4h_sever_test.py
+run_bodge_granite_4_h_test() {
+    python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/granite_4h_server_test.py"
 }
 
 # --- Utility Functions ---
