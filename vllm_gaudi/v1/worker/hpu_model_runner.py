@@ -5112,8 +5112,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             return
 
         logger.info("Hot replay: executing %d shapes on HPU "
-                    "(%d prompt, %d decode)",
-                    total, len(prompt_buckets), len(decode_buckets))
+                    "(%d prompt, %d decode)", total, len(prompt_buckets), len(decode_buckets))
         desc = "Hot replay: "
         with tqdm(total=total, desc=desc, unit="item") as pbar:
             for bucket in prompt_buckets:
@@ -5132,12 +5131,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # that are skipped during warmup_mode=True execution.
         logger.info("Hot replay: exercising full pipeline paths...")
         if prompt_buckets:
-            self._prepare_dummy_scenario(
-                prompt_buckets[0], None, warmup_mode=False)
+            self._prepare_dummy_scenario(prompt_buckets[0], None, warmup_mode=False)
         if decode_buckets:
             decode_cfg = (decode_buckets[0][0], 1, decode_buckets[0][2])
-            self._prepare_dummy_scenario(
-                None, decode_cfg, warmup_mode=False)
+            self._prepare_dummy_scenario(None, decode_cfg, warmup_mode=False)
         torch.hpu.synchronize()
         logger.info("Hot replay finished")
 
@@ -5366,8 +5363,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                 scheduled_tokens)
         self._execute_dummy_scenario(requests, scheduled_tokens)
 
-    def _prepare_dummy_scenario(self, prompt_cfg, decode_cfg,
-                                warmup_mode=True):
+    def _prepare_dummy_scenario(self, prompt_cfg, decode_cfg, warmup_mode=True):
         requests: list[NewRequestData] = []
         scheduled_tokens: dict[str, int] = {}
 
@@ -5417,11 +5413,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                         scheduled_tokens=1,
                                         is_prompt=False,
                                         block_id=block_id)
-        self._execute_dummy_scenario(requests, scheduled_tokens,
-                                       warmup_mode=warmup_mode)
+        self._execute_dummy_scenario(requests, scheduled_tokens, warmup_mode=warmup_mode)
 
-    def _execute_dummy_scenario(self, requests, scheduled_tokens,
-                               warmup_mode=True):
+    def _execute_dummy_scenario(self, requests, scheduled_tokens, warmup_mode=True):
         from vllm.v1.core.sched.output import (SchedulerOutput, CachedRequestData)
 
         sched_output = SchedulerOutput(
