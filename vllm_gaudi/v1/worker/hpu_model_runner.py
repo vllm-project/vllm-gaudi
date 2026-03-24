@@ -2561,7 +2561,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Look up the block_idx in the block table (logical<>physical map)
         # to compute this.
         block_number = torch.ones((padded_batch_size, num_tokens), dtype=torch.int32) * self._PAD_BLOCK_ID
-        block_number[:num_decodes] = torch.gather(input=block_table_cpu_tensor, dim=1, index=(index // self.block_size))
+        block_number[:num_decodes] = torch.gather(input=block_table_cpu_tensor, dim=1, index=(index // decode_block_size))
         block_number.apply_(self._resolve_block)
 
         block_offsets = padded_index % decode_block_size
