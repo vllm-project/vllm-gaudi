@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from enum import Enum
 from functools import partial
+import os
 from typing import Union
 
 from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import (
@@ -236,8 +237,8 @@ def patched_fused_moe_forward(
         if use_direct_implementation:
             shared_output, fused_output = self.layer.runner.forward_impl(self.layer, hidden_states, router_logits,
                                                                          original_hidden_states)
-            reduce_output(self, shared_output)[..., :og_hidden_states],
-            reduce_output(self, fused_output)[..., :og_hidden_states],
+            shared_output = reduce_output(self, shared_output)
+            fused_output = reduce_output(self, fused_output)
         else:
             shared_output, fused_output = torch.ops.vllm.moe_forward_shared(hidden_states, router_logits,
                                                                             original_hidden_states, self.layer_name)
@@ -404,6 +405,13 @@ def create_fused_moe_router(
 # Apply patches
 # Ensure DefaultMoERunner keeps a reference to its layer for defensive redirects.
 _orig_default_moe_runner_init = DefaultMoERunner.__init__
+_orig_default_moe_runner_forward = DefaultMoERunner.forward
+
+# When enabled, bypasses the opaque torch.ops.vllm.moe_forward_shared custom
+# op wrapper so that torch.ops.hpu.mixture_of_experts is captured directly in
+# compiled Synapse graphs instead of running eagerly.
+# Set HPU_FUSED_MOE=0 to disable and fall back to the original path.
+_MOE_COMPILE = os.getenv("HPU_FUSED_MOE", "1") == "1"
 
 
 def _patched_default_moe_runner_init(self, layer, *args, **kwargs):
@@ -411,9 +419,16 @@ def _patched_default_moe_runner_init(self, layer, *args, **kwargs):
     return _orig_default_moe_runner_init(self, layer, *args, **kwargs)
 
 
+def _patched_default_moe_runner_forward(self, *args, **kwargs):
+    if _MOE_COMPILE:
+        return patched_fused_moe_forward(self, *args, **kwargs)
+    return _orig_default_moe_runner_forward(self, *args, **kwargs)
+
+
 DefaultMoERunner.__init__ = _patched_default_moe_runner_init
 
-DefaultMoERunner.forward = patched_fused_moe_forward
+DefaultMoERunner.forward = _patched_default_moe_runner_forward
+
 vllm.model_executor.layers.fused_moe.layer.get_compressed_expert_map = \
     get_compressed_expert_map
 vllm.model_executor.layers.fused_moe.router.router_factory.create_fused_moe_router = \
