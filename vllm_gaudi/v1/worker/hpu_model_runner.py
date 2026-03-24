@@ -6056,9 +6056,25 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         kv_cache_tensor_size // kv_cache_spec.page_size_bytes
                     if isinstance(kv_cache_spec, FullAttentionSpec):
                         attn_kernel_block_size = kernel_block_size_by_gid[group_idx]
-                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, attn_kernel_block_size,
+                        # Virtual block splitting: each scheduler block of
+                        # spec.block_size tokens is split into
+                        # spec.block_size/kernel_block_size kernel blocks.
+                        # The flat tensor must accommodate all kernel blocks.
+                        blocks_per_kv_block = kv_cache_spec.block_size // attn_kernel_block_size
+                        num_kernel_blocks = num_blocks * blocks_per_kv_block
+                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_kernel_blocks + 1,
+                                                                              attn_kernel_block_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
+                        logger.info(
+                            "Hybrid ATN alloc: layer=%s num_blocks=%d "
+                            "spec_block_size=%d kernel_block_size=%d "
+                            "blocks_per_kv=%d num_kernel_blocks=%d "
+                            "kv_cache_shape=%s",
+                            layer_name, num_blocks,
+                            kv_cache_spec.block_size, attn_kernel_block_size,
+                            blocks_per_kv_block, num_kernel_blocks,
+                            kv_cache_shape)
                         # here attn does not share kv cache tensor, so we create separate tensors
                         kc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
