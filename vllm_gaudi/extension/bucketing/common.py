@@ -72,8 +72,12 @@ class HPUBucketingManager():
         self.mamba_chunk_size_is_explicit = mamba_chunk_size_is_explicit
         self.initialized = True
         self.fallback_bs_base_step = 2
-        self.fallback_seq_base_step = 32
+        self.fallback_seq_base_step = max(32, mamba_chunk_size)
         self.fallback_blocks_base_step = 32
+
+        if mamba_chunk_size > 0 and self.max_num_batched_tokens % mamba_chunk_size != 0:
+            raise ValueError(f"max_num_batched_tokens ({self.max_num_batched_tokens}) must be "
+                             f"divisible by mamba_chunk_size ({mamba_chunk_size})")
 
         self.use_sliding_window = get_config().PT_HPU_SDPA_QKV_SLICE_MODE_FWD
         if self.use_sliding_window:
