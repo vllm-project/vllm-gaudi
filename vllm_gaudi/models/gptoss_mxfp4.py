@@ -6,11 +6,14 @@ from vllm.model_executor.models.gpt_oss import GptOssModel
 from vllm.utils.math_utils import cdiv
 from vllm.transformers_utils.model_arch_config_convertor import ModelArchConfigConvertorBase
 from vllm.distributed import (
+    get_dp_group,
     get_ep_group,
+    get_pcp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_BLOCK_SIZE
+from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.models.utils import is_pp_missing_parameter
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
@@ -98,7 +101,7 @@ def convert_moe_packed_tensors(
         torch.ldexp(sub, exp, out=sub)
         del idx_lo, idx_hi, blk, exp, sub
 
-    out = out.reshape(*prefix_shape, G *B * 2).contiguous()
+    out = out.reshape(*prefix_shape, G * B * 2).contiguous()
     del blocks, scales, lut
     return out
 
@@ -117,13 +120,19 @@ def _load_weights_mxfp4_dequantize_hpu(
 
     use_ep = self.parallel_config.enable_expert_parallel
 
-    tp_rank = get_tensor_model_parallel_rank()
-    tp_size = get_tensor_model_parallel_world_size()
-    mxfp4_block = 32
+    # In MoE, we need to flatten the tensor parallel size across the data
+    # parallel size when EP is disabled.
+    tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
+        tp_size=get_tensor_model_parallel_world_size(),
+        dp_size=get_dp_group().world_size,
+        dp_rank=get_dp_group().rank_in_group,
+        pcp_size=get_pcp_group().world_size,
+        pcp_rank=get_pcp_group().rank_in_group,
+    )
     intermediate_size = self.config.intermediate_size
-    intermediate_size_block = intermediate_size // mxfp4_block
+    intermediate_size_block = intermediate_size // OCP_MX_BLOCK_SIZE
     per_rank_intermediate_size_block = cdiv(intermediate_size_block, tp_size)
-    per_rank_intermediate_size = per_rank_intermediate_size_block * mxfp4_block
+    per_rank_intermediate_size = per_rank_intermediate_size_block * OCP_MX_BLOCK_SIZE
 
     # Calculate common slicing bounds for current rank
     tp_rank_start = tp_rank * per_rank_intermediate_size
@@ -148,11 +157,14 @@ def _load_weights_mxfp4_dequantize_hpu(
 
             # Read block weight
             block_name = name.replace("weight_scale", "weight")
+            if block_name not in block_weight_dict:
+                raise ValueError(f"Expected block weight for {block_name} not found when processing {name}")
             block_weight = block_weight_dict[block_name]
             param = params_dict[block_name]
 
             weight = convert_moe_packed_tensors(block_weight, narrow_weight_scale)
             param[:, :2 * (tp_rank_end - tp_rank_start), :] = weight
+            del block_weight_dict[block_name]
             loaded_params.add(name)
             continue
         elif ".w13_weight" in name:
@@ -169,23 +181,26 @@ def _load_weights_mxfp4_dequantize_hpu(
             if use_ep:
                 narrow_weight_scale = weight[ep_rank_start:ep_rank_end, ...]
             else:
-                narrow_weight_scale = weight[..., tp_rank_start // mxfp4_block:tp_rank_end // mxfp4_block]
+                narrow_weight_scale = weight[..., tp_rank_start // OCP_MX_BLOCK_SIZE:tp_rank_end // OCP_MX_BLOCK_SIZE]
             narrow_weight_scale = narrow_weight_scale.contiguous()
 
             # Read block weight
             block_name = name.replace("weight_scale", "weight")
+            if block_name not in block_weight_dict:
+                raise ValueError(f"Expected block weight for {block_name} not found when processing {name}")
             block_weight = block_weight_dict[block_name]
             param = params_dict[block_name]
 
             weight = convert_moe_packed_tensors(block_weight, narrow_weight_scale)
             param[:, :, :(tp_rank_end - tp_rank_start)] = weight
+            del block_weight_dict[block_name]
             loaded_params.add(name)
             continue
         elif ".w2_weight" in name:
             if use_ep:
                 narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
             else:
-                narrow_weight = weight[:, :, tp_rank_start // mxfp4_block:tp_rank_end // mxfp4_block, :]
+                narrow_weight = weight[:, :, tp_rank_start // OCP_MX_BLOCK_SIZE:tp_rank_end // OCP_MX_BLOCK_SIZE, :]
             narrow_weight = narrow_weight.contiguous()
             block_weight_dict[name] = narrow_weight
             loaded_params.add(name)
