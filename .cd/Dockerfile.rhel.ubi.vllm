@@ -18,6 +18,8 @@ ARG PYPI_INDEX_URL="https://pypi.org/simple/"
 ARG HABANA_RPM_REPO_PATH="rhel/9/${OS_VERSION}"
 ARG VLLM_GAUDI_COMMIT=main
 ARG VLLM_PROJECT_COMMIT=
+ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
+ARG VLLM_GAUDI_REPO="https://github.com/vllm-project/vllm-gaudi.git"
 
 # ============================================================================
 # Stage 1: gaudi-base - Base system setup with Habana drivers
@@ -170,6 +172,8 @@ WORKDIR /workspace
 FROM gaudi-pytorch AS vllm-openai
 
 # Re-declare global ARGs needed in this stage
+ARG VLLM_REPO
+ARG VLLM_GAUDI_REPO
 ARG VLLM_GAUDI_COMMIT
 ARG VLLM_PROJECT_COMMIT
 ARG BASE_NAME
@@ -190,7 +194,7 @@ WORKDIR /root
 # Clone and install vLLM
 RUN set -e && \
     mkdir -p $VLLM_PATH2 && \
-    git clone https://github.com/vllm-project/vllm-gaudi.git $VLLM_PATH2 && \
+    git clone $VLLM_GAUDI_REPO $VLLM_PATH2 && \
     cd $VLLM_PATH2 && \
     if [ -z "${VLLM_PROJECT_COMMIT}" ]; then \
     VLLM_PROJECT_COMMIT=$(git show "origin/vllm/last-good-commit-for-vllm-gaudi:VLLM_STABLE_COMMIT" 2>/dev/null || { echo >&2 "Warning: Could not fetch last-good-commit, using main branch"; echo "main"; }) && \
@@ -200,9 +204,9 @@ RUN set -e && \
     fi && \
     mkdir -p $VLLM_PATH && \
     echo "Clone vllm-project/vllm and use configured or last good commit hash" && \
-    git clone https://github.com/vllm-project/vllm.git $VLLM_PATH && \
+    git clone $VLLM_REPO $VLLM_PATH && \
     cd $VLLM_PATH && \
-    git remote add upstream https://github.com/vllm-project/vllm.git && \
+    git remote add upstream $VLLM_REPO && \
     git fetch upstream --tags && \
     git checkout ${VLLM_PROJECT_COMMIT} && \
     pip install --no-cache-dir -r <(sed '/^torch/d' requirements/build.txt) && \
