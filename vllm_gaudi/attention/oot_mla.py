@@ -183,6 +183,7 @@ class HPUMLAAttention(MLAAttention):
                     weight,
                     weight_scale_inv,
                     kv_b_proj.weight_block_size,
+                    dtype=act_dtype,
                     original_M=orig_M,
                     original_N=orig_N,
                     do_unpad=(orig_M is not None),
