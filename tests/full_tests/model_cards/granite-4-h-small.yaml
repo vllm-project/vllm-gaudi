@@ -8,7 +8,6 @@ model_card:
   max_num_seqs: 8
 
 
-
 metrics:
   name: exact_match,strict-match
   value: 0.68

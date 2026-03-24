@@ -504,7 +504,7 @@ launch_all_tests() {
     run_qwen3_vl_load_generate_test
     run_mistral3_load_generate_test
     run_llama3_70b_inc_dynamic_quant_test
-    run_gsm8k_granite_4_test
+    run_bodge_granite_4_h_test
     run_gsm8k_granite_test
     run_gsm8k_granite_test_unified_attn
     run_gsm8k_granite_async_test
