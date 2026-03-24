@@ -784,6 +784,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     ):
         # TODO: use ModelRunnerBase.__init__(self, vllm_config=vllm_config)
         environment.set_vllm_config(vllm_config)
+
         finalize_config()
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -902,6 +903,30 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.num_mamba_like_layers = sum(
             self.model_config.get_num_layers_by_block_type(self.parallel_config, block_type)
             for block_type in mamba_like)
+        
+        if self.num_mamba_like_layers > 0:
+            # Auto-enable hybrid cache for GDN/mamba-like models.
+            gdn_types = ["linear_attention"]
+            num_gdn = sum(
+                vllm_config.model_config.get_num_layers_by_block_type(
+                    vllm_config.parallel_config, bt) for bt in gdn_types)
+            if num_gdn > 0:
+                # Default: hybrid=1, compact=1, naive_mamba_sharing=0
+                # Only set if user hasn't explicitly provided a value.
+                if not os.environ.get("VLLM_USE_HYBRID_CACHE"):
+                    os.environ["VLLM_USE_HYBRID_CACHE"] = "1"
+                if not os.environ.get("VLLM_USE_NAIVE_MAMBA_CACHE_SHARING"):
+                    os.environ["VLLM_USE_NAIVE_MAMBA_CACHE_SHARING"] = "0"
+                if not os.environ.get("VLLM_COMPACT_GDN"):
+                    os.environ["VLLM_COMPACT_GDN"] = "1"
+                logger.info("GDN layers detected (%d): "
+                            "VLLM_USE_HYBRID_CACHE=%s, "
+                            "VLLM_USE_NAIVE_MAMBA_CACHE_SHARING=%s, "
+                            "VLLM_COMPACT_GDN=%s",
+                            num_gdn,
+                            os.environ["VLLM_USE_HYBRID_CACHE"],
+                            os.environ["VLLM_USE_NAIVE_MAMBA_CACHE_SHARING"],
+                            os.environ["VLLM_COMPACT_GDN"])
 
         hf_text_config = self.model_config.hf_text_config
         self.mamba_chunk_size_is_explicit = (self.num_mamba_like_layers > 0
@@ -6053,7 +6078,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                               attn_kernel_block_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
-                        logger.info(
+                        logger.debug(
                             "Hybrid ATN alloc: layer=%s num_blocks=%d "
                             "spec_block_size=%d kernel_block_size=%d "
                             "blocks_per_kv=%d num_kernel_blocks=%d "
@@ -6083,7 +6108,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             target_shape = (compact_total, *shape)
                             tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
                             state_tensors.append(tensor)
-                        logger.info("GDN compact tensor: %d slots (max_reqs=%d * groups=%d + 2) vs baseline %d",
+                        logger.debug("GDN compact tensor: %d slots (max_reqs=%d * groups=%d + 2) vs baseline %d",
                                     compact_total, self.max_num_reqs, self._num_gdn_groups, num_blocks + 1)
                         # Propagate to all layers sharing the same kv_cache_tensor.
                         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
@@ -6313,7 +6338,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self._gdn_slot_free_list = list(range(self.max_num_reqs - 1, -1, -1))
             self._gdn_req_to_base_slot.clear()
             compact_total = self.max_num_reqs * self._num_gdn_groups + 2
-            logger.info("GDN compact: %d groups, %d base_slots, tensor_dim0=%d vs baseline=%d, free_list=%d",
+            logger.debug("GDN compact: %d groups, %d base_slots, tensor_dim0=%d vs baseline=%d, free_list=%d",
                         len(self._compact_gdn_group_ids), self.max_num_reqs,
                         compact_total, num_blocks + 1,
                         len(self._gdn_slot_free_list))

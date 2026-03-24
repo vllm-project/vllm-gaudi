@@ -52,7 +52,6 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
     query_start_loc: Optional[torch.Tensor] = None
     query_start_loc_p: Optional[torch.Tensor] = None
     padding_mask_flat: Optional[torch.Tensor] = None
-    num_actual_decodes: int = 0
 
     def seq_len(self):
         return self.slot_mapping.size(-1)
@@ -112,8 +111,7 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                              chunked_block_groups,
                              state_indices_tensor=None,
                              query_start_loc=None,
-                             seq_lens_tensor=None,
-                             num_actual_decodes=0):
+                             seq_lens_tensor=None):
         return cls(is_prompt=False,
                    block_mapping=None,
                    alibi_blocks=None,
@@ -135,5 +133,4 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    prep_initial_states=None,
                    state_indices_tensor=state_indices_tensor,
                    query_start_loc=query_start_loc,
-                   query_start_loc_p=query_start_loc,
-                   num_actual_decodes=num_actual_decodes)
+                   query_start_loc_p=query_start_loc)
