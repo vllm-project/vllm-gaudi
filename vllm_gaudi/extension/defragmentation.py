@@ -211,3 +211,55 @@ class OnlineDefragmenter:
             num_used = len(self.used_blocks)
             post_status = f'max_id_used={pre_max_used}->{max_used} num_used={num_used} swapped={len(to_swap)}/{to_swap_pad}'
             self.debug(f'defragmentation done {post_status}')
+
+    def _swap(self, to_swap, threshold):
+        """ Swap block_ids between srcs and dsts"""
+        assert self.cache_utils is not None
+        srcs, dsts = zip(*to_swap)
+        srcs = pad_list(list(srcs), threshold, itertools.repeat(-1))
+        dsts = pad_list(list(dsts), threshold, itertools.repeat(-1))
+        srcs = torch.tensor(srcs, dtype=torch.long, device='cpu').to('hpu', non_blocking=True)
+        dsts = torch.tensor(dsts, dtype=torch.long, device='cpu').to('hpu', non_blocking=True)
+        key_caches = [cache[0] for cache in self.kv_caches]
+        self.cache_utils(srcs, dsts, key_caches, self.block_size)
+        if not self.is_mla:
+            value_caches = [cache[1] for cache in self.kv_caches]
+            self.cache_utils(srcs, dsts, value_caches, self.block_size)
+
+    def warmup(self):
+        """Warm up defragmentation swap graphs for different thresholds.
+
+        We execute a minimal swap (1 pair) which will be padded internally to the
+        requested threshold size. Thresholds chosen to mirror potential production
+        values: 8, 16, 32, 64, 128, 256, 512.
+        """
+        # If defragmenter is disabled skip.
+        if not self.enabled:
+            return
+
+        # Use simple valid block ids present in caches (assume at least 2 blocks allocated when kv caches created)
+        # We only need distinct ids for a swap. They will be scaled by block_size inside swap.
+        # If for some reason only 1 block exists, skip warmup gracefully.
+        try:
+            k_cache = self.kv_caches[0][0]
+            num_blocks_available = k_cache.shape[0] // self.block_size
+        except Exception:
+            logger.warning("Failed to determine available blocks from KV cache, defaulting to 0")
+            num_blocks_available = 0
+        if num_blocks_available < 2:
+            logger.warning("Skipping defragmenter warmup, insufficient blocks (%s)", num_blocks_available)
+            return
+
+        thresholds = self.to_swap_pad_thresholds
+        logger.info("Warming up defragmenter with thresholds: %s", thresholds)
+
+        # Minimal pair to trigger a swap path
+        to_swap = [(1, 0)]
+        for th in thresholds:
+            self._swap(to_swap, th)
+
+        # If the number of swaps was odd, do one more to make it even and return to original state.
+        if len(thresholds) % 2 == 1:
+            self._swap(to_swap, thresholds[0])
+
+        logger.info("Defragmenter warmup completed successfully")

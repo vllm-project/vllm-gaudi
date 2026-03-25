@@ -3,11 +3,25 @@ import operator
 import os
 import math
 import ast
+import re
 from dataclasses import dataclass, field
 from typing import List, Tuple
 
 from vllm_gaudi.extension.logger import logger as logger
 from vllm_gaudi.extension.runtime import get_config
+
+_RANGE_RE = re.compile(r'range\((\d+)\s*,\s*(\d+)\s*(?:,\s*(\d+))?\)')
+
+
+def _expand_ranges(line: str) -> str:
+    """Replace range(start, stop[, step]) with list equivalents for safe parsing."""
+
+    def _replace(m):
+        start, stop = int(m.group(1)), int(m.group(2))
+        step = int(m.group(3)) if m.group(3) else 1
+        return repr(list(range(start, stop, step)))
+
+    return _RANGE_RE.sub(_replace, line)
 
 
 class FileBucketingStrategy:
@@ -23,13 +37,13 @@ class FileBucketingStrategy:
                     continue
 
                 try:
-                    bucket = eval(line, {"__builtins__": None}, {"range": range})
-                except Exception as e:
-                    print(f"Skipping line due to eval error: {e} - {line}")
+                    bucket = ast.literal_eval(_expand_ranges(line))
+                except (ValueError, SyntaxError):
+                    logger.warning("Skipping invalid bucketing line")
                     continue
 
                 if not isinstance(bucket, tuple) or len(bucket) != 3:
-                    print('Skipping line due to incorrect format - ', bucket)
+                    logger.warning("Skipping line due to incorrect format")
                     continue
 
                 x_num = ensure_is_list(bucket[0])
