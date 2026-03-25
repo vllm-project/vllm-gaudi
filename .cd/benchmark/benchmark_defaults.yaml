@@ -18,6 +18,8 @@ model_text:
     - ibm-granite/granite-8b-code-instruct-4k
     - ibm-granite/granite-20b-code-instruct-8k
     - speakleash/Bielik-4.5B-v3.0-Instruct
+    - gpt-oss/gpt-oss-20b
+    - gpt-oss/gpt-oss-120b-bf16
   DATASET: /workspace/vllm-project/benchmarks/sonnet.txt
   DATASET_NAME: sonnet
   ENDPOINT: /v1/completions

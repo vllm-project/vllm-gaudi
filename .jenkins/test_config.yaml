@@ -134,4 +134,32 @@ stages:
           VLLM_FUSED_BLOCK_SOFTMAX_ADJUSTMENT=False VLLM_CONTIGUOUS_PA=true VLLM_DEFRAG=true VLLM_USE_HYBRID_CACHE=true VLLM_USE_NAIVE_MAMBA_CACHE_SHARING=false  VLLM_GRAPH_RESERVED_MEM=0.5
           bash run-tests.sh -c configs/models-qwen3.5.txt -t 1 ;
           pip install transformers==$OLD_TRANSFORMERS_VER huggingface_hub==$OLD_HF_HUB_VER --no-deps
+  - name: nightly
+    steps:
+      - name: gsm8k_gpt_oss_20b_g3_tp1
+        flavor: g3
+        command: >-
+          export PT_HPU_LAZY_MODE=1 &&
+          export PT_HPU_ENABLE_FUSED_SDPA_SINK=1 &&
+          export PT_HPU_QKV_SLICE_SEQ_LEN_THLD=64 &&
+          export PT_HPU_SDPA_BR_FACTOR=64 &&
+          export PT_HPU_SDPA_BC_FACTOR=64 &&
+          export PT_HPU_SDPA_QKV_SLICE_MODE_FWD=1 &&
+          export VLLM_FUSEDSDPA_SLIDE_THLD=0 &&
+          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-gpt-oss.txt -t 1
+      - name: gsm8k_gpt_oss_120b_g3_tp4
+        flavor: g3.m
+        command: >-
+          export PT_HPU_LAZY_MODE=1 &&
+          export PT_HPU_ENABLE_FUSED_SDPA_SINK=1 &&
+          export PT_HPU_QKV_SLICE_SEQ_LEN_THLD=64 &&
+          export PT_HPU_SDPA_BR_FACTOR=64 &&
+          export PT_HPU_SDPA_BC_FACTOR=64 &&
+          export PT_HPU_SDPA_QKV_SLICE_MODE_FWD=1 &&
+          export VLLM_FUSEDSDPA_SLIDE_THLD=0 &&
+          export VLLM_CONTIGUOUS_PA=true &&
+          export VLLM_DEFRAG=true &&
+          export PT_HPUGRAPH_DISABLE_TENSOR_CACHE=1 &&
+          export VLLM_PROMPT_USE_FUSEDSDPA=1 &&
+          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-gpt-oss-large.txt -t 4
 
