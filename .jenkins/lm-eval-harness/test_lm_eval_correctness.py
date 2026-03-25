@@ -18,7 +18,7 @@ import lm_eval
 import numpy
 import yaml
 
-import vllm
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 RTOL = 0.06
 TEST_DATA_FILE = os.environ.get("LM_EVAL_TEST_DATA_FILE",
@@ -44,12 +44,14 @@ def launch_lm_eval(eval_config):
     trust_remote_code = eval_config.get('trust_remote_code', False)
     dtype = eval_config.get('dtype', 'bfloat16')
     max_num_seqs = eval_config.get('max_num_seqs', 128)
+    max_model_len = eval_config.get('max_model_len', 4096)
+    batch_size = eval_config.get('batch_size', 'auto')
     model_args = f"pretrained={eval_config['model_name']}," \
                  f"tensor_parallel_size={TP_SIZE}," \
                  f"enable_prefix_caching={APC_ENABLED}," \
                  f"add_bos_token=true," \
                  f"dtype={dtype}," \
-                 f"max_model_len=4096," \
+                 f"max_model_len={max_model_len}," \
                  f"max_num_seqs={max_num_seqs}," \
                  f"trust_remote_code={trust_remote_code},"
     extra_model_args = eval_config.get('model_args', "")
@@ -62,12 +64,14 @@ def launch_lm_eval(eval_config):
         kwargs['fewshot_as_multiturn'] = eval_config['fewshot_as_multiturn']
     if 'apply_chat_template' in eval_config:
         kwargs['apply_chat_template'] = eval_config['apply_chat_template']
+    if eval_config.get('gen_kwargs'):
+        kwargs['gen_kwargs'] = eval_config['gen_kwargs']
     results = lm_eval.simple_evaluate(model="vllm",
                                       model_args=model_args,
                                       tasks=[task["name"] for task in eval_config["tasks"]],
                                       num_fewshot=eval_config["num_fewshot"],
                                       limit=eval_config["limit"],
-                                      batch_size="auto",
+                                      batch_size=batch_size,
                                       **kwargs)
 
     return results
@@ -145,7 +149,7 @@ def test_lm_eval_correctness(record_xml_attribute, record_property):
     results = launch_lm_eval(eval_config)
     total_time = time.perf_counter() - start_time
 
-    tokenizer = vllm.transformers_utils.tokenizer.get_tokenizer(eval_config['model_name'])
+    tokenizer = get_tokenizer(eval_config['model_name'])
 
     # Confirm scores match ground truth.
     for task in eval_config["tasks"]:
