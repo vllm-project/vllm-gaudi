@@ -145,9 +145,10 @@ if __name__ == "__main__":
         "For single node calibration use the default multiprocessing backend. " \
         "For multi-node calibration use ray backend"
     )
-    parser.add_argument("--gpu-memory-utilization", type=float, default=0.9,
+    parser.add_argument("--gpu-memory-utilization",
+                        type=float,
+                        default=0.9,
                         help="GPU memory utilization for the model.")
-
 
     args = parser.parse_args()
     if not args.auto_process_dataset:
