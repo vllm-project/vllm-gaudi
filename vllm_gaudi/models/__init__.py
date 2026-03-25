@@ -48,3 +48,10 @@ def register_model():
 
     import vllm_gaudi.models.qwen3_next  # noqa: F401
     import vllm_gaudi.models.qwen3_5  # noqa: F401
+
+    from vllm_gaudi.models.qwen2_5_omni_thinker import HpuQwen2_5OmniThinkerForConditionalGeneration  # noqa: F401
+    ModelRegistry.register_model(
+        "Qwen2_5OmniModel", "vllm_gaudi.models.qwen2_5_omni_thinker:HpuQwen2_5OmniThinkerForConditionalGeneration")
+    ModelRegistry.register_model(
+        "Qwen2_5OmniForConditionalGeneration",
+        "vllm_gaudi.models.qwen2_5_omni_thinker:HpuQwen2_5OmniThinkerForConditionalGeneration")

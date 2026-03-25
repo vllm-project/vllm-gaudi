@@ -4407,6 +4407,22 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
         self.model_memory_usage = m.consumed_device_memory
         logger.info("Loading model weights took %.4f GB", self.model_memory_usage / float(2**30))
+        has_meta_params = any(p.is_meta for p in self.model.parameters())
+        has_meta_buffers = any(b.is_meta for b in self.model.buffers())
+        if has_meta_params:
+            logger.warning("Model contains meta parameters after loading. "
+                           "Materializing with to_empty() and reloading weights.")
+            self.model = self.model.to_empty(device="cpu")
+            model_loader = get_model_loader(self.load_config)
+            model_loader.load_weights(self.model, model_config=self.model_config)
+        elif has_meta_buffers:
+            meta_buffer_count = 0
+            for module in self.model.modules():
+                for name, buf in list(module._buffers.items()):
+                    if buf is not None and buf.is_meta:
+                        module._buffers[name] = torch.zeros(buf.shape, dtype=buf.dtype, device="cpu")
+                        meta_buffer_count += 1
+            logger.warning("Materialized %d meta buffers on CPU to allow device transfer.", meta_buffer_count)
 
         if self._is_quant_with_inc():
             logger.info("Preparing model with INC..")
@@ -5432,6 +5448,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         assert self.mm_budget is not None
         num_frames = 100
         count = 1
+        mm_options = None
         if self.get_model().vision_bucket_manager.is_batch_based:
             batch = image_args
         else:
@@ -5498,6 +5515,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             warmup_lists = warmup_lists + \
                 vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
         for modality, max_items in self.mm_budget.mm_limits.items():
+            # Skip audio warmup temporarily to unblock qwen omni multimodal models
+            if modality == 'audio':
+                continue
             if modality == 'image' and not is_image_warmup or modality == 'video' \
                 and not is_video_warmup:
                 continue
