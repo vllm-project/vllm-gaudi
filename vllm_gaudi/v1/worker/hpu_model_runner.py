@@ -1328,22 +1328,40 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             assert req_index is not None
             removed_req_indices.append(req_index)
 
-        # Free GDN compact base-slots for removed requests.
-        # IMPORTANT: finished_req_ids is a set[str] and unscheduled_req_ids
-        # is also a set.  With spawn-based multiprocessing each worker gets
-        # a different PYTHONHASHSEED, so set iteration order differs across
-        # TP ranks.  We must sort to keep _gdn_slot_free_list identical on
-        # every rank; otherwise different ranks assign different base_slots
-        # to the same request, causing state divergence and bad accuracy.
+        # Free GDN compact base-slots for finished requests ONLY.
+        # IMPORTANT: Do NOT free slots for unscheduled (temporarily paused
+        # or preempted) requests — they may be rescheduled later with
+        # retained blocks and num_computed_tokens > 0, so the GDN state
+        # in the old slot must remain valid.  Truly preempted requests
+        # will re-prefill (has_initial_states=False) and overwrite the
+        # state in-place; they are freed when they eventually finish.
+        # IMPORTANT: finished_req_ids is a set[str].  With spawn-based
+        # multiprocessing each worker gets a different PYTHONHASHSEED,
+        # so set iteration order differs across TP ranks.  We must sort
+        # to keep _gdn_slot_free_list identical on every rank.
         if self._compact_gdn_group_ids:
+            '''
+            if unscheduled_req_ids or scheduler_output.finished_req_ids:
+                logger.info(
+                    "GDN_COMPACT step: unsched=%d finished=%d "
+                    "free_list=%d slot_map=%d cached=%d scheduled=%d",
+                    len(unscheduled_req_ids),
+                    len(scheduler_output.finished_req_ids),
+                    len(self._gdn_slot_free_list),
+                    len(self._gdn_req_to_base_slot),
+                    len(cached_req_ids),
+                    len(scheduled_req_ids),
+                )
+            '''
             for req_id in sorted(scheduler_output.finished_req_ids):
                 base_slot = self._gdn_req_to_base_slot.pop(req_id, None)
                 if base_slot is not None:
                     self._gdn_slot_free_list.append(base_slot)
-            for req_id in sorted(unscheduled_req_ids):
-                base_slot = self._gdn_req_to_base_slot.pop(req_id, None)
-                if base_slot is not None:
-                    self._gdn_slot_free_list.append(base_slot)
+                else:
+                    logger.warning(
+                        "GDN_COMPACT free finished req=%s has NO slot! "
+                        "Possible leak.",
+                        req_id)
 
         req_ids_to_add: list[str] = []
         # Add new requests to the cached states.
@@ -1485,6 +1503,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if req_id not in self._gdn_req_to_base_slot:
                     base_slot = self._gdn_slot_free_list.pop()
                     self._gdn_req_to_base_slot[req_id] = base_slot
+                    logger.debug("GDN_COMPACT alloc req=%s base_slot=%d free_list_len=%d",
+                                req_id, base_slot, len(self._gdn_slot_free_list))
 
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
@@ -2661,6 +2681,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         req_id = self.input_batch.req_ids[i]
                         base_slot = self._gdn_req_to_base_slot[req_id]
                         state_indices_cpu[i] = base_slot * self._num_gdn_groups + g_offset + 1
+                    '''
+                    if g_offset == 0:
+                        logger.info("GDN_COMPACT decode g0 nd=%d si=%s req_ids=%s",
+                                    num_decodes, state_indices_cpu[:min(8, num_decodes)].tolist(),
+                                    [self.input_batch.req_ids[i] for i in range(min(4, num_decodes))])
+                    '''
                 else:
                     block_table_cpu_tensor = self.input_batch.block_table[group_idx].get_cpu_tensor()
                     state_indices_cpu = block_table_cpu_tensor[:num_decodes, 0].clone()
@@ -6062,6 +6088,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     if isinstance(g.kv_cache_spec, MambaSpec)
                     and g.kv_cache_spec.mamba_type in ("gdn_attention", "linear_attention"))
 
+            # Debug: log group structure and shared_by
+            logger.info("HYBRID_KV num_groups=%d num_gdn_groups=%d num_tensors=%d",
+                        len(kv_cache_config.kv_cache_groups), self._num_gdn_groups,
+                        len(kv_cache_config.kv_cache_tensors))
+            for gid, grp in enumerate(kv_cache_config.kv_cache_groups):
+                logger.info("HYBRID_KV group[%d] spec=%s layers=%d first=%s",
+                            gid, type(grp.kv_cache_spec).__name__,
+                            len(grp.layer_names), grp.layer_names[0] if grp.layer_names else "N/A")
+            for tid, kt in enumerate(kv_cache_config.kv_cache_tensors[:3]):
+                logger.info("HYBRID_KV tensor[%d] shared_by=%s", tid, kt.shared_by)
+
             for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
                 kv_cache_spec = group.kv_cache_spec
                 for layer_name in group.layer_names:
@@ -6121,6 +6158,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             if layer_name not in kv_cache_tensor.shared_by:
                                 continue
                             for shared_layer in kv_cache_tensor.shared_by:
+                                prev = kv_caches.get(shared_layer)
+                                if prev is not None and shared_layer != layer_name:
+                                    logger.info("HYBRID_KV OVERWRITE %s (was %s) with GDN compact tensors from %s",
+                                                shared_layer, type(prev).__name__, layer_name)
                                 kv_caches[shared_layer] = tuple(state_tensors)
                             break
                     elif isinstance(kv_cache_spec, MambaSpec) and \

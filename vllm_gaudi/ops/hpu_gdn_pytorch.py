@@ -767,7 +767,7 @@ def _recurrent_general_path(
 
     return out, final_state
 
-
+@torch._dynamo.disable
 def hpu_chunk_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
