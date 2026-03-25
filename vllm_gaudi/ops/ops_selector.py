@@ -102,8 +102,9 @@ def _wrap_selective_state_update_ref(selective_state_update_ref_fn):
             if dst_state_batch_indices is None:
                 dst_state_batch_indices = state_batch_indices
 
-            # Select state slices for reading
-            selected_state = state[state_batch_indices].clone()
+            # Use index_select instead of fancy indexing to dispatch a
+            # dedicated gather kernel rather than gather_nd TPC kernel.
+            selected_state = torch.index_select(state, 0, state_batch_indices.long())
 
             # Run the update
             result = selective_state_update_ref_fn(selected_state,
@@ -117,8 +118,9 @@ def _wrap_selective_state_update_ref(selective_state_update_ref_fn):
                                                    dt_bias=dt_bias,
                                                    dt_softplus=dt_softplus)
 
-            # Write back the updated states
-            state[dst_state_batch_indices] = selected_state
+            # Use index_copy_ instead of fancy indexing to dispatch a
+            # dedicated copy kernel rather than scatter_nd TPC kernel.
+            state.index_copy_(0, dst_state_batch_indices.long(), selected_state)
 
             # Handle output
             if out is not None:
