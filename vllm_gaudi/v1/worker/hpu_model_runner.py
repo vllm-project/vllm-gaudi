@@ -679,6 +679,13 @@ class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
                                                                                input_ids.size(0), input_ids.size(1),
                                                                                input_ids.device, self.dtype,
                                                                                model_has_chunked_attention)
+        # Avoid 0/1 size specialization on block_list dim 0 for MoE models.
+        # Must be outside compiled regions — mark_unbacked is a forbidden callable.
+        if self.flatten_input:
+            attn_md = kwargs.get('attn_metadata')
+            if (attn_md is not None and getattr(attn_md, 'is_prompt', False)
+                    and getattr(attn_md, 'block_list', None) is not None):
+                torch._dynamo.decorators.mark_unbacked(attn_md.block_list, 0)
         if self._rotary_prepare_cos_sin is not None:
             self._rotary_prepare_cos_sin(kwargs['positions'], recompute_cos_sin=self.recompute_cos_sin)
         attn_meta = kwargs.pop('attn_metadata', None)

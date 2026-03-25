@@ -1,10 +1,21 @@
+import os
+from itertools import islice
+
 import torch
 from torch import nn
 
+from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group, tensor_model_parallel_all_gather
 from vllm.model_executor.models.qwen3_moe import (
-    Qwen3MoeSparseMoeBlock as UpstreamQwen3MoeSparseMoeBlock, )
+    Qwen3MoeDecoderLayer as UpstreamQwen3MoeDecoderLayer,
+    Qwen3MoeForCausalLM as UpstreamQwen3MoeForCausalLM,
+    Qwen3MoeModel as UpstreamQwen3MoeModel,
+    Qwen3MoeSparseMoeBlock as UpstreamQwen3MoeSparseMoeBlock,
+)
 from vllm.model_executor.models.utils import sequence_parallel_chunk
-from vllm.distributed import tensor_model_parallel_all_gather
+from vllm.sequence import IntermediateTensors
+
+_MOE_GRAPH_BREAK = os.getenv("VLLM_MOE_GRAPH_BREAK", "false").lower() in ("1", "true", "yes")
 
 
 class HpuQwen3MoeSparseMoeBlock(UpstreamQwen3MoeSparseMoeBlock):
@@ -54,6 +65,30 @@ class HpuQwen3MoeSparseMoeBlock(UpstreamQwen3MoeSparseMoeBlock):
         return out.reshape(*orig_shape[:-1], hidden_dim)
 
 
+class HpuQwen3MoeDecoderLayer(UpstreamQwen3MoeDecoderLayer):
+    """Insert graph_break between attention and MLP in MoE decoder layers."""
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+        )
+
+        if _MOE_GRAPH_BREAK:
+            torch._dynamo.graph_break()
+
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states = self.mlp(hidden_states)
+
+        return hidden_states, residual
+
+
 def upgrade_qwen3_moe_blocks_inplace(language_model: nn.Module) -> int:
     lm_model = getattr(language_model, "model", None)
     layers = getattr(lm_model, "layers", None)
@@ -67,11 +102,60 @@ def upgrade_qwen3_moe_blocks_inplace(language_model: nn.Module) -> int:
             continue
 
         if isinstance(mlp, HpuQwen3MoeSparseMoeBlock):
-            continue
-
-        if isinstance(mlp, UpstreamQwen3MoeSparseMoeBlock):
+            pass
+        elif isinstance(mlp, UpstreamQwen3MoeSparseMoeBlock):
             mlp.__class__ = HpuQwen3MoeSparseMoeBlock
             mlp._hpu_accept_3d_installed = True
             upgraded += 1
 
+        if isinstance(layer, UpstreamQwen3MoeDecoderLayer) and not isinstance(layer, HpuQwen3MoeDecoderLayer):
+            layer.__class__ = HpuQwen3MoeDecoderLayer
+            upgraded += 1
+
     return upgraded
+
+
+class HpuQwen3MoeModel(UpstreamQwen3MoeModel):
+    """Initialize residual as zeros instead of None to eliminate Dynamo type guard."""
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        if get_pp_group().is_first_rank:
+            hidden_states = inputs_embeds if inputs_embeds is not None else self.embed_input_ids(input_ids)
+            residual = torch.zeros_like(hidden_states)
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+
+        aux_hidden_states = []
+        for layer_idx, layer in enumerate(
+                islice(self.layers, self.start_layer, self.end_layer),
+                start=self.start_layer,
+        ):
+            if layer_idx in self.aux_hidden_state_layers:
+                aux_hidden_state = hidden_states + residual
+                aux_hidden_states.append(aux_hidden_state)
+            hidden_states, residual = layer(positions, hidden_states, residual)
+
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+        hidden_states, _ = self.norm(hidden_states, residual)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
+        return hidden_states
+
+
+class HpuQwen3MoeForCausalLM(UpstreamQwen3MoeForCausalLM):
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        upgrade_qwen3_moe_blocks_inplace(self)
+        if hasattr(self, "model") and isinstance(self.model, UpstreamQwen3MoeModel):
+            self.model.__class__ = HpuQwen3MoeModel

@@ -44,6 +44,9 @@ def get_user_flags():
         Env('PT_HPU_SDPA_QKV_SLICE_MODE_FWD', boolean),
         Env('PT_HPU_SDPA_BC_FACTOR', int),
         Env('VLLM_FUSEDSDPA_SLIDE_THLD', int),
+
+        # Graph break controls
+        Env('VLLM_MOE_GRAPH_BREAK', str),
     ]
     return to_dict(flags)
 
