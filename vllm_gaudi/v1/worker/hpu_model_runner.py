@@ -1329,12 +1329,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             removed_req_indices.append(req_index)
 
         # Free GDN compact base-slots for removed requests.
+        # IMPORTANT: finished_req_ids is a set[str] and unscheduled_req_ids
+        # is also a set.  With spawn-based multiprocessing each worker gets
+        # a different PYTHONHASHSEED, so set iteration order differs across
+        # TP ranks.  We must sort to keep _gdn_slot_free_list identical on
+        # every rank; otherwise different ranks assign different base_slots
+        # to the same request, causing state divergence and bad accuracy.
         if self._compact_gdn_group_ids:
-            for req_id in scheduler_output.finished_req_ids:
+            for req_id in sorted(scheduler_output.finished_req_ids):
                 base_slot = self._gdn_req_to_base_slot.pop(req_id, None)
                 if base_slot is not None:
                     self._gdn_slot_free_list.append(base_slot)
-            for req_id in unscheduled_req_ids:
+            for req_id in sorted(unscheduled_req_ids):
                 base_slot = self._gdn_req_to_base_slot.pop(req_id, None)
                 if base_slot is not None:
                     self._gdn_slot_free_list.append(base_slot)
