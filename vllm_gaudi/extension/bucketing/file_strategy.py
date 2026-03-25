@@ -10,7 +10,9 @@ from typing import List, Tuple
 from vllm_gaudi.extension.logger import logger as logger
 from vllm_gaudi.extension.runtime import get_config
 
-_RANGE_RE = re.compile(r'range\((\d+)\s*,\s*(\d+)\s*(?:,\s*(\d+))?\)')
+_RANGE_RE = re.compile(r'range\(\s*(-?\d+)\s*,\s*(-?\d+)\s*(?:,\s*(-?\d+)\s*)?\)')
+
+_MAX_RANGE_ELEMENTS = 10000
 
 
 def _expand_ranges(line: str) -> str:
@@ -19,6 +21,11 @@ def _expand_ranges(line: str) -> str:
     def _replace(m):
         start, stop = int(m.group(1)), int(m.group(2))
         step = int(m.group(3)) if m.group(3) else 1
+        if step == 0:
+            return m.group(0)
+        count = max(0, (stop - start + (step - (1 if step > 0 else -1))) // step)
+        if count > _MAX_RANGE_ELEMENTS:
+            return m.group(0)
         return repr(list(range(start, stop, step)))
 
     return _RANGE_RE.sub(_replace, line)
@@ -31,7 +38,7 @@ class FileBucketingStrategy:
         decode_buckets = []
 
         with open(file_name, 'r') as f:
-            for line in f:
+            for line_num, line in enumerate(f, 1):
                 line = line.strip()
                 if not line or line.startswith('#'):
                     continue
@@ -39,11 +46,11 @@ class FileBucketingStrategy:
                 try:
                     bucket = ast.literal_eval(_expand_ranges(line))
                 except (ValueError, SyntaxError):
-                    logger.warning("Skipping invalid bucketing line")
+                    logger.warning("Skipping invalid bucketing line %d in %s", line_num, file_name)
                     continue
 
                 if not isinstance(bucket, tuple) or len(bucket) != 3:
-                    logger.warning("Skipping line due to incorrect format")
+                    logger.warning("Skipping line %d due to incorrect format in %s", line_num, file_name)
                     continue
 
                 x_num = ensure_is_list(bucket[0])

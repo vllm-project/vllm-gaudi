@@ -144,7 +144,11 @@ class HabanaHighLevelProfiler:
     event_cache: List[Any] = []
 
     def __init__(self, vllm_instance_id=None):
-        self.enabled = get_config().high_level_profiler_enabled and os.getenv('RANK', '0') == '0'
+        try:
+            rank = int(os.getenv('RANK', '0'))
+        except ValueError:
+            rank = 0
+        self.enabled = get_config().high_level_profiler_enabled and rank == 0
         self.pid = os.getpid()
         if self.enabled:
             self.vllm_instance_id = vllm_instance_id if vllm_instance_id is not None \
@@ -216,7 +220,7 @@ class HabanaHighLevelProfiler:
                 try:
                     os.makedirs(dir_name, exist_ok=True)
                 except Exception as e:
-                    raise RuntimeError("Failed to create profiling output directory") from e
+                    raise RuntimeError(f"Failed to create profiling output directory: {dir_name}") from e
             file_name = f"vllm.{time.time_ns()}.pt.trace.json"
             file_path = os.path.join(dir_name, file_name)
             prof.export_chrome_trace(file_path)

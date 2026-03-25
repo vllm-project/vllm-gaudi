@@ -465,7 +465,7 @@ def maybe_set_chunked_attention_layers(model_runner):
                 if "ChunkedLocalAttention" in layer.self_attn.attn.get_attn_backend().__name__:
                     layer.self_attn.attn.impl.is_chunked_attention = True
         except Exception as e:
-            logger.warning("Failed to set chunked attention flag: %s", e)
+            logger.warning("Failed to set chunked attention flag: %s", type(e).__name__)
 
 
 def _init_mamba_split_weights(model):
