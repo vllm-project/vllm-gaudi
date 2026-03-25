@@ -512,6 +512,10 @@ def hpu_fused_gdn_gating(
     beta_out = torch.sigmoid(b.to(torch.float32)).to(b.dtype)
     return g.unsqueeze(0), beta_out.unsqueeze(0)
 
+@torch._dynamo.disable
+def _eager_read_state(state: torch.Tensor, idx: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """Eager-only state read — isolates index_select from compiled graph."""
+    return state.index_select(0, idx).to(dtype)
 
 def hpu_fused_recurrent_gated_delta_rule(
     q: torch.Tensor,
@@ -575,6 +579,8 @@ def hpu_fused_recurrent_gated_delta_rule(
         else:
             final_state = initial_state if inplace_final_state else initial_state.clone()
 
+        # Compute state indices and read state eagerly BEFORE reshapes,
+        # so the graph break from _eager_read_state comes first.
         if ssm_state_indices is not None:
             sidx_raw = ssm_state_indices.reshape(-1).to(dtype=torch.long, device=device)
             num_slots = final_state.shape[0]
@@ -582,7 +588,7 @@ def hpu_fused_recurrent_gated_delta_rule(
         else:
             sidx = torch.arange(num_seqs, dtype=torch.long, device=device)
 
-        h_batch = final_state.index_select(0, sidx).to(_GDN_COMPUTE_DTYPE)
+        h_batch = _eager_read_state(final_state, sidx, _GDN_COMPUTE_DTYPE)
 
         # Flatten token axis.
         # Compute dtype controlled by VLLM_GDN_COMPUTE_FP32 env var (default: bf16)
