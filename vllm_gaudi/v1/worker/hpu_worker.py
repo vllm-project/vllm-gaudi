@@ -2,6 +2,7 @@
 """A GPU worker class."""
 import contextlib
 import gc
+import math
 import os
 import queue
 from contextlib import contextmanager
@@ -25,7 +26,7 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.utils.torch_utils import (STR_DTYPE_TO_TORCH_DTYPE, set_random_seed)
+from vllm.utils.torch_utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size, set_random_seed)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec, MambaSpec)
 from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerOutput)
 from vllm.v1.worker.utils import bind_kv_cache
@@ -285,8 +286,42 @@ class HPUWorker(WorkerBase):
             forward_context[layer_name].kv_cache = None
         runner_kv_caches = []
         gc.collect()
+        available = cache_size_bytes - dummy_block_headroom
 
-        return cache_size_bytes - dummy_block_headroom
+        # For hybrid GDN/linear_attention + ATN models, GPU shares one raw
+        # buffer across spec types, but HPU allocates separate tensors per
+        # spec (torch.compile can't handle as_strided mixed-dtype views).
+        # Reduce reported memory so the scheduler computes fewer num_blocks
+        # that fit the HPU separate-allocation model.
+        # NOTE: Only applies to GDN/linear_attention; standard Mamba2 + ATN
+        # uses the raw shared buffer path and is left unchanged.
+        has_attn = any(isinstance(s, FullAttentionSpec) for s in kv_cache_spec.values())
+        has_gdn = any(
+            isinstance(s, MambaSpec) and s.mamba_type in ("gdn_attention", "linear_attention")
+            for s in kv_cache_spec.values())
+        if has_attn and has_gdn:
+            # All specs share the same padded page_size_bytes after
+            # HybridAttentionMambaModelConfig unification.
+            padded_page = next(iter(kv_cache_spec.values())).page_size_bytes
+            # Compute real (unpadded) page size for each spec type.
+            real_attn = next(s.real_page_size_bytes for s in kv_cache_spec.values() if isinstance(s, FullAttentionSpec))
+            real_mamba = next(
+                sum(math.prod(sh) * get_dtype_size(dt) for sh, dt in zip(s.shapes, s.dtypes))
+                for s in kv_cache_spec.values()
+                if isinstance(s, MambaSpec) and s.mamba_type in ("gdn_attention", "linear_attention"))
+            total_real = real_attn + real_mamba
+            if total_real > padded_page:
+                factor = padded_page / total_real
+                adjusted = int(available * factor)
+                logger.info(
+                    "HPU hybrid cache: reducing available KV cache "
+                    "memory by %.1f%% (factor=%.3f) for separate "
+                    "per-spec allocations (padded_page=%s, "
+                    "real_attn=%s, real_mamba=%s).", (1 - factor) * 100, factor, format_bytes(padded_page),
+                    format_bytes(real_attn), format_bytes(real_mamba))
+                available = adjusted
+
+        return available
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
