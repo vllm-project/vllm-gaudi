@@ -59,6 +59,49 @@ def _apply_activation(output: torch.Tensor, activation: str | None) -> torch.Ten
     return output
 
 
+def _depthwise_conv1d_tpc_token_first(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Depthwise 1-D convolution on token-first layout using TPC ops only.
+
+    Same algorithm as ``_depthwise_conv1d_tpc`` but operates on
+    ``(seqlen, dim)`` layout instead of ``(batch, dim, seqlen)``,
+    eliminating the need for expensive MME native_mme_transpose ops
+    at the call site.
+
+    Args:
+        x:      (seqlen, dim)   — 2-D, token-first
+        weight: (dim, width)
+        bias:   (dim,) or None
+
+    Returns:
+        output: (out_len, dim)  — 2-D, token-first
+    """
+    width = weight.shape[1]
+    seq_len = x.shape[0]
+    if seq_len < width:
+        raise ValueError(f"Input length ({seq_len}) is smaller than kernel width ({width}).")
+    out_len = seq_len - width + 1
+
+    orig_dtype = x.dtype
+    needs_upcast = orig_dtype in (torch.bfloat16, torch.float16)
+
+    w = weight.float() if needs_upcast else weight  # (dim, width)
+
+    out = x[:out_len, :] * w[:, 0]  # (out_len, dim) * (dim,)
+    for k in range(1, width):
+        out = out + x[k:k + out_len, :] * w[:, k]
+
+    if bias is not None:
+        out = out + (bias.float() if needs_upcast else bias)
+
+    if needs_upcast:
+        out = out.to(orig_dtype)
+    return out
+
+
 def _depthwise_conv1d_tpc(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -199,7 +242,8 @@ def hpu_causal_conv1d_fn(
     if conv_states.device != x_work.device:
         raise ValueError("'conv_states' must reside on the same device as 'x'.")
 
-    # GPU-optimized: Keep all tensors on GPU, no CPU transfers
+    # x_work is now (seqlen, dim) — token-first layout.
+    # No transpose needed at entry or exit.
     # Don't use .to('cuda') during graph capture - use the device from x_work
     qsl = _ensure_query_start_loc(query_start_loc)
     assert qsl is not None
@@ -208,7 +252,7 @@ def hpu_causal_conv1d_fn(
     padded_batch = qsl.numel() - 1
     if padded_batch != 1:
         raise ValueError(f"'padded_batch' must be 1 but we get {padded_batch}")
-    dim, cu_seqlen = x_work.shape
+    cu_seqlen, dim = x_work.shape
     _, width = weight_work.shape
     state_len = max(width - 1, 0)
 
@@ -224,11 +268,8 @@ def hpu_causal_conv1d_fn(
         if has_initial_state is not None and has_initial_state.numel() != padded_batch:
             raise ValueError("'has_initial_state' must align with 'query_start_loc'.")
 
-    # Take all input data for this call
-    # Create tensor to get all data from 0 to lest sequence
-    # This works bor padded_batch equal 1
-    # ss = torch.arange(seq_starts[0], seq_ends[-1])
-    seq_x = x_work[:, :]
+    # Take all input data for this call — token-first layout (seqlen, dim)
+    seq_x = x_work  # (seqlen, dim)
 
     # Get init_state for all batch
     if has_initial_state is not None:
@@ -236,36 +277,33 @@ def hpu_causal_conv1d_fn(
                                  torch.zeros(padded_batch, state_len, dim, device=x_work.device, dtype=work_dtype))
     else:
         init_state = torch.zeros(padded_batch, state_len, dim, device=x_work.device, dtype=work_dtype)
-    init_state = init_state.transpose(-1, -2)
-    init_state = init_state.squeeze()
+    # init_state is (batch, state_len, dim) — already token-first
+    init_state = init_state.squeeze(0)  # (state_len, dim)
 
-    seq_input = torch.cat([init_state, seq_x], dim=1)
+    seq_input = torch.cat([init_state, seq_x], dim=0)  # (state_len + seqlen, dim)
     if enable_prefix_caching:
         assert seqlens_offsets_for_blocks is not None
         assert blocks_caching_range is not None
         offset = torch.arange(state_len, device=x.device)  # [state_len]
         indices = seqlens_offsets_for_blocks.unsqueeze(1) + offset  # [N, state_len]
 
-        # Gather all slices at once: seq_input is [dim, seq_len+state_len],
-        # indices is [N, state_len] -> new_states is [N, dim, state_len]
-        new_states = seq_input[:, indices].permute(1, 0, 2)
+        # Gather: seq_input is (seq_len+state_len, dim),
+        # indices is (N, state_len) -> new_states is (N, state_len, dim)
+        new_states = seq_input[indices]
 
         # Scatter all updates at once
-        conv_states[blocks_caching_range, -state_len:, :] = new_states.transpose(-1, -2)
+        conv_states[blocks_caching_range, -state_len:, :] = new_states
     else:
         end = qsl[-1]
-        idx = torch.arange(state_len, device=x.device) + end
-        new_state = seq_input.index_select(dim=1, index=idx)
-        conv_states[store_cache_indices, -state_len:, :] = new_state.transpose(-1, -2)
+        idx = torch.arange(state_len, device=x_work.device) + end
+        new_state = seq_input.index_select(dim=0, index=idx)  # (state_len, dim)
+        conv_states[store_cache_indices, -state_len:, :] = new_state
 
-    # Apply depthwise convolution using element-wise TPC ops.
-    # This avoids the MME spatial_convolution input1 weight-transpose
-    # that would otherwise stall TPC/MME pipelining on Gaudi.
-    seq_input = seq_input.unsqueeze(0)
-    seq_out = _depthwise_conv1d_tpc(seq_input, weight_work, bias_work)
+    # Depthwise conv in token-first layout — no batch dim or transposes.
+    seq_out = _depthwise_conv1d_tpc_token_first(seq_input, weight_work, bias_work)
     seq_out = _apply_activation(seq_out, activation)
 
-    return seq_out.squeeze(0).to(original_dtype)
+    return seq_out.to(original_dtype)  # (out_len, dim)
 
 
 def hpu_causal_conv1d_update(

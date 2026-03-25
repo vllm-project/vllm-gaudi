@@ -404,12 +404,12 @@ class HPUMambaMixer2(MambaMixer2):
         # Process prefill requests
         if has_prefill:
             assert padding_mask_flat is not None
-            x = hidden_states_B_C.transpose(0, 1)
-            hidden_states_B_C = hidden_states_B_C * padding_mask_flat
+            # hidden_states_B_C is in token-first (seqlen, dim) layout
+            # — no transpose needed.
             dt = dt * padding_mask_flat
 
             hidden_states_B_C = hpu_causal_conv1d_fn(
-                x,
+                hidden_states_B_C,  # (seqlen, dim) unmasked
                 self.conv_weights,
                 self.conv1d.bias,
                 activation=self.activation,
@@ -423,7 +423,7 @@ class HPUMambaMixer2(MambaMixer2):
                 metadata=attn_metadata,
                 query_start_loc=query_start_loc_p,
                 is_prompt=True,
-            ).transpose(0, 1)
+            )  # already (seqlen, dim)
 
             hidden_states_B_C = hidden_states_B_C * padding_mask_flat
             hidden_states_p, B_p, C_p = self.split_hidden_states_B_C_fn(hidden_states_B_C)
