@@ -5462,6 +5462,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             pin_memory=self.pin_memory,
         ))
 
+    _VISION_ENCODER_ATTRS = ('visual', 'vision_tower', 'vision_model', 'vision', 'img_processor', 'sam_model')
+
+    def _find_vision_encoder(self):
+        """Find the vision encoder module by checking common attribute names."""
+        model = self.get_model()
+        for attr_name in self._VISION_ENCODER_ATTRS:
+            encoder = getattr(model, attr_name, None)
+            if encoder is not None and isinstance(encoder, torch.nn.Module):
+                return encoder, attr_name
+        return None, None
+
     def warmup_multimodal_graphs(self, buckets):
 
         phase = 'Graph/Multimodal'
@@ -5473,6 +5484,32 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         vision_bucket_manager = self.get_model().vision_bucket_manager
         is_batch_based = vision_bucket_manager.is_batch_based
         mm_config = self.model_config.get_multimodal_config()
+
+        # Attempt to use compile-only mode on the vision encoder's forward()
+        # to speed up warmup by compiling graphs without executing operations.
+        use_compile_only = not htorch.utils.internal.is_lazy()
+        vision_encoder = None
+        original_forward = None
+        if use_compile_only:
+            try:
+                with bc.env_setting("PT_COMPILE_ONLY_MODE", True):
+                    pass
+            except (KeyError, AttributeError):
+                use_compile_only = False
+        if use_compile_only:
+            vision_encoder, encoder_attr = self._find_vision_encoder()
+            if vision_encoder is not None:
+                original_forward = vision_encoder.forward
+
+                def _compile_only_forward(*args, **kwargs):
+                    with bc.env_setting("PT_COMPILE_ONLY_MODE", True):
+                        return original_forward(*args, **kwargs)
+
+                vision_encoder.forward = _compile_only_forward
+                logger.info("Wrapping '%s.forward' in compile-only mode for multimodal warmup.", encoder_attr)
+            else:
+                logger.info("Could not find vision encoder module. Skipping compile-only for multimodal warmup.")
+                use_compile_only = False
 
         is_image_warmup = (mm_config is not None and mm_config.get_limit_per_prompt("image") is not None
                            and "image" in self.mm_budget.mm_limits and self.mm_budget.mm_limits['image'] != 0)
@@ -5497,35 +5534,56 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             patch_size = int(self.get_patch_size_from_model())
             warmup_lists = warmup_lists + \
                 vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
-        for modality, max_items in self.mm_budget.mm_limits.items():
-            if modality == 'image' and not is_image_warmup or modality == 'video' \
-                and not is_video_warmup:
-                continue
-            phase = f'Graph/Multimodal({modality})'
-            candidates = buckets if is_batch_based else warmup_lists
-            for idx in range(len(candidates)):
-                if is_batch_based:
-                    image_args = candidates[idx]
-                    width = 896  # pixels as in gemma3 config
-                    height = 896  # pixels as in gemma3 config
+        try:
+            for modality, max_items in self.mm_budget.mm_limits.items():
+                if modality == 'image' and not is_image_warmup or modality == 'video' \
+                    and not is_video_warmup:
+                    continue
+                phase = f'Graph/Multimodal({modality})'
+                candidates = buckets if is_batch_based else warmup_lists
+                for idx in range(len(candidates)):
+                    if is_batch_based:
+                        image_args = candidates[idx]
+                        width = 896  # pixels as in gemma3 config
+                        height = 896  # pixels as in gemma3 config
+                    else:
+                        image_args = None
+                        width, height = candidates[idx]
+                    batched_dummy_mm_inputs = self._get_mm_dummy_batch(modality,
+                                                                       image_args=image_args,
+                                                                       width=width,
+                                                                       height=height)
+                    if use_compile_only:
+                        try:
+                            dummy_encoder_outputs = self.model.embed_multimodal(**batched_dummy_mm_inputs)
+                        except Exception:
+                            logger.warning(
+                                "Compile-only mode failed for multimodal bucket %d/%d. "
+                                "Falling back to normal execution for remaining buckets.",
+                                idx + 1, len(candidates))
+                            vision_encoder.forward = original_forward
+                            original_forward = None
+                            use_compile_only = False
+                            dummy_encoder_outputs = self.model.embed_multimodal(**batched_dummy_mm_inputs)
+                    else:
+                        dummy_encoder_outputs = self.model.embed_multimodal(**batched_dummy_mm_inputs)
+                    if is_batch_based:
+                        if not use_compile_only:
+                            sanity_check_mm_encoder_outputs(
+                                dummy_encoder_outputs,
+                                expected_num_items=candidates[idx],
+                            )
+                        self.graphed_buckets.add(candidates[idx])
+                    self.log_warmup_multimodal(phase, idx, len(candidates),
+                                               candidates[idx] if is_batch_based else 1, 0, width, height)
+
+                if use_compile_only:
+                    logger.info("Multimodal warmup for '%s' used compile-only mode.", modality)
                 else:
-                    image_args = None
-                    width, height = candidates[idx]
-                batched_dummy_mm_inputs = self._get_mm_dummy_batch(modality,
-                                                                   image_args=image_args,
-                                                                   width=width,
-                                                                   height=height)
-                dummy_encoder_outputs = \
-                    self.model.embed_multimodal(
-                    **batched_dummy_mm_inputs)
-                if is_batch_based:
-                    sanity_check_mm_encoder_outputs(
-                        dummy_encoder_outputs,
-                        expected_num_items=candidates[idx],
-                    )
-                    self.graphed_buckets.add(candidates[idx])
-                self.log_warmup_multimodal(phase, idx, len(candidates), candidates[idx] if is_batch_based else 1, 0,
-                                           width, height)
+                    logger.info("Multimodal warmup for '%s' used normal execution mode.", modality)
+        finally:
+            if vision_encoder is not None and original_forward is not None:
+                vision_encoder.forward = original_forward
 
     def _maybe_profile_unified_attn(self):
         unified_cfg_str = os.environ.get('VLLM_PROFILE_UNIFIED', None)
@@ -5612,8 +5670,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         if not htorch.utils.internal.is_lazy() and not self.model_config.enforce_eager:
             multiplier = 5 if self.compile_config.regional_compilation else 1
+            mm_buckets = self.get_model().vision_bucket_manager.multimodal_buckets if self.supports_mm_inputs else None
+            mm_bucket_count = len(mm_buckets) if mm_buckets is not None else 0
             cache_size_limit = 1 + multiplier * (len(self.bucketing_manager.prompt_buckets) +
-                                                 len(self.bucketing_manager.decode_buckets))
+                                                 len(self.bucketing_manager.decode_buckets)) + mm_bucket_count
             torch._dynamo.config.cache_size_limit = max(cache_size_limit, torch._dynamo.config.cache_size_limit)
             # Multiply by 8 to follow the original default ratio between
             # the cache_size_limit and accumulated_cache_size_limit
