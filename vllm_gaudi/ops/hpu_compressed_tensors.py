@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 )
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors_moe)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (  # noqa: E501
-    CompressedTensorsScheme, CompressedTensorsWNA16)
+    CompressedTensorsScheme, CompressedTensorsW8A8Int8, CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_TYPES_MAP)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (find_matched_target)
@@ -104,6 +104,12 @@ class HPUCompressedTensorsLinearMethod(OrigCompressedTensorsLinearMethod):
                                                    symmetric=scheme.symmetric,
                                                    group_size=scheme.group_size,
                                                    actorder=weight_quant.actorder)
+        elif scheme_classname == "CompressedTensorsW8A8Int8":
+            hpu_scheme = HPUCompressedTensorsW8A8Int8(
+                strategy=scheme.strategy,
+                is_static_input_scheme=scheme.is_static_input_scheme,
+                input_symmetric=scheme.input_symmetric,
+            )
         else:
             raise ValueError(f"{scheme_classname} compressed format is not supported on HPU")
         return hpu_scheme
@@ -255,6 +261,110 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                                             input_scale=input_scale,
                                             bias=bias,
                                             trans_B=False)
+
+
+class HPUCompressedTensorsW8A8Int8(CompressedTensorsScheme):
+    """HPU implementation of W8A8 INT8 quantization scheme.
+
+    Since HPU does not expose a native INT8 GEMM kernel, this implementation
+    dequantizes INT8 weights to BF16 and performs a standard matmul.
+    """
+
+    def __init__(self, strategy: str, is_static_input_scheme: bool, input_symmetric: bool):
+        self.strategy = strategy
+        self.is_static_input_scheme = is_static_input_scheme
+        self.input_symmetric = input_symmetric
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return -1
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        output_partition_sizes: list[int],
+        input_size_per_partition: int,
+        params_dtype: torch.dtype,
+        weight_loader: Callable,
+        **kwargs,
+    ):
+        layer.logical_widths = output_partition_sizes
+        output_size_per_partition = sum(output_partition_sizes)
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
+
+        # WEIGHT
+        weight = ModelWeightParameter(
+            data=torch.empty(output_size_per_partition, input_size_per_partition, dtype=torch.int8),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight", weight)
+
+        # WEIGHT SCALE
+        if self.strategy == QuantizationStrategy.CHANNEL:
+            weight_scale = ChannelQuantScaleParameter(
+                data=torch.empty((output_size_per_partition, 1), dtype=torch.float32),
+                output_dim=0,
+                weight_loader=weight_loader,
+            )
+        else:
+            assert self.strategy == QuantizationStrategy.TENSOR
+            weight_scale = PerTensorScaleParameter(
+                data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+                weight_loader=weight_loader,
+            )
+        layer.register_parameter("weight_scale", weight_scale)
+
+        # INPUT SCALE
+        input_scale = None
+        input_zero_point = None
+        if self.is_static_input_scheme:
+            input_scale = BasevLLMParameter(
+                data=torch.empty(1, dtype=torch.float32),
+                weight_loader=weight_loader,
+            )
+            if not self.input_symmetric:
+                input_zero_point = BasevLLMParameter(
+                    data=torch.empty(1, dtype=torch.int8),
+                    weight_loader=weight_loader,
+                )
+        layer.register_parameter("input_scale", input_scale)
+        layer.register_parameter("input_zero_point", input_zero_point)
+        if not hasattr(layer, "azp_adj"):
+            layer.register_parameter("azp_adj", None)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Convert per-tensor scales to per-channel format
+        if self.strategy == QuantizationStrategy.TENSOR:
+            ws_channelwise = convert_to_channelwise(layer.weight_scale, layer.logical_widths)
+            layer.weight_scale = torch.nn.Parameter(ws_channelwise, requires_grad=False)
+        else:
+            layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data, requires_grad=False)
+
+        # Dequantize INT8 weights to BF16 and transpose for matmul
+        weight_bf16 = layer.weight.data.to(torch.bfloat16) * layer.weight_scale.data
+        layer.weight = torch.nn.Parameter(weight_bf16.t(), requires_grad=False)
+
+        # Handle static input scale
+        if self.is_static_input_scheme and hasattr(layer, "input_scale") and layer.input_scale is not None:
+            layer.input_scale = torch.nn.Parameter(layer.input_scale.data.max().reshape(()), requires_grad=False)
+        else:
+            layer.input_scale = None
+
+        logger.warning_once(
+            "W8A8 INT8 on HPU uses dequantized BF16 matmul fallback. "
+            "Performance may be lower than native INT8 or FP8 inference."
+        )
+
+    def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor, bias: Optional[torch.Tensor] = None):
+        # Weights are already dequantized to BF16 and transposed in process_weights_after_loading
+        output = torch.matmul(x, layer.weight)
+        if bias is not None:
+            output = output + bias
+        return output
 
 
 @CustomOp.register_oot(name='CompressedTensorsW8A8Fp8MoEMethod')

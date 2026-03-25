@@ -7,7 +7,8 @@ from utils import get_data_path, create_row_parallel_linear, create_fused_moe
 from unittest.mock import MagicMock
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import CompressedTensorsConfig
 from vllm_gaudi.ops.hpu_compressed_tensors import (HPUCompressedTensorsLinearMethod, HPUCompressedTensorsW8A8Fp8,
-                                                   HPUCompressedTensorsWNA16, HPUCompressedTensorsWNA16MoEMethod)
+                                                   HPUCompressedTensorsW8A8Int8, HPUCompressedTensorsWNA16,
+                                                   HPUCompressedTensorsWNA16MoEMethod)
 from vllm_gaudi.utils import HPUCompileConfig
 from vllm.forward_context import override_forward_context
 from safetensors import safe_open
@@ -392,3 +393,51 @@ def test_compressed_tensors_wna16_moe_method(default_vllm_config: None, dist_ini
 
     # Check correctness
     torch.testing.assert_close(ref_output, out, atol=1e-4, rtol=1e-4)
+
+
+def test_compressed_tensors_linear_method_w8a8int8_dispatch(default_vllm_config: None, dist_init):
+    """Verify CompressedTensorsW8A8Int8 scheme is dispatched correctly and does not raise ValueError."""
+    config = {
+        'config_groups': {
+            'group_0': {
+                'input_activations': {
+                    'actorder': None,
+                    'block_structure': None,
+                    'dynamic': True,
+                    'group_size': None,
+                    'num_bits': 8,
+                    'observer': None,
+                    'observer_kwargs': {},
+                    'strategy': 'token',
+                    'symmetric': True,
+                    'type': 'int'
+                },
+                'output_activations': None,
+                'targets': ['Linear'],
+                'weights': {
+                    'actorder': None,
+                    'block_structure': None,
+                    'dynamic': False,
+                    'group_size': None,
+                    'num_bits': 8,
+                    'observer': 'mse',
+                    'observer_kwargs': {},
+                    'strategy': 'channel',
+                    'symmetric': True,
+                    'type': 'int'
+                }
+            }
+        },
+        'format': 'int-quantized',
+        'global_compression_ratio': 1.2816636668151653,
+        'ignore': [],
+        'kv_cache_scheme': None,
+        'quant_method': 'compressed-tensors',
+        'quantization_status': 'compressed'
+    }
+    oot_quant_config = CompressedTensorsConfig.from_config(config)
+
+    # Prepare linear layer - this should NOT raise ValueError
+    oot_op = create_row_parallel_linear(input_size=256, output_size=256, quant_config=oot_quant_config).to("hpu")
+    assert isinstance(oot_op.quant_method, HPUCompressedTensorsLinearMethod)
+    assert isinstance(oot_op.scheme, HPUCompressedTensorsW8A8Int8)
