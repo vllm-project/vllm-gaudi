@@ -28,9 +28,9 @@ To execute the profiling, follow these steps:
 2. Run the inference command with the appropriate profiling flag, as in the following example.
 
     ```bash
-    VLLM_PT_PROFILE=decode_256_2048_t python3 -m vllm.entrypoints.openai.api_server \
+    VLLM_PT_PROFILE=decode_256_2048_t \
+      vllm serve "facebook/opt-125m" \
       --port 8080 \
-      --model "facebook/opt-125m" \
       --tensor-parallel-size 1 \
       --max-num-seqs 256 \
       --dtype bfloat16 \
@@ -62,9 +62,8 @@ To gain more detailed insights into device-level behavior, such as fused graph s
 
     ```
     HABANA_PROFILE_WRITE_HLTV=1 HABANA_PROFILE=1 VLLM_PT_PROFILE=decode_256_512_t \
-      python3 -m vllm.entrypoints.openai.api_server \
+      vllm serve "facebook/opt-125m" \
       --port 8080 \
-      --model "facebook/opt-125m" \
       --tensor-parallel-size 1 \
       --max-num-seqs 256 \
       --dtype bfloat16 \

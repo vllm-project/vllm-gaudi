@@ -40,8 +40,8 @@ To execute E2E profiling, use one of the following procedures.
 
     ```bash
     VLLM_PROMPT_SEQ_BUCKET_MAX=128 VLLM_PROMPT_SEQ_BUCKET_MIN=128 \
-    python3 -m vllm.entrypoints.openai.api_server --port 8080 \
-    --model "facebook/opt-125m" --tensor-parallel-size 1 \
+    vllm serve "facebook/opt-125m" --port 8080 \
+    --tensor-parallel-size 1 \
     --max-num-seqs 128 --dtype bfloat16 \
     --max-model-len 256
     ```
@@ -96,8 +96,8 @@ To execute E2E profiling, use one of the following procedures.
 
     ```bash
     VLLM_PROMPT_SEQ_BUCKET_MAX=128 VLLM_PROMPT_SEQ_BUCKET_MIN=128 \
-    python3 -m vllm.entrypoints.openai.api_server --port 8080 \
-    --model "facebook/opt-125m" --tensor-parallel-size 1 \
+    vllm serve "facebook/opt-125m" --port 8080 \
+    --tensor-parallel-size 1 \
     --max-num-seqs 128 --dtype bfloat16 \
     --max-model-len 256
     ```
