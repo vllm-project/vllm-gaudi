@@ -243,6 +243,7 @@ def hpu_chunk_gdr_phase_b(
         output_final_state,
     )
 
+
 @torch._dynamo.disable
 def _eager_output_accum(core_h, C_h_ci, state_t, ci):
     """Eager: output accumulation only.
@@ -525,10 +526,12 @@ def hpu_fused_gdn_gating(
     beta_out = torch.sigmoid(b.to(torch.float32)).to(b.dtype)
     return g.unsqueeze(0), beta_out.unsqueeze(0)
 
+
 @torch._dynamo.disable
 def _eager_read_state(state: torch.Tensor, idx: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     """Eager-only state read — isolates index_select from compiled graph."""
     return state.index_select(0, idx).to(dtype)
+
 
 def hpu_fused_recurrent_gated_delta_rule(
     q: torch.Tensor,
@@ -779,6 +782,7 @@ def _recurrent_general_path(
     out = out.unsqueeze(0) if cu_seqlens is not None else out.view(B, T, HV, Vdim)
 
     return out, final_state
+
 
 def hpu_chunk_gated_delta_rule(
     q: torch.Tensor,

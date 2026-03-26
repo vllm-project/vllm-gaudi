@@ -196,8 +196,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             # via remainder, same as the decode path.  Raw -1 in
             # index_copy_ is undefined behaviour on HPU.
             safe_si = torch.remainder(state_indices, ssm_state.shape[0]).long()
-            ssm_state.index_copy_(0, safe_si, final_state.to(device=ssm_state.device,
-                                                              dtype=ssm_state.dtype))
+            ssm_state.index_copy_(0, safe_si, final_state.to(device=ssm_state.device, dtype=ssm_state.dtype))
 
             non_spec_out = core_attn_out_result.squeeze(0)
             core_attn_out[:non_spec_out.shape[0]] = non_spec_out

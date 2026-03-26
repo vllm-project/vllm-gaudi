@@ -242,7 +242,7 @@ def hpu_causal_conv1d_fn(
     # conv_states), consistent with the decode path.
     garbage_slot_pf = conv_states.shape[0] - 1
     safe_cache_idx_prefill = torch.where(batch_cache_idx >= 0, batch_cache_idx,
-                                          torch.full_like(batch_cache_idx, garbage_slot_pf))
+                                         torch.full_like(batch_cache_idx, garbage_slot_pf))
     valid_mask_prefill = batch_cache_idx >= 0
 
     # Batched path — HPU bucketed prefill pads all sequences to the same
@@ -300,8 +300,8 @@ def hpu_causal_conv1d_fn(
             update_mask = (actual_qlens > 0).view(-1, 1, 1)
             new_states_t = new_states.transpose(-1, -2)  # [B, state_len, dim]
             existing_states = conv_states.index_select(0, safe_cache_idx_prefill)[:, -state_len:, :]
-            conv_states[safe_cache_idx_prefill, -state_len:, :] = torch.where(
-                update_mask, new_states_t, existing_states)
+            conv_states[safe_cache_idx_prefill, -state_len:, :] = torch.where(update_mask, new_states_t,
+                                                                              existing_states)
 
     else:
         # Fallback: variable-length sequences — per-sequence loop
