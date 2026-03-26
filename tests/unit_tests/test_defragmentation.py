@@ -296,8 +296,11 @@ class TestOnlineDefragmenter:
     @patch('vllm_gaudi.extension.defragmentation.htorch')
     def test_swap_mla_single_call(self, mock_htorch):
         """Test MLA swap only calls forward once (no value cache)"""
-        mla_caches = [(torch.randn(100, 8, 64), None), (torch.randn(100, 8, 64), None)]
-        defragmenter = OnlineDefragmenter(mla_caches, block_size=16)
+        num_blocks = 8
+        block_size = 16
+        mla_caches = [(torch.randn(num_blocks * block_size, 8, 64), None),
+                      (torch.randn(num_blocks * block_size, 8, 64), None)]
+        defragmenter = OnlineDefragmenter(mla_caches, block_size=block_size)
 
         to_swap = [(10, 5)]
         threshold = 8
@@ -353,11 +356,14 @@ class TestDefragmentationIntegration:
 
     def test_cache_swap_utils_mla_detection(self):
         """Test MLA (multi-layer attention) detection"""
-        # Create MLA-style caches (no value cache)
-        mla_caches = [(torch.randn(100, 8, 64), None), (torch.randn(100, 8, 64), None)]
+        # Create MLA-style caches (no value cache) with valid attention cache shape
+        num_blocks = 8
+        block_size = 16
+        mla_caches = [(torch.randn(num_blocks * block_size, 8, 64), None),
+                      (torch.randn(num_blocks * block_size, 8, 64), None)]
 
         with patch('vllm_gaudi.extension.defragmentation.htorch'):
-            utils = OnlineDefragmenter(tuple(mla_caches), block_size=16)
+            utils = OnlineDefragmenter(tuple(mla_caches), block_size=block_size)
             assert utils.is_mla is True
 
     def test_full_lifecycle(self, setup_defragmenter):
@@ -447,3 +453,115 @@ class TestDefragmentationIntegration:
 
         # req_ghost should not appear anywhere
         assert 'req_ghost' not in defrag.req_blocks
+
+
+class TestCacheClassification:
+    """Test cache classification into attention vs state types"""
+
+    def test_attention_only_caches(self, mock_config, mock_debug_logger):
+        """All caches with first_dim divisible by block_size are classified as attention"""
+        block_size = 16
+        num_blocks = 10
+        kv_caches = [
+            (torch.zeros(num_blocks * block_size, 8, 64), torch.zeros(num_blocks * block_size, 8, 64)),
+            (torch.zeros(num_blocks * block_size, 8, 64), torch.zeros(num_blocks * block_size, 8, 64)),
+        ]
+        with patch('vllm_gaudi.extension.defragmentation.htorch'):
+            defrag = OnlineDefragmenter(tuple(kv_caches), block_size=block_size)
+        assert defrag._attn_indices == [0, 1]
+        assert defrag._state_indices == []
+
+    def test_state_only_caches(self, mock_config, mock_debug_logger):
+        """Caches with first_dim = num_blocks + 1 are classified as state"""
+        block_size = 16
+        num_blocks = 10
+        kv_caches = [
+            (torch.zeros(num_blocks + 1, 64), torch.zeros(num_blocks + 1, 32)),
+            (torch.zeros(num_blocks + 1, 64), torch.zeros(num_blocks + 1, 32)),
+        ]
+        with patch('vllm_gaudi.extension.defragmentation.htorch'):
+            defrag = OnlineDefragmenter(tuple(kv_caches), block_size=block_size)
+        assert defrag._attn_indices == []
+        assert defrag._state_indices == [0, 1]
+
+    def test_hybrid_caches(self, mock_config, mock_debug_logger):
+        """Hybrid model: attention + state caches classified separately"""
+        block_size = 16
+        num_blocks = 10
+        attn_cache = (torch.zeros(num_blocks * block_size, 8, 64), torch.zeros(num_blocks * block_size, 8, 64))
+        state_cache = (torch.zeros(num_blocks + 1, 64), torch.zeros(num_blocks + 1, 32))
+        kv_caches = [attn_cache, state_cache, attn_cache]
+        with patch('vllm_gaudi.extension.defragmentation.htorch'):
+            defrag = OnlineDefragmenter(tuple(kv_caches), block_size=block_size)
+        assert defrag._attn_indices == [0, 2]
+        assert defrag._state_indices == [1]
+
+    def test_block_size_zero_skips_classification(self, mock_config, mock_debug_logger):
+        """block_size=0 does not crash and skips classification"""
+        kv_caches = ((torch.empty(0, device='meta'), torch.empty(0, device='meta')), )
+        defrag = OnlineDefragmenter(kv_caches, block_size=0)
+        assert defrag._attn_indices == []
+        assert defrag._state_indices == []
+
+    def test_is_mla_from_attention_layers_only(self, mock_config, mock_debug_logger):
+        """is_mla should be True even if state caches have non-None second element"""
+        block_size = 16
+        num_blocks = 10
+        mla_attn_cache = (torch.zeros(num_blocks * block_size, 8, 64), None)
+        state_cache = (torch.zeros(num_blocks + 1, 64), torch.zeros(num_blocks + 1, 32))
+        kv_caches = [mla_attn_cache, state_cache]
+        with patch('vllm_gaudi.extension.defragmentation.htorch'):
+            defrag = OnlineDefragmenter(tuple(kv_caches), block_size=block_size)
+        # is_mla should be True because the only *attention* layer is MLA
+        assert defrag.is_mla is True
+        assert defrag._attn_indices == [0]
+        assert defrag._state_indices == [1]
+
+    def test_is_mla_false_when_attention_has_value(self, mock_config, mock_debug_logger):
+        """is_mla should be False when attention caches have value tensors"""
+        block_size = 16
+        num_blocks = 10
+        attn_cache = (torch.zeros(num_blocks * block_size, 8, 64), torch.zeros(num_blocks * block_size, 8, 64))
+        kv_caches = [attn_cache]
+        with patch('vllm_gaudi.extension.defragmentation.htorch'):
+            defrag = OnlineDefragmenter(tuple(kv_caches), block_size=block_size)
+        assert defrag.is_mla is False
+
+
+class TestSwapStateRouting:
+    """Test that _swap routes caches through the correct swap path"""
+
+    def test_swap_routes_attention_through_cache_utils(self, mock_config, mock_debug_logger):
+        """Attention caches should go through CacheSwapUtils, state caches through _swap_state_caches"""
+        block_size = 16
+        num_blocks = 10
+        attn_cache = (torch.zeros(num_blocks * block_size, 8, 64), torch.zeros(num_blocks * block_size, 8, 64))
+        state_cache = (torch.zeros(num_blocks + 1, 64), torch.zeros(num_blocks + 1, 32))
+        kv_caches = [attn_cache, state_cache]
+
+        with patch('vllm_gaudi.extension.defragmentation.htorch'):
+            defrag = OnlineDefragmenter(tuple(kv_caches), block_size=block_size)
+
+        with patch.object(defrag.cache_utils, 'forward') as mock_attn, \
+             patch.object(defrag, '_swap_state_caches') as mock_state:
+            defrag._swap([(1, 0)], 8)
+            # Attention: keys + values = 2 calls
+            assert mock_attn.call_count == 2
+            # State: 2 slots (ssm + conv)
+            assert mock_state.call_count == 2
+
+    def test_swap_state_only_model(self, mock_config, mock_debug_logger):
+        """When only state caches exist, CacheSwapUtils should not be called"""
+        block_size = 16
+        num_blocks = 10
+        state_cache = (torch.zeros(num_blocks + 1, 64), torch.zeros(num_blocks + 1, 32))
+        kv_caches = [state_cache]
+
+        with patch('vllm_gaudi.extension.defragmentation.htorch'):
+            defrag = OnlineDefragmenter(tuple(kv_caches), block_size=block_size)
+
+        with patch.object(defrag.cache_utils, 'forward') as mock_attn, \
+             patch.object(defrag, '_swap_state_caches') as mock_state:
+            defrag._swap([(1, 0)], 8)
+            mock_attn.assert_not_called()
+            assert mock_state.call_count == 2

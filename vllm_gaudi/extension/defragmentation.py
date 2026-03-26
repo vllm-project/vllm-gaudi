@@ -61,19 +61,26 @@ class OnlineDefragmenter:
         self.graphed = with_default(config.VLLM_DEFRAG_WITH_GRAPHS, config.bridge_mode == 'eager')
         self.debug = init_debug_logger('defrag')
         self.kv_caches = tuple(kv_caches)
-        self.is_mla = all([cache[1] is None for cache in self.kv_caches])
         self.block_size = block_size
 
         # Attention caches: first dim = num_blocks * block_size.
         # State caches (GDN/Mamba): first dim = num_blocks + 1.
         self._attn_indices: list[int] = []
         self._state_indices: list[int] = []
-        for i, cache in enumerate(self.kv_caches):
-            first_dim = cache[0].shape[0]
-            if first_dim % block_size == 0 and first_dim >= block_size:
-                self._attn_indices.append(i)
-            else:
-                self._state_indices.append(i)
+        if block_size > 0:
+            for i, cache in enumerate(self.kv_caches):
+                first_dim = cache[0].shape[0]
+                if first_dim % block_size == 0 and first_dim >= block_size:
+                    self._attn_indices.append(i)
+                else:
+                    self._state_indices.append(i)
+
+        # Compute is_mla only from attention layers to avoid false negatives
+        # from state caches (e.g. Mamba) whose second element is not None.
+        if self._attn_indices:
+            self.is_mla = all(self.kv_caches[i][1] is None for i in self._attn_indices)
+        else:
+            self.is_mla = all(cache[1] is None for cache in self.kv_caches)
 
         self.cache_utils = CacheSwapUtils(block_size, kv_caches[0][0].device)
         if self.graphed:
@@ -236,9 +243,11 @@ class OnlineDefragmenter:
                 value_caches = [self.kv_caches[i][1] for i in self._attn_indices]
                 self.cache_utils(srcs, dsts, value_caches, self.block_size)
         if self._state_indices:
-            for slot in range(2):  # conv_state and temporal_state
-                state_caches = [self.kv_caches[i][slot] for i in self._state_indices
-                                if len(self.kv_caches[i]) > slot and self.kv_caches[i][slot] is not None]
+            for slot in range(2):  # ssm_state (slot 0) and conv_state (slot 1)
+                state_caches = [
+                    self.kv_caches[i][slot] for i in self._state_indices
+                    if len(self.kv_caches[i]) > slot and self.kv_caches[i][slot] is not None
+                ]
                 if state_caches:
                     self._swap_state_caches(srcs, dsts, state_caches)
 
@@ -257,7 +266,9 @@ class OnlineDefragmenter:
         # We only need distinct ids for a swap. They will be scaled by block_size inside swap.
         # If for some reason only 1 block exists, skip warmup gracefully.
         try:
-            k_cache = self.kv_caches[0][0]
+            # Use an attention cache for the block count; state caches have a
+            # different first-dimension layout (num_blocks + 1).
+            k_cache = (self.kv_caches[self._attn_indices[0]][0] if self._attn_indices else self.kv_caches[0][0])
             num_blocks_available = k_cache.shape[0] // self.block_size
         except Exception:
             num_blocks_available = 0
