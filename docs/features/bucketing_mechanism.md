@@ -44,7 +44,7 @@ After the prefill stage, it will be executed as a `(4, 1, 512)` decode bucket, w
 
 Bucketing is transparent to the user – padding in the sequence length dimension is never returned, and padding in the batch dimension does not create new requests.
 
-There are three bucketing strategies: exponential (default), linear, and unified.
+There are two bucketing strategies: exponential (default) and linear.
 
 ### Exponential Strategy
 
@@ -95,43 +95,6 @@ These parameters can be configured separately by the user for the prompt and dec
     => buckets = ramp_up + stable => (128, 256, 384, 512)
     ```
 
-<!-- ### Unified Strategy
-
-The unified strategy is dedicated to Unified Attention. Its buckets are determined by the following non-configurable parameters:
-
-- `query length`: The number of currently processed tokens, excluding context tokens.
-- `shared num blocks`: The context length measured in blocks. It includes only blocks that are shared between at least two block tables, in different requests, or blocks used by at least two tokens in the query.
-- `unique num blocks`: The context length measured in blocks. It includes only blocks that are not shared between block tables and are used by one token.
-- `is causal`: Indicates whether there is at least one prompt in the batch. Possible values are 0 or 1.
-
-Unified bucketing prepares buckets for both prompt and decode as one, known as `unified cfg`. -->
-
-#### Alpha Version
-
-Currently there are six points in ranges for query length, shared blocks and unique blocks. They are based on `max num seqs` and `max num batched tokens` values. The points are set at the whole, half, and one-quarter values of both parameters, resulting in a total of six points.
-
-The following example presents a possible distribution:
-
-```{.}
-batch size = 64, max num batched tokens = 4096
-```
-
-![exponential bucketing distribution for 4096 max query length](../assets/graphs/unified_bucketing_example.png)
-
-Additionally for context blocks, both shared and unique, a value of `0` is also included, resulting in the following bucketing:
-
-```{.}
-INFO 09-23 12:32:43 [common.py:100] Generated 375 unified buckets [query, shared_blocks, unique_blocks]: [(8, 0, 0, 1), (8, 0, 8, 0), ..., (2048, 256, 2890, 1), (2048, 256, 5781, 1)]
-```
-
-The following example presents a setup where every bucket is logged separately in the warm-up phase:
-
-```{.}
-(EngineCore_DP0 pid=805) INFO 09-23 12:32:50 [hpu_model_runner.py:3320] [Warmup][Unified CFG][2/375] query_len:2048 shared_blocks:256 unique_blocks:2890 (causal) free_mem:11.16 GiB
-(EngineCore_DP0 pid=805) INFO 09-23 12:32:53 [hpu_model_runner.py:3320] [Warmup][Unified CFG][3/375] query_len:2048 shared_blocks:256 unique_blocks:1445 (causal) free_mem:11.16 GiB
-(EngineCore_DP0 pid=805) INFO 09-23 12:32:56 [hpu_model_runner.py:3320] [Warmup][Unified CFG][4/375] query_len:2048 shared_blocks:256 unique_blocks:32 (causal) free_mem:11.16 GiB
-```
-
 ### Specifying Buckets in a File
 
 File-based bucketing allows you to manually configure precise buckets by specifying them in a configuration file. To use this approach, set the `VLLM_BUCKETING_FROM_FILE` flag to the path of your configuration file.
@@ -160,6 +123,3 @@ You can define buckets in a file using three approaches.
 You can mix these three approaches in a single file, for example `([64, 128, 256], 1, range(512, 1024, 32))` is a valid configuration.
 
 Each bucket or a configuration has to be provided in a separate line. You can find a sample bucketing in [bucketing_file.txt](https://github.com/vllm-project/vllm-gaudi/blob/main/vllm_gaudi/extension/bucketing/bucketing_file.txt).
-
-<!-- !!! note
-    Currently, bucketing from a file is not supported for unified attention. -->
