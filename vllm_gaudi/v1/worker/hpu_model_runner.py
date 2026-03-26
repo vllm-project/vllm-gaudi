@@ -1708,6 +1708,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         return num_decodes
 
     def _is_prompt(self, req_idx: int, scheduler_output: "SchedulerOutput") -> bool:
+        """Check whether the request at *req_idx* is a prompt (prefill).
+
+        A normal prompt has ``num_computed_tokens < num_prompt_tokens``.
+        However, a *preempted* prompt that has been rescheduled can have
+        ``num_computed_tokens >= num_prompt_tokens`` because some tokens
+        were already processed before preemption.  In that case we detect
+        it by comparing ``num_scheduled_tokens`` against the number of
+        tokens a regular decode step would schedule (1, or
+        ``len(spec_decode_tokens) + 1`` when speculative decoding is
+        active).  If the scheduler schedules more tokens than a decode
+        step, the request is a rescheduled prompt.
+
+        Decoder-only KV-transfer requests (``is_decoder_only``) are
+        always treated as decodes regardless of the token counts.
+        """
         req_id = self.input_batch.req_ids[req_idx]
         num_computed_tokens = int(self.input_batch.num_computed_tokens_cpu[req_idx])
         num_prompt_tokens = int(self.input_batch.num_prompt_tokens[req_idx])
@@ -3870,35 +3885,31 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         return attn_metadata
 
     def _ensure_decodes_first(self, scheduler_output: "SchedulerOutput"):
+        """Partition the batch so all decode requests precede all prompts.
+
+        Uses a single-pass two-pointer approach (O(n)) instead of
+        repeated full scans from both ends.
+        """
         num_reqs = self.input_batch.num_reqs
-        while True:
-            # Find the first prompt index
-            first_prompt_index = None
-            for i in range(num_reqs):
-                if self._is_prompt(i, scheduler_output):
-                    first_prompt_index = i
-                    break
-            if first_prompt_index is None:
-                break
+        if num_reqs <= 1:
+            return
 
-            # Find the last decode index
-            last_decode_index = None
-            for i in reversed(range(num_reqs)):
-                if not self._is_prompt(i, scheduler_output):
-                    last_decode_index = i
-                    break
-            if last_decode_index is None:
-                break
+        left = 0
+        right = num_reqs - 1
 
-            # Sanity
-            assert first_prompt_index != last_decode_index
+        while left < right:
+            # Advance left while it already points to a decode.
+            while left < right and not self._is_prompt(left, scheduler_output):
+                left += 1
 
-            # Check if done
-            if first_prompt_index > last_decode_index:
-                break
+            # Advance right while it already points to a prompt.
+            while left < right and self._is_prompt(right, scheduler_output):
+                right -= 1
 
-            # Swap
-            self.input_batch.swap_states(first_prompt_index, last_decode_index)
+            if left < right:
+                self.input_batch.swap_states(left, right)
+                left += 1
+                right -= 1
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
