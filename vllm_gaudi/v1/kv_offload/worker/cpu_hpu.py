@@ -36,7 +36,11 @@ class Transfer:
 
 
 is_hetero = os.getenv('PT_HPU_ENABLE_RESTORE_KV_LAYOUT', '0') == '1'
-block_factor = int(os.getenv('PT_HPU_BLOCK_SIZE_FACTOR', '1'))
+try:
+    block_factor = int(os.getenv('PT_HPU_BLOCK_SIZE_FACTOR', '1'))
+except ValueError:
+    logger.warning("Invalid PT_HPU_BLOCK_SIZE_FACTOR value, using default 1")
+    block_factor = 1
 
 
 def swap_blocks(
