@@ -2,6 +2,7 @@
 """A GPU worker class."""
 import contextlib
 import gc
+import math
 import os
 import queue
 from contextlib import contextmanager
@@ -25,7 +26,7 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.utils.torch_utils import (STR_DTYPE_TO_TORCH_DTYPE, set_random_seed)
+from vllm.utils.torch_utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size, set_random_seed)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec, MambaSpec)
 from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerOutput)
 from vllm.v1.worker.utils import bind_kv_cache
@@ -237,13 +238,6 @@ class HPUWorker(WorkerBase):
         runner_kv_caches: list[torch.Tensor] = []
         bind_kv_cache(kv_caches, self.vllm_config.compilation_config.static_forward_context, runner_kv_caches)
 
-        if self.model_runner.unified_attn:
-            # Create unified attention persistent context for profiling
-            from vllm_gaudi.extension.unified_batch import UnifiedBatchPersistentContext
-            self.model_runner.unified_attn_persistent_ctx = UnifiedBatchPersistentContext(
-                self.model_runner.max_num_batched_tokens, 0, 0, self.model_runner.block_size, dtype,
-                self.model_runner.profiler)
-
         if is_fake_hpu():
             fake_hpu_cache_alloc = 4 * 2**30  # take 4 GiB flat on fake hpu
             return fake_hpu_cache_alloc
@@ -285,8 +279,42 @@ class HPUWorker(WorkerBase):
             forward_context[layer_name].kv_cache = None
         runner_kv_caches = []
         gc.collect()
+        available = cache_size_bytes - dummy_block_headroom
 
-        return cache_size_bytes - dummy_block_headroom
+        # For hybrid GDN/linear_attention + ATN models, GPU shares one raw
+        # buffer across spec types, but HPU allocates separate tensors per
+        # spec (torch.compile can't handle as_strided mixed-dtype views).
+        # Reduce reported memory so the scheduler computes fewer num_blocks
+        # that fit the HPU separate-allocation model.
+        # NOTE: Only applies to GDN/linear_attention; standard Mamba2 + ATN
+        # uses the raw shared buffer path and is left unchanged.
+        has_attn = any(isinstance(s, FullAttentionSpec) for s in kv_cache_spec.values())
+        has_gdn = any(
+            isinstance(s, MambaSpec) and s.mamba_type in ("gdn_attention", "linear_attention")
+            for s in kv_cache_spec.values())
+        if has_attn and has_gdn:
+            # All specs share the same padded page_size_bytes after
+            # HybridAttentionMambaModelConfig unification.
+            padded_page = next(iter(kv_cache_spec.values())).page_size_bytes
+            # Compute real (unpadded) page size for each spec type.
+            real_attn = next(s.real_page_size_bytes for s in kv_cache_spec.values() if isinstance(s, FullAttentionSpec))
+            real_mamba = next(
+                sum(math.prod(sh) * get_dtype_size(dt) for sh, dt in zip(s.shapes, s.dtypes))
+                for s in kv_cache_spec.values()
+                if isinstance(s, MambaSpec) and s.mamba_type in ("gdn_attention", "linear_attention"))
+            total_real = real_attn + real_mamba
+            if total_real > padded_page:
+                factor = padded_page / total_real
+                adjusted = int(available * factor)
+                logger.info(
+                    "HPU hybrid cache: reducing available KV cache "
+                    "memory by %.1f%% (factor=%.3f) for separate "
+                    "per-spec allocations (padded_page=%s, "
+                    "real_attn=%s, real_mamba=%s).", (1 - factor) * 100, factor, format_bytes(padded_page),
+                    format_bytes(real_attn), format_bytes(real_mamba))
+                available = adjusted
+
+        return available
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -423,7 +451,7 @@ class HPUWorker(WorkerBase):
             logger.warning("KV cache has not been initialized yet, skipping discarding it")
         else:
             with HabanaMemoryProfiler() as m:
-                self.model_runner.defragmenter.cache_utils.kv_caches = None
+                self.model_runner.defragmenter = None
                 self.model_runner.kv_caches = []
                 forward_context = self.vllm_config.compilation_config.static_forward_context
                 for layer_name in forward_context:
@@ -471,8 +499,8 @@ class HPUWorker(WorkerBase):
             else:
                 with HabanaMemoryProfiler() as m:
                     self.model_runner.initialize_kv_cache(self.kv_cache_config)
-                    self.model_runner.defragmenter = OnlineDefragmenter()
-                    self.model_runner.defragmenter.initialize(self.model_runner.kv_caches, self.model_runner.block_size)
+                    self.model_runner.defragmenter = OnlineDefragmenter(self.model_runner.kv_caches,
+                                                                        self.model_runner.block_size)
                     gc.collect()
                     torch.hpu.synchronize()
                 msg = f"Waking up KV cache, reinitializing it took {m.get_summary_string()}"
