@@ -66,6 +66,10 @@ def register():
 def register_utils():
     """Register utility functions for the HPU platform."""
     import vllm_gaudi.utils  # noqa: F401
+    # Install the in-process EngineCore reconfigure hook in every process
+    # (parent and engine subprocess alike)
+    from vllm_gaudi.v1.engine.core_patch import install_engine_core_patch
+    install_engine_core_patch()
 
 
 def register_ops():
