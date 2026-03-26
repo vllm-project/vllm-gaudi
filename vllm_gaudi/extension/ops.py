@@ -967,6 +967,10 @@ def fp8_block_linear_postprocess_weights(layer, force_channel_fp8=False):
         weight_scale_inv = weight_scale_inv.squeeze(-1)
         layer.weight.data.copy_(weight)
         layer.weight_scale_inv = torch.nn.Parameter(weight_scale_inv, requires_grad=False)
+        # Scale is now per-channel, not per-block; clear stale block size to
+        # prevent downstream code (e.g. scaled_dequantize) from using it as
+        # a group_shape that is incompatible with the 1D channel-wise scale.
+        layer.weight_block_size = None
         htorch.core.mark_step()
         return layer
     else:
