@@ -1889,8 +1889,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def _align_and_pad_mrope_positions(self, req_ids: list[str], context_lens: list[int], query_lens: list[int],
                                        bucketing: tuple[int, int], padding_gen: int) -> torch.Tensor:
         target_bs, target_len = bucketing
+        # For BS=1 (flattened layout) the output is (3, target_len) with
+        # requests concatenated along the sequence dim.
+        # For BS>1 (2D padded layout) the output must still preserve
+        # the 3 M-RoPE axes: (3, target_bs * target_len).  Each request's
+        # positions sit at offset b_idx * target_len in the flattened dim,
+        # matching the 2D padded token_ids layout after flatten.
         out_shape = (3, target_len) if target_bs == 1 \
-            else (target_bs, target_len)
+            else (3, target_bs * target_len)
 
         mrope_position_tensor = torch.full(out_shape, padding_gen, dtype=torch.int32, device='cpu')
         dst_start = 0
