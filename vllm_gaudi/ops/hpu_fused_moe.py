@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import
     RoutingSimulatorRouter, )
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOp)
 from vllm_gaudi.extension.runtime import get_config
+from vllm.model_executor.utils import set_weight_attrs
 from vllm_gaudi.utils import has_quant_config
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
 
@@ -46,9 +47,13 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         torch.hpu.synchronize()
         vllm_config = get_current_vllm_config()
         self.model_type = None
+        self.is_mxfp4 = False
         if vllm_config is not None and vllm_config.model_config is not None \
             and vllm_config.model_config.hf_config is not None:
             self.model_type = vllm_config.model_config.hf_config.model_type
+            if hasattr(vllm_config.model_config.hf_config, "quantization_config") and \
+               vllm_config.model_config.hf_config.quantization_config is not None:
+                self.is_mxfp4 = vllm_config.model_config.hf_config.quantization_config.get("quant_method") == "mxfp4"
 
     def _select_monolithic(self) -> Callable:
         """Overriding base method"""
@@ -82,6 +87,43 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             if has_bias:
                 layer.moe_op.w13_list[expert_id].set_bias(layer.w13_bias.data[expert_id])
                 layer.moe_op.w2_list[expert_id].set_bias(layer.w2_bias.data[expert_id])
+
+    def create_weights(self, layer: torch.nn.Module, num_experts: int, hidden_size: int,
+                       intermediate_size_per_partition: int, params_dtype: torch.dtype, **extra_weight_attrs):
+
+        if self.model_type in ["gpt_oss"] and self.is_mxfp4:
+            from vllm.utils.math_utils import round_up
+            # Fused gate_up_proj (column parallel)
+            w13_weight = torch.nn.Parameter(torch.zeros(num_experts,
+                                                        2 * round_up(intermediate_size_per_partition, 32),
+                                                        hidden_size,
+                                                        dtype=params_dtype),
+                                            requires_grad=False)
+            layer.register_parameter("w13_weight", w13_weight)
+            set_weight_attrs(w13_weight, extra_weight_attrs)
+
+            w13_bias = torch.nn.Parameter(torch.zeros(num_experts,
+                                                      2 * round_up(intermediate_size_per_partition, 32),
+                                                      dtype=params_dtype),
+                                          requires_grad=False)
+            layer.register_parameter("w13_bias", w13_bias)
+            set_weight_attrs(w13_bias, extra_weight_attrs)
+
+            # down_proj (row parallel)
+            w2_weight = torch.nn.Parameter(torch.zeros(num_experts,
+                                                       hidden_size,
+                                                       round_up(intermediate_size_per_partition, 32),
+                                                       dtype=params_dtype),
+                                           requires_grad=False)
+            layer.register_parameter("w2_weight", w2_weight)
+            set_weight_attrs(w2_weight, extra_weight_attrs)
+
+            w2_bias = torch.nn.Parameter(torch.zeros(num_experts, hidden_size, dtype=params_dtype), requires_grad=False)
+            layer.register_parameter("w2_bias", w2_bias)
+            set_weight_attrs(w2_bias, extra_weight_attrs)
+        else:
+            super().create_weights(layer, num_experts, hidden_size, intermediate_size_per_partition, params_dtype,
+                                   **extra_weight_attrs)
 
     def apply_monolithic(
         self,
