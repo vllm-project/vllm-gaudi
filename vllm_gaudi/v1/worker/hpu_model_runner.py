@@ -4270,7 +4270,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     @with_thread_limits()
     def load_model(self) -> None:
         import habana_frameworks.torch.core as htcore
-        if self._is_quant_with_inc() or self.model_config.quantization == 'fp8':
+        if self._is_quant_with_inc() or self.model_config.quantization is not None:
             htcore.hpu_inference_set_env()
         logger.info("Starting to load model %s...", self.model_config.model)
         with HabanaMemoryProfiler() as m:  # noqa: SIM117
