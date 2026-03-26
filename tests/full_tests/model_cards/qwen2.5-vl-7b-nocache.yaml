@@ -1,0 +1,13 @@
+model_name: "Qwen/Qwen2.5-VL-7B-Instruct"
+test_config:
+  - modality: image
+    extra_engine_args:
+      mm_processor_kwargs:
+          min_pixels: 784
+          max_pixels: 1003520
+          fps: 1
+      mm_processor_cache_gb: 0
+      enable_prefix_caching: False
+    input_data_config:
+      num_prompts: 10
+      media_source: default
