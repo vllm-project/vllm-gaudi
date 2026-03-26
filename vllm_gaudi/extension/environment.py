@@ -29,8 +29,6 @@ def _get_hw(_):
 
 
 def _get_prefix(_):
-    if os.environ.get('VLLM_UNIFIED_ATTN'):
-        return True
     conti_pa = os.environ.get('VLLM_CONTIGUOUS_PA')
     if conti_pa is None:
         return True
