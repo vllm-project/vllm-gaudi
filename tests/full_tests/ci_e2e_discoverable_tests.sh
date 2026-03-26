@@ -292,9 +292,10 @@ run_llama3_70b_inc_dynamic_quant_test() {
 
 # --- LM-eval tests ---
 # Tests below score models on lmeval tasks, usually gsm8k
-# Final scores are verified against thresholds specified in .yaml config files in tests/full_tests_model_cards/*
+# Final scores are verified against thresholds specified in .yaml config files in tests/full_tests/model_cards/*
 # If the score is below the threshold, the test will fail. For implementation details see:
 #   tests/models/language/generation/test_common.py
+
 
 # GSM8K on granite-8b
 run_gsm8k_granite_test() {
@@ -463,6 +464,10 @@ run_structured_output_test() {
     echo "✅ Test with structured outputs passed."
 }
 
+run_granite_4_h_shell_load_generate_test() {
+    python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/granite_4h_server_test.py"
+}
+
 # --- Utility Functions ---
 
 # Function to run all tests sequentially
@@ -499,6 +504,7 @@ launch_all_tests() {
     run_qwen3_vl_load_generate_test
     run_mistral3_load_generate_test
     run_llama3_70b_inc_dynamic_quant_test
+    run_granite_4_h_shell_load_generate_test
     run_gsm8k_granite_test
     run_gsm8k_granite_test_unified_attn
     run_gsm8k_granite_async_test
