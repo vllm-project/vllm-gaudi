@@ -157,7 +157,7 @@ The potential consequences of omitting warm-up include:
 - Compilation latency can manifest as a sudden tail-latency spike for a user request.
 - Multiple first-seen swap sizes across different processes may each trigger separate compilations.
 
-You can disable either the warm-up step itself or the entire defragmentation feature. To skip all warm-up phases, including the defragmenter, set `VLLM_SKIP_WARMUP=true`. <!-- Alternatively, running without unified attention effectively disables the defragmenter, since it is tied to unified attention; in this case, the warm-up becomes a no-op. Note that there is no separate environment flag in this version to force-enable or disable defragmentation independently of unified attention.  -->Additionally, if supported by your execution mode, you can avoid graph compilation for defragmenter swaps by setting `VLLM_DEFRAG_WITH_GRAPHS=false`. This causes swaps to fall back to regular execution, while the warm-up still exercises them without triggering graph capture.
+You can disable either the warm-up step itself or the entire defragmentation feature. To skip all warm-up phases, including the defragmenter, set `VLLM_SKIP_WARMUP=true`. Additionally, if supported by your execution mode, you can avoid graph compilation for defragmenter swaps by setting `VLLM_DEFRAG_WITH_GRAPHS=false`. This causes swaps to fall back to regular execution, while the warm-up still exercises them without triggering graph capture.
 
 Related environment variables:
 
@@ -167,7 +167,7 @@ Related environment variables:
 - `VLLM_SKIP_WARMUP`: Disables all warm-up stages including defragmentation.
 
 !!! note
-    Disabling the defragmenter warm-up does not turn off defragmentation itself.<!--, unless unified attention or the feature is entirely disabled.--> It simply skips ahead-of-time graph preparation, which may shift the compilation cost to the first live fragmentation event.
+    Disabling the defragmenter warm-up does not turn off defragmentation itself. It simply skips ahead-of-time graph preparation, which may shift the compilation cost to the first live fragmentation event.
 
 ### Defragmenter Warm-Up Process
 
