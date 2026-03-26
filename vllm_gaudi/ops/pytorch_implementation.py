@@ -258,7 +258,8 @@ def selective_state_update_ref(state,
         x = x.unsqueeze(1)
     if dt.dim() == 2:
         dt = dt.unsqueeze(1)
-    if A.dim() == 1:
+    compact_A = (A.dim() == 1)
+    if compact_A:
         A = A[None, :, None]  # (nheads,) -> (1, nheads, 1) for broadcast with (batch, nheads, dim)
     elif A.dim() == 2:
         A = A.unsqueeze(0)
@@ -275,8 +276,6 @@ def selective_state_update_ref(state,
     batch, nheads, dim, dstate = state.shape
     assert x.shape == (batch, nheads, dim)
     assert dt.shape == x.shape
-    # A can be (nheads, dim, dstate) [legacy expanded] or (1, nheads, 1) [compact]
-    compact_A = (A.dim() == 3 and A.shape[2] == 1)
     if not compact_A:
         assert A.shape == (nheads, dim, dstate)
     ngroups = B.shape[1]
