@@ -2,6 +2,7 @@
 """A GPU worker class."""
 import contextlib
 import gc
+import math
 import os
 import queue
 from contextlib import contextmanager
@@ -278,6 +279,46 @@ class HPUWorker(WorkerBase):
 
         logger.info(msg)
 
+        # Estimate the number of KV cache blocks and warn if insufficient.
+        # Too few blocks leads to sequence preemption/recomputation, which
+        # can silently degrade output quality because the model sees a
+        # truncated context.
+        usable_cache_bytes = cache_size_bytes - dummy_block_headroom
+        if single_kv_block_size_bytes > 0:
+            estimated_num_blocks = int(
+                usable_cache_bytes // single_kv_block_size_bytes)
+            block_size = self.cache_config.block_size
+            max_model_len = self.model_config.max_model_len
+            blocks_per_req = (math.ceil(max_model_len / block_size)
+                              if block_size > 0 else 0)
+            if estimated_num_blocks < blocks_per_req:
+                logger.warning(
+                    "Estimated KV cache blocks (%d) is less than the "
+                    "blocks required for a single full-length sequence "
+                    "(%d blocks for max_model_len=%d with block_size=%d)."
+                    " This means even one request at maximum context "
+                    "length will trigger preemption/recomputation, which"
+                    " can degrade output accuracy. Consider increasing "
+                    "gpu_memory_utilization (current: %s), reducing "
+                    "max_model_len, increasing tensor_parallel_size, or "
+                    "decreasing VLLM_GRAPH_RESERVED_MEM (current: %s).",
+                    estimated_num_blocks, blocks_per_req,
+                    max_model_len, block_size,
+                    self.cache_config.gpu_memory_utilization,
+                    graph_reserved_mem)
+            elif estimated_num_blocks < 2 * blocks_per_req:
+                logger.warning(
+                    "Estimated KV cache blocks (%d) can barely fit one "
+                    "full-length sequence (%d blocks for "
+                    "max_model_len=%d with block_size=%d). Concurrent "
+                    "requests or long sequences may trigger preemption/"
+                    "recomputation, degrading output accuracy. Consider "
+                    "increasing gpu_memory_utilization (current: %s) "
+                    "for better throughput and accuracy.",
+                    estimated_num_blocks, blocks_per_req,
+                    max_model_len, block_size,
+                    self.cache_config.gpu_memory_utilization)
+
         # Clear the dummy KV cache to free up memory
         kv_caches = {}
         forward_context = self.vllm_config.compilation_config.static_forward_context
@@ -286,7 +327,7 @@ class HPUWorker(WorkerBase):
         runner_kv_caches = []
         gc.collect()
 
-        return cache_size_bytes - dummy_block_headroom
+        return usable_cache_bytes
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -313,6 +354,27 @@ class HPUWorker(WorkerBase):
                    f"(_PAD_BLOCK_ID={self.model_runner._PAD_BLOCK_ID}, "
                    f"_PAD_SLOT_ID={self.model_runner._PAD_SLOT_ID})")
             logger.info(msg)
+
+            # Warn if allocated blocks are insufficient for the
+            # configured max_model_len.  Insufficient blocks cause the
+            # scheduler to preempt/recompute sequences, silently
+            # degrading accuracy.
+            block_size = self.cache_config.block_size
+            max_model_len = self.model_config.max_model_len
+            blocks_per_req = (math.ceil(max_model_len / block_size)
+                              if block_size > 0 else 0)
+            if kv_cache_config.num_blocks < blocks_per_req:
+                logger.warning(
+                    "KV cache has %d usable blocks, but a single "
+                    "full-length sequence requires %d blocks "
+                    "(max_model_len=%d, block_size=%d). Requests may "
+                    "be preempted or their context truncated, which "
+                    "can degrade output accuracy. Increase "
+                    "gpu_memory_utilization (current: %s), reduce "
+                    "max_model_len, or increase tensor_parallel_size.",
+                    kv_cache_config.num_blocks, blocks_per_req,
+                    max_model_len, block_size,
+                    self.cache_config.gpu_memory_utilization)
         msg = ("Initializing cache engine "
                f"took {m.get_summary_string()}")
         logger.info(msg)

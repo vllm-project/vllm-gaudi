@@ -62,6 +62,7 @@ class HabanaProfilerCounterHelper:
         self.logged_once = False
         self.prompt_real_seq_lens = []
         self.decode_real_seq_lens = []
+        self._cache_pressure_warned = False
 
     def capture_decode_seq_stats(self, real_seq_lens):
         self.decode_real_seq_lens = real_seq_lens
@@ -127,6 +128,21 @@ class HabanaProfilerCounterHelper:
             counters['cache_num_free_blocks'] = cache_total_num_free_blocks
             counters['cache_computed_utilization'] = cache_computed_utilization
             counters[f'{phase}_batch_block_utilization'] = batch_block_utilization
+            # Warn once if KV cache pressure is high, as this can lead to
+            # sequence preemption/recomputation which degrades accuracy.
+            if not self._cache_pressure_warned and cache_total_num_free_blocks <= 0:
+                logger.warning(
+                    "KV cache is fully utilized (%d/%d blocks used, "
+                    "utilization=%.2f). Incoming requests risk preemption/"
+                    "recomputation which can degrade output accuracy. "
+                    "Consider increasing gpu_memory_utilization (current: "
+                    "%s), reducing max_model_len, or increasing "
+                    "tensor_parallel_size.",
+                    cache_total_num_blocks_used,
+                    num_cache_blocks,
+                    cache_computed_utilization,
+                    cache_config.gpu_memory_utilization)
+                self._cache_pressure_warned = True
         if not self.logged_once:
             counters['const_cache_num_blocks'] = cache_config.num_gpu_blocks
             counters[
