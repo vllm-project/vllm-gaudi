@@ -5533,7 +5533,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.get_model().vision_bucket_manager.is_batch_based:
             batch = image_args
         else:
-            mm_options = self.model_config.get_multimodal_config().get_limit_per_prompt(modality)
+            mm_options = self.model_config.get_multimodal_config().limit_per_prompt.get(modality)
             count = mm_options.count if mm_options and hasattr(mm_options, 'count') else count
             batch = count
         if modality == 'image':
@@ -5572,19 +5572,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         is_batch_based = vision_bucket_manager.is_batch_based
         mm_config = self.model_config.get_multimodal_config()
 
-        is_image_warmup = (mm_config is not None and mm_config.get_limit_per_prompt("image") is not None
+        is_image_warmup = (mm_config is not None and mm_config.limit_per_prompt.get("image") is not None
                            and "image" in self.mm_budget.mm_limits and self.mm_budget.mm_limits['image'] != 0)
-        is_video_warmup = (mm_config is not None and mm_config.get_limit_per_prompt("video") is not None
+        is_video_warmup = (mm_config is not None and mm_config.limit_per_prompt.get("video") is not None
                            and "video" in self.mm_budget.mm_limits and self.mm_budget.mm_limits['video'] != 999)
         warmup_configs = {
-            "image": (0, lambda: mm_config.get_limit_per_prompt("image")),
-            "video": (999, lambda: mm_config.get_limit_per_prompt("video"))
+            "image": (0, lambda: mm_config.limit_per_prompt.get("image")),
+            "video": (999, lambda: mm_config.limit_per_prompt.get("video"))
         }
         width = height = None
         warmup_lists = []
         for modality, (limit_value, get_options) in warmup_configs.items():
-            if (mm_config and mm_config.get_limit_per_prompt(modality)
-                    and self.mm_budget.mm_limits[modality] != limit_value):
+            if (mm_config and mm_config.limit_per_prompt.get(modality) is not None
+                    and modality in self.mm_budget.mm_limits and self.mm_budget.mm_limits[modality] != limit_value):
                 options = get_options()
                 width = options.width if hasattr(options, 'width') else None
                 height = options.height if hasattr(options, 'height') else None
