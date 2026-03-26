@@ -6385,7 +6385,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self._gdn_slot_free_list = list(range(self.max_num_reqs - 1, -1, -1))
             self._gdn_req_to_base_slot.clear()
             compact_total = self.max_num_reqs * self._num_gdn_groups + 2
-            logger.debug("GDN compact: %d groups, %d base_slots, tensor_dim0=%d vs baseline=%d, free_list=%d",
+            logger.info("GDN compact: %d groups, %d base_slots, tensor_dim0=%d vs baseline=%d, free_list_len=%d",
                         len(self._compact_gdn_group_ids), self.max_num_reqs,
                         compact_total, num_blocks + 1,
                         len(self._gdn_slot_free_list))

@@ -243,6 +243,17 @@ def hpu_chunk_gdr_phase_b(
         output_final_state,
     )
 
+@torch._dynamo.disable
+def _eager_output_accum(core_h, C_h_ci, state_t, ci):
+    """Eager: output accumulation only.
+
+    HPU torch.compile miscompiles any mutation of a 5D tensor slice
+    indexed by a loop variable (.add_(), slice assignment, index_add_).
+    This isolates just that op to eager mode.
+    """
+    core_h[:, ci].add_(torch.matmul(C_h_ci, state_t))
+    return core_h
+
 
 def _hpu_chunk_gdr_phase_b_optimized(
     u_all: torch.Tensor,
@@ -313,7 +324,9 @@ def _hpu_chunk_gdr_phase_b_optimized(
     state_t = init_state.to(compute_dtype).transpose(-1, -2)  # [S,H,K,V]
 
     for ci in range(num_chunks):
-        core_h[:, ci].add_(torch.matmul(C_h[:, ci], state_t))
+        # Output accum must be eager — HPU torch.compile miscompiles
+        # any mutation of a 5D tensor slice indexed by a loop variable.
+        core_h = _eager_output_accum(core_h, C_h[:, ci], state_t, ci)
         state_t = torch.matmul(M_full[:, ci], state_t) + N_t[:, ci]
 
     out = core_h.permute(0, 1, 3, 2, 4).reshape(S, padded_len, H, Vdim)[:, :seq_len, :, :].reshape(-1, H, Vdim)
@@ -767,7 +780,6 @@ def _recurrent_general_path(
 
     return out, final_state
 
-@torch._dynamo.disable
 def hpu_chunk_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
