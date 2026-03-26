@@ -138,7 +138,6 @@ except ImportError:
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
-hpu_buffer: list[list[torch.Tensor]] = []
 HPU_TORCH_DTYPE_TO_STR_DTYPE = {
     torch.float32: "float32",
     torch.bfloat16: "bfloat16",
@@ -829,6 +828,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Override settings when profiling a single prefill/decode
         # We can do such barbaric changes because we close vllm after the profiling
         prompt_profile_cfg, decode_profile_cfg = self._read_profiling_cfg()
+        # Save original max_num_seqs before profiling inflates it.
+        # Compact GDN allocation must use the real serving limit, not
+        # the inflated profiling value (which equals max_model_len).
+        self._original_max_num_seqs = self.scheduler_config.max_num_seqs
         if prompt_profile_cfg or decode_profile_cfg:
             self.scheduler_config.max_num_seqs = self.max_model_len
             if prompt_profile_cfg:
@@ -887,13 +890,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:
             self.max_encoder_len = 0
 
-        # Cache model-family checks used in hot paths.
-        # Qwen3.5 variants use model_type values like:
-        #   qwen3_5, qwen3_5_text, qwen3_5_moe, qwen3_5_moe_text
         model_type = self._get_model_type() or ""
-        self._requires_bool_mm_mask_for_merge = model_type.startswith("qwen3_5")
+        self._requires_bool_mm_mask_for_merge = model_type.startswith("qwen")
 
-        mamba_like = ["mamba", "linear_attention"]
+        mamba_like = ["mamba", "gdn_attention", "linear_attention"]
 
         self.num_mamba_like_layers = sum(
             self.model_config.get_num_layers_by_block_type(self.parallel_config, block_type)
@@ -901,7 +901,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         if self.num_mamba_like_layers > 0:
             # Auto-enable hybrid cache for GDN/mamba-like models.
-            gdn_types = ["linear_attention"]
+            gdn_types = ["gdn_attention", "linear_attention"]
             num_gdn = sum(
                 vllm_config.model_config.get_num_layers_by_block_type(vllm_config.parallel_config, bt)
                 for bt in gdn_types)
@@ -913,7 +913,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if not os.environ.get("VLLM_USE_NAIVE_MAMBA_CACHE_SHARING"):
                     os.environ["VLLM_USE_NAIVE_MAMBA_CACHE_SHARING"] = "0"
                 if not os.environ.get("VLLM_COMPACT_GDN"):
-                    os.environ["VLLM_COMPACT_GDN"] = "1"
+                    # Auto-disable compact GDN for incompatible modes.
+                    if self.vllm_config.kv_transfer_config is not None:
+                        os.environ["VLLM_COMPACT_GDN"] = "0"
+                        logger.warning("Compact GDN auto-disabled: incompatible with PD disaggregated serving")
+                    else:
+                        os.environ["VLLM_COMPACT_GDN"] = "1"
+                if os.environ.get("VLLM_COMPACT_GDN", "0") in ("1", "true") \
+                        and self.vllm_config.cache_config.enable_prefix_caching:
+                    logger.warning("Compact GDN mode does not support prefix caching.")
                 logger.info(
                     "GDN layers detected (%d): "
                     "VLLM_USE_HYBRID_CACHE=%s, "
@@ -1320,19 +1328,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # so set iteration order differs across TP ranks.  We must sort
         # to keep _gdn_slot_free_list identical on every rank.
         if self._compact_gdn_group_ids:
-            '''
-            if unscheduled_req_ids or scheduler_output.finished_req_ids:
-                logger.info(
-                    "GDN_COMPACT step: unsched=%d finished=%d "
-                    "free_list=%d slot_map=%d cached=%d scheduled=%d",
-                    len(unscheduled_req_ids),
-                    len(scheduler_output.finished_req_ids),
-                    len(self._gdn_slot_free_list),
-                    len(self._gdn_req_to_base_slot),
-                    len(cached_req_ids),
-                    len(scheduled_req_ids),
-                )
-            '''
             for req_id in sorted(scheduler_output.finished_req_ids):
                 base_slot = self._gdn_req_to_base_slot.pop(req_id, None)
                 if base_slot is not None:
@@ -2604,12 +2599,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         [self._gdn_req_to_base_slot[self.input_batch.req_ids[i]] for i in range(num_decodes)],
                         dtype=torch.int32)
                     state_indices_cpu = base_slots * self._num_gdn_groups + g_offset + 1
-                    '''
-                    if g_offset == 0:
-                        logger.info("GDN_COMPACT decode g0 nd=%d si=%s req_ids=%s",
-                                    num_decodes, state_indices_cpu[:min(8, num_decodes)].tolist(),
-                                    [self.input_batch.req_ids[i] for i in range(min(4, num_decodes))])
-                    '''
                 else:
                     block_table_cpu_tensor = self.input_batch.block_table[group_idx].get_cpu_tensor()
                     state_indices_cpu = block_table_cpu_tensor[:num_decodes, 0].clone()
@@ -5417,6 +5406,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         kv_caches: dict[str, torch.Tensor] = {}
         num_blocks = 0
+
+        # Pre-count GDN groups for compact allocation (shared by both
+        # hybrid and naive_mamba_cache_sharing paths).
+        if self.num_mamba_like_layers > 0 and self._compact_gdn_enabled:
+            self._num_gdn_groups = sum(
+                1 for g in kv_cache_config.kv_cache_groups
+                if isinstance(g.kv_cache_spec, MambaSpec) and g.kv_cache_spec.mamba_type in ("gdn_attention", "linear_attention"))
+
         if self.use_hybrid_cache and self.num_mamba_like_layers > 0:
             # Build layer_name -> spec lookup for skipping raw buffer
             # allocation for GDN/linear_attention groups (they use
@@ -5441,8 +5438,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     if isinstance(spec, FullAttentionSpec):
                         continue
                     if isinstance(spec, MambaSpec) and \
-                            spec.mamba_type in ("gdn_attention",
-                                                "linear_attention"):
+                            spec.mamba_type in ("gdn_attention", "linear_attention"):
                         continue
                     # Standard Mamba2 or unknown spec — needs raw buffer
                     return True
@@ -5456,24 +5452,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 tensor = torch.zeros(size // 2, dtype=torch.bfloat16, device=self.device)
                 for layer_name in kv_cache_tensor.shared_by:
                     kv_caches[layer_name] = tensor
-
-            # Pre-count GDN groups to compute compact tensor size.
-            if self._compact_gdn_enabled:
-                self._num_gdn_groups = sum(
-                    1 for g in kv_cache_config.kv_cache_groups
-                    if isinstance(g.kv_cache_spec, MambaSpec) and g.kv_cache_spec.mamba_type in ("gdn_attention",
-                                                                                                 "linear_attention"))
-
-            # Debug: log group structure and shared_by
-            logger.info("HYBRID_KV num_groups=%d num_gdn_groups=%d num_tensors=%d",
-                        len(kv_cache_config.kv_cache_groups), self._num_gdn_groups,
-                        len(kv_cache_config.kv_cache_tensors))
-            for gid, grp in enumerate(kv_cache_config.kv_cache_groups):
-                logger.info("HYBRID_KV group[%d] spec=%s layers=%d first=%s", gid,
-                            type(grp.kv_cache_spec).__name__, len(grp.layer_names),
-                            grp.layer_names[0] if grp.layer_names else "N/A")
-            for tid, kt in enumerate(kv_cache_config.kv_cache_tensors[:3]):
-                logger.info("HYBRID_KV tensor[%d] shared_by=%s", tid, kt.shared_by)
 
             for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
                 kv_cache_spec = group.kv_cache_spec
@@ -5518,24 +5496,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         self._compact_gdn_group_ids.add(group_idx)
                         if isinstance(kv_caches.get(layer_name), tuple):
                             continue
-                        compact_total = self.max_num_reqs * self._num_gdn_groups + 2
+                        gdn_max_reqs = self._original_max_num_seqs
+                        compact_total = gdn_max_reqs * self._num_gdn_groups + 2
                         state_tensors = []
                         for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
                             target_shape = (compact_total, *shape)
                             tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
                             state_tensors.append(tensor)
                         logger.debug("GDN compact tensor: %d slots (max_reqs=%d * groups=%d + 2) vs baseline %d",
-                                     compact_total, self.max_num_reqs, self._num_gdn_groups, num_blocks + 1)
+                                     compact_total, gdn_max_reqs, self._num_gdn_groups, num_blocks + 1)
                         # Propagate to all layers sharing the same kv_cache_tensor.
                         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
                             if layer_name not in kv_cache_tensor.shared_by:
                                 continue
                             for shared_layer in kv_cache_tensor.shared_by:
-                                prev = kv_caches.get(shared_layer)
-                                if prev is not None and shared_layer != layer_name:
-                                    logger.info("HYBRID_KV OVERWRITE %s (was %s) with GDN compact tensors from %s",
-                                                shared_layer,
-                                                type(prev).__name__, layer_name)
                                 kv_caches[shared_layer] = tuple(state_tensors)
                             break
                     elif isinstance(kv_cache_spec, MambaSpec) and \
@@ -5585,13 +5559,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     else:
                         pass
         elif self.use_naive_mamba_cache_sharing and self.num_mamba_like_layers > 0:
-            # Pre-count GDN groups for compact allocation.
-            if self._compact_gdn_enabled:
-                self._num_gdn_groups = sum(
-                    1 for g in kv_cache_config.kv_cache_groups
-                    if isinstance(g.kv_cache_spec, MambaSpec) and g.kv_cache_spec.mamba_type in ("gdn_attention",
-                                                                                                 "linear_attention"))
-
             for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
                 kv_cache_spec = group.kv_cache_spec
                 for layer_name in group.layer_names:
@@ -5617,7 +5584,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         self._compact_gdn_group_ids.add(group_idx)
                         if isinstance(kv_caches.get(layer_name), tuple):
                             continue
-                        compact_total = self.max_num_reqs * self._num_gdn_groups + 2
+                        gdn_max_reqs = self._original_max_num_seqs
+                        compact_total = gdn_max_reqs * self._num_gdn_groups + 2
                         state_tensors = []
                         for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
                             target_shape = (compact_total, *shape)
@@ -5757,18 +5725,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # compact groups), the tensor index is s * num_gdn_groups + g + 1.
         if self._compact_gdn_group_ids:
             self._compact_gdn_group_offset = {gid: i for i, gid in enumerate(sorted(self._compact_gdn_group_ids))}
-            self._gdn_slot_free_list = list(range(self.max_num_reqs - 1, -1, -1))
+            gdn_max_reqs = self._original_max_num_seqs
+            self._gdn_slot_free_list = list(range(gdn_max_reqs - 1, -1, -1))
             self._gdn_req_to_base_slot.clear()
-            compact_total = self.max_num_reqs * self._num_gdn_groups + 2
-            logger.info("GDN compact: %d groups, %d base_slots, tensor_dim0=%d vs baseline=%d, free_list_len=%d",
-                        len(self._compact_gdn_group_ids), self.max_num_reqs, compact_total, num_blocks + 1,
+            compact_total = gdn_max_reqs * self._num_gdn_groups + 2
+            logger.debug("GDN compact: %d groups, %d base_slots, tensor_dim0=%d vs baseline=%d, free_list_len=%d",
+                        len(self._compact_gdn_group_ids), gdn_max_reqs, compact_total, num_blocks + 1,
                         len(self._gdn_slot_free_list))
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(self.get_kv_caches_4D(kv_caches))
             if self.vllm_config.kv_transfer_config.kv_buffer_device == "cpu":
                 get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
-            global hpu_buffer
+
         # TODO: check if this one is needed; for now seems that not
         # if has_mamba:
         #     self._update_hybrid_attention_mamba_layout(kv_caches)

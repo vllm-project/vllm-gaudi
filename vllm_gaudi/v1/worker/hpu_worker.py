@@ -292,11 +292,18 @@ class HPUWorker(WorkerBase):
         has_gdn = any(
             isinstance(s, MambaSpec) and s.mamba_type in ("gdn_attention", "linear_attention")
             for s in kv_cache_spec.values())
-        if has_attn and has_gdn:
-            # All specs share the same padded page_size_bytes after
-            # HybridAttentionMambaModelConfig unification.
+        compact_gdn = os.environ.get("VLLM_COMPACT_GDN", "0").strip().lower() in ("1", "true")
+        if has_attn and has_gdn and not compact_gdn:
+            # When compact GDN is OFF, GDN state scales with num_blocks
+            # just like ATN.  GPU shares one raw buffer via as_strided,
+            # but HPU allocates separate tensors per spec type, so the
+            # total per-block cost is real_attn + real_mamba (not
+            # max(real_attn, real_mamba)).  Reduce reported memory so
+            # the scheduler computes fewer num_blocks that fit.
+            # When compact GDN is ON, GDN state is a small fixed
+            # allocation (max_reqs * num_groups + 2), independent of
+            # num_blocks, so no adjustment is needed.
             padded_page = next(iter(kv_cache_spec.values())).page_size_bytes
-            # Compute real (unpadded) page size for each spec type.
             real_attn = next(s.real_page_size_bytes for s in kv_cache_spec.values() if isinstance(s, FullAttentionSpec))
             real_mamba = next(
                 sum(math.prod(sh) * get_dtype_size(dt) for sh, dt in zip(s.shapes, s.dtypes))
