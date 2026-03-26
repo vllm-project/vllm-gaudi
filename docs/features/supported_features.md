@@ -83,7 +83,6 @@ Future plugin releases are planned to provide support for the following vLLM fea
 - Sliding window attention
 - P/D disaggregate support
 - In-place weight update
-- MLA with unified attention
 - Multinode support
 - Pipeline parallel inference
 
