@@ -464,9 +464,8 @@ def maybe_set_chunked_attention_layers(model_runner):
             for layer in model_runner.model.language_model.model.layers:
                 if "ChunkedLocalAttention" in layer.self_attn.attn.get_attn_backend().__name__:
                     layer.self_attn.attn.impl.is_chunked_attention = True
-        except Exception:
-            # add explicit warning
-            pass
+        except Exception as e:
+            logger.warning("Failed to set chunked attention flag: %s", type(e).__name__)
 
 
 def _init_mamba_split_weights(model):
@@ -4509,7 +4508,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             htcore.mark_step()
 
         apply_model_specific_patches(self)
-        hidden_layer_markstep_interval = int(os.getenv('VLLM_CONFIG_HIDDEN_LAYERS', '1'))
+        try:
+            hidden_layer_markstep_interval = int(os.getenv('VLLM_CONFIG_HIDDEN_LAYERS', '1'))
+        except ValueError:
+            logger.warning("Invalid VLLM_CONFIG_HIDDEN_LAYERS value, using default 1")
+            hidden_layer_markstep_interval = 1
         model_config = getattr(self.model, "config", None)
         modify_model_layers(self.model,
                             get_target_layer_suffix_list(model_config.model_type if model_config is not None else None),
@@ -6874,7 +6877,11 @@ class HPUAttentionMetadataProcessor:
             #os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
             self.slice_size = int(with_default(get_config().PT_HPU_SDPA_BC_FACTOR, "1024"))
             # int(os.getenv("PT_HPU_SDPA_BC_FACTOR", "1024"))
-            self.slice_thld = int(os.environ.get('VLLM_FUSEDSDPA_SLIDE_THLD', '8192'))
+            try:
+                self.slice_thld = int(os.environ.get('VLLM_FUSEDSDPA_SLIDE_THLD', '8192'))
+            except ValueError:
+                logger.warning("Invalid VLLM_FUSEDSDPA_SLIDE_THLD value, using default 8192")
+                self.slice_thld = 8192
 
     def _set_attn_bias(self, attn_metadata: HPUAttentionMetadataV1, batch_size: int, seq_len: int, device: torch.device,
                        dtype: torch.dtype) -> HPUAttentionMetadataV1:
