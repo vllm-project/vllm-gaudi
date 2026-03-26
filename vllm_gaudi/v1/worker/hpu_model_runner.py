@@ -948,6 +948,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Tensor size: max_num_reqs * num_gdn_groups + 2.
         self._compact_gdn_enabled = os.environ.get("VLLM_COMPACT_GDN", "1").strip().lower() in ("1", "true")
         self._compact_gdn_group_ids: set[int] = set()
+        self._compact_gdn_group_offset: dict[int, int] = {}  # {group_idx: g_offset}
         self._num_gdn_groups = 0  # set during initialize_kv_cache
         self._gdn_slot_free_list: list[int] = []  # stack of free base-slot IDs
         self._gdn_req_to_base_slot: dict[str, int] = {}
@@ -2284,8 +2285,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 state_indices_cpu = torch.zeros(num_prefill_reqs, dtype=torch.int32)
 
                 if group_idx in self._compact_gdn_group_ids:
-                    sorted_gdn_groups = sorted(self._compact_gdn_group_ids)
-                    g_offset = sorted_gdn_groups.index(group_idx)
+                    g_offset = self._compact_gdn_group_offset[group_idx]
                     for i, req_id in enumerate(contents.req_ids):
                         base_slot = self._gdn_req_to_base_slot[req_id]
                         state_indices_cpu[i] = base_slot * self._num_gdn_groups + g_offset + 1
@@ -2599,13 +2599,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             all_state_indices_cpu = []
             for group_idx in range(len(self.input_batch.block_table.block_tables)):
                 if group_idx in self._compact_gdn_group_ids:
-                    sorted_gdn_groups = sorted(self._compact_gdn_group_ids)
-                    g_offset = sorted_gdn_groups.index(group_idx)
-                    state_indices_cpu = torch.zeros(num_decodes, dtype=torch.int32)
-                    for i in range(num_decodes):
-                        req_id = self.input_batch.req_ids[i]
-                        base_slot = self._gdn_req_to_base_slot[req_id]
-                        state_indices_cpu[i] = base_slot * self._num_gdn_groups + g_offset + 1
+                    g_offset = self._compact_gdn_group_offset[group_idx]
+                    base_slots = torch.tensor(
+                        [self._gdn_req_to_base_slot[self.input_batch.req_ids[i]] for i in range(num_decodes)],
+                        dtype=torch.int32)
+                    state_indices_cpu = base_slots * self._num_gdn_groups + g_offset + 1
                     '''
                     if g_offset == 0:
                         logger.info("GDN_COMPACT decode g0 nd=%d si=%s req_ids=%s",
@@ -5382,6 +5380,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             cache size of each layer
         """
         self._compact_gdn_group_ids.clear()
+        self._compact_gdn_group_offset.clear()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
@@ -5757,6 +5756,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # For request with base_slot `s` in group `g` (0-indexed within
         # compact groups), the tensor index is s * num_gdn_groups + g + 1.
         if self._compact_gdn_group_ids:
+            self._compact_gdn_group_offset = {gid: i for i, gid in enumerate(sorted(self._compact_gdn_group_ids))}
             self._gdn_slot_free_list = list(range(self.max_num_reqs - 1, -1, -1))
             self._gdn_req_to_base_slot.clear()
             compact_total = self.max_num_reqs * self._num_gdn_groups + 2
