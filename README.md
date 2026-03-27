@@ -14,6 +14,10 @@ vLLM Hardware Plugin for Intel® Gaudi®
 
 ---
 *Latest News* 🔥
+- [2026/03] Version 0.17.1 is now available, built on [vLLM 0.17.1](https://github.com/vllm-project/vllm/releases/tag/v0.17.1) and fully compatible with [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
+
+  This release includes refactored MLA attention backends (HPUMLAImpl, HPUUnifiedMLAImpl), modular MoE runner/router infrastructure, and DeepSeek V3.2 sparse attention support with ~25% throughput improvement over v0.16.0.
+
 - [2026/03] Version 0.16.0 is now available, built on [vLLM 0.16.0](https://github.com/vllm-project/vllm/releases/tag/v0.16.0) and fully compatible with [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
 
   This release introduces validated support and critical stability fixes for Qwen3-VL models leveraging HPUMMEncoderAttention. Performance and stability were improved through backported Mamba architecture optimizations, Docker and UBI infrastructure enhancements, and a forced CPU loading mechanism for INC quantization to prevent OOM errors.
@@ -85,6 +89,8 @@ pip install vllm-gaudi
 
 | vllm-gaudi | vLLM | Intel® Gaudi® Software |
 |------------|------|------------------------|
+| 0.17.1     | 0.17.1 | v1.23.0 |
+| 0.16.0     | 0.16.0 | v1.23.0 |
 | 0.14.1     | 0.14.1 | v1.23.0 |
 | 0.13.0     | 0.13.0 | v1.23.0 |
 | 0.11.2     | 0.11.2 | v1.22.2 |
