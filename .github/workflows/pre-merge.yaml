@@ -227,13 +227,12 @@ jobs:
 
       - name: Validate PR info was retrieved
         shell: bash
+        env:
+          PR_NUMBER: ${{ steps.get_pr_info.outputs.pr_number }}
+          PR_TITLE: ${{ steps.get_pr_info.outputs.pr_title }}
+          PR_BASE_REF: ${{ steps.get_pr_info.outputs.pr_base_ref }}
         run: |
           set -euo pipefail
-
-          # Treat these as required for the rest of the workflow
-          PR_NUMBER='${{ steps.get_pr_info.outputs.pr_number }}'
-          PR_TITLE='${{ steps.get_pr_info.outputs.pr_title }}'
-          PR_BASE_REF='${{ steps.get_pr_info.outputs.pr_base_ref }}'
 
           if [[ -z "$PR_NUMBER" || -z "$PR_TITLE" || -z "$PR_BASE_REF" ]]; then
             echo "::error::retrieve_pr_info failed: missing required outputs from get-pr-details."
@@ -244,12 +243,18 @@ jobs:
           fi
 
       - name: Display retrieved PR information
+        env:
+          PR_NUMBER: ${{ steps.get_pr_info.outputs.pr_number }}
+          PR_TITLE: ${{ steps.get_pr_info.outputs.pr_title }}
+          PR_LABELS: ${{ steps.get_pr_info.outputs.pr_labels }}
+          PR_BASE_REF: ${{ steps.get_pr_info.outputs.pr_base_ref }}
+          SKIP_GAUDI_TESTS: ${{ steps.get_pr_info.outputs.skip_gaudi_tests }}
         run: |
-          echo "PR Number: ${{ steps.get_pr_info.outputs.pr_number }}"
-          echo "PR Title: ${{ steps.get_pr_info.outputs.pr_title }}"
-          echo "PR Labels: ${{ steps.get_pr_info.outputs.pr_labels }}"
-          echo "PR Base Ref: ${{ steps.get_pr_info.outputs.pr_base_ref }}"
-          echo "Skip Gaudi Tests: ${{ steps.get_pr_info.outputs.skip_gaudi_tests }}"
+          echo "PR Number: $PR_NUMBER"
+          echo "PR Title: $PR_TITLE"
+          echo "PR Labels: $PR_LABELS"
+          echo "PR Base Ref: $PR_BASE_REF"
+          echo "Skip Gaudi Tests: $SKIP_GAUDI_TESTS"
 
   pre-commit:
     # This job runs in parallel with the build job
