@@ -235,7 +235,7 @@ _REAL_BUGGY_MAX_DECODE_BLOCKS = 183808  # min(91964//128*256, 3593*256//4)
 def test_real_scenario_decode_cfg_matches_fixed_log(mock_get_config):
     """Verify decode bucket config matches expected values for real scenario.
 
-    With max_blocks * 3: block config should be [1, 256, 10779, 14]
+    With max_blocks * 3: block config should be [1, 256, 10779, 9]
     """
     mock_get_config.return_value = _MockConfig(use_contiguous_pa=False)
     strategy = ExponentialBucketingStrategy()
@@ -246,13 +246,15 @@ def test_real_scenario_decode_cfg_matches_fixed_log(mock_get_config):
                                                max_model_len=_REAL_MAX_MODEL_LEN,
                                                max_blocks=_REAL_MAX_BLOCKS)
 
-    # Expected: [1, 256, 10779, 14]
+    # Expected: [1, 256, 10779, 9]
     assert block_cfg[0] == 1, f"block min: expected 1, got {block_cfg[0]}"
     assert block_cfg[1] == _REAL_MAX_NUM_SEQS, (f"block step: expected {_REAL_MAX_NUM_SEQS}, got {block_cfg[1]}")
     assert block_cfg[2] == _REAL_FIXED_MAX_DECODE_BLOCKS, (
         f"block max: expected {_REAL_FIXED_MAX_DECODE_BLOCKS}, got {block_cfg[2]}")
     import math
-    expected_limit = math.ceil(math.log2(_REAL_MAX_BLOCKS * 3)) + 1  # 14
+    uncapped_limit = math.ceil(math.log2(_REAL_MAX_BLOCKS * 3)) + 1
+    decode_bs_limit = math.ceil(math.log2(_REAL_MAX_NUM_SEQS)) + 1
+    expected_limit = min(uncapped_limit, max(6, decode_bs_limit))  # min(15, 9) = 9
     assert block_cfg[3] == expected_limit, (f"block limit: expected {expected_limit}, got {block_cfg[3]}")
 
 
