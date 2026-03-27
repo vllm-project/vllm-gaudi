@@ -5840,13 +5840,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
-        if did_hot_replay or os.getenv('VLLM_FULL_WARMUP', 'false').strip().lower() in ("1", "true"):
-            # All compiled shapes have been executed on hardware (either
-            # via hot replay or full warmup).  Dynamo guard checks are
-            # expensive on first evaluation per shape; skipping them
-            # avoids that overhead on the first real request.
+        if os.getenv('VLLM_FULL_WARMUP', 'false').strip().lower() in ("1", "true"):
+            # When VLLM_FULL_WARMUP is explicitly set, all possible
+            # tensor sizes should have been exercised and Dynamo guard
+            # re-evaluation can be safely skipped.  Do NOT enable this
+            # automatically after hot replay: the full-pipeline warmup
+            # (warmup_mode=False) and real serving exercise additional
+            # code paths that may require recompilation.
             torch.compiler.set_stance(skip_guard_eval_unsafe=True)
-            logger.info("Enabled skip_guard_eval_unsafe after hot replay")
+            logger.info("Enabled skip_guard_eval_unsafe (VLLM_FULL_WARMUP)")
         elapsed_time = end_time - start_time
         msg = (f"Warmup finished in {elapsed_time:.0f} secs, "
                f"allocated {format_bytes(end_mem - start_mem)} of device memory")
