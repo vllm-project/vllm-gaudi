@@ -13,6 +13,7 @@ The server can be launched directly via:
 ```bash
 export VLLM_SERVER_DEV_MODE=1 
 export VLLM_ENABLE_V1_MULTIPROCESSING=0
+export VLLM_ALLOW_INSECURE_SERIALIZATION=1
 export VLLM_HPU_MULTI_MODEL_CONFIG=/path/to/multi_models.yaml
 python -m vllm_gaudi.entrypoints.openai.multi_model_api_server
 ```
@@ -79,3 +80,4 @@ Rebuilt state includes:
 - `/v1/models` returns all configured model aliases from the multi-model YAML file.
 - Inference requests are still served by the currently active model only.
 - `/v1/models/switch` is exposed only when `VLLM_SERVER_DEV_MODE=1`.
+- `VLLM_ALLOW_INSECURE_SERIALIZATION=1` is required because the current in-process reconfigure path uses `cloudpickle` for internal config transfer. Enable this only for trusted/internal deployments.

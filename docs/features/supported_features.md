@@ -102,6 +102,7 @@ To enable the feature:
     ```bash
     export VLLM_ENABLE_V1_MULTIPROCESSING=0
     export VLLM_SERVER_DEV_MODE=1
+    export VLLM_ALLOW_INSECURE_SERIALIZATION=1
     export VLLM_HPU_MULTI_MODEL_CONFIG=/path/to/multi_models.yaml
     ```
 
@@ -135,6 +136,7 @@ To enable the feature:
 - `/v1/models` shows all configured aliases from the YAML file.
 - Inference requests are served by the currently active model only.
 - `/v1/models/switch` is intentionally gated behind `VLLM_SERVER_DEV_MODE=1`.
+- `VLLM_ALLOW_INSECURE_SERIALIZATION=1` is required because the current in-process reconfigure path uses `cloudpickle` for internal config transfer. Enable this only for trusted/internal deployments.
 
 ## Planned Features
 

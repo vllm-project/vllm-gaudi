@@ -192,6 +192,7 @@ def run_server(config_path: str, api_host: str, api_port: int, log_capture: Serv
     env = os.environ.copy()
     env['VLLM_ENABLE_V1_MULTIPROCESSING'] = '0'
     env['VLLM_SERVER_DEV_MODE'] = '1'
+    env['VLLM_ALLOW_INSECURE_SERIALIZATION'] = '1'
     env['VLLM_HPU_MULTI_MODEL_CONFIG'] = config_path
     env['NO_PROXY'] = ','.join(filter(None, [env.get('NO_PROXY'), '127.0.0.1,localhost,0.0.0.0']))
     env['no_proxy'] = ','.join(filter(None, [env.get('no_proxy'), '127.0.0.1,localhost,0.0.0.0']))

@@ -11,6 +11,8 @@ from typing import Any
 
 import cloudpickle
 
+from vllm import envs
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.hashing import get_hash_fn_by_name
@@ -87,6 +89,48 @@ def _reset_executor_sleep_state(model_executor: Any) -> None:
     logger.info("[gaudi_reconfigure] executor sleeping tags reset")
 
 
+def _require_reconfigure_attr(config: Any, path: tuple[str, ...]) -> None:
+    current = config
+    for attr in path:
+        if not hasattr(current, attr):
+            joined_path = ".".join(path)
+            raise TypeError(f"Invalid reconfigure config payload: missing '{joined_path}'")
+        current = getattr(current, attr)
+    if current is None:
+        joined_path = ".".join(path)
+        raise TypeError(f"Invalid reconfigure config payload: '{joined_path}' cannot be None")
+
+
+def _validate_reconfigure_config(config: Any) -> VllmConfig:
+    if not isinstance(config, VllmConfig):
+        raise TypeError("Invalid reconfigure config payload: expected VllmConfig, "
+                        f"got {type(config).__name__}")
+
+    for path in (
+        ("model_config", ),
+        ("cache_config", ),
+        ("scheduler_config", ),
+        ("parallel_config", ),
+        ("model_config", "model"),
+    ):
+        _require_reconfigure_attr(config, path)
+
+    return config
+
+
+def _deserialize_reconfigure_config(vllm_config_bytes: bytes | bytearray) -> VllmConfig:
+    if not isinstance(vllm_config_bytes, (bytes, bytearray)):
+        raise TypeError("Invalid reconfigure config payload: expected bytes or bytearray, "
+                        f"got {type(vllm_config_bytes).__name__}")
+    if not vllm_config_bytes:
+        raise ValueError("Invalid reconfigure config payload: empty payload")
+    if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
+        raise RuntimeError("gaudi_reconfigure_engine requires VLLM_ALLOW_INSECURE_SERIALIZATION=1 "
+                           "because it uses cloudpickle for internal model-swap reconfiguration")
+
+    return _validate_reconfigure_config(cloudpickle.loads(bytes(vllm_config_bytes)))
+
+
 def install_engine_core_patch() -> None:
     """Install a Gaudi-only EngineCore reconfigure hook."""
     from vllm.v1.engine.core import EngineCore
@@ -101,7 +145,7 @@ def install_engine_core_patch() -> None:
         after reloading model weights on workers.
         """
         start = time.perf_counter()
-        new_config = cloudpickle.loads(vllm_config_bytes)
+        new_config = _deserialize_reconfigure_config(vllm_config_bytes)
         logger.info("[gaudi_reconfigure] start: target_model=%s", new_config.model_config.model)
         memory_before_mb = _collect_total_hpu_used_memory_mb(self)
 

@@ -34,6 +34,7 @@ models:
 ```bash
 export VLLM_ENABLE_V1_MULTIPROCESSING=0
 export VLLM_SERVER_DEV_MODE=1
+export VLLM_ALLOW_INSECURE_SERIALIZATION=1
 export VLLM_HPU_MULTI_MODEL_CONFIG=/path/to/multi_models.yaml
 
 python -m vllm_gaudi.entrypoints.openai.multi_model_api_server \
@@ -46,6 +47,7 @@ Notes:
 - This entrypoint reads configured model aliases from `VLLM_HPU_MULTI_MODEL_CONFIG`.
 - `/v1/models` lists every configured alias, but generation requests are handled by the currently active model only.
 - `/v1/models/switch` is available only when `VLLM_SERVER_DEV_MODE=1`.
+- `VLLM_ALLOW_INSECURE_SERIALIZATION=1` is currently required because the in-process reconfigure hook uses `cloudpickle` internally. Use this mode only in trusted/internal deployments.
 
 ## Online Flow (Smoke Test)
 

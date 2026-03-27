@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import cloudpickle
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -10,6 +11,7 @@ import yaml
 
 from vllm_gaudi.v1.engine.multi_model_async_llm import MultiModelAsyncLLM
 from vllm_gaudi.entrypoints.openai import multi_model_api_server as api_server
+from vllm_gaudi.v1.engine import core_patch
 
 
 class _FakeAsyncEngineArgs:
@@ -25,6 +27,15 @@ class _FakeAsyncEngineArgs:
             model=self.model,
             max_model_len=self.max_model_len,
         ))
+
+
+class _FakeVllmConfig:
+
+    def __init__(self):
+        self.model_config = SimpleNamespace(model="test-model", runner_type="generate")
+        self.cache_config = SimpleNamespace()
+        self.scheduler_config = SimpleNamespace()
+        self.parallel_config = SimpleNamespace()
 
 
 @pytest.fixture
@@ -131,3 +142,36 @@ async def test_initialize_invalid_model_raises():
 
     with pytest.raises(ValueError, match="not found"):
         await manager.initialize("qwen")
+
+
+def test_deserialize_reconfigure_config_requires_insecure_serialization(monkeypatch):
+    monkeypatch.setattr(core_patch, "VllmConfig", _FakeVllmConfig)
+    monkeypatch.setattr(core_patch.envs, "VLLM_ALLOW_INSECURE_SERIALIZATION", False)
+
+    payload = cloudpickle.dumps(_FakeVllmConfig())
+
+    with pytest.raises(RuntimeError, match="VLLM_ALLOW_INSECURE_SERIALIZATION=1"):
+        core_patch._deserialize_reconfigure_config(payload)
+
+
+def test_deserialize_reconfigure_config_rejects_non_vllm_config(monkeypatch):
+    monkeypatch.setattr(core_patch, "VllmConfig", _FakeVllmConfig)
+    monkeypatch.setattr(core_patch.envs, "VLLM_ALLOW_INSECURE_SERIALIZATION", True)
+
+    payload = cloudpickle.dumps({"model": "not-a-config"})
+
+    with pytest.raises(TypeError, match="expected VllmConfig"):
+        core_patch._deserialize_reconfigure_config(payload)
+
+
+def test_deserialize_reconfigure_config_accepts_valid_payload(monkeypatch):
+    monkeypatch.setattr(core_patch, "VllmConfig", _FakeVllmConfig)
+    monkeypatch.setattr(core_patch.envs, "VLLM_ALLOW_INSECURE_SERIALIZATION", True)
+
+    expected = _FakeVllmConfig()
+    payload = cloudpickle.dumps(expected)
+
+    decoded = core_patch._deserialize_reconfigure_config(payload)
+
+    assert isinstance(decoded, _FakeVllmConfig)
+    assert decoded.model_config.model == "test-model"
