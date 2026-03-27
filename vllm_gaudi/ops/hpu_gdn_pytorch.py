@@ -243,18 +243,10 @@ def hpu_chunk_gdr_phase_b(
         output_final_state,
     )
 
-
 @torch._dynamo.disable
-def _eager_output_accum(core_h, C_h_ci, state_t, ci):
-    """Eager: output accumulation only.
-
-    HPU torch.compile miscompiles any mutation of a 5D tensor slice
-    indexed by a loop variable (.add_(), slice assignment, index_add_).
-    This isolates just that op to eager mode.
-    """
-    core_h[:, ci].add_(torch.matmul(C_h_ci, state_t))
-    return core_h
-
+def _eager_reshape_output(core_h, S, padded_len, seq_len, H, Vdim):
+    """Reshape core_h to output tensor in eager mode."""
+    return core_h.permute(0, 1, 3, 2, 4).reshape(S, padded_len, H, Vdim)[:, :seq_len, :, :].reshape(-1, H, Vdim)
 
 def _hpu_chunk_gdr_phase_b_optimized(
     u_all: torch.Tensor,
@@ -325,14 +317,12 @@ def _hpu_chunk_gdr_phase_b_optimized(
     state_t = init_state.to(compute_dtype).transpose(-1, -2)  # [S,H,K,V]
 
     for ci in range(num_chunks):
-        # Output accum must be eager — HPU torch.compile miscompiles
-        # any mutation of a 5D tensor slice indexed by a loop variable.
-        core_h = _eager_output_accum(core_h, C_h[:, ci], state_t, ci)
+        core_h[:, ci].add_(torch.matmul(C_h[:, ci], state_t))
         state_t = torch.matmul(M_full[:, ci], state_t) + N_t[:, ci]
 
-    out = core_h.permute(0, 1, 3, 2, 4).reshape(S, padded_len, H, Vdim)[:, :seq_len, :, :].reshape(-1, H, Vdim)
+    out = _eager_reshape_output(core_h, S, padded_len, seq_len, H, Vdim)
 
-    final_state: torch.Tensor | None = None
+    final_state = None
     if output_final_state:
         final_state = state_t.transpose(-1, -2).contiguous().to(init_state.dtype)
 
