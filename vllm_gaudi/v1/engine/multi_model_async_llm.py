@@ -206,7 +206,7 @@ class MultiModelAsyncLLM:
         self,
         model_name: str,
         drain_timeout: int = 60,
-    ) -> dict[str, float | bool]:
+    ) -> dict[str, float | bool | None]:
         """
         Switch to a different model with error recovery
 
@@ -286,6 +286,7 @@ class MultiModelAsyncLLM:
                     model_name,
                     reconfigure_s,
                 )
+                assert self._current_model_name is not None
                 self._sleeping[self._current_model_name] = True
                 self._sleeping[model_name] = False
                 logger.info("Model sleep state: %s=sleeping", self._current_model_name)

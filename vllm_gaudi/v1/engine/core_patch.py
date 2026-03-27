@@ -29,7 +29,7 @@ def _collect_numeric_values(value: Any) -> list[float]:
             values.extend(_collect_numeric_values(item))
         return values
     if isinstance(value, (list, tuple)):
-        values: list[float] = []
+        values = []
         for item in value:
             values.extend(_collect_numeric_values(item))
         return values
@@ -57,7 +57,7 @@ def _collect_named_numeric_values(value: Any, field_name: str) -> list[float]:
             values.extend(_collect_named_numeric_values(item, field_name))
         return values
     if isinstance(value, (list, tuple)):
-        values: list[float] = []
+        values = []
         for item in value:
             values.extend(_collect_named_numeric_values(item, field_name))
         return values

@@ -195,7 +195,7 @@ class HPUWorker(WorkerBase):
                 stash_key = self._runner_stash_key(runner_config)
                 logger.info("[HPUWorker] Stashing runner for model: %s", runner_config.model_config.model)
                 self._model_runner_stash[stash_key] = self.model_runner
-                self.model_runner = None
+                self.model_runner = None  # type: ignore[assignment]
             self.kv_cache_config = None
             self.kv_cache_sleeping = False
             gc.collect()

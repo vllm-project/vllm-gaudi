@@ -49,13 +49,13 @@ Notes:
 
 ## Online Flow (Smoke Test)
 
-1) List available models:
+- List available models:
 
 ```bash
 curl -s http://localhost:8080/v1/models | jq
 ```
 
-1) Generate with default model:
+- Generate with default model:
 
 ```bash
 curl -s http://localhost:8080/v1/chat/completions \
@@ -70,7 +70,7 @@ curl -s http://localhost:8080/v1/chat/completions \
 
 The `model` field should match the active model. After a successful switch, use the new model alias in subsequent requests.
 
-1) Switch model in-process:
+- Switch model in-process:
 
 ```bash
 curl -s http://localhost:8080/v1/models/switch \
@@ -81,7 +81,7 @@ curl -s http://localhost:8080/v1/models/switch \
   }' | jq
 ```
 
-1) Generate with switched model:
+- Generate with switched model:
 
 ```bash
 curl -s http://localhost:8080/v1/chat/completions \

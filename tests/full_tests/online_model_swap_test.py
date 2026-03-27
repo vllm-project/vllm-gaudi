@@ -36,6 +36,7 @@ import sys
 import tempfile
 import threading
 import time
+from typing import Any
 
 import requests
 import yaml
@@ -109,6 +110,14 @@ def _mb_to_gb(memory_mb: float | None) -> float | None:
     if memory_mb is None:
         return None
     return memory_mb / 1024.0
+
+
+def _filter_present_floats(values: list[float | None]) -> list[float]:
+    present_values: list[float] = []
+    for value in values:
+        if value is not None:
+            present_values.append(value)
+    return present_values
 
 
 def find_free_port():
@@ -215,6 +224,7 @@ def run_server(config_path: str, api_host: str, api_port: int, log_capture: Serv
     def capture_logs():
         """Read stdout in background and capture log lines."""
         try:
+            assert proc.stdout is not None
             for line in proc.stdout:
                 line = line.rstrip('\n')
                 if line:
@@ -387,7 +397,7 @@ def print_accuracy_comparison(
     return matched, total
 
 
-async def switch_model(api_host: str, api_port: int, model_name: str, drain_timeout: int = 60) -> dict:
+async def switch_model(api_host: str, api_port: int, model_name: str, drain_timeout: int = 60) -> dict[str, Any]:
     """Call /v1/models/switch endpoint and return metrics."""
     url = _api_url(api_host, api_port, '/v1/models/switch')
     payload = {
@@ -545,16 +555,14 @@ def print_metrics_table(all_metrics):
         else:
             warmup_str = f"{'N/A':>9}"
 
-        freed_gbs = [_mb_to_gb(m.get('freed_memory_mb')) for m in all_metrics]
-        freed_gbs = [value for value in freed_gbs if isinstance(value, (int, float))]
+        freed_gbs = _filter_present_floats([_mb_to_gb(m.get('freed_memory_mb')) for m in all_metrics])
         if freed_gbs:
             avg_freed = sum(freed_gbs) / len(freed_gbs)
             freed_str = f"{avg_freed:>9.2f}"
         else:
             freed_str = f"{'N/A':>9}"
 
-        stash_used_gbs = [_mb_to_gb(m.get('stash_memory_after_mb')) for m in all_metrics]
-        stash_used_gbs = [value for value in stash_used_gbs if isinstance(value, (int, float))]
+        stash_used_gbs = _filter_present_floats([_mb_to_gb(m.get('stash_memory_after_mb')) for m in all_metrics])
         if stash_used_gbs:
             avg_stash_used = sum(stash_used_gbs) / len(stash_used_gbs)
             stash_used_str = f"{avg_stash_used:>13.2f}"
@@ -646,7 +654,7 @@ async def main():
         for model in models:
             print(f"    - {model['id']} -> {model['display_name']}")
 
-        all_metrics = []
+        all_metrics: list[dict[str, Any]] = []
         # baseline_texts[model_id] = outputs for all prompts on first load.
         baseline_texts: dict[str, list[str | None]] = {}
         accuracy_stats: dict[str, tuple[int, int]] = {}
@@ -670,7 +678,7 @@ async def main():
 
             if phase == 1:
                 print("  (Skipping switch on first phase - model already loaded)")
-                switch_result = {
+                switch_result: dict[str, Any] = {
                     'status': 'ok',
                     'duration_s': 0,
                     'reconfigure_ms': 0,
