@@ -1045,6 +1045,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.profiler = HabanaHighLevelProfiler()
         self.profiler_counter_helper = HabanaProfilerCounterHelper()
 
+        # First-request timing: tracks latency breakdown for first N iterations
+        self._ttft_profile_iters = int(os.environ.get('VLLM_TTFT_PROFILE_ITERS', '0'))
+        self._ttft_profile_counter = 0
+
         self.debug_fwd = init_debug_logger('fwd')
 
         self.get_dp_padding = partial(get_dp_padding,
@@ -3758,9 +3762,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         warmup_mode: bool = False,
     ) -> ModelRunnerOutput | None:
 
+        _tp = self._ttft_profile_counter < self._ttft_profile_iters and not warmup_mode
+        if _tp:
+            _t0 = time.perf_counter()
+
         self.run_defragmenter(scheduler_output, warmup_mode)
 
+        if _tp:
+            _t1 = time.perf_counter()
+
         batch_changed = self._update_states(scheduler_output)
+
+        if _tp:
+            _t2 = time.perf_counter()
+
         if not scheduler_output.total_num_scheduled_tokens:
             if not has_kv_transfer_group() or warmup_mode:
                 # Return empty ModelRunnerOuptut if there's no work to do.
@@ -3823,6 +3838,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.scheduler_output = scheduler_output
         self.warmup_mode = warmup_mode
         self.batch_changed = batch_changed
+        self._exec_model_tp = _tp
+        if _tp:
+            self._exec_model_times = (_t0, _t1, _t2)
 
         return None
 
@@ -3903,12 +3921,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.input_batch.swap_states(first_prompt_index, last_decode_index)
 
     @torch.inference_mode()
+    @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         if self.scheduler_output is None:
             # Nothing to do (PP non-final rank case), output isn't used.
             return None  # noqa
         scheduler_output = self.scheduler_output
         warmup_mode = self.warmup_mode
+        _tp = getattr(self, '_exec_model_tp', False) and not warmup_mode
         self.scheduler_output = None
         self.warmup_mode = False
 
@@ -3980,9 +4000,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         num_reqs = num_decodes + num_prefills
         if self.use_async_scheduling:
             self.invalid_req_indices: list[int] = []
+        if _tp:
+            _st_prep = time.perf_counter()
         with self.profiler.record_event('internal', 'prepare_input_tensors'):
             prefill_input_data, decode_input_data = self._prepare_inputs(scheduler_output, num_prefills, num_decodes,
                                                                          warmup_mode)
+        if _tp:
+            _st_prep_done = time.perf_counter()
         prefill_data, \
             dummy_prefill_input_data_batches_across_dp = prefill_input_data
         num_pad_prefill_batch_across_dp = \
@@ -4363,6 +4387,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     finished_sending=finished_sending,
                     finished_recving=finished_recving,
                 ))
+            if _tp:
+                _st_end = time.perf_counter()
+                _t0, _t1, _t2 = self._exec_model_times
+                logger.info(
+                    "TTFT_PROFILE iter=%d: "
+                    "defrag=%.1fms update_states=%.1fms "
+                    "prepare_inputs=%.1fms fwd+sample=%.1fms "
+                    "total_sample_tokens=%.1fms "
+                    "total_execute+sample=%.1fms "
+                    "prefills=%d decodes=%d",
+                    self._ttft_profile_counter,
+                    (_t1 - _t0) * 1000, (_t2 - _t1) * 1000,
+                    (_st_prep_done - _st_prep) * 1000,
+                    (_st_end - _st_prep_done) * 1000,
+                    (_st_end - _st_prep) * 1000,
+                    (_st_end - _t0) * 1000,
+                    num_prefills, num_decodes)
+                self._ttft_profile_counter += 1
             return AsyncHPUModelRunnerOutput(
                 model_runner_output=model_runner_output,
                 sampled_token_ids=sampled_token_ids,
@@ -4382,6 +4424,25 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             ))
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()
+
+        if _tp:
+            _st_end = time.perf_counter()
+            _t0, _t1, _t2 = self._exec_model_times
+            logger.info(
+                "TTFT_PROFILE iter=%d: "
+                "defrag=%.1fms update_states=%.1fms "
+                "prepare_inputs=%.1fms fwd+sample=%.1fms "
+                "total_sample_tokens=%.1fms "
+                "total_execute+sample=%.1fms "
+                "prefills=%d decodes=%d",
+                self._ttft_profile_counter,
+                (_t1 - _t0) * 1000, (_t2 - _t1) * 1000,
+                (_st_prep_done - _st_prep) * 1000,
+                (_st_end - _st_prep_done) * 1000,
+                (_st_end - _st_prep) * 1000,
+                (_st_end - _t0) * 1000,
+                num_prefills, num_decodes)
+            self._ttft_profile_counter += 1
 
         return model_runner_output
 
