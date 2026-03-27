@@ -8,6 +8,7 @@
 from vllm_gaudi.extension.utils import pad_list, with_default
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.extension.debug import init_debug_logger
+from vllm_gaudi.extension.block_profiler import BlockUsageProfiler
 
 import habana_frameworks.torch as htorch
 
@@ -74,10 +75,18 @@ class OnlineDefragmenter:
         self.graphed = with_default(config.VLLM_DEFRAG_WITH_GRAPHS, config.bridge_mode == 'eager')
         self.cache_utils: Optional[CacheSwapUtils] = None
         self.debug = init_debug_logger('defrag')
+        self.block_profiler: Optional[BlockUsageProfiler] = None
+        self._block_usage_warning_threshold = with_default(
+            config.VLLM_BLOCK_USAGE_WARNING_THRESHOLD, 0.9)
 
     def initialize(self, kv_caches: tuple[tuple[torch.tensor, torch.tensor]], block_size: int):
         """ Initialize defragmenter with required data """
         self.cache_utils = CacheSwapUtils(kv_caches, block_size)
+        total_blocks = kv_caches[0][0].shape[0] // block_size
+        self.block_profiler = BlockUsageProfiler(
+            total_blocks=total_blocks,
+            warning_threshold=self._block_usage_warning_threshold,
+        )
         if self.graphed:
             config = get_config()
             if config.bridge_mode == 'lazy':
@@ -161,6 +170,8 @@ class OnlineDefragmenter:
                 for b in self.req_blocks[req_id]:
                     self.free_block(self.resolve(b))
                 del self.req_blocks[req_id]
+        if self.block_profiler is not None:
+            self.block_profiler.record_usage(self.used_blocks)
 
     def free_blocks(self):
         """ Free block generator """
@@ -206,6 +217,15 @@ class OnlineDefragmenter:
         to_swap_pad = next((x for x in self.to_swap_pad_thresholds if x >= len(to_swap)),
                            self.to_swap_pad_thresholds[-1])
         self.cache_utils.swap(to_swap, to_swap_pad)
+        if self.block_profiler is not None:
+            post_max_used = max(self.used_blocks.keys())
+            self.block_profiler.record_defragmentation(
+                pre_max_block_id=pre_max_used,
+                post_max_block_id=post_max_used,
+                num_used=len(self.used_blocks),
+                num_swapped=len(to_swap),
+                pad_threshold=to_swap_pad,
+            )
         if self.debug:
             max_used = max(self.used_blocks.keys())
             num_used = len(self.used_blocks)
