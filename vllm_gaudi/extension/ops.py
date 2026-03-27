@@ -1002,6 +1002,16 @@ def fp8_block_moe_prepare_weights(layer, force_channel_fp8=False):
 
 
 def fp8_channel_moe_prepare_weights(layer):
+    if get_config().enable_unit_moe:
+        w13_weight = layer.w13_weight.to(torch.float)
+        w13_scale = layer.w13_weight_scale_inv if hasattr(layer, "w13_weight_scale_inv") else layer.w13_weight_scale
+        w13_weight = (w13_weight * w13_scale).to(torch.float8_e4m3fn)
+        layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
+        w2_weight = layer.w2_weight.to(torch.float)
+        w2_scale = layer.w2_weight_scale_inv if hasattr(layer, "w2_weight_scale_inv") else layer.w2_weight_scale
+        w2_weight = (w2_weight * w2_scale).to(torch.float8_e4m3fn)
+        layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
+
     for index in range(layer.moe_op.num_experts):
         layer.moe_op.w13_list[index].set_weight(layer.w13_weight[index])
         if hasattr(layer, "w13_weight_scale_inv"):
@@ -1187,6 +1197,7 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
         self.w2_list = torch.nn.ModuleList([MoeFP8Matmul() for _ in range(num_experts)])
         self.w13_input_scale = None
         self.w2_input_scale = None
+        self.enable_unit_moe = get_config().enable_unit_moe
 
     def forward(
         self,
@@ -1201,8 +1212,13 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
         experts_range = range(self.num_experts)
         w13_list = [self.w13_list[i].weight.squeeze() for i in experts_range]
         w2_list = [self.w2_list[i].weight.squeeze() for i in experts_range]
-        w13_weight_scale = [self.w13_list[i].scale_inv_fp8.squeeze() for i in experts_range]
-        w2_weight_scale = [self.w2_list[i].scale_inv_fp8.squeeze() for i in experts_range]
+
+        if self.enable_unit_moe:
+            w13_weight_scale = [1.0 for i in experts_range]
+            w2_weight_scale = [1.0 for i in experts_range]
+        else:
+            w13_weight_scale = [self.w13_list[i].scale_inv_fp8.squeeze() for i in experts_range]
+            w2_weight_scale = [self.w2_list[i].scale_inv_fp8.squeeze() for i in experts_range]
 
         if self.w13_input_scale is None:
             x_fp8, x_scale = dynamic_quant(x)
@@ -1220,9 +1236,13 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
                                                                    experts_max=self.experts_max,
                                                                    **kwargs)
         else:
-            x_scale = self.w13_input_scale.data
-            # w2_input_scale should be List[Tensor] when static and fused
-            w2_input_scale = [self.w2_input_scale[i] for i in experts_range]
+            if self.enable_unit_moe:
+                x_scale = 1.0
+                w2_input_scale = [1.0 for i in experts_range]
+            else:
+                x_scale = self.w13_input_scale.data
+                # w2_input_scale should be List[Tensor] when static and fused
+                w2_input_scale = [self.w2_input_scale[i] for i in experts_range]
             x_fp8 = torch.ops.hpu.cast_to_fp8_v2(x, 1.0 / x_scale, False, False, torch.float8_e4m3fn)[0]
             final_hidden_states = torch.ops.hpu.mixture_of_experts(hidden_states=x_fp8,
                                                                    expert_routing_table=topk_ids.to(torch.int64),
