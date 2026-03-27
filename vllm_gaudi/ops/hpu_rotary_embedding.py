@@ -658,7 +658,7 @@ class HPUMRotaryEmbedding(MRotaryEmbedding):
         from habana_frameworks.torch.hpex.kernels import (RotaryPosEmbeddingMode, apply_rotary_pos_emb)
 
         # NOTE (attafosu): positions is expected to be 2D tensor [3, seq_len],
-        # But the unified_attention API sends it as 3D [3, seq_len, 1]
+        # but it may arrive as 3D [3, seq_len, 1]
         # So we flatten it to 2D here
         if positions.ndim == 3:
             assert positions.shape[-1] == 1, "Expected last dimension to be 1 for 3d positions"
