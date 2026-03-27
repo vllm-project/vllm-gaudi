@@ -5100,19 +5100,40 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         recipe into HPU compute engines, allocate device memory for
         intermediates, and populate the graph-replay cache.
 
-        This method replays all compiled prompt and decode shapes
-        outside compile-only mode so the first-execution penalty is
-        paid during warmup rather than on live requests.
+        This method replays all compiled prompt, decode, and mixed-batch
+        shapes outside compile-only mode so the first-execution penalty
+        is paid during warmup rather than on live requests.
+
+        Note: Full-pipeline warmup (warmup_mode=False) is deliberately
+        NOT done here. It must run after the defragmenter is re-created
+        (see _full_pipeline_warmup).
         """
         prompt_buckets = self.bucketing_manager.prompt_buckets
         decode_buckets = self.bucketing_manager.decode_buckets
 
-        total = len(prompt_buckets) + len(decode_buckets)
+        # Build mixed scenarios (same logic as warmup_mixed_graphs)
+        mixed_scenarios = []
+        if prompt_buckets and decode_buckets:
+            smallest_prompt = prompt_buckets[0]
+            decode_sample_indices = {0}
+            if len(decode_buckets) > 1:
+                decode_sample_indices.add(len(decode_buckets) // 2)
+            if len(decode_buckets) > 2:
+                decode_sample_indices.add(len(decode_buckets) - 1)
+            for idx in sorted(decode_sample_indices):
+                db = decode_buckets[idx]
+                if smallest_prompt[0] + db[0] <= self.max_num_seqs:
+                    mixed_scenarios.append(
+                        (smallest_prompt, (db[0], 1, db[2])))
+
+        total = len(prompt_buckets) + len(decode_buckets) + len(mixed_scenarios)
         if total == 0:
             return
 
-        logger.info("Hot replay: executing %d shapes on HPU "
-                    "(%d prompt, %d decode)", total, len(prompt_buckets), len(decode_buckets))
+        logger.info(
+            "Hot replay: executing %d shapes on HPU "
+            "(%d prompt, %d decode, %d mixed)", total,
+            len(prompt_buckets), len(decode_buckets), len(mixed_scenarios))
         desc = "Hot replay: "
         with tqdm(total=total, desc=desc, unit="item") as pbar:
             for bucket in prompt_buckets:
@@ -5124,19 +5145,53 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self._prepare_dummy_scenario(None, decode_cfg)
                 pbar.update(1)
 
-        torch.hpu.synchronize()
+            for prompt_cfg, decode_cfg in mixed_scenarios:
+                self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
+                pbar.update(1)
 
-        # Run a few shapes through the full pipeline (warmup_mode=False)
-        # to exercise defragmenter, KV connector, and other paths
-        # that are skipped during warmup_mode=True execution.
-        logger.info("Hot replay: exercising full pipeline paths...")
-        if prompt_buckets:
-            self._prepare_dummy_scenario(prompt_buckets[0], None, warmup_mode=False)
-        if decode_buckets:
-            decode_cfg = (decode_buckets[0][0], 1, decode_buckets[0][2])
-            self._prepare_dummy_scenario(None, decode_cfg, warmup_mode=False)
         torch.hpu.synchronize()
         logger.info("Hot replay finished")
+
+    def _full_pipeline_warmup(self):
+        """Exercise full serving pipeline paths after defragmenter re-creation.
+
+        During warmup_mode=True execution, several runtime paths are
+        skipped (defragmenter, KV connector setup, etc.).  This method
+        runs a few representative shapes through the complete pipeline
+        with warmup_mode=False to pay any first-use initialization cost
+        during warmup rather than on live requests.
+
+        Must be called AFTER the defragmenter is re-created so that the
+        production defragmenter instance gets exercised.
+        """
+        prompt_buckets = self.bucketing_manager.prompt_buckets
+        decode_buckets = self.bucketing_manager.decode_buckets
+
+        scenarios = []
+        # Smallest prompt shape
+        if prompt_buckets:
+            scenarios.append((prompt_buckets[0], None))
+        # Smallest decode shape
+        if decode_buckets:
+            scenarios.append(
+                (None, (decode_buckets[0][0], 1, decode_buckets[0][2])))
+        # One mixed scenario if possible
+        if prompt_buckets and decode_buckets:
+            p = prompt_buckets[0]
+            d = decode_buckets[0]
+            if p[0] + d[0] <= self.max_num_seqs:
+                scenarios.append((p, (d[0], 1, d[2])))
+
+        if not scenarios:
+            return
+
+        logger.info("Full-pipeline warmup: exercising %d scenarios "
+                    "with warmup_mode=False...", len(scenarios))
+        for prompt_cfg, decode_cfg in scenarios:
+            self._prepare_dummy_scenario(
+                prompt_cfg, decode_cfg, warmup_mode=False)
+        torch.hpu.synchronize()
+        logger.info("Full-pipeline warmup finished")
 
     def _add_dummy_request(self,
                            requests,
@@ -5779,18 +5834,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # real execution of each recipe incurs a significant "first
         # replay" penalty (loading recipe into HPU engines, allocating
         # device memory for intermediates, populating the graph replay
-        # cache).  Re-executing a few representative shapes here—outside
-        # compile-only mode—pays that cost during warmup.
+        # cache).  Re-executing all shapes here—outside compile-only
+        # mode—pays that cost during warmup.
+        did_hot_replay = False
         if can_use_compile_only_mode and not self.model_config.enforce_eager \
                 and not self.is_pooling_model and not self.unified_attn:
             self._hot_replay_representative_shapes()
+            did_hot_replay = True
 
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
-        if os.getenv('VLLM_FULL_WARMUP', 'false').strip().lower() in ("1", "true"):
-            # Since the model is warmed up for all possible tensor sizes,
-            # Dynamo can skip checking the guards
+        if did_hot_replay or os.getenv(
+                'VLLM_FULL_WARMUP', 'false').strip().lower() in ("1", "true"):
+            # All compiled shapes have been executed on hardware (either
+            # via hot replay or full warmup).  Dynamo guard checks are
+            # expensive on first evaluation per shape; skipping them
+            # avoids that overhead on the first real request.
             torch.compiler.set_stance(skip_guard_eval_unsafe=True)
+            logger.info("Enabled skip_guard_eval_unsafe after hot replay")
         elapsed_time = end_time - start_time
         msg = (f"Warmup finished in {elapsed_time:.0f} secs, "
                f"allocated {format_bytes(end_mem - start_mem)} of device memory")
@@ -5805,6 +5866,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # and re-initialize it.
         if not self.is_pooling_model:
             self.defragmenter = OnlineDefragmenter(self.kv_caches, self.block_size)
+            self.defragmenter.warmup()
+
+        # Full-pipeline warmup: run representative shapes with
+        # warmup_mode=False to exercise the production defragmenter,
+        # KV connector, and other runtime paths that are skipped
+        # during warmup_mode=True.  This must happen AFTER defragmenter
+        # re-creation so the real defragmenter gets exercised.
+        if did_hot_replay:
+            self._full_pipeline_warmup()
 
     def shutdown_inc(self, suppress=suppress, finalize_calibration=finalize_calibration):
         global shutdown_inc_called
