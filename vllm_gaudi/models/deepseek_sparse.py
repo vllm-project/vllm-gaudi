@@ -62,7 +62,7 @@ class DeepSeekSparseMLP(nn.Module):
         hidden_act: str = "silu",
     ):
         super().__init__()
-        self.gate_up_proj = ColumnParallelLinear(
+        self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             intermediate_size * 2,
             bias=False,
