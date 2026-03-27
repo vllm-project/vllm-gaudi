@@ -55,3 +55,7 @@ def register_model():
         "DeepseekV3ForCausalLM",  # Standard architecture name
         "vllm_gaudi.models.hpu_deepseek_v3:HpuDeepseekV3ForCausalLM"
     )
+    ModelRegistry.register_model(
+        "DeepseekV32ForCausalLM",  # DeepSeek V3.2 (model_type: deepseek_v32)
+        "vllm_gaudi.models.hpu_deepseek_v3:HpuDeepseekV3ForCausalLM"
+    )

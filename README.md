@@ -36,6 +36,20 @@ The vLLM Hardware Plugin for Intel® Gaudi® integrates [Intel® Gaudi® AI acce
 
 1. [Set up](https://docs.habana.ai/en/latest/Installation_Guide/index.html) your execution environment. Additionally, to achieve the best performance on HPU, follow the methods outlined in the [Optimizing Training Platform Guide](https://docs.habana.ai/en/latest/PyTorch/Model_Optimization_PyTorch/Optimization_in_Training_Platform.html).
 
+### Option A: Install from PyPI
+
+> **Important:** vLLM is a prerequisite but is **not** automatically installed by `vllm-gaudi`. You must install vLLM first. The plugin requires a compatible vLLM version — see the [version compatibility table](#version-compatibility) below.
+
+```bash
+# Step 1: Install vLLM (required prerequisite)
+pip install vllm==0.14.1
+
+# Step 2: Install the Gaudi plugin
+pip install vllm-gaudi
+```
+
+### Option B: Install from Source
+
 2. Get the last verified vLLM commit. While vLLM Hardware Plugin for Intel® Gaudi® follows the latest vLLM commits, upstream API updates may introduce compatibility issues. The saved commit has been thoroughly validated.
 
     ```bash
@@ -66,6 +80,14 @@ The vLLM Hardware Plugin for Intel® Gaudi® integrates [Intel® Gaudi® AI acce
     ```
 
     To see all the available installation methods, such as NIXL, see the [Installation](https://vllm-gaudi.readthedocs.io/en/latest/getting_started/installation.html) guide.
+
+### Version Compatibility
+
+| vllm-gaudi | vLLM | Intel® Gaudi® Software |
+|------------|------|------------------------|
+| 0.14.1     | 0.14.1 | v1.23.0 |
+| 0.13.0     | 0.13.0 | v1.23.0 |
+| 0.11.2     | 0.11.2 | v1.22.2 |
 
 ## Contributing
 

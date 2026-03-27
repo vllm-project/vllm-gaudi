@@ -233,3 +233,60 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
 
 fp8.Fp8LinearMethod = Fp8LinearMethod
 fp8.Fp8MoEMethod = HPUFp8MoEMethod
+
+
+# Monkey-patch per_token_group_quant_fp8 to add HPU fallback.
+# The pip-installed vLLM 0.16 only has CUDA and triton paths; HPU needs
+# a pure-PyTorch implementation to avoid triton kernel launches.
+from vllm.model_executor.layers.quantization.utils import fp8_utils as _fp8_utils
+from vllm.platforms import current_platform as _current_platform
+
+_orig_per_token_group_quant_fp8 = _fp8_utils.per_token_group_quant_fp8
+
+
+def _hpu_per_token_group_quant_fp8(
+    x: torch.Tensor,
+    group_size: int,
+    eps: float = 1e-10,
+    dtype: torch.dtype = torch.float8_e4m3fn,
+    column_major_scales: bool = False,
+    tma_aligned_scales: bool = False,
+    use_ue8m0: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """HPU-compatible per-token group FP8 quantization (pure PyTorch)."""
+    if _current_platform.device_type != "hpu":
+        return _orig_per_token_group_quant_fp8(
+            x, group_size, eps, dtype, column_major_scales,
+            tma_aligned_scales, use_ue8m0)
+
+    finfo = torch.finfo(dtype)
+    fp8_max = finfo.max
+    fp8_min = finfo.min
+
+    x_q = torch.empty_like(x, dtype=dtype)
+    if column_major_scales:
+        shape = x.shape[:-1] + (x.shape[-1] // group_size,)
+        x_s = torch.empty(
+            shape, device=x.device, dtype=torch.float32
+        ).permute(-1, -2)
+    else:
+        shape = x.shape[:-1] + (x.shape[-1] // group_size,)
+        x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
+
+    x_reshaped = x.view(-1, group_size)
+    absmax = torch.max(torch.abs(x_reshaped), dim=1, keepdim=True)[0]
+    absmax = torch.clamp(absmax, min=eps)
+    scale = fp8_max / absmax
+    x_q_reshaped = torch.clamp(x_reshaped * scale, min=fp8_min, max=fp8_max)
+    x_q.copy_(x_q_reshaped.view(x.shape).to(dtype))
+
+    if column_major_scales:
+        num_groups_per_row = x.shape[-1] // group_size
+        x_s.copy_(absmax.view(-1, num_groups_per_row).T)
+    else:
+        x_s.copy_(absmax.view(x_s.shape))
+
+    return x_q, x_s
+
+
+_fp8_utils.per_token_group_quant_fp8 = _hpu_per_token_group_quant_fp8
