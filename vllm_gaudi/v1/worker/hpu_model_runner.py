@@ -5412,7 +5412,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.num_mamba_like_layers > 0 and self._compact_gdn_enabled:
             self._num_gdn_groups = sum(
                 1 for g in kv_cache_config.kv_cache_groups
-                if isinstance(g.kv_cache_spec, MambaSpec) and g.kv_cache_spec.mamba_type in ("gdn_attention", "linear_attention"))
+                if isinstance(g.kv_cache_spec, MambaSpec) and g.kv_cache_spec.mamba_type in ("gdn_attention",
+                                                                                             "linear_attention"))
 
         if self.use_hybrid_cache and self.num_mamba_like_layers > 0:
             # Build layer_name -> spec lookup for skipping raw buffer
@@ -5730,8 +5731,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self._gdn_req_to_base_slot.clear()
             compact_total = gdn_max_reqs * self._num_gdn_groups + 2
             logger.debug("GDN compact: %d groups, %d base_slots, tensor_dim0=%d vs baseline=%d, free_list_len=%d",
-                        len(self._compact_gdn_group_ids), gdn_max_reqs, compact_total, num_blocks + 1,
-                        len(self._gdn_slot_free_list))
+                         len(self._compact_gdn_group_ids), gdn_max_reqs, compact_total, num_blocks + 1,
+                         len(self._gdn_slot_free_list))
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(self.get_kv_caches_4D(kv_caches))
