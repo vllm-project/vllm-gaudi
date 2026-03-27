@@ -5414,6 +5414,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 1 for g in kv_cache_config.kv_cache_groups
                 if isinstance(g.kv_cache_spec, MambaSpec) and g.kv_cache_spec.mamba_type in ("gdn_attention",
                                                                                              "linear_attention"))
+        # Profiling may request more sequences than max_num_seqs
+        # (e.g. VLLM_PROFILE_DECODE=16,64 with max_num_seqs=1).
+        # Ensure GDN compact tensors and free-list are large enough.
+        profile_bs = self._original_max_num_seqs
+        for env_key in ("VLLM_PROFILE_PROMPT", "VLLM_PROFILE_DECODE"):
+            cfg = os.environ.get(env_key)
+            if cfg:
+                profile_bs = max(profile_bs, int(cfg.split(",")[0]))
+        self._gdn_max_reqs = max(self._original_max_num_seqs, profile_bs)
 
         if self.use_hybrid_cache and self.num_mamba_like_layers > 0:
             # Build layer_name -> spec lookup for skipping raw buffer
@@ -5497,7 +5506,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         self._compact_gdn_group_ids.add(group_idx)
                         if isinstance(kv_caches.get(layer_name), tuple):
                             continue
-                        gdn_max_reqs = self._original_max_num_seqs
+                        gdn_max_reqs = self._gdn_max_reqs
                         compact_total = gdn_max_reqs * self._num_gdn_groups + 2
                         state_tensors = []
                         for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
@@ -5585,7 +5594,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         self._compact_gdn_group_ids.add(group_idx)
                         if isinstance(kv_caches.get(layer_name), tuple):
                             continue
-                        gdn_max_reqs = self._original_max_num_seqs
+                        gdn_max_reqs = self._gdn_max_reqs
                         compact_total = gdn_max_reqs * self._num_gdn_groups + 2
                         state_tensors = []
                         for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
@@ -5726,7 +5735,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # compact groups), the tensor index is s * num_gdn_groups + g + 1.
         if self._compact_gdn_group_ids:
             self._compact_gdn_group_offset = {gid: i for i, gid in enumerate(sorted(self._compact_gdn_group_ids))}
-            gdn_max_reqs = self._original_max_num_seqs
+            gdn_max_reqs = self._gdn_max_reqs
             self._gdn_slot_free_list = list(range(gdn_max_reqs - 1, -1, -1))
             self._gdn_req_to_base_slot.clear()
             compact_total = gdn_max_reqs * self._num_gdn_groups + 2
