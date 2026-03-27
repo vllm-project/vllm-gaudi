@@ -5123,17 +5123,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             for idx in sorted(decode_sample_indices):
                 db = decode_buckets[idx]
                 if smallest_prompt[0] + db[0] <= self.max_num_seqs:
-                    mixed_scenarios.append(
-                        (smallest_prompt, (db[0], 1, db[2])))
+                    mixed_scenarios.append((smallest_prompt, (db[0], 1, db[2])))
 
         total = len(prompt_buckets) + len(decode_buckets) + len(mixed_scenarios)
         if total == 0:
             return
 
-        logger.info(
-            "Hot replay: executing %d shapes on HPU "
-            "(%d prompt, %d decode, %d mixed)", total,
-            len(prompt_buckets), len(decode_buckets), len(mixed_scenarios))
+        logger.info("Hot replay: executing %d shapes on HPU "
+                    "(%d prompt, %d decode, %d mixed)", total, len(prompt_buckets), len(decode_buckets),
+                    len(mixed_scenarios))
         desc = "Hot replay: "
         with tqdm(total=total, desc=desc, unit="item") as pbar:
             for bucket in prompt_buckets:
@@ -5173,8 +5171,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             scenarios.append((prompt_buckets[0], None))
         # Smallest decode shape
         if decode_buckets:
-            scenarios.append(
-                (None, (decode_buckets[0][0], 1, decode_buckets[0][2])))
+            scenarios.append((None, (decode_buckets[0][0], 1, decode_buckets[0][2])))
         # One mixed scenario if possible
         if prompt_buckets and decode_buckets:
             p = prompt_buckets[0]
@@ -5188,8 +5185,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         logger.info("Full-pipeline warmup: exercising %d scenarios "
                     "with warmup_mode=False...", len(scenarios))
         for prompt_cfg, decode_cfg in scenarios:
-            self._prepare_dummy_scenario(
-                prompt_cfg, decode_cfg, warmup_mode=False)
+            self._prepare_dummy_scenario(prompt_cfg, decode_cfg, warmup_mode=False)
         torch.hpu.synchronize()
         logger.info("Full-pipeline warmup finished")
 
@@ -5844,8 +5840,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
-        if did_hot_replay or os.getenv(
-                'VLLM_FULL_WARMUP', 'false').strip().lower() in ("1", "true"):
+        if did_hot_replay or os.getenv('VLLM_FULL_WARMUP', 'false').strip().lower() in ("1", "true"):
             # All compiled shapes have been executed on hardware (either
             # via hot replay or full warmup).  Dynamo guard checks are
             # expensive on first evaluation per shape; skipping them
