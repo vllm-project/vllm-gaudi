@@ -49,23 +49,15 @@ class HpuPlatform(Platform):
     ) -> str:
         if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on HPU.")
-        elif get_config().unified_attn:
-            if attn_selector_config.use_mla:
-                logger.info("Using HPUUnifiedMLA backend.")
-                return ("vllm_gaudi.attention.backends.hpu_attn."
-                        "HPUUnifiedMLABackend")
-            logger.info("Using UnifiedAttention backend.")
-            return ("vllm_gaudi.attention.backends."
-                    "hpu_attn.HPUUnifiedAttentionBackend")
-        else:
-            if attn_selector_config.use_mla:
-                logger.info("Using HPUAttentionMLA backend.")
-                return ("vllm_gaudi.attention.backends.hpu_attn."
-                        "HPUMLAAttentionBackend")
 
-            logger.info("Using HPUAttentionV1 backend.")
-            return ("vllm_gaudi.v1.attention.backends."
-                    "hpu_attn.HPUAttentionBackendV1")
+        if attn_selector_config.use_mla:
+            logger.info("Using HPUAttentionMLA backend.")
+            return ("vllm_gaudi.attention.backends.hpu_attn."
+                    "HPUMLAAttentionBackend")
+
+        logger.info("Using HPUAttentionV1 backend.")
+        return ("vllm_gaudi.v1.attention.backends."
+                "hpu_attn.HPUAttentionBackendV1")
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
@@ -190,7 +182,7 @@ class HpuPlatform(Platform):
         compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         compilation_config.cudagraph_capture_sizes = []
 
-        if get_config().VLLM_CONTIGUOUS_PA and not get_config().unified_attn:
+        if get_config().VLLM_CONTIGUOUS_PA:
             logger.warning("Using Contiguous PA, disabling prefix caching")
             vllm_config.cache_config.enable_prefix_caching = False
 
