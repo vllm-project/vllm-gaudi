@@ -230,15 +230,22 @@ def _move_remaining_tensors_to_device(model: torch.nn.Module, device: str) -> No
 
     # Internal nn.Module registry attributes that should never be touched.
     _SKIP_ATTRS = frozenset({
-        "_parameters", "_buffers", "_modules",
+        "_parameters",
+        "_buffers",
+        "_modules",
         "_non_persistent_buffers_set",
-        "_backward_pre_hooks", "_backward_hooks",
+        "_backward_pre_hooks",
+        "_backward_hooks",
         "_is_full_backward_hook",
-        "_forward_hooks", "_forward_hooks_with_kwargs",
+        "_forward_hooks",
+        "_forward_hooks_with_kwargs",
         "_forward_hooks_always_called",
-        "_forward_pre_hooks", "_forward_pre_hooks_with_kwargs",
-        "_state_dict_hooks", "_state_dict_pre_hooks",
-        "_load_state_dict_pre_hooks", "_load_state_dict_post_hooks",
+        "_forward_pre_hooks",
+        "_forward_pre_hooks_with_kwargs",
+        "_state_dict_hooks",
+        "_state_dict_pre_hooks",
+        "_load_state_dict_pre_hooks",
+        "_load_state_dict_post_hooks",
     })
 
     moved = 0
@@ -4424,6 +4431,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         _apply_inc_patch()
         self._detached_moe_gates: set[int] = set()
         self._remove_duplicate_submodules()
+
         # INC's PatchedMixtralMoE accesses kernel flags directly on
         # the module. Reuse the existing _sync_moe_kernel_flags logic
         # (which reads from moe_parallel_config) so all 5 flags are set

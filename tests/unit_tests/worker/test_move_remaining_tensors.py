@@ -6,7 +6,6 @@ Tests run on HPU (the real target device). Tensors start on CPU and are
 moved to HPU, matching the actual INC post-conversion code path.
 """
 
-import pytest
 import torch
 import torch.nn as nn
 
@@ -93,7 +92,7 @@ def test_skips_nn_parameter_in_list():
 
 def test_nested_containers():
     mod = _StubModule()
-    mod.nested = {"outer": [torch.randn(2), (torch.randn(3),)]}
+    mod.nested = {"outer": [torch.randn(2), (torch.randn(3), )]}
     _move_remaining_tensors_to_device(mod, TARGET_DEVICE)
     assert mod.nested["outer"][0].device.type == "hpu"
     assert mod.nested["outer"][1][0].device.type == "hpu"
