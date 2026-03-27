@@ -4616,6 +4616,56 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         return total_mem, total_batch_seq, captured_all
 
+    def _hot_replay_warmup(self):
+        """Re-execute all compiled shapes outside PT_COMPILE_ONLY_MODE.
+
+        After compile-only warmup, graph recipes exist but have never run on
+        hardware. The first real execution of each recipe pays a 'first replay'
+        cost. This method pays that cost during warmup by replaying every
+        compiled shape, then exercising full-pipeline paths with
+        warmup_mode=False for a small shape.
+        """
+        start = time.perf_counter()
+        prompt_buckets = self.bucketing_manager.prompt_buckets
+        decode_buckets = self.bucketing_manager.decode_buckets
+        total = len(prompt_buckets) + len(decode_buckets)
+        logger.info("Hot replay: re-executing %d compiled shapes outside "
+                    "compile-only mode...", total)
+
+        replayed = 0
+        # Replay all prompt shapes
+        first_prompt = None
+        for batch_size, seq_len, num_blocks in prompt_buckets:
+            if seq_len > self.max_num_tokens:
+                continue
+            if first_prompt is None:
+                first_prompt = (batch_size, seq_len, num_blocks)
+            self._prepare_dummy_scenario((batch_size, seq_len, num_blocks), None)
+            replayed += 1
+
+        # Replay all decode shapes
+        first_decode = None
+        for batch_size, seq_len, num_blocks in decode_buckets:
+            if seq_len > self.max_num_tokens:
+                continue
+            if first_decode is None:
+                first_decode = (batch_size, seq_len, num_blocks)
+            self._prepare_dummy_scenario(None, (batch_size, seq_len, num_blocks))
+            replayed += 1
+
+        torch.hpu.synchronize()
+
+        # Exercise full pipeline paths (defragmenter, KV connector, etc.)
+        # with warmup_mode=False for one small shape of each type.
+        if first_prompt is not None:
+            self._prepare_dummy_scenario(first_prompt, None, warmup_mode=False)
+        if first_decode is not None:
+            self._prepare_dummy_scenario(None, first_decode, warmup_mode=False)
+        torch.hpu.synchronize()
+
+        elapsed = time.perf_counter() - start
+        logger.info("Hot replay finished in %.1f secs (%d shapes replayed)", elapsed, replayed)
+
     def _add_dummy_request(self,
                            requests,
                            num_scheduled_tokens,
@@ -4723,7 +4773,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         ctx_list = ctx_list if len(ctx_list) > 0 else [0] * len(prompt_list)
         return prompt_list, ctx_list
 
-    def _prepare_dummy_scenario(self, prompt_cfg, decode_cfg):
+    def _prepare_dummy_scenario(self, prompt_cfg, decode_cfg, warmup_mode=True):
         requests: list[NewRequestData] = []
         scheduled_tokens: dict[str, int] = {}
 
@@ -4773,9 +4823,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                         scheduled_tokens=1,
                                         is_prompt=False,
                                         block_id=block_id)
-        self._execute_dummy_scenario(requests, scheduled_tokens)
+        self._execute_dummy_scenario(requests, scheduled_tokens, warmup_mode=warmup_mode)
 
-    def _execute_dummy_scenario(self, requests, scheduled_tokens):
+    def _execute_dummy_scenario(self, requests, scheduled_tokens, warmup_mode=True):
         from vllm.v1.core.sched.output import (SchedulerOutput, CachedRequestData)
 
         sched_output = SchedulerOutput(
@@ -4800,9 +4850,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             finished_req_ids=set(req.req_id for req in requests),
             free_encoder_mm_hashes=[],
         )
-        self.execute_model(sched_output, warmup_mode=True)
+        self.execute_model(sched_output, warmup_mode=warmup_mode)
         self.sample_tokens(None)
-        self.execute_model(cleanup, warmup_mode=True)
+        self.execute_model(cleanup, warmup_mode=warmup_mode)
 
     def _generate_profiling(self, prompt_cfg, decode_cfg):
         steps = 3
@@ -5065,6 +5115,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                       self.warmup_graphs(
                           self.bucketing_manager.decode_buckets, False, kv_caches)
                     self.log_graph_warmup_summary(self.bucketing_manager.decode_buckets, False, mem_post_decode)
+
+        # Hot replay: pay first-execution cost during warmup
+        if not self.model_config.enforce_eager and not self.is_pooling_model \
+                and can_use_compile_only_mode:
+            self._hot_replay_warmup()
 
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
