@@ -27,7 +27,7 @@ _USE_LEGACY_PHASE_B = os.getenv("VLLM_GDN_LEGACY_PHASE_B", "0") == "1"
 # Set VLLM_GDN_COMPUTE_FP32=1 to use float32 instead of bfloat16 for GDN
 # compute ops (preprocess casts, decode path, state buffers).  bf16 is
 # the default for performance; fp32 is useful for debugging accuracy.
-_GDN_COMPUTE_DTYPE = torch.float32 if os.getenv("VLLM_GDN_COMPUTE_FP32", "0") == "1" else torch.bfloat16
+_GDN_COMPUTE_DTYPE = torch.float32 if os.getenv("VLLM_GDN_COMPUTE_FP32", "1") == "1" else torch.bfloat16
 
 # Set VLLM_GDN_EXACT_SOLVE=1 to use exact row-by-row forward substitution
 # instead of the Neumann iterative solver.  Exact but ~2.6x slower (127
@@ -249,7 +249,7 @@ def _eager_reshape_output(core_h, S, padded_len, seq_len, H, Vdim):
     """Reshape core_h to output tensor in eager mode."""
     return core_h.permute(0, 1, 3, 2, 4).reshape(S, padded_len, H, Vdim)[:, :seq_len, :, :].reshape(-1, H, Vdim)
 
-
+#@torch._dynamo.disable
 def _hpu_chunk_gdr_phase_b_optimized(
     u_all: torch.Tensor,
     w_all: torch.Tensor,
@@ -524,7 +524,7 @@ def _eager_read_state(state: torch.Tensor, idx: torch.Tensor, dtype: torch.dtype
     """Eager-only state read — isolates index_select from compiled graph."""
     return state.index_select(0, idx).to(dtype)
 
-
+@torch._dynamo.disable
 def hpu_fused_recurrent_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -776,6 +776,10 @@ def _recurrent_general_path(
     return out, final_state
 
 
+_GDN_CAPTURE_DIR = os.getenv("VLLM_GDN_CAPTURE_DIR", "")
+_gdn_capture_done = False
+
+
 def hpu_chunk_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -804,6 +808,34 @@ def hpu_chunk_gated_delta_rule(
     requires a device-to-host sync) and constructs uniform seq_ranges
     directly.  This makes the function fully compilable with torch.compile.
     """
+    # --- one-shot tensor capture for debugging ---
+    global _gdn_capture_done
+    if _GDN_CAPTURE_DIR and not _gdn_capture_done:
+        _gdn_capture_done = True
+        _cap = _GDN_CAPTURE_DIR
+        os.makedirs(_cap, exist_ok=True)
+        torch.save(q.detach().cpu(), os.path.join(_cap, "q.pt"))
+        torch.save(k.detach().cpu(), os.path.join(_cap, "k.pt"))
+        torch.save(v.detach().cpu(), os.path.join(_cap, "v.pt"))
+        torch.save(g.detach().cpu(), os.path.join(_cap, "g.pt"))
+        torch.save(beta.detach().cpu(), os.path.join(_cap, "beta.pt"))
+        if initial_state is not None:
+            torch.save(initial_state.detach().cpu(),
+                       os.path.join(_cap, "initial_state.pt"))
+        import json
+        with open(os.path.join(_cap, "meta.json"), "w") as f:
+            json.dump(dict(
+                scale=scale, output_final_state=output_final_state,
+                use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+                chunk_size=chunk_size,
+                prefill_num_seqs=prefill_num_seqs,
+                prefill_seq_len=prefill_seq_len,
+                neumann_iters=neumann_iters,
+                q_shape=list(q.shape), v_shape=list(v.shape),
+                q_dtype=str(q.dtype),
+            ), f, indent=2)
+        logger.info("GDN capture saved to %s", _cap)
+
     # https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fla/ops/chunk_scaled_dot_kkt.py#L132
     B, T, H, Kdim = q.shape
     _, _, HV, Vdim = v.shape
