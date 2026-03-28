@@ -5740,8 +5740,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self._gdn_req_to_base_slot.clear()
             compact_total = gdn_max_reqs * self._num_gdn_groups + 2
             logger.info("GDN compact: %d groups, %d base_slots, tensor_dim0=%d vs baseline=%d, free_list_len=%d",
-                         len(self._compact_gdn_group_ids), gdn_max_reqs, compact_total, num_blocks + 1,
-                         len(self._gdn_slot_free_list))
+                        len(self._compact_gdn_group_ids), gdn_max_reqs, compact_total, num_blocks + 1,
+                        len(self._gdn_slot_free_list))
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(self.get_kv_caches_4D(kv_caches))

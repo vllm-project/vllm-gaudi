@@ -249,6 +249,7 @@ def _eager_reshape_output(core_h, S, padded_len, seq_len, H, Vdim):
     """Reshape core_h to output tensor in eager mode."""
     return core_h.permute(0, 1, 3, 2, 4).reshape(S, padded_len, H, Vdim)[:, :seq_len, :, :].reshape(-1, H, Vdim)
 
+
 #@torch._dynamo.disable
 def _hpu_chunk_gdr_phase_b_optimized(
     u_all: torch.Tensor,
@@ -523,6 +524,7 @@ def hpu_fused_gdn_gating(
 def _eager_read_state(state: torch.Tensor, idx: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     """Eager-only state read — isolates index_select from compiled graph."""
     return state.index_select(0, idx).to(dtype)
+
 
 @torch._dynamo.disable
 def hpu_fused_recurrent_gated_delta_rule(
@@ -820,20 +822,23 @@ def hpu_chunk_gated_delta_rule(
         torch.save(g.detach().cpu(), os.path.join(_cap, "g.pt"))
         torch.save(beta.detach().cpu(), os.path.join(_cap, "beta.pt"))
         if initial_state is not None:
-            torch.save(initial_state.detach().cpu(),
-                       os.path.join(_cap, "initial_state.pt"))
+            torch.save(initial_state.detach().cpu(), os.path.join(_cap, "initial_state.pt"))
         import json
         with open(os.path.join(_cap, "meta.json"), "w") as f:
             json.dump(dict(
-                scale=scale, output_final_state=output_final_state,
+                scale=scale,
+                output_final_state=output_final_state,
                 use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
                 chunk_size=chunk_size,
                 prefill_num_seqs=prefill_num_seqs,
                 prefill_seq_len=prefill_seq_len,
                 neumann_iters=neumann_iters,
-                q_shape=list(q.shape), v_shape=list(v.shape),
+                q_shape=list(q.shape),
+                v_shape=list(v.shape),
                 q_dtype=str(q.dtype),
-            ), f, indent=2)
+            ),
+                      f,
+                      indent=2)
         logger.info("GDN capture saved to %s", _cap)
 
     # https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fla/ops/chunk_scaled_dot_kkt.py#L132
