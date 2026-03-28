@@ -1,0 +1,52 @@
+{
+  "timestamp": "2026-03-28T15:36:23Z",
+  "checkpoints": {
+    "baseline": {
+      "description": "Latest vllm-gaudi main (exponential + linear bucketing)",
+      "commit_sha": "05cfbe69e795dfb68e7ba1232352a74c3b874dec"
+    },
+    "linear_with_limits": {
+      "description": "Baseline + PR #762 (linear-with-limits bucketing)",
+      "commit_sha": "TO_BE_RESOLVED_AFTER_PR762_FETCH"
+    }
+  },
+  "hardware": {
+    "device": "Gaudi2/Gaudi3 (detect at runtime via hl-smi)",
+    "driver_version": "detect at runtime via hl-smi or modinfo habanalabs"
+  },
+  "software": {
+    "os": "detect at runtime",
+    "python_version": ">=3.10",
+    "pytorch_version": "detect at runtime (torch.__version__)",
+    "habana_sw_version": "detect at runtime (hl-smi -v or habana_frameworks.__version__)"
+  },
+  "repo": {
+    "remote_url": "https://github.com/vllm-project/vllm-gaudi",
+    "main_sha": "05cfbe69e795dfb68e7ba1232352a74c3b874dec"
+  },
+  "bucketing_strategies": {
+    "exponential": {
+      "source_file": "vllm_gaudi/extension/bucketing/exponential.py",
+      "env_vars": {
+        "VLLM_EXPONENTIAL_BUCKETING": "true (or unset, this is the default)"
+      },
+      "available_in": ["baseline", "linear_with_limits"]
+    },
+    "linear": {
+      "source_file": "vllm_gaudi/extension/bucketing/linear.py",
+      "env_vars": {
+        "VLLM_EXPONENTIAL_BUCKETING": "false"
+      },
+      "available_in": ["baseline", "linear_with_limits"]
+    },
+    "linear_with_limits": {
+      "source_file": "vllm_gaudi/extension/bucketing/linear.py",
+      "env_vars": {
+        "VLLM_EXPONENTIAL_BUCKETING": "false",
+        "VLLM_LINEAR_WITH_LIMITS": "true"
+      },
+      "available_in": ["linear_with_limits"],
+      "note": "Requires PR #762 cherry-picked on top of baseline"
+    }
+  }
+}
