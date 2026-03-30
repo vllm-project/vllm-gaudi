@@ -180,6 +180,26 @@ run_granite_inc_calibration_and_quantization_load_generate_test() {
     echo "Test with inc calibration and quantization with hw aligned scales on granite passed"
 }
 
+run_granite_4_h_load_generate_test() {
+    echo "➡️ Testing granite-4.0-h-small..."
+    RUNTIME_SCALE_PATCHING=1 \
+    VLLM_SKIP_WARMUP=true \
+    PT_HPU_LAZY_MODE=0 \
+    python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" \
+        --model ibm-granite/granite-4.0-h-small \
+        --block-size 128 \
+        --dtype bfloat16 \
+        --tensor-parallel-size 1 \
+        --max-model-len 43008 \
+        --gpu-memory-utilization 0.5 \
+        --max-num-seqs 32 \
+        --max-num-batched-tokens 8192 \
+        --override-generation-config '{"temperature":0}' \
+        --enable-chunked-prefill \
+        --no-enable-prefix-caching
+    echo "✅ Test with granite-4.0-h-small passed."
+}
+
 # AWQ test
 run_awq_load_generate_test() {
     echo "➡️ Testing awq inference with vllm-hpu plugin v1..."
@@ -288,25 +308,6 @@ run_llama3_70b_inc_dynamic_quant_test() {
 # If the score is below the threshold, the test will fail. For implementation details see:
 #   tests/models/language/generation/test_common.py
 
-# GSM8K on granite-4.0-h
-run_gsm8k_granite_4_test() {
-    echo "➡️ Testing GSM8K on granite-4-h..."
-    VLLM_EXPONENTIAL_BUCKETING=false \
-    VLLM_PROMPT_QUERY_BUCKET_MIN=256 \
-    VLLM_PROMPT_QUERY_BUCKET_MAX=4096 \
-    VLLM_PROMPT_QUERY_BUCKET_STEP=256 \
-    VLLM_DECODE_BS_BUCKET_MIN=16 \
-    VLLM_DECODE_BS_BUCKET_STEP=16 \
-    VLLM_DECODE_BS_BUCKET_MAX=16 \
-    VLLM_CONTIGUOUS_PA=true \
-    VLLM_SKIP_WARMUP=true \
-    ENABLE_APC=false \
-    ASYNC_SCHEDULING=true \
-    TP_SIZE=1 \
-    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/granite-4-h-small.yaml"
-    echo "✅ Test with granite-4-h passed."
-}
-
 # GSM8K on granite-8b
 run_gsm8k_granite_test() {
     echo "➡️ Testing GSM8K on granite-8b..."
@@ -341,7 +342,7 @@ run_gsm8k_qwen3_30b_test() {
 }
 
 
-# GSM8K on Qwen3.5-9B 
+# GSM8K on Qwen3.5-9B
 # TODO once Qwen3.5-35B-A3B compile time is improved, replace this test.
 # This test requires new transformers and huggingface_hub versions for Qwen3.5 model support, once VLLM supports latest transfomer,
 # we can remove the pip version pinning and restoration in this test and just rely on the environment having the right versions.
@@ -499,6 +500,7 @@ launch_all_tests() {
     run_llama3_per_tensor_scaling_load_generate_test
     run_llama3_modelopt_per_tensor_scaling_load_generate_test
     run_granite_inc_calibration_and_quantization_load_generate_test
+    run_granite_4_h_load_generate_test
     run_awq_load_generate_test
     run_gptq_load_generate_test
     run_compressed_w4a16_channelwise_load_generate_test
