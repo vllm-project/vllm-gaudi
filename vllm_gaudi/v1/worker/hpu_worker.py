@@ -93,6 +93,32 @@ class HPUWorker(WorkerBase):
         self.model_sleeping = False
         self.kv_cache_sleeping = False
         self.kv_cache_config = None
+        self._model_runner_stash: dict[tuple[object, ...], HPUModelRunner] = {}
+
+    def _apply_vllm_config(self, vllm_config: VllmConfig) -> None:
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        self.lora_config = vllm_config.lora_config
+        self.load_config = vllm_config.load_config
+        self.parallel_config = vllm_config.parallel_config
+        self.scheduler_config = vllm_config.scheduler_config
+        self.device_config = vllm_config.device_config
+        self.speculative_config = vllm_config.speculative_config
+        self.observability_config = vllm_config.observability_config
+
+    def _runner_stash_key(self, vllm_config: VllmConfig) -> tuple[object, ...]:
+        compile_cfg = vllm_config.compilation_config
+        return (
+            vllm_config.model_config.model,
+            vllm_config.model_config.dtype,
+            vllm_config.model_config.enforce_eager,
+            vllm_config.model_config.max_model_len,
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            vllm_config.cache_config.block_size,
+            tuple(getattr(compile_cfg, "compile_ranges_endpoints", ()) or ()),
+            tuple(getattr(compile_cfg, "compile_sizes", ()) or ()),
+        )
 
     def init_profiler(self):
         """Initialize the profiler."""
@@ -141,7 +167,8 @@ class HPUWorker(WorkerBase):
         init_worker_distributed_environment(self.vllm_config, self.rank, self.distributed_init_method, self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
-        self.model_runner = HPUModelRunner(vllm_config=self.vllm_config, is_driver_worker=self.is_driver_worker)
+        with set_current_vllm_config(self.vllm_config):
+            self.model_runner = HPUModelRunner(vllm_config=self.vllm_config, is_driver_worker=self.is_driver_worker)
         self.init_profiler()
 
     def shutdown(self):
@@ -156,9 +183,76 @@ class HPUWorker(WorkerBase):
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
-    def load_model(self) -> None:
+    def unload_model(self) -> dict[str, float | None]:
+        """Stash the current HPUModelRunner (weights already on CPU from sleep)
+        so its compiled ModuleCacher graph dict survives across model switches.
+        On a subsequent load_model() for the same model the runner is restored
+        directly, skipping warmup_graphs entirely.
+        """
+        with HabanaMemoryProfiler() as m:
+            if hasattr(self, 'model_runner') and self.model_runner is not None:
+                runner_config = getattr(self.model_runner, "vllm_config", self.vllm_config)
+                stash_key = self._runner_stash_key(runner_config)
+                logger.info("[HPUWorker] Stashing runner for model: %s", runner_config.model_config.model)
+                self._model_runner_stash[stash_key] = self.model_runner
+                self.model_runner = None  # type: ignore[assignment]
+            self.kv_cache_config = None
+            self.kv_cache_sleeping = False
+            gc.collect()
+            with contextlib.suppress(Exception):
+                import ctypes
+                libc = ctypes.CDLL("libc.so.6")
+                libc.malloc_trim(0)
+            with contextlib.suppress(Exception):
+                torch.hpu.synchronize()
+        msg = f"Stashing model runner took {m.get_summary_string()}"
+        logger.info(msg)
+
+        memory_after_stash_mb = self.get_hpu_used_memory_mb()
+
+        return {
+            "stash_memory_after_mb": memory_after_stash_mb,
+        }
+
+    def load_model(
+        self,
+        vllm_config: Optional[VllmConfig] = None,
+    ) -> None:
+        """Load a model. If vllm_config is provided, update config and rebuild runner.
+
+        If a runner was previously stashed for this model (weights on CPU from
+        a prior sleep→unload cycle) it is restored directly and weights are
+        moved back to HPU, skipping the expensive warmup_graphs phase.
+        """
+        if vllm_config is not None:
+            self._apply_vllm_config(vllm_config)
+
+            stash_key = self._runner_stash_key(vllm_config)
+            if stash_key in self._model_runner_stash:
+                # Runner is alive with compiled graph cache intact;
+                # weights are on CPU — just move them back to HPU.
+                logger.info("[HPUWorker] Restoring stashed runner for model: %s", vllm_config.model_config.model)
+                self.model_runner = self._model_runner_stash.pop(stash_key)
+                restored_config = getattr(self.model_runner, "vllm_config", self.vllm_config)
+                self._apply_vllm_config(restored_config)
+                # wake_up(weights) checks self.model_sleeping; set it first.
+                self.model_sleeping = True
+                self.wake_up(tags=["weights"])
+                # model_sleeping is cleared by wake_up; kv_cache handled by
+                # _initialize_kv_caches called separately by gaudi_reconfigure.
+                self.kv_cache_sleeping = False
+                return
+
+            with set_current_vllm_config(vllm_config):
+                self.model_runner = HPUModelRunner(
+                    vllm_config=vllm_config,
+                    is_driver_worker=self.is_driver_worker,
+                )
         with set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
+
+        self.model_sleeping = False
+        self.kv_cache_sleeping = False
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -333,6 +427,7 @@ class HPUWorker(WorkerBase):
         with HabanaMemoryProfiler() as m:
             self.kv_cache_config = kv_cache_config
             self.model_runner.initialize_kv_cache(kv_cache_config)
+            self.kv_cache_sleeping = False
             torch.hpu.synchronize()
         if len(self.model_runner.kv_caches) > 0:
             msg = (f"Usable num_blocks: {kv_cache_config.num_blocks}, "
@@ -416,6 +511,17 @@ class HPUWorker(WorkerBase):
 
         tp_rank = get_tp_group().rank_in_group
         return {tp_rank: metadata}
+
+    def get_hpu_used_memory_mb(self) -> float | None:
+        """Return currently used HPU memory in MB for this worker."""
+        if is_fake_hpu():
+            return None
+        try:
+            torch.hpu.synchronize()
+            free_bytes, total_bytes = torch.hpu.mem_get_info()
+            return (total_bytes - free_bytes) / (1024**2)
+        except Exception:
+            return None
 
     def sleep(self, level: int = 1) -> None:
         """Put the worker into sleep mode to reduce memory usage. Unlike GPU workers that use custom
