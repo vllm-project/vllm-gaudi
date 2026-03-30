@@ -335,7 +335,7 @@ _async_sched_module.AsyncScheduler = HPUAsyncScheduler
 # when KV-cache blocks are invalidated during OOM and token-count bookkeeping
 # becomes temporarily inconsistent.  Prometheus counters require non-negative
 # increments; clamping here prevents a crash in PrometheusStatLogger.record().
-import vllm.v1.metrics.stats as _stats_module
+import vllm.v1.metrics.stats as _stats_module  # noqa: E403
 _stats_get_by_source_orig = _stats_module.PromptTokenStats.get_by_source
 
 

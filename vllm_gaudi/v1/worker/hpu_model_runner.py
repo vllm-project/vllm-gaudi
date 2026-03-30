@@ -2787,9 +2787,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             else:
                 token_ids_split_tensors = torch.split(self.input_ids_hpu[:total_num_scheduled_tokens],
                                                       num_tokens_per_req[:num_decodes])
-                # token_ids_device was reshaped to [padded_batch*num_tokens, 1]
-                # via view(-1,1); write into the first num_decodes*num_tokens
-                # rows (not just num_decodes) to avoid a shape mismatch.
+                # token_ids was already reshaped to [padded_batch*num_tokens, 1]
+                # (via view(-1,1) in the CPU prepare path above) before the
+                # async_h2d_copy, so token_ids_device has the same flat shape.
+                # Index [:num_decodes*num_tokens] to write all rows for the
+                # decode region (not just the first num_decodes rows).
                 token_ids_device[:num_decodes * num_tokens] = \
                     pad_sequence(list(token_ids_split_tensors),
                                     batch_first=True,
