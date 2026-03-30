@@ -4,7 +4,6 @@ import contextlib
 import gc
 import math
 import os
-import queue
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Optional
 
@@ -90,15 +89,29 @@ class HPUWorker(WorkerBase):
         self.step_profiler = setup_step_profiler(self.profile_steps)
         self.step_debug = init_debug_logger('steps')
 
+        self.profiler_config = vllm_config.profiler_config
         self.model_sleeping = False
         self.kv_cache_sleeping = False
         self.kv_cache_config = None
 
     def init_profiler(self):
-        """Initialize the profiler."""
+        """Initialize the profiler.
+
+        Supports two paths:
+        1. New --profiler-config mechanism: stores config, profiler created lazily in profile().
+        2. Legacy VLLM_TORCH_PROFILER_DIR env var: creates profiler immediately.
+        """
+        # New --profiler-config path: defer profiler creation to profile()
+        if self.profiler_config is not None and self.profiler_config.profiler is not None:
+            self.profiler = None
+            logger.info("Profiler config detected (type=%s). Profiler will be created on first profile() call.",
+                        self.profiler_config.profiler)
+            return
+
+        # Legacy VLLM_TORCH_PROFILER_DIR path: create profiler immediately
         torch_profiler_dir = os.getenv('VLLM_TORCH_PROFILER_DIR')
         if torch_profiler_dir:
-            logger.warning("VLLM_TORCH_PROFILER_DIR is deprecated!")
+            logger.warning("VLLM_TORCH_PROFILER_DIR is deprecated! Use --profiler-config instead.")
             torch_profiler_trace_dir = torch_profiler_dir
             logger.info("Profiling enabled. Traces will be saved to: %s", torch_profiler_trace_dir)
             if os.getenv('VLLM_PROFILER_ENABLED') == 'full':
@@ -113,27 +126,14 @@ class HPUWorker(WorkerBase):
             ],
                                                    with_stack=with_stack,
                                                    on_trace_ready=fn(torch_profiler_trace_dir, use_gzip=True))
-
         else:
             self.profiler = None
 
     def start_profile(self):
-        if self.profiler is None:
-            raise RuntimeError("Profiler is not enabled.")
-        high_level_profiler = self.model_runner.profiler
-        with high_level_profiler.record_event('internal', 'start_profiler'):
-            # Clean up the queue
-            while True:
-                try:
-                    high_level_profiler.profiling_trace_events.get_nowait()
-                except queue.Empty:
-                    break
-            self.profiler.start()
+        self.profile(is_start=True)
 
     def stop_profile(self):
-        if self.profiler is None:
-            raise RuntimeError("Profiler is not enabled.")
-        self.profiler.stop()
+        self.profile(is_start=False)
 
     def init_device(self):
         self.device = torch.device("hpu")
@@ -395,13 +395,62 @@ class HPUWorker(WorkerBase):
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         return self.model_runner.take_draft_token_ids()
 
-    def profile(self, is_start: bool = True):
-        if self.profiler is None:
-            raise RuntimeError("Profiler is not enabled.")
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+        if self.profiler_config is None or self.profiler_config.profiler is None:
+            # Fall back to legacy profiler if available
+            if self.profiler is not None:
+                if is_start:
+                    self.profiler.start()
+                else:
+                    self.profiler.stop()
+                return
+            raise RuntimeError("Profiling is not enabled. Please set --profiler-config to enable "
+                               "profiling. Example: "
+                               "'--profiler-config.profiler=torch --profiler-config.torch_profiler_dir"
+                               "=YOUR_DIR_PATH_TO_DUMP_TRACE'")
+
         if is_start:
+            from vllm.distributed.utils import get_worker_rank_suffix
+
+            rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
+            trace_name = f"{profile_prefix}_{rank_suffix}" if profile_prefix else rank_suffix
+
+            if self.profiler is None:
+                profiler_type = self.profiler_config.profiler
+                if profiler_type == "torch":
+                    torch_profiler_trace_dir = self.profiler_config.torch_profiler_dir
+                    # NOTE: We use raw torch.profiler.profile instead of upstream's
+                    # TorchProfilerWrapper because its TorchProfilerActivityMap
+                    # does not include HPU. ProfilerActivity.HPU is required for
+                    # capturing device-side traces on Gaudi hardware.
+                    self.profiler = torch.profiler.profile(
+                        activities=[
+                            torch.profiler.ProfilerActivity.CPU,
+                            torch.profiler.ProfilerActivity.HPU,
+                        ],
+                        with_stack=self.profiler_config.torch_profiler_with_stack,
+                        with_flops=self.profiler_config.torch_profiler_with_flops,
+                        record_shapes=self.profiler_config.torch_profiler_record_shapes,
+                        profile_memory=self.profiler_config.torch_profiler_with_memory,
+                        on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                            torch_profiler_trace_dir,
+                            worker_name=trace_name,
+                            use_gzip=self.profiler_config.torch_profiler_use_gzip,
+                        ),
+                    )
+                    logger.debug("Starting HPU torch profiler with trace name: %s, dir: %s", trace_name,
+                                 torch_profiler_trace_dir)
+                else:
+                    raise ValueError(f"Unsupported profiler type for HPU: {profiler_type}")
+
             self.profiler.start()
         else:
+            if self.profiler is None:
+                logger.warning("Profiler was not started, nothing to stop.")
+                return
             self.profiler.stop()
+            # Reset so next profile(is_start=True) recreates the profiler
+            self.profiler = None
 
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1)
