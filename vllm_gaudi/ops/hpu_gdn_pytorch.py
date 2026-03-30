@@ -250,10 +250,12 @@ def hpu_chunk_gdr_phase_b(
         output_final_state,
     )
 
+
 @torch._dynamo.disable
 def _eager_reshape_output(core_h, S, padded_len, seq_len, H, Vdim):
     """Reshape core_h to output tensor in eager mode."""
     return core_h.permute(0, 1, 3, 2, 4).reshape(S, padded_len, H, Vdim)[:, :seq_len, :, :].reshape(-1, H, Vdim)
+
 
 def _hpu_chunk_gdr_phase_b_optimized(
     u_all: torch.Tensor,
@@ -780,6 +782,7 @@ def _recurrent_general_path(
     out = out.unsqueeze(0) if cu_seqlens is not None else out.view(B, T, HV, Vdim)
 
     return out, final_state
+
 
 def hpu_chunk_gated_delta_rule(
     q: torch.Tensor,

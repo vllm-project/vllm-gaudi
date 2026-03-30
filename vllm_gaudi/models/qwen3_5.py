@@ -24,9 +24,7 @@ def _save_ssm_state(core_attn_out, final_state, ssm_state, state_indices):
     the call — HPU drops dynamo-disabled calls whose results are unused.
     """
     safe_si = torch.remainder(state_indices, ssm_state.shape[0]).long()
-    ssm_state.index_copy_(
-        0, safe_si,
-        final_state.to(device=ssm_state.device, dtype=ssm_state.dtype))
+    ssm_state.index_copy_(0, safe_si, final_state.to(device=ssm_state.device, dtype=ssm_state.dtype))
     return core_attn_out
 
 
@@ -197,7 +195,11 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 beta = beta * token_mask_h
 
             core_attn_out_result, final_state = hpu_chunk_gated_delta_rule(
-                q=query, k=key, v=value, g=g, beta=beta,
+                q=query,
+                k=key,
+                v=value,
+                g=g,
+                beta=beta,
                 initial_state=initial_state,
                 output_final_state=True,
                 use_qk_l2norm_in_kernel=True,
@@ -208,7 +210,10 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             # State save in dynamo-disabled wrapper — index_copy_ is
             # silently dropped by HPU torch.compile on aliased tensors.
             core_attn_out_result = _save_ssm_state(
-                core_attn_out_result, final_state, ssm_state, state_indices,
+                core_attn_out_result,
+                final_state,
+                ssm_state,
+                state_indices,
             )
 
             non_spec_out = core_attn_out_result.squeeze(0)
