@@ -163,8 +163,8 @@ class Env:
                     raise RuntimeError(error)
                 return value
             except Exception as e:
-                msg = f'{self.name}: exception during construction: {e}'
-                raise RuntimeError(msg)
+                msg = f'{self.name}: failed to process environment variable'
+                raise RuntimeError(msg) from e
         return None
 
 

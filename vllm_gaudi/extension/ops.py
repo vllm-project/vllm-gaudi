@@ -29,9 +29,17 @@ FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
 if is_hpu_gaudi2:
     FP8_MAX = torch.finfo(torch.float8_e4m3fnuz).max
 
+import logging
 import os
+
+logger = logging.getLogger(__name__)
+
 # MAX_EXPERTS_PER_SLICE is needed for 1.20, up to 64 experts per slice
-MAX_EXPERTS_PER_SLICE = int(os.environ.get("MAX_EXPERTS_PER_SLICE", -1))
+try:
+    MAX_EXPERTS_PER_SLICE = int(os.environ.get("MAX_EXPERTS_PER_SLICE", -1))
+except ValueError:
+    logger.warning("Invalid MAX_EXPERTS_PER_SLICE value, using default -1")
+    MAX_EXPERTS_PER_SLICE = -1
 
 
 def _as_activation_str(activation):
