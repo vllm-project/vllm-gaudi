@@ -358,8 +358,7 @@ def ensure_decodes_first(b: InputBatch):
         b.swap_states(first_prompt_index, last_decode_index)
 
 
-def ensure_multi_token_decodes_last(b: InputBatch,
-                                    scheduled_tokens: dict) -> None:
+def ensure_multi_token_decodes_last(b: InputBatch, scheduled_tokens: dict) -> None:
     """Within the decode region, sort single-token decodes before multi-token ones.
 
     When spec-decode is not configured, resumed/catch-up decode requests with
@@ -1856,13 +1855,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
             # Must be a true prompt OR a multi-token catch-up decode re-routed
             # to the prefill path (num_computed may be >= num_prompt for these).
-            assert num_computed_tokens < num_prompt_tokens or (
-                num_scheduled_tokens > 1
-                and not self.vllm_config.speculative_config
-            ), (f"Unexpected at prompt-traversal idx {i}: "
-                f"computed={num_computed_tokens}, "
-                f"prompt={num_prompt_tokens}, "
-                f"scheduled={num_scheduled_tokens}")
+            assert num_computed_tokens < num_prompt_tokens or (num_scheduled_tokens > 1
+                                                               and not self.vllm_config.speculative_config), (
+                                                                   f"Unexpected at prompt-traversal idx {i}: "
+                                                                   f"computed={num_computed_tokens}, "
+                                                                   f"prompt={num_prompt_tokens}, "
+                                                                   f"scheduled={num_scheduled_tokens}")
             # NOTE(kzawora): In preempted sequences, num_output_tokens can be > 0, and still be a valid prefill
 
             prompt_req_ids.append(req_id)
@@ -2787,9 +2785,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if num_tokens == 1:
                 token_ids_device[:num_decodes] = self.input_ids_hpu[:num_decodes].view(-1, 1)
             else:
-                token_ids_split_tensors = torch.split(
-                    self.input_ids_hpu[:total_num_scheduled_tokens],
-                    num_tokens_per_req[:num_decodes])
+                token_ids_split_tensors = torch.split(self.input_ids_hpu[:total_num_scheduled_tokens],
+                                                      num_tokens_per_req[:num_decodes])
                 # token_ids_device was reshaped to [padded_batch*num_tokens, 1]
                 # via view(-1,1); write into the first num_decodes*num_tokens
                 # rows (not just num_decodes) to avoid a shape mismatch.
@@ -4100,9 +4097,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # _get_prompts_and_decodes routes them through the prefill path,
         # preventing bucket overflow and Habana workspace OOM.
         if not self.vllm_config.speculative_config:
-            ensure_multi_token_decodes_last(
-                self.input_batch,
-                scheduler_output.num_scheduled_tokens)
+            ensure_multi_token_decodes_last(self.input_batch, scheduler_output.num_scheduled_tokens)
         # Prepare prompts/decodes info
         pd_info = self._get_prompts_and_decodes(scheduler_output)
         num_decodes = len(pd_info.decode_req_ids)
