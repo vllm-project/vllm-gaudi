@@ -51,11 +51,8 @@ class HPUAsyncScheduler(AsyncScheduler):
             else:
                 req_num_computed_tokens = request.num_cached_tokens
 
-            req_num_computed_blocks = (
-                req_num_computed_tokens + self.block_size - 1
-            ) // self.block_size
-            for idx, block_id in zip(range(req_num_computed_blocks),
-                                     req_block_ids):
+            req_num_computed_blocks = (req_num_computed_tokens + self.block_size - 1) // self.block_size
+            for idx, block_id in zip(range(req_num_computed_blocks), req_block_ids):
                 if block_id not in invalid_block_ids:
                     continue
 

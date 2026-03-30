@@ -338,7 +338,9 @@ _async_sched_module.AsyncScheduler = HPUAsyncScheduler
 # increments; clamping here prevents a crash in PrometheusStatLogger.record().
 _stats_get_by_source_orig = _stats_module.PromptTokenStats.get_by_source
 
+
 def _hpu_get_by_source(self, source: str) -> int:
     return max(0, _stats_get_by_source_orig(self, source))
+
 
 _stats_module.PromptTokenStats.get_by_source = _hpu_get_by_source
