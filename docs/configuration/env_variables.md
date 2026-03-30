@@ -127,7 +127,7 @@ FusedSDPA can be split into smaller chunks to improve performance by:
 ## Additional Performance Tuning Parameters for the MiniMaxText01RMSNormTP
 The allreduce in MiniMaxText01RMSNormTP is a relative large overhead for small batched tokens. The overhead could be reduced by disable TP for small batched tokens with the trade-off of loading full weights for the Q and K projection. The following environment variables are used to control this optimization.
 
-| Parameter name               | Description                                                     | Default value                                               |
-| ---------------------------- | --------------------------------------------------------------- | ----------------------------------------------------------- |
-| `VLLM_ADAPTIVE_NORM_TP`      | Enable adaptive TP for the RMSNorm to reduce the HCCL overhead. | `True` for `model_type=='minimax_m2'` and `False` otherwise |
-| `VLLM_ADAPTIVE_NORM_TP_THLD` | Threshold bellow which to disable TP for the RMSNorm.           | `256`                                                       |
+| Parameter name               | Description                                                          | Default value                                               |
+| ---------------------------- | -------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `VLLM_ADAPTIVE_NORM_TP`      | Enable adaptive TP for the RMSNorm to reduce the HCCL overhead.      | `True` for `model_type=='minimax_m2'` and `False` otherwise |
+| `VLLM_ADAPTIVE_NORM_TP_THLD` | Batched tokens threshold bellow which to disable TP for the RMSNorm. | `256`                                                       |
