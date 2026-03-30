@@ -36,6 +36,14 @@ _GDN_COMPUTE_DTYPE = torch.float32 if os.getenv("VLLM_GDN_COMPUTE_FP32", "1") ==
 _USE_EXACT_SOLVE = os.getenv("VLLM_GDN_EXACT_SOLVE", "0") == "1"
 
 
+@torch._dynamo.disable
+def _preprocess_qk_l2norm(q, k):
+    """L2norm in eager mode — HPU torch.compile miscompiles l2norm."""
+    q = _l2norm_last_dim(q.to(torch.float32))
+    k = _l2norm_last_dim(k.to(torch.float32))
+    return q, k
+
+
 def hpu_chunk_gdr_preprocess(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -68,12 +76,11 @@ def hpu_chunk_gdr_preprocess(
         else:
             raise ValueError(f"Unsupported head mapping: q/k heads={H}, value heads={HV}.")
 
+    if use_qk_l2norm_in_kernel:
+        q, k = _preprocess_qk_l2norm(q, k)
+
     if scale is None:
         scale = k.shape[-1]**-0.5
-
-    if use_qk_l2norm_in_kernel:
-        q = _l2norm_last_dim(q.to(torch.float32))
-        k = _l2norm_last_dim(k.to(torch.float32))
 
     # Compute dtype controlled by VLLM_GDN_COMPUTE_FP32 env var (default: bf16)
     qf = q.reshape(-1, H, Kdim).to(_GDN_COMPUTE_DTYPE)
@@ -250,7 +257,6 @@ def _eager_reshape_output(core_h, S, padded_len, seq_len, H, Vdim):
     return core_h.permute(0, 1, 3, 2, 4).reshape(S, padded_len, H, Vdim)[:, :seq_len, :, :].reshape(-1, H, Vdim)
 
 
-#@torch._dynamo.disable
 def _hpu_chunk_gdr_phase_b_optimized(
     u_all: torch.Tensor,
     w_all: torch.Tensor,
@@ -778,10 +784,6 @@ def _recurrent_general_path(
     return out, final_state
 
 
-_GDN_CAPTURE_DIR = os.getenv("VLLM_GDN_CAPTURE_DIR", "")
-_gdn_capture_done = False
-
-
 def hpu_chunk_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -810,37 +812,6 @@ def hpu_chunk_gated_delta_rule(
     requires a device-to-host sync) and constructs uniform seq_ranges
     directly.  This makes the function fully compilable with torch.compile.
     """
-    # --- one-shot tensor capture for debugging ---
-    global _gdn_capture_done
-    if _GDN_CAPTURE_DIR and not _gdn_capture_done:
-        _gdn_capture_done = True
-        _cap = _GDN_CAPTURE_DIR
-        os.makedirs(_cap, exist_ok=True)
-        torch.save(q.detach().cpu(), os.path.join(_cap, "q.pt"))
-        torch.save(k.detach().cpu(), os.path.join(_cap, "k.pt"))
-        torch.save(v.detach().cpu(), os.path.join(_cap, "v.pt"))
-        torch.save(g.detach().cpu(), os.path.join(_cap, "g.pt"))
-        torch.save(beta.detach().cpu(), os.path.join(_cap, "beta.pt"))
-        if initial_state is not None:
-            torch.save(initial_state.detach().cpu(), os.path.join(_cap, "initial_state.pt"))
-        import json
-        with open(os.path.join(_cap, "meta.json"), "w") as f:
-            json.dump(dict(
-                scale=scale,
-                output_final_state=output_final_state,
-                use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-                chunk_size=chunk_size,
-                prefill_num_seqs=prefill_num_seqs,
-                prefill_seq_len=prefill_seq_len,
-                neumann_iters=neumann_iters,
-                q_shape=list(q.shape),
-                v_shape=list(v.shape),
-                q_dtype=str(q.dtype),
-            ),
-                      f,
-                      indent=2)
-        logger.info("GDN capture saved to %s", _cap)
-
     # https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fla/ops/chunk_scaled_dot_kkt.py#L132
     B, T, H, Kdim = q.shape
     _, _, HV, Vdim = v.shape
