@@ -70,9 +70,8 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         is_prompt = bool(getattr(attn_metadata, "is_prompt", False))
         state_indices = self._resolve_state_indices(attn_metadata)
 
-        self_kv_cache = self.kv_cache[0]
-        conv_state = self_kv_cache[0]
-        ssm_state = self_kv_cache[1]
+        conv_state = self.kv_cache[0]
+        ssm_state = self.kv_cache[1]
 
         query_start_loc = attn_metadata.query_start_loc_p
         has_initial_state = getattr(attn_metadata, "has_initial_states_p", None)
