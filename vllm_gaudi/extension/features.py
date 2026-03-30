@@ -144,5 +144,6 @@ def get_features():
         Value('use_hpu_aligned_scale', False, env_var='HPU_ALIGNED_SCALE', env_var_type=boolean),
         Value('adaptive_norm_tp', ModelType('minimax_m2'), env_var='VLLM_ADAPTIVE_NORM_TP', env_var_type=boolean),
         Value('adaptive_norm_tp_thld', 256, env_var='VLLM_ADAPTIVE_NORM_TP_THLD', env_var_type=int),
+        Value('enable_unit_moe', False, env_var='VLLM_ENABLE_UNIT_MOE', env_var_type=boolean),
     ]
     return split_values_and_flags(features)
