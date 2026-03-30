@@ -36,7 +36,11 @@ class Transfer:
 
 
 is_hetero = os.getenv('PT_HPU_ENABLE_RESTORE_KV_LAYOUT', '0') == '1'
-block_factor = int(os.getenv('PT_HPU_BLOCK_SIZE_FACTOR', '1'))
+try:
+    block_factor = int(os.getenv('PT_HPU_BLOCK_SIZE_FACTOR', '1'))
+except ValueError:
+    logger.warning("Invalid PT_HPU_BLOCK_SIZE_FACTOR value, using default 1")
+    block_factor = 1
 
 
 def swap_blocks(
@@ -360,12 +364,23 @@ def get_handlers(
     attn_backends: dict[str, type[AttentionBackend]],
 ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
     if not self._handlers:
-        assert len(self.gpu_block_size) == 1
-        gpu_block_size = self.gpu_block_size[0]
+        gpu_block_size = self.gpu_block_size
+        if isinstance(gpu_block_size, (list, tuple)):
+            assert len(gpu_block_size) == 1
+            gpu_block_size = gpu_block_size[0]
+        gpu_block_size = int(gpu_block_size)
+
+        # Upstream OffloadingSpec uses offloaded_block_size for CPU-side blocks.
+        # Keep backward compatibility with older plugin fields.
+        cpu_block_size = getattr(self, "offloaded_block_size", None)
+        if cpu_block_size is None:
+            cpu_block_size = gpu_block_size * self.block_size_factor
+        cpu_block_size = int(cpu_block_size)
+
         self._handlers = CpuGpuOffloadingHandlers(
             attn_backends=attn_backends,
             gpu_block_size=gpu_block_size,
-            cpu_block_size=gpu_block_size * self.block_size_factor,
+            cpu_block_size=cpu_block_size,
             num_cpu_blocks=self.num_blocks,
             gpu_caches=kv_caches,
         )

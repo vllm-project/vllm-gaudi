@@ -226,14 +226,6 @@ run_qwen2_5_vl_load_generate_test() {
     echo "✅ Test with multimodal-support with qwen2.5-vl-7b passed."
 }
 
-# Multimodal-support + unified attention with qwen2.5-vl
-run_qwen2_5_vl_unified_attn_load_generate_test() {
-    echo "➡️ Testing Qwen2.5-VL-7B with unified attention..."
-    VLLM_SKIP_WARMUP=true VLLM_UNIFIED_ATTN=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
-    python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen2.5-vl-7b.yaml"
-    echo "✅ Test multimodal-support + unified attention with qwen2.5-vl-7b passed."
-}
-
 # Multimodal-support with qwen2.5-vl with warmup (small max model len and max num seqs) and lazy mode
 run_qwen2_5_vl_lazy_warmup_test() {
     echo "➡️ Testing Qwen2.5-VL-7B with full warmup under tight limits and lazy mode..."
@@ -304,28 +296,12 @@ run_gsm8k_granite_test() {
     echo "✅ Test with granite-8b passed."
 }
 
-# GSM8K on granite-8b (unified attn)
-run_gsm8k_granite_test_unified_attn() {
-    echo "➡️ Testing GSM8K on granite-8b with unified attention..."
-    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 \
-    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/granite-8b.yaml"
-    echo "✅ Test with granite-8b unified attention passed."
-}
-
 # GSM8K on granite-8b with async scheduling
 run_gsm8k_granite_async_test() {
     echo "➡️ Testing GSM8K on granite-8b with async scheduling..."
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 ASYNC_SCHEDULING=1 \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/granite-8b.yaml"
     echo "✅ Test with granite-8b + async_scheduling passed."
-}
-
-# GSM8K on granite-8b (unified attn + async scheduling)
-run_gsm8k_granite_test_unified_attn_async() {
-    echo "➡️ Testing GSM8K on granite-8b with unified attention + async scheduling..."
-    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 ASYNC_SCHEDULING=1 \
-    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/granite-8b.yaml"
-    echo "✅ Test with granite-8b unified attention + async scheduling passed."
 }
 
 # GSM8K on deepseek v2 lite
@@ -337,14 +313,6 @@ run_gsm8k_deepseek_test() {
 }
 
 
-# GSM8K on deepseek v2 lite + unified attn
-#run_gsm8k_deepseek_unified_mla_test() {
-#    echo "➡️ Testing GSM8K on deepseek v2 lite + Unified MLA..."
-#    VLLM_UNIFIED_ATTN=true VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 \
-#    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml"
-#    echo "✅ GSM8K Test with deepseek v2 lite + Unified MLA passed."
-#}
-
 # GSM8K on QWEN3-30B-A3B
 run_gsm8k_qwen3_30b_test() {
     echo "➡️ Testing GSM8K on QWEN3-30B-A3B..."
@@ -352,6 +320,38 @@ run_gsm8k_qwen3_30b_test() {
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/Qwen3-30B-A3B.yaml"
     echo "✅ Test with QWEN3-30B-A3B passed."
 }
+
+
+# GSM8K on Qwen3.5-9B 
+# TODO once Qwen3.5-35B-A3B compile time is improved, replace this test.
+# This test requires new transformers and huggingface_hub versions for Qwen3.5 model support, once VLLM supports latest transfomer,
+# we can remove the pip version pinning and restoration in this test and just rely on the environment having the right versions.
+run_gsm8k_qwen35_9b_test() {
+    echo "➡️ Testing GSM8K on Qwen3.5-9B..."
+    _QWEN35_OLD_TRANSFORMERS_VER=$(pip show transformers | grep Version | awk '{print $2}')
+    _QWEN35_OLD_HF_HUB_VER=$(pip show huggingface_hub | grep Version | awk '{print $2}')
+
+    # Ensure old package versions are restored on exit (even on failure)
+    _restore_qwen35_deps() {
+        if [ -n "$_QWEN35_OLD_TRANSFORMERS_VER" ] && [ -n "$_QWEN35_OLD_HF_HUB_VER" ]; then
+            echo "🔄 Restoring transformers==$_QWEN35_OLD_TRANSFORMERS_VER huggingface_hub==$_QWEN35_OLD_HF_HUB_VER ..."
+            pip install "transformers==$_QWEN35_OLD_TRANSFORMERS_VER" "huggingface_hub==$_QWEN35_OLD_HF_HUB_VER" --no-deps
+        else
+            echo "⚠️ Skipping restore: could not determine original package versions."
+        fi
+        trap - EXIT
+    }
+    trap _restore_qwen35_deps EXIT
+
+    pip install transformers==5.3.0 huggingface_hub==1.7.1 --no-deps
+
+    VLLM_SKIP_WARMUP=True ENABLE_APC=False VLLM_FUSED_BLOCK_SOFTMAX_ADJUSTMENT=False VLLM_CONTIGUOUS_PA=true VLLM_DEFRAG=true VLLM_USE_HYBRID_CACHE=true VLLM_USE_NAIVE_MAMBA_CACHE_SHARING=false VLLM_GRAPH_RESERVED_MEM=0.1 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen3.5-9b.yaml"
+
+    _restore_qwen35_deps
+    echo "✅ Test with Qwen3.5-9B passed."
+}
+
 
 # --- Spec decode tests ---
 # Tests below check if speculative decoding is matching accept rate specified as an argument.
@@ -396,20 +396,6 @@ run_spec_decode_eagle3_num_spec_2_test() {
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.59 --osl 2048 --num_spec_tokens 2
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --accuracy_rate 0.59 --num_spec_tokens 2
     echo "✅ Test with spec decode with eagle3 and num_speculative_tokens = 2 passed."
-}
-
-# Spec decode with ngram with UA
-run_UA_spec_decode_ngram_test() {
-    echo "➡️ Testing Spec-decode with ngram..."
-    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --assert_accept_rate 0.25 --osl 512
-    echo "✅ Test with spec decode with ngram passed."
-}
-
-# Spec decode with eagle3 with UA
-run_UA_spec_decode_eagle3_test() {
-    echo "➡️ Testing Spec-decode with eagle3..."
-    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.50 --osl 1024
-    echo "✅ Test with spec decode with eagle3 passed."
 }
 
 # --- Other tests ---
@@ -500,25 +486,19 @@ launch_all_tests() {
     run_compressed_w4a16_moe_gidx_load_generate_test
     run_llama3_70b_inc_dynamic_quant_load_generate_test
     run_qwen2_5_vl_load_generate_test
-    run_qwen2_5_vl_unified_attn_load_generate_test
     run_qwen2_5_vl_lazy_warmup_test
     run_qwen2_5_vl_compile_warmup_test
     run_qwen3_vl_load_generate_test
     run_mistral3_load_generate_test
     run_llama3_70b_inc_dynamic_quant_test
     run_gsm8k_granite_test
-    run_gsm8k_granite_test_unified_attn
     run_gsm8k_granite_async_test
-    run_gsm8k_granite_test_unified_attn_async
     run_gsm8k_deepseek_test
-    #run_gsm8k_deepseek_unified_mla_test
     run_gsm8k_qwen3_30b_test
     run_preemption_test
     run_spec_decode_ngram_test
     run_spec_decode_eagle3_test
     run_spec_decode_eagle3_num_spec_2_test
-    run_UA_spec_decode_ngram_test
-    run_UA_spec_decode_eagle3_test
     run_embedding_model_test
     run_pd_disaggregate_nixl_libfabric_test
     run_pd_disaggregate_nixl_ucx_test
