@@ -592,10 +592,17 @@ def hpu_fused_recurrent_gated_delta_rule(
         # better HPU graph performance (no implicit copies or graph breaks).
         if ssm_state_indices is not None:
             sidx = ssm_state_indices.reshape(-1).to(dtype=torch.long, device=device)
-            h_batch = final_state.index_select(0, sidx).to(_GDN_COMPUTE_DTYPE)
+            # Clamp out-of-range indices to 0 so index_select never receives
+            # negative or too-large values (mirrors the prefill validity
+            # guard).  The caller is expected to supply valid indices for real
+            # sequences; this protects only padded/dummy entries.
+            sidx_valid = (sidx >= 0) & (sidx < final_state.shape[0])
+            sidx_safe = torch.where(sidx_valid, sidx, torch.zeros_like(sidx))
+            h_batch = final_state.index_select(0, sidx_safe).to(_GDN_COMPUTE_DTYPE)
         else:
-            sidx = torch.arange(num_seqs, dtype=torch.long, device=device)
-            h_batch = final_state.index_select(0, sidx).to(_GDN_COMPUTE_DTYPE)
+            sidx_safe = torch.arange(num_seqs, dtype=torch.long, device=device)
+            sidx_valid = None
+            h_batch = final_state.index_select(0, sidx_safe).to(_GDN_COMPUTE_DTYPE)
 
         # Vectorized recurrent step — all N sequences in one pass.
         q_s = qf * scale  # [N, H, K]
@@ -607,7 +614,13 @@ def hpu_fused_recurrent_gated_delta_rule(
         out_batch = torch.matmul(h_batch, q_s.unsqueeze(-1)).squeeze(-1)  # [N, HV, V]
 
         # Scatter ONLY the N modified states back — no full-buffer round-trip.
-        final_state.index_copy_(0, sidx, h_batch.to(final_state.dtype))
+        # For invalid (padded) entries, write back the original state so the
+        # cache is not corrupted.
+        h_write = h_batch.to(final_state.dtype)
+        if sidx_valid is not None:
+            orig = final_state.index_select(0, sidx_safe)
+            h_write = torch.where(sidx_valid.view(-1, 1, 1, 1), h_write, orig)
+        final_state.index_copy_(0, sidx_safe, h_write)
 
         out_result = out_batch.to(v.dtype)
         out_result = out_result.unsqueeze(0) if cu_seqlens is not None else out_result.view(B, T, HV, Vdim)

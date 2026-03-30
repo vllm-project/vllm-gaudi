@@ -6159,7 +6159,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         self._PAD_BLOCK_ID = num_blocks
         self._PAD_SLOT_ID = num_blocks * self.block_size
-        self._MAMBA_PAD_BLOCK_ID = -1
+        # Use the dummy block (num_blocks) as the mamba pad block ID,
+        # consistent with _PAD_BLOCK_ID.  The previous value of -1 caused
+        # undefined behaviour in index_select / index_copy_ on HPU during
+        # decode when padded batch entries accessed mamba/GDN state tensors.
+        self._MAMBA_PAD_BLOCK_ID = num_blocks
         self._dummy_num_blocks = num_blocks
 
         if has_kv_transfer_group():
