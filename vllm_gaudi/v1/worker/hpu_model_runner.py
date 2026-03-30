@@ -168,6 +168,106 @@ def _override_platform_device_type(device_type: str):
         current_platform.device_type = original
 
 
+def _move_remaining_tensors_to_device(model: torch.nn.Module, device: str) -> None:
+    """Move non-Parameter/non-buffer tensors left on the wrong device.
+
+    ``nn.Module.to()`` only traverses ``_parameters``, ``_buffers`` and
+    child ``_modules``.  Tensors stored as plain attributes or inside
+    Python lists, tuples, or dicts (e.g. INC scale inverses, deepstack
+    embeds, dynamic-KV-quant range scalars) are invisible to it.  This
+    helper walks every module's ``__dict__`` and moves stray tensors
+    in-place.
+    """
+    target_type = torch.device(device).type
+
+    def _move_obj(obj):
+        """Recursively move tensors in containers to the target device.
+
+        Returns (new_obj, moved_count, changed).
+        """
+        if isinstance(obj, torch.nn.Module):
+            return obj, 0, False
+        if isinstance(obj, torch.nn.Parameter):
+            return obj, 0, False
+        if isinstance(obj, torch.Tensor):
+            if obj.device.type != target_type:
+                return obj.to(device), 1, True
+            return obj, 0, False
+        if isinstance(obj, list):
+            moved_here = 0
+            changed = False
+            for i, item in enumerate(obj):
+                new_item, cnt, item_changed = _move_obj(item)
+                if item_changed:
+                    obj[i] = new_item
+                    changed = True
+                moved_here += cnt
+            return obj, moved_here, changed
+        if isinstance(obj, tuple):
+            moved_here = 0
+            changed = False
+            new_items = []
+            for item in obj:
+                new_item, cnt, item_changed = _move_obj(item)
+                new_items.append(new_item)
+                moved_here += cnt
+                if item_changed:
+                    changed = True
+            if changed:
+                return tuple(new_items), moved_here, True
+            return obj, moved_here, False
+        if isinstance(obj, dict):
+            moved_here = 0
+            changed = False
+            for k, v in list(obj.items()):
+                new_v, cnt, v_changed = _move_obj(v)
+                if v_changed:
+                    obj[k] = new_v
+                    changed = True
+                moved_here += cnt
+            return obj, moved_here, changed
+        return obj, 0, False
+
+    # Internal nn.Module registry attributes that should never be touched.
+    _SKIP_ATTRS = frozenset({
+        "_parameters",
+        "_buffers",
+        "_modules",
+        "_non_persistent_buffers_set",
+        "_backward_pre_hooks",
+        "_backward_hooks",
+        "_is_full_backward_hook",
+        "_forward_hooks",
+        "_forward_hooks_with_kwargs",
+        "_forward_hooks_always_called",
+        "_forward_pre_hooks",
+        "_forward_pre_hooks_with_kwargs",
+        "_state_dict_hooks",
+        "_state_dict_pre_hooks",
+        "_load_state_dict_pre_hooks",
+        "_load_state_dict_post_hooks",
+    })
+
+    moved = 0
+    for mod in model.modules():
+        for attr_name in list(mod.__dict__.keys()):
+            # Skip PyTorch's internal registry dicts and registered
+            # parameters, buffers, and child modules — all of these
+            # are already handled by Module.to().
+            if attr_name in _SKIP_ATTRS:
+                continue
+            if attr_name in mod._parameters or attr_name in mod._buffers or attr_name in mod._modules:
+                continue
+            obj = mod.__dict__[attr_name]
+            new_obj, cnt, changed = _move_obj(obj)
+            if cnt:
+                moved += cnt
+            if changed:
+                mod.__dict__[attr_name] = new_obj
+    if moved:
+        logger.info("Moved %d stray tensors to %s", moved, device)
+
+
 class BucketingFailedException(Exception):
     pass
 
@@ -4019,6 +4119,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     raise ValueError("Unknown quantization config mode,"
                                      "please validate quantization config file")
                 self._sync_shared_moe_gates()
+                if not is_fake_hpu():
+                    self.model = self.model.to("hpu")
+                    _move_remaining_tensors_to_device(self.model, "hpu")
+                    htorch.core.mark_step()
                 if not disable_mark_scales_as_const:
                     htcore.hpu_initialize(self.model, mark_only_scales_as_const=True)
             self.inc_initialized_successfully = True
@@ -4340,6 +4444,25 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         _apply_inc_patch()
         self._detached_moe_gates: set[int] = set()
         self._remove_duplicate_submodules()
+
+        # INC's PatchedMixtralMoE accesses kernel flags directly on
+        # the module. Reuse the existing _sync_moe_kernel_flags logic
+        # (which reads from moe_parallel_config) so all 5 flags are set
+        # before INC conversion.
+        def _sync_moe_kernel_flags(module: torch.nn.Module):
+            moe_config = getattr(module, "moe_config", None)
+            for name in (
+                    "use_pplx_kernels",
+                    "use_deepep_ht_kernels",
+                    "use_deepep_ll_kernels",
+                    "use_mori_kernels",
+                    "use_fi_all2allv_kernels",
+            ):
+                setattr(module, name, bool(getattr(moe_config, name, False)))
+
+        for mod in self.model.modules():
+            if isinstance(mod, FusedMoE):
+                _sync_moe_kernel_flags(mod)
 
     def log_graph_warmup_summary(self, buckets, is_prompt, total_mem):
         phase = f'Graph/{"Prompt" if is_prompt else "Decode"}'
