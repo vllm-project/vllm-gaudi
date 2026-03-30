@@ -338,8 +338,12 @@ class HPUWorker(WorkerBase):
         # recipes we will use the extra memory for graphs/blocks
         free_hpu_memory = torch.hpu.mem_get_info()[0]
 
-        graph_reserved_mem = (float(os.environ.get('VLLM_GRAPH_RESERVED_MEM', '0.1'))
-                              if not self.model_config.enforce_eager else 0)
+        try:
+            graph_reserved_mem = (float(os.environ.get('VLLM_GRAPH_RESERVED_MEM', '0.1'))
+                                  if not self.model_config.enforce_eager else 0)
+        except ValueError:
+            graph_reserved_mem = 0.0 if self.model_config.enforce_eager else 0.1
+            logger.warning("Invalid VLLM_GRAPH_RESERVED_MEM value, using default %s", graph_reserved_mem)
         graph_headroom = 1 - graph_reserved_mem
         available_hpu_memory = free_hpu_memory * \
             self.cache_config.gpu_memory_utilization

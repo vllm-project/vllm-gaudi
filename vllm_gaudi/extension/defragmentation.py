@@ -228,6 +228,7 @@ class OnlineDefragmenter:
             k_cache = self.kv_caches[0][0]
             num_blocks_available = k_cache.shape[0] // self.block_size
         except Exception:
+            logger.warning("Failed to determine available blocks from KV cache, defaulting to 0")
             num_blocks_available = 0
         if num_blocks_available < 2:
             logger.warning("Skipping defragmenter warmup, insufficient blocks (%s)", num_blocks_available)
