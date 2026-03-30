@@ -21,8 +21,7 @@ class HPUAsyncScheduler(AsyncScheduler):
         """
         output = super().schedule()
         for request in self.running:
-            if (request.num_cached_tokens
-                    < request.num_external_computed_tokens):
+            if (request.num_cached_tokens < request.num_external_computed_tokens):
                 request.num_cached_tokens = request.num_computed_tokens
         return output
 
@@ -45,13 +44,10 @@ class HPUAsyncScheduler(AsyncScheduler):
             marked_invalid_block = False
             req_id = request.request_id
             # TODO (davidb): add support for hybrid memory allocator
-            (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
+            (req_block_ids, ) = self.kv_cache_manager.get_block_ids(req_id)
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                req_num_computed_tokens = (
-                    request.num_computed_tokens
-                    if req_id in self.failed_recving_kv_req_ids
-                    else len(req_block_ids) * self.block_size
-                )
+                req_num_computed_tokens = (request.num_computed_tokens if req_id in self.failed_recving_kv_req_ids else
+                                           len(req_block_ids) * self.block_size)
             else:
                 req_num_computed_tokens = request.num_cached_tokens
 
@@ -75,9 +71,7 @@ class HPUAsyncScheduler(AsyncScheduler):
 
                 marked_invalid_block = True
                 request.num_computed_tokens = idx * self.block_size
-                num_affected_tokens = (
-                    req_num_computed_tokens - request.num_computed_tokens
-                )
+                num_affected_tokens = (req_num_computed_tokens - request.num_computed_tokens)
                 total_affected_tokens += num_affected_tokens
                 # Clamp to 0: num_affected_tokens may exceed the number of
                 # externally-computed tokens when OOM-invalidation spans
@@ -91,9 +85,7 @@ class HPUAsyncScheduler(AsyncScheduler):
 
             if is_affected:
                 if not marked_invalid_block:
-                    total_affected_tokens += (
-                        request.num_computed_tokens - request.num_cached_tokens
-                    )
+                    total_affected_tokens += (request.num_computed_tokens - request.num_cached_tokens)
                     request.num_computed_tokens = request.num_cached_tokens
 
                 affected_req_ids.add(request.request_id)
