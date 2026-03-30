@@ -515,52 +515,52 @@ async def _run_multi_model_server_worker(
             all_model_paths,
             model_max_lens,
     ):
-        supported_tasks = await engine_client.get_supported_tasks()
-        logger.info("Supported tasks: %s", supported_tasks)
+        try:
+            supported_tasks = await engine_client.get_supported_tasks()
+            logger.info("Supported tasks: %s", supported_tasks)
 
-        app = build_app(args, supported_tasks)
-        app.state.multi_model_manager = manager
-        app.state.multi_model_engine_client = engine_client
-        app.state.multi_model_all_model_paths = all_model_paths
-        app.state.multi_model_max_lens = model_max_lens
-        app.state.supported_tasks = supported_tasks
-        app.state.args = args
+            app = build_app(args, supported_tasks)
+            app.state.multi_model_manager = manager
+            app.state.multi_model_engine_client = engine_client
+            app.state.multi_model_all_model_paths = all_model_paths
+            app.state.multi_model_max_lens = model_max_lens
+            app.state.supported_tasks = supported_tasks
+            app.state.args = args
 
-        await _init_multi_model_state(
-            engine_client,
-            app.state,
-            args,
-            supported_tasks,
-            all_model_paths=all_model_paths,
-            model_max_lens=model_max_lens,
-            active_model_name=manager.current_model or args.model,
-        )
-        _attach_multi_model_router(app)
+            await _init_multi_model_state(
+                engine_client,
+                app.state,
+                args,
+                supported_tasks,
+                all_model_paths=all_model_paths,
+                model_max_lens=model_max_lens,
+                active_model_name=manager.current_model or args.model,
+            )
+            _attach_multi_model_router(app)
 
-        logger.info("Starting vLLM multi-model API server on %s", listen_address)
-        shutdown_task = await serve_http(
-            app,
-            sock=sock,
-            enable_ssl_refresh=args.enable_ssl_refresh,
-            host=args.host,
-            port=args.port,
-            log_level=args.uvicorn_log_level,
-            access_log=not args.disable_uvicorn_access_log,
-            timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
-            ssl_keyfile=args.ssl_keyfile,
-            ssl_certfile=args.ssl_certfile,
-            ssl_ca_certs=args.ssl_ca_certs,
-            ssl_cert_reqs=args.ssl_cert_reqs,
-            ssl_ciphers=args.ssl_ciphers,
-            h11_max_incomplete_event_size=args.h11_max_incomplete_event_size,
-            h11_max_header_count=args.h11_max_header_count,
-            **uvicorn_kwargs,
-        )
+            logger.info("Starting vLLM multi-model API server on %s", listen_address)
+            shutdown_task = await serve_http(
+                app,
+                sock=sock,
+                enable_ssl_refresh=args.enable_ssl_refresh,
+                host=args.host,
+                port=args.port,
+                log_level=args.uvicorn_log_level,
+                access_log=not args.disable_uvicorn_access_log,
+                timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
+                ssl_keyfile=args.ssl_keyfile,
+                ssl_certfile=args.ssl_certfile,
+                ssl_ca_certs=args.ssl_ca_certs,
+                ssl_cert_reqs=args.ssl_cert_reqs,
+                ssl_ciphers=args.ssl_ciphers,
+                h11_max_incomplete_event_size=args.h11_max_incomplete_event_size,
+                h11_max_header_count=args.h11_max_header_count,
+                **uvicorn_kwargs,
+            )
 
-    try:
-        await shutdown_task
-    finally:
-        sock.close()
+            await shutdown_task
+        finally:
+            sock.close()
 
 
 async def _run_multi_model_server(args: Namespace) -> None:
