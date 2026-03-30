@@ -43,6 +43,7 @@ from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8, VllmMixtureOfExpertsOpFP8PerChannel,
                                       VllmMixtureOfExpertsOpWNA16)
 from vllm_gaudi.extension.runtime import get_config
+from vllm_gaudi.ops.hpu_fused_moe import _normalize_moe_activation
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase, )
 import vllm.model_executor.model_loader.weight_utils as vllm_weight_utils
@@ -418,7 +419,7 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
             topk_ids.to(torch.int64),
             topk_weights.to(x.dtype),
             permuted_weights=True,
-            activation=activation,
+            activation=_normalize_moe_activation(layer.activation),
         )
         return output.view(*input_shape)
 
@@ -858,7 +859,7 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
             topk_ids.to(torch.int64),
             topk_weights.to(x.dtype),
             permuted_weights=False,
-            activation=activation,
+            activation=_normalize_moe_activation(layer.activation),
         )
         return output.view(*input_shape)
 
