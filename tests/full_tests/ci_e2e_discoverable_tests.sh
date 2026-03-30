@@ -342,7 +342,7 @@ run_gsm8k_qwen3_30b_test() {
 }
 # GSM8K on Qwen3.5-9B 
 # TODO once Qwen3.5-35B-A3B compile time is improved, replace this test.
-# This test requires new transformers and huggingface_hub versions for Qwen3.5 model support, once VLLM supports latest transfomer,
+# This test requires new transformers and huggingface_hub versions for Qwen3.5 model support, once VLLM supports latest transformers,
 # we can remove the pip version pinning and restoration in this test and just rely on the environment having the right versions.
 run_gsm8k_qwen35_9b_test() {
     echo "➡️ Testing GSM8K on Qwen3.5-9B..."
@@ -363,7 +363,7 @@ run_gsm8k_qwen35_9b_test() {
 
     pip install transformers==5.3.0 huggingface_hub==1.7.1 --no-deps
 
-    VLLM_SKIP_WARMUP=True ENABLE_APC=False VLLM_FUSED_BLOCK_SOFTMAX_ADJUSTMENT=False VLLM_CONTIGUOUS_PA=true VLLM_DEFRAG=true VLLM_USE_HYBRID_CACHE=true VLLM_USE_NAIVE_MAMBA_CACHE_SHARING=false VLLM_GRAPH_RESERVED_MEM=0.1 \
+    VLLM_SKIP_WARMUP=True ENABLE_APC=False VLLM_FUSED_BLOCK_SOFTMAX_ADJUSTMENT=False VLLM_GRAPH_RESERVED_MEM=0.2 \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen3.5-9b.yaml"
 
     _restore_qwen35_deps
