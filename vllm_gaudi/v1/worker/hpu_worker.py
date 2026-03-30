@@ -6,7 +6,7 @@ import math
 import os
 import queue
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 import torch.distributed
@@ -86,6 +86,7 @@ class HPUWorker(WorkerBase):
         self.kv_cache_sleeping = False
         self.kv_cache_config = None
         self._model_runner_stash: dict[tuple[object, ...], HPUModelRunner] = {}
+        self._model_runner_state_stash: dict[tuple[object, ...], dict[str, Any]] = {}
 
     def _apply_vllm_config(self, vllm_config: VllmConfig) -> None:
         self.vllm_config = vllm_config
@@ -165,6 +166,7 @@ class HPUWorker(WorkerBase):
 
     def shutdown(self):
         self._model_runner_stash.clear()
+        self._model_runner_state_stash.clear()
         getattr(self.model_runner, 'shutdown_inc', lambda: None)()
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
@@ -188,8 +190,15 @@ class HPUWorker(WorkerBase):
                 stash_key = self._runner_stash_key(runner_config)
                 logger.info("[HPUWorker] Stashing runner for model: %s", runner_config.model_config.model)
                 self._model_runner_stash[stash_key] = self.model_runner
+                self._model_runner_state_stash[stash_key] = {
+                    "vllm_config": runner_config,
+                    "model_sleeping": self.model_sleeping,
+                    "kv_cache_sleeping": self.kv_cache_sleeping,
+                    "kv_cache_config": self.kv_cache_config,
+                }
                 self.model_runner = None  # type: ignore[assignment]
-            self.kv_cache_config = None
+            # Preserve previous KV cache metadata in stash for rollback.
+            self.model_sleeping = False
             self.kv_cache_sleeping = False
             gc.collect()
             with contextlib.suppress(Exception):
@@ -224,15 +233,7 @@ class HPUWorker(WorkerBase):
             if stash_key in self._model_runner_stash:
                 # Runner is alive with compiled graph cache intact;
                 # weights are on CPU — just move them back to HPU.
-                logger.info("[HPUWorker] Restoring stashed runner for model: %s", vllm_config.model_config.model)
-                self.model_runner = self._model_runner_stash.pop(stash_key)
-                restored_config = getattr(self.model_runner, "vllm_config", self.vllm_config)
-                self._apply_vllm_config(restored_config)
-                # wake_up(weights) checks self.model_sleeping; set it first.
-                self.model_sleeping = True
-                self.wake_up(tags=["weights"])
-                # model_sleeping is cleared by wake_up; kv_cache handled by
-                # _initialize_kv_caches called separately by gaudi_reconfigure.
+                self.restore_stashed_model(vllm_config=vllm_config, restore_kv_cache=False)
                 self.kv_cache_sleeping = False
                 return
 
@@ -246,6 +247,49 @@ class HPUWorker(WorkerBase):
 
         self.model_sleeping = False
         self.kv_cache_sleeping = False
+
+    def restore_stashed_model(
+        self,
+        vllm_config: Optional[VllmConfig] = None,
+        restore_kv_cache: bool = True,
+    ) -> dict[str, bool]:
+        """Restore a previously stashed runner and optionally wake its state.
+
+        This is primarily used as a rollback path when model reconfigure fails
+        after unload_model().
+        """
+        target_config = vllm_config or self.vllm_config
+        stash_key = self._runner_stash_key(target_config)
+
+        if stash_key not in self._model_runner_stash:
+            logger.warning("[HPUWorker] No stashed runner found for rollback key=%s", stash_key)
+            return {"restored": False}
+
+        self.model_runner = self._model_runner_stash.pop(stash_key)
+        stashed_state = self._model_runner_state_stash.pop(stash_key, {})
+
+        restored_config = stashed_state.get("vllm_config", getattr(self.model_runner, "vllm_config", target_config))
+        self._apply_vllm_config(restored_config)
+
+        self.model_sleeping = bool(stashed_state.get("model_sleeping", True))
+        self.kv_cache_sleeping = bool(stashed_state.get("kv_cache_sleeping", False))
+        self.kv_cache_config = stashed_state.get("kv_cache_config", None)
+
+        wake_tags: list[str] = []
+        if self.model_sleeping:
+            wake_tags.append("weights")
+        if restore_kv_cache and self.kv_cache_sleeping and self.kv_cache_config is not None:
+            wake_tags.append("kv_cache")
+
+        if wake_tags:
+            self.wake_up(tags=wake_tags)
+
+        if not restore_kv_cache:
+            # gaudi_reconfigure_engine will recreate KV cache with the new config.
+            self.kv_cache_sleeping = False
+
+        logger.info("[HPUWorker] Restored stashed runner for model: %s", restored_config.model_config.model)
+        return {"restored": True}
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:

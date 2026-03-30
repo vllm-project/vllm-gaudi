@@ -296,7 +296,7 @@ def _load_multi_model_config(path: str) -> tuple[dict[str, AsyncEngineArgs], str
     return model_configs, default_model
 
 
-def _build_model_registry(manager: MultiModelAsyncLLM, ) -> tuple[dict[str, BaseModelPath], dict[str, int]]:
+def _build_model_registry(manager: MultiModelAsyncLLM) -> tuple[dict[str, BaseModelPath], dict[str, int]]:
     all_model_paths: dict[str, BaseModelPath] = {}
     model_max_lens: dict[str, int] = {}
     for name, vllm_config in manager.get_all_vllm_configs().items():

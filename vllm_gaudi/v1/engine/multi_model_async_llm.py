@@ -270,11 +270,10 @@ class MultiModelAsyncLLM:
                     )
                 except asyncio.TimeoutError:
                     logger.warning(
-                        "Drain timeout (%ss) exceeded; %s in-flight requests will be aborted "
+                        "Drain timeout (%ss) exceeded; in-flight requests will be aborted "
                         "by the reconfigure step (pause_scheduler mode='abort'). "
                         "Clients whose requests are aborted will receive errors.",
                         drain_timeout,
-                        model_name,
                     )
                 finally:
                     drain_s = time.perf_counter() - drain_start
