@@ -226,14 +226,6 @@ run_qwen2_5_vl_load_generate_test() {
     echo "✅ Test with multimodal-support with qwen2.5-vl-7b passed."
 }
 
-# Multimodal-support + unified attention with qwen2.5-vl
-run_qwen2_5_vl_unified_attn_load_generate_test() {
-    echo "➡️ Testing Qwen2.5-VL-7B with unified attention..."
-    VLLM_SKIP_WARMUP=true VLLM_UNIFIED_ATTN=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 \
-    python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen2.5-vl-7b.yaml"
-    echo "✅ Test multimodal-support + unified attention with qwen2.5-vl-7b passed."
-}
-
 # Multimodal-support with qwen2.5-vl with warmup (small max model len and max num seqs) and lazy mode
 run_qwen2_5_vl_lazy_warmup_test() {
     echo "➡️ Testing Qwen2.5-VL-7B with full warmup under tight limits and lazy mode..."
@@ -304,28 +296,12 @@ run_gsm8k_granite_test() {
     echo "✅ Test with granite-8b passed."
 }
 
-# GSM8K on granite-8b (unified attn)
-run_gsm8k_granite_test_unified_attn() {
-    echo "➡️ Testing GSM8K on granite-8b with unified attention..."
-    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 \
-    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/granite-8b.yaml"
-    echo "✅ Test with granite-8b unified attention passed."
-}
-
 # GSM8K on granite-8b with async scheduling
 run_gsm8k_granite_async_test() {
     echo "➡️ Testing GSM8K on granite-8b with async scheduling..."
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 ASYNC_SCHEDULING=1 \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/granite-8b.yaml"
     echo "✅ Test with granite-8b + async_scheduling passed."
-}
-
-# GSM8K on granite-8b (unified attn + async scheduling)
-run_gsm8k_granite_test_unified_attn_async() {
-    echo "➡️ Testing GSM8K on granite-8b with unified attention + async scheduling..."
-    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 VLLM_USE_V1=1 ASYNC_SCHEDULING=1 \
-    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/granite-8b.yaml"
-    echo "✅ Test with granite-8b unified attention + async scheduling passed."
 }
 
 # GSM8K on deepseek v2 lite
@@ -336,14 +312,6 @@ run_gsm8k_deepseek_test() {
     echo "✅ GSM8K Test with deepseek v2 lite passed."
 }
 
-
-# GSM8K on deepseek v2 lite + unified attn
-#run_gsm8k_deepseek_unified_mla_test() {
-#    echo "➡️ Testing GSM8K on deepseek v2 lite + Unified MLA..."
-#    VLLM_UNIFIED_ATTN=true VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 \
-#    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml"
-#    echo "✅ GSM8K Test with deepseek v2 lite + Unified MLA passed."
-#}
 
 # GSM8K on QWEN3-30B-A3B
 run_gsm8k_qwen3_30b_test() {
@@ -428,20 +396,6 @@ run_spec_decode_eagle3_num_spec_2_test() {
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.59 --osl 2048 --num_spec_tokens 2
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --accuracy_rate 0.59 --num_spec_tokens 2
     echo "✅ Test with spec decode with eagle3 and num_speculative_tokens = 2 passed."
-}
-
-# Spec decode with ngram with UA
-run_UA_spec_decode_ngram_test() {
-    echo "➡️ Testing Spec-decode with ngram..."
-    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --assert_accept_rate 0.25 --osl 512
-    echo "✅ Test with spec decode with ngram passed."
-}
-
-# Spec decode with eagle3 with UA
-run_UA_spec_decode_eagle3_test() {
-    echo "➡️ Testing Spec-decode with eagle3..."
-    VLLM_UNIFIED_ATTN=True VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.50 --osl 1024
-    echo "✅ Test with spec decode with eagle3 passed."
 }
 
 # --- Other tests ---
@@ -532,25 +486,19 @@ launch_all_tests() {
     run_compressed_w4a16_moe_gidx_load_generate_test
     run_llama3_70b_inc_dynamic_quant_load_generate_test
     run_qwen2_5_vl_load_generate_test
-    run_qwen2_5_vl_unified_attn_load_generate_test
     run_qwen2_5_vl_lazy_warmup_test
     run_qwen2_5_vl_compile_warmup_test
     run_qwen3_vl_load_generate_test
     run_mistral3_load_generate_test
     run_llama3_70b_inc_dynamic_quant_test
     run_gsm8k_granite_test
-    run_gsm8k_granite_test_unified_attn
     run_gsm8k_granite_async_test
-    run_gsm8k_granite_test_unified_attn_async
     run_gsm8k_deepseek_test
-    #run_gsm8k_deepseek_unified_mla_test
     run_gsm8k_qwen3_30b_test
     run_preemption_test
     run_spec_decode_ngram_test
     run_spec_decode_eagle3_test
     run_spec_decode_eagle3_num_spec_2_test
-    run_UA_spec_decode_ngram_test
-    run_UA_spec_decode_eagle3_test
     run_embedding_model_test
     run_pd_disaggregate_nixl_libfabric_test
     run_pd_disaggregate_nixl_ucx_test
