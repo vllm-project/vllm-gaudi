@@ -594,8 +594,9 @@ def hpu_fused_recurrent_gated_delta_rule(
             sidx = ssm_state_indices.reshape(-1).to(dtype=torch.long, device=device)
             # Clamp out-of-range indices to 0 so index_select never receives
             # negative or too-large values (mirrors the prefill validity
-            # guard).  The caller is expected to supply valid indices for real
-            # sequences; this protects only padded/dummy entries.
+            # guard at line ~694 in _recurrent_general_path).  The caller is
+            # expected to supply valid indices for real sequences; this
+            # protects only padded/dummy entries.
             sidx_valid = (sidx >= 0) & (sidx < final_state.shape[0])
             sidx_safe = torch.where(sidx_valid, sidx, torch.zeros_like(sidx))
             h_batch = final_state.index_select(0, sidx_safe).to(_GDN_COMPUTE_DTYPE)
