@@ -8,7 +8,6 @@ from vllm.plugins import load_plugins_by_group
 
 @CustomOp.register("upstream_test_op")
 class UpstreamTestOp(CustomOp):
-
     def __init__(self, value):
         super().__init__()
         self.value = value * 2
@@ -21,7 +20,6 @@ def register_hpu_upstream_test_op():
 
     @UpstreamTestOp.register_oot
     class HPUUpstreamTestOp(UpstreamTestOp):
-
         def __init__(self, value):
             super().__init__(value)
             self.value = value * 3
@@ -32,7 +30,7 @@ def register_hpu_upstream_test_op():
 
 def test_dummy_custom_op_registration(default_vllm_config: None):
     """
-    Checks if a dummy op can be correctly registered 
+    Checks if a dummy op can be correctly registered
     using the register_oot decorator.
     """
     expected_value_before_registration = 4
@@ -52,10 +50,10 @@ def test_dummy_custom_op_registration(default_vllm_config: None):
 @patch("vllm_gaudi.register_ops")
 def test_custom_ops_registration(mock_register_ops):
     """
-    Checks whether the custom ops are registered 
+    Checks whether the custom ops are registered
     correctly when loading plugin
     """
-    DEFAULT_PLUGINS_GROUP = 'vllm.general_plugins'
+    DEFAULT_PLUGINS_GROUP = "vllm.general_plugins"
     plugins = load_plugins_by_group(group=DEFAULT_PLUGINS_GROUP)
 
     for func in plugins.values():

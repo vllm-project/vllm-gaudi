@@ -25,8 +25,8 @@ logger = init_logger()
 
 
 def retain_envs(var_name):
-    retain_var_list = ['GLOO_SOCKET_IFNAME', 'HCCL_SOCKET_IFNAME', 'NCCL_SOCKET_IFNAME']
-    return ('HPU' in var_name or 'RAY' in var_name or 'VLLM' in var_name or var_name in retain_var_list)
+    retain_var_list = ["GLOO_SOCKET_IFNAME", "HCCL_SOCKET_IFNAME", "NCCL_SOCKET_IFNAME"]
+    return "HPU" in var_name or "RAY" in var_name or "VLLM" in var_name or var_name in retain_var_list
 
 
 class HpuPlatform(Platform):
@@ -52,12 +52,10 @@ class HpuPlatform(Platform):
 
         if attn_selector_config.use_mla:
             logger.info("Using HPUAttentionMLA backend.")
-            return ("vllm_gaudi.attention.backends.hpu_attn."
-                    "HPUMLAAttentionBackend")
+            return "vllm_gaudi.attention.backends.hpu_attn.HPUMLAAttentionBackend"
 
         logger.info("Using HPUAttentionV1 backend.")
-        return ("vllm_gaudi.v1.attention.backends."
-                "hpu_attn.HPUAttentionBackendV1")
+        return "vllm_gaudi.v1.attention.backends.hpu_attn.HPUAttentionBackendV1"
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
@@ -85,8 +83,7 @@ class HpuPlatform(Platform):
         # default_max_num_batched_tokens, in order to avoid the
         # error in hpu_perf_test, while also preventing a
         # NotImplementedError in test_defaults_with_usage_context.
-        logger.warning("This is a workaround! Please check the NOTE "
-                       "in the get_device_total_memory definition.")
+        logger.warning("This is a workaround! Please check the NOTE in the get_device_total_memory definition.")
 
         total_hpu_memory = 0
 
@@ -97,8 +94,7 @@ class HpuPlatform(Platform):
         parallel_config = vllm_config.parallel_config
 
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = \
-                    "vllm_gaudi.v1.worker.hpu_worker.HPUWorker"
+            parallel_config.worker_cls = "vllm_gaudi.v1.worker.hpu_worker.HPUWorker"
 
         # NOTE(kzawora): default block size for Gaudi should be 128
         # smaller sizes still work, but very inefficiently
@@ -112,16 +108,19 @@ class HpuPlatform(Platform):
         # size (block_size * per-token KV bytes).  Without this the upstream
         # unify_kv_cache_spec_page_size() fails because the two page sizes
         # are not divisible.
-        if (cache_config and cache_config.block_size is not None and vllm_config.model_config is not None
-                and vllm_config.model_config.is_hybrid):
+        if (
+            cache_config
+            and cache_config.block_size is not None
+            and vllm_config.model_config is not None
+            and vllm_config.model_config.is_hybrid
+        ):
             # Ensure block_size is 128-aligned (should already be, but
             # guard against future callers that set odd sizes).
             original_block_size = cache_config.block_size
             aligned_block_size = ((original_block_size + 127) // 128) * 128
             if aligned_block_size != original_block_size:
                 logger.warning(
-                    "Padding hybrid cache block_size from %d to %d to satisfy "
-                    "Gaudi 128-token kernel alignment.",
+                    "Padding hybrid cache block_size from %d to %d to satisfy Gaudi 128-token kernel alignment.",
                     original_block_size,
                     aligned_block_size,
                 )
@@ -134,18 +133,20 @@ class HpuPlatform(Platform):
             if cache_config.mamba_page_size_padded is not None:
                 from vllm.utils.torch_utils import get_dtype_size
                 from math import ceil
+
                 model_config = vllm_config.model_config
                 if cache_config.cache_dtype == "auto":
                     kv_dtype = model_config.dtype
                 else:
                     from vllm.config.model import STR_DTYPE_TO_TORCH_DTYPE
+
                     kv_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
                 num_kv_heads = model_config.get_num_kv_heads(parallel_config)
                 head_size = model_config.get_head_size()
-                attn_page = (2 * cache_config.block_size * num_kv_heads * head_size * get_dtype_size(kv_dtype))
+                attn_page = 2 * cache_config.block_size * num_kv_heads * head_size * get_dtype_size(kv_dtype)
                 if attn_page > 0 and cache_config.mamba_page_size_padded % attn_page != 0:
                     old_padded = cache_config.mamba_page_size_padded
-                    cache_config.mamba_page_size_padded = (ceil(old_padded / attn_page) * attn_page)
+                    cache_config.mamba_page_size_padded = ceil(old_padded / attn_page) * attn_page
                     logger.info(
                         "Rescaled mamba_page_size_padded from %d to %d "
                         "to align with HPU attention page size %d "
@@ -155,27 +156,35 @@ class HpuPlatform(Platform):
                         attn_page,
                         cache_config.block_size,
                     )
-        if (parallel_config.distributed_executor_backend in ['mp', 'uni']
-                and envs.VLLM_WORKER_MULTIPROC_METHOD == 'fork'):
+        if (
+            parallel_config.distributed_executor_backend in ["mp", "uni"]
+            and envs.VLLM_WORKER_MULTIPROC_METHOD == "fork"
+        ):
             if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD", None) is not None:
-                logger.warning("On HPU, VLLM_WORKER_MULTIPROC_METHOD=fork "
-                               "might cause application hangs on exit. Using "
-                               "VLLM_WORKER_MULTIPROC_METHOD=fork anyway, "
-                               "as it was explicitly requested.")
+                logger.warning(
+                    "On HPU, VLLM_WORKER_MULTIPROC_METHOD=fork "
+                    "might cause application hangs on exit. Using "
+                    "VLLM_WORKER_MULTIPROC_METHOD=fork anyway, "
+                    "as it was explicitly requested."
+                )
             else:
-                logger.warning("On HPU, VLLM_WORKER_MULTIPROC_METHOD=fork "
-                               "might cause application hangs on exit. Setting "
-                               "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
-                               "To override that behavior, please set "
-                               "VLLM_WORKER_MULTIPROC_METHOD=fork explicitly.")
+                logger.warning(
+                    "On HPU, VLLM_WORKER_MULTIPROC_METHOD=fork "
+                    "might cause application hangs on exit. Setting "
+                    "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
+                    "To override that behavior, please set "
+                    "VLLM_WORKER_MULTIPROC_METHOD=fork explicitly."
+                )
                 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-        if (vllm_config.model_config is not None and vllm_config.model_config.dtype in (torch.float16, torch.float32)):
-            logger.warning("The HPU backend currently does not support %s. "
-                           "Using bfloat16 instead.", vllm_config.model_config.dtype)
+        if vllm_config.model_config is not None and vllm_config.model_config.dtype in (torch.float16, torch.float32):
+            logger.warning(
+                "The HPU backend currently does not support %s. Using bfloat16 instead.", vllm_config.model_config.dtype
+            )
             vllm_config.model_config.dtype = torch.bfloat16
 
         from vllm.config import CompilationMode, CUDAGraphMode
+
         compilation_config = vllm_config.compilation_config
         # Activate custom ops for v1.
         compilation_config.custom_ops = ["all"]
@@ -187,8 +196,7 @@ class HpuPlatform(Platform):
             vllm_config.cache_config.enable_prefix_caching = False
 
         if compilation_config.mode != CompilationMode.NONE:
-            logger.info("[HPU] Forcing CompilationMode.NONE "
-                        "compilation mode")
+            logger.info("[HPU] Forcing CompilationMode.NONE compilation mode")
             compilation_config.mode = CompilationMode.NONE
 
         # Force CPU loading for INC quantization to prevent OOM during weight loading.
@@ -206,8 +214,9 @@ class HpuPlatform(Platform):
 
         # NOTE: vLLM has default enabled async scheduling with speculative decoding is on.
         # However, for HPU, speculative decoding is not supported with async scheduling.
-        vllm_config.scheduler_config.async_scheduling = \
+        vllm_config.scheduler_config.async_scheduling = (
             vllm_config.scheduler_config.async_scheduling and vllm_config.speculative_config is None
+        )
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
@@ -261,21 +270,21 @@ class HpuPlatform(Platform):
         # does not support torch.compile
         # Eager backend (PT_HPU_LAZY_MODE = 0) must be selected for
         # torch.compile support
-        os.environ['PT_HPU_WEIGHT_SHARING'] = '0'
+        os.environ["PT_HPU_WEIGHT_SHARING"] = "0"
         is_lazy = htorch.utils.internal.is_lazy()
         if is_lazy:
             torch._dynamo.config.disable = True
             # NOTE multi-HPU inference with HPUGraphs (lazy-only)
             # requires enabling lazy collectives
             # see https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html  # noqa: E501
-            os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
+            os.environ["PT_HPU_ENABLE_LAZY_COLLECTIVES"] = "true"
         else:
             # If not set by user then for torch compile enable Runtime scale patching by default
-            if os.environ.get('RUNTIME_SCALE_PATCHING') is None:
-                os.environ['RUNTIME_SCALE_PATCHING'] = '1'
-            #This allows for utilization of Parallel Compilation feature
-            if os.environ.get('FUSER_ENABLE_MULTI_THREADED_INVOCATIONS') is None:
-                os.environ['FUSER_ENABLE_MULTI_THREADED_INVOCATIONS'] = '1'
+            if os.environ.get("RUNTIME_SCALE_PATCHING") is None:
+                os.environ["RUNTIME_SCALE_PATCHING"] = "1"
+            # This allows for utilization of Parallel Compilation feature
+            if os.environ.get("FUSER_ENABLE_MULTI_THREADED_INVOCATIONS") is None:
+                os.environ["FUSER_ENABLE_MULTI_THREADED_INVOCATIONS"] = "1"
 
     @classmethod
     def adjust_cuda_hooks(cls) -> None:
@@ -327,10 +336,12 @@ class HpuPlatform(Platform):
         if isinstance(dst_cache, tuple):
             _src_cache = src_cache[:, src_block_indices]
             _src_cache = _src_cache.to(dst_cache[0].device)
-            dst_cache[0].index_copy_(0, dst_block_indices,
-                                     _src_cache[0].view(original_src_dtype) if view_as_uint else _src_cache[0])
-            dst_cache[1].index_copy_(0, dst_block_indices,
-                                     _src_cache[1].view(original_src_dtype) if view_as_uint else _src_cache[1])
+            dst_cache[0].index_copy_(
+                0, dst_block_indices, _src_cache[0].view(original_src_dtype) if view_as_uint else _src_cache[0]
+            )
+            dst_cache[1].index_copy_(
+                0, dst_block_indices, _src_cache[1].view(original_src_dtype) if view_as_uint else _src_cache[1]
+            )
         else:
             indexed_cache = src_cache[src_block_indices]
             if view_as_uint:
@@ -357,10 +368,12 @@ class HpuPlatform(Platform):
     def patch_for_pt27(cls) -> None:
 
         from vllm.utils import is_torch_equal_or_newer
+
         if is_torch_equal_or_newer("2.8.0"):
             return
 
         from vllm.model_executor import BasevLLMParameter
+
         parent_class = BasevLLMParameter.__mro__[1]
         parent_torch_function = getattr(parent_class, "__torch_function__", None)
 

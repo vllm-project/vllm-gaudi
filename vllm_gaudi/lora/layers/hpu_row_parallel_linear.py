@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """HPU-specific LoRA layer for RowParallelLinear.
 
-This module registers HPU-aware LoRA wrappers that can handle 
+This module registers HPU-aware LoRA wrappers that can handle
 HPURowParallelLinear instances created via OOT registration.
 """
 
@@ -56,7 +56,7 @@ class HPURowParallelLinearWithShardedLoRA(RowParallelLinearWithShardedLoRA):
 
 def register_hpu_lora_layers():
     """Register HPU LoRA layers in the global lora_utils._all_lora_classes set.
-    
+
     This must be called before LoRA model creation to ensure HPU layers
     are checked before upstream layers.
     """

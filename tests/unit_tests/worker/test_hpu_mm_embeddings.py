@@ -16,15 +16,15 @@ import torch
 if "habana_frameworks" not in sys.modules:
     _hf = MagicMock()
     for submod in [
-            "habana_frameworks",
-            "habana_frameworks.torch",
-            "habana_frameworks.torch.core",
-            "habana_frameworks.torch.hpu",
-            "habana_frameworks.torch.internal",
-            "habana_frameworks.torch.internal.bridge_config",
-            "habana_frameworks.torch.utils",
-            "habana_frameworks.torch.utils.experimental",
-            "habana_frameworks.torch.utils.internal",
+        "habana_frameworks",
+        "habana_frameworks.torch",
+        "habana_frameworks.torch.core",
+        "habana_frameworks.torch.hpu",
+        "habana_frameworks.torch.internal",
+        "habana_frameworks.torch.internal.bridge_config",
+        "habana_frameworks.torch.utils",
+        "habana_frameworks.torch.utils.experimental",
+        "habana_frameworks.torch.utils.internal",
     ]:
         sys.modules.setdefault(submod, _hf)
 
@@ -70,7 +70,7 @@ def _make_request_state(
         mm_features=mm_features,
         sampling_params=SamplingParams(),
         generator=None,
-        block_ids=([0], ),
+        block_ids=([0],),
         num_computed_tokens=num_computed_tokens,
         output_token_ids=[],
     )
@@ -211,8 +211,9 @@ class TestGatherMmEmbeddings2DPadded:
         encoder_out = _make_encoder_output(4)
 
         requests = {
-            "req_0":
-            _make_request_state("req_0", 11, [_make_mm_feature("hash_0", offset=2, length=4)], num_computed_tokens=1),
+            "req_0": _make_request_state(
+                "req_0", 11, [_make_mm_feature("hash_0", offset=2, length=4)], num_computed_tokens=1
+            ),
         }
         encoder_cache = {"hash_0": encoder_out}
 

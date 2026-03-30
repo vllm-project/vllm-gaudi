@@ -92,7 +92,7 @@ def test_skips_nn_parameter_in_list():
 
 def test_nested_containers():
     mod = _StubModule()
-    mod.nested = {"outer": [torch.randn(2), (torch.randn(3), )]}
+    mod.nested = {"outer": [torch.randn(2), (torch.randn(3),)]}
     _move_remaining_tensors_to_device(mod, TARGET_DEVICE)
     assert mod.nested["outer"][0].device.type == "hpu"
     assert mod.nested["outer"][1][0].device.type == "hpu"

@@ -15,12 +15,12 @@ from vllm_gaudi.extension.defragmentation import OnlineDefragmenter, CacheSwapUt
 @pytest.fixture
 def mock_config():
     """Mock configuration for defragmenter"""
-    with patch('vllm_gaudi.extension.defragmentation.get_config') as mock_cfg:
+    with patch("vllm_gaudi.extension.defragmentation.get_config") as mock_cfg:
         config = MagicMock()
         config.defrag = True
         config.VLLM_DEFRAG_THRESHOLD = 32
         config.VLLM_DEFRAG_WITH_GRAPHS = False
-        config.bridge_mode = 'eager'
+        config.bridge_mode = "eager"
         mock_cfg.return_value = config
         yield config
 
@@ -28,7 +28,7 @@ def mock_config():
 @pytest.fixture
 def mock_debug_logger():
     """Mock debug logger"""
-    with patch('vllm_gaudi.extension.defragmentation.init_debug_logger') as mock_debug:
+    with patch("vllm_gaudi.extension.defragmentation.init_debug_logger") as mock_debug:
         mock_debug.return_value = None
         yield mock_debug
 
@@ -36,7 +36,7 @@ def mock_debug_logger():
 @pytest.fixture
 def defragmenter(mock_config, mock_debug_logger):
     """Create OnlineDefragmenter instance"""
-    kv_caches = ((torch.empty(0, device='meta'), torch.empty(0, device='meta')), )
+    kv_caches = ((torch.empty(0, device="meta"), torch.empty(0, device="meta")),)
     return OnlineDefragmenter(kv_caches, block_size=0)
 
 
@@ -127,11 +127,11 @@ class TestOnlineDefragmenter:
 
     def test_update_state_new_blocks(self, defragmenter):
         """Test updating state with new blocks"""
-        new_blocks = {'req_1': [10, 11, 12], 'req_2': [20, 21]}
+        new_blocks = {"req_1": [10, 11, 12], "req_2": [20, 21]}
 
         defragmenter.update_state(new_blocks, [])
 
-        assert defragmenter.req_blocks == {'req_1': [10, 11, 12], 'req_2': [20, 21]}
+        assert defragmenter.req_blocks == {"req_1": [10, 11, 12], "req_2": [20, 21]}
         assert defragmenter.get_ref_count(10) == 1
         assert defragmenter.get_ref_count(11) == 1
         assert defragmenter.get_ref_count(12) == 1
@@ -143,18 +143,18 @@ class TestOnlineDefragmenter:
 
     def test_update_state_finished_requests(self, defragmenter):
         """Test updating state when requests finish"""
-        new_blocks = {'req_1': [10, 11]}
+        new_blocks = {"req_1": [10, 11]}
         defragmenter.update_state(new_blocks, [])
 
         assert defragmenter.get_ref_count(10) == 1
         assert defragmenter.get_ref_count(11) == 1
 
         # no blocks to add, mark req_1 as finished
-        defragmenter.update_state({}, ['req_1'])
+        defragmenter.update_state({}, ["req_1"])
 
         assert 10 not in defragmenter.used_blocks
         assert 11 not in defragmenter.used_blocks
-        assert 'req_1' not in defragmenter.req_blocks
+        assert "req_1" not in defragmenter.req_blocks
 
     def test_free_blocks_generator(self, defragmenter):
         """Test free blocks generator yields correct sequence"""
@@ -176,7 +176,7 @@ class TestOnlineDefragmenter:
         """Test defragmentation when disabled"""
         mock_config.defrag = False
 
-        kv_caches = ((torch.empty(0, device='meta'), torch.empty(0, device='meta')), )
+        kv_caches = ((torch.empty(0, device="meta"), torch.empty(0, device="meta")),)
         defrag = OnlineDefragmenter(kv_caches, 0)
 
         defrag.use_block(100)
@@ -266,7 +266,7 @@ class TestOnlineDefragmenter:
         num_heads = 8
         head_dim = 64
         num_layers = 2
-        DEVICE = 'hpu'
+        DEVICE = "hpu"
 
         kv_caches = []
         for _ in range(num_layers):
@@ -280,20 +280,20 @@ class TestOnlineDefragmenter:
         threshold = 8
 
         # Store original values to verify swap
-        orig_k_10 = kv_caches[0][0][10 * block_size:(10 + 1) * block_size].clone()
-        orig_k_5 = kv_caches[0][0][5 * block_size:(5 + 1) * block_size].clone()
+        orig_k_10 = kv_caches[0][0][10 * block_size : (10 + 1) * block_size].clone()
+        orig_k_5 = kv_caches[0][0][5 * block_size : (5 + 1) * block_size].clone()
 
         defragmenter._swap(to_swap, threshold)
         htorch.core.mark_step()
 
         # Verify blocks were swapped
-        swapped_k_10 = kv_caches[0][0][10 * block_size:(10 + 1) * block_size]
-        swapped_k_5 = kv_caches[0][0][5 * block_size:(5 + 1) * block_size]
+        swapped_k_10 = kv_caches[0][0][10 * block_size : (10 + 1) * block_size]
+        swapped_k_5 = kv_caches[0][0][5 * block_size : (5 + 1) * block_size]
 
         assert torch.allclose(swapped_k_10, orig_k_5)
         assert torch.allclose(swapped_k_5, orig_k_10)
 
-    @patch('vllm_gaudi.extension.defragmentation.htorch')
+    @patch("vllm_gaudi.extension.defragmentation.htorch")
     def test_swap_mla_single_call(self, mock_htorch):
         """Test MLA swap only calls forward once (no value cache)"""
         mla_caches = [(torch.randn(100, 8, 64), None), (torch.randn(100, 8, 64), None)]
@@ -302,7 +302,7 @@ class TestOnlineDefragmenter:
         to_swap = [(10, 5)]
         threshold = 8
 
-        with patch.object(defragmenter.cache_utils, 'forward') as mock_forward:
+        with patch.object(defragmenter.cache_utils, "forward") as mock_forward:
             defragmenter._swap(to_swap, threshold)
 
             # Should only be called once for keys (no values)
@@ -331,8 +331,8 @@ class TestCacheSwapUtils:
     @pytest.fixture
     def swap_utils(self, mock_kv_caches):
         """Create CacheSwapUtils instance"""
-        with patch('vllm_gaudi.extension.defragmentation.htorch'):
-            return CacheSwapUtils(16, 'hpu')
+        with patch("vllm_gaudi.extension.defragmentation.htorch"):
+            return CacheSwapUtils(16, "hpu")
 
 
 class TestDefragmentationIntegration:
@@ -343,10 +343,12 @@ class TestDefragmentationIntegration:
         """Setup defragmenter with mock caches"""
 
         # Create simple mock caches
-        kv_caches = [(torch.zeros(1600, 8, 64), torch.zeros(1600, 8, 64)),
-                     (torch.zeros(1600, 8, 64), torch.zeros(1600, 8, 64))]
+        kv_caches = [
+            (torch.zeros(1600, 8, 64), torch.zeros(1600, 8, 64)),
+            (torch.zeros(1600, 8, 64), torch.zeros(1600, 8, 64)),
+        ]
 
-        with patch('vllm_gaudi.extension.defragmentation.htorch'):
+        with patch("vllm_gaudi.extension.defragmentation.htorch"):
             defrag = OnlineDefragmenter(tuple(kv_caches), block_size=16)
 
         return defrag
@@ -356,7 +358,7 @@ class TestDefragmentationIntegration:
         # Create MLA-style caches (no value cache)
         mla_caches = [(torch.randn(100, 8, 64), None), (torch.randn(100, 8, 64), None)]
 
-        with patch('vllm_gaudi.extension.defragmentation.htorch'):
+        with patch("vllm_gaudi.extension.defragmentation.htorch"):
             utils = OnlineDefragmenter(tuple(mla_caches), block_size=16)
             assert utils.is_mla is True
 
@@ -365,23 +367,23 @@ class TestDefragmentationIntegration:
         defrag = setup_defragmenter
 
         # Add requests
-        defrag.update_state({'req_1': [10, 11, 12]}, [])
-        defrag.update_state({'req_2': [50, 51]}, [])
+        defrag.update_state({"req_1": [10, 11, 12]}, [])
+        defrag.update_state({"req_2": [50, 51]}, [])
 
         assert len(defrag.used_blocks) == 5
         assert len(defrag.req_blocks) == 2
 
         # Finish req_1
-        defrag.update_state({}, ['req_1'])
+        defrag.update_state({}, ["req_1"])
 
         assert len(defrag.used_blocks) == 2
         assert len(defrag.req_blocks) == 1
 
         # Add more fragmented requests
-        defrag.update_state({'req_3': [100, 101, 102]}, [])
+        defrag.update_state({"req_3": [100, 101, 102]}, [])
 
         # Trigger defragmentation
-        with patch.object(defrag, '_swap'):
+        with patch.object(defrag, "_swap"):
             defrag.defragment()
 
     def test_mapping_persistence(self, setup_defragmenter):
@@ -394,7 +396,7 @@ class TestDefragmentationIntegration:
 
         defrag._extend_mapping_table(100)
 
-        with patch.object(defrag, '_swap'):
+        with patch.object(defrag, "_swap"):
             defrag.defragment()
 
         # Verify mappings exist
@@ -413,37 +415,37 @@ class TestDefragmentationIntegration:
         defrag = setup_defragmenter
 
         # Add a normal request so there is some state
-        defrag.update_state({'req_1': [10, 11]}, [])
+        defrag.update_state({"req_1": [10, 11]}, [])
         assert defrag.get_ref_count(10) == 1
         assert defrag.get_ref_count(11) == 1
 
         # Finish a request that was never registered (simulates Ctrl+C
         # cancellation before blocks were allocated)
-        defrag.update_state({}, ['unknown_req'])
+        defrag.update_state({}, ["unknown_req"])
 
         # The server must survive — no KeyError
         # Existing state should be untouched
         assert defrag.get_ref_count(10) == 1
         assert defrag.get_ref_count(11) == 1
-        assert 'req_1' in defrag.req_blocks
-        assert 'unknown_req' not in defrag.req_blocks
+        assert "req_1" in defrag.req_blocks
+        assert "unknown_req" not in defrag.req_blocks
 
     def test_finish_cancelled_and_normal_requests_together(self, setup_defragmenter):
         """Test finishing both a known and an unknown request in the same call."""
         defrag = setup_defragmenter
 
-        defrag.update_state({'req_1': [10], 'req_2': [20]}, [])
+        defrag.update_state({"req_1": [10], "req_2": [20]}, [])
 
         # Finish req_1 (known) and req_ghost (never allocated) together
-        defrag.update_state({}, ['req_1', 'req_ghost'])
+        defrag.update_state({}, ["req_1", "req_ghost"])
 
         # req_1 should be cleaned up properly
-        assert 'req_1' not in defrag.req_blocks
+        assert "req_1" not in defrag.req_blocks
         assert defrag.get_ref_count(10) == 0
 
         # req_2 should be unaffected
-        assert 'req_2' in defrag.req_blocks
+        assert "req_2" in defrag.req_blocks
         assert defrag.get_ref_count(20) == 1
 
         # req_ghost should not appear anywhere
-        assert 'req_ghost' not in defrag.req_blocks
+        assert "req_ghost" not in defrag.req_blocks

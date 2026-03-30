@@ -20,7 +20,6 @@ from vllm.model_executor.models.deepseek_ocr import (
 
 
 class HpuDeepseekOCRDummyInputsBuilder(DeepseekOCRDummyInputsBuilder):
-
     def get_dummy_mm_data(
         self,
         seq_len: int,
@@ -52,8 +51,7 @@ class HpuDeepseekOCRDummyInputsBuilder(DeepseekOCRDummyInputsBuilder):
                 image_overrides.height = 300
 
         return {
-            "image":
-            self._get_dummy_images(
+            "image": self._get_dummy_images(
                 num_images=num_images,
                 width=max_image_size.width,
                 height=max_image_size.height,
@@ -68,7 +66,6 @@ class HpuDeepseekOCRDummyInputsBuilder(DeepseekOCRDummyInputsBuilder):
     dummy_inputs=HpuDeepseekOCRDummyInputsBuilder,
 )
 class HpuDeepseekOCRForCausalLM(DeepseekOCRForCausalLM):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -119,9 +116,11 @@ class HpuDeepseekOCRForCausalLM(DeepseekOCRForCausalLM):
         width_tiles = int(crop_shape[0].item())
         height_tiles = int(crop_shape[1].item())
 
-        features = (features.view(height_tiles, width_tiles, patch_side, patch_side,
-                                  dim).permute(0, 2, 1, 3, 4).reshape(height_tiles * patch_side,
-                                                                      width_tiles * patch_side, dim))
+        features = (
+            features.view(height_tiles, width_tiles, patch_side, patch_side, dim)
+            .permute(0, 2, 1, 3, 4)
+            .reshape(height_tiles * patch_side, width_tiles * patch_side, dim)
+        )
         newline = self.image_newline[None, None, :].expand(height_tiles * patch_side, 1, dim)
         features = torch.cat([features, newline], dim=1)
 

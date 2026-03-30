@@ -5,7 +5,6 @@ from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderA
 
 @MMEncoderAttention.register_oot()
 class HpuMMEncoderAttention(MMEncoderAttention):
-
     def _forward_sdpa(
         self,
         query: torch.Tensor,
@@ -33,8 +32,7 @@ class HpuMMEncoderAttention(MMEncoderAttention):
 
         from vllm_gaudi.extension.runtime import get_config
 
-        if get_config().prompt_attn_impl == 'fsdpa_impl':
-
+        if get_config().prompt_attn_impl == "fsdpa_impl":
             from vllm_gaudi.extension.utils import ModuleFusedSDPA
             import vllm_gaudi.extension.kernels as kernels
 
@@ -42,16 +40,18 @@ class HpuMMEncoderAttention(MMEncoderAttention):
             fsdpa_op = ModuleFusedSDPA(HPUFusedSDPA)
 
             if cu_seqlens is None:
-                out = fsdpa_op(query,
-                               key,
-                               value,
-                               None,
-                               dropout_p=0.0,
-                               is_causal=False,
-                               scale=self.scale,
-                               softmax_mode="fast",
-                               recompute_mode=True,
-                               valid_sequence_lengths=None)
+                out = fsdpa_op(
+                    query,
+                    key,
+                    value,
+                    None,
+                    dropout_p=0.0,
+                    is_causal=False,
+                    scale=self.scale,
+                    softmax_mode="fast",
+                    recompute_mode=True,
+                    valid_sequence_lengths=None,
+                )
             else:
                 cu_seqlens_list = cu_seqlens.to("cpu").tolist()
                 outputs = []
@@ -66,16 +66,18 @@ class HpuMMEncoderAttention(MMEncoderAttention):
                     v_i = value[:, :, start_idx:end_idx, :]
 
                     # Process each chunk
-                    output_i = fsdpa_op(q_i,
-                                        k_i,
-                                        v_i,
-                                        None,
-                                        dropout_p=0.0,
-                                        is_causal=False,
-                                        scale=self.scale,
-                                        softmax_mode="fast",
-                                        recompute_mode=True,
-                                        valid_sequence_lengths=None)
+                    output_i = fsdpa_op(
+                        q_i,
+                        k_i,
+                        v_i,
+                        None,
+                        dropout_p=0.0,
+                        is_causal=False,
+                        scale=self.scale,
+                        softmax_mode="fast",
+                        recompute_mode=True,
+                        valid_sequence_lengths=None,
+                    )
                     outputs.append(output_i)
                     start_idx = end_idx
                 out = torch.cat(outputs, dim=2)

@@ -7,7 +7,6 @@ from vllm.model_executor.models.utils import AutoWeightsLoader
 
 
 class ModuleWithBatchNorm(torch.nn.Module):
-
     def __init__(self):
         super().__init__()
         self.bn = torch.nn.BatchNorm1d(2)
@@ -17,7 +16,6 @@ class ModuleWithBatchNorm(torch.nn.Module):
 
 
 class ModuleWithNestedBatchNorm(torch.nn.Module):
-
     def __init__(self):
         super().__init__()
         self.nested_mod = ModuleWithBatchNorm()

@@ -12,12 +12,20 @@ from concurrent.futures import Future, ThreadPoolExecutor
 import msgspec
 import numpy as np
 
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (TransferHandle, ReqId, ReqMeta,
-                                                                         _NIXL_SUPPORTED_DEVICE, NixlAgentMetadata,
-                                                                         NixlConnector, NixlConnectorWorker,
-                                                                         NixlConnectorScheduler, NixlConnectorMetadata,
-                                                                         NixlHandshakePayload, NixlKVConnectorStats,
-                                                                         compute_nixl_compatibility_hash)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+    TransferHandle,
+    ReqId,
+    ReqMeta,
+    _NIXL_SUPPORTED_DEVICE,
+    NixlAgentMetadata,
+    NixlConnector,
+    NixlConnectorWorker,
+    NixlConnectorScheduler,
+    NixlConnectorMetadata,
+    NixlHandshakePayload,
+    NixlKVConnectorStats,
+    compute_nixl_compatibility_hash,
+)
 from vllm_gaudi.platform import logger
 
 from vllm import envs
@@ -111,7 +119,7 @@ def kv_postprocess_layout_on_save(cache, indices):
     blocks_to_update = cache.index_select(0, indices)
     target_shape = blocks_to_update.shape
     # NHD => HND
-    blocks_processed = (blocks_to_update.permute(0, 2, 1, 3).contiguous().view(target_shape))
+    blocks_processed = blocks_to_update.permute(0, 2, 1, 3).contiguous().view(target_shape)
     cache.index_copy_(0, indices, blocks_processed)
 
 
@@ -123,15 +131,14 @@ def if_postprocess_kvcache_on_save(vllm_config, current_block_size, current_kv_c
     postprocess_kv_caches_on_save = False
     kv_cache_layout_on_save = "HND"
     agreed_block_size = int(
-        vllm_config.kv_transfer_config.get_from_extra_config("agreed_block_size", current_block_size))
+        vllm_config.kv_transfer_config.get_from_extra_config("agreed_block_size", current_block_size)
+    )
     # Only allow save to smaller block size (larger required additional allocation)
-    block_size_on_save = (agreed_block_size if agreed_block_size <= current_block_size else current_block_size)
-    if (kv_cache_layout_on_save != current_kv_cache_layout or block_size_on_save != current_block_size):
+    block_size_on_save = agreed_block_size if agreed_block_size <= current_block_size else current_block_size
+    if kv_cache_layout_on_save != current_kv_cache_layout or block_size_on_save != current_block_size:
         postprocess_kv_caches_on_save = True
         logger.info(
-            "KV cache postprocess on save is enabled. "
-            "Local kv cache layout: %s -> %s, "
-            "block size: %d -> %d",
+            "KV cache postprocess on save is enabled. Local kv cache layout: %s -> %s, block size: %d -> %d",
             current_kv_cache_layout,
             kv_cache_layout_on_save,
             current_block_size,
@@ -178,12 +185,12 @@ def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str):
     self.kv_cache_layout = get_kv_cache_layout()
     self.engine_id: EngineId = engine_id  # type: ignore[misc]
     self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
-    self.side_channel_port = (envs.VLLM_NIXL_SIDE_CHANNEL_PORT + vllm_config.parallel_config.data_parallel_index)
+    self.side_channel_port = envs.VLLM_NIXL_SIDE_CHANNEL_PORT + vllm_config.parallel_config.data_parallel_index
     assert vllm_config.kv_transfer_config is not None
     if current_platform.device_type == "cpu":
         self.use_host_buffer = False
     else:
-        self.use_host_buffer = (vllm_config.kv_transfer_config.kv_buffer_device == "cpu")
+        self.use_host_buffer = vllm_config.kv_transfer_config.kv_buffer_device == "cpu"
 
     self.postprocess_kv_caches_on_save = False
     self.kv_cache_layout_on_save = self.kv_cache_layout
@@ -221,8 +228,7 @@ def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str):
 def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
     params = request.kv_transfer_params
     logger.debug(
-        "NIXLConnector update_state_after_alloc: "
-        "num_external_tokens=%s, kv_transfer_params=%s",
+        "NIXLConnector update_state_after_alloc: num_external_tokens=%s, kv_transfer_params=%s",
         num_external_tokens,
         params,
     )
@@ -238,16 +244,19 @@ def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", 
         self._reqs_need_save[request.request_id] = request
     elif params.get("do_remote_prefill"):
         if params.get("remote_block_ids"):
-            if all(p in params for p in (
+            if all(
+                p in params
+                for p in (
                     "remote_engine_id",
                     "remote_request_id",
                     "remote_host",
                     "remote_port",
-            )):
+                )
+            ):
                 # If remote_blocks and num_external_tokens = 0, we have
                 # a full prefix cache hit on the D worker. We need to call
                 # send_notif in _read_blocks to free the memory on the P.
-                local_block_ids = (blocks.get_unhashed_block_ids() if num_external_tokens > 0 else [])
+                local_block_ids = blocks.get_unhashed_block_ids() if num_external_tokens > 0 else []
                 # Get unhashed blocks to pull from remote.
                 self._reqs_need_recv[request.request_id] = (
                     request,
@@ -256,8 +265,7 @@ def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", 
 
             else:
                 logger.warning(
-                    "Got invalid KVTransferParams: %s. This "
-                    "request will not utilize KVTransfer",
+                    "Got invalid KVTransferParams: %s. This request will not utilize KVTransfer",
                     params,
                 )
         else:
@@ -344,8 +352,7 @@ def request_finished(
 
     params = request.kv_transfer_params
     logger.debug(
-        "NIXLConnector request_finished(%s), request_status=%s, "
-        "kv_transfer_params=%s",
+        "NIXLConnector request_finished(%s), request_status=%s, kv_transfer_params=%s",
         request.request_id,
         request.status,
         params,
@@ -383,12 +390,11 @@ def request_finished(
     if delay_free_blocks:
         # Prefill request on remote. It will be read from D upon completion
         logger.debug(
-            "NIXLConnector request_finished(%s) waiting for %d seconds "
-            "for remote decode to fetch blocks",
+            "NIXLConnector request_finished(%s) waiting for %d seconds for remote decode to fetch blocks",
             request.request_id,
             envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT,
         )
-        self._reqs_need_send[request.request_id] = (time.perf_counter() + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT)
+        self._reqs_need_send[request.request_id] = time.perf_counter() + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
 
     block_size_ratio = self.block_size // self.block_size_on_save
     block_ids_on_save = block_ids
@@ -444,8 +450,11 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
         config = None
     else:
         # Enable telemetry by default for NIXL 0.7.1 and above.
-        config = (nixl_agent_config(backends=self.nixl_backends, capture_telemetry=True)
-                  if len(non_ucx_backends) > 0 else nixl_agent_config(num_threads=num_threads, capture_telemetry=True))
+        config = (
+            nixl_agent_config(backends=self.nixl_backends, capture_telemetry=True)
+            if len(non_ucx_backends) > 0
+            else nixl_agent_config(num_threads=num_threads, capture_telemetry=True)
+        )
 
     self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), config)
     # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
@@ -466,8 +475,7 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
     if self.device_type not in _NIXL_SUPPORTED_DEVICE:
         raise RuntimeError(f"{self.device_type} is not supported.")
     elif self.kv_buffer_device not in _NIXL_SUPPORTED_DEVICE[self.device_type]:
-        raise RuntimeError(f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
-                           "is not supported.")
+        raise RuntimeError(f"{self.device_type} with {self.kv_buffer_device} kv_buffer is not supported.")
     self.device_kv_caches: dict[str, torch.Tensor] = {}  # type: ignore[misc]
 
     # cpu kv buffer for xfer
@@ -487,8 +495,7 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
         elif self.kv_buffer_device == "cpu":
             nixl_memory_type = "DRAM"
     if nixl_memory_type is None:
-        raise RuntimeError(f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
-                           "is not supported.")
+        raise RuntimeError(f"{self.device_type} with {self.kv_buffer_device} kv_buffer is not supported.")
     self.nixl_memory_type = nixl_memory_type
 
     # Note: host xfer buffer ops when use_host_buffer is True
@@ -591,8 +598,9 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
         total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
         attn_backend=backend,
     )
-    self.compat_hash = compute_nixl_compatibility_hash(self.vllm_config, self.backend_name,
-                                                       self.kv_topo.cross_layers_blocks)
+    self.compat_hash = compute_nixl_compatibility_hash(
+        self.vllm_config, self.backend_name, self.kv_topo.cross_layers_blocks
+    )
     self._physical_blocks_per_logical_kv_block = 1
 
 
@@ -601,17 +609,18 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
 
     if self.use_host_buffer:
         self.initialize_host_xfer_buffer(kv_caches=kv_caches)
-        assert len(self.host_xfer_buffers) == len(kv_caches), (f"host_buffer: {len(self.host_xfer_buffers)}, "
-                                                               f"kv_caches: {len(kv_caches)}")
+        assert len(self.host_xfer_buffers) == len(kv_caches), (
+            f"host_buffer: {len(self.host_xfer_buffers)}, kv_caches: {len(kv_caches)}"
+        )
         xfer_buffers = self.host_xfer_buffers
     else:
         xfer_buffers = kv_caches
-        assert not self.host_xfer_buffers, ("host_xfer_buffer should not be initialized when "
-                                            f"kv_buffer_device is {self.kv_buffer_device}")
+        assert not self.host_xfer_buffers, (
+            f"host_xfer_buffer should not be initialized when kv_buffer_device is {self.kv_buffer_device}"
+        )
 
     logger.info(
-        "Registering KV_Caches. use_mla: %s, kv_buffer_device: %s, "
-        "use_host_buffer: %s",
+        "Registering KV_Caches. use_mla: %s, kv_buffer_device: %s, use_host_buffer: %s",
         self.use_mla,
         self.kv_buffer_device,
         self.use_host_buffer,
@@ -656,7 +665,7 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
                     self.block_size,
                     kernel_block_size,
                 )
-                self._physical_blocks_per_logical_kv_block = (self.block_size // kernel_block_size)
+                self._physical_blocks_per_logical_kv_block = self.block_size // kernel_block_size
                 self.block_size = kernel_block_size
                 self._block_size[self.engine_id] = kernel_block_size
 
@@ -667,18 +676,18 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
                 tensor_size_bytes = curr_tensor_size_bytes
                 self.num_blocks = cache.shape[0]
 
-            assert cache.shape[0] == self.num_blocks, ("All kv cache tensors must have the same number of blocks")
+            assert cache.shape[0] == self.num_blocks, "All kv cache tensors must have the same number of blocks"
 
             block_size_ratio_on_save = self.block_size // self.block_size_on_save
 
             self.block_len_per_layer.append(curr_tensor_size_bytes // self.num_blocks)
             self.slot_size_per_layer.append(self.block_len_per_layer[-1] // self.block_size)
             block_len_per_layer_on_save.append(curr_tensor_size_bytes // self.num_blocks // block_size_ratio_on_save)
-            num_blocks_on_save = (curr_tensor_size_bytes // block_len_per_layer_on_save[-1])
+            num_blocks_on_save = curr_tensor_size_bytes // block_len_per_layer_on_save[-1]
 
             if not self.use_mla:
                 # Different kv cache shape is not supported by HeteroTP
-                assert tensor_size_bytes == curr_tensor_size_bytes, ("All kv cache tensors must have the same size")
+                assert tensor_size_bytes == curr_tensor_size_bytes, "All kv cache tensors must have the same size"
             # Need to make sure the device ID is non-negative for NIXL,
             # Torch uses -1 to indicate CPU tensors.
             self.device_id = max(cache.get_device(), 0)
@@ -779,9 +788,9 @@ def register_local_xfer_handler(
     for i, base_addr in enumerate(self.seen_base_addresses):
         # The new block_len is using prefill block_len;
         # and num_blocks is multiple with N
-        kv_block_len = (self.get_backend_aware_kv_block_len(layer_idx=i) // block_size_ratio)
+        kv_block_len = self.get_backend_aware_kv_block_len(layer_idx=i) // block_size_ratio
         block_len_per_layer = self.block_len_per_layer[i] // block_size_ratio
-        num_blocks = (self.num_blocks * self.block_len_per_layer[i] // block_len_per_layer)
+        num_blocks = self.num_blocks * self.block_len_per_layer[i] // block_len_per_layer
         for block_id in range(num_blocks):
             block_offset = block_id * block_len_per_layer
             addr = base_addr + block_offset
@@ -843,7 +852,7 @@ def post_process_device_kv_on_save(self, block_ids: list[int]):
     for _, cache_or_caches in self.device_kv_caches.items():
         cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
         for cache in cache_list:
-            if (self.kv_cache_layout_on_save != self.kv_cache_layout and self.block_size_on_save != self.block_size):
+            if self.kv_cache_layout_on_save != self.kv_cache_layout and self.block_size_on_save != self.block_size:
                 kv_postprocess_layout_and_blksize_on_save(cache, indices, target_block_size)
             elif self.kv_cache_layout_on_save != self.kv_cache_layout:
                 kv_postprocess_layout_on_save(cache, indices)
@@ -901,8 +910,7 @@ def _read_blocks(
         except Exception as e:
             self._log_failure(
                 failure_type="notification_failed",
-                msg="P worker blocks will be freed after timeout. "
-                "This may indicate network issues.",
+                msg="P worker blocks will be freed after timeout. This may indicate network issues.",
                 req_id=request_id,
                 error=e,
                 dst_engine_id=dst_engine_id,

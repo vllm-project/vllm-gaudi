@@ -4,7 +4,6 @@ from vllm.v1.request import Request
 
 
 class HPUAsyncScheduler(AsyncScheduler):
-
     def _update_request_with_output(self, request: Request, new_token_ids: list[int]) -> tuple[list[int], bool]:
         # HPU may complete prompt processing and generate logits for a request
         # even if the scheduler only scheduled a partial chunk (where

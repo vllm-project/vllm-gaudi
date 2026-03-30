@@ -22,7 +22,8 @@ PROMPTS = [
         "intfloat/e5-mistral-7b-instruct",
         # "ssmits/Qwen2-7B-Instruct-embed-base",
         # "BAAI/bge-multilingual-gemma2",
-    ])
+    ],
+)
 def test_embeddings(model):
 
     args = Namespace(model=model, runner="pooling", enforce_eager=True)

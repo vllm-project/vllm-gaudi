@@ -63,17 +63,16 @@ def main(args):
         else:
             tmp_conversation = [{"role": "system", "content": system_prompt}, {"role": "user", "content": question}]
         try:
-            tmp_input = tokenizer.apply_chat_template(tmp_conversation,
-                                                      chat_template=chat_template,
-                                                      tokenize=False,
-                                                      truncation=True)
+            tmp_input = tokenizer.apply_chat_template(
+                tmp_conversation, chat_template=chat_template, tokenize=False, truncation=True
+            )
         except ValueError:
             # Case when given model don't need any chat-template and can process raw string without any system tokens,
             # e.g. facebook/opt-125m
             tmp_input = f"{system_prompt}. {question}"
         inputs.append(tmp_input)
 
-    calibration_ds['input'] = inputs
+    calibration_ds["input"] = inputs
 
     print("Saving calibration dataset...")
     calibration_ds.to_pickle(f"{args.output_name}-calibration-dataset.pkl")
@@ -81,17 +80,18 @@ def main(args):
 
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser(description="Create a calibration dataset for a model.")
     parser.add_argument("-d", "--dataset", type=str, required=True)
     parser.add_argument("-m", "--model", type=str, required=True)
     parser.add_argument("-o", "--output_name", type=str, required=True)
     parser.add_argument("--max-model-length", type=int, default=1024)
     parser.add_argument("--max-dataset-samples", type=int, default=0)
-    parser.add_argument("--chat-template",
-                        type=str,
-                        default="",
-                        help="If not provided, the default chat-template from the model will be used.")
+    parser.add_argument(
+        "--chat-template",
+        type=str,
+        default="",
+        help="If not provided, the default chat-template from the model will be used.",
+    )
 
     args = parser.parse_args()
 

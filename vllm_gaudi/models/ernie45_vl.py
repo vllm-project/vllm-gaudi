@@ -19,7 +19,6 @@ import types
     dummy_inputs=Ernie4_5_VLDummyInputsBuilder,
 )
 class HpuErnie4_5_VLMoeForConditionalGeneration(Ernie4_5_VLMoeForConditionalGeneration):
-
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -52,14 +51,19 @@ def ernie4_5_vlmoemoe_forward_hpu(
     elif visual_token_mask is not None and visual_token_mask.cpu().any():  # WA for HPU: fallback to CPU
         text_token_mask = ~visual_token_mask
         text_router_logits, _ = self.text_experts_gate(hidden_states.to(dtype=torch.float32))
-        text_shared_output, text_experts_output = self.text_experts(hidden_states=hidden_states,
-                                                                    router_logits=text_router_logits)
+        text_shared_output, text_experts_output = self.text_experts(
+            hidden_states=hidden_states, router_logits=text_router_logits
+        )
         vision_router_logits, _ = self.vision_experts_gate(hidden_states.to(dtype=torch.float32))
-        vision_shared_output, vision_experts_output = self.vision_experts(hidden_states=hidden_states,
-                                                                          router_logits=vision_router_logits)
-        final_hidden_states = (text_shared_output * text_token_mask +
-                               vision_shared_output * visual_token_mask if self.has_shared_experts else None,
-                               text_experts_output * text_token_mask + vision_experts_output * visual_token_mask)
+        vision_shared_output, vision_experts_output = self.vision_experts(
+            hidden_states=hidden_states, router_logits=vision_router_logits
+        )
+        final_hidden_states = (
+            text_shared_output * text_token_mask + vision_shared_output * visual_token_mask
+            if self.has_shared_experts
+            else None,
+            text_experts_output * text_token_mask + vision_experts_output * visual_token_mask,
+        )
     else:
         # only text modal input
         text_router_logits, _ = self.text_experts_gate(hidden_states.to(dtype=torch.float32))
@@ -74,17 +78,17 @@ def ernie4_5_vlmoemoe_forward_hpu(
         final_hidden_states = final_hidden_states[1]
 
     if self.tp_size > 1:
-        final_hidden_states = (self.text_experts.maybe_all_reduce_tensor_model_parallel(final_hidden_states))
+        final_hidden_states = self.text_experts.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
 
     return final_hidden_states.view(orig_shape)
 
 
 def ernie4_5_visionattention_forward_hpu(
-        self,
-        x: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        rotary_pos_emb: torch.Tensor,
-        max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+    self,
+    x: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    rotary_pos_emb: torch.Tensor,
+    max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
 ) -> torch.Tensor:
     # [s, b, c] --> [s, b, head * 3 * head_dim]
     x, _ = self.qkv(x)

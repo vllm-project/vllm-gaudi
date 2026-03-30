@@ -9,36 +9,28 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm_gaudi.extension.utils import VLLMKVCache
-from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, B2BMatmul, ModuleFusedSDPA, Softmax, VLLMFP8KVCache)
+from vllm_gaudi.extension.utils import FP8Matmul, Matmul, B2BMatmul, ModuleFusedSDPA, Softmax, VLLMFP8KVCache
 from vllm_gaudi.attention.backends.hpu_attn import HPUMLAMetadata
 import vllm_gaudi.extension.kernels as kernels
 from vllm.forward_context import ForwardContext, get_forward_context
 
 
 class HPUMLAAttention(MLAAttention):
-
     scale: float
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.enable_fp8_attn = self.kv_cache_dtype == 'fp8_inc' and os.environ.get('QUANT_CONFIG', None) is None
+        self.enable_fp8_attn = self.kv_cache_dtype == "fp8_inc" and os.environ.get("QUANT_CONFIG", None) is None
         self.scale = float(self.scale)
-        self.matmul_qk = Matmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
+        self.matmul_qk = Matmul() if not self.enable_fp8_attn else FP8Matmul()
         self.softmax = Softmax()
-        self.matmul_av = Matmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
-        self.batch2block_matmul = B2BMatmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
-        self.block2batch_matmul = B2BMatmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
-        self.k_cache = VLLMKVCache() if not self.enable_fp8_attn \
-            else VLLMFP8KVCache()
-        self.v_cache = VLLMKVCache(is_v_cache=True) if not self.enable_fp8_attn \
-            else VLLMFP8KVCache()
+        self.matmul_av = Matmul() if not self.enable_fp8_attn else FP8Matmul()
+        self.batch2block_matmul = B2BMatmul() if not self.enable_fp8_attn else FP8Matmul()
+        self.block2batch_matmul = B2BMatmul() if not self.enable_fp8_attn else FP8Matmul()
+        self.k_cache = VLLMKVCache() if not self.enable_fp8_attn else VLLMFP8KVCache()
+        self.v_cache = VLLMKVCache(is_v_cache=True) if not self.enable_fp8_attn else VLLMFP8KVCache()
         HPUFusedSDPA = kernels.fsdpa()
-        self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
-            else ModuleFusedSDPA(HPUFusedSDPA)
+        self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None else ModuleFusedSDPA(HPUFusedSDPA)
 
     def forward(
         self,
@@ -56,19 +48,19 @@ class HPUMLAAttention(MLAAttention):
             if isinstance(attn_metadata, dict):
                 attn_metadata = attn_metadata[self.layer_name]
             self_kv_cache = self.kv_cache[0]
-            #slot_mapping = forward_context.slot_mapping
+            # slot_mapping = forward_context.slot_mapping
 
-            #assert isinstance(slot_mapping, dict), (
+            # assert isinstance(slot_mapping, dict), (
             #    f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
-            #)
-            #self.impl.do_kv_cache_update(
+            # )
+            # self.impl.do_kv_cache_update(
             #    kv_c_normed,
             #    k_pe,
             #    self_kv_cache,
             #    slot_mapping.get(self.layer_name),
             #    self.kv_cache_dtype,
             #    self._k_scale,
-            #)
+            # )
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 self.forward_impl(
@@ -166,7 +158,7 @@ class HPUMLAAttention(MLAAttention):
         # We handle this by directly dequantizing kv_b_proj for the HPU path.
         kv_b_proj = self.kv_b_proj
         weight = kv_b_proj.weight
-        weight_scale_inv = getattr(kv_b_proj, 'weight_scale_inv', None)
+        weight_scale_inv = getattr(kv_b_proj, "weight_scale_inv", None)
 
         if weight.dtype == torch.float8_e4m3fn and weight_scale_inv is not None:
             if weight_scale_inv.dim() == 1:
@@ -177,8 +169,9 @@ class HPUMLAAttention(MLAAttention):
             else:
                 # Block FP8 (force_channel_fp8=False): use HPU block dequant.
                 from vllm_gaudi.extension.ops import dequant_block_fp8_weight_naive
-                orig_M = kv_b_proj.orig_M.item() if hasattr(kv_b_proj, 'orig_M') else None
-                orig_N = kv_b_proj.orig_N.item() if hasattr(kv_b_proj, 'orig_N') else None
+
+                orig_M = kv_b_proj.orig_M.item() if hasattr(kv_b_proj, "orig_M") else None
+                orig_N = kv_b_proj.orig_N.item() if hasattr(kv_b_proj, "orig_N") else None
                 kv_b_proj_weight = dequant_block_fp8_weight_naive(
                     weight,
                     weight_scale_inv,
@@ -192,9 +185,11 @@ class HPUMLAAttention(MLAAttention):
             assert kv_b_proj_weight.shape == (
                 self.kv_lora_rank,
                 self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
-            ), (f"{kv_b_proj_weight.shape=}, "
+            ), (
+                f"{kv_b_proj_weight.shape=}, "
                 f"{self.kv_lora_rank=}, {self.num_heads=}, "
-                f"{self.qk_nope_head_dim=}, {self.v_head_dim=}")
+                f"{self.qk_nope_head_dim=}, {self.v_head_dim=}"
+            )
             kv_b_proj_weight = kv_b_proj_weight.view(
                 self.kv_lora_rank,
                 self.num_heads,
@@ -204,10 +199,14 @@ class HPUMLAAttention(MLAAttention):
             self.W_UV = W_UV.transpose(0, 1).contiguous()
             self.W_UK_T = W_UK.permute(1, 2, 0).contiguous()
 
-            from vllm.model_executor.layers.attention.attention import (set_default_quant_scales,
-                                                                        should_load_quant_weights)
-            quant_method = (self.quant_config.get_quant_method(self, prefix=self.layer_name)
-                            if self.quant_config else None)
+            from vllm.model_executor.layers.attention.attention import (
+                set_default_quant_scales,
+                should_load_quant_weights,
+            )
+
+            quant_method = (
+                self.quant_config.get_quant_method(self, prefix=self.layer_name) if self.quant_config else None
+            )
             if not should_load_quant_weights(quant_method):
                 set_default_quant_scales(self, register_buffer=False)
         else:
@@ -230,7 +229,6 @@ class HPUMLAAttention(MLAAttention):
 
 @PluggableLayer.register_oot(name="MultiHeadLatentAttentionWrapper")
 class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
-
     def __init__(
         self,
         hidden_size: int,

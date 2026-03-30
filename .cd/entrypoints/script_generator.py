@@ -29,26 +29,28 @@ def shutil_copy(source_file, destination_dir):
 
 
 class ScriptGenerator:
-
-    def __init__(self,
-                 template_script_path,
-                 output_script_path,
-                 variables,
-                 log_dir="logs",
-                 dry_run_dir="/local/",
-                 varlist_conf_path=None):
+    def __init__(
+        self,
+        template_script_path,
+        output_script_path,
+        variables,
+        log_dir="logs",
+        dry_run_dir="/local/",
+        varlist_conf_path=None,
+    ):
         self.template_script_path = template_script_path
         self.varlist_conf_path = varlist_conf_path
         self.output_script_path = output_script_path
         self.variables = variables
         self.log_dir = log_dir
         self.dry_run_dir = dry_run_dir
-        self.log_file = os.path.join(self.log_dir,
-                                     f"{os.path.splitext(os.path.basename(self.output_script_path))[0]}.log")
+        self.log_file = os.path.join(
+            self.log_dir, f"{os.path.splitext(os.path.basename(self.output_script_path))[0]}.log"
+        )
 
     def generate_script(self, vars_dict):
         """
-        Generate the script from a template, 
+        Generate the script from a template,
         replacing placeholders with environment variables.
         """
         with open(self.template_script_path) as f:
@@ -64,7 +66,7 @@ class ScriptGenerator:
         else:
             export_lines = "\n".join([f"export {k}={v}" for k, v in vars_dict.items()])
         script_content = template.replace("#@VARS", export_lines)
-        with open(self.output_script_path, 'w') as f:
+        with open(self.output_script_path, "w") as f:
             f.write(script_content)
 
     def make_script_executable(self):
@@ -94,7 +96,7 @@ class ScriptGenerator:
         except Exception:
             print(f"Error: could not create {self.log_dir}.")
 
-        if os.environ.get("DRY_RUN") == '1':
+        if os.environ.get("DRY_RUN") == "1":
             shutil_copy(self.output_script_path, self.dry_run_dir)
             print(f"[INFO] This is a dry run to save the command line file {self.output_script_path}.")
             sys.exit(0)

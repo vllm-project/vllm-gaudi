@@ -27,7 +27,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa
-    ExampleConnector, )
+    ExampleConnector,
+)
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
@@ -64,9 +65,9 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.encoder_cache_manager.cached) == 0
 
     # KVCache Manager.
-    assert (len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks) == 0)
-    assert (len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].num_cached_block) == 0)
-    num_free_blocks = (scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks)
+    assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks) == 0
+    assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].num_cached_block) == 0
+    num_free_blocks = scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks
     assert num_free_blocks == (scheduler.kv_cache_manager.block_pool.num_gpu_blocks - 1)
 
     # NOTE(rob): just the ref count on blocks will be 0. The hash
@@ -240,12 +241,15 @@ def create_model_runner_output(
     sampled_token = EOS_TOKEN_ID if use_eos else token_id
     sampled_token_ids = [[sampled_token] for _ in req_ids]
 
-    kv_connector_output = (None if (finished_sending is None and finished_recving is None and invalid_block_ids is None)
-                           else KVConnectorOutput(
-                               finished_sending=finished_sending,
-                               finished_recving=finished_recving,
-                               invalid_block_ids=invalid_block_ids or set(),
-                           ))
+    kv_connector_output = (
+        None
+        if (finished_sending is None and finished_recving is None and invalid_block_ids is None)
+        else KVConnectorOutput(
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
+            invalid_block_ids=invalid_block_ids or set(),
+        )
+    )
 
     # Make output data structure.
     return ModelRunnerOutput(
@@ -260,27 +264,26 @@ def create_model_runner_output(
 
 
 class TestExampleConnector(ExampleConnector):
-
     def __init__(self, config: VllmConfig, role, kv_cache_config):
         self.name = config.kv_transfer_config.kv_connector_extra_config["name"]
         self._connector = ExampleConnector(config, role)
         self.call_record: dict[str, int] = defaultdict(int)
         # Use a unique temp file per connector
-        self._event_file = (tempfile.gettempdir() + f"/connector_{self.name}-{self.role.name}_events.log")
+        self._event_file = tempfile.gettempdir() + f"/connector_{self.name}-{self.role.name}_events.log"
         # Start with an empty file
         with open(self._event_file, "w") as _:
             pass
 
     def __getattribute__(self, name):
         if name in (
-                "_connector",
-                "call_record",
-                "name",
-                "_event_file",
-                "__class__",
-                "__dict__",
-                "__getattribute__",
-                "__init__",
+            "_connector",
+            "call_record",
+            "name",
+            "_event_file",
+            "__class__",
+            "__dict__",
+            "__getattribute__",
+            "__init__",
         ):  # avoid recursion
             return object.__getattribute__(self, name)
         if not hasattr(self._connector, name):
@@ -321,7 +324,6 @@ class MockKVConfig:
 
 
 class MockKVConnectorMetadata(KVConnectorMetadata):
-
     def __init__(self):
         # Scheduler tests check metadata.requests
         self.requests: list = []

@@ -9,7 +9,6 @@ from server.vllm_autocalc_rules import PARAM_CALC_FUNCS
 
 
 class VarsGenerator:
-
     def __init__(self, defaults_path, varlist_conf_path, model_def_settings_path):
         """
         Initialize VarsGenerator by opening all config files and storing
@@ -24,6 +23,7 @@ class VarsGenerator:
 
     def get_device_name(self):
         import habana_frameworks.torch.hpu as hthpu
+
         os.environ["LOG_LEVEL_ALL"] = "6"
         device_name = hthpu.get_device_name()
         return device_name
@@ -33,11 +33,10 @@ class VarsGenerator:
         Reads the model settings CSV and returns a dictionary for the
         selected model.
         """
-        filtered = self.model_def_settings[self.model_def_settings['MODEL'] == self.context['MODEL']]
+        filtered = self.model_def_settings[self.model_def_settings["MODEL"] == self.context["MODEL"]]
 
         if filtered.empty:
-            raise ValueError(f"No matching rows found for model "
-                             f"'{self.context['MODEL']}'")
+            raise ValueError(f"No matching rows found for model '{self.context['MODEL']}'")
 
         return filtered.iloc[0].to_dict()
 
@@ -45,14 +44,14 @@ class VarsGenerator:
         """
         Build context dictionary for autocalc rules and server configuration.
         """
-        self.context['MODEL'] = os.environ.get('MODEL')
-        if not self.context['MODEL']:
+        self.context["MODEL"] = os.environ.get("MODEL")
+        if not self.context["MODEL"]:
             print('Error: no model. Provide model name in env var "MODEL"')
             exit(-1)
-        defaults = self.defaults.get('hw_defaults', {})
-        self.context['HPU_MEM'] = defaults.get('HPU_MEM', {})
-        self.context['DTYPE'] = defaults.get('DTYPE', "bfloat16")
-        self.context['DEVICE_NAME'] = (defaults.get('DEVICE_NAME') or self.get_device_name())
+        defaults = self.defaults.get("hw_defaults", {})
+        self.context["HPU_MEM"] = defaults.get("HPU_MEM", {})
+        self.context["DTYPE"] = defaults.get("DTYPE", "bfloat16")
+        self.context["DEVICE_NAME"] = defaults.get("DEVICE_NAME") or self.get_device_name()
         server_conf = self.get_model_from_csv()
         self.context.update(server_conf)
 
@@ -68,10 +67,10 @@ class VarsGenerator:
             with open(env_file) as f:
                 for line in f:
                     line = line.strip()
-                    if not line or line.startswith('#'):
+                    if not line or line.startswith("#"):
                         continue
-                    if '=' in line:
-                        key, _ = line.split('=', 1)
+                    if "=" in line:
+                        key, _ = line.split("=", 1)
                         key = key.strip()
                     else:
                         key = line

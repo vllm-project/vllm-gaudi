@@ -151,7 +151,7 @@ def _load_weights_mxfp4_dequantize_hpu(
             if use_ep:
                 narrow_weight_scale = weight[ep_rank_start:ep_rank_end, ...]
             else:
-                narrow_weight_scale = weight[:, 2 * tp_rank_start:2 * tp_rank_end, :]
+                narrow_weight_scale = weight[:, 2 * tp_rank_start : 2 * tp_rank_end, :]
 
             narrow_weight_scale = narrow_weight_scale.contiguous()
 
@@ -163,7 +163,7 @@ def _load_weights_mxfp4_dequantize_hpu(
             param = params_dict[block_name]
 
             weight = convert_moe_packed_tensors(block_weight, narrow_weight_scale)
-            param[:, :2 * (tp_rank_end - tp_rank_start), :] = weight
+            param[:, : 2 * (tp_rank_end - tp_rank_start), :] = weight
             del block_weight_dict[block_name]
             loaded_params.add(name)
             continue
@@ -171,7 +171,7 @@ def _load_weights_mxfp4_dequantize_hpu(
             if use_ep:
                 narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
             else:
-                narrow_weight = weight[:, 2 * tp_rank_start:2 * tp_rank_end, :, :]
+                narrow_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end, :, :]
             narrow_weight = narrow_weight.contiguous()
             block_weight_dict[name] = narrow_weight
             loaded_params.add(name)
@@ -181,7 +181,7 @@ def _load_weights_mxfp4_dequantize_hpu(
             if use_ep:
                 narrow_weight_scale = weight[ep_rank_start:ep_rank_end, ...]
             else:
-                narrow_weight_scale = weight[..., tp_rank_start // OCP_MX_BLOCK_SIZE:tp_rank_end // OCP_MX_BLOCK_SIZE]
+                narrow_weight_scale = weight[..., tp_rank_start // OCP_MX_BLOCK_SIZE : tp_rank_end // OCP_MX_BLOCK_SIZE]
             narrow_weight_scale = narrow_weight_scale.contiguous()
 
             # Read block weight
@@ -192,7 +192,7 @@ def _load_weights_mxfp4_dequantize_hpu(
             param = params_dict[block_name]
 
             weight = convert_moe_packed_tensors(block_weight, narrow_weight_scale)
-            param[:, :, :(tp_rank_end - tp_rank_start)] = weight
+            param[:, :, : (tp_rank_end - tp_rank_start)] = weight
             del block_weight_dict[block_name]
             loaded_params.add(name)
             continue
@@ -200,7 +200,7 @@ def _load_weights_mxfp4_dequantize_hpu(
             if use_ep:
                 narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
             else:
-                narrow_weight = weight[:, :, tp_rank_start // OCP_MX_BLOCK_SIZE:tp_rank_end // OCP_MX_BLOCK_SIZE, :]
+                narrow_weight = weight[:, :, tp_rank_start // OCP_MX_BLOCK_SIZE : tp_rank_end // OCP_MX_BLOCK_SIZE, :]
             narrow_weight = narrow_weight.contiguous()
             block_weight_dict[name] = narrow_weight
             loaded_params.add(name)
@@ -211,11 +211,11 @@ def _load_weights_mxfp4_dequantize_hpu(
             if use_ep:
                 narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
             else:
-                narrow_weight = weight[:, 2 * tp_rank_start:2 * tp_rank_end]
+                narrow_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end]
             narrow_weight = narrow_weight.contiguous()
 
             param = params_dict[name]
-            param[:, :2 * (tp_rank_end - tp_rank_start)] = narrow_weight
+            param[:, : 2 * (tp_rank_end - tp_rank_start)] = narrow_weight
             loaded_params.add(name)
             continue
         elif ".w2_bias" in name:

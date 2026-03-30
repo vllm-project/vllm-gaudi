@@ -74,7 +74,8 @@ def install_system_dependencies():
             "WARNING: Not running as root. Skipping system dependency installation.\n"
             "Please ensure the following packages are installed on your system:\n"
             "  patchelf build-essential git cmake ninja-build autotools-dev automake meson libtool libtool-bin\n"
-            "---\n")
+            "---\n"
+        )
         return
 
     logger.info("--- Running as root. Installing system dependencies... ---")
@@ -411,8 +412,9 @@ def build_and_install_prerequisites(args):
     if not newly_built_wheel:
         raise RuntimeError("Failed to find the repaired NIXL wheel.")
 
-    logger.info("--> Successfully built self-contained wheel: %s. Now installing...",
-                os.path.basename(newly_built_wheel))
+    logger.info(
+        "--> Successfully built self-contained wheel: %s. Now installing...", os.path.basename(newly_built_wheel)
+    )
     install_command = [
         sys.executable,
         "-m",

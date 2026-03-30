@@ -31,11 +31,11 @@ def on_page_markdown(markdown: str, *, page: Page, config: MkDocsConfig, files: 
     auto_link = re.compile(f"<{scheme}>")
 
     def replace_inline_link(match: re.Match) -> str:
-        url = f'{urls[match.group("type")]}/{match.group("path")}'
+        url = f"{urls[match.group('type')]}/{match.group('path')}"
         if fragment := match.group("fragment"):
             url += f"#{fragment}"
 
-        return f'[{gh_icon} {match.group("title")}]({url})'
+        return f"[{gh_icon} {match.group('title')}]({url})"
 
     def replace_auto_link(match: re.Match) -> str:
         type = match.group("type")

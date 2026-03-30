@@ -21,8 +21,14 @@ _orig_qwen3next_attention_forward = Qwen3NextAttention.forward
 # ====================================================================
 def _hpu_qwen3next_attention_forward(self, positions, output, hidden_states):
 
-    is_decode_like = (hidden_states is not None and output is not None and hidden_states.dim() == 3
-                      and output.dim() == 3 and hidden_states.shape[1] == 1 and output.shape[1] == 1)
+    is_decode_like = (
+        hidden_states is not None
+        and output is not None
+        and hidden_states.dim() == 3
+        and output.dim() == 3
+        and hidden_states.shape[1] == 1
+        and output.shape[1] == 1
+    )
     if not is_decode_like:
         return _orig_qwen3next_attention_forward(self, positions, output, hidden_states)
 
@@ -59,7 +65,7 @@ def _hpu_qwen3next_attention_forward(self, positions, output, hidden_states):
     # Output buffer may be [B, 1, H_out] in decode.
     output_2d = output.view(-1, output.shape[-1])
     proj_out_2d = proj_out.view(-1, proj_out.shape[-1])
-    output_2d[:proj_out_2d.shape[0]].copy_(proj_out_2d)
+    output_2d[: proj_out_2d.shape[0]].copy_(proj_out_2d)
 
 
 # ====================================================================
@@ -87,13 +93,13 @@ def _hpu_qwen3next_sparse_moe_forward(
         final_hidden_states = self.experts(hidden_states=hidden_states, router_logits=router_logits)
 
     if self.shared_expert is not None:
-        final_hidden_states = (final_hidden_states[0] + final_hidden_states[1])
+        final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
 
     if self.is_sequence_parallel:
         final_hidden_states = tensor_model_parallel_all_gather(final_hidden_states, 0)
         final_hidden_states = final_hidden_states[:num_tokens]
     elif self.tp_size > 1:
-        final_hidden_states = (self.experts.maybe_all_reduce_tensor_model_parallel(final_hidden_states))
+        final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
 
     return final_hidden_states.reshape(orig_shape)
 

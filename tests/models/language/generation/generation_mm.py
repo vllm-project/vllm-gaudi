@@ -18,30 +18,35 @@ logger = init_logger()
 class PROMPT_DATA:
     _questions = {
         "image": [
-            "What is the most prominent object in this image?", "Describe the scene in the image.",
-            "What is the weather like in the image?", "Write a short poem about this image."
+            "What is the most prominent object in this image?",
+            "Describe the scene in the image.",
+            "What is the weather like in the image?",
+            "Write a short poem about this image.",
         ],
-        "video": ["Describe this video", "Which movie would you associate this video with?"]
+        "video": ["Describe this video", "Which movie would you associate this video with?"],
     }
 
     _data = {
-        "image":
-        lambda source: convert_image_mode(
-            ImageAsset("cherry_blossom").pil_image if source == "default" else Image.open(source), "RGB"),
-        "video":
-        lambda source: VideoAsset(name="baby_reading" if source == "default" else source, num_frames=16).np_ndarrays
+        "image": lambda source: convert_image_mode(
+            ImageAsset("cherry_blossom").pil_image if source == "default" else Image.open(source), "RGB"
+        ),
+        "video": lambda source: (
+            VideoAsset(name="baby_reading" if source == "default" else source, num_frames=16).np_ndarrays
+        ),
     }
 
     def __post_init__(self):
         self._questions = self._questions
         self._data = self._data
 
-    def get_prompts(self,
-                    model_name: str = "",
-                    modality: str = "image",
-                    media_source: str = "default",
-                    num_prompts: int = 1,
-                    skip_vision_data=False):
+    def get_prompts(
+        self,
+        model_name: str = "",
+        modality: str = "image",
+        media_source: str = "default",
+        num_prompts: int = 1,
+        skip_vision_data=False,
+    ):
         if modality == "image":
             data = encode_image_url(self._data[modality](media_source))
         elif modality == "video":
@@ -126,16 +131,18 @@ def start_test(model_card_path: str):
                 "input_data_config: %(input_data_config)s\n"
                 "extra_engine_args: %(extra_engine_args)s\n"
                 "================================================",
-                dict(modality=modality, input_data_config=input_data_config, extra_engine_args=extra_engine_args))
+                dict(modality=modality, input_data_config=input_data_config, extra_engine_args=extra_engine_args),
+            )
 
             data = PROMPT_DATA()
-            inputs = data.get_prompts(model_name=model_name,
-                                      modality=modality,
-                                      media_source=media_source,
-                                      num_prompts=num_prompts)
+            inputs = data.get_prompts(
+                model_name=model_name, modality=modality, media_source=media_source, num_prompts=num_prompts
+            )
 
-            logger.info("*** Questions for modality %(modality)s: %(questions)s",
-                        dict(modality=modality, questions=data._questions[modality]))
+            logger.info(
+                "*** Questions for modality %(modality)s: %(questions)s",
+                dict(modality=modality, questions=data._questions[modality]),
+            )
             responses = run_model(model_name, inputs, modality, **extra_engine_args)
             for response in responses:
                 print(f"{response.outputs[0].text}")
@@ -159,6 +166,7 @@ if __name__ == "__main__":
     except Exception:
         import os
         import traceback
+
         print("An error occurred during generation:")
         traceback.print_exc()
         os._exit(1)

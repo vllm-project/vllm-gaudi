@@ -8,7 +8,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData, CachedRequestData
-from vllm.config import (VllmConfig, ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig, set_current_vllm_config)
+from vllm.config import VllmConfig, ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig, set_current_vllm_config
 
 DEVICE = current_platform.device_type
 
@@ -73,8 +73,9 @@ def make_new_request(req_id, prompt_token_ids, num_computed_tokens=0):
     "prompt1, prompt2, num_common_prefix, expected_tokens",
     [
         ([1, 2, 3, 4], [1, 2, 3, 4], 4, 0),  # full prefix cache hit
-        ([1, 2, 3], [1, 2, 3, 6, 7], 3, 2)  # partial prefix cache hit (3 cached, 2 new)
-    ])
+        ([1, 2, 3], [1, 2, 3, 6, 7], 3, 2),  # partial prefix cache hit (3 cached, 2 new)
+    ],
+)
 def test_prefix_cache_hits(model_runner, prompt1, prompt2, num_common_prefix, expected_tokens, dist_init):
     req_id1 = "req1"
     req_id2 = "req2"
@@ -126,7 +127,8 @@ def test_prefix_cache_hits(model_runner, prompt1, prompt2, num_common_prefix, ex
     "prompt, cache_first, cache_second",
     [
         ([10, 11, 12], 3, 0),  # first: all tokens cached, second: cache reset, all tokens need compute
-    ])
+    ],
+)
 def test_prefix_cache_reset(model_runner, prompt, cache_first, cache_second, dist_init):
     req_id = "req_reset"
     new_req_1 = make_new_request(req_id, prompt, num_computed_tokens=cache_first)

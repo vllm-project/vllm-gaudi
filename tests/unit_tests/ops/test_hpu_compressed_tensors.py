@@ -6,51 +6,54 @@ import habana_frameworks.torch as htorch
 from utils import get_data_path, create_row_parallel_linear, create_fused_moe
 from unittest.mock import MagicMock
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import CompressedTensorsConfig
-from vllm_gaudi.ops.hpu_compressed_tensors import (HPUCompressedTensorsLinearMethod, HPUCompressedTensorsW8A8Fp8,
-                                                   HPUCompressedTensorsWNA16, HPUCompressedTensorsWNA16MoEMethod)
+from vllm_gaudi.ops.hpu_compressed_tensors import (
+    HPUCompressedTensorsLinearMethod,
+    HPUCompressedTensorsW8A8Fp8,
+    HPUCompressedTensorsWNA16,
+    HPUCompressedTensorsWNA16MoEMethod,
+)
 from vllm_gaudi.utils import HPUCompileConfig
 from vllm.forward_context import override_forward_context
 from safetensors import safe_open
 
 
 def test_compressed_tensors_linear_method_w8a8fp8_static_per_tensor(default_vllm_config: None, dist_init):
-    """weight per-tensor, activation per-tensor
-    """
+    """weight per-tensor, activation per-tensor"""
     config = {
-        'config_groups': {
-            'group_0': {
-                'input_activations': {
-                    'block_structure': None,
-                    'dynamic': False,
-                    'group_size': None,
-                    'num_bits': 8,
-                    'observer': 'memoryless',
-                    'observer_kwargs': {},
-                    'strategy': 'tensor',
-                    'symmetric': True,
-                    'type': 'float'
+        "config_groups": {
+            "group_0": {
+                "input_activations": {
+                    "block_structure": None,
+                    "dynamic": False,
+                    "group_size": None,
+                    "num_bits": 8,
+                    "observer": "memoryless",
+                    "observer_kwargs": {},
+                    "strategy": "tensor",
+                    "symmetric": True,
+                    "type": "float",
                 },
-                'output_activations': None,
-                'targets': ['Linear'],
-                'weights': {
-                    'block_structure': None,
-                    'dynamic': False,
-                    'group_size': None,
-                    'num_bits': 8,
-                    'observer': 'minmax',
-                    'observer_kwargs': {},
-                    'strategy': 'tensor',
-                    'symmetric': True,
-                    'type': 'float'
-                }
+                "output_activations": None,
+                "targets": ["Linear"],
+                "weights": {
+                    "block_structure": None,
+                    "dynamic": False,
+                    "group_size": None,
+                    "num_bits": 8,
+                    "observer": "minmax",
+                    "observer_kwargs": {},
+                    "strategy": "tensor",
+                    "symmetric": True,
+                    "type": "float",
+                },
             }
         },
-        'format': 'float-quantized',
-        'global_compression_ratio': 1.239290831149584,
-        'ignore': [],
-        'kv_cache_scheme': None,
-        'quant_method': 'compressed-tensors',
-        'quantization_status': 'compressed'
+        "format": "float-quantized",
+        "global_compression_ratio": 1.239290831149584,
+        "ignore": [],
+        "kv_cache_scheme": None,
+        "quant_method": "compressed-tensors",
+        "quantization_status": "compressed",
     }
     oot_quant_config = CompressedTensorsConfig.from_config(config)
 
@@ -63,9 +66,11 @@ def test_compressed_tensors_linear_method_w8a8fp8_static_per_tensor(default_vllm
     # Weight and weight_scale_inv were extracted from first o_proj layer of Intel/Qwen3-0.6B-FP8-Test-Only
     # which is RowParallelLinear
     # (with adjusted shapes, to make tensors smaller)
-    with safe_open(get_data_path("data/compressed_tensors/linear_w8a8fp8_static_per_tensor.safetensors"),
-                   framework="pt",
-                   device="hpu") as f:
+    with safe_open(
+        get_data_path("data/compressed_tensors/linear_w8a8fp8_static_per_tensor.safetensors"),
+        framework="pt",
+        device="hpu",
+    ) as f:
         oot_op.weight.copy_(f.get_tensor("weight"))
         oot_op.weight_scale.copy_(f.get_tensor("weight_scale"))
         oot_op.input_scale.copy_(f.get_tensor("input_scale"))
@@ -80,9 +85,11 @@ def test_compressed_tensors_linear_method_w8a8fp8_static_per_tensor(default_vllm
     # Input and expected output
     # Output tensor holds data that was returned by cuda impl of CompressedTensorsLinearMethod for given input
     # (CompressedTensorsLinearMethod was triggered offline with the same input as below to get the ref_output)
-    with safe_open(get_data_path("data/compressed_tensors/linear_w8a8fp8_static_per_tensor.safetensors"),
-                   framework="pt",
-                   device="hpu") as f:
+    with safe_open(
+        get_data_path("data/compressed_tensors/linear_w8a8fp8_static_per_tensor.safetensors"),
+        framework="pt",
+        device="hpu",
+    ) as f:
         input = f.get_tensor("input")
         ref_output = f.get_tensor("ref_output")
 
@@ -94,43 +101,42 @@ def test_compressed_tensors_linear_method_w8a8fp8_static_per_tensor(default_vllm
 
 
 def test_compressed_tensors_linear_method_w8a8fp8_static_per_channel(default_vllm_config: None, dist_init):
-    """weight per-channel, activation per-tensor
-    """
+    """weight per-channel, activation per-tensor"""
     config = {
-        'config_groups': {
-            'group_0': {
-                'input_activations': {
-                    'block_structure': None,
-                    'dynamic': False,
-                    'group_size': None,
-                    'num_bits': 8,
-                    'observer': 'memoryless',
-                    'observer_kwargs': {},
-                    'strategy': 'tensor',
-                    'symmetric': True,
-                    'type': 'float'
+        "config_groups": {
+            "group_0": {
+                "input_activations": {
+                    "block_structure": None,
+                    "dynamic": False,
+                    "group_size": None,
+                    "num_bits": 8,
+                    "observer": "memoryless",
+                    "observer_kwargs": {},
+                    "strategy": "tensor",
+                    "symmetric": True,
+                    "type": "float",
                 },
-                'output_activations': None,
-                'targets': ['Linear'],
-                'weights': {
-                    'block_structure': None,
-                    'dynamic': False,
-                    'group_size': None,
-                    'num_bits': 8,
-                    'observer': 'minmax',
-                    'observer_kwargs': {},
-                    'strategy': 'channel',
-                    'symmetric': True,
-                    'type': 'float'
-                }
+                "output_activations": None,
+                "targets": ["Linear"],
+                "weights": {
+                    "block_structure": None,
+                    "dynamic": False,
+                    "group_size": None,
+                    "num_bits": 8,
+                    "observer": "minmax",
+                    "observer_kwargs": {},
+                    "strategy": "channel",
+                    "symmetric": True,
+                    "type": "float",
+                },
             }
         },
-        'format': 'float-quantized',
-        'global_compression_ratio': 1.239290831149584,
-        'ignore': [],
-        'kv_cache_scheme': None,
-        'quant_method': 'compressed-tensors',
-        'quantization_status': 'compressed'
+        "format": "float-quantized",
+        "global_compression_ratio": 1.239290831149584,
+        "ignore": [],
+        "kv_cache_scheme": None,
+        "quant_method": "compressed-tensors",
+        "quantization_status": "compressed",
     }
     oot_quant_config = CompressedTensorsConfig.from_config(config)
 
@@ -143,9 +149,11 @@ def test_compressed_tensors_linear_method_w8a8fp8_static_per_channel(default_vll
     # Weight and weight_scale_inv were extracted from first o_proj layer of Intel/Qwen3-0.6B-FP8-Static-Test-Only
     # which is RowParallelLinear
     # (with adjusted shapes, to make tensors smaller)
-    with safe_open(get_data_path("data/compressed_tensors/linear_w8a8fp8_static_per_channel.safetensors"),
-                   framework="pt",
-                   device="hpu") as f:
+    with safe_open(
+        get_data_path("data/compressed_tensors/linear_w8a8fp8_static_per_channel.safetensors"),
+        framework="pt",
+        device="hpu",
+    ) as f:
         oot_op.weight.copy_(f.get_tensor("weight"))
         oot_op.weight_scale.copy_(f.get_tensor("weight_scale"))
         oot_op.input_scale.copy_(f.get_tensor("input_scale"))
@@ -160,9 +168,11 @@ def test_compressed_tensors_linear_method_w8a8fp8_static_per_channel(default_vll
     # Input and expected output
     # Output tensor holds data that was returned by cuda impl of CompressedTensorsLinearMethod for given input
     # (CompressedTensorsLinearMethod was triggered offline with the same input as below to get the ref_output)
-    with safe_open(get_data_path("data/compressed_tensors/linear_w8a8fp8_static_per_channel.safetensors"),
-                   framework="pt",
-                   device="hpu") as f:
+    with safe_open(
+        get_data_path("data/compressed_tensors/linear_w8a8fp8_static_per_channel.safetensors"),
+        framework="pt",
+        device="hpu",
+    ) as f:
         input = f.get_tensor("input")
         ref_output = f.get_tensor("ref_output")
 
@@ -175,40 +185,40 @@ def test_compressed_tensors_linear_method_w8a8fp8_static_per_channel(default_vll
 
 def test_compressed_tensors_linear_method_w8a8fp8(default_vllm_config: None, dist_init):
     config = {
-        'config_groups': {
-            'group_0': {
-                'input_activations': {
-                    'block_structure': None,
-                    'dynamic': True,
-                    'group_size': None,
-                    'num_bits': 8,
-                    'observer': 'memoryless',
-                    'observer_kwargs': {},
-                    'strategy': 'token',
-                    'symmetric': True,
-                    'type': 'float'
+        "config_groups": {
+            "group_0": {
+                "input_activations": {
+                    "block_structure": None,
+                    "dynamic": True,
+                    "group_size": None,
+                    "num_bits": 8,
+                    "observer": "memoryless",
+                    "observer_kwargs": {},
+                    "strategy": "token",
+                    "symmetric": True,
+                    "type": "float",
                 },
-                'output_activations': None,
-                'targets': ['Linear'],
-                'weights': {
-                    'block_structure': None,
-                    'dynamic': False,
-                    'group_size': None,
-                    'num_bits': 8,
-                    'observer': 'minmax',
-                    'observer_kwargs': {},
-                    'strategy': 'channel',
-                    'symmetric': True,
-                    'type': 'float'
-                }
+                "output_activations": None,
+                "targets": ["Linear"],
+                "weights": {
+                    "block_structure": None,
+                    "dynamic": False,
+                    "group_size": None,
+                    "num_bits": 8,
+                    "observer": "minmax",
+                    "observer_kwargs": {},
+                    "strategy": "channel",
+                    "symmetric": True,
+                    "type": "float",
+                },
             }
         },
-        'format': 'naive-quantized',
-        'global_compression_ratio': 1.239290831149584,
-        'ignore': [],
-        'kv_cache_scheme': None,
-        'quant_method': 'compressed-tensors',
-        'quantization_status': 'frozen'
+        "format": "naive-quantized",
+        "global_compression_ratio": 1.239290831149584,
+        "ignore": [],
+        "kv_cache_scheme": None,
+        "quant_method": "compressed-tensors",
+        "quantization_status": "frozen",
     }
     oot_quant_config = CompressedTensorsConfig.from_config(config)
 
@@ -221,8 +231,9 @@ def test_compressed_tensors_linear_method_w8a8fp8(default_vllm_config: None, dis
     # Weight and weight_scale_inv were extracted from first RowParallelLinear
     # layer of RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8-dynamic
     # (with adjusted shapes, to make tensors smaller)
-    with safe_open(get_data_path("data/compressed_tensors/linear_w8a8fp8.safetensors"), framework="pt",
-                   device="hpu") as f:
+    with safe_open(
+        get_data_path("data/compressed_tensors/linear_w8a8fp8.safetensors"), framework="pt", device="hpu"
+    ) as f:
         oot_op.weight.copy_(f.get_tensor("weight"))
         oot_op.weight_scale.copy_(f.get_tensor("weight_scale"))
     oot_op.quant_method.process_weights_after_loading(oot_op)
@@ -234,8 +245,9 @@ def test_compressed_tensors_linear_method_w8a8fp8(default_vllm_config: None, dis
     # Input and expected output
     # Output tensor holds data that was returned by cuda impl of CompressedTensorsLinearMethod for given input
     # (CompressedTensorsLinearMethod was triggered offline with the same input as below to get the ref_output)
-    with safe_open(get_data_path("data/compressed_tensors/linear_w8a8fp8.safetensors"), framework="pt",
-                   device="hpu") as f:
+    with safe_open(
+        get_data_path("data/compressed_tensors/linear_w8a8fp8.safetensors"), framework="pt", device="hpu"
+    ) as f:
         input = f.get_tensor("input")
         ref_output = f.get_tensor("ref_output")
 
@@ -248,31 +260,31 @@ def test_compressed_tensors_linear_method_w8a8fp8(default_vllm_config: None, dis
 
 def test_compressed_tensors_linear_method_wna16(default_vllm_config: None, dist_init):
     config = {
-        'config_groups': {
-            'group_0': {
-                'input_activations': None,
-                'output_activations': None,
-                'targets': ['Linear'],
-                'weights': {
-                    'actorder': 'weight',
-                    'block_structure': None,
-                    'dynamic': False,
-                    'group_size': 128,
-                    'num_bits': 4,
-                    'observer': 'minmax',
-                    'observer_kwargs': {},
-                    'strategy': 'group',
-                    'symmetric': False,
-                    'type': 'int'
-                }
+        "config_groups": {
+            "group_0": {
+                "input_activations": None,
+                "output_activations": None,
+                "targets": ["Linear"],
+                "weights": {
+                    "actorder": "weight",
+                    "block_structure": None,
+                    "dynamic": False,
+                    "group_size": 128,
+                    "num_bits": 4,
+                    "observer": "minmax",
+                    "observer_kwargs": {},
+                    "strategy": "group",
+                    "symmetric": False,
+                    "type": "int",
+                },
             }
         },
-        'format': 'pack-quantized',
-        'global_compression_ratio': None,
-        'ignore': [],
-        'kv_cache_scheme': None,
-        'quant_method': 'compressed-tensors',
-        'quantization_status': 'compressed'
+        "format": "pack-quantized",
+        "global_compression_ratio": None,
+        "ignore": [],
+        "kv_cache_scheme": None,
+        "quant_method": "compressed-tensors",
+        "quantization_status": "compressed",
     }
     oot_quant_config = CompressedTensorsConfig.from_config(config)
 
@@ -284,12 +296,13 @@ def test_compressed_tensors_linear_method_wna16(default_vllm_config: None, dist_
 
     # Weights were extracted from first RowParallelLinear layer of RedHatAI/Qwen3-8B-quantized.w4a16
     # (with adjusted shapes, to make tensors smaller)
-    with safe_open(get_data_path("data/compressed_tensors/linear_wna16.safetensors"), framework="pt",
-                   device="hpu") as f:
+    with safe_open(
+        get_data_path("data/compressed_tensors/linear_wna16.safetensors"), framework="pt", device="hpu"
+    ) as f:
         oot_op.weight_packed.copy_(f.get_tensor("weight_packed"))
         oot_op.weight_scale.copy_(f.get_tensor("weight_scale"))
         oot_op.weight_zero_point.copy_(f.get_tensor("weight_zero_point"))
-        oot_op.weight_shape.data = torch.tensor([256, 256], device='hpu:0')
+        oot_op.weight_shape.data = torch.tensor([256, 256], device="hpu:0")
     oot_op.quant_method.process_weights_after_loading(oot_op)
 
     if not htorch.utils.internal.is_lazy():
@@ -299,8 +312,9 @@ def test_compressed_tensors_linear_method_wna16(default_vllm_config: None, dist_
     # Input and expected output
     # Output tensor holds data that was returned by cuda impl of CompressedTensorsLinearMethod for given input
     # (CompressedTensorsLinearMethod was triggered offline with the same input as below to get the ref_output)
-    with safe_open(get_data_path("data/compressed_tensors/linear_wna16.safetensors"), framework="pt",
-                   device="hpu") as f:
+    with safe_open(
+        get_data_path("data/compressed_tensors/linear_wna16.safetensors"), framework="pt", device="hpu"
+    ) as f:
         input = f.get_tensor("input")
         ref_output = f.get_tensor("ref_output")
 
@@ -313,31 +327,31 @@ def test_compressed_tensors_linear_method_wna16(default_vllm_config: None, dist_
 
 def test_compressed_tensors_wna16_moe_method(default_vllm_config: None, dist_init):
     config = {
-        'config_groups': {
-            'group_0': {
-                'input_activations': None,
-                'output_activations': None,
-                'targets': ['Linear'],
-                'weights': {
-                    'actorder': 'weight',
-                    'block_structure': None,
-                    'dynamic': False,
-                    'group_size': 128,
-                    'num_bits': 4,
-                    'observer': 'minmax',
-                    'observer_kwargs': {},
-                    'strategy': 'group',
-                    'symmetric': True,
-                    'type': 'int'
-                }
+        "config_groups": {
+            "group_0": {
+                "input_activations": None,
+                "output_activations": None,
+                "targets": ["Linear"],
+                "weights": {
+                    "actorder": "weight",
+                    "block_structure": None,
+                    "dynamic": False,
+                    "group_size": 128,
+                    "num_bits": 4,
+                    "observer": "minmax",
+                    "observer_kwargs": {},
+                    "strategy": "group",
+                    "symmetric": True,
+                    "type": "int",
+                },
             }
         },
-        'format': 'pack-quantized',
-        'global_compression_ratio': None,
-        'ignore': [],
-        'kv_cache_scheme': None,
-        'quant_method': 'compressed-tensors',
-        'quantization_status': 'compressed'
+        "format": "pack-quantized",
+        "global_compression_ratio": None,
+        "ignore": [],
+        "kv_cache_scheme": None,
+        "quant_method": "compressed-tensors",
+        "quantization_status": "compressed",
     }
     oot_quant_config = CompressedTensorsConfig.from_config(config)
 

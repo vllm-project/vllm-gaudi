@@ -3,10 +3,17 @@ from habana_frameworks.torch.hpex.kernels import FusedSDPA
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
-from vllm.model_executor.models.pixtral import (Attention, VisionEncoderArgs, VisionTransformer, TransformerBlock,
-                                                position_meshgrid, PixtralForConditionalGeneration,
-                                                PixtralProcessingInfo, PixtralMultiModalProcessor,
-                                                PixtralDummyInputsBuilder)
+from vllm.model_executor.models.pixtral import (
+    Attention,
+    VisionEncoderArgs,
+    VisionTransformer,
+    TransformerBlock,
+    position_meshgrid,
+    PixtralForConditionalGeneration,
+    PixtralProcessingInfo,
+    PixtralMultiModalProcessor,
+    PixtralDummyInputsBuilder,
+)
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
@@ -22,7 +29,7 @@ def precompute_freqs_real_2d(
         to be indexed by (height, width) position tuples
     """
     # (dim / 2) frequency bases
-    freqs = 1.0 / (theta**(torch.arange(0, dim, 2).float() / dim))
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
 
     h = torch.arange(height, device=freqs.device)
     w = torch.arange(width, device=freqs.device)
@@ -88,12 +95,12 @@ def apply_hpu_rotary_emb_vit(
 
 
 class HPUAttention(Attention):
-
     def __init__(self, args: VisionEncoderArgs):
         super().__init__(args)
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
-        self.softmax_mode = 'fp32' if os.environ.get('VLLM_FP32_SOFTMAX_VISION', 'false').lower() \
-            in ['true', '1'] else 'None'
+        self.softmax_mode = (
+            "fp32" if os.environ.get("VLLM_FP32_SOFTMAX_VISION", "false").lower() in ["true", "1"] else "None"
+        )
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor, cos_sin_cache: torch.Tensor) -> torch.Tensor:
         batch, patches, _ = x.shape
@@ -116,7 +123,6 @@ class HPUAttention(Attention):
 
 
 class HPUTransformerBlock(TransformerBlock):
-
     def __init__(self, args: VisionEncoderArgs):
         super().__init__(args)
         self.attention = HPUAttention(args)
@@ -130,7 +136,6 @@ class HPUTransformerBlock(TransformerBlock):
 
 
 class HPUTransformer(nn.Module):
-
     def __init__(self, args: VisionEncoderArgs):
         super().__init__()
         self.layers = torch.nn.ModuleList()
@@ -144,7 +149,6 @@ class HPUTransformer(nn.Module):
 
 
 class HPUVisionTransformer(VisionTransformer):
-
     def __init__(self, args: VisionEncoderArgs):
         super().__init__(args)
         self.transformer = HPUTransformer(args)
@@ -193,7 +197,8 @@ class HPUVisionTransformer(VisionTransformer):
 
         # pass through Transformer with a block diagonal mask delimiting images
         from transformers.models.pixtral.modeling_pixtral import (
-            generate_block_attention_mask, )
+            generate_block_attention_mask,
+        )
 
         mask = generate_block_attention_mask([p.shape[-2] * p.shape[-1] for p in patch_embeds_list], patch_embeds)
         out = self.transformer(patch_embeds, mask=mask, cos_sin_cache=cos_sin_cache)
@@ -208,7 +213,6 @@ class HPUVisionTransformer(VisionTransformer):
     dummy_inputs=PixtralDummyInputsBuilder,
 )
 class HPUPixtralForConditionalGeneration(PixtralForConditionalGeneration):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         multimodal_config = vllm_config.model_config.multimodal_config

@@ -19,15 +19,15 @@ import torch
 if "habana_frameworks" not in sys.modules:
     _hf = MagicMock()
     for submod in [
-            "habana_frameworks",
-            "habana_frameworks.torch",
-            "habana_frameworks.torch.core",
-            "habana_frameworks.torch.hpu",
-            "habana_frameworks.torch.internal",
-            "habana_frameworks.torch.internal.bridge_config",
-            "habana_frameworks.torch.utils",
-            "habana_frameworks.torch.utils.experimental",
-            "habana_frameworks.torch.utils.internal",
+        "habana_frameworks",
+        "habana_frameworks.torch",
+        "habana_frameworks.torch.core",
+        "habana_frameworks.torch.hpu",
+        "habana_frameworks.torch.internal",
+        "habana_frameworks.torch.internal.bridge_config",
+        "habana_frameworks.torch.utils",
+        "habana_frameworks.torch.utils.experimental",
+        "habana_frameworks.torch.utils.internal",
     ]:
         sys.modules.setdefault(submod, _hf)
 
@@ -56,10 +56,12 @@ def _make_batch_contents(req_id: str, num_tokens: int) -> BatchContents:
     )
 
 
-def _make_runner_stub(max_prefill_batch_size: int,
-                      max_num_tokens: int = 8192,
-                      use_merged_prefill: bool = False,
-                      unified_attn: bool = False):
+def _make_runner_stub(
+    max_prefill_batch_size: int,
+    max_num_tokens: int = 8192,
+    use_merged_prefill: bool = False,
+    unified_attn: bool = False,
+):
     """Lightweight stub with attributes needed by _can_merge_prefill_contents."""
     stub = MagicMock(spec=HPUModelRunner)
     stub.max_prefill_batch_size = max_prefill_batch_size
@@ -67,9 +69,9 @@ def _make_runner_stub(max_prefill_batch_size: int,
     stub.use_merged_prefill = use_merged_prefill
     stub.unified_attn = unified_attn
 
-    stub._can_merge_prefill_contents = (HPUModelRunner._can_merge_prefill_contents.__get__(stub))
-    stub._get_prompt_bucketing_fn = (HPUModelRunner._get_prompt_bucketing_fn.__get__(stub))
-    stub._bucketize_2d_prompt = (HPUModelRunner._bucketize_2d_prompt.__get__(stub))
+    stub._can_merge_prefill_contents = HPUModelRunner._can_merge_prefill_contents.__get__(stub)
+    stub._get_prompt_bucketing_fn = HPUModelRunner._get_prompt_bucketing_fn.__get__(stub)
+    stub._bucketize_2d_prompt = HPUModelRunner._bucketize_2d_prompt.__get__(stub)
 
     def _find_prompt_bucket(bs, seq, num_blocks):
         bs_bucket = 1 << max(0, math.ceil(math.log2(max(bs, 1))))
@@ -86,18 +88,20 @@ def _make_mrope_runner_stub(req_dict: dict):
     """Lightweight stub with attributes needed by _align_and_pad_mrope_positions."""
     stub = MagicMock(spec=HPUModelRunner)
     stub.requests = req_dict
-    stub._align_and_pad_mrope_positions = (HPUModelRunner._align_and_pad_mrope_positions.__get__(stub))
+    stub._align_and_pad_mrope_positions = HPUModelRunner._align_and_pad_mrope_positions.__get__(stub)
     return stub
 
 
 def _make_request_with_mrope(num_tokens: int):
     """Create a mock request with mrope_positions of shape (3, num_tokens)."""
     req = MagicMock()
-    req.mrope_positions = torch.stack([
-        torch.arange(num_tokens, dtype=torch.int32),
-        torch.arange(num_tokens, dtype=torch.int32) * 2,
-        torch.arange(num_tokens, dtype=torch.int32) * 3,
-    ])  # shape (3, num_tokens)
+    req.mrope_positions = torch.stack(
+        [
+            torch.arange(num_tokens, dtype=torch.int32),
+            torch.arange(num_tokens, dtype=torch.int32) * 2,
+            torch.arange(num_tokens, dtype=torch.int32) * 3,
+        ]
+    )  # shape (3, num_tokens)
     return req
 
 
@@ -105,7 +109,6 @@ def _make_request_with_mrope(num_tokens: int):
 # Test _can_merge_prefill_contents
 # ===========================================================================
 class TestCanMergePrefillContents:
-
     def test_bs1_blocks_merge(self):
         """With max_prefill_batch_size=1, two prefills cannot merge."""
         runner = _make_runner_stub(max_prefill_batch_size=1)
@@ -169,7 +172,6 @@ class TestCanMergePrefillContents:
 # Test _align_and_pad_mrope_positions
 # ===========================================================================
 class TestAlignAndPadMropePositions:
-
     def test_bs1_single_request_shape(self):
         """BS=1 with one request produces (3, target_len) output."""
         req = _make_request_with_mrope(64)
@@ -248,11 +250,13 @@ class TestAlignAndPadMropePositions:
         for b_idx in range(4):
             offset = b_idx * target_len
             # Actual positions (first 64 of each block)
-            assert (result[:, offset:offset + 64] != -1).all(), \
-                f"req-{b_idx}: expected data at [{offset}:{offset+64}]"
+            assert (result[:, offset : offset + 64] != -1).all(), (
+                f"req-{b_idx}: expected data at [{offset}:{offset + 64}]"
+            )
             # Padding (remaining 64 of each block)
-            assert (result[:, offset + 64:offset + target_len] == -1).all(), \
-                f"req-{b_idx}: expected padding at [{offset+64}:{offset+target_len}]"
+            assert (result[:, offset + 64 : offset + target_len] == -1).all(), (
+                f"req-{b_idx}: expected padding at [{offset + 64}:{offset + target_len}]"
+            )
 
     def test_bs2_different_query_lengths(self):
         """BS=2 with different query lengths: correct placement."""
@@ -295,9 +299,8 @@ class TestAlignAndPadMropePositions:
         for b_idx in range(4):
             offset = b_idx * target_len
             expected_mrope = reqs[f"req-{b_idx}"].mrope_positions
-            actual = result[:, offset:offset + 32]
-            assert torch.equal(actual, expected_mrope), \
-                f"req-{b_idx}: mrope values mismatch"
+            actual = result[:, offset : offset + 32]
+            assert torch.equal(actual, expected_mrope), f"req-{b_idx}: mrope values mismatch"
 
     def test_bs4_with_context_lens(self):
         """BS=4 with context offsets: positions start from context_len."""
@@ -331,8 +334,7 @@ class TestAlignAndPadMropePositions:
 # Test VLLM_PROMPT_BS_BUCKET_MAX override
 # ===========================================================================
 class TestMaxPrefillBatchSizeOverride:
-
-    @patch('vllm_gaudi.extension.runtime.get_config')
+    @patch("vllm_gaudi.extension.runtime.get_config")
     def test_default_is_1(self, mock_get_config):
         """Default max_prefill_batch_size is 1."""
         from vllm_gaudi.extension.utils import with_default
@@ -344,7 +346,7 @@ class TestMaxPrefillBatchSizeOverride:
         result = with_default(mock_config.VLLM_PROMPT_BS_BUCKET_MAX, 1)
         assert result == 1
 
-    @patch('vllm_gaudi.extension.runtime.get_config')
+    @patch("vllm_gaudi.extension.runtime.get_config")
     def test_explicit_env_overrides_default(self, mock_get_config):
         """Explicit VLLM_PROMPT_BS_BUCKET_MAX overrides the default."""
         from vllm_gaudi.extension.utils import with_default

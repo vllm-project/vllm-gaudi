@@ -1,13 +1,14 @@
 import gc
 
 import torch
-from vllm.distributed import (init_distributed_environment, initialize_model_parallel)
+from vllm.distributed import init_distributed_environment, initialize_model_parallel
 import pytest
 import tempfile
 from huggingface_hub import snapshot_download
 from vllm import envs
 from vllm.distributed import parallel_state
 from vllm.platforms import current_platform
+
 """Ops-level monkey patches for Gaudi.
 
 Provides the HPU-specific override of distributed cleanup so `_host_emptyCache`
@@ -42,7 +43,7 @@ def hpu_cleanup_dist_env_and_memory(shutdown_ray: bool = False):
 
 
 # Apply monkey-patch on import
-#parallel_state.cleanup_dist_env_and_memory = _hpu_cleanup_dist_env_and_memory
+# parallel_state.cleanup_dist_env_and_memory = _hpu_cleanup_dist_env_and_memory
 
 
 @pytest.fixture

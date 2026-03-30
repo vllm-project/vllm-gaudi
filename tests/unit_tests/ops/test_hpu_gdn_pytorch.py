@@ -43,6 +43,7 @@ def _import_gdn(env_overrides: dict[str, str] | None = None):
         env.update(env_overrides)
     with mock.patch.dict(os.environ, env):
         import vllm_gaudi.ops.hpu_gdn_pytorch as mod
+
         mod = importlib.reload(mod)
     return mod
 
@@ -186,9 +187,11 @@ class TestSolveLowerTriangularBatched:
         # Residuals should be monotonically non-increasing
         for i in range(1, len(residuals)):
             iter_steps = [2, 6, 14, 30]
-            assert residuals[i] <= residuals[i - 1] + 1e-7, ("Residual increased: "
-                                                             f"iters {iter_steps[i - 1]}->{iter_steps[i]}: "
-                                                             f"{residuals[i - 1]:.6f}->{residuals[i]:.6f}")
+            assert residuals[i] <= residuals[i - 1] + 1e-7, (
+                "Residual increased: "
+                f"iters {iter_steps[i - 1]}->{iter_steps[i]}: "
+                f"{residuals[i - 1]:.6f}->{residuals[i]:.6f}"
+            )
 
     def test_identity_input(self, gdn):
         """Inverse of identity matrix is identity."""
@@ -639,8 +642,7 @@ class TestChunkGatedDeltaRule:
             neumann_iters=14,
         )
 
-        assert not torch.allclose(out_zero, out_nonzero, atol=1e-6), \
-            "Initial state had no effect on output"
+        assert not torch.allclose(out_zero, out_nonzero, atol=1e-6), "Initial state had no effect on output"
 
     def test_chunk_head_mismatch(self, gdn):
         """Chunk path with HV != H (grouped-value attention)."""

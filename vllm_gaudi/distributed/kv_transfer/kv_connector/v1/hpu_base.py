@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any, Optional
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (KVConnectorBase_V1)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 from vllm.v1.request import Request
 from vllm_gaudi.extension.logger import logger as init_logger
 

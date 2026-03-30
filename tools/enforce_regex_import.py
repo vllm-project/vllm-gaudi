@@ -7,21 +7,20 @@ from pathlib import Path
 
 import regex as re
 
-FORBIDDEN_PATTERNS = re.compile(r'^\s*(?:import\s+re(?:$|\s|,)|from\s+re\s+import)')
+FORBIDDEN_PATTERNS = re.compile(r"^\s*(?:import\s+re(?:$|\s|,)|from\s+re\s+import)")
 ALLOWED_PATTERNS = [
-    re.compile(r'^\s*import\s+regex\s+as\s+re\s*$'),
-    re.compile(r'^\s*import\s+regex\s*$'),
+    re.compile(r"^\s*import\s+regex\s+as\s+re\s*$"),
+    re.compile(r"^\s*import\s+regex\s*$"),
 ]
 
 
 def get_staged_python_files() -> list[str]:
     try:
-        result = subprocess.run(['git', 'diff', '--cached', '--name-only', '--diff-filter=AM'],
-                                capture_output=True,
-                                text=True,
-                                check=True)
-        files = result.stdout.strip().split('\n') if result.stdout.strip() else []
-        return [f for f in files if f.endswith('.py')]
+        result = subprocess.run(
+            ["git", "diff", "--cached", "--name-only", "--diff-filter=AM"], capture_output=True, text=True, check=True
+        )
+        files = result.stdout.strip().split("\n") if result.stdout.strip() else []
+        return [f for f in files if f.endswith(".py")]
     except subprocess.CalledProcessError:
         return []
 
@@ -34,7 +33,7 @@ def is_forbidden_import(line: str) -> bool:
 def check_file(filepath: str) -> list[tuple[int, str]]:
     violations = []
     try:
-        with open(filepath, encoding='utf-8') as f:
+        with open(filepath, encoding="utf-8") as f:
             for line_num, line in enumerate(f, 1):
                 if is_forbidden_import(line):
                     violations.append((line_num, line.strip()))

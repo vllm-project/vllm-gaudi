@@ -36,8 +36,7 @@ class HPUModelOptFp8Config(ModelOptFp8Config):
         super().__init__(quant_method, is_checkpoint_fp8_serialized, kv_cache_quant_method, exclude_modules)
 
         if self.quant_method != "FP8":
-            raise ValueError("Unsupported ModelOpt FP8 quant_algo on Gaudi: "
-                             f"{self.quant_method}. Supported: FP8 only.")
+            raise ValueError(f"Unsupported ModelOpt FP8 quant_algo on Gaudi: {self.quant_method}. Supported: FP8 only.")
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.bfloat16]
@@ -112,7 +111,7 @@ class HPUModelOptFp8LinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
-        weight_dtype = (torch.float8_e4m3fn if self.quant_config.is_checkpoint_fp8_serialized else params_dtype)
+        weight_dtype = torch.float8_e4m3fn if self.quant_config.is_checkpoint_fp8_serialized else params_dtype
         weight = ModelWeightParameter(
             data=torch.empty(output_size_per_partition, input_size_per_partition, dtype=weight_dtype),
             input_dim=1,
@@ -142,8 +141,9 @@ class HPUModelOptFp8LinearMethod(LinearMethodBase):
         weight = layer.weight
         max_w_scale = layer.weight_scale.max()
         if not (layer.weight_scale == layer.weight_scale[0]).all():
-            max_w_scale, weight = hpu_ops.requantize_with_max_scale(layer.weight, layer.weight_scale,
-                                                                    layer.logical_widths)
+            max_w_scale, weight = hpu_ops.requantize_with_max_scale(
+                layer.weight, layer.weight_scale, layer.logical_widths
+            )
         layer.weight = Parameter(weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
         layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
@@ -155,17 +155,19 @@ class HPUModelOptFp8LinearMethod(LinearMethodBase):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         weight_scale = layer.weight_scale.transpose(0, 1) if layer.weight_scale.dim() > 1 else layer.weight_scale
-        input_scale = getattr(layer, 'input_scale', None)
+        input_scale = getattr(layer, "input_scale", None)
 
         # View input as 2D matrix for fp8 methods
         input_2d = x.view(-1, x.shape[-1])
         output_shape = [*x.shape[:-1], layer.weight.shape[1]]
-        output = hpu_ops.apply_fp8_linear_hpu(input=input_2d,
-                                              weight=layer.weight,
-                                              weight_scale=weight_scale,
-                                              input_scale=input_scale,
-                                              bias=bias,
-                                              trans_B=False)
+        output = hpu_ops.apply_fp8_linear_hpu(
+            input=input_2d,
+            weight=layer.weight,
+            weight_scale=weight_scale,
+            input_scale=input_scale,
+            bias=bias,
+            trans_B=False,
+        )
         output = torch.narrow(output, 0, 0, input_2d.shape[0]).view(*output_shape)
         return output
 

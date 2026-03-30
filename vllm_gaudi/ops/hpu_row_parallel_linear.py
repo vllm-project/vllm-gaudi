@@ -29,7 +29,7 @@ def register():
         return
     _registered = True
 
-    env_value = os.environ.get('VLLM_ROW_PARALLEL_CHUNKS', '1')
+    env_value = os.environ.get("VLLM_ROW_PARALLEL_CHUNKS", "1")
     try:
         num_chunks = int(env_value)
     except ValueError:
@@ -40,17 +40,17 @@ def register():
 
 class HPURowParallelLinear(RowParallelLinear):
     """HPU-optimized RowParallelLinear implementation.
-    
+
     This implementation provides chunked computation for overlapping
     compute and communication on HPU devices.
     """
 
     def __init__(self, *args, **kwargs):
         """Initialize HPURowParallelLinear with chunking support.
-        
+
         The number of chunks can be configured via the row_parallel_chunks
         feature flag (env var VLLM_ROW_PARALLEL_CHUNKS). Default is 1 (disabled).
-        
+
         The token threshold for enabling chunking can be configured via the
         row_parallel_chunk_threshold feature flag (env var
         VLLM_ROW_PARALLEL_CHUNK_THRESHOLD). Default is 8192 tokens.
@@ -70,10 +70,10 @@ class HPURowParallelLinear(RowParallelLinear):
         input_,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Parameter]]:
         """Forward pass with HPU-specific optimizations.
-        
+
         Args:
             input_: Input tensor to process
-            
+
         Returns:
             Output tensor, or tuple of (output, bias) if skip_bias_add is True
         """
@@ -98,8 +98,9 @@ class HPURowParallelLinear(RowParallelLinear):
 
         # Check if we should use chunking
         # Don't chunk for inputs below threshold as there's no overlap benefit
-        should_chunk = (self.num_chunks > 1 and self.reduce_results and self.tp_size > 1
-                        and total_tokens >= self.chunk_threshold)
+        should_chunk = (
+            self.num_chunks > 1 and self.reduce_results and self.tp_size > 1 and total_tokens >= self.chunk_threshold
+        )
 
         # Chunked computation for overlapping compute and communication
         if should_chunk:
@@ -121,19 +122,23 @@ class HPURowParallelLinear(RowParallelLinear):
                     # Chunk along batch dimension for batched decodes
                     chunk_dim = 0
                     total_tokens = batch_size
-                output = torch.empty(batch_size,
-                                     seq_len,
-                                     self.output_size_per_partition,
-                                     dtype=input_parallel.dtype,
-                                     device=input_parallel.device)
+                output = torch.empty(
+                    batch_size,
+                    seq_len,
+                    self.output_size_per_partition,
+                    dtype=input_parallel.dtype,
+                    device=input_parallel.device,
+                )
             else:
                 # Input is [batch*seq, hidden], chunk along batch dimension
                 total_tokens, hidden_dim = input_parallel.shape
                 chunk_dim = 0
-                output = torch.empty(total_tokens,
-                                     self.output_size_per_partition,
-                                     dtype=input_parallel.dtype,
-                                     device=input_parallel.device)
+                output = torch.empty(
+                    total_tokens,
+                    self.output_size_per_partition,
+                    dtype=input_parallel.dtype,
+                    device=input_parallel.device,
+                )
 
             chunk_size = (total_tokens + self.num_chunks - 1) // self.num_chunks
 

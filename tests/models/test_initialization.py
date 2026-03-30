@@ -30,26 +30,32 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
 
         text_config = hf_config.get_text_config()
 
-        text_config.update({
-            "num_layers": 1,
-            "num_hidden_layers": 1,
-            "num_experts": 2,
-            "num_experts_per_tok": 2,
-            "num_local_experts": 2,
-        })
-
-        if hasattr(hf_config, "vision_config"):
-            hf_config.vision_config.update({
+        text_config.update(
+            {
                 "num_layers": 1,
                 "num_hidden_layers": 1,
-            })
+                "num_experts": 2,
+                "num_experts_per_tok": 2,
+                "num_local_experts": 2,
+            }
+        )
+
+        if hasattr(hf_config, "vision_config"):
+            hf_config.vision_config.update(
+                {
+                    "num_layers": 1,
+                    "num_hidden_layers": 1,
+                }
+            )
 
         # e.g.: ibm-granite/granite-speech-3.3-2b
         if hasattr(hf_config, "encoder_config"):
-            hf_config.encoder_config.update({
-                "num_layers": 1,
-                "num_hidden_layers": 1,
-            })
+            hf_config.encoder_config.update(
+                {
+                    "num_layers": 1,
+                    "num_hidden_layers": 1,
+                }
+            )
 
         return hf_config
 
@@ -64,7 +70,7 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
         # gpu_blocks (> 0), cpu_blocks, scheduler_kv_cache_config
         return 1, 0, scheduler_kv_cache_config
 
-    with (patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1)):
+    with patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1):
         LLM(
             model_info.default,
             tokenizer=model_info.tokenizer,
@@ -72,7 +78,9 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
             speculative_config={
                 "model": model_info.speculative_model,
                 "num_speculative_tokens": 1,
-            } if model_info.speculative_model else None,
+            }
+            if model_info.speculative_model
+            else None,
             trust_remote_code=model_info.trust_remote_code,
             max_model_len=model_info.max_model_len,
             load_format="dummy",

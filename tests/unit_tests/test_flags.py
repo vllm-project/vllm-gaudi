@@ -8,8 +8,7 @@
 import os
 import pytest
 
-from vllm_gaudi.extension.config import (VersionRange, Config, Kernel, Env, boolean, All, Not, Eq, Enabled,
-                                         FirstEnabled)
+from vllm_gaudi.extension.config import VersionRange, Config, Kernel, Env, boolean, All, Not, Eq, Enabled, FirstEnabled
 from vllm_gaudi.extension.validation import choice, regex
 
 
@@ -89,30 +88,30 @@ def test_other_releases():
 
 
 def test_env_flag():
-    os.environ['A'] = 'True'
-    os.environ['B'] = 'true'
-    os.environ['C'] = 't'
-    os.environ['D'] = '1'
-    os.environ['E'] = 'False'
-    os.environ['F'] = 'false'
-    os.environ['G'] = 'f'
-    os.environ['H'] = '0'
+    os.environ["A"] = "True"
+    os.environ["B"] = "true"
+    os.environ["C"] = "t"
+    os.environ["D"] = "1"
+    os.environ["E"] = "False"
+    os.environ["F"] = "false"
+    os.environ["G"] = "f"
+    os.environ["H"] = "0"
 
-    assert Env('A', boolean)(None) is True
-    assert Env('B', boolean)(None) is True
-    assert Env('C', boolean)(None) is True
-    assert Env('D', boolean)(None) is True
+    assert Env("A", boolean)(None) is True
+    assert Env("B", boolean)(None) is True
+    assert Env("C", boolean)(None) is True
+    assert Env("D", boolean)(None) is True
 
-    assert Env('E', boolean)(None) is False
-    assert Env('F', boolean)(None) is False
-    assert Env('G', boolean)(None) is False
-    assert Env('H', boolean)(None) is False
+    assert Env("E", boolean)(None) is False
+    assert Env("F", boolean)(None) is False
+    assert Env("G", boolean)(None) is False
+    assert Env("H", boolean)(None) is False
 
-    assert Env('I', boolean)(None) is None
+    assert Env("I", boolean)(None) is None
 
-    assert Env('A', str)(None) == 'True'
-    assert Env('D', str)(None) == '1'
-    assert Env('D', int)(None) == 1
+    assert Env("A", str)(None) == "True"
+    assert Env("D", str)(None) == "1"
+    assert Env("D", int)(None) == 1
 
 
 def test_kernel():
@@ -124,9 +123,9 @@ def test_kernel():
 
         return load
 
-    assert Kernel(loader(True))(Config(hw='g2'))
-    assert not Kernel(loader(True))(Config(hw='cpu'))
-    assert not Kernel(loader(False))(Config(hw='g2'))
+    assert Kernel(loader(True))(Config(hw="g2"))
+    assert not Kernel(loader(True))(Config(hw="cpu"))
+    assert not Kernel(loader(False))(Config(hw="g2"))
 
 
 def false(_):
@@ -159,47 +158,46 @@ def test_combinators__not():
 
 
 def test_combinators__eq():
-    assert Eq('foo', 'bar')(Config(foo='bar')) is True
-    assert Eq('foo', 'bar')(Config(foo='dingo')) is False
+    assert Eq("foo", "bar")(Config(foo="bar")) is True
+    assert Eq("foo", "bar")(Config(foo="dingo")) is False
     with pytest.raises(AssertionError):
-        assert Eq('foo', 'bar')(Config(dingo='bar'))
+        assert Eq("foo", "bar")(Config(dingo="bar"))
 
 
 def test_combinators__active():
     with pytest.raises(AssertionError):
-        assert Enabled('foo')(Config()) is False
-    assert Enabled('foo')(Config(foo=False)) is False
-    assert Enabled('foo')(Config(foo=True)) is True
+        assert Enabled("foo")(Config()) is False
+    assert Enabled("foo")(Config(foo=False)) is False
+    assert Enabled("foo")(Config(foo=True)) is True
 
 
 def test_combinators__first_active():
     with pytest.raises(AssertionError):
-        assert FirstEnabled('foo', 'bar')(Config())
-    assert FirstEnabled('foo', 'bar')(Config(foo=True)) == 'foo'
-    assert FirstEnabled('foo', 'bar')(Config(foo=False, bar=False)) is None
-    assert FirstEnabled('foo', 'bar')(Config(foo=False, bar=True)) == 'bar'
-    assert FirstEnabled('foo', 'bar')(Config(foo=True, bar=False)) == 'foo'
-    assert FirstEnabled('foo', 'bar')(Config(foo=True, bar=True)) == 'foo'
+        assert FirstEnabled("foo", "bar")(Config())
+    assert FirstEnabled("foo", "bar")(Config(foo=True)) == "foo"
+    assert FirstEnabled("foo", "bar")(Config(foo=False, bar=False)) is None
+    assert FirstEnabled("foo", "bar")(Config(foo=False, bar=True)) == "bar"
+    assert FirstEnabled("foo", "bar")(Config(foo=True, bar=False)) == "foo"
+    assert FirstEnabled("foo", "bar")(Config(foo=True, bar=True)) == "foo"
 
 
 def test_choice():
-    assert choice('a', 'b')('a') is None
-    assert choice('a', 'b')('b') is None
-    error = choice('a', 'b')('c')
+    assert choice("a", "b")("a") is None
+    assert choice("a", "b")("b") is None
+    error = choice("a", "b")("c")
     assert error is not None
-    assert 'a, b' in error
-    assert 'c' in error
+    assert "a, b" in error
+    assert "c" in error
 
 
 def test_regex_empty_string():
-    check = regex(r'.+')
-    result = check('')
+    check = regex(r".+")
+    result = check("")
     assert result == "'' doesn't match pattern '.+'! "
 
 
 def test_regex_with_hint():
-    check = regex(r'^[a-z]+$', hint='Only lowercase letters allowed')
-    result = check('ABC')
-    expected = "'ABC' doesn't match pattern '^[a-z]+$'!"\
-               " Only lowercase letters allowed"
+    check = regex(r"^[a-z]+$", hint="Only lowercase letters allowed")
+    result = check("ABC")
+    expected = "'ABC' doesn't match pattern '^[a-z]+$'! Only lowercase letters allowed"
     assert result == expected
