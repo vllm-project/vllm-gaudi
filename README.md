@@ -16,7 +16,7 @@ vLLM Hardware Plugin for Intel® Gaudi®
 *Latest News* 🔥
 - [2026/03] Version 0.17.1 is now available, built on [vLLM 0.17.1](https://github.com/vllm-project/vllm/releases/tag/v0.17.1) and fully compatible with [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
 
-  This release adds validated support for Ernie4.5-VL and reranking models, introduces MxFP4 weight loading and dequantization, and delivers major Mamba/Granite 4.0-h improvements including prefix caching, custom depthwise conv1d TPC kernels, and precision enhancements. It also introduces unified attention mixed batch support, RowParallel NIC chunking, logprobs output, and Granite tool calling accuracy improvements.
+  This release adds validated support for Ernie4.5-VL, GPT-OSS (20B/120B), and reranking models, introduces MxFP4 weight loading and dequantization, and delivers major Mamba/Granite 4.0-h improvements including prefix caching, custom depthwise conv1d TPC kernels, and precision enhancements. It also introduces, RowParallel NIC chunking, logprobs output, and Granite tool calling accuracy improvements.
 
 - [2026/03] Version 0.16.0 is now available, built on [vLLM 0.16.0](https://github.com/vllm-project/vllm/releases/tag/v0.16.0) and fully compatible with [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
 
