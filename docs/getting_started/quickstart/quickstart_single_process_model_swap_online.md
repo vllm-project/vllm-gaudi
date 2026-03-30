@@ -32,7 +32,6 @@ models:
 ## Start Server
 
 ```bash
-export VLLM_ENABLE_V1_MULTIPROCESSING=0
 export VLLM_SERVER_DEV_MODE=1
 export VLLM_ALLOW_INSECURE_SERIALIZATION=1
 export VLLM_HPU_MULTI_MODEL_CONFIG=/path/to/multi_models.yaml

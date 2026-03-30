@@ -11,8 +11,7 @@ vLLM provides multiple entrypoints for interacting with the system. For online i
 The server can be launched directly via:
 
 ```bash
-export VLLM_SERVER_DEV_MODE=1 
-export VLLM_ENABLE_V1_MULTIPROCESSING=0
+export VLLM_SERVER_DEV_MODE=1
 export VLLM_ALLOW_INSECURE_SERIALIZATION=1
 export VLLM_HPU_MULTI_MODEL_CONFIG=/path/to/multi_models.yaml
 python -m vllm_gaudi.entrypoints.openai.multi_model_api_server

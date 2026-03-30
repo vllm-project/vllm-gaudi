@@ -11,17 +11,17 @@ Collects per-phase metrics (switch time, gen time, warmup time, memory) and
 prints a summary table.
 
 Requires:
-  VLLM_ENABLE_V1_MULTIPROCESSING=0
   VLLM_SERVER_DEV_MODE=1
+  VLLM_ALLOW_INSECURE_SERIALIZATION=1
   Multi-model YAML config
 
 Usage:
-  VLLM_ENABLE_V1_MULTIPROCESSING=0 \\
-  VLLM_SERVER_DEV_MODE=1 \\
-  python tests/full_tests/online_model_swap_test.py \\
-    --config tests/full_tests/multi_models.yaml \\
-    --phases 5 \\
-    --api-host localhost \\
+  VLLM_SERVER_DEV_MODE=1 \
+  VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
+  python tests/full_tests/online_model_swap_test.py \
+    --config tests/full_tests/multi_models.yaml \
+    --phases 5 \
+    --api-host localhost \
     --api-port 8080
 """
 
@@ -190,7 +190,6 @@ def run_server(config_path: str, api_host: str, api_port: int, log_capture: Serv
     """Start the multi-model API server as a subprocess."""
     server_host = _server_api_host(api_host)
     env = os.environ.copy()
-    env['VLLM_ENABLE_V1_MULTIPROCESSING'] = '0'
     env['VLLM_SERVER_DEV_MODE'] = '1'
     env['VLLM_ALLOW_INSECURE_SERIALIZATION'] = '1'
     env['VLLM_HPU_MULTI_MODEL_CONFIG'] = config_path
