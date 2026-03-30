@@ -29,8 +29,7 @@ Implementation lives in [vllm_gaudi/entrypoints/openai/multi_model_api_server.py
 | `MultiModelServingModels` | OpenAI model registry adapter | Lists all configured models in `/v1/models`, while keeping request validation aligned with the currently active model |
 | `install_engine_core_patch()` | Runtime patch installer | Injects `gaudi_reconfigure_engine()` into V1 `EngineCore` when `MultiModelAsyncLLM` is constructed |
 | `EngineCore.gaudi_reconfigure_engine()` | Added utility method (patched) | Performs in-place runtime rebuild: pause/sleep, worker reload, KV cache re-init, scheduler/state reconstruction, resume |
-| `HPUWorker.load_model()` | Extended worker load path | Reloads model runner/model with new config |
-| `HPUWorker._rebuild_kv_cache_config_for_current_model(...)` | New helper | Rebuilds KV cache layer mappings from current model spec to prevent stale block-table/layer mapping state |
+| `HPUWorker.unload_model()` / `HPUWorker.load_model()` | Extended worker load/unload path | Stashes and restores model runner across switches, skipping warmup for repeat loads |
 | `MultiModelAsyncLLM._refresh_engine_frontend_config()` | Frontend refresh step | Rebuilds frontend-side renderer and processors so request parsing/tokenization matches the newly active model |
 
 ## Control Plane Delta: Switch Flow

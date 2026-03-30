@@ -421,7 +421,7 @@ async def switch_model(api_host: str, api_port: int, model_name: str, drain_time
                 'switched': data.get('switched', False),
                 'model': data.get('current_model'),
                 'memory_before_mb': data.get('memory_before_mb'),
-                'memory_after_mb': data.get('memory_after_mb'),
+                'memory_after_unload_mb': data.get('memory_after_unload_mb'),
                 'freed_memory_mb': data.get('freed_memory_mb'),
                 'stash_memory_after_mb': data.get('stash_memory_after_mb'),
             }

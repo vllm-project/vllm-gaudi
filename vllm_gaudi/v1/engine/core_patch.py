@@ -274,7 +274,7 @@ def install_engine_core_patch() -> None:
 
         return {
             "memory_before_mb": memory_before_mb,
-            "memory_after_mb": memory_after_unload_mb,
+            "memory_after_unload_mb": memory_after_unload_mb,
             "freed_memory_mb": freed_memory_mb,
             "stash_memory_after_mb": stash_memory_after_mb,
         }

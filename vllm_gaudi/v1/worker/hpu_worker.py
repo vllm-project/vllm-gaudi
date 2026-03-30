@@ -62,16 +62,7 @@ class HPUWorker(WorkerBase):
     ):
 
         # TODO: use WorkerBase.__init__(self, vllm_config=vllm_config)
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.cache_config = vllm_config.cache_config
-        self.lora_config = vllm_config.lora_config
-        self.load_config = vllm_config.load_config
-        self.parallel_config = vllm_config.parallel_config
-        self.scheduler_config = vllm_config.scheduler_config
-        self.device_config = vllm_config.device_config
-        self.speculative_config = vllm_config.speculative_config
-        self.observability_config = vllm_config.observability_config
+        self._apply_vllm_config(vllm_config)
 
         self.local_rank = local_rank
         self.rank = rank
@@ -172,6 +163,7 @@ class HPUWorker(WorkerBase):
         self.init_profiler()
 
     def shutdown(self):
+        self._model_runner_stash.clear()
         getattr(self.model_runner, 'shutdown_inc', lambda: None)()
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:

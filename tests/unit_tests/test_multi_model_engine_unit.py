@@ -48,13 +48,6 @@ def mock_engine():
     return engine
 
 
-def test_env_truthy_variants():
-    assert api_server._env_truthy("1")
-    assert api_server._env_truthy("true")
-    assert api_server._env_truthy("YES")
-    assert not api_server._env_truthy("0")
-    assert not api_server._env_truthy(None)
-
 
 def test_load_multi_model_config_success(tmp_path):
     cfg_path = tmp_path / "multi.yaml"
@@ -109,7 +102,8 @@ async def test_initialize_and_switch_reconfigures_engine(mock_engine):
     }
 
     with patch("vllm_gaudi.v1.engine.multi_model_async_llm.AsyncLLM.from_engine_args",
-               return_value=mock_engine), patch.object(MultiModelAsyncLLM, "_refresh_engine_frontend_config"):
+               return_value=mock_engine), patch.object(MultiModelAsyncLLM, "_refresh_engine_frontend_config",
+                                                       new_callable=AsyncMock):
         manager = MultiModelAsyncLLM(model_configs)
         await manager.initialize("llama")
         await manager.switch_model("qwen", drain_timeout=1)
