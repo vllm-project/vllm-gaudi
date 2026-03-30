@@ -8,7 +8,7 @@ from lm_eval.models.vllm_causallms import VLLM
 import os
 
 
-def launch_lm_eval(eval_config: dict):
+def launch_lm_eval(eval_config):
     trust_remote_code = eval_config.get('trust_remote_code', False)
     dtype = eval_config.get('dtype', 'bfloat16')
     max_num_seqs = eval_config.get('max_num_seqs', 128)
