@@ -450,9 +450,8 @@ def maybe_set_chunked_attention_layers(model_runner):
             for layer in model_runner.model.language_model.model.layers:
                 if "ChunkedLocalAttention" in layer.self_attn.attn.get_attn_backend().__name__:
                     layer.self_attn.attn.impl.is_chunked_attention = True
-        except Exception:
-            # add explicit warning
-            pass
+        except Exception as e:
+            logger.warning("Failed to set chunked attention flag: %s", type(e).__name__)
 
 
 def apply_model_specific_patches(model_runner):
@@ -4030,7 +4029,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             htcore.mark_step()
 
         apply_model_specific_patches(self)
-        hidden_layer_markstep_interval = int(os.getenv('VLLM_CONFIG_HIDDEN_LAYERS', '1'))
+        try:
+            hidden_layer_markstep_interval = int(os.getenv('VLLM_CONFIG_HIDDEN_LAYERS', '1'))
+        except ValueError:
+            logger.warning("Invalid VLLM_CONFIG_HIDDEN_LAYERS value, using default 1")
+            hidden_layer_markstep_interval = 1
         model_config = getattr(self.model, "config", None)
         modify_model_layers(self.model,
                             get_target_layer_suffix_list(model_config.model_type if model_config is not None else None),
@@ -4243,12 +4246,22 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     for m in duplicate_mods:
                         if hasattr(self_attn, m) and hasattr(mla_attn, m):
                             delattr(self_attn, m)
-                    if hasattr(mla_attn, "mla_attn") and hasattr(mla_attn.mla_attn, "impl"):
-                        mla_impl = mla_attn.mla_attn.impl
+                    inner_mla_attn = getattr(mla_attn, "mla_attn", None)
+                    if inner_mla_attn is not None:
+                        # Keep a single canonical owner for shared MLA projections.
+                        # INC builds parent maps from module references; duplicate
+                        # owners can make alias paths win over the execution path.
+                        canonical_mla_owner = getattr(inner_mla_attn, "impl", None)
+                        if canonical_mla_owner is None:
+                            canonical_mla_owner = inner_mla_attn
+
                         duplicate_mods = ["kv_b_proj"]
                         for m in duplicate_mods:
-                            if hasattr(mla_attn, m) and hasattr(mla_impl, m):
+                            if hasattr(mla_attn, m) and hasattr(canonical_mla_owner, m):
                                 delattr(mla_attn, m)
+                            if (inner_mla_attn is not canonical_mla_owner and hasattr(inner_mla_attn, m)
+                                    and hasattr(canonical_mla_owner, m)):
+                                delattr(inner_mla_attn, m)
 
                 # Remove duplicate gate from SharedFusedMoE.
                 # Models like Qwen3MoE, DeepSeek-V2, etc. pass the
@@ -6025,7 +6038,11 @@ class HPUAttentionMetadataProcessor:
             #os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
             self.slice_size = int(with_default(get_config().PT_HPU_SDPA_BC_FACTOR, "1024"))
             # int(os.getenv("PT_HPU_SDPA_BC_FACTOR", "1024"))
-            self.slice_thld = int(os.environ.get('VLLM_FUSEDSDPA_SLIDE_THLD', '8192'))
+            try:
+                self.slice_thld = int(os.environ.get('VLLM_FUSEDSDPA_SLIDE_THLD', '8192'))
+            except ValueError:
+                logger.warning("Invalid VLLM_FUSEDSDPA_SLIDE_THLD value, using default 8192")
+                self.slice_thld = 8192
 
     def _set_attn_bias(self, attn_metadata: HPUAttentionMetadataV1, batch_size: int, seq_len: int, device: torch.device,
                        dtype: torch.dtype) -> HPUAttentionMetadataV1:
