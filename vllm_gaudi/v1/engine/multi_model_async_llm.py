@@ -6,7 +6,6 @@ Simplified version that does not use complex mode/pause handling
 and focuses on core functionality: initialize -> generate -> switch -> generate.
 """
 
-from typing import Optional
 from collections.abc import AsyncGenerator
 import asyncio
 import contextlib
@@ -76,9 +75,9 @@ class MultiModelAsyncLLM:
         """
         install_engine_core_patch()
 
-        self._engine: Optional[AsyncLLM] = None
+        self._engine: AsyncLLM | None = None
         self._sleeping: dict[str, bool] = {}
-        self._current_model_name: Optional[str] = None
+        self._current_model_name: str | None = None
         self._vllm_configs: dict[str, VllmConfig] = {}
         self._switching_lock = asyncio.Lock()
 
@@ -97,7 +96,7 @@ class MultiModelAsyncLLM:
             logger.info("  %s: %s", name, self._vllm_configs[name].model_config.model)
 
     @property
-    def current_model(self) -> Optional[str]:
+    def current_model(self) -> str | None:
         """Return currently loaded model name."""
         return self._current_model_name
 
@@ -130,12 +129,14 @@ class MultiModelAsyncLLM:
             raise RuntimeError("Engine not initialized. Call initialize() first.")
         return self._engine
 
-    def _refresh_engine_frontend_config(self, model_name: str) -> None:
+    async def _refresh_engine_frontend_config(self, model_name: str) -> None:
         """Refresh AsyncLLM frontend state to target model config.
 
         Engine core reloads model weights/config in-place, but AsyncLLM frontend
-        keeps its own `model_config`, renderer, and processors used by API
-        request validation/tokenization. Keep these aligned with switched model.
+        keeps its own ``model_config``, renderer, and processors used by API
+        request validation/tokenization.  Keep these aligned with the switched
+        model, then restart the background output handler so it picks up the
+        new ``output_processor`` / ``renderer``.
         """
         if self._engine is None:
             raise RuntimeError("Engine not initialized. Call initialize() first.")
@@ -143,6 +144,15 @@ class MultiModelAsyncLLM:
         target_config = self._vllm_configs[model_name]
         engine = self._engine
 
+        # --- 1. Cancel the old output_handler before rebuilding processors ---
+        old_task = getattr(engine, "output_handler", None)
+        if old_task is not None and not old_task.done():
+            old_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await old_task
+        engine.output_handler = None
+
+        # --- 2. Rebuild config / renderer / processors ---
         engine.vllm_config = target_config
         engine.model_config = target_config.model_config
         engine.observability_config = target_config.observability_config
@@ -165,11 +175,8 @@ class MultiModelAsyncLLM:
             tracing_enabled=target_config.observability_config.otlp_traces_endpoint is not None,
         )
 
-        # Cancel the background output_handler task.
-        old_task = getattr(engine, "output_handler", None)
-        if old_task is not None and not old_task.done():
-            old_task.cancel()
-        engine.output_handler = None
+        # --- 3. Restart the output handler with the new processors ---
+        engine._run_output_handler()
 
     async def initialize(self, model_name: str) -> None:
         """
@@ -293,7 +300,7 @@ class MultiModelAsyncLLM:
                 logger.info("Model sleep state: %s=awake", model_name)
 
                 self._current_model_name = model_name
-                self._refresh_engine_frontend_config(model_name)
+                await self._refresh_engine_frontend_config(model_name)
                 logger.info("Successfully switched to: %s", new_model)
 
                 result: dict[str, float | bool | None] = {

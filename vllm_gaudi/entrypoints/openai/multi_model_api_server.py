@@ -255,15 +255,9 @@ class ModelSwitchResponse(BaseModel):
     duration_ms: float
     reconfigure_ms: float | None = None
     memory_before_mb: float | None = None
-    memory_after_mb: float | None = None
+    memory_after_unload_mb: float | None = None
     freed_memory_mb: float | None = None
     stash_memory_after_mb: float | None = None
-
-
-def _env_truthy(value: str | None) -> bool:
-    if value is None:
-        return False
-    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _resolve_multi_model_config_path() -> str | None:
@@ -464,7 +458,7 @@ def _attach_multi_model_router(app: FastAPI) -> None:
         duration_ms = (time.perf_counter() - start) * 1000.0
         reconfigure_ms = None
         memory_before_mb = None
-        memory_after_mb = None
+        memory_after_unload_mb = None
         freed_mb = None
         stash_memory_after_mb = None
         if isinstance(switch_metrics, dict):
@@ -472,13 +466,13 @@ def _attach_multi_model_router(app: FastAPI) -> None:
             if isinstance(reconfigure_s, (int, float)):
                 reconfigure_ms = float(reconfigure_s) * 1000.0
             raw_before_mb = switch_metrics.get("memory_before_mb")
-            raw_after_mb = switch_metrics.get("memory_after_mb")
+            raw_after_unload_mb = switch_metrics.get("memory_after_unload_mb")
             raw_freed_mb = switch_metrics.get("freed_memory_mb")
             raw_stash_after_mb = switch_metrics.get("stash_memory_after_mb")
             if isinstance(raw_before_mb, (int, float)):
                 memory_before_mb = float(raw_before_mb)
-            if isinstance(raw_after_mb, (int, float)):
-                memory_after_mb = float(raw_after_mb)
+            if isinstance(raw_after_unload_mb, (int, float)):
+                memory_after_unload_mb = float(raw_after_unload_mb)
             if isinstance(raw_freed_mb, (int, float)):
                 freed_mb = float(raw_freed_mb)
             if isinstance(raw_stash_after_mb, (int, float)):
@@ -491,7 +485,7 @@ def _attach_multi_model_router(app: FastAPI) -> None:
             duration_ms=duration_ms,
             reconfigure_ms=reconfigure_ms,
             memory_before_mb=memory_before_mb,
-            memory_after_mb=memory_after_mb,
+            memory_after_unload_mb=memory_after_unload_mb,
             freed_memory_mb=freed_mb,
             stash_memory_after_mb=stash_memory_after_mb,
         )
