@@ -99,4 +99,4 @@ curl -sS http://localhost:30360/v1/models \
 
 HAProxy uses **leastconn** balancing — each new request goes to the backend with the fewest active connections, similar to the `least-busy` strategy in LiteLLM.
 
-Health checks run every 10 seconds against `/v1/models` on each backend. A backend is marked down after 3 consecutive failures and restored after 2 successes.
+Health checks run every 10 seconds against `/v1/models` on each backend. A backend is marked down after 3 consecutive failures and restored after 2 successes. The stats dashboard (`HAPROXY_PORT+1`) shows real-time backend status.

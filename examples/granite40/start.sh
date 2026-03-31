@@ -7,7 +7,6 @@ BASE_PORT="${BASE_PORT:-30001}"               # first vLLM backend port (instanc
 HAPROXY_PORT="${HAPROXY_PORT:-30360}"         # HAProxy frontend port (client-facing API)
 HAPROXY_STATS_PORT=$((HAPROXY_PORT + 1))     # HAProxy stats dashboard (always HAPROXY_PORT+1)
 API_KEY="granite4.0h-g3key"
-SERVER_CMD="./server_command.sh"
 HAPROXY_PATH="${HAPROXY_PATH:-/tmp}"
 LOG_DIR="${HAPROXY_PATH}/logs"
 HAPROXY_CFG="${HAPROXY_PATH}/haproxy.cfg"
@@ -107,11 +106,14 @@ frontend vllm_frontend
 
 backend vllm_backends
     balance leastconn
+    option httpchk GET /v1/models
+    http-check send hdr Authorization "Bearer ${API_KEY}"
+    default-server inter 10s fall 3 rise 2
 EOF
 
 for i in $(seq 0 $((N_INSTANCES - 1))); do
     PORT=$((BASE_PORT + i))
-    echo "    server vllm_${i} 127.0.0.1:${PORT}" >> "$HAPROXY_CFG"
+    echo "    server vllm_${i} 127.0.0.1:${PORT} check" >> "$HAPROXY_CFG"
 done
 
 cat >> "$HAPROXY_CFG" <<EOF
