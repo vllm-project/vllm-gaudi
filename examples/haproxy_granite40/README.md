@@ -22,8 +22,8 @@ Load-balances multiple vLLM instances serving `ibm-granite/granite-4.0-h-small` 
 
 ```bash
 # Copy the scripts to a working directory
-mkdir -p ~/granite40 && cp examples/granite40/* ~/granite40/
-cd ~/granite40
+mkdir -p ~/haproxy_granite40 && cp examples/haproxy_granite40/* ~/haproxy_granite40/
+cd ~/haproxy_granite40
 
 # Install HAProxy if not already present
 apt-get install -y haproxy
@@ -37,15 +37,15 @@ apt-get install -y haproxy
 
 ### Docker
 
-Make sure the directory you will use for the scripts is mapped into the container (e.g. `-v /host/path/granite40:/workspace/granite40`).
+Make sure the directory you will use for the scripts is mapped into the container (e.g. `-v /host/path/haproxy_granite40:/workspace/haproxy_granite40`).
 
 ```bash
 # On the host — copy scripts to the mapped directory
-mkdir -p /host/path/granite40
-cp examples/granite40/* /host/path/granite40/
+mkdir -p /host/path/haproxy_granite40
+cp examples/haproxy_granite40/* /host/path/haproxy_granite40/
 
 # Enter the container (adjust image name as needed)
-docker exec -it <container_name> bash -c "cd /workspace/granite40 && exec bash"
+docker exec -it <container_name> bash -c "cd /workspace/haproxy_granite40 && exec bash"
 ```
 
 Once inside the container:
