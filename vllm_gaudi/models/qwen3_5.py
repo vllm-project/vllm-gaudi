@@ -1,6 +1,7 @@
 import torch
 import vllm.model_executor.models.qwen3_5 as qwen3_5_module
-from vllm.model_executor.models.qwen3_5 import Qwen3_5GatedDeltaNet
+#from vllm.model_executor.models.qwen3_5 import Qwen3_5GatedDeltaNet
+from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention
 from vllm.forward_context import get_forward_context
 
 from vllm_gaudi.ops.causal_conv1d_pytorch import (
@@ -14,7 +15,7 @@ from vllm_gaudi.ops.hpu_gdn_pytorch import (
 )
 
 
-class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
+class HPUQwen3_5GatedDeltaNet(GatedDeltaNetAttention):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
