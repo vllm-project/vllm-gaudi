@@ -180,7 +180,7 @@ ENV BASE_NAME=${BASE_NAME} \
     VLLM_PATH2=/workspace/vllm-gaudi
 
 # Install additional system dependencies
-RUN dnf install -y gettext --allowerasing && \
+RUN dnf install -y gettext haproxy --allowerasing && \
     dnf clean all && \
     ln -sf /usr/bin/python3 /usr/bin/python
 
@@ -215,7 +215,9 @@ RUN set -e && \
 RUN umask 002 && \
     useradd --uid 2000 --gid 0 vllm && \
     chmod g+rwx /home/vllm /usr/src /workspace && \
-    chmod -R g+rwx /var/log/habana_logs
+    chmod -R g+rwx /var/log/habana_logs && \
+    mkdir -p /var/lib/haproxy /var/run/haproxy /etc/haproxy && \
+    chmod -R g+rwx /var/lib/haproxy /var/run/haproxy /etc/haproxy
 
 # Copy license
 COPY LICENSE /licenses/vllm.md
