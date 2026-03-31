@@ -182,9 +182,17 @@ class HpuPlatform(Platform):
         compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         compilation_config.cudagraph_capture_sizes = []
 
-        if get_config().VLLM_CONTIGUOUS_PA:
-            logger.warning("Using Contiguous PA, disabling prefix caching")
-            vllm_config.cache_config.enable_prefix_caching = False
+        cfg = get_config()
+        if cfg.VLLM_CONTIGUOUS_PA:
+            if vllm_config.cache_config.enable_prefix_caching:
+                logger.info(
+                    "Prefix caching was enabled. Disabling contiguous PA as it is incompatible with prefix caching."
+                )
+                cfg._data['VLLM_CONTIGUOUS_PA'] = False
+                cfg._data['use_contiguous_pa'] = False
+            else:
+                logger.info("Contiguous PA is the default behavior on Gaudi.")
+                vllm_config.cache_config.enable_prefix_caching = False
 
         if compilation_config.mode != CompilationMode.NONE:
             logger.info("[HPU] Forcing CompilationMode.NONE "
