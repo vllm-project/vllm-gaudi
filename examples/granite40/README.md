@@ -10,20 +10,58 @@ Load-balances multiple vLLM instances serving `ibm-granite/granite-4.0-h-small` 
 | `stop.sh` | Stops everything |
 | `server_command.sh` | vLLM serve command template |
 
-## Usage
+## Prerequisites
+
+- **Gaudi3 HPUs** — one per vLLM instance
+- **HAProxy** installed (`apt-get install -y haproxy`)
+- **vLLM** with the **vllm-gaudi** plugin installed and working
+
+## Setup
+
+### Baremetal
 
 ```bash
-# Start with 8 instances (default)
+# Copy the scripts to a working directory
+mkdir -p ~/granite40 && cp examples/granite40/* ~/granite40/
+cd ~/granite40
+
+# Install HAProxy if not already present
+apt-get install -y haproxy
+
+# Start (8 instances by default)
 ./start.sh
 
-# Start with a custom number of instances
-./start.sh 4
-
-# Stop all
+# Stop
 ./stop.sh
 ```
 
-### Configuration
+### Docker
+
+Make sure the directory you will use for the scripts is mapped into the container (e.g. `-v /host/path/granite40:/workspace/granite40`).
+
+```bash
+# On the host — copy scripts to the mapped directory
+mkdir -p /host/path/granite40
+cp examples/granite40/* /host/path/granite40/
+
+# Enter the container (adjust image name as needed)
+docker exec -it <container_name> bash -c "cd /workspace/granite40 && exec bash"
+```
+
+Once inside the container:
+
+```bash
+# Install HAProxy if not already present
+apt-get install -y haproxy
+
+# Start (8 instances by default)
+./start.sh
+
+# Stop
+./stop.sh
+```
+
+## Configuration
 
 Set these environment variables before running `start.sh` to customize behavior:
 
@@ -62,9 +100,3 @@ curl -sS http://localhost:30360/v1/models \
 HAProxy uses **leastconn** balancing — each new request goes to the backend with the fewest active connections, similar to the `least-busy` strategy in LiteLLM.
 
 Health checks run every 10 seconds against `/v1/models` on each backend. A backend is marked down after 3 consecutive failures and restored after 2 successes.
-
-## Prerequisites
-
-- HAProxy installed (`apt-get install haproxy` or `yum install haproxy`)
-- vLLM with Gaudi support
-- One Gaudi3 HPU per instance
