@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -9,8 +9,13 @@ import torch
 from collections.abc import Iterator
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.v1.kv_cache_interface import AttentionSpec, UniformTypeKVCacheSpecs
 from vllm.v1.kv_offload.mediums import BlockIDsLoadStoreSpec
-from vllm.v1.kv_offload.spec import CanonicalKVCacheRef, CanonicalKVCaches
+from vllm.v1.kv_offload.spec import (
+    CanonicalKVCacheRef,
+    CanonicalKVCaches,
+    CanonicalKVCacheTensor,
+)
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
     TransferSpec,
@@ -19,6 +24,7 @@ from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.abstract import LoadStoreSpec
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.worker.cpu_gpu import (SingleDirectionOffloadingHandler, CpuGpuOffloadingHandlers)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import OffloadingConnectorWorker
 
 logger = init_logger(__name__)
 
@@ -274,3 +280,89 @@ CPUOffloadingSpec.get_handlers = get_handlers
 SingleDirectionOffloadingHandler.__init__ = SingleDirectionOffloadingHandler_init_
 SingleDirectionOffloadingHandler.transfer_async = transfer_async
 CpuGpuOffloadingHandlers.__init__ = CpuGpuOffloadingHandlers_init_
+
+
+def register_kv_caches(
+    self,
+    kv_caches: dict[str, torch.Tensor],
+):
+    """HPU-specific register_kv_caches.
+
+    On HPU, get_kv_caches_4D() may return a TensorTuple (K, V pair)
+    instead of a single torch.Tensor for attention layers. This override
+    handles that by treating each element of the tuple as a separate
+    canonical tensor (similar to the FlashAttention unbind case).
+    """
+    tensors_per_block: dict[str, tuple[torch.Tensor, ...]] = {}
+    page_size_bytes: dict[str, int] = {}
+
+    for kv_cache_group in self.spec.kv_cache_config.kv_cache_groups:
+        group_layer_names = kv_cache_group.layer_names
+        group_kv_cache_spec = kv_cache_group.kv_cache_spec
+        if isinstance(group_kv_cache_spec, UniformTypeKVCacheSpecs):
+            per_layer_specs = group_kv_cache_spec.kv_cache_specs
+        else:
+            per_layer_specs = {}
+        for layer_name in group_layer_names:
+            layer_kv_cache_spec = per_layer_specs.get(layer_name, group_kv_cache_spec)
+            if not isinstance(layer_kv_cache_spec, AttentionSpec):
+                raise NotImplementedError(f"HPU offloading does not support {type(layer_kv_cache_spec)}")
+
+            layer_kv_cache = kv_caches[layer_name]
+
+            # HPU may return a TensorTuple (K, V) or a single Tensor
+            cache_tensors = list(layer_kv_cache) if isinstance(layer_kv_cache, tuple) else [layer_kv_cache]
+
+            block_tensors_for_layer = []
+            for t in cache_tensors:
+                assert isinstance(t, torch.Tensor)
+                num_blocks = t.shape[0]
+                # Compute page size from tensor shape, not storage size,
+                # because HPU may have extra padding blocks in storage.
+                per_tensor_page_size = t[0].numel() * t.element_size()
+                # Reshape to (num_blocks, page_size_bytes) as int8
+                canonical = (t.contiguous().view(torch.int8).reshape(num_blocks, per_tensor_page_size))
+                block_tensors_for_layer.append(canonical)
+
+            tensors_per_block[layer_name] = tuple(block_tensors_for_layer)
+            # per-tensor page size (all tensors in a TensorTuple have equal size)
+            page_size_bytes[layer_name] = block_tensors_for_layer[0].shape[1]
+
+    # Build CanonicalKVCaches
+    block_tensors: list[CanonicalKVCacheTensor] = []
+    block_data_refs: dict[str, list[CanonicalKVCacheRef]] = defaultdict(list)
+    for kv_cache_tensor in self.spec.kv_cache_config.kv_cache_tensors:
+        tensor_layer_names = kv_cache_tensor.shared_by
+
+        first_layer_name = tensor_layer_names[0]
+        for tensor in tensors_per_block[first_layer_name]:
+            block_tensors.append(
+                CanonicalKVCacheTensor(
+                    tensor=tensor,
+                    page_size_bytes=page_size_bytes[first_layer_name],
+                ))
+
+            curr_tensor_idx = len(block_tensors) - 1
+            for layer_name in tensor_layer_names:
+                block_data_refs[layer_name].append(
+                    CanonicalKVCacheRef(
+                        tensor_idx=curr_tensor_idx,
+                        page_size_bytes=page_size_bytes[layer_name],
+                    ))
+
+    group_data_refs: list[list[CanonicalKVCacheRef]] = []
+    for kv_cache_group in self.spec.kv_cache_config.kv_cache_groups:
+        group_refs: list[CanonicalKVCacheRef] = []
+        for layer_name in kv_cache_group.layer_names:
+            group_refs += block_data_refs[layer_name]
+        group_data_refs.append(group_refs)
+
+    canonical_kv_caches = CanonicalKVCaches(
+        tensors=block_tensors,
+        group_data_refs=group_data_refs,
+    )
+
+    self._register_handlers(canonical_kv_caches)
+
+
+OffloadingConnectorWorker.register_kv_caches = register_kv_caches
