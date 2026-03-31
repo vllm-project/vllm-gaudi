@@ -16,8 +16,8 @@ ARG PT_MODULES_REPO_NAME=gaudi-pt-modules
 ARG PT_PACKAGE_NAME_NON_DEFAULT_PYTHON_SUBSTRING=
 ARG PYPI_INDEX_URL="https://pypi.org/simple/"
 ARG HABANA_RPM_REPO_PATH="rhel/9/${OS_VERSION}"
-ARG VLLM_GAUDI_COMMIT=main
-ARG VLLM_PROJECT_COMMIT=
+ARG VLLM_GAUDI_COMMIT=v0.17.1
+ARG VLLM_PROJECT_COMMIT=v0.17.1
 
 # ============================================================================
 # Stage 1: gaudi-base - Base system setup with Habana drivers
