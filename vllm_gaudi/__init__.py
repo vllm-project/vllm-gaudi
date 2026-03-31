@@ -118,6 +118,5 @@ def register_models():
     import vllm_gaudi.models.utils  # noqa: F401
     import vllm_gaudi.models.interfaces  # noqa: F401
     import vllm_gaudi.models.bert  # noqa: F401
-    import vllm_gaudi.models.roberta  # noqa: F401
     from .models import register_model
     register_model()

@@ -649,6 +649,9 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                         dtype=self.alibi_slopes.dtype,
                     )
 
+            if key_cache is None:
+                return torch.zeros(*output_shape, dtype=query.dtype, device=query.device)
+
             output = HPUPagedAttention.forward_decode(query=query,
                                                       block_mapping=block_mapping,
                                                       block_bias=attn_bias,
