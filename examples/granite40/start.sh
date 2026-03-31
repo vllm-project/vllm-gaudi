@@ -3,9 +3,9 @@ set -euo pipefail
 
 # ── Configuration ──────────────────────────────────────────────────
 N_INSTANCES="${1:-8}"          # number of vLLM instances (default: 8)
-BASE_PORT=30001               # first vLLM backend port
-HAPROXY_PORT=30360            # HAProxy frontend port
-HAPROXY_STATS_PORT=30361      # HAProxy stats page port
+BASE_PORT="${BASE_PORT:-30001}"               # first vLLM backend port (instances get BASE_PORT, BASE_PORT+1, …)
+HAPROXY_PORT="${HAPROXY_PORT:-30360}"         # HAProxy frontend port (client-facing API)
+HAPROXY_STATS_PORT=$((HAPROXY_PORT + 1))     # HAProxy stats dashboard (always HAPROXY_PORT+1)
 API_KEY="granite4.0h-g3key"
 SERVER_CMD="./server_command.sh"
 HAPROXY_PATH="${HAPROXY_PATH:-/tmp}"

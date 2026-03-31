@@ -21,7 +21,7 @@ vllm serve ibm-granite/granite-4.0-h-small \
 --max-num-seqs 32 \
 --max-num-batched-tokens 8192 \
 --enable-chunked-prefill \
---port 30360 \
+--port 30001 \
 --no-enable-prefix-caching \
 --tool-call-parser hermes \
 --enable-auto-tool-choice

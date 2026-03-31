@@ -25,10 +25,20 @@ Load-balances multiple vLLM instances serving `ibm-granite/granite-4.0-h-small` 
 
 ### Configuration
 
-Set `HAPROXY_PATH` to control where HAProxy config, PID file, and vLLM logs are stored. Defaults to `/tmp` if not set.
+Set these environment variables before running `start.sh` to customize behavior:
+
+| Variable | Default | Description |
+|---|---|---|
+| `HAPROXY_PATH` | `/tmp` | Directory for HAProxy config, PID file, and vLLM logs |
+| `HAPROXY_PORT` | `30360` | Client-facing API port (HAProxy frontend) |
+| `BASE_PORT` | `30001` | First vLLM backend port; instances use `BASE_PORT`, `BASE_PORT+1`, … |
+
+The HAProxy stats dashboard is always at `HAPROXY_PORT + 1` (default `30361`).
 
 ```bash
 export HAPROXY_PATH=/my/custom/path
+export HAPROXY_PORT=8080
+export BASE_PORT=9001
 ./start.sh
 ```
 
@@ -36,8 +46,9 @@ export HAPROXY_PATH=/my/custom/path
 
 | Endpoint | Default Port | Description |
 |---|---|---|
-| API | `30360` | HAProxy frontend — drop-in replacement for the LiteLLM proxy |
-| Stats | `30361` | HAProxy stats dashboard (auto-refresh) |
+| API | `HAPROXY_PORT` (30360) | HAProxy frontend — drop-in replacement for the LiteLLM proxy |
+| Stats | `HAPROXY_PORT+1` (30361) | HAProxy stats dashboard (auto-refresh) |
+| Backends | `BASE_PORT` … `BASE_PORT+N-1` (30001–30008) | Individual vLLM instances (one per HPU) |
 
 ### Example request
 
