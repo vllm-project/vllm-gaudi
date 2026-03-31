@@ -9,8 +9,11 @@ import pytest
 from unittest.mock import patch
 
 import vllm_gaudi.extension.bucketing.linear as linear
-from vllm_gaudi.extension.bucketing.common import generate_buckets, calc_fallback_value
+import vllm_gaudi.extension.bucketing.padding_aware as padding_aware
+from vllm_gaudi.extension.bucketing.common import HPUBucketingManager, generate_buckets, calc_fallback_value
 from vllm_gaudi.extension.bucketing.exponential import (ExponentialBucketingStrategy, warmup_range_with_limit)
+from vllm_gaudi.extension.bucketing.linear import LinearBucketingStrategy
+from vllm_gaudi.extension.bucketing.padding_aware import PaddingAwareBucketingStrategy
 from vllm_gaudi.extension.runtime import get_config, clear_config
 
 
@@ -20,6 +23,24 @@ def default_config():
     get_config()
     yield
     clear_config()
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected_type"),
+    [
+        ("exp", ExponentialBucketingStrategy),
+        ("lin", LinearBucketingStrategy),
+        ("pad", PaddingAwareBucketingStrategy),
+    ],
+)
+def test_get_bucketing_strategy_selected_by_env(monkeypatch, env_value, expected_type):
+    monkeypatch.setenv("VLLM_BUCKETING_STRATEGY", env_value)
+    clear_config()
+
+    manager = HPUBucketingManager.__new__(HPUBucketingManager)
+    strategy = manager.get_bucketing_strategy()
+
+    assert isinstance(strategy, expected_type)
 
 
 def test_read_bucket_settings(monkeypatch):
@@ -491,3 +512,67 @@ def test_exponential_decode_block_limit_cap(monkeypatch):
     # the uncapped ~126.
     total = len(bs_range) * len(block_range)
     assert total <= 50
+
+
+# --- Padding-aware bucketing tests ---
+
+
+def test_padding_aware_read_bucket_settings_query_seq_fallback(monkeypatch):
+    monkeypatch.setenv("VLLM_PROMPT_SEQ_BUCKET_MIN", "64")
+    monkeypatch.setenv("VLLM_PROMPT_SEQ_BUCKET_STEP", "128")
+    monkeypatch.setenv("VLLM_PROMPT_SEQ_BUCKET_MAX", "1024")
+    monkeypatch.setenv("VLLM_PROMPT_SEQ_BUCKET_PAD_MAX", "256")
+    monkeypatch.setenv("VLLM_PROMPT_SEQ_BUCKET_PAD_PERCENT", "10")
+
+    config = padding_aware.read_bucket_settings("prompt",
+                                                "query",
+                                                min=32,
+                                                step=32,
+                                                max=2048,
+                                                pad_max=512,
+                                                pad_percent=25)
+
+    assert config == [64, 128, 1024, 256, 10]
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        ((0, 8, 64, 64, 0), [0, 1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64]),
+        ((0, 8, 64, 64, 50), [0, 1, 2, 4, 8, 16, 32, 64]),
+        ((0, 8, 64, 16, 50), [0, 1, 2, 4, 8, 16, 32, 48, 64]),
+        ((16, 16, 128, 32, 25), [16, 32, 48, 64, 80, 96, 128]),
+    ],
+)
+def test_padding_aware_warmup_range_with_limits_examples(config, expected):
+    assert padding_aware.warmup_range_with_limits(config) == expected
+
+
+def test_padding_aware_prompt_cfgs_defaults():
+    strategy = PaddingAwareBucketingStrategy()
+
+    bs_cfg, query_cfg, ctx_cfg = strategy.get_prompt_cfgs(max_num_prefill_seqs=16,
+                                                          block_size=128,
+                                                          max_num_batched_tokens=2048,
+                                                          max_model_len=4096)
+
+    assert bs_cfg == [1, 1, 16, 4, 25]
+    assert query_cfg == [128, 128, 2048, 512, 25]
+    assert ctx_cfg == [0, 2, 31, 16, 25]
+
+
+@patch('vllm_gaudi.extension.bucketing.padding_aware.get_config')
+def test_padding_aware_decode_cfgs_contiguous_pa_clamps_block_range(mock_get_config, monkeypatch):
+    mock_get_config.return_value = _MockConfig(use_contiguous_pa=True)
+    monkeypatch.setenv("VLLM_DECODE_BLOCK_BUCKET_MIN", "4096")
+    monkeypatch.setenv("VLLM_DECODE_BLOCK_BUCKET_STEP", "128")
+    monkeypatch.setenv("VLLM_DECODE_BLOCK_BUCKET_MAX", "8192")
+
+    strategy = PaddingAwareBucketingStrategy()
+    _, _, block_cfg = strategy.get_decode_cfgs(max_num_seqs=64,
+                                               block_size=128,
+                                               max_num_batched_tokens=2048,
+                                               max_model_len=4096,
+                                               max_blocks=3593)
+
+    assert block_cfg == [3465, 128, 3593, 899, 25]
