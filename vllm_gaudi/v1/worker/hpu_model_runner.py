@@ -575,10 +575,14 @@ class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
         input_ids = kwargs['input_ids']
         model_has_chunked_attention = kwargs.pop('model_has_chunked_attention', False)
         if 'attn_metadata' in kwargs and not self.pooling_model:
+            kwargs['attn_metadata'] = _pad_prefill_block_list_to_bucket(
+                kwargs['attn_metadata'], input_ids.size(0))
             kwargs['attn_metadata'] = self.metadata_processor.process_metadata(kwargs['attn_metadata'],
                                                                                input_ids.size(0), input_ids.size(1),
                                                                                input_ids.device, self.dtype,
                                                                                model_has_chunked_attention)
+            kwargs['attn_metadata'] = _pad_block_tensors_to_bucket(
+                kwargs['attn_metadata'])
         if self._rotary_prepare_cos_sin is not None:
             self._rotary_prepare_cos_sin(kwargs['positions'], recompute_cos_sin=self.recompute_cos_sin)
         attn_meta = kwargs.pop('attn_metadata', None)
@@ -634,6 +638,121 @@ def _maybe_wrap_in_hpu_graph(*args, **kwargs):
     return htorch.hpu.wrap_in_hpu_graph(HpuModelAdapter(
         *args, **kwargs), disable_tensor_cache=True) if htorch.utils.internal.is_lazy() else HpuModelAdapter(
             *args, **kwargs)
+
+
+# Sorted list of block counts from decode warmup buckets.
+# Set by HPUModelRunner.warmup_model() so that _pad_block_tensors_to_bucket
+# can snap runtime block counts to a warmed-up size.
+_DECODE_BLOCK_BUCKETS: list[int] = []
+
+# Sorted list of block counts from prompt warmup buckets.
+# Set by HPUModelRunner.warmup_model() so that
+# _pad_prefill_block_list_to_bucket can snap prefill block counts
+# to shapes that were exercised during warmup.
+_PREFILL_BLOCK_BUCKETS: list[int] = []
+
+
+def _pad_block_tensors_to_bucket(attn_metadata):
+    """Pad block-dimension tensors to the nearest warmed-up bucket size.
+
+    During decode, tensors like block_mapping and attn_bias have dim-0
+    equal to the number of allocated KV-cache blocks, which varies per
+    request.  The HPU backend compiles with concrete shapes
+    (force_static_compile), so every unseen block count triggers an
+    expensive graph recompilation / HPUGraph capture.
+
+    This function pads the block dimension to the next size that was
+    already exercised during warmup, guaranteeing a cache hit.
+
+    Padding strategy (safe for pipelined_pa / flat_pa softmax):
+      * block_mapping rows = zeros  -> batch2block produces zero queries
+      * attn_bias rows    = -1e4   -> finite, so no NaN in softmax;
+        exp(-1e4 - group_max) ~ 0, so padded blocks contribute nothing
+      * 1-D tensors (block_list, block_groups, block_usage) = 0
+    """
+    if attn_metadata.is_prompt or not _DECODE_BLOCK_BUCKETS:
+        return attn_metadata
+
+    overrides: dict = {}
+    _FAMILIES = [
+        ('block_list',
+         ('block_list', 'block_usage', 'block_groups'),
+         (('block_mapping', 0.0), ('attn_bias', -1e4))),
+        ('window_block_list',
+         ('window_block_list', 'window_block_usage', 'window_block_groups'),
+         (('window_block_mapping', 0.0), ('window_attn_bias', -1e4))),
+        ('chunked_block_list',
+         ('chunked_block_list', 'chunked_block_usage', 'chunked_block_groups'),
+         (('chunked_block_mapping', 0.0), ('chunked_attn_bias', -1e4))),
+    ]
+    for ref_field, fields_1d, fields_2d in _FAMILIES:
+        ref = getattr(attn_metadata, ref_field, None)
+        if ref is None or not isinstance(ref, torch.Tensor) or ref.numel() == 0:
+            continue
+        n = ref.size(0)
+        target = _snap_to_bucket(n)
+        if target <= n:
+            continue
+        pad_n = target - n
+        for name in fields_1d:
+            t = getattr(attn_metadata, name, None)
+            if t is not None and isinstance(t, torch.Tensor):
+                overrides[name] = torch.nn.functional.pad(t, (0, pad_n))
+        for name, fill in fields_2d:
+            t = getattr(attn_metadata, name, None)
+            if t is not None and isinstance(t, torch.Tensor):
+                overrides[name] = torch.nn.functional.pad(
+                    t, (0, 0, 0, pad_n), value=fill)
+    if overrides:
+        return custom_tuple_replace(
+            attn_metadata, "TrimmedAttentionMetadata", **overrides)
+    return attn_metadata
+
+
+def _snap_to_bucket(n: int) -> int:
+    """Return the smallest decode block bucket >= *n*."""
+    import bisect
+    idx = bisect.bisect_left(_DECODE_BLOCK_BUCKETS, n)
+    if idx < len(_DECODE_BLOCK_BUCKETS):
+        return _DECODE_BLOCK_BUCKETS[idx]
+    # Beyond all warmup buckets — fall back to next power of 2
+    return 1 << (n - 1).bit_length() if n > 0 else 0
+
+
+def _snap_to_prefill_bucket(n: int) -> int:
+    """Return the smallest prefill block bucket >= *n*."""
+    import bisect
+    idx = bisect.bisect_left(_PREFILL_BLOCK_BUCKETS, n)
+    if idx < len(_PREFILL_BLOCK_BUCKETS):
+        return _PREFILL_BLOCK_BUCKETS[idx]
+    return 1 << (n - 1).bit_length() if n > 0 else 0
+
+
+def _pad_prefill_block_list_to_bucket(attn_metadata, batch_size: int):
+    """Pad prefill block_list to the nearest warmed-up block bucket.
+
+    Called BEFORE the compiled process_metadata so that
+    max_context_len (derived from block_list.size(-1)) matches
+    a shape exercised during warmup, preventing recompilation.
+
+    Padded block entries (value 0) are safe because the bias mask
+    in _set_attn_bias_for_chunked_attention uses past_indices <
+    context_lens_t, which excludes padded positions.
+    """
+    if not attn_metadata.is_prompt or not _PREFILL_BLOCK_BUCKETS:
+        return attn_metadata
+    block_list = getattr(attn_metadata, 'block_list', None)
+    if block_list is None or not isinstance(block_list, torch.Tensor) or block_list.numel() == 0:
+        return attn_metadata
+    bs = max(batch_size, 1)
+    num_blocks = block_list.size(-1) // bs
+    target = _snap_to_prefill_bucket(num_blocks)
+    if target <= num_blocks:
+        return attn_metadata
+    pad_n = (target - num_blocks) * bs
+    padded = torch.nn.functional.pad(block_list, (0, pad_n), value=0)
+    return custom_tuple_replace(
+        attn_metadata, "TrimmedAttentionMetadata", block_list=padded)
 
 
 def subtuple(obj: object, typename: str, to_copy: list[str], to_override: Optional[dict[str, object]] = None):
@@ -4975,6 +5094,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.bucketing_manager.generate_prompt_buckets()
         if not self.is_pooling_model:
             self.bucketing_manager.generate_decode_buckets()
+            # Populate the module-level block bucket list so that
+            # _pad_block_tensors_to_bucket can snap runtime block counts
+            # to shapes that were exercised during warmup.
+            global _DECODE_BLOCK_BUCKETS
+            _DECODE_BLOCK_BUCKETS = sorted(
+                set(b[2] for b in self.bucketing_manager.decode_buckets
+                    if b[2] > 0))
+            logger.info("Decode block buckets for padding: %d entries, "
+                        "range [%d, %d]",
+                        len(_DECODE_BLOCK_BUCKETS),
+                        _DECODE_BLOCK_BUCKETS[0] if _DECODE_BLOCK_BUCKETS
+                        else 0,
+                        _DECODE_BLOCK_BUCKETS[-1] if _DECODE_BLOCK_BUCKETS
+                        else 0)
         else:
             self.bucketing_manager.decode_buckets = []
 
@@ -5063,6 +5196,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     self.warmup_graphs(
                         self.bucketing_manager.prompt_buckets, True, kv_caches)
                 self.log_graph_warmup_summary(self.bucketing_manager.prompt_buckets, True, mem_post_prompt)
+                global _PREFILL_BLOCK_BUCKETS
+                _PREFILL_BLOCK_BUCKETS = sorted(
+                    set(b[2] for b in self.bucketing_manager.prompt_buckets
+                        if b[2] > 0))
+                if _PREFILL_BLOCK_BUCKETS:
+                    logger.info(
+                        "Prefill block buckets for padding: %d entries, "
+                        "range [%d, %d]",
+                        len(_PREFILL_BLOCK_BUCKETS),
+                        _PREFILL_BLOCK_BUCKETS[0],
+                        _PREFILL_BLOCK_BUCKETS[-1])
                 if not self.is_pooling_model:
                     mem_post_decode, decode_batch_seq, decode_captured_all = \
                       self.warmup_graphs(
