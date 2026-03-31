@@ -22,7 +22,6 @@ class HPUMLAAttention(MLAAttention):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.enable_fp8_attn = self.kv_cache_dtype == 'fp8_inc' and os.environ.get('QUANT_CONFIG', None) is None
-        self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn else VLLMFP8KVCache()
         self.scale = float(self.scale)
         self.matmul_qk = Matmul() if not self.enable_fp8_attn \
             else FP8Matmul()
@@ -56,7 +55,7 @@ class HPUMLAAttention(MLAAttention):
             attn_metadata = forward_context.attn_metadata
             if isinstance(attn_metadata, dict):
                 attn_metadata = attn_metadata[self.layer_name]
-            self_kv_cache = self.kv_cache[0]
+            self_kv_cache = self.kv_cache
             #slot_mapping = forward_context.slot_mapping
 
             #assert isinstance(slot_mapping, dict), (
@@ -144,7 +143,8 @@ class HPUMLAAttention(MLAAttention):
 
         # write the latent and rope to kv cache
         if kv_cache is not None and len(kv_cache) >= 2:
-            self.latent_cache_k(latent_vec_k, kv_cache[0], slot_mapping)
+            # Always use impl-owned cache op so INC quantization maps to one canonical module path.
+            self.impl.latent_cache_k(latent_vec_k, kv_cache[0], slot_mapping)
 
         if is_prefill:
             output = self.impl.forward_mha(q, latent_vec_k, kv_cache, attn_metadata)

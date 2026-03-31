@@ -53,7 +53,7 @@ def patched_attention_forward(
     attn_metadata = forward_context.attn_metadata
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[self.layer_name]
-    self_kv_cache = self.kv_cache[0]
+    self_kv_cache = self.kv_cache
     return self.impl.forward(self, query, key, value, self_kv_cache, attn_metadata)
 
 
