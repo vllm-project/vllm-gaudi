@@ -38,7 +38,6 @@ from vllm_gaudi.v1.worker.hpu_dp_utils import set_hpu_dp_metadata
 
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.attention import MLAAttention
 from vllm.v1.attention.selector import get_attn_backend
 
 from vllm.config import (VllmConfig, get_layers_from_vllm_config, update_config)
@@ -49,7 +48,6 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.platforms import current_platform
@@ -73,7 +71,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
-    MLAAttentionSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
     EncoderOnlyAttentionSpec,
@@ -675,10 +672,15 @@ class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
         input_ids = kwargs['input_ids']
         model_has_chunked_attention = kwargs.pop('model_has_chunked_attention', False)
         if 'attn_metadata' in kwargs and not self.pooling_model:
-            kwargs['attn_metadata'] = self.metadata_processor.process_metadata(kwargs['attn_metadata'],
-                                                                               input_ids.size(0), input_ids.size(1),
-                                                                               input_ids.device, self.dtype,
-                                                                               model_has_chunked_attention)
+            # Decode per-layer namedtuple back to dict and process each layer's metadata
+            per_layer_metadata = decode_subtuple_to_dict(kwargs['attn_metadata'])
+
+            def _process(m):
+                return self.metadata_processor.process_metadata(m, input_ids.size(0), input_ids.size(1),
+                                                                input_ids.device, self.dtype,
+                                                                model_has_chunked_attention)
+
+            kwargs['attn_metadata'] = _build_per_layer_metadata(per_layer_metadata, _process)
         if self._rotary_prepare_cos_sin is not None:
             self._rotary_prepare_cos_sin(kwargs['positions'], recompute_cos_sin=self.recompute_cos_sin)
         attn_meta = kwargs.pop('attn_metadata', None)
@@ -736,14 +738,73 @@ def _maybe_wrap_in_hpu_graph(*args, **kwargs):
             *args, **kwargs)
 
 
-def subtuple(obj: object, typename: str, to_copy: list[str], to_override: Optional[dict[str, object]] = None):
+# Key encoding/decoding for per-layer attn_metadata namedtuples.
+# Layer names (e.g. "model.layers.0.self_attn") are not valid Python
+# identifiers, but namedtuple field names must be. We encode them to
+# hex with a distinctive prefix and decode back when needed.
+_ENCODED_KEY_PREFIX = "__lyr_"
+
+
+def encode_layer_key(key: str) -> str:
+    """Encode a layer name string into a valid Python identifier."""
+    if isinstance(key, str):
+        return _ENCODED_KEY_PREFIX + key.encode('ascii').hex()
+    return key
+
+
+def decode_layer_key(key: str) -> str:
+    """Decode an encoded layer key back to the original layer name."""
+    if isinstance(key, str) and key.startswith(_ENCODED_KEY_PREFIX):
+        try:
+            return bytes.fromhex(key[len(_ENCODED_KEY_PREFIX):]).decode('ascii')
+        except ValueError:
+            return key
+    return key
+
+
+def decode_subtuple_to_dict(st: object) -> dict[str, object]:
+    """Convert a namedtuple with encoded keys back to a dict with decoded keys."""
+    st_dict = st._asdict()
+    return {decode_layer_key(key): st_dict[key] for key in st_dict}
+
+
+def _build_per_layer_metadata(
+    attn_metadata: dict[str, HPUAttentionMetadataV1],
+    update_fn: Callable[[HPUAttentionMetadataV1], HPUAttentionMetadataV1],
+) -> dict[str, HPUAttentionMetadataV1]:
+    """Apply update_fn to each unique metadata object in a per-layer dict.
+
+    When all layers share the same metadata object (common case), the
+    update function is called only once and the result is reused.
+    """
+    first_metadata = next(iter(attn_metadata.values()))
+    updated_first = update_fn(first_metadata)
+    result: dict[str, HPUAttentionMetadataV1] = {}
+    for key, metadata in attn_metadata.items():
+        if metadata is first_metadata:
+            result[key] = updated_first
+        else:
+            logger.warning("Different attn_metadata encountered on layer %s. Updating it individually.", key)
+            result[key] = update_fn(metadata)
+    return result
+
+
+def subtuple(obj: object,
+             typename: str,
+             to_copy: list[str],
+             to_override: Optional[dict[str, object]] = None,
+             encode_keys: bool = False):
     if obj is None:
         return None
     if to_override is None:
         to_override = {}
     fields = set(to_copy) | set(to_override.keys())
+    if encode_keys:
+        # Encode field names to valid Python identifiers for namedtuple
+        fields = {encode_layer_key(f) for f in fields}
     if type(obj) is dict:
-        values = {key: obj[key] for key in fields if key in obj}
+        decoding_fn = decode_layer_key if encode_keys else lambda x: x
+        values = {key: obj[decoding_fn(key)] for key in fields if decoding_fn(key) in obj}
     else:
         values = {f: to_override.get(f, getattr(obj, f)) for f in fields}
     if typename not in _TYPE_CACHE:
@@ -1268,55 +1329,22 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             format. Layers that do not need KV cache are not included.
         """
 
-        forward_ctx = self.vllm_config.compilation_config.static_forward_context
-        block_size = self.vllm_config.cache_config.block_size
         kv_cache_spec: dict[str, KVCacheSpec] = {}
-        cache_dtype_str = self.vllm_config.cache_config.cache_dtype
-        for layer_name, attn_module in forward_ctx.items():
-            kv_sharing_target_layer_name = getattr(attn_module, 'kv_sharing_target_layer_name', None)
-            if kv_sharing_target_layer_name is not None:
-                from vllm.model_executor.layers.attention.attention import validate_kv_sharing_target
-                try:
-                    validate_kv_sharing_target(
-                        layer_name,
-                        kv_sharing_target_layer_name,
-                        forward_ctx,
-                    )
-                    self.shared_kv_cache_layers[layer_name] = kv_sharing_target_layer_name
-                except Exception as e:
-                    logger.error("KV sharing validation failed for %s -> %s: %s", layer_name,
-                                 kv_sharing_target_layer_name, e)
+        attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
+        for layer_name, attn_module in attn_layers.items():
+            if isinstance(attn_module, Attention) and (kv_tgt_layer := attn_module.kv_sharing_target_layer_name):
+                # The layer doesn't need its own KV cache and will use that of
+                # the target layer. We skip creating a KVCacheSpec for it, so
+                # that KV cache management logic will act as this layer does
+                # not exist, and doesn't allocate KV cache for the layer. This
+                # enables the memory saving of cross-layer kv sharing, allowing
+                # a given amount of memory to accommodate longer context lengths
+                # or enable more requests to be processed simultaneously.
+                self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
                 continue
-            if isinstance(attn_module, FusedMoE):
-                continue
-
-            # TODO: Support other attention modules, e.g., sliding window,
-            # cross-attention
-            if isinstance(attn_module, MambaBase):
-                kv_cache_spec[layer_name] = attn_module.get_kv_cache_spec(self.vllm_config)
-            elif isinstance(attn_module, Attention):
-                if attn_module.attn_type == AttentionType.DECODER:
-                    kv_cache_spec[layer_name] = FullAttentionSpec(block_size=block_size,
-                                                                  num_kv_heads=attn_module.num_kv_heads,
-                                                                  head_size=attn_module.head_size,
-                                                                  dtype=self.kv_cache_dtype)
-                elif attn_module.attn_type in (AttentionType.ENCODER, AttentionType.ENCODER_ONLY):
-                    # encoder-only attention does not need KV cache.
-                    continue
-                elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
-                    raise NotImplementedError
-                else:
-                    raise ValueError(f"Unknown attention type: {attn_module.attn_type}")
-            elif isinstance(attn_module, MLAAttention):
-                if layer_name in kv_cache_spec:
-                    continue
-                kv_cache_spec[layer_name] = MLAAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=attn_module.head_size,
-                    dtype=self.kv_cache_dtype,
-                    cache_dtype_str=cache_dtype_str,
-                )
+            # Skip modules that don't need KV cache (eg encoder-only attention)
+            if spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec
 
@@ -2377,11 +2405,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                      state_indices_tensor=state_indices_tensor,
                                                                      query_start_loc=query_start_loc_p,
                                                                      padding_mask_flat=padding_mask_flat)
+
+        per_layer_attn_metadata: dict[str, HPUAttentionMetadataV1] = {}
+        for kcg in self.kv_cache_config.kv_cache_groups:
+            for layer_name in kcg.layer_names:
+                per_layer_attn_metadata[layer_name] = attn_metadata
+
         return PrefillInputData(request_ids=[req_ids],
                                 prompt_lens=[query_lens],
                                 token_ids=[token_ids],
                                 position_ids=[token_positions],
-                                attn_metadata=[attn_metadata],
+                                attn_metadata=[per_layer_attn_metadata],
                                 logits_indices=[logits_indices],
                                 logits_requests=[logits_requests])
 
@@ -2706,11 +2740,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             query_start_loc=query_start_loc_p,
         )
 
+        per_layer_attn_metadata: dict[str, HPUAttentionMetadataV1] = {}
+        for kcg in self.kv_cache_config.kv_cache_groups:
+            for layer_name in kcg.layer_names:
+                per_layer_attn_metadata[layer_name] = attn_metadata
+
         return DecodeInputData(num_decodes=num_decodes,
                                token_ids=token_ids_device,
                                position_ids=positions_device,
                                logits_indices=logits_indices_device,
-                               attn_metadata=attn_metadata,
+                               attn_metadata=per_layer_attn_metadata,
                                spec_decode_metadata=spec_decode_metadata)
 
     def _prepare_decode_inputs(self,
@@ -2971,9 +3010,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                model_mm_kwargs=None):
         # FORWARD.
         batch_size = token_ids.size(0)
-        seq_len = self._seq_len(attn_metadata)
-        num_blocks = self._num_blocks(attn_metadata)
-        self._check_config(batch_size, seq_len, num_blocks, attn_metadata, warmup_mode)
+        # NOTE(kzawora): Temporarily, we assume that all layers have the same
+        # attn_metadata, so the first one is going to be the same as the rest.
+        first_attn_metadata = next(iter(attn_metadata.values()))
+        seq_len = self._seq_len(first_attn_metadata)
+        num_blocks = self._num_blocks(first_attn_metadata)
+        self._check_config(batch_size, seq_len, num_blocks, first_attn_metadata, warmup_mode)
         additional_kwargs = {}
         if htorch.utils.internal.is_lazy():
             use_graphs = self._use_graphs()
@@ -2985,7 +3027,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             use_graphs = False
         if self.model_has_chunked_attention:
             additional_kwargs.update({"model_has_chunked_attention": True})
-        trimmed_attn_metadata = trim_attn_metadata(attn_metadata)
+
+        trimmed_attn_metadata = _build_per_layer_metadata(attn_metadata, trim_attn_metadata)
+        trimmed_attn_metadata = subtuple(trimmed_attn_metadata,
+                                         "TrimmedPerLayerAttnMetadataDict",
+                                         trimmed_attn_metadata.keys(),
+                                         encode_keys=True)
+
         if self.is_driver_worker:
             model_event_name = ("model_forward_"
                                 f"bs{batch_size}_"
