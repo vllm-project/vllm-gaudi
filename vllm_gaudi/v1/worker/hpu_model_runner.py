@@ -745,14 +745,14 @@ def _maybe_wrap_in_hpu_graph(*args, **kwargs):
 _ENCODED_KEY_PREFIX = "__lyr_"
 
 
-def encode_layer_key(key: str) -> str:
+def encode_layer_key(key: object) -> object:
     """Encode a layer name string into a valid Python identifier."""
     if isinstance(key, str):
         return _ENCODED_KEY_PREFIX + key.encode('ascii').hex()
     return key
 
 
-def decode_layer_key(key: str) -> str:
+def decode_layer_key(key: object) -> object:
     """Decode an encoded layer key back to the original layer name."""
     if isinstance(key, str) and key.startswith(_ENCODED_KEY_PREFIX):
         try:
@@ -804,7 +804,11 @@ def subtuple(obj: object,
         fields = {encode_layer_key(f) for f in fields}
     if type(obj) is dict:
         decoding_fn = decode_layer_key if encode_keys else lambda x: x
-        values = {key: obj[decoding_fn(key)] for key in fields if decoding_fn(key) in obj}
+        values = {}
+        for key in fields:
+            decoded = decoding_fn(key)
+            if decoded in obj:
+                values[key] = obj[decoded]
     else:
         values = {f: to_override.get(f, getattr(obj, f)) for f in fields}
     if typename not in _TYPE_CACHE:
