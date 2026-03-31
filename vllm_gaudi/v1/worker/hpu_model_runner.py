@@ -3492,6 +3492,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
                 pooling_metadata = PoolingMetadata(prompt_lens=torch.tensor([num_scheduled_tokens]),
                                                    prompt_token_ids=input_ids,
+                                                   prompt_token_ids_cpu=input_ids.cpu(),
                                                    pooling_params=[pooling_params[req_id]],
                                                    pooling_states=[pooling_states[req_id]])
                 num_scheduled_tokens_np = np.array([num_scheduled_tokens], dtype=np.int32)
@@ -4562,6 +4563,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             pooling_metadata = PoolingMetadata(
                 prompt_lens=prompt_lens_cpu,
                 prompt_token_ids=prompt_token_ids,
+                prompt_token_ids_cpu=prompt_token_ids.cpu(),
                 pooling_params=pooling_params_list,
                 pooling_states=[PoolingStates() for _ in range(bs)],
             )
