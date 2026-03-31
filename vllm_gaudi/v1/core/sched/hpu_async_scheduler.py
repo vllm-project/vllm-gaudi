@@ -1,9 +1,93 @@
 # SPDX-License-Identifier: Apache-2.0
+from collections.abc import Iterable
+
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 
 class HPUAsyncScheduler(AsyncScheduler):
+
+    def schedule(self):
+        """HPU override: fix stale num_cached_tokens after OOM preemption.
+
+        After preemption and requeue a request restarts scheduling from
+        num_computed_tokens=0.  The OffloadingConnector may assign new external
+        cache hits, setting num_external_computed_tokens > 0 while
+        num_cached_tokens stays stale at 0 from the previous scheduling pass.
+        Upstream only refreshes num_cached_tokens when it is negative, missing
+        this case.  We post-process running requests to detect and fix it:
+        inv: num_cached_tokens >= num_external_computed_tokens (always holds
+        when both fields are consistent), so a violation means staleness.
+        """
+        output = super().schedule()
+        for request in self.running:
+            if (request.num_cached_tokens < request.num_external_computed_tokens):
+                request.num_cached_tokens = request.num_computed_tokens
+        return output
+
+    def _update_requests_with_invalid_blocks(
+        self,
+        requests: Iterable[Request],
+        invalid_block_ids: set[int],
+        evict_blocks: bool = True,
+    ) -> tuple[set[str], int, set[int]]:
+        """HPU override: clamp num_external_computed_tokens to 0 instead of
+        allowing it to go negative when OOM-invalidated blocks span both
+        externally-computed and locally-computed token ranges.
+        """
+        affected_req_ids: set[str] = set()
+        total_affected_tokens = 0
+        blocks_to_evict: set[int] = set()
+        marked_invalid_block_ids: set[int] = set()
+        for request in requests:
+            is_affected = False
+            marked_invalid_block = False
+            req_id = request.request_id
+            # TODO (davidb): add support for hybrid memory allocator
+            (req_block_ids, ) = self.kv_cache_manager.get_block_ids(req_id)
+            if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                req_num_computed_tokens = (request.num_computed_tokens if req_id in self.failed_recving_kv_req_ids else
+                                           len(req_block_ids) * self.block_size)
+            else:
+                req_num_computed_tokens = request.num_cached_tokens
+
+            req_num_computed_blocks = (req_num_computed_tokens + self.block_size - 1) // self.block_size
+            for idx, block_id in zip(range(req_num_computed_blocks), req_block_ids):
+                if block_id not in invalid_block_ids:
+                    continue
+
+                is_affected = True
+
+                if block_id in marked_invalid_block_ids:
+                    continue
+
+                marked_invalid_block_ids.add(block_id)
+
+                if marked_invalid_block:
+                    continue
+
+                marked_invalid_block = True
+                request.num_computed_tokens = idx * self.block_size
+                num_affected_tokens = (req_num_computed_tokens - request.num_computed_tokens)
+                total_affected_tokens += num_affected_tokens
+                # Clamp to 0: num_affected_tokens may exceed the number of
+                # externally-computed tokens when OOM-invalidation spans
+                # locally-computed blocks too.
+                request.num_external_computed_tokens = max(
+                    0,
+                    request.num_external_computed_tokens - num_affected_tokens,
+                )
+                if evict_blocks:
+                    blocks_to_evict.update(req_block_ids[idx:])
+
+            if is_affected:
+                if not marked_invalid_block:
+                    total_affected_tokens += (request.num_computed_tokens - request.num_cached_tokens)
+                    request.num_computed_tokens = request.num_cached_tokens
+
+                affected_req_ids.add(request.request_id)
+
+        return affected_req_ids, total_affected_tokens, blocks_to_evict
 
     def _mamba_block_aligned_split(
         self,
