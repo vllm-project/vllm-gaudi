@@ -238,13 +238,6 @@ class HPUWorker(WorkerBase):
         runner_kv_caches: list[torch.Tensor] = []
         bind_kv_cache(kv_caches, self.vllm_config.compilation_config.static_forward_context, runner_kv_caches)
 
-        if self.model_runner.unified_attn:
-            # Create unified attention persistent context for profiling
-            from vllm_gaudi.extension.unified_batch import UnifiedBatchPersistentContext
-            self.model_runner.unified_attn_persistent_ctx = UnifiedBatchPersistentContext(
-                self.model_runner.max_num_batched_tokens, 0, 0, self.model_runner.block_size, dtype,
-                self.model_runner.profiler)
-
         if is_fake_hpu():
             fake_hpu_cache_alloc = 4 * 2**30  # take 4 GiB flat on fake hpu
             return fake_hpu_cache_alloc
@@ -258,8 +251,12 @@ class HPUWorker(WorkerBase):
         # recipes we will use the extra memory for graphs/blocks
         free_hpu_memory = torch.hpu.mem_get_info()[0]
 
-        graph_reserved_mem = (float(os.environ.get('VLLM_GRAPH_RESERVED_MEM', '0.1'))
-                              if not self.model_config.enforce_eager else 0)
+        try:
+            graph_reserved_mem = (float(os.environ.get('VLLM_GRAPH_RESERVED_MEM', '0.1'))
+                                  if not self.model_config.enforce_eager else 0)
+        except ValueError:
+            graph_reserved_mem = 0.0 if self.model_config.enforce_eager else 0.1
+            logger.warning("Invalid VLLM_GRAPH_RESERVED_MEM value, using default %s", graph_reserved_mem)
         graph_headroom = 1 - graph_reserved_mem
         available_hpu_memory = free_hpu_memory * \
             self.cache_config.gpu_memory_utilization

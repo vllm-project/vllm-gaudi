@@ -29,9 +29,17 @@ FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
 if is_hpu_gaudi2:
     FP8_MAX = torch.finfo(torch.float8_e4m3fnuz).max
 
+import logging
 import os
+
+logger = logging.getLogger(__name__)
+
 # MAX_EXPERTS_PER_SLICE is needed for 1.20, up to 64 experts per slice
-MAX_EXPERTS_PER_SLICE = int(os.environ.get("MAX_EXPERTS_PER_SLICE", -1))
+try:
+    MAX_EXPERTS_PER_SLICE = int(os.environ.get("MAX_EXPERTS_PER_SLICE", -1))
+except ValueError:
+    logger.warning("Invalid MAX_EXPERTS_PER_SLICE value, using default -1")
+    MAX_EXPERTS_PER_SLICE = -1
 
 
 def _as_activation_str(activation):
@@ -967,6 +975,10 @@ def fp8_block_linear_postprocess_weights(layer, force_channel_fp8=False):
         weight_scale_inv = weight_scale_inv.squeeze(-1)
         layer.weight.data.copy_(weight)
         layer.weight_scale_inv = torch.nn.Parameter(weight_scale_inv, requires_grad=False)
+        # Scale is now per-channel, not per-block; clear stale block size to
+        # prevent downstream code (e.g. scaled_dequantize) from using it as
+        # a group_shape that is incompatible with the 1D channel-wise scale.
+        layer.weight_block_size = None
         htorch.core.mark_step()
         return layer
     else:
