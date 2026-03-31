@@ -292,15 +292,15 @@ class MultiModelAsyncLLM:
                     model_name,
                     reconfigure_s,
                 )
-                assert self._current_model_name is not None
-                self._sleeping[self._current_model_name] = True
-                self._sleeping[model_name] = False
-                logger.info("Model sleep state: %s=sleeping", self._current_model_name)
-                logger.info("Model sleep state: %s=awake", model_name)
-
-                self._current_model_name = model_name
+                previous_model_name = self._current_model_name
+                assert previous_model_name is not None
                 await self._refresh_engine_frontend_config(model_name)
-                logger.info("Successfully switched to: %s", new_model)
+                self._sleeping[previous_model_name] = True
+                self._sleeping[model_name] = False
+                logger.info("Model sleep state: %s=sleeping", previous_model_name)
+                logger.info("Model sleep state: %s=awake", model_name)
+                self._current_model_name = model_name
+                logger.info("Successfully switched from %s to: %s", previous_model_name, new_model)
 
                 result: dict[str, float | bool | None] = {
                     "switched": True,

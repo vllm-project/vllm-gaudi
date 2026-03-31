@@ -304,7 +304,12 @@ async def generate_text(
         "seed": seed,
     }
     try:
-        resp = _HTTP_SESSION.post(url, json=payload, timeout=60)
+        resp = await asyncio.to_thread(
+            _HTTP_SESSION.post,
+            url,
+            json=payload,
+            timeout=60,
+        )
         if resp.status_code == 200:
             data = resp.json()
             return data.get('choices', [{}])[0].get('message', {}).get('content', '')
