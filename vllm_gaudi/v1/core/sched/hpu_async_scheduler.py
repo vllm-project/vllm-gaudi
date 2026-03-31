@@ -28,7 +28,7 @@ class HPUAsyncScheduler(AsyncScheduler):
         """Log block IDs allocated, in-use, freed and preempted."""
         # Blocks allocated for brand-new requests.
         for new_req in scheduler_output.scheduled_new_reqs:
-            logger.debug(
+            logger.info(
                 "[BlockTracker] Allocated blocks for NEW request %s: %s",
                 new_req.req_id,
                 [list(group) for group in new_req.block_ids],
@@ -40,7 +40,7 @@ class HPUAsyncScheduler(AsyncScheduler):
             if new_block_ids is not None:
                 is_resumed = req_id in cached.resumed_req_ids
                 label = "RESUMED" if is_resumed else "CACHED"
-                logger.debug(
+                logger.info(
                     "[BlockTracker] New blocks for %s request %s: %s",
                     label,
                     req_id,
@@ -56,18 +56,18 @@ class HPUAsyncScheduler(AsyncScheduler):
             except (KeyError, AttributeError):
                 pass
         if in_use:
-            logger.debug("[BlockTracker] In-use blocks: %s", in_use)
+            logger.info("[BlockTracker] In-use blocks: %s", in_use)
 
         # Requests whose blocks were freed because they finished.
         if scheduler_output.finished_req_ids:
-            logger.debug(
+            logger.info(
                 "[BlockTracker] Finished (freed) request IDs: %s",
                 scheduler_output.finished_req_ids,
             )
 
         # Preempted requests (blocks freed and request re-queued).
         if scheduler_output.preempted_req_ids:
-            logger.debug(
+            logger.info(
                 "[BlockTracker] Preempted request IDs: %s",
                 scheduler_output.preempted_req_ids,
             )
@@ -77,7 +77,7 @@ class HPUAsyncScheduler(AsyncScheduler):
             pool = self.kv_cache_manager.block_pool
             free = pool.get_num_free_blocks()
             total = pool.num_gpu_blocks
-            logger.debug(
+            logger.info(
                 "[BlockTracker] Block pool: %d / %d used (%d free)",
                 total - free,
                 total,
@@ -90,14 +90,14 @@ class HPUAsyncScheduler(AsyncScheduler):
         if _LOG_BLOCK_IDS:
             try:
                 block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
-                logger.debug(
+                logger.info(
                     "[BlockTracker] Preempting request %s — "
                     "releasing blocks: %s",
                     request.request_id,
                     [list(group) for group in block_ids],
                 )
             except (KeyError, AttributeError):
-                logger.debug(
+                logger.info(
                     "[BlockTracker] Preempting request %s — "
                     "block IDs unavailable",
                     request.request_id,
@@ -108,14 +108,14 @@ class HPUAsyncScheduler(AsyncScheduler):
         if _LOG_BLOCK_IDS:
             try:
                 block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
-                logger.debug(
+                logger.info(
                     "[BlockTracker] Freeing blocks for finished "
                     "request %s: %s",
                     request.request_id,
                     [list(group) for group in block_ids],
                 )
             except (KeyError, AttributeError):
-                logger.debug(
+                logger.info(
                     "[BlockTracker] Freeing blocks for finished "
                     "request %s — block IDs unavailable",
                     request.request_id,
