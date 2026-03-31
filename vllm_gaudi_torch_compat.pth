@@ -1,0 +1,1 @@
+import vllm_gaudi._torch_compat

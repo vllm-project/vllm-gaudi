@@ -62,6 +62,11 @@ setup(
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     extras_require={},
+    data_files=[
+        # Install a .pth file so the torch compat shim runs at Python startup,
+        # before ``import vllm`` triggers env_override.py.
+        (".", ["vllm_gaudi_torch_compat.pth"]),
+    ],
     entry_points={
         "vllm.platform_plugins": ["hpu = vllm_gaudi:register"],
         "vllm.general_plugins": [
