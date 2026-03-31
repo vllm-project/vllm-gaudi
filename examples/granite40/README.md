@@ -28,8 +28,8 @@ cd ~/granite40
 # Install HAProxy if not already present
 apt-get install -y haproxy
 
-# Start (8 instances by default)
-./start.sh
+# Start (8 instances by default; 4 in this example)
+./start.sh 4
 
 # Stop
 ./stop.sh
@@ -54,8 +54,8 @@ Once inside the container:
 # Install HAProxy if not already present
 apt-get install -y haproxy
 
-# Start (8 instances by default)
-./start.sh
+# Start (8 instances by default; 4 in this example)
+./start.sh 4
 
 # Stop
 ./stop.sh
