@@ -5,8 +5,6 @@ import torch
 import vllm
 
 from vllm import envs as envs
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant, )
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (GroupedTopk, fused_grouped_topk)
@@ -55,7 +53,7 @@ def grouped_topk(
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
     # For batch invariance, use sorted=True to ensure deterministic expert selection
-    use_sorted = vllm_is_batch_invariant()
+    use_sorted = envs.VLLM_BATCH_INVARIANT
 
     num_token = scores.size(0)
 
@@ -130,7 +128,7 @@ class HPUGroupedTopk(GroupedTopk):
             raise ValueError(f"Unsupported scoring function: {self.scoring_func}")
 
         # For batch invariance, use sorted=True to ensure deterministic expert selection
-        use_sorted = vllm_is_batch_invariant()
+        use_sorted = envs.VLLM_BATCH_INVARIANT
 
         num_token = scores.size(0)
         if e_score_correction_bias is not None:
