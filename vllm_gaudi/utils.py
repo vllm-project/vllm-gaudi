@@ -330,3 +330,18 @@ class HPUCompileConfig:
 
 
 _async_sched_module.AsyncScheduler = HPUAsyncScheduler
+
+# Guard Prometheus counters against negative prompt-token counts that can arise
+# when KV-cache blocks are invalidated during OOM and token-count bookkeeping
+# becomes temporarily inconsistent.  Prometheus counters require non-negative
+# increments; clamping here prevents a crash in PrometheusStatLogger.record().
+import vllm.v1.metrics.stats as _stats_module  # noqa: E402
+
+_stats_get_by_source_orig = _stats_module.PromptTokenStats.get_by_source
+
+
+def _hpu_get_by_source(self, source: str) -> int:
+    return max(0, _stats_get_by_source_orig(self, source))
+
+
+_stats_module.PromptTokenStats.get_by_source = _hpu_get_by_source
