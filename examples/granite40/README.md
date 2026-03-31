@@ -23,6 +23,15 @@ Load-balances multiple vLLM instances serving `ibm-granite/granite-4.0-h-small` 
 ./stop.sh
 ```
 
+### Configuration
+
+Set `HAPROXY_PATH` to control where HAProxy config, PID file, and vLLM logs are stored. Defaults to `/tmp` if not set.
+
+```bash
+export HAPROXY_PATH=/my/custom/path
+./start.sh
+```
+
 ## Endpoints
 
 | Endpoint | Default Port | Description |

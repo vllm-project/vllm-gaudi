@@ -8,9 +8,10 @@ HAPROXY_PORT=30360            # HAProxy frontend port
 HAPROXY_STATS_PORT=30361      # HAProxy stats page port
 API_KEY="granite4.0h-g3key"
 SERVER_CMD="./server_command.sh"
-LOG_DIR="/root/granite_lb_haproxy/logs"
-HAPROXY_CFG="/root/granite_lb_haproxy/haproxy.cfg"
-HAPROXY_PID="/root/granite_lb_haproxy/haproxy.pid"
+HAPROXY_PATH="${HAPROXY_PATH:-/tmp}"
+LOG_DIR="${HAPROXY_PATH}/logs"
+HAPROXY_CFG="${HAPROXY_PATH}/haproxy.cfg"
+HAPROXY_PID="${HAPROXY_PATH}/haproxy.pid"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 mkdir -p "$LOG_DIR" "$(dirname "$HAPROXY_CFG")"

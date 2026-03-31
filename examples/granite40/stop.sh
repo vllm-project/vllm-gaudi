@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
-HAPROXY_PID="/root/granite_lb_haproxy/haproxy.pid"
+HAPROXY_PATH="${HAPROXY_PATH:-/tmp}"
+HAPROXY_PID="${HAPROXY_PATH}/haproxy.pid"
 
 echo "Stopping HAProxy..."
 if [[ -f "$HAPROXY_PID" ]]; then
