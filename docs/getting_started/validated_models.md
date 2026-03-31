@@ -15,7 +15,7 @@ The following configurations have been validated to function with IntelÂ® GaudiÂ
 | [deepseek-ai/DeepSeek-R1-Distill-Llama-70B](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-70B)  | 8    | FP8    | Gaudi 3|
 | [ibm-granite/granite-8b-code-instruct-4k](https://huggingface.co/ibm-granite/granite-8b-code-instruct-4k)     | 1  | BF16    | Gaudi 3|
 | [MiniMaxAI/MiniMax-M2](https://huggingface.co/MiniMaxAI/MiniMax-M2)     | 8    | BF16    | Gaudi 3|
-| [ibm-granite/CodeLlama-34b-Instruct-hf](https://huggingface.co/meta-llama/CodeLlama-34b-Instruct-hf)     | 1    | BF16    |Gaudi 3|
+| [meta-llama/CodeLlama-34b-Instruct-hf](https://huggingface.co/meta-llama/CodeLlama-34b-Instruct-hf)     | 1    | BF16    |Gaudi 3|
 | [ibm-granite/Granite-3.1-8B-instruct](https://huggingface.co/ibm-granite/granite-3.1-8b-instruct)     | 1  | BF16    | Gaudi 3|
 | [ibm-granite/Granite-3B-code-instruct-128k](https://huggingface.co/ibm-granite/granite-3b-code-instruct-128k)     | 1  | BF16    | Gaudi 3|
 | [ibm-granite/Granite-8B-code-instruct-128k](https://huggingface.co/ibm-granite/granite-8b-code-instruct-128k)     | 1  | BF16    | Gaudi 3|
