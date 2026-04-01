@@ -411,15 +411,15 @@ class ModuleFP8FusedSDPA(ModuleFusedSDPABase):
         self.fp8_fused_sdpa = fusedSDPA
 
         # set the descale_amax and scale_amax 1.0 temporarily
-        self.descale_amax = torch.tensor(1.0)
-        self.scale_amax = torch.tensor(1.0)
-        self.scale_q = torch.tensor(1.0)
-        self.scale_k = torch.tensor(1.0)
-        self.scale_v = torch.tensor(1.0)
-        self.d_scale_q = torch.tensor(1.0)
-        self.d_scale_k = torch.tensor(1.0)
-        self.d_scale_v = torch.tensor(1.0)
-        self.d_scale_output = torch.tensor(1.0)
+        self.descale_amax = torch.tensor([1.0], dtype=torch.float32, device="hpu")
+        self.scale_amax = torch.tensor([1.0], dtype=torch.float32, device="hpu")
+        self.scale_q = torch.tensor([1.0], dtype=torch.float32, device="hpu")
+        self.scale_k = torch.tensor([1.0], dtype=torch.float32, device="hpu")
+        self.scale_v = torch.tensor([1.0], dtype=torch.float32, device="hpu")
+        self.d_scale_q = torch.tensor([1.0], dtype=torch.float32, device="hpu")
+        self.d_scale_k = torch.tensor([1.0], dtype=torch.float32, device="hpu")
+        self.d_scale_v = torch.tensor([1.0], dtype=torch.float32, device="hpu")
+        self.d_scale_output = torch.tensor([1.0], dtype=torch.float32, device="hpu")
 
     def quant_input(self, x, scale):
         return torch.ops.hpu.cast_to_fp8_v2(x, scale, False, False, torch.float8_e4m3fn)[0]
@@ -581,7 +581,8 @@ class ModuleFP8FusedSDPA(ModuleFusedSDPABase):
                     mask_chunk = mask_chunk.clone() if mask_chunk is not None else None
                     self.break_graph()
 
-                chunk_res = self.fp8_fsdpa_fwd(q_chunk, k_chunk, v_chunk, None, dropout_p, scale, False, softmax_mode)
+                chunk_res = self.fp8_fsdpa_fwd(q_chunk, k_chunk, v_chunk, mask_chunk, dropout_p, scale, False,
+                                               softmax_mode)
                 chunk_out, chunk_m, chunk_linv = (gqa_output_reshape(x) if gqa else x for x in chunk_res[:3])
                 chunk_m = chunk_m.to(torch.float32)
                 chunk_linv = chunk_linv.to(torch.float32) * (128.0 if softmax_mode == "fast" else 1.0)
