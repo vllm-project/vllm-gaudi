@@ -454,6 +454,13 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         HPUFusedSDPA = kernels.fsdpa()
         self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
             else ModuleFusedSDPA(HPUFusedSDPA)
+        try:
+            from habana_frameworks.torch.hpex.kernels import fp8_fused_sdpa
+            if self.enable_fp8_attn:
+                self.fused_scaled_dot_product_attention = ModuleFP8FusedSDPA(fp8_fused_sdpa)
+        except ImportError:
+            pass
+
         self.prefill_impl = get_config().prompt_attn_impl
         self.use_contiguous_pa = get_config().use_contiguous_pa
         self.use_merged_prefill = get_config().merged_prefill
