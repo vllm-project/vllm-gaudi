@@ -8,6 +8,11 @@ from typing import List, Tuple
 
 from vllm_gaudi.extension.logger import logger as logger
 from vllm_gaudi.extension.runtime import get_config
+from vllm_gaudi.extension.config import boolean
+from vllm_gaudi.extension.bucketing.exponential import ExponentialBucketingStrategy
+from vllm_gaudi.extension.bucketing.linear import LinearBucketingStrategy
+from vllm_gaudi.extension.bucketing.padding_aware import PaddingAwareBucketingStrategy
+from vllm_gaudi.extension.bucketing.file_strategy import FileBucketingStrategy
 
 LONG_CTX_THRESHOLD = 8192
 
@@ -93,7 +98,6 @@ class HPUBucketingManager():
 
     def read_from_file(self, is_prompt):
         file_name = get_config().VLLM_BUCKETING_FROM_FILE
-        from vllm_gaudi.extension.bucketing.file_strategy import (FileBucketingStrategy)
         strategy = FileBucketingStrategy()
         return strategy.get_buckets(file_name, is_prompt)
 
@@ -101,17 +105,31 @@ class HPUBucketingManager():
         # TODO - we can use different strategies for decode and prompt
         bucketing_strategy = get_config().bucketing_strategy
         if bucketing_strategy == 'exp':
-            from vllm_gaudi.extension.bucketing.exponential import (ExponentialBucketingStrategy)
             strategy = ExponentialBucketingStrategy()
         elif bucketing_strategy == 'lin':
-            from vllm_gaudi.extension.bucketing.linear import LinearBucketingStrategy
             strategy = LinearBucketingStrategy()
         elif bucketing_strategy == 'pad':
-            from vllm_gaudi.extension.bucketing.padding_aware import PaddingAwareBucketingStrategy
             strategy = PaddingAwareBucketingStrategy()
         else:
             raise ValueError(
                 f"Invalid bucketing strategy: {bucketing_strategy}, please choose from ['exp', 'lin', 'pad']")
+
+        # for backward compatibility - if VLLM_EXPONENTIAL_BUCKETING is set, it will override the bucketing strategy
+        exp_bucketing_env = os.getenv('VLLM_EXPONENTIAL_BUCKETING', None)
+        if exp_bucketing_env is not None:
+            logger().warning(
+                "VLLM_EXPONENTIAL_BUCKETING is deprecated and will be removed in a future release. Use VLLM_BUCKETING_STRATEGY='exp'|'lin'|'pad' instead."
+            )
+            use_exp_bucketing = boolean(exp_bucketing_env)
+            if use_exp_bucketing:
+                override_strategy = ExponentialBucketingStrategy()
+            else:
+                override_strategy = LinearBucketingStrategy()
+            if override_strategy.__class__ != strategy.__class__:
+                logger().warning(
+                    f"Overriding bucketing strategy {strategy.__class__.__name__} with {override_strategy.__class__.__name__} due to VLLM_EXPONENTIAL_BUCKETING={exp_bucketing_env}"
+                )
+                strategy = override_strategy
         return strategy
 
     def generate_prompt_buckets(self):

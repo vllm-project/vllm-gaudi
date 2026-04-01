@@ -43,6 +43,66 @@ def test_get_bucketing_strategy_selected_by_env(monkeypatch, env_value, expected
     assert isinstance(strategy, expected_type)
 
 
+def test_get_bucketing_strategy_default_when_env_not_set(monkeypatch):
+    monkeypatch.delenv("VLLM_BUCKETING_STRATEGY", raising=False)
+    clear_config()
+
+    manager = HPUBucketingManager.__new__(HPUBucketingManager)
+    strategy = manager.get_bucketing_strategy()
+
+    assert isinstance(strategy, ExponentialBucketingStrategy)
+
+
+@patch('vllm_gaudi.extension.bucketing.common.logger')
+def test_get_bucketing_strategy_deprecated_env_overrides_to_exponential(mock_logger, monkeypatch):
+    monkeypatch.setenv("VLLM_BUCKETING_STRATEGY", "lin")
+    monkeypatch.setenv("VLLM_EXPONENTIAL_BUCKETING", "true")
+    clear_config()
+
+    manager = HPUBucketingManager.__new__(HPUBucketingManager)
+    strategy = manager.get_bucketing_strategy()
+
+    assert isinstance(strategy, ExponentialBucketingStrategy)
+
+    warnings = [call.args[0] for call in mock_logger.return_value.warning.call_args_list]
+    assert any("deprecated" in message for message in warnings)
+    assert any("Overriding bucketing strategy LinearBucketingStrategy with ExponentialBucketingStrategy" in message
+               for message in warnings)
+
+
+@patch('vllm_gaudi.extension.bucketing.common.logger')
+def test_get_bucketing_strategy_deprecated_env_overrides_to_linear(mock_logger, monkeypatch):
+    monkeypatch.setenv("VLLM_BUCKETING_STRATEGY", "pad")
+    monkeypatch.setenv("VLLM_EXPONENTIAL_BUCKETING", "false")
+    clear_config()
+
+    manager = HPUBucketingManager.__new__(HPUBucketingManager)
+    strategy = manager.get_bucketing_strategy()
+
+    assert isinstance(strategy, LinearBucketingStrategy)
+
+    warnings = [call.args[0] for call in mock_logger.return_value.warning.call_args_list]
+    assert any("deprecated" in message for message in warnings)
+    assert any("Overriding bucketing strategy PaddingAwareBucketingStrategy with LinearBucketingStrategy" in message
+               for message in warnings)
+
+
+@patch('vllm_gaudi.extension.bucketing.common.logger')
+def test_get_bucketing_strategy_deprecated_env_without_override_logs_only_deprecation(mock_logger, monkeypatch):
+    monkeypatch.setenv("VLLM_BUCKETING_STRATEGY", "exp")
+    monkeypatch.setenv("VLLM_EXPONENTIAL_BUCKETING", "true")
+    clear_config()
+
+    manager = HPUBucketingManager.__new__(HPUBucketingManager)
+    strategy = manager.get_bucketing_strategy()
+
+    assert isinstance(strategy, ExponentialBucketingStrategy)
+
+    warnings = [call.args[0] for call in mock_logger.return_value.warning.call_args_list]
+    assert any("deprecated" in message for message in warnings)
+    assert not any("Overriding bucketing strategy" in message for message in warnings)
+
+
 def test_read_bucket_settings(monkeypatch):
     monkeypatch.setenv("VLLM_PROMPT_BS_BUCKET_MIN", "1")
     monkeypatch.setenv("VLLM_PROMPT_BS_BUCKET_STEP", "16")

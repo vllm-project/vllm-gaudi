@@ -52,6 +52,9 @@ Bucketing is transparent to the user – padding in the sequence length dimensio
 
 There are three generated bucketing strategies, selected with `VLLM_BUCKETING_STRATEGY`: exponential (`exp`, default), linear (`lin`), and padding-aware (`pad`).
 
+!!! note
+    `VLLM_EXPONENTIAL_BUCKETING` is deprecated, but it is still honored for backward compatibility. If it is set, it overrides `VLLM_BUCKETING_STRATEGY`: `true` forces exponential bucketing and `false` forces linear bucketing. It cannot select padding-aware bucketing, so leave it unset when using `VLLM_BUCKETING_STRATEGY=pad`.
+
 ### Exponential Strategy
 
 The exponential strategy is the default warm-up mechanism. Enable it with `VLLM_BUCKETING_STRATEGY=exp`. It is based on 4 parameters that are not configurable by the user:
