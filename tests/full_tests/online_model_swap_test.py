@@ -239,10 +239,10 @@ def run_server(config_path: str, api_host: str, api_port: int, log_capture: Serv
     return proc, log_thread
 
 
-def wait_for_server(api_host: str,
-                    api_port: int,
-                    timeout: int = 300,
-                    proc: subprocess.Popen | None = None) -> list[dict[str, str]]:
+async def wait_for_server(api_host: str,
+                          api_port: int,
+                          timeout: int = 300,
+                          proc: subprocess.Popen | None = None) -> list[dict[str, str]]:
     """Wait for server to be ready and return list of available models."""
     url = _api_url(api_host, api_port, '/v1/models')
     start = time.time()
@@ -252,7 +252,11 @@ def wait_for_server(api_host: str,
         if proc is not None and proc.poll() is not None:
             raise RuntimeError(f"Server exited before readiness check succeeded (exit code {proc.returncode})")
         try:
-            resp = _HTTP_SESSION.get(url, timeout=5)
+            resp = await asyncio.to_thread(
+                _HTTP_SESSION.get,
+                url,
+                timeout=5,
+            )
             if resp.status_code == 200:
                 data = resp.json()
                 models = []
@@ -273,7 +277,7 @@ def wait_for_server(api_host: str,
             last_error = f"HTTP {resp.status_code}: {resp.text[:300]}"
         except Exception as e:
             last_error = str(e)
-        time.sleep(2)
+        await asyncio.sleep(2)
 
     suffix = f" Last error: {last_error}" if last_error else ""
     raise RuntimeError(f"Server did not start after {timeout}s.{suffix}")
@@ -412,7 +416,12 @@ async def switch_model(api_host: str, api_port: int, model_name: str, drain_time
 
     start = time.perf_counter()
     try:
-        resp = _HTTP_SESSION.post(url, json=payload, timeout=600)
+        resp = await asyncio.to_thread(
+            _HTTP_SESSION.post,
+            url,
+            json=payload,
+            timeout=600,
+        )
         elapsed_s = time.perf_counter() - start
 
         if resp.status_code == 200:
@@ -469,7 +478,12 @@ async def generate(api_host: str,
 
     start = time.perf_counter()
     try:
-        resp = _HTTP_SESSION.post(url, json=payload, timeout=120)
+        resp = await asyncio.to_thread(
+            _HTTP_SESSION.post,
+            url,
+            json=payload,
+            timeout=120,
+        )
         elapsed_s = time.perf_counter() - start
 
         if resp.status_code == 200:
@@ -486,7 +500,12 @@ async def generate(api_host: str,
             if strict_tokens and resp.status_code == 400:
                 payload.pop("min_tokens", None)
                 payload.pop("ignore_eos", None)
-                retry_resp = _HTTP_SESSION.post(url, json=payload, timeout=120)
+                retry_resp = await asyncio.to_thread(
+                    _HTTP_SESSION.post,
+                    url,
+                    json=payload,
+                    timeout=120,
+                )
                 retry_elapsed_s = time.perf_counter() - start
                 if retry_resp.status_code == 200:
                     data = retry_resp.json()
@@ -646,7 +665,7 @@ async def main():
             log_capture,
             args.max_num_batched_tokens,
         )
-        available_models = wait_for_server(args.api_host, args.api_port, proc=proc)
+        available_models = await wait_for_server(args.api_host, args.api_port, proc=proc)
         initial_load_s = time.perf_counter() - startup_begin
         startup_warmup_times = log_capture.get_warmup_times()
         startup_warmup_s = startup_warmup_times[-1] if startup_warmup_times else None
