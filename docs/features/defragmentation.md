@@ -36,7 +36,7 @@ If this inequality holds, the block range is considered fragmented and a compact
 
 When compaction is triggered:
 
-1. **Identify candidates**: The used blocks are sorted in descending order (highest first) and paired with the lowest available free slots produced by a generator.
+1. **Identify candidates**: The used blocks are sorted in descending order (highest first) and paired with the lowest available free slots yielded by a free-slot generator.
 2. **Pair validation**: A pair `(high_block, low_free)` is only valid when `high_block > low_free`. The first pair that violates this condition ends the pass. The number of pairs is also capped at **512** (the largest padding threshold).
 3. **Reference and mapping update**: For each pair the reference counts are swapped, and the forward/backward mapping tables are updated so that future `resolve()` calls translate the original block ID to the new physical position.
 4. **Physical data swap**: The `CacheSwapUtils` module copies KV-cache rows between the source and destination slots on the HPU. Key caches and value caches are swapped in separate calls. For models using Multi-head Latent Attention (MLA), where only a key cache exists, the value-cache swap is skipped.
@@ -54,7 +54,7 @@ After defragmentation, any code that converts scheduler-provided block IDs into 
 | Environment Variable | Type | Default | Description |
 |---|---|---|---|
 | `VLLM_DEFRAG_THRESHOLD` | `int` | `32` | Fragmentation trigger gap. Compaction runs when `max_block_id − threshold > num_used`. Lower values compact more aggressively. |
-| `VLLM_DEFRAG_WITH_GRAPHS` | `bool` | Follows `bridge_mode == eager` | Whether swap operations use compiled/HPU graphs. When `false`, swaps execute without graph capture. |
+| `VLLM_DEFRAG_WITH_GRAPHS` | `bool` | `true` when `bridge_mode` is `eager`, otherwise `false` | Whether swap operations use compiled/HPU graphs. When `false`, swaps execute without graph capture. |
 | `VLLM_DEBUG=defrag` | flag | — | Enables verbose logging of defragmentation events, including the number of blocks swapped and post-compaction statistics. |
 | `VLLM_SKIP_WARMUP` | `bool` | `false` | Skips all warm-up stages including defragmenter warm-up. Does **not** disable defragmentation itself. |
 
