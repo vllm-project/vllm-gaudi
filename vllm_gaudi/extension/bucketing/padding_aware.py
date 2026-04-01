@@ -9,6 +9,7 @@ from vllm_gaudi.extension.runtime import get_config
 class PaddingAwareBucketingStrategy:
 
     def get_prompt_cfgs(self, max_num_prefill_seqs, block_size, max_num_batched_tokens, max_model_len):
+        use_merged_prefill = get_config().merged_prefill
         prompt_bs_bucket_cfg = read_bucket_settings('prompt',
                                                     'bs',
                                                     min=1,
@@ -31,6 +32,29 @@ class PaddingAwareBucketingStrategy:
                                                      max=max_ctx,
                                                      pad_max=math.ceil(max_num_batched_tokens / block_size),
                                                      pad_percent=25)
+        if use_merged_prefill:
+            prev_prompt_bs_bucket_cfg = tuple(prompt_bs_bucket_cfg)
+            prev_prompt_query_bucket_cfg = tuple(prompt_query_bucket_cfg)
+            prev_prompt_ctx_bucket_cfg = tuple(prompt_ctx_bucket_cfg)
+
+            prompt_bs_bucket_cfg = (1, 1, 1, prev_prompt_bs_bucket_cfg[-2], prev_prompt_bs_bucket_cfg[-1])
+            query_min, query_step, _, query_pad_max, query_pad_percent = prev_prompt_query_bucket_cfg
+            prompt_query_bucket_cfg = (query_min, query_step * 4, max_num_batched_tokens, query_pad_max,
+                                       query_pad_percent)
+            prompt_ctx_bucket_cfg = read_bucket_settings('prompt',
+                                                         'ctx',
+                                                         min=0,
+                                                         step=4,
+                                                         max=max_ctx * max_num_prefill_seqs,
+                                                         pad_max=math.ceil(max_num_batched_tokens / block_size),
+                                                         pad_percent=25)
+
+            msg = ('Merged prefill is enabled!\n'
+                   'Overriding prompt bucketing settings!\n'
+                   f'prompt bs cfg: {prev_prompt_bs_bucket_cfg} -> {prompt_bs_bucket_cfg}\n'
+                   f'prompt query cfg: {prev_prompt_query_bucket_cfg} -> {prompt_query_bucket_cfg}\n'
+                   f'prompt ctx cfg: {prev_prompt_ctx_bucket_cfg} -> {prompt_ctx_bucket_cfg}\n')
+            logger().info(msg)
 
         msg = ("Prompt bucket config (min, step, max_warmup, pad_max, pad_percent) "
                f"bs:{prompt_bs_bucket_cfg}, "
@@ -50,7 +74,9 @@ class PaddingAwareBucketingStrategy:
                                                     max=max_num_seqs,
                                                     pad_max=math.ceil(max_num_seqs / 4),
                                                     pad_percent=25)
-        decode_query_bucket_cfg = [1, 1, 1, 1, 1]
+        # Decode query is always 1 token (autoregressive), no bucketing needed
+        decode_query_bucket_cfg = [1, 1, 1, 1, 0]
+
         max_decode_blocks = max(math.ceil(max_model_len * max_num_seqs / block_size), block_size)
         if contiguous_pa:
             max_decode_blocks = max_blocks

@@ -621,6 +621,51 @@ def test_padding_aware_prompt_cfgs_defaults():
     assert ctx_cfg == [0, 2, 31, 16, 25]
 
 
+@patch('vllm_gaudi.extension.bucketing.padding_aware.logger')
+@patch('vllm_gaudi.extension.bucketing.padding_aware.get_config')
+def test_padding_aware_prompt_cfgs_merged_prefill_overrides_defaults(mock_get_config, mock_logger):
+    mock_get_config.return_value = _MockConfig(merged_prefill=True)
+    strategy = PaddingAwareBucketingStrategy()
+
+    bs_cfg, query_cfg, ctx_cfg = strategy.get_prompt_cfgs(max_num_prefill_seqs=16,
+                                                          block_size=128,
+                                                          max_num_batched_tokens=2048,
+                                                          max_model_len=4096)
+
+    assert bs_cfg == (1, 1, 1, 4, 25)
+    assert query_cfg == (128, 512, 2048, 512, 25)
+    assert ctx_cfg == [0, 4, 496, 16, 25]
+
+    info_messages = [call.args[0] for call in mock_logger.return_value.info.call_args_list]
+    assert any('Merged prefill is enabled!' in message for message in info_messages)
+    assert any('prompt bs cfg: (1, 1, 16, 4, 25) -> (1, 1, 1, 4, 25)' in message for message in info_messages)
+    assert any('prompt query cfg: (128, 128, 2048, 512, 25) -> (128, 512, 2048, 512, 25)' in message
+               for message in info_messages)
+    assert any('prompt ctx cfg: (0, 2, 31, 16, 25) -> [0, 4, 496, 16, 25]' in message for message in info_messages)
+
+
+@patch('vllm_gaudi.extension.bucketing.padding_aware.get_config')
+def test_padding_aware_prompt_cfgs_merged_prefill_preserves_user_padding_limits(mock_get_config, monkeypatch):
+    mock_get_config.return_value = _MockConfig(merged_prefill=True)
+    monkeypatch.setenv("VLLM_PROMPT_BS_BUCKET_PAD_MAX", "8")
+    monkeypatch.setenv("VLLM_PROMPT_BS_BUCKET_PAD_PERCENT", "10")
+    monkeypatch.setenv("VLLM_PROMPT_QUERY_BUCKET_STEP", "256")
+    monkeypatch.setenv("VLLM_PROMPT_QUERY_BUCKET_PAD_MAX", "640")
+    monkeypatch.setenv("VLLM_PROMPT_QUERY_BUCKET_PAD_PERCENT", "15")
+    monkeypatch.setenv("VLLM_PROMPT_CTX_BUCKET_PAD_MAX", "32")
+    monkeypatch.setenv("VLLM_PROMPT_CTX_BUCKET_PAD_PERCENT", "5")
+
+    strategy = PaddingAwareBucketingStrategy()
+    bs_cfg, query_cfg, ctx_cfg = strategy.get_prompt_cfgs(max_num_prefill_seqs=16,
+                                                          block_size=128,
+                                                          max_num_batched_tokens=2048,
+                                                          max_model_len=4096)
+
+    assert bs_cfg == (1, 1, 1, 8, 10)
+    assert query_cfg == (128, 1024, 2048, 640, 15)
+    assert ctx_cfg == [0, 4, 496, 32, 5]
+
+
 @patch('vllm_gaudi.extension.bucketing.padding_aware.get_config')
 def test_padding_aware_decode_cfgs_contiguous_pa_clamps_block_range(mock_get_config, monkeypatch):
     mock_get_config.return_value = _MockConfig(use_contiguous_pa=True)
