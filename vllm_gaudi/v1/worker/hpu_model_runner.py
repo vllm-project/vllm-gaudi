@@ -5137,8 +5137,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                               self.vllm_config.model_config.logits_processors),
             )
 
-        if not self.is_pooling_model:
+        if not self.is_pooling_model and self.num_mamba_like_layers == 0:
             self.defragmenter = OnlineDefragmenter(self.kv_caches, self.block_size)
+        elif self.num_mamba_like_layers > 0 and get_config().defrag:
+            logger.warning(
+                "Defragmentation is not supported for hybrid models "
+                "(Mamba + Attention). Disabling defragmenter.")
         # Profiling
         prompt_profile_cfg, decode_profile_cfg = self._read_profiling_cfg()
         if prompt_profile_cfg or decode_profile_cfg:
@@ -5220,7 +5224,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # NOTE(kzawora): This is a nasty workaround - for whatever cache_utils-related reason,
         # reusing defragmenter used in warmup causes accuracy drops, which is why we re-create
         # and re-initialize it.
-        if not self.is_pooling_model:
+        if not self.is_pooling_model and self.num_mamba_like_layers == 0:
             self.defragmenter = OnlineDefragmenter(self.kv_caches, self.block_size)
 
     def shutdown_inc(self, suppress=suppress, finalize_calibration=finalize_calibration):
