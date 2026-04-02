@@ -235,14 +235,13 @@ def hpu_causal_conv1d_fn(
         batch_cache_idx = cache_indices.to(x_work.device) if cache_indices.device != x_work.device else cache_indices
 
     # HPU bucketing pads the batch with state_indices == -1
-    # (PAD_SLOT_ID).  Replace negative indices with 0 for safe
-    # gathering.  Padding slots are masked out below via
-    # has_initial_state or query-length checks.
-    # Route any -1 padding indices to a garbage slot (last entry in
-    # conv_states), consistent with the decode path.
-    garbage_slot_pf = conv_states.shape[0] - 1
-    safe_cache_idx_prefill = torch.where(batch_cache_idx >= 0, batch_cache_idx,
-                                         torch.full_like(batch_cache_idx, garbage_slot_pf))
+    # (PAD_SLOT_ID).  Route padding to a *garbage slot* (last entry
+    # in the conv_states tensor), consistent with the decode path.
+    # Use torch.remainder (not torch.where) — HPU torch.compile
+    # silently miscompiles torch.where on integer tensors.
+    # remainder(-1, N) == N-1, remainder(valid, N) == valid.
+    num_conv_slots_pf = conv_states.shape[0]
+    safe_cache_idx_prefill = torch.remainder(batch_cache_idx, num_conv_slots_pf)
     valid_mask_prefill = batch_cache_idx >= 0
 
     # Batched path — HPU bucketed prefill pads all sequences to the same
