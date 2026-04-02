@@ -153,6 +153,52 @@ def create_multi_model_config(model_a, model_b, max_model_len=4096, max_num_batc
         return tmpfile.name
 
 
+def read_default_model_id(config_path: str) -> str | None:
+    """Read default_model from a multi-model YAML config."""
+    try:
+        with open(config_path, encoding='utf-8') as f:
+            config = yaml.safe_load(f) or {}
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [warning] Failed to read config {config_path}: {exc}")
+        return None
+
+    if not isinstance(config, dict):
+        print(f"  [warning] Config {config_path} is not a YAML mapping")
+        return None
+
+    default_model = config.get('default_model')
+    if not isinstance(default_model, str) or not default_model.strip():
+        print(f"  [warning] Config {config_path} has no valid default_model")
+        return None
+
+    return default_model.strip()
+
+
+def select_models_for_test(available_models: list[dict[str, str]],
+                           default_model_id: str | None,
+                           count: int = 2) -> list[dict[str, str]]:
+    """Pick models for test and ensure the configured default model is first."""
+    if not available_models:
+        return []
+
+    if not default_model_id:
+        return available_models[:count]
+
+    default_model = next((m for m in available_models if m.get('id') == default_model_id), None)
+    if default_model is None:
+        print(f"  [warning] default_model '{default_model_id}' not found in /v1/models response")
+        return available_models[:count]
+
+    selected_models = [default_model]
+    for model in available_models:
+        if model.get('id') == default_model_id:
+            continue
+        selected_models.append(model)
+        if len(selected_models) >= count:
+            break
+    return selected_models
+
+
 class ServerLogCapture:
     """Capture and parse server logs to extract warmup timings."""
 
@@ -185,8 +231,11 @@ class ServerLogCapture:
             self.warmup_events = []
 
 
-def run_server(config_path: str, api_host: str, api_port: int, log_capture: ServerLogCapture,
-               max_num_batched_tokens: int):
+def run_server(config_path: str,
+               api_host: str,
+               api_port: int,
+               log_capture: ServerLogCapture,
+               max_num_batched_tokens: int | None = None):
     """Start the multi-model API server as a subprocess."""
     server_host = _server_api_host(api_host)
     env = os.environ.copy()
@@ -204,9 +253,12 @@ def run_server(config_path: str, api_host: str, api_port: int, log_capture: Serv
         server_host,
         '--port',
         str(api_port),
-        '--max-num-batched-tokens',
-        str(max_num_batched_tokens),
     ]
+    if max_num_batched_tokens is not None:
+        cmd.extend([
+            '--max-num-batched-tokens',
+            str(max_num_batched_tokens),
+        ])
 
     print(f"\n>>> Starting server: {' '.join(cmd)}")
     print(f"    Config: {config_path}")
@@ -241,7 +293,7 @@ def run_server(config_path: str, api_host: str, api_port: int, log_capture: Serv
 
 async def wait_for_server(api_host: str,
                           api_port: int,
-                          timeout: int = 300,
+                          timeout: int = 600,
                           proc: subprocess.Popen | None = None) -> list[dict[str, str]]:
     """Wait for server to be ready and return list of available models."""
     url = _api_url(api_host, api_port, '/v1/models')
@@ -624,6 +676,7 @@ async def main():
                         action="store_true",
                         help="Skip accuracy comparison between baseline and post-switch outputs")
     args = parser.parse_args()
+    config_provided = args.config is not None
 
     if args.api_port is None:
         args.api_port = find_free_port()
@@ -642,11 +695,18 @@ async def main():
     print("=" * 60)
     print("  ONLINE MODEL SWAPPING TEST")
     print("=" * 60)
-    print(f"  Model A: {args.model_a}")
-    print(f"  Model B: {args.model_b}")
+    if config_provided:
+        print("  Models: see config (--config)")
+    else:
+        print(f"  Model A: {args.model_a}")
+        print(f"  Model B: {args.model_b}")
     print(f"  Phases: {args.phases}")
-    print(f"  Max model len: {args.max_model_len}")
-    print(f"  Max num batched tokens: {args.max_num_batched_tokens}")
+    if config_provided:
+        print("  Max model len: see config")
+        print("  Max num batched tokens: see config")
+    else:
+        print(f"  Max model len: {args.max_model_len}")
+        print(f"  Max num batched tokens: {args.max_num_batched_tokens}")
     print(f"  Fixed output tokens: {args.fixed_output_tokens}")
     print(f"  API: {args.api_host}:{args.api_port}")
     print(f"  Config: {config_path}")
@@ -656,6 +716,8 @@ async def main():
     proc = None
 
     try:
+        default_model_id = read_default_model_id(config_path)
+
         # Start server
         startup_begin = time.perf_counter()
         proc, log_thread = run_server(
@@ -663,7 +725,7 @@ async def main():
             args.api_host,
             args.api_port,
             log_capture,
-            args.max_num_batched_tokens,
+            None if config_provided else args.max_num_batched_tokens,
         )
         available_models = await wait_for_server(args.api_host, args.api_port, proc=proc)
         initial_load_s = time.perf_counter() - startup_begin
@@ -673,7 +735,7 @@ async def main():
         if len(available_models) < 2:
             raise RuntimeError(f"Expected at least 2 models, got {len(available_models)}: {available_models}")
 
-        models = available_models[:2]  # Use first two available models
+        models = select_models_for_test(available_models, default_model_id, count=2)
         print("  Using models for test:")
         for model in models:
             print(f"    - {model['id']} -> {model['display_name']}")
