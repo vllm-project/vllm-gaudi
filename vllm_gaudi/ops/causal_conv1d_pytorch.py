@@ -176,25 +176,17 @@ def hpu_causal_conv1d_fn(
     bias: torch.Tensor | None,
     conv_states: torch.Tensor | None,
     query_start_loc: torch.Tensor,
-    cache_indices: torch.Tensor | None = None,
+    enable_prefix_caching: bool = False,
+    load_cache_indices: torch.Tensor | None = None,
+    store_cache_indices: torch.Tensor | None = None,
+    blocks_caching_range: torch.Tensor | None = None,
+    seqlens_offsets_for_blocks: torch.Tensor | None = None,
     has_initial_state: torch.Tensor | None = None,
     activation: str | None = "silu",
-    block_idx_first_scheduled_token: torch.Tensor | None = None,
-    block_idx_last_scheduled_token: torch.Tensor | None = None,
-    initial_state_idx: torch.Tensor | None = None,
-    num_computed_tokens: torch.Tensor | None = None,
-    block_size_to_align: int = 0,
     metadata=None,
     validate_data: bool = False,
     is_prompt: bool = True,
 ):
-    if any(ptr is not None for ptr in (
-            block_idx_first_scheduled_token,
-            block_idx_last_scheduled_token,
-            initial_state_idx,
-            num_computed_tokens,
-    )):
-        raise NotImplementedError("Prefix caching metadata is not supported in the PyTorch reference implementation.")
 
     activation = _normalize_activation(activation)
     original_dtype = x.dtype
@@ -227,124 +219,44 @@ def hpu_causal_conv1d_fn(
             raise ValueError("'bias' must match the feature dimension.")
         if not ((x_work.stride(0) == 1) or (x_work.stride(1) == 1)):
             raise ValueError("Input tensor must be in channel-last or channel-first memory layout.")
-        if cache_indices is not None and cache_indices.numel() != padded_batch:
-            raise ValueError("'cache_indices' must align with the batch dimension implied by 'query_start_loc'.")
         if has_initial_state is not None and has_initial_state.numel() != padded_batch:
             raise ValueError("'has_initial_state' must align with 'query_start_loc'.")
 
-    # Get cache indices
-    if cache_indices is None:
-        batch_cache_idx = torch.arange(padded_batch, device=x_work.device, dtype=torch.long)
+    # Take all input data for this call
+    seq_x = x_work[:, :]
+
+    # Get init_state for all batch
+    if has_initial_state is not None:
+        init_state = torch.where(has_initial_state, conv_states[load_cache_indices, -state_len:, :],
+                                 torch.zeros(padded_batch, state_len, dim, device=x_work.device, dtype=work_dtype))
     else:
-        # Ensure cache_indices is on the correct device
-        batch_cache_idx = cache_indices.to(x_work.device) if cache_indices.device != x_work.device else cache_indices
+        init_state = conv_states[load_cache_indices, -state_len:, :]
 
-    # HPU bucketing pads the batch with state_indices == -1
-    # (PAD_SLOT_ID).  Route padding to a *garbage slot* (last entry
-    # in the conv_states tensor), consistent with the decode path.
-    # Use torch.remainder (not torch.where) — HPU torch.compile
-    # silently miscompiles torch.where on integer tensors.
-    # remainder(-1, N) == N-1, remainder(valid, N) == valid.
-    num_conv_slots_pf = conv_states.shape[0]
-    safe_cache_idx_prefill = torch.remainder(batch_cache_idx, num_conv_slots_pf)
-    valid_mask_prefill = batch_cache_idx >= 0
+    init_state = init_state.transpose(-1, -2)
+    init_state = init_state.squeeze(0)
 
-    # Batched path — HPU bucketed prefill pads all sequences to the same
-    # length, so we can reshape to (B, dim, L) and process all sequences in
-    # one shot without any device-to-host syncs.
-    if padded_batch > 0 and cu_seqlen % padded_batch == 0:
-        seq_len_each = cu_seqlen // padded_batch
+    seq_input = torch.cat([init_state, seq_x], dim=1)
 
-        # (dim, B*L) -> (dim, B, L) -> (B, dim, L)
-        x_batch = x_work.reshape(dim, padded_batch, seq_len_each).permute(1, 0, 2)
+    if enable_prefix_caching:
+        assert seqlens_offsets_for_blocks is not None
+        assert blocks_caching_range is not None
+        offset = torch.arange(state_len, device=x.device)  # [state_len]
+        indices = seqlens_offsets_for_blocks.unsqueeze(1) + offset  # [N, state_len]
 
-        # Gather init states for all sequences at once: (B, state_len, dim) -> (B, dim, state_len)
-        if has_initial_state is not None:
-            raw_states = conv_states.index_select(0, safe_cache_idx_prefill)[:, -state_len:, :].transpose(-1, -2)
-            # has_initial_state may have fewer elements than padded_batch;
-            # pad with False (0) so the mask broadcasts correctly.
-            his = has_initial_state
-            if his.numel() < padded_batch:
-                his = torch.nn.functional.pad(his, (0, padded_batch - his.numel()), value=0)
-            mask = his[:padded_batch].reshape(-1, 1, 1).to(dtype=raw_states.dtype)
-            # Also mask out padding slots to avoid reading stale state.
-            mask = mask * valid_mask_prefill.reshape(-1, 1, 1).to(dtype=mask.dtype)
-            init_states = raw_states * mask
-        else:
-            init_states = torch.zeros(padded_batch, dim, state_len, device=x_work.device, dtype=work_dtype)
+        # Gather all slices at once: seq_input is [dim, seq_len+state_len],
+        # indices is [N, state_len] -> new_states is [N, dim, state_len]
+        new_states = seq_input[:, indices].permute(1, 0, 2)
 
-        # Prepend state and convolve: (B, dim, state_len + L)
-        seq_input = torch.cat([init_states, x_batch], dim=2)
-
-        # Gather new states from the ACTUAL end of each sequence, not
-        # the padded end.  Without this, sequences shorter than
-        # seq_len_each get their conv_state overwritten with zeros
-        # (from the padding region), corrupting subsequent decode steps.
-        actual_qlens = (qsl[1:padded_batch + 1] - qsl[:padded_batch]).clamp(min=0)
-        col_offsets = torch.arange(state_len, device=x_work.device, dtype=torch.int64)
-        col_indices = actual_qlens.unsqueeze(-1).to(torch.int64) + col_offsets.unsqueeze(0)
-        col_indices = col_indices.unsqueeze(1).expand(-1, dim, -1)
-        new_states = torch.gather(seq_input, 2, col_indices)  # [B, dim, state_len]
-
-        # Batched manual depthwise conv1d — loop over kernel width
-        # (statically unrolled by torch.compile since width is a Python int)
-        seq_out_batch = torch.zeros(padded_batch, dim, seq_len_each, device=x_work.device, dtype=work_dtype)
-        for k in range(width):
-            seq_out_batch = seq_out_batch + seq_input[:, :, k:k + seq_len_each] * weight_work[:, k:k + 1].unsqueeze(0)
-        if bias_work is not None:
-            seq_out_batch = seq_out_batch + bias_work.unsqueeze(0).unsqueeze(-1)
-
-        # (B, dim, L) -> (dim, B, L) -> (dim, B*L)
-        seq_out = seq_out_batch.permute(1, 0, 2).reshape(dim, cu_seqlen)
-
-        # Write back conv states.  Only update sequences with real
-        # tokens (actual_qlen > 0) to preserve existing state for
-        # padding slots.  Garbage slot absorbs padding writes harmlessly.
-        with torch.no_grad():
-            update_mask = (actual_qlens > 0).view(-1, 1, 1)
-            new_states_t = new_states.transpose(-1, -2)  # [B, state_len, dim]
-            existing_states = conv_states.index_select(0, safe_cache_idx_prefill)[:, -state_len:, :]
-            conv_states[safe_cache_idx_prefill, -state_len:, :] = torch.where(update_mask, new_states_t,
-                                                                              existing_states)
-
+        # Scatter all updates at once
+        conv_states[blocks_caching_range, -state_len:, :] = new_states.transpose(-1, -2)
     else:
-        # Fallback: variable-length sequences — per-sequence loop
-        seq_out = torch.zeros(dim, cu_seqlen, device=x_work.device, dtype=work_dtype)
-        for b in range(padded_batch):
-            seq_start = int(qsl[b])
-            seq_end = int(qsl[b + 1])
-            seq_len_b = seq_end - seq_start
-            if seq_len_b <= 0:
-                continue
-            # Skip padding slots with invalid cache indices.
-            if not valid_mask_prefill[b]:
-                continue
+        end = qsl[-1]
+        idx = torch.arange(state_len, device=x.device) + end
+        new_state = seq_input.index_select(dim=1, index=idx)
+        conv_states[store_cache_indices, -state_len:, :] = new_state.transpose(-1, -2)
 
-            seq_x_b = x_work[:, seq_start:seq_end]
-            cache_idx_b = safe_cache_idx_prefill[b:b + 1]
-
-            if has_initial_state is not None:
-                raw_state_b = conv_states[cache_idx_b, -state_len:, :].transpose(-1, -2).squeeze(0)
-                mask_b = has_initial_state[b] if has_initial_state.numel() > 1 else has_initial_state[0]
-                init_state_b = torch.where(mask_b, raw_state_b,
-                                           torch.zeros(dim, state_len, device=x_work.device, dtype=work_dtype))
-            else:
-                init_state_b = torch.zeros(dim, state_len, device=x_work.device, dtype=work_dtype)
-
-            seq_input_b = torch.cat([init_state_b, seq_x_b], dim=1)
-            new_state_b = seq_input_b[:, -state_len:]
-
-            out_b = torch.zeros(dim, seq_len_b, device=x_work.device, dtype=work_dtype)
-            for k in range(width):
-                out_b = out_b + seq_input_b[:, k:k + seq_len_b] * weight_work[:, k:k + 1]
-            if bias_work is not None:
-                out_b = out_b + bias_work.unsqueeze(-1)
-
-            seq_out[:, seq_start:seq_end] = out_b
-
-            with torch.no_grad():
-                conv_states[cache_idx_b, -state_len:, :] = new_state_b.unsqueeze(0).transpose(-1, -2)
-
+    # _depthwise_conv1d_tpc expects (batch, dim, L) — add batch dim.
+    seq_out = _depthwise_conv1d_tpc(seq_input.unsqueeze(0), weight_work, bias_work)
     seq_out = _apply_activation(seq_out, activation)
 
     return seq_out.squeeze(0).to(original_dtype)
@@ -356,19 +268,17 @@ def hpu_causal_conv1d_update(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
     activation: bool | str | None = None,
-    conv_state_indices: torch.Tensor | None = None,
+    load_cache_indices: torch.Tensor | None = None,
+    store_cache_indices: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
     max_query_len: int = -1,
     pad_slot_id: int = PAD_SLOT_ID,
-    block_idx_last_scheduled_token: torch.Tensor | None = None,
     initial_state_idx: torch.Tensor | None = None,
     validate_data: bool = False,
 ):
     if num_accepted_tokens is not None:
         raise NotImplementedError("Speculative decoding updates are not supported in the reference implementation.")
-    if block_idx_last_scheduled_token is not None or initial_state_idx is not None:
-        raise NotImplementedError("Prefix caching metadata is not supported in the reference implementation.")
     if max_query_len not in (-1, None):  # Provided only for Triton helper parity
         raise NotImplementedError("'max_query_len' is not used in the reference implementation.")
 
@@ -383,7 +293,8 @@ def hpu_causal_conv1d_update(
         bias,
         conv_state,
         qsl,
-        cache_indices=conv_state_indices,
+        load_cache_indices=load_cache_indices,
+        store_cache_indices=store_cache_indices,
         has_initial_state=None,
         activation=activation,
         metadata=None,
@@ -400,25 +311,14 @@ def hpu_causal_conv1d_fn_update(
     bias: torch.Tensor | None,
     conv_states: torch.Tensor | None,
     query_start_loc: torch.Tensor,
-    cache_indices: torch.Tensor | None = None,
+    load_cache_indices: torch.Tensor | None = None,
+    store_cache_indices: torch.Tensor | None = None,
     has_initial_state: torch.Tensor | None = None,
     activation: str | None = "silu",
-    block_idx_first_scheduled_token: torch.Tensor | None = None,
-    block_idx_last_scheduled_token: torch.Tensor | None = None,
-    initial_state_idx: torch.Tensor | None = None,
-    num_computed_tokens: torch.Tensor | None = None,
-    block_size_to_align: int = 0,
     metadata=None,
     validate_data: bool = False,
     is_prompt: bool = True,
 ):
-    if any(ptr is not None for ptr in (
-            block_idx_first_scheduled_token,
-            block_idx_last_scheduled_token,
-            initial_state_idx,
-            num_computed_tokens,
-    )):
-        raise NotImplementedError("Prefix caching metadata is not supported in the PyTorch reference implementation.")
 
     activation = _normalize_activation(activation)
     original_dtype = x.dtype
@@ -451,30 +351,12 @@ def hpu_causal_conv1d_fn_update(
             raise ValueError("'bias' must match the feature dimension.")
         if not ((x_work.stride(0) == 1) or (x_work.stride(1) == 1)):
             raise ValueError("Input tensor must be in channel-last or channel-first memory layout.")
-        if cache_indices is not None and cache_indices.numel() != padded_batch:
-            raise ValueError("'cache_indices' must align with the batch dimension implied by 'query_start_loc'.")
         if has_initial_state is not None and has_initial_state.numel() != padded_batch:
             raise ValueError("'has_initial_state' must align with 'query_start_loc'.")
 
     out = torch.zeros_like(x_work)
 
-    # Get cache indices
-    if cache_indices is None:
-        batch_cache_idx = torch.arange(padded_batch, device=x_work.device, dtype=torch.long)
-    else:
-        # Ensure cache_indices is on the correct device
-        batch_cache_idx = cache_indices.to(x_work.device) if cache_indices.device != x_work.device else cache_indices
-
-    # HPU bucketing pads the batch with state_indices == -1
-    # (PAD_SLOT_ID).  Route padding to a *garbage slot* (last entry
-    # in the conv_states tensor, unused by any real request).
-    # Use torch.remainder (not torch.where) — HPU torch.compile
-    # silently miscompiles torch.where on integer tensors.
-    # remainder(-1, N) == N-1, remainder(valid, N) == valid.
-    num_conv_slots = conv_states.shape[0]
-    safe_cache_idx = torch.remainder(batch_cache_idx, num_conv_slots)
-
-    init_state = conv_states[safe_cache_idx, -state_len:, :]
+    init_state = conv_states[load_cache_indices, -state_len:, :]
     init_state = init_state.transpose(-1, -2)
 
     seq_input = torch.cat([init_state, x_work], dim=2)
@@ -485,7 +367,6 @@ def hpu_causal_conv1d_fn_update(
     seq_out = _apply_activation(seq_out, activation)
     out = seq_out
 
-    with torch.no_grad():
-        conv_states[safe_cache_idx, -state_len:, :] = new_state.transpose(-1, -2)
+    conv_states[store_cache_indices, -state_len:, :] = new_state.transpose(-1, -2)
 
     return out.to(original_dtype)
