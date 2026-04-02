@@ -5145,7 +5145,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             )
 
         if not self.is_pooling_model:
-            self.defragmenter = OnlineDefragmenter(self.kv_caches, self.block_size)
+            defrag_caches = getattr(self, 'defrag_kv_caches', self.kv_caches)
+            self.defragmenter = OnlineDefragmenter(defrag_caches, self.block_size)
         # Profiling
         prompt_profile_cfg, decode_profile_cfg = self._read_profiling_cfg()
         if prompt_profile_cfg or decode_profile_cfg:
@@ -5228,7 +5229,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # reusing defragmenter used in warmup causes accuracy drops, which is why we re-create
         # and re-initialize it.
         if not self.is_pooling_model:
-            self.defragmenter = OnlineDefragmenter(self.kv_caches, self.block_size)
+            defrag_caches = getattr(self, 'defrag_kv_caches', self.kv_caches)
+            self.defragmenter = OnlineDefragmenter(defrag_caches, self.block_size)
 
     def shutdown_inc(self, suppress=suppress, finalize_calibration=finalize_calibration):
         global shutdown_inc_called
@@ -5682,6 +5684,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 kv_caches[layer_name] = kv_caches[target_layer_name]
         assert layer_names == set(kv_caches.keys()), "Some layers are not correctly initialized"
         bind_kv_cache(kv_caches, self.vllm_config.compilation_config.static_forward_context, self.kv_caches)
+
+        # Build filtered list of attention-only KV caches for defragmenter.
+        # GDN/mamba state tensors use per-block indexing (dim 0 = num_blocks+1)
+        # while defragmentation uses per-token indexing (block_id * block_size),
+        # making it incompatible with non-attention caches.
+        if self.num_mamba_like_layers > 0:
+            self.defrag_kv_caches = []
+            for group in kv_cache_config.kv_cache_groups:
+                if isinstance(group.kv_cache_spec, FullAttentionSpec):
+                    for layer_name in group.layer_names:
+                        if layer_name in kv_caches:
+                            self.defrag_kv_caches.append(kv_caches[layer_name])
+        else:
+            self.defrag_kv_caches = self.kv_caches
 
         if self.enable_bucketing:
             self.bucketing_manager.num_hpu_blocks = num_blocks
