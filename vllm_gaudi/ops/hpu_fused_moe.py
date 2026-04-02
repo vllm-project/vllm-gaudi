@@ -269,38 +269,16 @@ def patched_fused_moe_forward(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
 ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-    """
-    Patched forward method that bypasses the custom op to avoid recompilation issues.
-    """
-    og_hidden_states = hidden_states.shape[-1]
-    original_hidden_states = hidden_states
-    if self.moe_config.hidden_dim != og_hidden_states:
-        hidden_states = torch.nn.functional.pad(hidden_states, (0, self.hidden_size - og_hidden_states),
-                                                mode='constant',
-                                                value=0.0)
+    """Patched forward with upstream-aligned MoE dispatch flow."""
+    hidden_states, shared_experts_input = self.apply_routed_input_transform(hidden_states)
+    hidden_states, og_hidden_dims = self._maybe_pad_hidden_states(shared_experts_input, hidden_states)
 
-    use_direct_implementation = self.moe_config.dp_size == 1
-    if self.shared_experts is None:
-        if use_direct_implementation:
-            fused_output = self.layer.runner.forward_impl(self.layer, hidden_states, router_logits,
-                                                          original_hidden_states)
-            assert not isinstance(fused_output, tuple)
-            return reduce_output(self, fused_output)[..., :og_hidden_states]
-        else:
-            fused_output = torch.ops.vllm.moe_forward(hidden_states, router_logits, original_hidden_states,
-                                                      self.layer_name)
-
-        return fused_output[..., :og_hidden_states]
+    if self.moe_config.dp_size == 1:
+        fused_output = self.forward_dispatch(self.layer, hidden_states, router_logits, shared_experts_input)
     else:
-        if use_direct_implementation:
-            shared_output, fused_output = self.layer.runner.forward_impl(self.layer, hidden_states, router_logits,
-                                                                         original_hidden_states)
-            shared_output = reduce_output(self, shared_output)
-            fused_output = reduce_output(self, fused_output)
-        else:
-            shared_output, fused_output = torch.ops.vllm.moe_forward_shared(hidden_states, router_logits,
-                                                                            original_hidden_states, self.layer_name)
-        return (shared_output[..., :og_hidden_states], fused_output[..., :og_hidden_states])
+        fused_output = self.forward_entry(hidden_states, router_logits, shared_experts_input, self._encode_layer_name())
+
+    return self._maybe_reduce_output(fused_output, og_hidden_dims)
 
 
 def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
