@@ -61,7 +61,7 @@ from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingType
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_map_leaves
 from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy, getattr_nested, setattr_nested)
@@ -5453,44 +5453,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         kv_caches: dict[str, torch.Tensor] = {}
         num_blocks = 0
         if self.use_hybrid_cache and self.num_mamba_like_layers > 0:
-            # Build layer_name -> spec lookup for skipping raw buffer
-            # allocation for GDN/linear_attention groups (they use
-            # contiguous tensors instead).
-            _layer_spec: dict[str, KVCacheSpec] = {}
-            for group in kv_cache_config.kv_cache_groups:
-                for ln in group.layer_names:
-                    _layer_spec[ln] = group.kv_cache_spec
-
-            def _needs_raw_buffer(kv_cache_tensor) -> bool:
-                """Return False when every layer in this tensor will allocate
-                its own storage (FullAttentionSpec creates separate kc/vc;
-                GDN/linear_attention MambaSpec uses contiguous tensors).
-                Only standard Mamba2 MambaSpec needs the raw shared buffer
-                for as_strided views.
-                Note: GDN/linear_attention cannot use as_strided because
-                torch.compile's aot_autograd does not support input mutations
-                on views with different dtypes (the raw buffer is bf16 but
-                GDN states may be float32)."""
-                for ln in kv_cache_tensor.shared_by:
-                    spec = _layer_spec.get(ln)
-                    if isinstance(spec, FullAttentionSpec):
-                        continue
-                    if isinstance(spec, MambaSpec) and \
-                            spec.mamba_type in ("gdn_attention",
-                                                "linear_attention"):
-                        continue
-                    # Standard Mamba2 or unknown spec — needs raw buffer
-                    return True
-                return False
-
-            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                if not _needs_raw_buffer(kv_cache_tensor):
-                    continue
-                # taking into account dummy block
-                size = (kv_cache_tensor.size + kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes)
-                tensor = torch.zeros(size // 2, dtype=torch.bfloat16, device=self.device)
-                for layer_name in kv_cache_tensor.shared_by:
-                    kv_caches[layer_name] = tensor
+            # All MambaSpec types use contiguous tensors instead of
+            # as_strided views over a shared raw buffer. This avoids
+            # torch.compile/aot_autograd issues with input mutations
+            # on strided views (especially mixed-dtype aliasing).
             for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
                 kv_cache_spec = group.kv_cache_spec
                 for layer_name in group.layer_names:
@@ -5510,12 +5476,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         kc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         kv_caches[layer_name] = (kc, vc, None, None)
-                    elif isinstance(kv_cache_spec, MambaSpec) and \
-                            kv_cache_spec.mamba_type in ("gdn_attention", "linear_attention"):
-                        # GDN/linear_attention layers use contiguous tensors
-                        # because torch.compile's aot_autograd cannot handle
-                        # input mutations on as_strided views with different
-                        # dtypes (raw buffer is bf16, GDN states are float32).
+                    elif isinstance(kv_cache_spec, MambaSpec):
+                        # Skip if already created by another layer sharing
+                        # the same kv_cache_tensor.
                         if isinstance(kv_caches.get(layer_name), tuple):
                             continue
                         state_tensors = []
@@ -5530,33 +5493,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             for shared_layer in kv_cache_tensor.shared_by:
                                 kv_caches[shared_layer] = tuple(state_tensors)
                             break
-                    elif isinstance(kv_cache_spec, MambaSpec):
-                        # Standard Mamba2 and other MambaSpec types: use the
-                        # original as_strided interleaved layout from the raw
-                        # shared buffer.
-                        raw = kv_caches[layer_name]
-                        offset = 0
-                        state_tensors = []
-                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                            numel_per_block = math.prod(shape)
-                            target_dtype_size = get_dtype_size(dtype)
-                            # view raw bf16 buffer as target dtype
-                            raw_view = raw.view(dtype) if dtype != raw.dtype else raw
-                            target_shape = (num_blocks + 1, *shape)
-                            stride_inner = []
-                            s = 1
-                            for d in reversed(shape):
-                                stride_inner.append(s)
-                                s *= d
-                            stride_inner.reverse()
-                            page_numel = kv_cache_spec.page_size_bytes // target_dtype_size
-                            stride_block = page_numel
-                            full_stride = (stride_block, *stride_inner)
-                            storage_offset = offset // target_dtype_size
-                            t = torch.as_strided(raw_view, target_shape, full_stride, storage_offset)
-                            state_tensors.append(t)
-                            offset += numel_per_block * target_dtype_size
-                        kv_caches[layer_name] = tuple(state_tensors)
                     else:
                         pass
         elif self.use_naive_mamba_cache_sharing and self.num_mamba_like_layers > 0:

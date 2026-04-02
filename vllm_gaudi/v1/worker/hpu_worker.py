@@ -285,18 +285,14 @@ class HPUWorker(WorkerBase):
         gc.collect()
         available = cache_size_bytes - dummy_block_headroom
 
-        # For hybrid GDN/linear_attention + ATN models, GPU shares one raw
-        # buffer across spec types, but HPU allocates separate tensors per
+        # For hybrid ATN + Mamba models, GPU shares one raw buffer across
+        # spec types, but HPU allocates separate contiguous tensors per
         # spec (torch.compile can't handle as_strided mixed-dtype views).
         # Reduce reported memory so the scheduler computes fewer num_blocks
         # that fit the HPU separate-allocation model.
-        # NOTE: Only applies to GDN/linear_attention; standard Mamba2 + ATN
-        # uses the raw shared buffer path and is left unchanged.
         has_attn = any(isinstance(s, FullAttentionSpec) for s in kv_cache_spec.values())
-        has_gdn = any(
-            isinstance(s, MambaSpec) and s.mamba_type in ("gdn_attention", "linear_attention")
-            for s in kv_cache_spec.values())
-        if has_attn and has_gdn:
+        has_mamba = any(isinstance(s, MambaSpec) for s in kv_cache_spec.values())
+        if has_attn and has_mamba:
             # All specs share the same padded page_size_bytes after
             # HybridAttentionMambaModelConfig unification.
             padded_page = next(iter(kv_cache_spec.values())).page_size_bytes
@@ -305,7 +301,7 @@ class HPUWorker(WorkerBase):
             real_mamba = next(
                 sum(math.prod(sh) * get_dtype_size(dt) for sh, dt in zip(s.shapes, s.dtypes))
                 for s in kv_cache_spec.values()
-                if isinstance(s, MambaSpec) and s.mamba_type in ("gdn_attention", "linear_attention"))
+                if isinstance(s, MambaSpec))
             total_real = real_attn + real_mamba
             if total_real > padded_page:
                 factor = padded_page / total_real
