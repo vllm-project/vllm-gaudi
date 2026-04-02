@@ -500,8 +500,7 @@ launch_all_tests() {
     run_llama3_per_tensor_scaling_load_generate_test
     run_llama3_modelopt_per_tensor_scaling_load_generate_test
     run_granite_inc_calibration_and_quantization_load_generate_test
-    # TODO:comment this in once the test is stable
-    # run_granite_4_h_load_generate_test
+    run_granite_4_h_load_generate_test
     run_awq_load_generate_test
     run_gptq_load_generate_test
     run_compressed_w4a16_channelwise_load_generate_test
