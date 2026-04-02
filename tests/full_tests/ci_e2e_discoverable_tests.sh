@@ -458,7 +458,7 @@ run_cpu_offloading_test() {
 run_offloading_connector_test() {
     echo "➡️ Testing OffloadingConnector."
     VLLM_SKIP_WARMUP=True VLLM_USE_V1=1 \
-    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/unit_tests/kv_offload/test_offloading_connector.py"
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/unit_tests/kv_offload/offloading_connector"
     echo "✅ Test OffloadingConnector passed."
 }
 
