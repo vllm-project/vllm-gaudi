@@ -340,7 +340,7 @@ class HPUMambaMixer2(MambaMixer2):
         mamba_block_size = self.cache_config.mamba_block_size
         assert not self.cache_config.enable_prefix_caching
         if attn_metadata is not None:
-            self_kv_cache = self.kv_cache[0]
+            self_kv_cache = self.kv_cache
             # conv_state = (..., dim, width-1) yet contiguous along 'dim'
             conv_state = self_kv_cache[0]
             ssm_state = self_kv_cache[1]
