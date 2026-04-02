@@ -532,7 +532,6 @@ def _eager_read_state(state: torch.Tensor, idx: torch.Tensor, dtype: torch.dtype
     return state.index_select(0, idx).to(dtype)
 
 
-@torch._dynamo.disable
 def hpu_fused_recurrent_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
