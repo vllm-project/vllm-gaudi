@@ -251,8 +251,8 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         ##### get prefix cache #####
         if attn_metadata.block_list is not None:
             current = latent_vec_k
-            # Patch for vllm-gaudi kv_cache tuple format.
-            if isinstance(k_cache, tuple):
+            # Patch for vllm-gaudi kv_cache tuple/list format.
+            if isinstance(k_cache, (tuple, list)):
                 k_cache = k_cache[0]  # Use only key_cache for MLA
             past = self.latent_cache_k.fetch_from_cache(k_cache.unflatten(0, (-1, attn_metadata.block_size)),
                                                         attn_metadata.block_list)
