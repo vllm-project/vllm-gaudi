@@ -478,20 +478,21 @@ class HPUWorker(WorkerBase):
             self.model_runner.initialize_kv_cache(kv_cache_config)  # type: ignore[union-attr]
             self.kv_cache_sleeping = False
             torch.hpu.synchronize()
-        if len(self.model_runner.kv_caches) > 0:
+        if len(self.model_runner.kv_caches) > 0:  # type: ignore[union-attr]
             # Find the first ATN layer's tensor shape for a meaningful
             # block count (compact GDN layers have a much smaller dim-0).
             alloc_blocks = None
-            for kv in self.model_runner.kv_caches:
+            for kv in self.model_runner.kv_caches:  # type: ignore[union-attr]
                 t = kv[0] if not isinstance(kv[0], tuple) else kv[0][0]
                 dim0 = t.shape[0]
                 if alloc_blocks is None or dim0 > alloc_blocks:
                     alloc_blocks = dim0
-            msg = (f"Usable num_blocks: {kv_cache_config.num_blocks}, "
-                   f"actual allocated num_blocks (max across layers): "
-                   f"{alloc_blocks} "
-                   f"(_PAD_BLOCK_ID={self.model_runner._PAD_BLOCK_ID}, "
-                   f"_PAD_SLOT_ID={self.model_runner._PAD_SLOT_ID})")
+            msg = (
+                f"Usable num_blocks: {kv_cache_config.num_blocks}, "
+                f"actual allocated num_blocks (max across layers): "
+                f"{alloc_blocks} "
+                f"(_PAD_BLOCK_ID={self.model_runner._PAD_BLOCK_ID}, "  # type: ignore[union-attr]
+                f"_PAD_SLOT_ID={self.model_runner._PAD_SLOT_ID})")  # type: ignore[union-attr]
             logger.info(msg)
         msg = ("Initializing cache engine "
                f"took {m.get_summary_string()}")
