@@ -5685,7 +5685,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         # because torch.compile's aot_autograd cannot handle
                         # input mutations on as_strided views with different
                         # dtypes (raw buffer is bf16, GDN states are float32).
-                        if isinstance(kv_caches.get(layer_name), tuple):
+                        if isinstance(kv_caches.get(layer_name), (tuple, list)):
                             continue
                         state_tensors = []
                         for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):

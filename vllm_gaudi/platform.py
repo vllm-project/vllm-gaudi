@@ -343,7 +343,7 @@ class HpuPlatform(Platform):
         view_as_uint = original_src_dtype in [torch.float8_e4m3fn, torch.float8_e5m2]
         if view_as_uint:
             src_cache = src_cache.view(torch.uint8)
-        if isinstance(dst_cache, tuple):
+        if isinstance(dst_cache, (tuple, list)):
             _src_cache = src_cache[:, src_block_indices]
             _src_cache = _src_cache.to(dst_cache[0].device)
             dst_cache[0].index_copy_(0, dst_block_indices,
@@ -366,7 +366,7 @@ class HpuPlatform(Platform):
         dst_block_indices: torch.Tensor,
     ) -> None:
         """Copy blocks from HPU to host (CPU)."""
-        if isinstance(src_cache, tuple):
+        if isinstance(src_cache, (tuple, list)):
             _src_cache = torch.stack([c[src_block_indices] for c in src_cache], dim=0)
             dst_cache[:, dst_block_indices] = _src_cache.cpu()
         else:

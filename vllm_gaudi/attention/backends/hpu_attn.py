@@ -320,10 +320,10 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
     def forward_mqa(  # type: ignore
             self, q_nope: torch.Tensor, q_pe: torch.Tensor, k_cache: torch.Tensor,
             attn_metadata: HPUAttentionMetadata) -> torch.Tensor:
-        if k_cache is not None and isinstance(k_cache, tuple):
+        if k_cache is not None and isinstance(k_cache, (tuple, list)):
             key_cache, value_cache, k_scales, v_scales = \
                 HPUPagedAttention.split_kv_cache(k_cache, self.num_kv_heads, self.head_size)
-        if isinstance(k_cache, tuple):
+        if isinstance(k_cache, (tuple, list)):
             k_cache = k_cache[0]  # Use only key_cache for MLA
         query = torch.cat([q_nope, q_pe], dim=-1)
         key_cache = k_cache.unsqueeze(1) if k_cache is not None else None
@@ -550,7 +550,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         value_cache = None
         k_scales = None
         v_scales = None
-        if kv_cache is not None and isinstance(kv_cache, tuple):
+        if kv_cache is not None and isinstance(kv_cache, (tuple, list)):
             key_cache, value_cache, k_scales, v_scales = \
                 HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
             if key.dtype == torch.float32 and key.dtype != key_cache.dtype:
@@ -747,7 +747,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
 
         cross_slot_mapping = attn_metadata.cross_slot_mapping.flatten(
         ) if attn_metadata.cross_slot_mapping is not None else None
-        if kv_cache is not None and isinstance(kv_cache, tuple):
+        if kv_cache is not None and isinstance(kv_cache, (tuple, list)):
             key_cache, value_cache, k_scales, v_scales = \
                 HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
 
