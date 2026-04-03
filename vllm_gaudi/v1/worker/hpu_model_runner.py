@@ -1181,7 +1181,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             from vllm import envs
             # disable device group for dp synchronization when hpu graph is
             # turned on since it's not captured and causes issues
-            envs.VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION = True
+            if hasattr(envs, 'VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION'):
+                envs.VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION = True
 
         self.logits_rounding = 1
         # High-level profiler

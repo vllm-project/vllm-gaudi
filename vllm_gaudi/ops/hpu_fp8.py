@@ -55,7 +55,7 @@ class Fp8LinearMethod(OrigFp8LinearMethod):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.quant_config = self.quant_config
         if self.block_quant:
-            layer = hpu_ops.fp8_block_linear_postprocess_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
+            layer = hpu_ops.fp8_block_linear_postprocess_weights(layer, getattr(envs, 'VLLM_HPU_FORCE_CHANNEL_FP8', False))
             return
         # If checkpoint not serialized fp8, quantize the weights.
         elif not self.quant_config.is_checkpoint_fp8_serialized:
@@ -96,7 +96,7 @@ class Fp8LinearMethod(OrigFp8LinearMethod):
                 block_size=self.quant_config.weight_block_size,
                 bias=bias,
                 do_unpad=True,
-                force_channel_fp8=envs.VLLM_HPU_FORCE_CHANNEL_FP8,
+                force_channel_fp8=getattr(envs, 'VLLM_HPU_FORCE_CHANNEL_FP8', False),
             )
 
         weight_scale = layer.weight_scale.transpose(0, 1) if layer.weight_scale.dim() > 1 else layer.weight_scale
@@ -158,7 +158,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         else:
             dispatch_fn = None
 
-        if self.block_quant and not envs.VLLM_HPU_FORCE_CHANNEL_FP8:
+        if self.block_quant and not getattr(envs, 'VLLM_HPU_FORCE_CHANNEL_FP8', False):
             layer.moe_op = VllmMixtureOfExpertsOpFP8(
                 layer.global_num_experts,
                 num_experts,
@@ -175,7 +175,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
                 dispatch_fn,
             )
         if self.block_quant:
-            layer = hpu_ops.fp8_block_moe_prepare_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
+            layer = hpu_ops.fp8_block_moe_prepare_weights(layer, getattr(envs, 'VLLM_HPU_FORCE_CHANNEL_FP8', False))
         else:
             if self.quant_config.activation_scheme == "static":
                 if (layer.w13_input_scale is None or layer.w2_input_scale is None):

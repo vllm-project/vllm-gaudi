@@ -53,7 +53,7 @@ def grouped_topk(
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
     # For batch invariance, use sorted=True to ensure deterministic expert selection
-    use_sorted = envs.VLLM_BATCH_INVARIANT
+    use_sorted = getattr(envs, 'VLLM_BATCH_INVARIANT', False)
 
     num_token = scores.size(0)
 
@@ -128,7 +128,7 @@ class HPUGroupedTopk(GroupedTopk):
             raise ValueError(f"Unsupported scoring function: {self.scoring_func}")
 
         # For batch invariance, use sorted=True to ensure deterministic expert selection
-        use_sorted = envs.VLLM_BATCH_INVARIANT
+        use_sorted = getattr(envs, 'VLLM_BATCH_INVARIANT', False)
 
         num_token = scores.size(0)
         if e_score_correction_bias is not None:
