@@ -117,7 +117,7 @@ class HpuPlatform(Platform):
         # NOTE(kzawora): default block size for Gaudi should be 128
         # smaller sizes still work, but very inefficiently
         cache_config = vllm_config.cache_config
-        if not cache_config.user_specified_block_size:
+        if not getattr(cache_config, 'user_specified_block_size', False):
             cache_config.block_size = 128
         # Hybrid GDN/Mamba models: upstream HybridAttentionMambaModelConfig
         # already ran and computed block_size / mamba_page_size_padded for
