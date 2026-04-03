@@ -61,26 +61,31 @@ class HabanaProfilerCounterHelper:
         self.average_real_throughput = None
         self.logged_once = False
         self.prompt_real_seq_lens = []
+        self.prompt_real_ctx_lens = []
         self.decode_real_seq_lens = []
 
     def capture_decode_seq_stats(self, real_seq_lens):
         self.decode_real_seq_lens = real_seq_lens
 
-    def capture_prompt_seq_stats(self, real_seq_lens):
+    def capture_prompt_seq_stats(self, real_seq_lens, real_ctx_lens):
         self.prompt_real_seq_lens.append(real_seq_lens)
+        self.prompt_real_ctx_lens.append(real_ctx_lens)
 
     def reset_prompt_seq_stats(self):
         self.prompt_real_seq_lens = []
+        self.prompt_real_ctx_lens = []
 
-    def get_counter_dict(self, cache_config, duration, seq_len, batch_size_padded, real_batch_size, prompt_batch_idx,
-                         is_prompt):
+    def get_counter_dict(self, cache_config, duration, seq_len, ctx_blocks, batch_size_padded, real_batch_size,
+                         prompt_batch_idx, is_prompt):
         throughput = batch_size_padded / (duration / 1e6)
         throughput_effective = real_batch_size / (duration / 1e6)
         if is_prompt:
             real_max_seq_len = max(self.prompt_real_seq_lens[prompt_batch_idx])
+            real_max_ctx_len = max(self.prompt_real_ctx_lens[prompt_batch_idx])
             real_num_tokens = sum(self.prompt_real_seq_lens[prompt_batch_idx])
         else:
             real_max_seq_len = max(self.decode_real_seq_lens)
+            real_max_ctx_len = real_max_seq_len
             real_num_tokens = sum(self.decode_real_seq_lens)
         padded_num_tokens = batch_size_padded * seq_len
         batch_token_utilization = real_num_tokens / padded_num_tokens
@@ -94,7 +99,9 @@ class HabanaProfilerCounterHelper:
             f'{phase}_bucket_batch_size': batch_size_padded,
             f'{phase}_batch_size': real_batch_size,
             f'{phase}_bucket_seq_len': seq_len,
+            f'{phase}_bucket_ctx_blocks': ctx_blocks,
             f'{phase}_seq_len': real_max_seq_len,
+            f'{phase}_ctx_len': int(real_max_ctx_len),
             f'{phase}_bucket_gen_throughput': throughput,
             f'{phase}_real_gen_throughput': throughput_effective,
             f'{phase}_batch_token_utilization': batch_token_utilization,

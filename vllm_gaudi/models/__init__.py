@@ -47,6 +47,8 @@ def register_model():
     ModelRegistry.register_model("DeepseekOCRForCausalLM", "vllm_gaudi.models.deepseek_ocr:HpuDeepseekOCRForCausalLM")
 
     import vllm_gaudi.models.gptoss_mxfp4  # noqa: F401
+    import vllm_gaudi.models.qwen3_next  # noqa: F401
+    import vllm_gaudi.models.qwen3_5  # noqa: F401
 
     # DeepSeek V3 with HPU-optimized sparse attention (V3.2); supports chunked prefill
     # and long context (16k/32k) via HPU MLA backends.

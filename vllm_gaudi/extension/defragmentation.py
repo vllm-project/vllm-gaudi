@@ -5,33 +5,33 @@
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
 
-from vllm_gaudi.extension.utils import pad_list, with_default
-from vllm_gaudi.extension.runtime import get_config
-from vllm_gaudi.extension.debug import init_debug_logger
-
-import habana_frameworks.torch as htorch
-
-import torch
 import itertools
 from typing import Optional
+
+import habana_frameworks.torch as htorch
+import torch
+
+from vllm_gaudi.extension.debug import init_debug_logger
+from vllm_gaudi.extension.logger import logger as init_logger
+from vllm_gaudi.extension.runtime import get_config
+from vllm_gaudi.extension.utils import pad_list, with_default
+
+logger = init_logger()
 
 
 class CacheSwapUtils(torch.nn.Module):
     """ KV-cache swapping utilities """
 
-    def __init__(self, kv_caches: tuple[tuple[torch.tensor, torch.tensor]], block_size: int):
+    def __init__(self, block_size: int, device):
         super().__init__()
-        self.block_size = block_size
         self.enable_prefix_caching = get_config().prefix_caching
-        self.kv_caches = tuple(kv_caches)
-        self.block_slots = torch.arange(0, self.block_size, dtype=torch.long, device=kv_caches[0][0].device)
-        self.is_mla = all([cache[1] is None for cache in self.kv_caches])
+        self.block_slots = torch.arange(0, block_size, dtype=torch.long, device=device)
 
-    def forward(self, srcs: torch.tensor, dsts: torch.tensor, caches: list[torch.tensor]):
+    def forward(self, srcs: torch.tensor, dsts: torch.tensor, caches: list[torch.tensor], block_size: int):
         """ Internal method wrapped in HPU/t.compile graphs"""
         htorch.core.mark_step()
-        srcs = ((srcs * self.block_size).unsqueeze(-1) + self.block_slots).flatten()  # used
-        dsts = ((dsts * self.block_size).unsqueeze(-1) + self.block_slots).flatten()  # free
+        srcs = ((srcs * block_size).unsqueeze(-1) + self.block_slots).flatten()  # used
+        dsts = ((dsts * block_size).unsqueeze(-1) + self.block_slots).flatten()  # free
         for cache in caches:
             prev_srcs = cache.index_select(0, srcs)
             # using apc we need to swap free blocks back as they can contain cached data
@@ -45,24 +45,11 @@ class CacheSwapUtils(torch.nn.Module):
         dsts = None
         htorch.core.mark_step()
 
-    def swap(self, to_swap, threshold):
-        """ Swap block_ids between srcs and dsts"""
-        srcs, dsts = zip(*to_swap)
-        srcs = pad_list(list(srcs), threshold, itertools.repeat(-1))
-        dsts = pad_list(list(dsts), threshold, itertools.repeat(-1))
-        srcs = torch.tensor(srcs, dtype=torch.long, device='cpu').to('hpu', non_blocking=True)
-        dsts = torch.tensor(dsts, dtype=torch.long, device='cpu').to('hpu', non_blocking=True)
-        key_caches = [cache[0] for cache in self.kv_caches]
-        self(srcs, dsts, key_caches)
-        if not self.is_mla:
-            value_caches = [cache[1] for cache in self.kv_caches]
-            self(srcs, dsts, value_caches)
-
 
 class OnlineDefragmenter:
     """ Keeps track of assigned block_ids and remaps them if necessary """
 
-    def __init__(self):
+    def __init__(self, kv_caches: tuple[tuple[torch.tensor, torch.tensor]], block_size: int):
         config = get_config()
         self.threshold = with_default(config.VLLM_DEFRAG_THRESHOLD, 32)
         self.to_swap_pad_thresholds = [8, 16, 32, 64, 128, 256, 512]
@@ -72,21 +59,17 @@ class OnlineDefragmenter:
         self.bwd_mapping_table = []
         self.enabled = config.defrag
         self.graphed = with_default(config.VLLM_DEFRAG_WITH_GRAPHS, config.bridge_mode == 'eager')
-        self.cache_utils: Optional[CacheSwapUtils] = None
         self.debug = init_debug_logger('defrag')
-
-    def initialize(self, kv_caches: tuple[tuple[torch.tensor, torch.tensor]], block_size: int):
-        """ Initialize defragmenter with required data """
-        self.cache_utils = CacheSwapUtils(kv_caches, block_size)
+        self.kv_caches = tuple(kv_caches)
+        self.is_mla = all([cache[1] is None for cache in self.kv_caches])
+        self.block_size = block_size
+        self.cache_utils = CacheSwapUtils(block_size, kv_caches[0][0].device)
         if self.graphed:
             config = get_config()
             if config.bridge_mode == 'lazy':
                 self.cache_utils = htorch.hpu.wrap_in_hpu_graph(self.cache_utils, disable_tensor_cache=True)
             elif config.bridge_mode == 'eager':
-                self.cache_utils.forward = torch.compile(self.cache_utils.forward,
-                                                         backend='hpu_backend',
-                                                         fullgraph=True,
-                                                         dynamic=False)
+                self.cache_utils = torch.compile(self.cache_utils, backend='hpu_backend', fullgraph=True, dynamic=False)
         if self.debug:
             self.debug('initialized')
 
@@ -202,10 +185,11 @@ class OnlineDefragmenter:
             self.update_mapping(orig_used_block, free_block)
             self.update_mapping(orig_free_block, used_block)
 
-        assert self.cache_utils is not None
         to_swap_pad = next((x for x in self.to_swap_pad_thresholds if x >= len(to_swap)),
                            self.to_swap_pad_thresholds[-1])
-        self.cache_utils.swap(to_swap, to_swap_pad)
+
+        self._swap(to_swap, to_swap_pad)
+
         if self.debug:
             max_used = max(self.used_blocks.keys())
             num_used = len(self.used_blocks)

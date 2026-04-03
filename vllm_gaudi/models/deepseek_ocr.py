@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 
 import torch
-import torch.nn as nn
+import habana_frameworks.torch.core as htcore
 
 from vllm.distributed import get_pp_group
 from vllm.sequence import IntermediateTensors
@@ -17,28 +17,6 @@ from vllm.model_executor.models.deepseek_ocr import (
     DeepseekOCRProcessingInfo,
     DeepseekOCRDummyInputsBuilder,
 )
-
-import habana_frameworks.torch.core as htcore
-
-
-class HpuDeepseekOCRVisual(nn.Module):
-
-    def __init__(
-        self,
-        sam_model,
-        vision_model,
-    ):
-        super().__init__()
-        self.sam_model = sam_model
-        self.vision_model = vision_model
-        self.patch_size = 16
-
-    def forward(self, image_tensor: torch.Tensor) -> torch.Tensor:
-        htcore.mark_step()
-        features_1 = self.sam_model(image_tensor)
-        htcore.mark_step()
-        features_2 = self.vision_model(image_tensor, features_1)
-        return features_1, features_2
 
 
 class HpuDeepseekOCRDummyInputsBuilder(DeepseekOCRDummyInputsBuilder):
@@ -93,10 +71,13 @@ class HpuDeepseekOCRForCausalLM(DeepseekOCRForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        self.visual = HpuDeepseekOCRVisual(self.sam_model, self.vision_model)
 
     def _encode_global_features(self, image_tensor: torch.Tensor) -> torch.Tensor:
-        global_features_1, global_features_2 = self.visual(image_tensor)
+        global_features_1 = self.sam_model(image_tensor)
+        htcore.mark_step()
+        global_features_2 = self.vision_model(image_tensor, global_features_1)
+        htcore.mark_step()
+
         features = torch.cat(
             (
                 global_features_2[:, 1:],
@@ -118,7 +99,11 @@ class HpuDeepseekOCRForCausalLM(DeepseekOCRForCausalLM):
         if torch.sum(patches).item() == 0:
             return None
 
-        local_features_1, local_features_2 = self.visual(patches)
+        local_features_1 = self.sam_model(patches)
+        htcore.mark_step()
+        local_features_2 = self.vision_model(patches, local_features_1)
+        htcore.mark_step()
+
         features = torch.cat(
             (
                 local_features_2[:, 1:],

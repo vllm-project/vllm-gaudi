@@ -83,24 +83,19 @@ def _depthwise_conv1d_tpc(
                          f" ({width}). Convolution is not defined for this configuration.")
     out_len = x.shape[2] - width + 1
 
-    # Cast only weight to float32 for reduced-precision dtypes so that
-    # per-tap multiplies are promoted to float32 via PyTorch type promotion
-    # (bf16 × fp32 → fp32).  Weight is small (dim × width) so the cast is
-    # cheap, whereas casting the full x tensor (batch × dim × seq_len)
-    # would add a large node to the Synapse graph and hurt performance.
+    # Accumulate in float32 for reduced-precision dtypes (bfloat16 / float16)
+    # to match F.conv1d behaviour.  Keep inputs in their original dtype so
+    # the multiplications stay in bf16 (avoiding large cast-induced graph
+    # changes on Gaudi), and only upcast the running sum.
     orig_dtype = x.dtype
     needs_upcast = orig_dtype in (torch.bfloat16, torch.float16)
 
-    # Broadcast weight: (dim, width) -> (1, dim, width)
-    w = weight.unsqueeze(0)
-    if needs_upcast:
-        w = w.float()
-
-    # Each x_slice (bf16) * w_slice (fp32) auto-promotes to fp32,
-    # so accumulation and the running sum stay in fp32.
-    out = x[:, :, :out_len] * w[:, :, 0:1]
+    # Broadcast weight: (dim, width) -> (1, dim, 1) per kernel tap
+    w = weight.unsqueeze(0)  # (1, dim, width)
+    out = (x[:, :, :out_len] * w[:, :, 0:1]).float() if needs_upcast else x[:, :, :out_len] * w[:, :, 0:1]
     for k in range(1, width):
-        out = out + x[:, :, k:k + out_len] * w[:, :, k:k + 1]
+        out = out + (x[:, :, k:k + out_len] *
+                     w[:, :, k:k + 1]).float() if needs_upcast else out + x[:, :, k:k + out_len] * w[:, :, k:k + 1]
 
     if bias is not None:
         out = out + (bias.float() if needs_upcast else bias).unsqueeze(0).unsqueeze(-1)
@@ -223,6 +218,13 @@ def hpu_causal_conv1d_fn(
             raise ValueError("Input tensor must be in channel-last or channel-first memory layout.")
         if has_initial_state is not None and has_initial_state.numel() != padded_batch:
             raise ValueError("'has_initial_state' must align with 'query_start_loc'.")
+
+    # Get cache indices
+    if cache_indices is None:
+        batch_cache_idx = torch.arange(padded_batch, device=x_work.device, dtype=torch.long)
+    else:
+        # Ensure cache_indices is on the correct device
+        batch_cache_idx = cache_indices.to(x_work.device) if cache_indices.device != x_work.device else cache_indices
 
     # Take all input data for this call
     # Create tensor to get all data from 0 to lest sequence

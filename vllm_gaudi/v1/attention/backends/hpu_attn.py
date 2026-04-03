@@ -34,7 +34,7 @@ class HPUAttentionBackendV1(HPUAttentionBackend):
         return HPUAttentionMetadataV1
 
     @staticmethod
-    def get_supported_kernel_block_size() -> list[Union[int, MultipleOf]]:
+    def get_supported_kernel_block_sizes() -> list[Union[int, MultipleOf]]:
         # for mamba models we don't split block size across kernels
         # kernel_block_sizes in InputBatch are the same as block_sizes
         return [128]

@@ -23,7 +23,6 @@ from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention, HPUPaged
                                                      HPUPagedAttentionMetadataBuilder)
 
 from vllm_gaudi.extension.logger import logger as init_logger
-from vllm_gaudi.extension.unified import (unified_attn, unified_mla, HPUUnifiedAttentionMetadata)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.v1.attention.backends.registry import (register_backend, AttentionBackendEnum)
 from vllm._aiter_ops import rocm_aiter_ops
@@ -96,49 +95,6 @@ class HPUMLAAttentionBackend(HPUAttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> tuple[int, ...]:
-        return (num_blocks * block_size, head_size)
-
-
-@register_backend(AttentionBackendEnum.CUSTOM, "HPU_UA")
-class HPUUnifiedAttentionBackend(HPUAttentionBackend):
-
-    @staticmethod
-    def get_name() -> str:
-        return "CUSTOM"
-
-    @staticmethod
-    def get_impl_cls() -> type["AttentionImpl"]:
-        return HPUUnifiedAttentionImpl
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return HPUUnifiedAttentionMetadata
-
-
-@register_backend(AttentionBackendEnum.CUSTOM, "HPU_UNIFIED_MLA")
-class HPUUnifiedMLABackend(HPUAttentionBackend):
-
-    @staticmethod
-    def get_name() -> str:
-        return "CUSTOM"
-
-    @staticmethod
-    def get_impl_cls() -> type["AttentionImpl"]:
-        return HPUUnifiedMLAImpl
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return HPUUnifiedAttentionMetadata
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-    ) -> tuple[int, ...]:
-        # MLA stores latent vectors without per-head dimension
-        # Return 2D shape: [num_slots, latent_dim]
         return (num_blocks * block_size, head_size)
 
 
@@ -708,6 +664,9 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                         alibi_slopes=self.alibi_slopes,
                         dtype=self.alibi_slopes.dtype,
                     )
+
+            if key_cache is None:
+                return torch.zeros(*output_shape, dtype=query.dtype, device=query.device)
 
             output = HPUPagedAttention.forward_decode(query=query,
                                                       block_mapping=block_mapping,

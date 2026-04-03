@@ -18,7 +18,7 @@ from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
     TransferSpec,
 )
-from vllm.v1.kv_offload.cpu import CPUOffloadingSpec
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.abstract import LoadStoreSpec
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.worker.cpu_gpu import (SingleDirectionOffloadingHandler, CpuGpuOffloadingHandlers)
@@ -364,10 +364,23 @@ def get_handlers(
     attn_backends: dict[str, type[AttentionBackend]],
 ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
     if not self._handlers:
+        gpu_block_size = self.gpu_block_size
+        if isinstance(gpu_block_size, (list, tuple)):
+            assert len(gpu_block_size) == 1
+            gpu_block_size = gpu_block_size[0]
+        gpu_block_size = int(gpu_block_size)
+
+        # Upstream OffloadingSpec uses offloaded_block_size for CPU-side blocks.
+        # Keep backward compatibility with older plugin fields.
+        cpu_block_size = getattr(self, "offloaded_block_size", None)
+        if cpu_block_size is None:
+            cpu_block_size = gpu_block_size * self.block_size_factor
+        cpu_block_size = int(cpu_block_size)
+
         self._handlers = CpuGpuOffloadingHandlers(
             attn_backends=attn_backends,
-            gpu_block_size=self.gpu_block_size,
-            cpu_block_size=self.offloaded_block_size,
+            gpu_block_size=gpu_block_size,
+            cpu_block_size=cpu_block_size,
             num_cpu_blocks=self.num_blocks,
             gpu_caches=kv_caches,
         )

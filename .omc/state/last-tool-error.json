@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"git merge main 2>&1\",\"description\":\"Merge main into backport branch\"}",
+  "error": "Exit code 1\nAuto-merging .github/workflows/pre-merge.yaml\nAuto-merging README.md\nCONFLICT (content): Merge conflict in README.md\nAuto-merging calibration/calibrate_model.sh\nAuto-merging docs/getting_started/validated_models.md\nAuto-merging pyproject.toml\nAuto-merging tests/full_tests/ci_e2e_discoverable_tests.sh\nAuto-merging vllm_gaudi/__init__.py\nCONFLICT (content): Merge conflict in vllm_gaudi/__init__.py\nAuto-merging vllm_gaudi/attention/backends/hpu_attn.py\nCONFLICT (content): Merge conflict...",
+  "timestamp": "2026-04-03T05:04:20.879Z",
+  "retry_count": 1
+}

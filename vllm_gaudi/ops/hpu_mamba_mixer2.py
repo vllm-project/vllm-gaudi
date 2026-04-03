@@ -368,7 +368,7 @@ class HPUMambaMixer2(MambaMixer2):
         assert self.cache_config is not None
         enable_prefix_caching = self.cache_config.enable_prefix_caching
         if attn_metadata is not None:
-            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+            self_kv_cache = self.kv_cache
             # conv_state = (..., dim, width-1) yet contiguous along 'dim'
             conv_state = self_kv_cache[0]
             ssm_state = self_kv_cache[1]

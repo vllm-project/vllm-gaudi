@@ -13,9 +13,10 @@ import vllm_gaudi.extension.ops as hpu_ops
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel, VllmMixtureOfExpertsOpFP8)
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.utils import has_quant_config
+from vllm_gaudi.ops.hpu_fused_moe import _normalize_moe_activation
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
 
-from vllm.model_executor.kernels import linear as scaled_mm
+from vllm.model_executor.kernels.linear import _POSSIBLE_FP8_KERNELS
 from vllm.platforms import PlatformEnum
 from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
     PerTensorTorchFP8ScaledMMLinearKernel,
@@ -37,8 +38,8 @@ class HPUChannelWiseTorchFP8ScaledMMLinearKernel(ChannelWiseTorchFP8ScaledMMLine
         return True, None
 
 
-if PlatformEnum.OOT not in scaled_mm._POSSIBLE_FP8_KERNELS:
-    scaled_mm._POSSIBLE_FP8_KERNELS[PlatformEnum.OOT] = [
+if PlatformEnum.OOT not in _POSSIBLE_FP8_KERNELS:
+    _POSSIBLE_FP8_KERNELS[PlatformEnum.OOT] = [
         HPUPerTensorTorchFP8ScaledMMLinearKernel,
         HPUChannelWiseTorchFP8ScaledMMLinearKernel,
     ]
@@ -226,7 +227,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
             topk_ids,
             topk_weights,
             permuted_weights=True,
-            activation=layer.activation,
+            activation=_normalize_moe_activation(layer.activation),
         )
         return output.view(*(output.size(0), *input_shape[1:]))
 

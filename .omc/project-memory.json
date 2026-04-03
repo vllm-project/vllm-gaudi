@@ -1,0 +1,225 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1775192118441,
+  "projectRoot": "/home/ubuntu/GitHubA8/gaudi_vllm_compiler/vllm-gaudi",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Python",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "pyproject.toml",
+          "requirements.txt"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "pip",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": "pytest",
+    "lintCommand": "ruff check",
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "examples",
+      "tests"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "calibration": {
+      "path": "calibration",
+      "purpose": null,
+      "fileCount": 12,
+      "lastAccessed": 1775192118436,
+      "keyFiles": [
+        "README.md",
+        "calibrate_model.sh",
+        "deepseek_gaudi2_converter.py",
+        "requirements.txt",
+        "step-0-detect-device.py"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 5,
+      "lastAccessed": 1775192118438,
+      "keyFiles": [
+        "README.md",
+        "release_notes.md",
+        "release_notes_v0.15.1.md",
+        "release_notes_v0.16.0.md"
+      ]
+    },
+    "examples": {
+      "path": "examples",
+      "purpose": "Example code",
+      "fileCount": 2,
+      "lastAccessed": 1775192118438,
+      "keyFiles": [
+        "data_parallel.py",
+        "test_plugin.py"
+      ]
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 1,
+      "lastAccessed": 1775192118439,
+      "keyFiles": [
+        "__init__.py"
+      ]
+    },
+    "tools": {
+      "path": "tools",
+      "purpose": null,
+      "fileCount": 9,
+      "lastAccessed": 1775192118439,
+      "keyFiles": [
+        "check_repo.sh",
+        "check_spdx_header.py",
+        "enforce_regex_import.py",
+        "install_nixl.sh",
+        "mypy.sh"
+      ]
+    },
+    "vllm_gaudi": {
+      "path": "vllm_gaudi",
+      "purpose": null,
+      "fileCount": 5,
+      "lastAccessed": 1775192118439,
+      "keyFiles": [
+        "__init__.py",
+        "_version.py",
+        "envs.py",
+        "platform.py",
+        "utils.py"
+      ]
+    },
+    "vllm_gaudi.egg-info": {
+      "path": "vllm_gaudi.egg-info",
+      "purpose": null,
+      "fileCount": 6,
+      "lastAccessed": 1775192118439,
+      "keyFiles": [
+        "PKG-INFO",
+        "SOURCES.txt",
+        "dependency_links.txt",
+        "entry_points.txt",
+        "requires.txt"
+      ]
+    },
+    "docs/api": {
+      "path": "docs/api",
+      "purpose": "API routes",
+      "fileCount": 1,
+      "lastAccessed": 1775192118439,
+      "keyFiles": [
+        "README.md"
+      ]
+    },
+    "docs/assets": {
+      "path": "docs/assets",
+      "purpose": "Static assets",
+      "fileCount": 0,
+      "lastAccessed": 1775192118439,
+      "keyFiles": []
+    },
+    "tests/models": {
+      "path": "tests/models",
+      "purpose": "Data models",
+      "fileCount": 5,
+      "lastAccessed": 1775192118440,
+      "keyFiles": [
+        "__init__.py",
+        "registry.py",
+        "test_initialization.py"
+      ]
+    },
+    "vllm_gaudi/models": {
+      "path": "vllm_gaudi/models",
+      "purpose": "Data models",
+      "fileCount": 20,
+      "lastAccessed": 1775192118440,
+      "keyFiles": [
+        "__init__.py",
+        "bert.py",
+        "deepseek_ocr.py"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "vllm_gaudi/v1/worker/hpu_model_runner.py",
+      "accessCount": 19,
+      "lastAccessed": 1775193803911,
+      "type": "file"
+    },
+    {
+      "path": "vllm_gaudi/__init__.py",
+      "accessCount": 8,
+      "lastAccessed": 1775193820095,
+      "type": "file"
+    },
+    {
+      "path": "vllm_gaudi/ops/causal_conv1d_pytorch.py",
+      "accessCount": 7,
+      "lastAccessed": 1775193613125,
+      "type": "file"
+    },
+    {
+      "path": "vllm_gaudi/attention/backends/hpu_attn.py",
+      "accessCount": 6,
+      "lastAccessed": 1775193479469,
+      "type": "file"
+    },
+    {
+      "path": "vllm_gaudi/platform.py",
+      "accessCount": 4,
+      "lastAccessed": 1775193410539,
+      "type": "file"
+    },
+    {
+      "path": "vllm_gaudi/extension/bucketing/common.py",
+      "accessCount": 3,
+      "lastAccessed": 1775193309470,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 2,
+      "lastAccessed": 1775192842209,
+      "type": "file"
+    },
+    {
+      "path": "vllm_gaudi/models/__init__.py",
+      "accessCount": 2,
+      "lastAccessed": 1775193209988,
+      "type": "file"
+    },
+    {
+      "path": "vllm_gaudi/extension/features.py",
+      "accessCount": 2,
+      "lastAccessed": 1775193270353,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

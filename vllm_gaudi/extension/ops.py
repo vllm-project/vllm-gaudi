@@ -416,9 +416,17 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
     assert attn_bias is not None or valid_seq_lengths is not None, \
         'Either attn_bias or valid_seq_lengths must be != None'
     if is_causal and attn_bias is not None:
-        # TODO: causal + attn_bias is not yet supported
-        is_causal = False
-        valid_seq_lengths = None
+        # WAR: FusedSDPA with explicit attn_bias triggers
+        # complex_guid_extractor error 400 when head_dim > 128 (e.g.
+        # Qwen3.5-397B with head_dim=256).  Use is_causal=True with
+        # valid_seq_lengths instead, letting Synapse handle causal masking
+        # internally.
+        if query.shape[-1] > 128 and valid_seq_lengths is not None:
+            attn_bias = None
+        else:
+            # TODO: causal + attn_bias is not yet supported
+            is_causal = False
+            valid_seq_lengths = None
 
     args = [
         query, key, value, attn_bias, 0.0, is_causal, scale, softmax_mode, recompute_mode, valid_seq_lengths,
@@ -970,6 +978,10 @@ def fp8_block_linear_postprocess_weights(layer, force_channel_fp8=False):
         weight_scale_inv = weight_scale_inv.squeeze(-1)
         layer.weight.data.copy_(weight)
         layer.weight_scale_inv = torch.nn.Parameter(weight_scale_inv, requires_grad=False)
+        # Scale is now per-channel, not per-block; clear stale block size to
+        # prevent downstream code (e.g. scaled_dequantize) from using it as
+        # a group_shape that is incompatible with the 1D channel-wise scale.
+        layer.weight_block_size = None
         htorch.core.mark_step()
         return layer
     else:
