@@ -13,9 +13,6 @@ from vllm_gaudi.ops.hpu_gdn_pytorch import (
 )
 
 
-<<<<<<< hourly2903
-class HPUGatedDeltaNetAttention(GatedDeltaNetAttention):
-=======
 def _save_ssm_state(core_attn_out, final_state, ssm_state, state_indices):
     """Persist GDN final_state into ssm_state cache for chunked prefill.
 
@@ -29,8 +26,7 @@ def _save_ssm_state(core_attn_out, final_state, ssm_state, state_indices):
     return core_attn_out
 
 
-class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
->>>>>>> main
+class HPUGatedDeltaNetAttention(GatedDeltaNetAttention):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
