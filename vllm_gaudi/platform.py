@@ -138,7 +138,7 @@ class HpuPlatform(Platform):
                 if cache_config.cache_dtype == "auto":
                     kv_dtype = model_config.dtype
                 else:
-                    from vllm.config.model import STR_DTYPE_TO_TORCH_DTYPE
+                    from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
                     kv_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
                 num_kv_heads = model_config.get_num_kv_heads(parallel_config)
                 head_size = model_config.get_head_size()
@@ -356,7 +356,7 @@ class HpuPlatform(Platform):
     @classmethod
     def patch_for_pt27(cls) -> None:
 
-        from vllm.utils import is_torch_equal_or_newer
+        from vllm.utils.torch_utils import is_torch_equal_or_newer
         if is_torch_equal_or_newer("2.8.0"):
             return
 
@@ -371,5 +371,5 @@ class HpuPlatform(Platform):
                 return NotImplemented
             return parent_torch_function(func, types, args, kwargs)
 
-        BasevLLMParameter.__torch_function__ = classmethod(torch_function)
+        BasevLLMParameter.__torch_function__ = staticmethod(torch_function)  # type: ignore[assignment]
         return
