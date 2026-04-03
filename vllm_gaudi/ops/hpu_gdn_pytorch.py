@@ -531,6 +531,7 @@ def hpu_fused_gdn_gating(
     beta_out = torch.sigmoid(b.to(torch.float32)).to(b.dtype)
     return g.unsqueeze(0), beta_out.unsqueeze(0)
 
+
 def _eager_read_state(state: torch.Tensor, idx: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     """Eager-only state read — isolates index_select from compiled graph."""
     return state.index_select(0, idx).to(dtype)
