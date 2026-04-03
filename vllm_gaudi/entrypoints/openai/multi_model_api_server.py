@@ -9,6 +9,7 @@ import time
 from argparse import Namespace
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 
 import uvloop
 import yaml
@@ -40,6 +41,20 @@ from vllm.utils.system_utils import decorate_logs
 from vllm_gaudi.v1.engine.multi_model_async_llm import MultiModelAsyncLLM
 
 logger = init_logger("vllm_gaudi.entrypoints.openai.multi_model_api_server")
+
+
+@dataclass
+class ModelFrontendOverrides:
+    enable_auto_tool_choice: bool | None = None
+    tool_call_parser: str | None = None
+    chat_template: str | None = None
+
+
+@dataclass
+class FrontendSettings:
+    enable_auto_tool_choice: bool
+    tool_call_parser: str | None
+    chat_template: str | None
 
 
 class MultiModelEngineClient(EngineClient):
@@ -264,7 +279,52 @@ def _resolve_multi_model_config_path() -> str | None:
     return os.environ.get("VLLM_HPU_MULTI_MODEL_CONFIG")
 
 
-def _load_multi_model_config(path: str) -> tuple[dict[str, AsyncEngineArgs], str]:
+def _normalize_chat_template_path(config_dir: str, chat_template: str) -> str:
+    if os.path.isabs(chat_template):
+        return chat_template
+    return os.path.abspath(os.path.join(config_dir, chat_template))
+
+
+def _resolve_frontend_settings(
+    args: Namespace,
+    model_frontend_overrides: dict[str, ModelFrontendOverrides],
+    active_model_name: str,
+) -> FrontendSettings:
+    model_overrides = model_frontend_overrides.get(active_model_name, ModelFrontendOverrides())
+    return FrontendSettings(
+        enable_auto_tool_choice=(model_overrides.enable_auto_tool_choice if model_overrides.enable_auto_tool_choice
+                                 is not None else args.enable_auto_tool_choice),
+        tool_call_parser=(model_overrides.tool_call_parser
+                          if model_overrides.tool_call_parser is not None else args.tool_call_parser),
+        chat_template=(model_overrides.chat_template
+                       if model_overrides.chat_template is not None else args.chat_template),
+    )
+
+
+def _validate_model_frontend_overrides(
+    args: Namespace,
+    model_frontend_overrides: dict[str, ModelFrontendOverrides],
+) -> None:
+    valid_tool_parsers = ToolParserManager.list_registered()
+    for model_name, override in model_frontend_overrides.items():
+        effective_enable_auto = (override.enable_auto_tool_choice
+                                 if override.enable_auto_tool_choice is not None else args.enable_auto_tool_choice)
+        effective_tool_parser = (override.tool_call_parser
+                                 if override.tool_call_parser is not None else args.tool_call_parser)
+
+        if effective_enable_auto and not effective_tool_parser:
+            raise ValueError(f"Model '{model_name}' enables auto tool choice but no tool_call_parser is set.")
+
+        if (effective_enable_auto and effective_tool_parser and effective_tool_parser not in valid_tool_parsers):
+            raise ValueError(f"Model '{model_name}' has invalid tool_call_parser='{effective_tool_parser}'. "
+                             f"Valid options: {valid_tool_parsers}")
+
+        if override.chat_template is not None:
+            # load_chat_template validates template content/format up front.
+            load_chat_template(override.chat_template)
+
+
+def _load_multi_model_config(path: str) -> tuple[dict[str, AsyncEngineArgs], str, dict[str, ModelFrontendOverrides]]:
     with open(path) as f:
         data = yaml.safe_load(f)
 
@@ -275,14 +335,40 @@ def _load_multi_model_config(path: str) -> tuple[dict[str, AsyncEngineArgs], str
     if not isinstance(raw_models, dict) or not raw_models:
         raise ValueError("Multi-model config requires a non-empty 'models' mapping.")
 
+    config_dir = os.path.dirname(os.path.abspath(path))
     model_configs: dict[str, AsyncEngineArgs] = {}
+    model_frontend_overrides: dict[str, ModelFrontendOverrides] = {}
     for name, raw_cfg in raw_models.items():
         if not isinstance(raw_cfg, dict):
             raise ValueError(f"Model config for '{name}' must be a mapping.")
         if "model" not in raw_cfg:
             raise ValueError(f"Model config for '{name}' must include 'model'.")
+
+        raw_cfg_copy = dict(raw_cfg)
+        overrides = ModelFrontendOverrides()
+        if "enable_auto_tool_choice" in raw_cfg_copy:
+            enable_auto_tool_choice = raw_cfg_copy.pop("enable_auto_tool_choice")
+            if not isinstance(enable_auto_tool_choice, bool):
+                raise ValueError(f"Model '{name}' field 'enable_auto_tool_choice' must be a boolean.")
+            overrides.enable_auto_tool_choice = enable_auto_tool_choice
+
+        if "tool_call_parser" in raw_cfg_copy:
+            tool_call_parser = raw_cfg_copy.pop("tool_call_parser")
+            if tool_call_parser is not None and not isinstance(tool_call_parser, str):
+                raise ValueError(f"Model '{name}' field 'tool_call_parser' must be a string.")
+            overrides.tool_call_parser = tool_call_parser
+
+        if "chat_template" in raw_cfg_copy:
+            chat_template = raw_cfg_copy.pop("chat_template")
+            if chat_template is not None and not isinstance(chat_template, str):
+                raise ValueError(f"Model '{name}' field 'chat_template' must be a string.")
+            if isinstance(chat_template, str):
+                chat_template = _normalize_chat_template_path(config_dir, chat_template)
+            overrides.chat_template = chat_template
+
+        model_frontend_overrides[name] = overrides
         try:
-            model_configs[name] = AsyncEngineArgs(**raw_cfg)
+            model_configs[name] = AsyncEngineArgs(**raw_cfg_copy)
         except TypeError as e:
             raise ValueError(f"Invalid config for '{name}': {e}") from e
 
@@ -293,7 +379,7 @@ def _load_multi_model_config(path: str) -> tuple[dict[str, AsyncEngineArgs], str
         raise ValueError(f"Default model '{default_model}' not found in config models: "
                          f"{list(model_configs.keys())}")
 
-    return model_configs, default_model
+    return model_configs, default_model, model_frontend_overrides
 
 
 def _build_model_registry(manager: MultiModelAsyncLLM) -> tuple[dict[str, BaseModelPath], dict[str, int]]:
@@ -311,13 +397,15 @@ async def build_multi_model_engine_client(
     args: Namespace,
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
-) -> AsyncIterator[tuple[MultiModelEngineClient, MultiModelAsyncLLM, dict[str, BaseModelPath], dict[str, int]]]:
+) -> AsyncIterator[tuple[MultiModelEngineClient, MultiModelAsyncLLM, dict[str, BaseModelPath], dict[str, int], dict[
+        str, ModelFrontendOverrides]]]:
     config_path = _resolve_multi_model_config_path()
     if not config_path:
         raise ValueError("A multi-model config path must be set when multi-model mode is enabled. "
                          "Supported env var: VLLM_HPU_MULTI_MODEL_CONFIG.")
 
-    model_configs, default_model = _load_multi_model_config(config_path)
+    model_configs, default_model, model_frontend_overrides = _load_multi_model_config(config_path)
+    _validate_model_frontend_overrides(args, model_frontend_overrides)
     manager = MultiModelAsyncLLM(
         model_configs,
         usage_context=usage_context,
@@ -332,7 +420,7 @@ async def build_multi_model_engine_client(
     all_model_paths, model_max_lens = _build_model_registry(manager)
 
     try:
-        yield engine_client, manager, all_model_paths, model_max_lens
+        yield engine_client, manager, all_model_paths, model_max_lens, model_frontend_overrides
     finally:
         manager.shutdown()
 
@@ -346,6 +434,7 @@ async def _init_multi_model_state(
     all_model_paths: dict[str, BaseModelPath],
     model_max_lens: dict[str, int],
     active_model_name: str,
+    model_frontend_overrides: dict[str, ModelFrontendOverrides],
 ) -> None:
     request_logger = RequestLogger(max_log_len=args.max_log_len) if args.enable_log_requests else None
 
@@ -366,7 +455,8 @@ async def _init_multi_model_state(
     )
     await state.openai_serving_models.init_static_loras()
 
-    resolved_chat_template = load_chat_template(args.chat_template)
+    frontend_settings = _resolve_frontend_settings(args, model_frontend_overrides, active_model_name)
+    resolved_chat_template = load_chat_template(frontend_settings.chat_template)
 
     state.openai_serving_render = OpenAIServingRender(
         model_config=engine_client.model_config,
@@ -377,9 +467,9 @@ async def _init_multi_model_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
         trust_request_chat_template=args.trust_request_chat_template,
-        enable_auto_tools=args.enable_auto_tool_choice,
+        enable_auto_tools=frontend_settings.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
-        tool_parser=args.tool_call_parser,
+        tool_parser=frontend_settings.tool_call_parser,
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
@@ -397,7 +487,11 @@ async def _init_multi_model_state(
     if "generate" in supported_tasks:
         from vllm.entrypoints.openai.generate.api_router import init_generate_state
 
-        await init_generate_state(engine_client, state, args, request_logger, supported_tasks)
+        state_args = Namespace(**vars(args))
+        state_args.enable_auto_tool_choice = frontend_settings.enable_auto_tool_choice
+        state_args.tool_call_parser = frontend_settings.tool_call_parser
+        state_args.chat_template = frontend_settings.chat_template
+        await init_generate_state(engine_client, state, state_args, request_logger, supported_tasks)
 
     if "transcription" in supported_tasks:
         from vllm.entrypoints.openai.speech_to_text.api_router import (
@@ -433,6 +527,7 @@ def _attach_multi_model_router(app: FastAPI) -> None:
         engine_client: EngineClient = raw_request.app.state.multi_model_engine_client
         all_model_paths = raw_request.app.state.multi_model_all_model_paths
         model_max_lens = raw_request.app.state.multi_model_max_lens
+        model_frontend_overrides = raw_request.app.state.multi_model_frontend_overrides
         args = raw_request.app.state.args
         supported_tasks = raw_request.app.state.supported_tasks
 
@@ -454,6 +549,7 @@ def _attach_multi_model_router(app: FastAPI) -> None:
             all_model_paths=all_model_paths,
             model_max_lens=model_max_lens,
             active_model_name=manager.current_model or request.model,
+            model_frontend_overrides=model_frontend_overrides,
         )
         duration_ms = (time.perf_counter() - start) * 1000.0
         reconfigure_ms = None
@@ -514,6 +610,7 @@ async def _run_multi_model_server_worker(
             manager,
             all_model_paths,
             model_max_lens,
+            model_frontend_overrides,
     ):
         try:
             supported_tasks = await engine_client.get_supported_tasks()
@@ -524,6 +621,7 @@ async def _run_multi_model_server_worker(
             app.state.multi_model_engine_client = engine_client
             app.state.multi_model_all_model_paths = all_model_paths
             app.state.multi_model_max_lens = model_max_lens
+            app.state.multi_model_frontend_overrides = model_frontend_overrides
             app.state.supported_tasks = supported_tasks
             app.state.args = args
 
@@ -535,6 +633,7 @@ async def _run_multi_model_server_worker(
                 all_model_paths=all_model_paths,
                 model_max_lens=model_max_lens,
                 active_model_name=manager.current_model or args.model,
+                model_frontend_overrides=model_frontend_overrides,
             )
             _attach_multi_model_router(app)
 
