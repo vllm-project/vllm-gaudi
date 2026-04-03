@@ -1018,6 +1018,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.head_size,
             self.dtype,
             self.kv_cache_dtype_str,
+            self.block_size,
             use_mla=self.model_config.use_mla,
         )
         self.attn_backend_name = getattr(self.attn_backend, "__name__", None)
