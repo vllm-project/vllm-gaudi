@@ -210,6 +210,7 @@ def hpu_chunk_gdr_phase_b(
     Kdim: int,
     Vdim: int,
     output_final_state: bool,
+    output_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Phase B: sequential loop — stages 5-6 (state-dependent).
 
@@ -232,6 +233,7 @@ def hpu_chunk_gdr_phase_b(
             Kdim,
             Vdim,
             output_final_state,
+            output_dtype,
         )
     return _hpu_chunk_gdr_phase_b_optimized(
         u_all,
@@ -248,10 +250,10 @@ def hpu_chunk_gdr_phase_b(
         Kdim,
         Vdim,
         output_final_state,
+        output_dtype,
     )
 
 
-@torch._dynamo.disable
 def _eager_reshape_output(core_h, S, padded_len, seq_len, H, Vdim):
     """Reshape core_h to output tensor in eager mode."""
     return core_h.permute(0, 1, 3, 2, 4).reshape(S, padded_len, H, Vdim)[:, :seq_len, :, :].reshape(-1, H, Vdim)
@@ -272,6 +274,7 @@ def _hpu_chunk_gdr_phase_b_optimized(
     Kdim: int,
     Vdim: int,
     output_final_state: bool,
+    output_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Optimized Phase B: chunk-local precompute hoisted out of the loop.
 
@@ -333,7 +336,10 @@ def _hpu_chunk_gdr_phase_b_optimized(
 
     final_state = None
     if output_final_state:
-        final_state = state_t.transpose(-1, -2).contiguous().to(init_state.dtype)
+        # Cast to output dtype before transpose+contiguous to halve the
+        # size of the contiguous copy (e.g. fp32 -> bf16).
+        st = state_t if output_dtype is None else state_t.to(output_dtype)
+        final_state = st.transpose(-1, -2).contiguous()
 
     return out, final_state
 
@@ -525,8 +531,6 @@ def hpu_fused_gdn_gating(
     beta_out = torch.sigmoid(b.to(torch.float32)).to(b.dtype)
     return g.unsqueeze(0), beta_out.unsqueeze(0)
 
-
-@torch._dynamo.disable
 def _eager_read_state(state: torch.Tensor, idx: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     """Eager-only state read — isolates index_select from compiled graph."""
     return state.index_select(0, idx).to(dtype)
@@ -869,11 +873,10 @@ def hpu_chunk_gated_delta_rule(
             Kdim=Kdim_c,
             Vdim=Vdim_c,
             output_final_state=output_final_state,
+            output_dtype=initial_state.dtype if initial_state is not None else None,
         )
 
         out = out.to(q.dtype).view(B, T, H_c, Vdim)
-        if final_state is not None and initial_state is not None:
-            final_state = final_state.to(initial_state.dtype)
         return out, final_state
 
     # ---- Legacy paths (cu_seqlens / non-bucketed) ----
@@ -1161,6 +1164,7 @@ def _hpu_chunk_gdr_phase_b_legacy(
     Kdim: int,
     Vdim: int,
     output_final_state: bool,
+    output_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Legacy Phase B: uses _phase_b_step per chunk (reference accuracy).
 
@@ -1193,7 +1197,7 @@ def _hpu_chunk_gdr_phase_b_legacy(
 
     final_state: torch.Tensor | None = None
     if output_final_state:
-        final_state = states.to(init_state.dtype)
+        final_state = states.to(output_dtype if output_dtype is not None else init_state.dtype)
 
     return out, final_state
 
