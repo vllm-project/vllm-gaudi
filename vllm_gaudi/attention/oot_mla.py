@@ -142,9 +142,15 @@ class HPUMLAAttention(MLAAttention):
         latent_vec_k = latent_vec_k.view(-1, self.qk_rope_head_dim + self.kv_lora_rank)
 
         # write the latent and rope to kv cache
-        if kv_cache is not None and len(kv_cache) >= 2:
-            # Always use impl-owned cache op so INC quantization maps to one canonical module path.
-            self.impl.latent_cache_k(latent_vec_k, kv_cache[0], slot_mapping)
+        # MLA uses a single cache tensor (not a key/value pair), so the cache
+        # may arrive as a list with one element [latent_cache].  Extract the
+        # tensor regardless of wrapper type.
+        if kv_cache is not None:
+            cache_tensor = kv_cache
+            while isinstance(cache_tensor, (tuple, list)):
+                cache_tensor = cache_tensor[0]
+            if cache_tensor is not None:
+                self.impl.latent_cache_k(latent_vec_k, cache_tensor, slot_mapping)
 
         if is_prefill:
             output = self.impl.forward_mha(q, latent_vec_k, kv_cache, attn_metadata)
@@ -278,3 +284,67 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             use_sparse=self.is_sparse,
             indexer=self.indexer,
         )
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """HPU forward that bypasses the sparse indexer.
+
+        The upstream V3.2 sparse indexer uses CUDA-specific ops
+        (per_token_group_quant_fp8, DeepGEMM kernels) that are not
+        available on HPU. Since the HPU MLA backend performs full
+        attention (not sparse), we skip the indexer entirely and
+        go straight to the MLA attention path.
+        """
+        q_c = None
+
+        if self.q_lora_rank is not None:
+            assert self.fused_qkv_a_proj is not None
+            assert self.q_a_layernorm is not None
+            assert self.q_b_proj is not None
+
+            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+            q_c, kv_lora = qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                dim=-1,
+            )
+            q_c = self.q_a_layernorm(q_c)
+            q = self.q_b_proj(q_c)[0]
+        else:
+            assert self.kv_a_proj_with_mqa is not None
+            assert self.q_proj is not None
+            kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
+            q = self.q_proj(hidden_states)[0]
+
+        kv_c, k_pe = kv_lora.split(
+            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+        )
+        kv_c_normed = self.kv_a_layernorm(kv_c)
+
+        q = q.view(-1, self.num_heads, self.qk_head_dim)
+        k_pe = k_pe.unsqueeze(1)
+
+        if self.rotary_emb is not None:
+            q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
+                positions, q[..., self.qk_nope_head_dim:], k_pe
+            )
+
+        # NOTE(HPU): Skip self.indexer call — the HPU MLA backend does
+        # full attention and does not consume sparse topk indices.
+        # The CUDA indexer uses per_token_group_quant_fp8 and DeepGEMM
+        # kernels which are unavailable on HPU.
+
+        if llama_4_scaling is not None:
+            q *= llama_4_scaling
+
+        attn_out = self.mla_attn(
+            q,
+            kv_c_normed,
+            k_pe,
+            output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
+        )
+
+        return self.o_proj(attn_out)[0]
