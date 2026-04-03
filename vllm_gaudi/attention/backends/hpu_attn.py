@@ -251,9 +251,9 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         ##### get prefix cache #####
         if attn_metadata.block_list is not None:
             current = latent_vec_k
-            # Patch for vllm-gaudi kv_cache tuple/list format.
-            if isinstance(k_cache, (tuple, list)):
-                k_cache = k_cache[0]  # Use only key_cache for MLA
+            # Extract tensor from kv_cache container for MLA
+            while isinstance(k_cache, (tuple, list)):
+                k_cache = k_cache[0]
             past = self.latent_cache_k.fetch_from_cache(k_cache.unflatten(0, (-1, attn_metadata.block_size)),
                                                         attn_metadata.block_list)
             past = past.view(-1, past.shape[-1])
@@ -320,11 +320,9 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
     def forward_mqa(  # type: ignore
             self, q_nope: torch.Tensor, q_pe: torch.Tensor, k_cache: torch.Tensor,
             attn_metadata: HPUAttentionMetadata) -> torch.Tensor:
-        if isinstance(k_cache, (tuple, list)):
-            if len(k_cache) >= 2:
-                key_cache, value_cache, k_scales, v_scales = \
-                    HPUPagedAttention.split_kv_cache(k_cache, self.num_kv_heads, self.head_size)
-            k_cache = k_cache[0]  # Use only key_cache for MLA
+        # Extract tensor from kv_cache container (list/tuple) for MLA
+        while isinstance(k_cache, (tuple, list)):
+            k_cache = k_cache[0]
         query = torch.cat([q_nope, q_pe], dim=-1)
         key_cache = k_cache.unsqueeze(1) if k_cache is not None else None
         value_cache = None
