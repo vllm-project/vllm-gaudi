@@ -554,10 +554,26 @@ def maybe_set_chunked_attention_layers(model_runner):
             logger.warning("Failed to set chunked attention flag: %s", type(e).__name__)
 
 
+def _init_mamba_split_weights(model):
+    """Eagerly split in_proj weights for HPUMambaMixer2 layers.
+
+    _init_split_weights() clones weight slices so F.linear sees
+    independent contiguous tensors.  This MUST happen before warmup
+    because PT_COMPILE_ONLY_MODE compiles recipes without executing
+    them, so .clone() would produce uninitialised tensors if called
+    during warmup.
+    """
+    from vllm_gaudi.ops.hpu_mamba_mixer2 import HPUMambaMixer2
+    for module in model.modules():
+        if isinstance(module, HPUMambaMixer2) and not module._split_weights_ready:
+            module._init_split_weights()
+
+
 def apply_model_specific_patches(model_runner):
     """The function applies model-specific monkey patches."""
     maybe_set_chunked_attention_layers(model_runner)
     patch_llama4_get_attn_scale(model_runner.model)
+    _init_mamba_split_weights(model_runner.model)
 
 
 class HpuKVConnectorModelRunnerMixin(KVConnectorModelRunnerMixin):
@@ -5681,7 +5697,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         self._PAD_BLOCK_ID = num_blocks
         self._PAD_SLOT_ID = num_blocks * self.block_size
-        self._MAMBA_PAD_BLOCK_ID = -1
+        self._MAMBA_PAD_BLOCK_ID = num_blocks
         self._dummy_num_blocks = num_blocks
 
         if has_kv_transfer_group():
