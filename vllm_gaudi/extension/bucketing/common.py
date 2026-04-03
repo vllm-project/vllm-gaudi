@@ -466,26 +466,6 @@ def generate_buckets(bs_range,
     return sorted(buckets)
 
 
-def generate_unified_buckets(query_range, shared_ctx_range, unique_ctx_range, bs, block_size, max_model_len):
-    buckets = set()
-    is_causal = [0, 1]
-
-    for query, shared_ctx, unique_ctx, causal in itertools.product(query_range, shared_ctx_range, unique_ctx_range,
-                                                                   is_causal):
-        if causal:
-            max_bs = min(bs, query)
-            if math.ceil(shared_ctx * block_size // max_bs) <= max_model_len:
-                buckets.add((query, shared_ctx, unique_ctx, causal))
-        elif query <= bs:
-            # non causal query = current bs
-            if shared_ctx > 0 or unique_ctx > 0:
-                # Guard against division by zero when query=1 (query // 2 = 0)
-                query_divisor = max(query // 2, 1)
-                if shared_ctx == 0 or (math.ceil(shared_ctx * block_size // query_divisor) <= max_model_len):
-                    if shared_ctx > 0 or query <= unique_ctx:
-                        buckets.add((query, shared_ctx, unique_ctx, causal))
-
-    return sorted(buckets)
 
 
 def is_greater_or_equal(tuple1, tuple2):

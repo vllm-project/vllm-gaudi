@@ -51,28 +51,18 @@ class HpuPlatform(Platform):
 
         When use_sparse is True (e.g. DeepSeek V3.2), token selection is done in the
         custom attention class before the backend; the backend sees already-selected
-        tokens. If use_mla is also True: unified_attn selects HPUUnifiedMLABackend,
-        otherwise (chunked prefill mode) HPUMLAAttentionBackend is used for
-        TrimmedAttentionMetadata compatibility.
+        tokens. The regular HPUMLAAttentionBackend handles the computation.
         """
         if attn_selector_config.use_sparse:
-            # DeepSeek V3.2 uses sparse attention on top of MLA
-            # Sparse selection logic is handled in the custom attention class before
-            # calling the backend, so the backend just sees the already-selected tokens.
-            logger.info("[HPU] Sparse attention detected")
+            # DeepSeek V3.2 uses sparse attention on top of MLA.
+            # Sparse token selection is handled in the model's custom attention class
+            # before calling the backend — the backend sees already-selected tokens.
             if attn_selector_config.use_mla:
-                if get_config().unified_attn:
-                    logger.info("[HPU] Using HPUUnifiedMLABackend for sparse+MLA attention (unified mode)")
-                    return ("vllm_gaudi.attention.backends.hpu_attn."
-                            "HPUUnifiedMLABackend")
-                else:
-                    logger.info("[HPU] Using HPUMLAAttentionBackend for sparse+MLA attention (chunked prefill mode)")
-                    return ("vllm_gaudi.attention.backends.hpu_attn."
-                            "HPUMLAAttentionBackend")
+                logger.info("[HPU] Using HPUMLAAttentionBackend for sparse+MLA attention")
+                return ("vllm_gaudi.attention.backends.hpu_attn."
+                        "HPUMLAAttentionBackend")
             else:
-                logger.info("[HPU] Using HPUUnifiedAttentionBackend for sparse attention")
-                return ("vllm_gaudi.attention.backends."
-                        "hpu_attn.HPUUnifiedAttentionBackend")
+                raise NotImplementedError("Sparse attention without MLA is not supported on HPU.")
 
         if attn_selector_config.use_mla:
             logger.info("Using HPUAttentionMLA backend.")

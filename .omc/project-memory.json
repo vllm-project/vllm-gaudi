@@ -168,8 +168,14 @@
   "hotPaths": [
     {
       "path": "vllm_gaudi/v1/worker/hpu_model_runner.py",
-      "accessCount": 19,
-      "lastAccessed": 1775193803911,
+      "accessCount": 25,
+      "lastAccessed": 1775194911269,
+      "type": "file"
+    },
+    {
+      "path": "vllm_gaudi/attention/backends/hpu_attn.py",
+      "accessCount": 16,
+      "lastAccessed": 1775194804298,
       "type": "file"
     },
     {
@@ -185,21 +191,21 @@
       "type": "file"
     },
     {
-      "path": "vllm_gaudi/attention/backends/hpu_attn.py",
-      "accessCount": 6,
-      "lastAccessed": 1775193479469,
-      "type": "file"
-    },
-    {
       "path": "vllm_gaudi/platform.py",
-      "accessCount": 4,
-      "lastAccessed": 1775193410539,
+      "accessCount": 7,
+      "lastAccessed": 1775194935877,
       "type": "file"
     },
     {
       "path": "vllm_gaudi/extension/bucketing/common.py",
+      "accessCount": 4,
+      "lastAccessed": 1775194868232,
+      "type": "file"
+    },
+    {
+      "path": "vllm_gaudi/extension/features.py",
       "accessCount": 3,
-      "lastAccessed": 1775193309470,
+      "lastAccessed": 1775194854421,
       "type": "file"
     },
     {
@@ -212,12 +218,6 @@
       "path": "vllm_gaudi/models/__init__.py",
       "accessCount": 2,
       "lastAccessed": 1775193209988,
-      "type": "file"
-    },
-    {
-      "path": "vllm_gaudi/extension/features.py",
-      "accessCount": 2,
-      "lastAccessed": 1775193270353,
       "type": "file"
     }
   ],

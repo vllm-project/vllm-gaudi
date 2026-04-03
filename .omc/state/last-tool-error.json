@@ -1,7 +1,7 @@
 {
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"git merge main 2>&1\",\"description\":\"Merge main into backport branch\"}",
-  "error": "Exit code 1\nAuto-merging .github/workflows/pre-merge.yaml\nAuto-merging README.md\nCONFLICT (content): Merge conflict in README.md\nAuto-merging calibration/calibrate_model.sh\nAuto-merging docs/getting_started/validated_models.md\nAuto-merging pyproject.toml\nAuto-merging tests/full_tests/ci_e2e_discoverable_tests.sh\nAuto-merging vllm_gaudi/__init__.py\nCONFLICT (content): Merge conflict in vllm_gaudi/__init__.py\nAuto-merging vllm_gaudi/attention/backends/hpu_attn.py\nCONFLICT (content): Merge conflict...",
-  "timestamp": "2026-04-03T05:04:20.879Z",
+  "tool_name": "Read",
+  "tool_input_preview": "{\"file_path\":\"/home/ubuntu/GitHubA8/gaudi_vllm_compiler/vllm-gaudi/vllm_gaudi/attention/backends/hpu_attn.py\",\"offset\":1,\"limit\":882}",
+  "error": "File content (12173 tokens) exceeds maximum allowed tokens (10000). Use offset and limit parameters to read specific portions of the file, or search for specific content instead of reading the whole file.",
+  "timestamp": "2026-04-03T05:40:12.970Z",
   "retry_count": 1
 }

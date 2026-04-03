@@ -1223,13 +1223,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def _make_buffer(self, *size: Union[int, torch.SymInt], dtype: torch.dtype, numpy: bool = True) -> CpuGpuBuffer:
         return CpuGpuBuffer(*size, dtype=dtype, device=self.device, pin_memory=self.pin_memory, with_numpy=numpy)
 
-    def unified_bucketing_fn(self, is_causal, query_len, shared_blocks, unique_blocks, logits):
-        if not get_config().use_bucketing:
-            return query_len, shared_blocks, unique_blocks, logits
-
-        new_bucket = self.bucketing_manager.find_unified_bucket(query_len, shared_blocks, unique_blocks, is_causal)
-        return (new_bucket[0], new_bucket[1], new_bucket[2], self.max_num_seqs)
-
     def prepare_mamba_state_idxs(self, req_indices, block_table_offsets, target_bs):
         num_indices = len(req_indices)
         all_state_indices_cpu = []
@@ -4925,88 +4918,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 pbar.update(1)
 
         return total_mem, total_batch_seq, captured_all
-
-    def warmup_unified_graphs(self, buckets, kv_cache):
-        if get_config().targeted_warmup:
-            # Targeted warmup: compile only the configs actually needed at runtime,
-            # taken directly from the existing bucket list (no crafted values).
-            #
-            # Compilation ORDER is critical — each compile allocates a contiguous
-            # workspace, compiles the graph, then FREES the workspace.  After weights
-            # + KV-cache are loaded the remaining HPU memory is only partially
-            # contiguous.  Compiling the graph with the LARGEST workspace first
-            # guarantees it fits; subsequent smaller workspaces fit in the freed block.
-            #
-            # Config selection — minimal set, one config per (q, phase):
-            #   prefill — causal (is_causal=1), q ≥ max_model_len, s=0, smallest unique_ctx
-            #             With chunked prefill disabled the only runtime scenario is a
-            #             fresh prompt (unique_ctx=0).  The bucket list can contain up to
-            #             ~11 unique_ctx variants per q value; compiling them all wastes
-            #             memory and risks OOM.  Smallest unique_ctx (=0) is sufficient.
-            #   decode  — non-causal (is_causal=0), q ≤ max_num_seqs, s=0, smallest unique_ctx
-            #             Large unique_ctx configs allocate proportionally larger SynapseAI
-            #             workspaces.  The bucket router maps actual runtime unique_ctx to
-            #             the nearest compiled bucket, so one compile covers all cases.
-            max_model_len = self.model_config.max_model_len
-            max_num_seqs  = self.scheduler_config.max_num_seqs
-
-            # Both phases: pick ONE representative config per (q, phase) combination —
-            # the one with the SMALLEST unique_ctx present in the bucket list.
-            #
-            # Why smallest unique_ctx only:
-            #   • unique_ctx > 0 for prefill means attending over prior KV context
-            #     (only relevant for chunked prefill, which is disabled here).
-            #     With --no-enable-chunked-prefill every prefill is fresh → unique_ctx=0.
-            #   • Compiling configs with large unique_ctx allocates proportionally larger
-            #     SynapseAI workspaces and OOMs on memory-constrained setups.
-            #   • The bucket router maps actual runtime unique_ctx to the nearest compiled
-            #     bucket, so the single smallest-unique_ctx compile covers all cases.
-
-            def _one_per_q_smallest_u(candidates):
-                """Return one (q, s, u, c) per distinct q, choosing smallest u."""
-                by_q: dict = {}
-                for cfg in candidates:
-                    q = cfg[0]
-                    if q not in by_q or cfg[2] < by_q[q][2]:
-                        by_q[q] = cfg
-                return list(by_q.values())
-
-            prefill_all = [(q, s, u, c) for (q, s, u, c) in buckets
-                           if q >= max_model_len and s == 0 and c == 1]
-            prefill_cfgs = _one_per_q_smallest_u(prefill_all)
-
-            decode_all = [(q, s, u, c) for (q, s, u, c) in buckets
-                          if 0 < q <= max_num_seqs and s == 0 and c == 0]
-            decode_cfgs = _one_per_q_smallest_u(decode_all)
-
-            # Compile order: prefill first (larger workspace: max_model_len × hidden_dim),
-            # then decode (smaller workspace).  Prefill compiles while memory is still
-            # unfragmented; its workspace is freed before decode compilation begins.
-            targeted = prefill_cfgs + decode_cfgs
-
-            logger.info("Targeted warmup: %d configs selected "
-                        "(%d prefill, %d decode) from %d total buckets",
-                        len(targeted), len(prefill_cfgs), len(decode_cfgs), len(buckets))
-            for cfg in targeted:
-                if cfg not in self.graphed_buckets:
-                    self.graphed_buckets.add(cfg)
-                    self._prepare_dummy_unified_scenario(cfg)
-            return
-
-        idx = 0
-        num_candidates = len(buckets)
-        developer_settings = get_config().VLLM_DEVELOPER_MODE
-        with tqdm(total=num_candidates, desc="Unified Attention warmup", unit="item") as pbar:
-            for idx, (query, shared_ctx, unique_ctx, is_causal) in enumerate(reversed(buckets)):
-                unified_cfg = (query, shared_ctx, unique_ctx, is_causal)
-                if unified_cfg in self.graphed_buckets:
-                    continue
-                self.graphed_buckets.add(unified_cfg)
-                if developer_settings:
-                    self.log_warmup("Unified CFG", idx, num_candidates, query, shared_ctx, unique_ctx, is_causal)
-                self._prepare_dummy_unified_scenario(unified_cfg)
-                pbar.set_postfix_str(f"{idx}/{num_candidates}")
-                pbar.update(1)
 
     def _add_dummy_request(self,
                            requests,
