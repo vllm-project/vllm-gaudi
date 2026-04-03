@@ -1,7 +1,0 @@
-{
-  "tool_name": "Read",
-  "tool_input_preview": "{\"file_path\":\"/home/ubuntu/GitHubA8/gaudi_vllm_compiler/vllm-gaudi/vllm_gaudi/attention/backends/hpu_attn.py\",\"offset\":1,\"limit\":882}",
-  "error": "File content (12173 tokens) exceeds maximum allowed tokens (10000). Use offset and limit parameters to read specific portions of the file, or search for specific content instead of reading the whole file.",
-  "timestamp": "2026-04-03T05:40:12.970Z",
-  "retry_count": 1
-}
