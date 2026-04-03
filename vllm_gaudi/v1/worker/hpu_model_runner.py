@@ -6386,7 +6386,8 @@ class HPUAttentionMetadataProcessor:
 
         block_list = attn_metadata.block_list
         max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
-        max_context_len = max_context_len * self.block_size
+        block_size = getattr(prefill_metadata, "block_size", self.block_size)
+        max_context_len = max_context_len * block_size
         past_mask = torch.arange(0, max_context_len, dtype=torch.int32, device=device)
         past_mask = (past_mask.view(1, -1).expand(batch_size, -1).ge(context_lens_t.view(-1, 1)).view(
             batch_size, 1, -1).expand(batch_size, seq_len, -1).view(batch_size, 1, seq_len, -1))

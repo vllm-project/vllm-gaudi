@@ -412,20 +412,10 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
     recompute_mode = True
     assert attn_bias is not None or valid_seq_lengths is not None, \
         'Either attn_bias or valid_seq_lengths must be != None'
-    has_prefix = key.shape[2] > query.shape[2]
     if is_causal and attn_bias is not None:
-        # WAR: FusedSDPA with explicit attn_bias triggers
-        # complex_guid_extractor error 400 when head_dim > 128 (e.g.
-        # Qwen3.5-397B with head_dim=256) when Q_len == KV_len (no prefix context).
-        # With prefix (KV_len > Q_len from chunked prefill), is_causal
-        # generates a top-left aligned mask which is wrong — we need the
-        # bottom-right aligned mask from attn_bias.
-        if query.shape[-1] > 128 and valid_seq_lengths is not None and not has_prefix:
-            attn_bias = None
-        else:
-            # TODO: causal + attn_bias is not yet supported
-            is_causal = False
-            valid_seq_lengths = None
+        # TODO: causal + attn_bias is not yet supported
+        is_causal = False
+        valid_seq_lengths = None
 
     args = [
         query, key, value, attn_bias, 0.0, is_causal, scale, softmax_mode, recompute_mode, valid_seq_lengths,
