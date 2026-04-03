@@ -496,8 +496,7 @@ class HPUMambaMixer2(MambaMixer2):
 
             # 3. State Space Model sequence transformation
             n_groups = self.n_groups // self.tp_size
-            A_d = (self.A[:, None, ...][:, :, None].expand(-1, self.head_dim,
-                                                           self.ssm_state_size).to(dtype=torch.float32))
+            A_d = self.A.to(dtype=torch.float32)  # (nheads,) — keep compact, no expand
             dt = dt[:, :, None].expand(-1, -1, self.head_dim)
             dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
             D_d = self.D[:, None, ...].expand(-1, self.head_dim)
