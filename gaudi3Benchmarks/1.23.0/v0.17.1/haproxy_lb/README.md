@@ -10,6 +10,13 @@ Load-balances multiple vLLM instances serving `ibm-granite/granite-4.0-h-small` 
 | `stop.sh` | Stops everything |
 | `server_command.sh` | vLLM serve command template |
 
+
+## Prerequisites
+```bash
+yum install -y haproxy procps-ng
+```
+
+
 ## Usage
 
 ```bash
