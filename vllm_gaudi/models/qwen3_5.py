@@ -14,7 +14,6 @@ from vllm_gaudi.ops.hpu_gdn_pytorch import (
 )
 
 
-@torch._dynamo.disable
 def _save_ssm_state(core_attn_out, final_state, ssm_state, state_indices):
     """Persist GDN final_state into ssm_state cache for chunked prefill.
 
@@ -42,6 +41,9 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         has_explicit = (hf_text_config is not None and (getattr(hf_text_config, "mamba_chunk_size", None) is not None
                                                         or getattr(hf_text_config, "chunk_size", None) is not None))
         self.mamba_chunk_size = (self.model_config.get_mamba_chunk_size() if has_explicit else 128)
+
+        self.qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
+        self.z_size = self.value_dim // self.tp_size
 
     def rearrange_mixed_qkv(self, mixed_qkv):
         """Pure-torch rearrange – avoids einops graph breaks on HPU."""
@@ -134,9 +136,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
         # === Part 1: Input Projection ================================
         mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-        z_size = self.value_dim // self.tp_size
-        mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
+        mixed_qkv, z = mixed_qkvz.split([self.qkv_size, self.z_size], dim=-1)
         z = z.reshape(z.size(0), -1, self.head_v_dim)
         ba, _ = self.in_proj_ba(hidden_states)
         b, a = ba.chunk(2, dim=-1)
