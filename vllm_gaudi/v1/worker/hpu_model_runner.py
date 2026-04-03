@@ -5854,7 +5854,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         self._PAD_BLOCK_ID = num_blocks
         self._PAD_SLOT_ID = num_blocks * self.block_size
-        self._MAMBA_PAD_BLOCK_ID = -1
+        self._MAMBA_PAD_BLOCK_ID = num_blocks
         self._dummy_num_blocks = num_blocks
 
         # Initialize the GDN compact slot free-list.
