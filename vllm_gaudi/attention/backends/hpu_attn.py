@@ -320,10 +320,10 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
     def forward_mqa(  # type: ignore
             self, q_nope: torch.Tensor, q_pe: torch.Tensor, k_cache: torch.Tensor,
             attn_metadata: HPUAttentionMetadata) -> torch.Tensor:
-        if k_cache is not None and isinstance(k_cache, (tuple, list)):
-            key_cache, value_cache, k_scales, v_scales = \
-                HPUPagedAttention.split_kv_cache(k_cache, self.num_kv_heads, self.head_size)
         if isinstance(k_cache, (tuple, list)):
+            if len(k_cache) >= 2:
+                key_cache, value_cache, k_scales, v_scales = \
+                    HPUPagedAttention.split_kv_cache(k_cache, self.num_kv_heads, self.head_size)
             k_cache = k_cache[0]  # Use only key_cache for MLA
         query = torch.cat([q_nope, q_pe], dim=-1)
         key_cache = k_cache.unsqueeze(1) if k_cache is not None else None
