@@ -12,7 +12,7 @@ Key optimizations:
 
 import torch
 import torch.nn as nn
-from typing import Optional, List, Tuple
+from typing import Optional
 from collections.abc import Iterable
 
 from vllm.config import VllmConfig
@@ -104,10 +104,6 @@ class HpuDeepseekV3Model(DeepseekV2Model):
         # Initialize with parent, but we'll replace the layers
         super().__init__(*args, **kwargs)
 
-        config = args[0] if args else kwargs.get('config')
-        cache_config = kwargs.get('cache_config')
-        quant_config = kwargs.get('quant_config')
-
         # Replace layers with HPU-optimized versions
         # Note: This assumes layers are in self.layers
         # We keep the same layer structure but with HPU attention
@@ -167,7 +163,7 @@ class HpuDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
             inputs_embeds=inputs_embeds,
         )
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         """
         Load weights - delegates to base implementation.
 

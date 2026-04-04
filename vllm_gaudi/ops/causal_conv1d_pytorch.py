@@ -223,11 +223,11 @@ def hpu_causal_conv1d_fn(
             raise ValueError("'has_initial_state' must align with 'query_start_loc'.")
 
     # Get cache indices
-    if cache_indices is None:
+    if load_cache_indices is None:
         batch_cache_idx = torch.arange(padded_batch, device=x_work.device, dtype=torch.long)
     else:
         # Ensure cache_indices is on the correct device
-        batch_cache_idx = cache_indices.to(x_work.device) if cache_indices.device != x_work.device else cache_indices
+        batch_cache_idx = load_cache_indices.to(x_work.device) if load_cache_indices.device != x_work.device else load_cache_indices
 
     # HPU bucketing pads the batch with state_indices == -1
     # (PAD_SLOT_ID).  Route padding to a *garbage slot* (last entry

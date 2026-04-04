@@ -12,7 +12,7 @@ change per forward pass. We provide both dynamic and graph-friendly versions.
 import torch
 import torch.nn as nn
 import math
-from typing import Optional, Tuple
+from typing import Optional
 
 
 class LightningIndexer(nn.Module):
@@ -63,7 +63,7 @@ class LightningIndexer(nn.Module):
         query_states: torch.Tensor,    # [B, H, T_q, D]
         key_states: torch.Tensor,      # [B, H, T_kv, D]
         attention_mask: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Compute token selection indices.
 
@@ -169,7 +169,7 @@ class GraphFriendlyLightningIndexer(nn.Module):
         key_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         actual_seq_len: Optional[int] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Graph-friendly forward pass.
 

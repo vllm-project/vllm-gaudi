@@ -7,7 +7,7 @@ with sparse attention (Lightning Indexer + Token Selector).
 
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple, List
+from typing import Optional
 from collections.abc import Iterable
 
 from vllm.config import CacheConfig, VllmConfig
@@ -41,8 +41,8 @@ from vllm.model_executor.models.utils import (
 
 # Import our sparse attention implementation (symlinked)
 try:
-    from vllm_gaudi.models.sparse_attention import DeepSeekSparseAttention
-    from vllm_gaudi.models.lightning_indexer import LightningIndexer
+    from vllm_gaudi.models.sparse_attention import DeepSeekSparseAttention  # noqa: F401
+    from vllm_gaudi.models.lightning_indexer import LightningIndexer  # noqa: F401
 except ImportError:
     # Fallback for testing outside vLLM
     import sys
@@ -102,7 +102,6 @@ class DeepSeekSparseDecoderLayer(nn.Module):
 
         # For now, use standard vLLM Attention
         # TODO: Replace with DeepSeekSparseAttention once integrated
-        rope_scaling = getattr(config, "rope_scaling", None)
         self.self_attn = Attention(
             num_heads=config.num_attention_heads,
             head_size=config.hidden_size // config.num_attention_heads,
@@ -130,7 +129,7 @@ class DeepSeekSparseDecoderLayer(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata,
         residual: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self attention with residual
         if residual is None:
             residual = hidden_states
@@ -190,15 +189,12 @@ class DeepSeekSparseModel(nn.Module):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if inputs_embeds is not None:
-            hidden_states = inputs_embeds
-        else:
-            hidden_states = self.embed_tokens(input_ids)
+        hidden_states = inputs_embeds if inputs_embeds is not None else self.embed_tokens(input_ids)
 
         residual = None
         for i in range(self.start_layer, self.end_layer):
@@ -272,7 +268,7 @@ class DeepSeekSparseForCausalLM(nn.Module, SupportsLoRA):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
@@ -295,9 +291,8 @@ class DeepSeekSparseForCausalLM(nn.Module, SupportsLoRA):
         logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         """Load model weights from checkpoint."""
-        stacked_params_mapping = []
         params_dict = dict(self.named_parameters())
 
         for name, loaded_weight in weights:
