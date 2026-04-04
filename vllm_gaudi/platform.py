@@ -111,8 +111,7 @@ class HpuPlatform(Platform):
         cache_config = vllm_config.cache_config
         if not cache_config.user_specified_block_size:
             cache_config.block_size = 128
-        elif (vllm_config.model_config is not None
-              and vllm_config.model_config.is_hybrid
+        elif (vllm_config.model_config is not None and vllm_config.model_config.is_hybrid
               and cache_config.block_size != 128):
             logger.info(
                 "Resetting hybrid-inflated block_size from %d to 128 "
