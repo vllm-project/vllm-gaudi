@@ -61,6 +61,24 @@ logger = init_logger(__name__)
 SUPPORTED_STRATEGIES = [QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR, QuantizationStrategy.BLOCK]
 
 
+def _hpu_weight_scale_alias(layer: torch.nn.Module, scale_name: str, hpu_scale_name: str) -> None:
+    """Rename weight scale name to convention expected by HPU ops
+
+    For example, for block quantization, HPU ops expect `weight_scale` to be named `weight_scale_inv`.
+
+    This preserves compatibility across checkpoints/codepaths that use either
+    naming convention.
+    """
+    if hasattr(layer, hpu_scale_name) or not hasattr(layer, scale_name):
+        return
+
+    # Rename weight_scale to convection expected by HPU ops
+    scale = getattr(layer, scale_name)
+    scale = scale.data if isinstance(scale, torch.nn.Parameter) else scale
+    layer.register_parameter(hpu_scale_name, torch.nn.Parameter(scale, requires_grad=False))
+    delattr(layer, scale_name)
+
+
 @CustomOp.register_oot(name='CompressedTensorsLinearMethod')
 class HPUCompressedTensorsLinearMethod(OrigCompressedTensorsLinearMethod):
 
@@ -160,6 +178,11 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             ws_channelwise = convert_to_channelwise(layer.weight_scale, layer.logical_widths)
             layer.weight_scale = torch.nn.Parameter(ws_channelwise, requires_grad=False)
         elif layer.scheme.strategy == QuantizationStrategy.BLOCK:
+            # Align naming for blockwise quantization parameters to expected format in fp8_block_linear_postprocess_weights
+            # Needed for models like Mistral-Large-3-675B
+            _hpu_weight_scale_alias(layer, "weight_scale", "weight_scale_inv")
+            layer.quant_config.weight_block_size = self.weight_block_size
+
             layer = hpu_ops.fp8_block_linear_postprocess_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
         else:
             # required by torch.compile to be torch.nn.Parameter
@@ -255,7 +278,8 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             layer.register_parameter("input_scale", input_scale)
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor, bias: Optional[torch.Tensor] = None):
-        weight_scale = layer.weight_scale.transpose(0, 1) if layer.weight_scale.dim() > 1 else layer.weight_scale
+        weight_scale = layer.weight_scale_inv if hasattr(layer, "weight_scale_inv") else layer.weight_scale
+        weight_scale = weight_scale.transpose(0, 1) if weight_scale.dim() > 1 else weight_scale
         input_scale = getattr(layer, 'input_scale', None)
         return hpu_ops.apply_fp8_linear_hpu(input=x,
                                             weight=layer.weight,
@@ -382,6 +406,12 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
 
         if self.block_quant:
             assert layer.weight_block_size is not None
+            # Align naming for blockwise quantization parameters to expected format in fp8_block_moe_prepare_weights
+            # Needed for models like Mistral-Large-3-675B
+            _hpu_weight_scale_alias(layer, "w13_weight_scale", "w13_weight_scale_inv")
+            _hpu_weight_scale_alias(layer, "w2_weight_scale", "w2_weight_scale_inv")
+
+            layer.quant_config.weight_block_size = self.weight_block_size
             layer = hpu_ops.fp8_block_moe_prepare_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
         else:
             layer = hpu_ops.fp8_channel_moe_prepare_weights(layer)

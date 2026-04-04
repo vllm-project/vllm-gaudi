@@ -149,7 +149,10 @@ class HPUMLAAttention(MLAAttention):
                 # Channel-wise FP8 (produced by VLLM_HPU_FORCE_CHANNEL_FP8=True):
                 # one scale per output channel; dequant via simple broadcast multiply.
                 ws = weight_scale_inv.view(-1, 1).to(act_dtype)  # [N_out, 1]
-                kv_b_proj_weight = (weight.to(act_dtype) * ws).T
+                weight_fp = weight.to(act_dtype)
+                if weight_fp.shape[0] != ws.shape[0]:
+                    weight_fp = weight_fp.T
+                kv_b_proj_weight = (weight_fp * ws).T
             else:
                 # Block FP8 (force_channel_fp8=False): use HPU block dequant.
                 from vllm_gaudi.extension.ops import dequant_block_fp8_weight_naive
