@@ -239,8 +239,8 @@ fp8.Fp8MoEMethod = HPUFp8MoEMethod
 # Monkey-patch per_token_group_quant_fp8 to add HPU fallback.
 # The pip-installed vLLM 0.16 only has CUDA and triton paths; HPU needs
 # a pure-PyTorch implementation to avoid triton kernel launches.
-from vllm.model_executor.layers.quantization.utils import fp8_utils as _fp8_utils
-from vllm.platforms import current_platform as _current_platform
+from vllm.model_executor.layers.quantization.utils import fp8_utils as _fp8_utils  # noqa: E402
+from vllm.platforms import current_platform as _current_platform  # noqa: E402
 
 _orig_per_token_group_quant_fp8 = _fp8_utils.per_token_group_quant_fp8
 

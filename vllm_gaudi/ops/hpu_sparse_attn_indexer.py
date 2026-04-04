@@ -88,10 +88,7 @@ class HPUSparseAttnIndexer(SparseAttnIndexer):
         self.topk_indices_buffer[:num_tokens] = -1
 
         # Dequantize q_fp8 to float for matmul if needed
-        if q_fp8.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
-            q = q_fp8.to(hidden_states.dtype)
-        else:
-            q = q_fp8
+        q = q_fp8.to(hidden_states.dtype) if q_fp8.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz) else q_fp8
 
         # Compute attention-like scores: q @ k^T weighted by indexer weights
         # q: [num_tokens, head_dim], k: [num_tokens, head_dim]
