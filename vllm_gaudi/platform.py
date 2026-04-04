@@ -102,8 +102,23 @@ class HpuPlatform(Platform):
 
         # NOTE(kzawora): default block size for Gaudi should be 128
         # smaller sizes still work, but very inefficiently
+        # For hybrid models (GDN/Mamba), HybridAttentionMambaModelConfig
+        # runs before this method and may inflate block_size (e.g. to 1056)
+        # to satisfy mamba page-size constraints computed for GPU kernels.
+        # On HPU the paged-attention kernel always operates with 128-token
+        # blocks, so we must reset block_size to 128 unconditionally;
+        # the mamba_page_size_padded realignment below handles the rest.
         cache_config = vllm_config.cache_config
         if not cache_config.user_specified_block_size:
+            cache_config.block_size = 128
+        elif (vllm_config.model_config is not None
+              and vllm_config.model_config.is_hybrid
+              and cache_config.block_size != 128):
+            logger.info(
+                "Resetting hybrid-inflated block_size from %d to 128 "
+                "for Gaudi kernel compatibility.",
+                cache_config.block_size,
+            )
             cache_config.block_size = 128
         # Hybrid GDN/Mamba models: upstream HybridAttentionMambaModelConfig
         # already ran and computed block_size / mamba_page_size_padded for
