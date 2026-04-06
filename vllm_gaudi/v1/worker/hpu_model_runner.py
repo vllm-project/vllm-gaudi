@@ -4381,7 +4381,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         Returns True when:
         - VLLM_SPLIT_MOE_COMPILATION=true (explicit flag), OR
-        - The model has >= 64 MoE experts (auto-detect heuristic)
+        - The model has > 256 MoE experts (auto-detect heuristic)
 
         AND the module actually contains a MoE MLP.
         """
@@ -4395,15 +4395,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if not is_moe:
             return False
 
-        # Check explicit flag
-        if get_config().split_moe_compilation:
-            return True
+        # If VLLM_SPLIT_MOE_COMPILATION is explicitly set, parse it directly
+        # to avoid config-system resolution issues.
+        env_val = os.environ.get('VLLM_SPLIT_MOE_COMPILATION')
+        if env_val is not None:
+            return env_val.lower() in ('true', 't', '1', 'yes', 'y', 'on')
 
-        # Auto-detect: split when num_experts >= 200
+        # Auto-detect: split when num_experts > 256
         hf_config = getattr(self.model_config, 'hf_text_config', getattr(self.model_config, 'hf_config', None))
         if hf_config is not None:
             num_experts = getattr(hf_config, 'num_experts', getattr(hf_config, 'num_local_experts', 0))
-            if num_experts >= 200:
+            if num_experts > 256:
                 return True
 
         return False
