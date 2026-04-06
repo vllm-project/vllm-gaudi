@@ -9,6 +9,10 @@ MULTIMODAL_CONFIG = {
         'is_batch_based': True,
         'buckets': [1, 2, 4, 8]
     },
+    'gemma-4': {
+        'is_batch_based': True,
+        'buckets': [1, 2, 4, 8]
+    },
 
     # Pixel-based models
     'ovis': {

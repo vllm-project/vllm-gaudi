@@ -455,9 +455,9 @@ def modify_model_layers(module: torch.nn.Module, suffix_list: list[str], n=1, co
 
 
 def is_mm_optimized(model):
-    return 'Gemma3ForConditionalGeneration' in str(type(model.model)) \
-        if hasattr(model, 'model') else \
-        'Gemma3ForConditionalGeneration' in str(type(model))
+    model_type_str = str(type(model.model)) if hasattr(model, 'model') else str(type(model))
+    return 'Gemma3ForConditionalGeneration' in model_type_str \
+        or 'Gemma4ForConditionalGeneration' in model_type_str
 
 
 def patch_llama4_get_attn_scale(model):
@@ -5183,8 +5183,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             for idx in range(len(candidates)):
                 if is_batch_based:
                     image_args = candidates[idx]
-                    width = 896  # pixels as in gemma3 config
-                    height = 896  # pixels as in gemma3 config
+                    width = 896  # pixels for batch-based multimodal warmup
+                    height = 896
                 else:
                     image_args = None
                     width, height = candidates[idx]

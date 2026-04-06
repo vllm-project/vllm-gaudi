@@ -1,0 +1,9 @@
+model_name: "google/gemma-4-12b-it"
+test_config:
+  - modality: image
+    extra_engine_args:
+      mm_processor_kwargs:
+          max_soft_tokens: 280
+    input_data_config:
+      num_prompts: 4
+      media_source: default

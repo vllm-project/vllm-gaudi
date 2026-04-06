@@ -104,10 +104,21 @@ class PROMPT_DATA:
                     skip_vision_data=False):
 
         # Handle multi-image modality
+        model_name_lower = model_name.lower()
         if modality == "multi_image" or modality == "image":
-            pholder = "<start_of_image>" * num_images if "gemma" in model_name.lower() else "<|image_pad|>" * num_images
+            if "gemma-4" in model_name_lower or "gemma4" in model_name_lower:
+                pholder = "\t<|image|>" * num_images
+            elif "gemma" in model_name_lower:
+                pholder = "<start_of_image>" * num_images
+            else:
+                pholder = "<|image_pad|>" * num_images
         elif modality == "video":
-            pholder = "<video>" if "gemma" in model_name.lower() else "<|video_pad|>"
+            if "gemma-4" in model_name_lower or "gemma4" in model_name_lower:
+                pholder = "<|video|>"
+            elif "gemma" in model_name_lower:
+                pholder = "<video>"
+            else:
+                pholder = "<|video_pad|>"
         else:
             raise ValueError(f"Unsupported modality: {modality}."
                              " Supported modality: [image, video, multi_image]")
