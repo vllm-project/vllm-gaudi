@@ -4344,7 +4344,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         1. Children of the nn.ModuleList
         2. Member of regional_compilation_layers_list
 
-        When split_moe_compilation is enabled, MoE decoder layers
+        When split MoE compilation is enabled, MoE decoder layers
         have their sub-components (self_attn, mlp, layernorms) compiled
         individually instead of as a single unit. This splits the large
         attention+MoE graph into smaller pieces, dramatically reducing
@@ -4379,11 +4379,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         """
         Decide whether to split-compile a decoder layer's sub-components.
 
-        Returns True when:
-        - VLLM_SPLIT_MOE_COMPILATION=true (explicit flag), OR
-        - The model has > 256 MoE experts (auto-detect heuristic)
-
-        AND the module actually contains a MoE MLP.
+        Returns True when the model has more MoE experts than the
+        configurable threshold (default 256, controlled via
+        VLLM_SPLIT_MOE_EXPERT_THRESHOLD env var) AND the module
+        actually contains a MoE MLP.
         """
         mlp = getattr(module, 'mlp', None)
         if mlp is None:
