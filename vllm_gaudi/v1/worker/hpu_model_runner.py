@@ -5130,6 +5130,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         else 0,
                         _DECODE_BLOCK_BUCKETS[-1] if _DECODE_BLOCK_BUCKETS
                         else 0)
+            # Populate prefill block buckets BEFORE prompt warmup so that
+            # _pad_prefill_block_list_to_bucket can pad block_list during
+            # warmup compilation (otherwise 0-context buckets compile with
+            # block_list=None, causing runtime recompilations).
+            global _PREFILL_BLOCK_BUCKETS
+            _PREFILL_BLOCK_BUCKETS = sorted(
+                set(b[2] for b in self.bucketing_manager.prompt_buckets
+                    if b[2] > 0))
+            if _PREFILL_BLOCK_BUCKETS:
+                logger.info(
+                    "Prefill block buckets for padding: %d entries, "
+                    "range [%d, %d]",
+                    len(_PREFILL_BLOCK_BUCKETS),
+                    _PREFILL_BLOCK_BUCKETS[0],
+                    _PREFILL_BLOCK_BUCKETS[-1])
         else:
             self.bucketing_manager.decode_buckets = []
 
@@ -5218,17 +5233,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     self.warmup_graphs(
                         self.bucketing_manager.prompt_buckets, True, kv_caches)
                 self.log_graph_warmup_summary(self.bucketing_manager.prompt_buckets, True, mem_post_prompt)
-                global _PREFILL_BLOCK_BUCKETS
-                _PREFILL_BLOCK_BUCKETS = sorted(
-                    set(b[2] for b in self.bucketing_manager.prompt_buckets
-                        if b[2] > 0))
-                if _PREFILL_BLOCK_BUCKETS:
-                    logger.info(
-                        "Prefill block buckets for padding: %d entries, "
-                        "range [%d, %d]",
-                        len(_PREFILL_BLOCK_BUCKETS),
-                        _PREFILL_BLOCK_BUCKETS[0],
-                        _PREFILL_BLOCK_BUCKETS[-1])
                 if not self.is_pooling_model:
                     mem_post_decode, decode_batch_seq, decode_captured_all = \
                       self.warmup_graphs(
