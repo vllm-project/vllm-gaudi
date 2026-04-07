@@ -735,19 +735,41 @@ def _pad_prefill_block_list_to_bucket(attn_metadata, batch_size: int):
     max_context_len (derived from block_list.size(-1)) matches
     a shape exercised during warmup, preventing recompilation.
 
-    Padded block entries (value 0) are safe because the bias mask
-    in _set_attn_bias_for_chunked_attention uses past_indices <
-    context_lens_t, which excludes padded positions.
+    When block_list is None (zero-context first prefill), a zero-filled
+    tensor matching the smallest warmed bucket is created.  This ensures
+    process_metadata always receives a tensor, eliminating the
+    None-vs-Tensor type guard mismatch that causes extra compilations.
+
+    Padded / synthetic block entries (value 0) are safe because the bias
+    mask in _set_attn_bias_for_chunked_attention uses
+    past_indices < context_lens_t, which excludes padded positions
+    when context_lens_tensor is 0.
     """
     if not attn_metadata.is_prompt or not _PREFILL_BLOCK_BUCKETS:
         return attn_metadata
+    bs = max(batch_size, 1)
     block_list = getattr(attn_metadata, 'block_list', None)
     if block_list is None or not isinstance(block_list, torch.Tensor) or block_list.numel() == 0:
-        return attn_metadata
-    bs = max(batch_size, 1)
+        # Zero-context prefill: create a zero-filled block_list matching
+        # the smallest non-zero warmed bucket so that process_metadata
+        # always receives a tensor with a bucket-aligned size.
+        nonzero = [b for b in _PREFILL_BLOCK_BUCKETS if b > 0]
+        if not nonzero:
+            return attn_metadata
+        target = nonzero[0]
+        device = attn_metadata.seq_lens_tensor.device
+        padded = torch.zeros(target * bs, dtype=torch.int64, device=device)
+        return custom_tuple_replace(
+            attn_metadata, "TrimmedAttentionMetadata", block_list=padded)
+    # Normalize dtype to int64 for consistency across prefill and decode.
+    if block_list.dtype != torch.int64:
+        block_list = block_list.to(torch.int64)
     num_blocks = block_list.size(-1) // bs
     target = _snap_to_prefill_bucket(num_blocks)
     if target <= num_blocks:
+        if block_list is not getattr(attn_metadata, 'block_list', None):
+            return custom_tuple_replace(
+                attn_metadata, "TrimmedAttentionMetadata", block_list=block_list)
         return attn_metadata
     pad_n = (target - num_blocks) * bs
     padded = torch.nn.functional.pad(block_list, (0, pad_n), value=0)
@@ -2382,7 +2404,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         logits_indices = async_h2d_copy(logits_indices, dtype=torch.int32)
         context_lens = async_h2d_copy(context_lens, dtype=torch.int32)
         context_blocks_t: Optional[torch.tensor]
-        context_blocks_t = async_h2d_copy(context_blocks, dtype=torch.int32).flatten() if target_blocks > 0 else None
+        context_blocks_t = async_h2d_copy(context_blocks, dtype=torch.int64).flatten() if target_blocks > 0 else None
 
         attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(seq_lens_tensor=query_lens,
                                                                      context_lens_tensor=context_lens,
