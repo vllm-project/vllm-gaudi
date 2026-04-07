@@ -3,15 +3,15 @@ tasks:
 - name: "gsm8k"
   metrics:
   - name: "exact_match,strict-match"
-    value: 0.66
+    value: 0.85
   - name: "exact_match,flexible-extract"
-    value: 0.66
-limit: 12
+    value: 0.85
+limit: 256
 num_fewshot: 5
-max_num_seqs: 4
-max_model_len: 8196
-batch_size: 4
+max_num_seqs: 32
+max_model_len: 16384
+batch_size: 32
 dtype: "bfloat16"
 trust_remote_code: True
-model_args: "gpu_memory_utilization=0.5,reasoning_parser=qwen3,max_num_batched_tokens=8196"
+model_args: "gpu_memory_utilization=0.7,reasoning_parser=qwen3,max_num_batched_tokens=16384"
 gen_kwargs: "max_gen_toks=2048"
