@@ -6036,16 +6036,27 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         if layer_name in kv_caches:
                             continue
                         state_tensors = []
-                        offset_bytes = 0
+                        storage_offset_bytes = 0
                         for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
                             dtype_size = get_dtype_size(dtype)
+                            num_element_per_page = (
+                                kv_cache_spec.page_size_bytes // dtype_size
+                            )
                             target_shape = (num_blocks + 1, *shape)
-                            num_elements = math.prod(target_shape)
-                            num_bytes = num_elements * dtype_size
-                            # int8 → target dtype → reshape
-                            state = raw[offset_bytes:offset_bytes + num_bytes].view(dtype).view(target_shape)
+                            stride = torch.empty(target_shape).stride()
+                            target_stride = (num_element_per_page, *stride[1:])
+                            assert storage_offset_bytes % dtype_size == 0
+                            # Use page-aligned strides so mamba state blocks
+                            # do not overlap with attention K/V blocks that
+                            # share the same raw tensor.
+                            state = torch.as_strided(
+                                raw.view(dtype),
+                                size=target_shape,
+                                stride=target_stride,
+                                storage_offset=storage_offset_bytes // dtype_size,
+                            )
                             state_tensors.append(state)
-                            offset_bytes += num_bytes
+                            storage_offset_bytes += stride[0] * dtype_size
                         # Share state tensors with other mamba layers in the
                         # same kv_cache_tensor. Guard: do not overwrite
                         # attention entries already set by the attention path.
@@ -6159,9 +6170,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                                  self.block_size, dtype, self.profiler)
             logger.info("Allocating unified persistent batch took %.4f GB of host memory",
                         m.consumed_host_memory / float(2**30))
-        # TODO: check if this one is needed; for now seems that not
-        # if has_mamba:
-        #     self._update_hybrid_attention_mamba_layout(kv_caches)
+        if self.num_mamba_layers > 0:
+            self._update_hybrid_attention_mamba_layout(kv_caches)
 
         htorch.hpu.synchronize()
 
