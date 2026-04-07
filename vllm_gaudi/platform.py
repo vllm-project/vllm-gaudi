@@ -183,16 +183,24 @@ class HpuPlatform(Platform):
         compilation_config.cudagraph_capture_sizes = []
 
         cfg = get_config()
-        if cfg.VLLM_CONTIGUOUS_PA:
+        model_type = getattr(vllm_config.model_config.hf_config, 'model_type', None)
+        is_granite_hybrid = model_type == 'granitemoehybrid'
+        user_set_contiguous = os.environ.get('VLLM_CONTIGUOUS_PA') is not None
+
+        contiguous_pa_enabled = cfg.VLLM_CONTIGUOUS_PA if user_set_contiguous else not is_granite_hybrid
+
+        if contiguous_pa_enabled and is_granite_hybrid:
+            logger.warning("Contiguous PA forced via env var but incompatible with Granite hybrid model. Disabling.")
+            contiguous_pa_enabled = False
+
+        if contiguous_pa_enabled:
             if vllm_config.cache_config.enable_prefix_caching:
-                logger.info(
-                    "Prefix caching was enabled. Disabling contiguous PA as it is incompatible with prefix caching."
-                )
-                cfg._data['VLLM_CONTIGUOUS_PA'] = False
-                cfg._data['use_contiguous_pa'] = False
+                logger.info("Contiguous PA is the default behavior on Gaudi. Disabling prefix caching.")
             else:
                 logger.info("Contiguous PA is the default behavior on Gaudi.")
-                vllm_config.cache_config.enable_prefix_caching = False
+            vllm_config.cache_config.enable_prefix_caching = False
+        elif is_granite_hybrid:
+            logger.info("Granite hybrid model detected. Contiguous PA is disabled.")
 
         if compilation_config.mode != CompilationMode.NONE:
             logger.info("[HPU] Forcing CompilationMode.NONE "

@@ -78,10 +78,9 @@ def get_features():
         ValueFromList('prompt_attn_impl', supported_attn_impls),
         Value('skip_warmup', False),
         Value('merged_prefill', False),
-        Value(
-            'use_contiguous_pa',
-            All(Not(ModelType('granitemoehybrid')), Disabled('prefix_caching')),
-            env_var='VLLM_CONTIGUOUS_PA'),
+        Value('use_contiguous_pa',
+              All(Not(ModelType('granitemoehybrid')), Disabled('prefix_caching')),
+              env_var='VLLM_CONTIGUOUS_PA'),
         Value('use_bucketing', True, env_var='VLLM_ENABLE_BUCKETING'),
         Value('exponential_bucketing', True),
         Value('linear_bucketing', True),
