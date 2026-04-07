@@ -142,12 +142,13 @@ def test_mamba_strided_views_into_backing_tensor():
     assert ssm_end_byte <= page_size, "mamba state exceeds page!"
 
 
-def test_attention_strided_views_into_backing_tensor():
-    """Show how attention K/V can use strided views into the backing tensor.
+def test_attention_sliced_views_into_backing_tensor():
+    """Show how attention K/V uses slice views into the backing tensor.
 
-    This is the CORRECT approach: create K and V as strided views with
-    stride[0] = page_size // dtype_size, placing K+V at the start of
-    each page and skipping the unused padding.
+    This is the CORRECT approach: reshape the backing tensor to expose
+    the slot structure, then slice K and V regions within each slot.
+    Uses reshape/slice/unflatten (torch.compile-friendly, avoids
+    as_strided).
     """
     page_size, _, _, _, _ = _compute_page_size_bytes()
     N = NUM_BLOCKS + 1
@@ -156,35 +157,23 @@ def test_attention_strided_views_into_backing_tensor():
 
     attn_dtype_size = ATTN_DTYPE.itemsize  # 2 (bfloat16)
     elems_per_page = page_size // attn_dtype_size
+    slot_stride = elems_per_page // BLOCK_SIZE
+    kv_elements = NUM_KV_HEADS * HEAD_SIZE
+    num_slots = N * BLOCK_SIZE
 
-    kv_shape = (N, BLOCK_SIZE, NUM_KV_HEADS, HEAD_SIZE)
-    # K inner strides: (BLOCK_SIZE * NUM_KV_HEADS * HEAD_SIZE, NUM_KV_HEADS * HEAD_SIZE, HEAD_SIZE, 1)
-    inner_stride = torch.empty(kv_shape).stride()
-    kv_stride = (elems_per_page, *inner_stride[1:])
+    k_bytes_per_block = BLOCK_SIZE * kv_elements * attn_dtype_size  # 131,072
 
-    k_elems_per_block = BLOCK_SIZE * NUM_KV_HEADS * HEAD_SIZE  # 65,536
-    k_bytes_per_block = k_elems_per_block * attn_dtype_size     # 131,072
+    # Create K/V via reshape + slice + unflatten
+    slots_2d = backing.view(ATTN_DTYPE).reshape(num_slots, slot_stride)
+    k_view = slots_2d[:, :kv_elements].unflatten(
+        1, (NUM_KV_HEADS, HEAD_SIZE))
+    v_view = slots_2d[:, kv_elements:2 * kv_elements].unflatten(
+        1, (NUM_KV_HEADS, HEAD_SIZE))
 
-    # K view — starts at byte 0 of each page
-    k_view = torch.as_strided(
-        backing.view(ATTN_DTYPE),
-        size=kv_shape,
-        stride=kv_stride,
-        storage_offset=0,
-    )
-
-    # V view — starts after K data
-    v_view = torch.as_strided(
-        backing.view(ATTN_DTYPE),
-        size=kv_shape,
-        stride=kv_stride,
-        storage_offset=k_elems_per_block,
-    )
-
-    assert k_view.shape == (N, BLOCK_SIZE, NUM_KV_HEADS, HEAD_SIZE)
-    assert v_view.shape == (N, BLOCK_SIZE, NUM_KV_HEADS, HEAD_SIZE)
-    assert k_view.stride(0) == elems_per_page
-    assert v_view.stride(0) == elems_per_page
+    assert k_view.shape == (num_slots, NUM_KV_HEADS, HEAD_SIZE)
+    assert v_view.shape == (num_slots, NUM_KV_HEADS, HEAD_SIZE)
+    assert k_view.stride(0) == slot_stride
+    assert v_view.stride(0) == slot_stride
 
     # ── No overlap within one page ──
     k_end_byte = k_bytes_per_block          # 131,072
@@ -200,16 +189,20 @@ def test_attention_strided_views_into_backing_tensor():
         "K data from page i would bleed into page i+1")
 
 
-def test_3d_strided_kv_cache_index_ops():
-    """Verify that 3D strided K/V caches work with index_copy_ and
-    index_select, matching the flat_pa pattern used in HPU attention.
+def test_3d_sliced_kv_cache_index_ops():
+    """Verify that 3D K/V cache views (from reshape/slice/unflatten) work
+    with index_copy_ and index_select, matching the flat_pa pattern used
+    in HPU attention.
 
-    The actual implementation creates 3D K/V tensors:
-      shape  = (num_slots, num_kv_heads, head_size)
-      stride = (slot_stride, head_size, 1)
+    The actual implementation creates 3D K/V tensors via:
+      slots_2d = backing.view(dtype).reshape(num_slots, slot_stride)
+      kc = slots_2d[:, :kv_elements].unflatten(1, (num_kv_heads, head_size))
+      vc = slots_2d[:, kv_elements:2*kv_elements].unflatten(1, (...))
 
-    where slot_stride = page_elements // block_size, and slot indexing
-    maps slot = block_id * block_size + offset to the correct page.
+    This gives shape = (num_slots, num_kv_heads, head_size) with
+    stride = (slot_stride, head_size, 1), identical to as_strided but
+    using torch.compile-friendly standard view operations.
+
     This test verifies:
       1. index_copy_ writes to the correct memory locations
       2. index_select reads back the correct data
@@ -233,19 +226,12 @@ def test_3d_strided_kv_cache_index_ops():
     assert 2 * kv_elements <= slot_stride, (
         f"K+V ({2*kv_elements}) exceeds slot_stride ({slot_stride})")
 
-    # Create 3D strided K and V
-    kc = torch.as_strided(
-        backing.view(ATTN_DTYPE),
-        size=(num_slots, NUM_KV_HEADS, HEAD_SIZE),
-        stride=(slot_stride, HEAD_SIZE, 1),
-        storage_offset=0,
-    )
-    vc = torch.as_strided(
-        backing.view(ATTN_DTYPE),
-        size=(num_slots, NUM_KV_HEADS, HEAD_SIZE),
-        stride=(slot_stride, HEAD_SIZE, 1),
-        storage_offset=kv_elements,
-    )
+    # Create 3D K and V via reshape + slice + unflatten
+    slots_2d = backing.view(ATTN_DTYPE).reshape(num_slots, slot_stride)
+    kc = slots_2d[:, :kv_elements].unflatten(
+        1, (NUM_KV_HEADS, HEAD_SIZE))
+    vc = slots_2d[:, kv_elements:2 * kv_elements].unflatten(
+        1, (NUM_KV_HEADS, HEAD_SIZE))
 
     assert kc.shape == (num_slots, NUM_KV_HEADS, HEAD_SIZE)
     assert vc.shape == (num_slots, NUM_KV_HEADS, HEAD_SIZE)
@@ -340,19 +326,19 @@ def test_contiguous_reshape_fails_when_page_larger_than_kv():
         backing.view(ATTN_DTYPE).reshape(
             2, N * BLOCK_SIZE, NUM_KV_HEADS, HEAD_SIZE)
 
-    # But strided views WORK
-    kv_shape = (N, BLOCK_SIZE, NUM_KV_HEADS, HEAD_SIZE)
-    inner_stride = torch.empty(kv_shape).stride()
-    kv_stride = (elems_per_page, *inner_stride[1:])
-    k_elems = BLOCK_SIZE * NUM_KV_HEADS * HEAD_SIZE
+    # But reshape + slice views WORK
+    slot_stride = elems_per_page // BLOCK_SIZE
+    kv_elements = NUM_KV_HEADS * HEAD_SIZE
+    num_slots = N * BLOCK_SIZE
 
-    k_view = torch.as_strided(
-        backing, size=kv_shape, stride=kv_stride, storage_offset=0)
-    v_view = torch.as_strided(
-        backing, size=kv_shape, stride=kv_stride, storage_offset=k_elems)
+    slots_2d = backing.reshape(num_slots, slot_stride)
+    k_view = slots_2d[:, :kv_elements].unflatten(
+        1, (NUM_KV_HEADS, HEAD_SIZE))
+    v_view = slots_2d[:, kv_elements:2 * kv_elements].unflatten(
+        1, (NUM_KV_HEADS, HEAD_SIZE))
 
-    assert k_view.shape == kv_shape
-    assert v_view.shape == kv_shape
+    assert k_view.shape == (num_slots, NUM_KV_HEADS, HEAD_SIZE)
+    assert v_view.shape == (num_slots, NUM_KV_HEADS, HEAD_SIZE)
 
 
 def test_no_overlap_all_views():

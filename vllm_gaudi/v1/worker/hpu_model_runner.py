@@ -5998,14 +5998,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #   On GPU, the attention layer views the backing tensor
             #   directly (K and V interleaved per block, with
             #   _update_hybrid_attention_mamba_layout re-striding).
-            #   On HPU, K and V are created as strided views of the
-            #   backing tensor using torch.as_strided.  The slot stride
-            #   (dim-0 stride) is page_elements // block_size, so flat
-            #   slot indexing (index_copy_ with slot_mapping) maps each
-            #   slot to the correct page-aligned position.  K occupies
-            #   the first kv_elements per slot, V follows with a
-            #   storage_offset of kv_elements.  No separate allocation
-            #   is needed.
+            #   On HPU, K and V are created as views of the backing
+            #   tensor using reshape/slice/unflatten (which avoids
+            #   torch.as_strided for torch.compile compatibility).
+            #   The slot stride (dim-0 stride) is
+            #   page_elements // block_size, so flat slot indexing
+            #   (index_copy_ with slot_mapping) maps each slot to
+            #   the correct page-aligned position.  K occupies the
+            #   first kv_elements per slot, V follows immediately
+            #   after.  No separate allocation is needed.
             #
             # HOW ONE BACKING TENSOR IS USED BY 9 MAMBA + 1 ATTENTION:
             #
@@ -6102,7 +6103,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #   Mamba page (grp0-8):                Attention page (grp9):
             #   ┌──────────────────────────────┐    ┌──────────────────────────────┐
             #   │ byte 0          │             │    │ K+V viewed from backing      │
-            #   │  conv_state     │ S0 bytes    │    │ tensor via torch.as_strided  │
+            #   │  conv_state     │ S0 bytes    │    │ tensor via reshape/slice     │
             #   │  (float32)      │ (used)      │    │                              │
             #   ├─────────────────┤             │    │ Per slot within page:        │
             #   │ byte S0         │             │    │  K: kv_elements (used)       │
@@ -6177,7 +6178,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #   MAMBA2 page:                    ATTENTION page:
             #   byte 0                          byte 0
             #   ┌────────────────────────┐      ┌───────────────────────────┐
-            #   │ conv_state (float32)   │      │ K+V data via as_strided   │
+            #   │ conv_state (float32)   │      │ K+V data via slice views  │
             #   │ 104,448 B (2.4%)       │      │                           │
             #   │ ▓▓                     │      │ Per slot (×16 per page):  │
             #   ├────────────────────────┤      │  K: 4096 bf16 (8,192 B)   │
@@ -6199,27 +6200,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             #     Size = N × 4,298,752 bytes (+ 1 dummy page)
             #     Shared by: 9 mamba2 layers + 1 attention layer
             #     Mamba2 uses 100% of bytes in its assigned pages
-            #     Attention uses strided views (K+V at page start)
+            #     Attention uses slice views (K+V at page start)
             #
             #   HPU memory per tensor[i] (no overhead):
             #     backing tensor:     N × 4,298,752 B
-            #     (K/V are strided views — no separate allocation)
+            #     (K/V are slice views — no separate allocation)
             #
-            #   Strided K/V layout within one attention page:
+            #   K/V layout within one attention page:
             #
             #     page_elements = page_size_bytes / dtype_size
             #     slot_stride   = page_elements / block_size
             #     kv_elements   = num_kv_heads × head_size
             #
-            #     K = as_strided(backing.view(bf16),
-            #           size  = ((N+1)×16, 32, 128),
-            #           stride= (slot_stride, 128, 1),
-            #           offset= 0)
-            #
-            #     V = as_strided(backing.view(bf16),
-            #           size  = ((N+1)×16, 32, 128),
-            #           stride= (slot_stride, 128, 1),
-            #           offset= kv_elements)
+            #     slots_2d = backing.view(bf16).reshape(num_slots, slot_stride)
+            #     K = slots_2d[:, :kv_elements].unflatten(1, (32, 128))
+            #     V = slots_2d[:, kv_elements:2*kv_elements].unflatten(1, (32, 128))
             #
             #   For Granite 4.0: slot_stride = 2,149,376/16 = 134,336
             #   K uses elements [0, 4096) per slot
@@ -6259,12 +6254,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
-                        # Create K and V as strided views of the backing
-                        # tensor (same approach as mamba layers).
+                        # Create K and V as views of the backing tensor
+                        # using standard reshape/slice/unflatten ops
+                        # (torch.compile-friendly, avoids as_strided).
                         # Each page has room for K+V+padding.  K and V are
-                        # placed consecutively at the start of each page:
-                        #   K: kv_elements per slot × block_size slots
-                        #   V: kv_elements per slot × block_size slots
+                        # placed consecutively at the start of each slot:
+                        #   K: kv_elements per slot
+                        #   V: kv_elements per slot
                         # The slot stride (dim-0 stride) is
                         #   page_elements // block_size
                         # so that slot (block_id * block_size + offset)
@@ -6289,24 +6285,22 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             f"{2*kv_elements}) exceeds slot stride "
                             f"({slot_stride}); K and V data would overlap")
                         num_slots = (num_blocks + 1) * block_size
-                        kc = torch.as_strided(
-                            raw_tensor.view(dtype),
-                            size=(num_slots, num_kv_heads, head_size),
-                            stride=(slot_stride, head_size, 1),
-                            storage_offset=0,
-                        )
-                        vc = torch.as_strided(
-                            raw_tensor.view(dtype),
-                            size=(num_slots, num_kv_heads, head_size),
-                            stride=(slot_stride, head_size, 1),
-                            storage_offset=kv_elements,
-                        )
+                        # Reshape to (num_slots, slot_stride), slice K and V
+                        # regions, then unflatten to 3D.  This avoids
+                        # torch.as_strided which is suboptimal for
+                        # torch.compile.
+                        slots_2d = raw_tensor.view(dtype).reshape(
+                            num_slots, slot_stride)
+                        kc = slots_2d[:, :kv_elements].unflatten(
+                            1, (num_kv_heads, head_size))
+                        vc = slots_2d[:, kv_elements:2 * kv_elements].unflatten(
+                            1, (num_kv_heads, head_size))
                         kv_caches[layer_name] = (kc, vc, None, None)
                         logger.debug(
                             "[Hybrid cache] Attention layer %s: "
                             "K/V shape=%s, dtype=%s, num_blocks=%d, "
                             "slot_stride=%d (page_elements=%d, "
-                            "block_size=%d); strided views of backing "
+                            "block_size=%d); views of backing "
                             "tensor (no separate allocation)",
                             layer_name, kv_cache_shape,
                             dtype, num_blocks,
@@ -6381,7 +6375,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # tensor per kv_cache_tensor (including +1 dummy page), then
             # create strided views for both mamba and attention layers.
             # Attention K/V are placed at the start of each page using
-            # torch.as_strided, with the same page stride as mamba.
+            # reshape/slice/unflatten, with the same page stride as mamba.
             page_size_bytes = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
                 # Taking into account dummy block (+1 page).
@@ -6414,8 +6408,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
-                        # Attention K/V as strided views of the backing
-                        # tensor (same page layout as mamba).
+                        # Attention K/V as views of the backing tensor
+                        # using reshape/slice/unflatten (torch.compile-
+                        # friendly, same page layout as mamba).
                         raw_tensor = kv_caches[layer_name]
                         dtype = kv_cache_spec.dtype
                         dtype_size = dtype.itemsize
@@ -6436,18 +6431,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             f"{2*kv_elements}) exceeds slot stride "
                             f"({slot_stride}); K and V data would overlap")
                         num_slots = (num_blocks + 1) * block_size
-                        kc = torch.as_strided(
-                            raw_tensor.view(dtype),
-                            size=(num_slots, num_kv_heads, head_size),
-                            stride=(slot_stride, head_size, 1),
-                            storage_offset=0,
-                        )
-                        vc = torch.as_strided(
-                            raw_tensor.view(dtype),
-                            size=(num_slots, num_kv_heads, head_size),
-                            stride=(slot_stride, head_size, 1),
-                            storage_offset=kv_elements,
-                        )
+                        slots_2d = raw_tensor.view(dtype).reshape(
+                            num_slots, slot_stride)
+                        kc = slots_2d[:, :kv_elements].unflatten(
+                            1, (num_kv_heads, head_size))
+                        vc = slots_2d[:, kv_elements:2 * kv_elements].unflatten(
+                            1, (num_kv_heads, head_size))
                         kv_caches[layer_name] = (kc, vc, None, None)
                     elif isinstance(kv_cache_spec, MambaSpec):
                         # Mamba layers use strided views into the shared
