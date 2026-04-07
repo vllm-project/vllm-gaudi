@@ -105,16 +105,18 @@ class HpuPlatform(Platform):
         # For hybrid models (GDN/Mamba), HybridAttentionMambaModelConfig
         # runs before this method and may inflate block_size (e.g. to 1056)
         # to satisfy mamba page-size constraints computed for GPU kernels.
-        # On HPU the paged-attention kernel always operates with 128-token
-        # blocks, so we must reset block_size to 128 unconditionally;
-        # the mamba_page_size_padded realignment below handles the rest.
+        # In the Gaudi hybrid path, we normalize that inflated value back to
+        # 128 so the HPU paged-attention setup remains aligned with the
+        # expectations of the logic below; mamba_page_size_padded is then
+        # re-aligned afterwards to handle the remaining hybrid-specific
+        # layout constraints.
         cache_config = vllm_config.cache_config
         if not cache_config.user_specified_block_size:
             cache_config.block_size = 128
         elif (vllm_config.model_config is not None and vllm_config.model_config.is_hybrid
               and cache_config.block_size != 128):
             logger.info(
-                "Resetting hybrid-inflated block_size from %d to 128 "
+                "Resetting hybrid model block_size from %d to 128 "
                 "for Gaudi kernel compatibility.",
                 cache_config.block_size,
             )
