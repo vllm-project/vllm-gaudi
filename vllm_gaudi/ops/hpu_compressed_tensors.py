@@ -22,6 +22,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     SparsityCompressionConfig,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors_moe)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
+    compressed_tensors_moe_wna16,
+    compressed_tensors_moe_wna16_marlin,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (  # noqa: E501
     CompressedTensorsScheme, CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
@@ -1007,6 +1011,10 @@ compressed_tensors_moe.CompressedTensorsWNA16MoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod
 compressed_tensors_moe.CompressedTensorsWNA16MarlinMoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod # Override default WNA16 MoE method
+compressed_tensors_moe_wna16.CompressedTensorsWNA16MoEMethod = \
+    HPUCompressedTensorsWNA16MoEMethod
+compressed_tensors_moe_wna16_marlin.CompressedTensorsWNA16MarlinMoEMethod = \
+    HPUCompressedTensorsWNA16MoEMethod
 compressed_tensors.CompressedTensorsConfig = HPUCompressedTensorsConfig
 
 # support weight_loader_v2
