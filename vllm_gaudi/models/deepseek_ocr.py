@@ -10,7 +10,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalDataDict
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.models.deepseek_ocr import (
     DeepseekOCRForCausalLM,
     DeepseekOCRMultiModalProcessor,

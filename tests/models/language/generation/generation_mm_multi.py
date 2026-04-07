@@ -3,7 +3,6 @@ from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.image import ImageAsset, ImageAssetName
 from vllm.assets.video import VideoAsset
 from vllm.multimodal.image import convert_image_mode
-from dataclasses import asdict
 from typing import Union, get_args
 from PIL import Image
 from dataclasses import dataclass
@@ -170,8 +169,7 @@ def run_model(model_name: str, inputs: Union[dict, list[dict]], modality: str, *
 
     engine_args = EngineArgs(model=model_name, **extra_engine_args)
 
-    engine_args = asdict(engine_args)
-    llm = LLM(**engine_args)
+    llm = LLM.from_engine_args(engine_args)
 
     outputs = llm.generate(
         inputs,
