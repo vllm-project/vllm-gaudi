@@ -4395,12 +4395,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if not is_moe:
             return False
 
-        # If VLLM_SPLIT_MOE_COMPILATION is explicitly set, parse it directly
-        # to avoid config-system resolution issues.
-        env_val = os.environ.get('VLLM_SPLIT_MOE_COMPILATION')
-        if env_val is not None:
-            return env_val.lower() in ('true', 't', '1', 'yes', 'y', 'on')
-
         # Auto-detect: split when num_experts > threshold
         hf_config = getattr(self.model_config, 'hf_text_config', getattr(self.model_config, 'hf_config', None))
         if hf_config is not None:
