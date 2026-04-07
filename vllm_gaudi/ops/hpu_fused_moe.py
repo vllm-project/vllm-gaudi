@@ -78,6 +78,18 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             dispatch_fn = None
 
         bias = has_bias if has_bias is True else None
+
+        is_bf16 = getattr(layer, 'w13_weight', None) is not None and layer.w13_weight.dtype == torch.bfloat16
+
+        model_config = None
+        if getattr(layer, "vllm_config", None) is not None:
+            model_config = getattr(layer.vllm_config, "model_config", None)
+
+        is_unquantized = (model_config is None) or (not has_quant_config(model_config))
+
+        cache_weight_lists = bool(is_bf16 and is_unquantized)
+
+        # Pass cache flag into moe_op (requires ops.py __init__ signature update)
         layer.moe_op = VllmMixtureOfExpertsOp(layer.global_num_experts, num_experts, experts_min, experts_max, bias,
                                               dispatch_fn)
 
@@ -87,6 +99,10 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             if has_bias:
                 layer.moe_op.w13_list[expert_id].set_bias(layer.w13_bias.data[expert_id])
                 layer.moe_op.w2_list[expert_id].set_bias(layer.w2_bias.data[expert_id])
+
+        # Build cache once AFTER weights/bias are set (BF16 + unquantized only)
+        if cache_weight_lists and hasattr(layer.moe_op, "_cache_weight_lists"):
+            layer.moe_op._cache_weight_lists()
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int, params_dtype: torch.dtype, **extra_weight_attrs):
