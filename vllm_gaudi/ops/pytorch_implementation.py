@@ -290,7 +290,8 @@ def selective_state_update_ref(state,
         assert dt_bias.shape == (nheads, dim)
         dt = dt + dt_bias
     if dt_softplus:
-        dt = torch.where(dt <= softplus_thres, F.softplus(dt), dt)
+        dt = F.softplus(dt, threshold=softplus_thres)
+
     dA = torch.exp(dt * A).unsqueeze(-1) if compact_A else torch.exp(dt.unsqueeze(-1) * A)
     # Rewrite (dt * B) * x as (dt * x) * B: saves one 33.5M-element multiply
     dx = (dt * x).unsqueeze(-1)  # (batch, nheads, dim, 1)
