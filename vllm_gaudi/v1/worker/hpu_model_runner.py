@@ -4401,11 +4401,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if env_val is not None:
             return env_val.lower() in ('true', 't', '1', 'yes', 'y', 'on')
 
-        # Auto-detect: split when num_experts > 256
+        # Auto-detect: split when num_experts > threshold
         hf_config = getattr(self.model_config, 'hf_text_config', getattr(self.model_config, 'hf_config', None))
         if hf_config is not None:
             num_experts = getattr(hf_config, 'num_experts', getattr(hf_config, 'num_local_experts', 0))
-            if num_experts > 256:
+            if num_experts > get_config().split_moe_expert_threshold:
                 return True
 
         return False
