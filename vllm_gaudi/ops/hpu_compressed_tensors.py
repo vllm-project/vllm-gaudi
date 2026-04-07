@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 )
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors_moe)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
+    compressed_tensors_moe_w8a8_fp8,
     compressed_tensors_moe_wna16,
     compressed_tensors_moe_wna16_marlin,
 )
@@ -1006,6 +1007,8 @@ class HPUCompressedTensorsConfig(CompressedTensorsConfig):
 compressed_tensors.CompressedTensorsLinearMethod = \
     HPUCompressedTensorsLinearMethod
 compressed_tensors_moe.CompressedTensorsW8A8Fp8MoEMethod = \
+    HPUCompressedTensorsW8A8Fp8MoEMethod
+compressed_tensors_moe_w8a8_fp8.CompressedTensorsW8A8Fp8MoEMethod = \
     HPUCompressedTensorsW8A8Fp8MoEMethod
 compressed_tensors_moe.CompressedTensorsWNA16MoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod
