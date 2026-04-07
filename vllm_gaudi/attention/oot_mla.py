@@ -124,6 +124,12 @@ class HPUMLAAttention(MLAAttention):
         if output is not None:
             raise NotImplementedError("output is not yet supported for MLAImplBase")
 
+        # Lazily move projection weights to the compute device if they are
+        # still on CPU (e.g. after FP8 dequant in process_weights_after_loading).
+        if self.W_UK_T.device != q.device:
+            self.W_UK_T = self.W_UK_T.to(q.device)
+            self.W_UV = self.W_UV.to(q.device)
+
         is_prefill = attn_metadata.is_prompt
 
         if not is_prefill:
@@ -201,8 +207,8 @@ class HPUMLAAttention(MLAAttention):
                 self.qk_nope_head_dim + self.v_head_dim,
             )
             W_UK, W_UV = kv_b_proj_weight.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-            self.W_UV = W_UV.transpose(0, 1).contiguous()
-            self.W_UK_T = W_UK.permute(1, 2, 0).contiguous()
+            self.register_buffer('W_UV', W_UV.transpose(0, 1).contiguous(), persistent=False)
+            self.register_buffer('W_UK_T', W_UK.permute(1, 2, 0).contiguous(), persistent=False)
 
             from vllm.model_executor.layers.attention.attention import (set_default_quant_scales,
                                                                         should_load_quant_weights)
@@ -213,8 +219,8 @@ class HPUMLAAttention(MLAAttention):
         else:
             # Non-FP8 kv_b_proj: use upstream logic as before.
             MLAAttention.process_weights_after_loading(self, act_dtype)
-            self.W_UV = self.W_UV.contiguous()
-            self.W_UK_T = self.W_UK_T.contiguous()
+            self.register_buffer('W_UV', self.W_UV.contiguous(), persistent=False)
+            self.register_buffer('W_UK_T', self.W_UK_T.contiguous(), persistent=False)
 
     # NOTE(Chendi): PR25184 using output buffer as default, which can't be used in HPU Graph,
     # so we override and always return a new tensor
