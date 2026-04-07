@@ -443,9 +443,9 @@ class ModuleFP8FusedSDPA(ModuleFusedSDPABase):
         window_size=None,
     ):
 
-        qinput = self.quant_input(query, self.scale_q)
-        kinput = self.quant_input(key, self.scale_k)
-        vinput = self.quant_input(value, self.scale_v)
+        qinput = self.quant_input(query, self.scale_q).detach()
+        kinput = self.quant_input(key, self.scale_k).detach()
+        vinput = self.quant_input(value, self.scale_v).detach()
 
         bs = query.shape[0]
         q_len = query.shape[-2]
@@ -510,8 +510,7 @@ class ModuleFP8FusedSDPA(ModuleFusedSDPABase):
             q_start = max(q_start, 0)
             q_end = q_len - q_chunk_idx * self.chunk_size
             q_chunk_size = q_end - q_start
-            q_chunk = q[..., q_start:q_end, :].clone() if self.with_graph_breaks else q[..., q_start:q_end, :]
-
+            q_chunk = q[..., q_start:q_end, :].detach()
             last_out = None
             last_m = None
             last_linv = None
@@ -522,21 +521,17 @@ class ModuleFP8FusedSDPA(ModuleFusedSDPABase):
                 kv_start = max(kv_start, prefix_len)
                 kv_end = prefix_len + q_end - kv_chunk_idx * self.chunk_size
                 kv_chunk_size = kv_end - kv_start
-                k_chunk = k[..., kv_start:kv_end, :]
-                v_chunk = v[..., kv_start:kv_end, :]
+                k_chunk = k[..., kv_start:kv_end, :].detach()
+                v_chunk = v[..., kv_start:kv_end, :].detach()
 
                 is_causal_chunk = kv_chunk_idx == 0 and q_chunk_idx >= self.num_padded_query_chunks
                 # chunk sizes must be multiples of 1024 to get valid m and linv
                 is_causal_chunk = is_causal_chunk and q_chunk_size % 1024 == 0 and kv_chunk_size % 1024 == 0
                 # use mask only for the causal chunks that may have padding
-                mask_chunk = (attn_mask[..., q_start:q_end, kv_start:kv_end]
+                mask_chunk = (attn_mask[..., q_start:q_end, kv_start:kv_end].detach() \
                               if kv_chunk_idx < self.num_padded_query_chunks and not is_causal_chunk else None)
 
                 if self.with_graph_breaks:
-                    # break_graph() cannot break the tensor slicing, use clone to isolate the graph
-                    k_chunk = k_chunk.clone()
-                    v_chunk = v_chunk.clone()
-                    mask_chunk = mask_chunk.clone() if mask_chunk is not None else None
                     self.break_graph()
 
                 chunk_res = self.fp8_fsdpa_fwd(q_chunk, k_chunk, v_chunk, mask_chunk, dropout_p, scale, is_causal_chunk,
