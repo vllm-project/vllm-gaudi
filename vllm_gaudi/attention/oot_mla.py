@@ -18,6 +18,8 @@ from vllm.forward_context import ForwardContext, get_forward_context
 class HPUMLAAttention(MLAAttention):
 
     scale: float
+    W_UK_T: torch.Tensor
+    W_UV: torch.Tensor
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
