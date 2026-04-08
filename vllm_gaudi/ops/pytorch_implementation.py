@@ -225,6 +225,7 @@ def new_ssd_bmm(a, b, chunk_size, causal=False, output_dtype=None):
 
 # Based on https://github.com/state-spaces/mamba/blob/95d8aba8a8c75aedcaa6143713b11e745e7cd0d9/mamba_ssm/ops/triton/selective_state_update.py#L219
 # Added support for softplus threshold which is applied by default in the triton kernel.
+# Optimized: A can be passed as compact (nheads,) to avoid dstate x exp overhead.
 def selective_state_update_ref(state,
                                x,
                                dt,
@@ -257,7 +258,10 @@ def selective_state_update_ref(state,
         x = x.unsqueeze(1)
     if dt.dim() == 2:
         dt = dt.unsqueeze(1)
-    if A.dim() == 2:
+    compact_A = (A.dim() == 1)
+    if compact_A:
+        A = A[None, :, None]  # (nheads,) -> (1, nheads, 1) for broadcast with (batch, nheads, dim)
+    elif A.dim() == 2:
         A = A.unsqueeze(0)
     if B.dim() == 2:
         B = B.unsqueeze(1)
@@ -272,7 +276,8 @@ def selective_state_update_ref(state,
     batch, nheads, dim, dstate = state.shape
     assert x.shape == (batch, nheads, dim)
     assert dt.shape == x.shape
-    assert A.shape == (nheads, dim, dstate)
+    if not compact_A:
+        assert A.shape == (nheads, dim, dstate)
     ngroups = B.shape[1]
     assert nheads % ngroups == 0, "nheads must be divisible by ngroups"
     assert B.shape == (batch, ngroups, dstate)
@@ -285,13 +290,22 @@ def selective_state_update_ref(state,
         assert dt_bias.shape == (nheads, dim)
         dt = dt + dt_bias
     if dt_softplus:
-        dt = torch.where(dt <= softplus_thres, F.softplus(dt), dt)
-    dA = torch.exp(dt.unsqueeze(-1) * A)  # (batch, nheads, dim, dstate)
-    B = B.repeat_interleave(nheads // ngroups, dim=1)  # (batch, nheads, dstate)
-    C = C.repeat_interleave(nheads // ngroups, dim=1)  # (batch, nheads, dstate)
-    dB = dt.unsqueeze(-1) * B.unsqueeze(-2)  # (batch, nheads, dim, dstate)
-    state.copy_(state * dA + dB * x.unsqueeze(-1))  # (batch, dim, dstate)
-    out = torch.einsum("bhdn,bhn->bhd", state.to(C.dtype), C)
+        dt = F.softplus(dt, threshold=softplus_thres)
+
+    dA = torch.exp(dt * A).unsqueeze(-1) if compact_A else torch.exp(dt.unsqueeze(-1) * A)
+    # Rewrite (dt * B) * x as (dt * x) * B: saves one 33.5M-element multiply
+    dx = (dt * x).unsqueeze(-1)  # (batch, nheads, dim, 1)
+    if ngroups == 1 and nheads > 1:
+        # ngroups=1: B and C are identical for all heads.
+        # Skip repeat_interleave (128x copy) — use stride-0 broadcast instead.
+        # B: (batch, 1, dstate) broadcasts over nheads and dim via unsqueeze
+        state.copy_(state * dA + dx * B.unsqueeze(-2))  # B (batch,1,dstate) broadcasts
+        out = torch.einsum("bhdn,bhn->bhd", state.to(C.dtype), C.expand(-1, nheads, -1))  # stride-0 expand, no copy
+    else:
+        B = B.repeat_interleave(nheads // ngroups, dim=1)  # (batch, nheads, dstate)
+        C = C.repeat_interleave(nheads // ngroups, dim=1)  # (batch, nheads, dstate)
+        state.copy_(state * dA + dx * B.unsqueeze(-2))  # (batch, nheads, dim, dstate)
+        out = torch.einsum("bhdn,bhn->bhd", state.to(C.dtype), C)
     if D is not None:
         out += (x * D).to(out.dtype)
     out = (out if z is None else out * F.silu(z)).to(x.dtype)

@@ -3,16 +3,16 @@ model_card:
   tasks: "gsm8k"
   num_fewshot: 5
   trust_remote_code: true
-  limit: 12
-  max_num_seqs: 2
-  max_model_len: 4096
-  batch_size: 2
+  limit: 512
+  max_num_seqs: 256
+  max_model_len: 16384
+  batch_size: 32
   dtype: bfloat16
-  gpu_memory_utilization: 0.5
+  gpu_memory_utilization: 0.7
   reasoning_parser: qwen3
-  max_num_batched_tokens: 4096
-  max_gen_toks: 1024
+  max_num_batched_tokens: 16384
+  max_gen_toks: 2048
 
 metrics:
   name: exact_match,strict-match
-  value: 0.66
+  value: 0.85
