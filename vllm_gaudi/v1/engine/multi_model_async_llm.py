@@ -10,6 +10,7 @@ from collections.abc import AsyncGenerator
 import asyncio
 import contextlib
 import cloudpickle
+import os
 import time
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -63,6 +64,7 @@ class MultiModelAsyncLLM:
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         disable_log_stats: bool = False,
         enable_log_requests: bool = False,
+        model_quant_configs: dict[str, str | None] | None = None,
     ):
         """
         Initialize multi-model manager.
@@ -72,6 +74,8 @@ class MultiModelAsyncLLM:
             usage_context: Engine usage context
             disable_log_stats: Disable stats logging
             enable_log_requests: Enable request logging
+            model_quant_configs: Optional dict mapping model names to their
+                QUANT_CONFIG path (INC FP8 calibration JSON)
         """
         install_engine_core_patch()
 
@@ -88,12 +92,29 @@ class MultiModelAsyncLLM:
         self.usage_context = usage_context
         self.disable_log_stats = disable_log_stats
         self.enable_log_requests = enable_log_requests
+        self.model_quant_configs: dict[str, str | None] = model_quant_configs or {}
 
         # Pre-create VllmConfig for each model
         logger.info("Creating configs for %s models", len(model_configs))
         for name, args in model_configs.items():
             self._vllm_configs[name] = args.create_engine_config(usage_context)
             logger.info("  %s: %s", name, self._vllm_configs[name].model_config.model)
+
+    def _apply_quant_config_env(self, model_name: str) -> None:
+        """Set or unset QUANT_CONFIG in the current process for *model_name*.
+
+        Call it before the workers are spawned (initialize) or
+        before gaudi_reconfigure_engine sends load_model to the workers
+        (switch_model), so that each worker process inherits / uses the
+        correct quantization calibration file for the target model.
+        """
+        quant_config_path = self.model_quant_configs.get(model_name)
+        if quant_config_path is not None:
+            os.environ["QUANT_CONFIG"] = quant_config_path
+            logger.info("[quant_config] QUANT_CONFIG=%s (model=%s)", quant_config_path, model_name)
+        else:
+            os.environ.pop("QUANT_CONFIG", None)
+            logger.info("[quant_config] QUANT_CONFIG unset (model=%s)", model_name)
 
     @property
     def current_model(self) -> str | None:
@@ -195,6 +216,7 @@ class MultiModelAsyncLLM:
         if self._engine is not None:
             raise RuntimeError("Engine already initialized. Use switch_model() instead.")
         logger.info("Initializing engine with: %s", model_name)
+        self._apply_quant_config_env(model_name)
         args = self.model_configs[model_name]
         args.disable_log_stats = self.disable_log_stats
         args.enable_log_requests = self.enable_log_requests
@@ -281,10 +303,12 @@ class MultiModelAsyncLLM:
                 # Step 2: Reconfigure engine core and scheduler in-process
                 logger.info("Reconfiguring engine for: %s", model_name)
                 serialized_config = cloudpickle.dumps(self._vllm_configs[model_name])
+                quant_config_path = self.model_quant_configs.get(model_name)
                 reconfigure_start = time.perf_counter()
                 reconfigure_result = await self._engine.engine_core.call_utility_async(
                     "gaudi_reconfigure_engine",
                     serialized_config,
+                    quant_config_path,
                 )
                 reconfigure_s = time.perf_counter() - reconfigure_start
                 logger.info(

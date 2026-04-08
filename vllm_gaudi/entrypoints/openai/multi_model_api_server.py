@@ -324,7 +324,8 @@ def _validate_model_frontend_overrides(
             load_chat_template(override.chat_template)
 
 
-def _load_multi_model_config(path: str) -> tuple[dict[str, AsyncEngineArgs], str, dict[str, ModelFrontendOverrides]]:
+def _load_multi_model_config(
+    path: str, ) -> tuple[dict[str, AsyncEngineArgs], str, dict[str, ModelFrontendOverrides], dict[str, str | None]]:
     with open(path) as f:
         data = yaml.safe_load(f)
 
@@ -338,6 +339,7 @@ def _load_multi_model_config(path: str) -> tuple[dict[str, AsyncEngineArgs], str
     config_dir = os.path.dirname(os.path.abspath(path))
     model_configs: dict[str, AsyncEngineArgs] = {}
     model_frontend_overrides: dict[str, ModelFrontendOverrides] = {}
+    model_quant_configs: dict[str, str | None] = {}
     for name, raw_cfg in raw_models.items():
         if not isinstance(raw_cfg, dict):
             raise ValueError(f"Model config for '{name}' must be a mapping.")
@@ -367,6 +369,16 @@ def _load_multi_model_config(path: str) -> tuple[dict[str, AsyncEngineArgs], str
             overrides.chat_template = chat_template
 
         model_frontend_overrides[name] = overrides
+
+        quant_config: str | None = None
+        if "quant_config" in raw_cfg_copy:
+            quant_config = raw_cfg_copy.pop("quant_config")
+            if quant_config is not None and not isinstance(quant_config, str):
+                raise ValueError(f"Model '{name}' field 'quant_config' must be a string path.")
+            if isinstance(quant_config, str) and not os.path.isabs(quant_config):
+                quant_config = os.path.abspath(os.path.join(config_dir, quant_config))
+        model_quant_configs[name] = quant_config
+
         try:
             model_configs[name] = AsyncEngineArgs(**raw_cfg_copy)
         except TypeError as e:
@@ -379,7 +391,7 @@ def _load_multi_model_config(path: str) -> tuple[dict[str, AsyncEngineArgs], str
         raise ValueError(f"Default model '{default_model}' not found in config models: "
                          f"{list(model_configs.keys())}")
 
-    return model_configs, default_model, model_frontend_overrides
+    return model_configs, default_model, model_frontend_overrides, model_quant_configs
 
 
 def _build_model_registry(manager: MultiModelAsyncLLM) -> tuple[dict[str, BaseModelPath], dict[str, int]]:
@@ -404,13 +416,14 @@ async def build_multi_model_engine_client(
         raise ValueError("A multi-model config path must be set when multi-model mode is enabled. "
                          "Supported env var: VLLM_HPU_MULTI_MODEL_CONFIG.")
 
-    model_configs, default_model, model_frontend_overrides = _load_multi_model_config(config_path)
+    model_configs, default_model, model_frontend_overrides, model_quant_configs = _load_multi_model_config(config_path)
     _validate_model_frontend_overrides(args, model_frontend_overrides)
     manager = MultiModelAsyncLLM(
         model_configs,
         usage_context=usage_context,
         disable_log_stats=args.disable_log_stats,
         enable_log_requests=args.enable_log_requests,
+        model_quant_configs=model_quant_configs,
     )
 
     await manager.initialize(default_model)
