@@ -133,6 +133,9 @@ from vllm.model_executor.models.bert import _encode_token_type_ids
 
 logger = init_logger()
 
+MASK_VALUES = {torch.float32: -3E38, torch.bfloat16: -3E38, torch.float16: -6E4}
+DEFAULT_MASK_VALUE = -3E38
+
 try:
     from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
 except ImportError:
@@ -2054,6 +2057,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         return all_batch_contents, num_pad_across_dp
 
     def _make_attn_bias(self, context_groups, token_groups):
+        dtype = self.dtype
         is_causal = True  # TODO: add support for non-causal tasks
         context_groups = torch.tensor(context_groups, device='cpu', dtype=torch.int16)
         context_groups = context_groups.repeat_interleave(self.block_size, dim=-1)
@@ -2066,7 +2070,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             causal_mask = torch.ones(num_queries, num_queries, device='cpu', dtype=torch.bool)
             causal_mask = torch.triu(causal_mask, diagonal=1).unsqueeze(0)
             attn_mask[:, :, context_len:].logical_or_(causal_mask)
-        attn_mask = ~attn_mask
+        attn_mask = attn_mask.to(dtype).masked_fill_(attn_mask, MASK_VALUES.get(dtype, DEFAULT_MASK_VALUE))
 
         return attn_mask.unflatten(0, (1, -1))
 
@@ -3786,15 +3790,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.is_pooling_model:
             len_mask_v = len_mask.view(batch_size, 1, seq_len, 1)
             mask = attn_mask.logical_or(len_mask).logical_or(len_mask_v)
-            off_value = -3E38  # small number, avoid nan and overflow
-            if dtype == torch.float16:
-                off_value = -63000  # a small value close to float16.min
         else:
             mask = attn_mask.logical_or(len_mask)  # no need for len_mask_v as decode overwrites it
-            off_value = -math.inf
 
         mask = torch.concat((past_mask, mask), dim=-1)
-        attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(mask, off_value))
+        attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(mask, MASK_VALUES.get(dtype, DEFAULT_MASK_VALUE)))
         attn_metadata = custom_tuple_replace(prefill_metadata, "TrimmedAttentionMetadata", attn_bias=attn_bias)
         return attn_metadata
 
@@ -6547,7 +6547,7 @@ class HPUAttentionMetadataProcessor:
                                  diagonal=1)
         mask = causal_mask.logical_or(len_mask)
         mask = torch.concat((past_mask, mask), dim=-1)
-        attn_bias = ~mask
+        attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(mask, MASK_VALUES.get(dtype, DEFAULT_MASK_VALUE)))
         attn_metadata = custom_tuple_replace(prefill_metadata, "TrimmedAttentionMetadata", attn_bias=attn_bias)
         return attn_metadata
 
@@ -6605,13 +6605,19 @@ class HPUAttentionMetadataProcessor:
             #     seq_lens_t.unsqueeze(-1)).view(batch_size, 1, 1, seq_len))
             # causal_mask = causal_mask.logical_and(len_mask)
 
-            attn_bias = torch.concat((past_mask, causal_mask), dim=-1)
+            mask = torch.concat((past_mask, causal_mask), dim=-1)
+            attn_bias = torch.where(
+                mask, torch.tensor(0.0, dtype=dtype, device=device),
+                torch.tensor(MASK_VALUES.get(dtype, DEFAULT_MASK_VALUE), dtype=dtype, device=device))
         else:
             # CAUSAL MASK without removing padding (CAUSAL+sliding window)
             # removing padding cause accuracy issue for images input
-            tensor = torch.ones((batch_size, 1, seq_len, seq_len), device=device, dtype=torch.bool)
+            tensor = torch.full((batch_size, 1, seq_len, seq_len), device=device, dtype=dtype, fill_value=1)
             mask = torch.tril(tensor, diagonal=shift)
-            attn_bias = torch.triu(mask, diagonal=shift - window_size + 1)
+            mask = torch.triu(mask, diagonal=shift - window_size + 1)
+            attn_bias = torch.where(
+                mask, torch.tensor(0.0, dtype=dtype, device=device),
+                torch.tensor(MASK_VALUES.get(dtype, DEFAULT_MASK_VALUE), dtype=dtype, device=device))
 
         attn_metadata = prefill_metadata._replace(window_attn_bias=attn_bias)
         return attn_metadata
@@ -6664,15 +6670,21 @@ class HPUAttentionMetadataProcessor:
             causal_mask = causal_mask & same_chunk_mask
             causal_mask = causal_mask.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, seq_len, seq_len)
 
-            attn_bias = torch.concat((past_mask, causal_mask), dim=-1)
+            mask = torch.concat((past_mask, causal_mask), dim=-1)
+            attn_bias = torch.where(
+                mask, torch.tensor(0.0, dtype=dtype, device=device),
+                torch.tensor(MASK_VALUES.get(dtype, DEFAULT_MASK_VALUE), dtype=dtype, device=device))
         else:
-            tensor = torch.ones((batch_size, 1, seq_len, seq_len), device=device, dtype=torch.bool)
+            tensor = torch.full((batch_size, 1, seq_len, seq_len), device=device, dtype=dtype, fill_value=1)
             mask = torch.tril(tensor, diagonal=shift)
             idx = torch.arange(seq_len, device=device)
             chunk_id = idx // chunk_size
             same_chunk = chunk_id.unsqueeze(0) == chunk_id.unsqueeze(1)
             same_chunk = same_chunk.unsqueeze(0).unsqueeze(0)
-            attn_bias = same_chunk & mask
+            mask = torch.where(same_chunk, mask, torch.tensor(0.0, dtype=dtype, device=device))
+            attn_bias = torch.where(
+                mask, torch.tensor(0.0, dtype=dtype, device=device),
+                torch.tensor(MASK_VALUES.get(dtype, DEFAULT_MASK_VALUE), dtype=dtype, device=device))
 
         attn_metadata = custom_tuple_replace(prefill_metadata, "TrimmedAttentionMetadata", chunked_attn_bias=attn_bias)
         return attn_metadata
@@ -6711,7 +6723,8 @@ class HPUAttentionMetadataProcessor:
             block_groups = metadata.block_groups
 
         mask = torch.arange(0, self.block_size, device=device, dtype=torch.int32).unsqueeze(0)
-        attn_bias = mask < block_usage.unsqueeze(-1)
+        mask = mask >= block_usage.unsqueeze(-1)
+        attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(mask, MASK_VALUES.get(dtype, DEFAULT_MASK_VALUE)))
 
         if not is_fake_hpu():
             block_mapping = torch.nn.functional.one_hot(block_groups, num_classes=batch_size)
