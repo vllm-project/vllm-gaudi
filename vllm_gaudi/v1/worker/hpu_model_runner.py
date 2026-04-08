@@ -5239,6 +5239,42 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                           self.bucketing_manager.decode_buckets, False, kv_caches)
                     self.log_graph_warmup_summary(self.bucketing_manager.decode_buckets, False, mem_post_decode)
 
+        # Validation warmup outside compile-only mode: re-run a small
+        # set of prompt and decode buckets to trigger any compilations
+        # that compile-only tracing missed (e.g. heterogeneous layer
+        # types like Llama4 with nope/MoE/residual variants where
+        # chunked_attn_bias rank differs between prefill and decode).
+        if (not self.model_config.enforce_eager
+                and not self.is_pooling_model
+                and not self.skip_warmup
+                and can_use_compile_only_mode):
+            # Pick one prompt bucket with context (non-zero num_blocks)
+            # so the chunked attention path is triggered properly.
+            prompt_validation: list[tuple[int, int, int]] = []
+            for b in self.bucketing_manager.prompt_buckets:
+                if b[2] > 0:  # has context blocks
+                    prompt_validation.append(b)
+                    break
+            if prompt_validation:
+                logger.info(
+                    "Validation warmup (prompt): %s outside "
+                    "compile-only mode", prompt_validation)
+                self.warmup_graphs(prompt_validation, True, kv_caches)
+
+            # Pick one decode bucket per unique batch size.
+            seen_bs: set[int] = set()
+            decode_validation: list[tuple[int, int, int]] = []
+            for b in self.bucketing_manager.decode_buckets:
+                if b[0] not in seen_bs:
+                    seen_bs.add(b[0])
+                    decode_validation.append(b)
+            if decode_validation:
+                logger.info(
+                    "Validation warmup (decode): %d buckets (one per "
+                    "batch size) outside compile-only mode",
+                    len(decode_validation))
+                self.warmup_graphs(decode_validation, False, kv_caches)
+
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
         if os.getenv('VLLM_FULL_WARMUP', 'false').strip().lower() in ("1", "true"):
