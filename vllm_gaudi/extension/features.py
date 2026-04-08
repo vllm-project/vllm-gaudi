@@ -40,6 +40,9 @@ def get_user_flags():
         Env('PT_HPU_WEIGHT_SHARING', str),
         Env('RUNTIME_SCALE_PATCHING', str),
 
+        # Graph break controls
+        Env('VLLM_MOE_GRAPH_BREAK', boolean),
+
         # Sliding window flags
         Env('PT_HPU_SDPA_QKV_SLICE_MODE_FWD', boolean),
         Env('PT_HPU_SDPA_BC_FACTOR', int),
@@ -100,6 +103,7 @@ def get_features():
         Value('moe_chunk', "", env_var='VLLM_MOE_CHUNK', env_var_type=list_of(int)),
         Value('moe_token_boundary', "", env_var='VLLM_MOE_TOKEN_BOUNDARY', env_var_type=list_of(int)),
         Value('split_moe_compilation', False, env_var='VLLM_SPLIT_MOE_COMPILATION', env_var_type=boolean),
+        Value('moe_graph_break', False, env_var='VLLM_MOE_GRAPH_BREAK', env_var_type=boolean),
         Value('row_parallel_chunks', 1, env_var='VLLM_ROW_PARALLEL_CHUNKS', env_var_type=int),
         Value('row_parallel_chunk_threshold', 8192, env_var='VLLM_ROW_PARALLEL_CHUNK_THRESHOLD', env_var_type=int),
         Value('use_dispatch_fn',
