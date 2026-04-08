@@ -5261,6 +5261,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     seen_ql.add(b[1])
                     prompt_validation.append(b)
             if prompt_validation:
+                # Remove from graphed_buckets so warmup_graphs actually
+                # re-runs them (compile-only mode already added them).
+                for b in prompt_validation:
+                    self.graphed_buckets.discard(
+                        (b[0], b[1], b[2], True))
                 logger.info(
                     "Validation warmup (prompt): %d buckets (one per "
                     "query length) outside compile-only mode",
@@ -5275,6 +5280,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     seen_bs.add(b[0])
                     decode_validation.append(b)
             if decode_validation:
+                for b in decode_validation:
+                    self.graphed_buckets.discard(
+                        (b[0], b[1], b[2], False))
                 logger.info(
                     "Validation warmup (decode): %d buckets (one per "
                     "batch size) outside compile-only mode",
