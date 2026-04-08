@@ -32,6 +32,10 @@ def _get_prefix(cfg):
     conti_pa = os.environ.get('VLLM_CONTIGUOUS_PA')
     if conti_pa is not None:
         return not boolean(conti_pa)
+    # If user explicitly asked for prefix caching via CLI, respect it.
+    import sys
+    if '--enable-prefix-caching' in sys.argv:
+        return True
     # Default: contiguous PA is ON for Gaudi (prefix caching OFF),
     # except for granite hybrid which doesn't support contiguous PA.
     model_type = cfg.get('model_type') if cfg else None
