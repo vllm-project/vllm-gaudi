@@ -1,6 +1,5 @@
 import torch
-import vllm.model_executor.models.qwen3_5 as qwen3_5_module
-from vllm.model_executor.models.qwen3_5 import Qwen3_5GatedDeltaNet
+from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention
 from vllm.forward_context import get_forward_context
 
 from vllm_gaudi.ops.causal_conv1d_pytorch import (
@@ -27,7 +26,7 @@ def _save_ssm_state(core_attn_out, final_state, ssm_state, state_indices):
     return core_attn_out
 
 
-class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
+class HPUGatedDeltaNetAttention(GatedDeltaNetAttention):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -269,6 +268,6 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         output_flat[:num_tokens], _ = self.out_proj(core_attn_out)
 
 
-# Replace the class in the upstream module so that Qwen3_5DecoderLayer
-# instantiates HPUQwen3_5GatedDeltaNet instead of the original.
-qwen3_5_module.Qwen3_5GatedDeltaNet = HPUQwen3_5GatedDeltaNet
+# Replace the class in the upstream module so that GatedDeltaNetAttention
+# instantiates GatedDeltaNetAttention instead of the original.
+GatedDeltaNetAttention = HPUGatedDeltaNetAttention
