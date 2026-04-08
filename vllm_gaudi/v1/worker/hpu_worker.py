@@ -319,6 +319,43 @@ class HPUWorker(WorkerBase):
                     max_model_len, block_size,
                     self.cache_config.gpu_memory_utilization)
 
+        # For hybrid models (attention + mamba), HPU uses a flat KV cache
+        # layout where K and V are separate contiguous arrays.  This makes
+        # it impossible to share a single raw tensor between attention
+        # (K/V) and mamba (conv/ssm) without memory corruption.  We
+        # therefore allocate independent tensors for each layer type, which
+        # costs roughly 2x what the shared layout would.  Reduce the
+        # reported available memory so the upstream scheduler computes a
+        # num_blocks that fits the separate allocation.
+        has_attn = False
+        has_mamba = False
+        attn_page_size = 0
+        mamba_state_per_block = 0
+        for layer_spec in kv_cache_spec.values():
+            if isinstance(layer_spec, FullAttentionSpec):
+                has_attn = True
+                attn_page_size = layer_spec.page_size_bytes
+            elif isinstance(layer_spec, MambaSpec):
+                has_mamba = True
+                if mamba_state_per_block == 0:
+                    mamba_state_per_block = sum(
+                        math.prod(s) * torch.tensor(
+                            [], dtype=d).element_size()
+                        for s, d in zip(
+                            layer_spec.shapes, layer_spec.dtypes))
+        if has_attn and has_mamba and attn_page_size > 0:
+            # Scale down so upstream divides by (page + mamba) instead of
+            # just page when computing num_blocks.
+            ratio = attn_page_size / (attn_page_size
+                                      + mamba_state_per_block)
+            usable_cache_bytes = int(usable_cache_bytes * ratio)
+            logger.info(
+                "Hybrid model: adjusted usable KV cache from "
+                "%s to %s (attn_page=%d, mamba_state=%d, ratio=%.3f)",
+                format_bytes(cache_size_bytes - dummy_block_headroom),
+                format_bytes(usable_cache_bytes),
+                attn_page_size, mamba_state_per_block, ratio)
+
         # Clear the dummy KV cache to free up memory
         kv_caches = {}
         forward_context = self.vllm_config.compilation_config.static_forward_context
