@@ -1212,13 +1212,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.defrag_kv_caches: list | None = None
 
     def _resolve_block(self, block_id):
-        if not getattr(self, 'defragmenter', None):
+        if self.defragmenter is None:
             return block_id
 
         return self.defragmenter.resolve(block_id)
 
     def _resolve_all_blocks(self, block_table_list: list[list[int]]) -> list[list[int]]:
-        if not getattr(self, 'defragmenter', None):
+        if self.defragmenter is None:
             return [[self._resolve_block(b) for b in bl] for bl in block_table_list]
 
         return self.defragmenter.resolve_all(block_table_list)
@@ -5246,7 +5246,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             )
 
         if not self.is_pooling_model and self.defrag_kv_caches:
-            self.defragmenter = OnlineDefragmenter(self.defrag_kv_caches, self.block_size)
+            self.defragmenter = OnlineDefragmenter(self.defrag_kv_caches, self.block_size)  # type: ignore[arg-type]
         # Profiling
         prompt_profile_cfg, decode_profile_cfg = self._read_profiling_cfg()
         if prompt_profile_cfg or decode_profile_cfg:
@@ -5329,7 +5329,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # reusing defragmenter used in warmup causes accuracy drops, which is why we re-create
         # and re-initialize it.
         if not self.is_pooling_model and self.defrag_kv_caches:
-            self.defragmenter = OnlineDefragmenter(self.defrag_kv_caches, self.block_size)
+            self.defragmenter = OnlineDefragmenter(self.defrag_kv_caches, self.block_size)  # type: ignore[arg-type]
 
     def shutdown_inc(self, suppress=suppress, finalize_calibration=finalize_calibration):
         global shutdown_inc_called
