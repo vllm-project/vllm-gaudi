@@ -19,7 +19,7 @@ from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.pooling_params import PoolingParams
 from vllm.outputs import RequestOutput, PoolingRequestOutput
-from vllm.inputs import PromptType, ProcessorInputs
+from vllm.inputs import PromptType, EngineInput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.renderers import renderer_from_config
 from vllm.v1.engine.input_processor import InputProcessor
@@ -345,7 +345,7 @@ class MultiModelAsyncLLM:
 
     async def generate(
         self,
-        prompt: PromptType | ProcessorInputs,
+        prompt: PromptType | EngineInput,
         sampling_params: SamplingParams,
         request_id: str,
         **kwargs,
@@ -373,7 +373,7 @@ class MultiModelAsyncLLM:
 
     async def encode(
         self,
-        prompt: PromptType | ProcessorInputs,
+        prompt: PromptType | EngineInput,
         pooling_params: PoolingParams,
         request_id: str,
         **kwargs,
