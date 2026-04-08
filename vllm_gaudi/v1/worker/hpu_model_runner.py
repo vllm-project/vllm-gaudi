@@ -5248,17 +5248,23 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 and not self.is_pooling_model
                 and not self.skip_warmup
                 and can_use_compile_only_mode):
-            # Pick one prompt bucket with context (non-zero num_blocks)
-            # so the chunked attention path is triggered properly.
+            # Pick one prompt bucket per unique query length (with
+            # non-zero context blocks) so that heterogeneous layers
+            # compile for every positions-tensor size.  Without this,
+            # layers with different attributes (e.g. nope/MoE) that
+            # were only traced in compile-only mode would recompile
+            # at runtime for unseen query lengths.
+            seen_ql: set[int] = set()
             prompt_validation: list[tuple[int, int, int]] = []
             for b in self.bucketing_manager.prompt_buckets:
-                if b[2] > 0:  # has context blocks
+                if b[1] not in seen_ql and b[2] > 0:
+                    seen_ql.add(b[1])
                     prompt_validation.append(b)
-                    break
             if prompt_validation:
                 logger.info(
-                    "Validation warmup (prompt): %s outside "
-                    "compile-only mode", prompt_validation)
+                    "Validation warmup (prompt): %d buckets (one per "
+                    "query length) outside compile-only mode",
+                    len(prompt_validation))
                 self.warmup_graphs(prompt_validation, True, kv_caches)
 
             # Pick one decode bucket per unique batch size.
