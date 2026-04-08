@@ -37,10 +37,23 @@ _USE_EXACT_SOLVE = os.getenv("VLLM_GDN_EXACT_SOLVE", "0") == "1"
 
 
 @torch._dynamo.disable
-def _preprocess_qk_l2norm(q, k):
-    """L2norm in eager mode — HPU torch.compile miscompiles l2norm."""
-    q = _l2norm_last_dim(q.to(torch.float32))
-    k = _l2norm_last_dim(k.to(torch.float32))
+def _l2norm_reduce_pair(qsq: torch.Tensor, ksq: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Eager sum reduction for both q and k — single graph break."""
+    return (torch.sum(qsq, dim=-1, keepdim=True),
+            torch.sum(ksq, dim=-1, keepdim=True))
+
+
+def _preprocess_qk_l2norm(q, k, eps=1e-6):
+    """L2norm for q and k with a single graph break.
+
+    Squares both tensors (compiled), reduces both in one eager call
+    (1 graph break), then divides both (compiled).
+    """
+    q = q.to(torch.float32)
+    k = k.to(torch.float32)
+    q_sumsq, k_sumsq = _l2norm_reduce_pair(q * q, k * k)
+    q = q / torch.sqrt(q_sumsq + eps)
+    k = k / torch.sqrt(k_sumsq + eps)
     return q, k
 
 
@@ -619,8 +632,7 @@ def hpu_fused_recurrent_gated_delta_rule(
         bf = beta.reshape(-1, HV).to(_GDN_COMPUTE_DTYPE)
 
         if use_qk_l2norm_in_kernel:
-            qf = _l2norm_last_dim(qf)
-            kf = _l2norm_last_dim(kf)
+            qf, kf = _preprocess_qk_l2norm(qf, kf)
 
         out_full = torch.zeros(num_seqs, HV, Vdim, dtype=v.dtype, device=device)
 
