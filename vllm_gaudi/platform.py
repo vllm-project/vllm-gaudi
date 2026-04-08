@@ -23,10 +23,27 @@ from vllm_gaudi.extension.logger import logger as init_logger
 
 logger = init_logger()
 
+QWEN3_5_HYBRID_ARCHS = frozenset({
+    "Qwen3_5ForConditionalGeneration",
+    "Qwen3_5MoeForConditionalGeneration",
+})
+
 
 def retain_envs(var_name):
     retain_var_list = ['GLOO_SOCKET_IFNAME', 'HCCL_SOCKET_IFNAME', 'NCCL_SOCKET_IFNAME']
     return ('HPU' in var_name or 'RAY' in var_name or 'VLLM' in var_name or var_name in retain_var_list)
+
+
+def is_qwen3_5_hybrid_model(model_config: Optional[ModelConfig]) -> bool:
+    if model_config is None or not model_config.is_hybrid:
+        return False
+
+    architectures = set(getattr(getattr(model_config, "hf_config", None), "architectures", []) or [])
+    architecture = getattr(model_config, "architecture", None)
+    if architecture is not None:
+        architectures.add(architecture)
+
+    return any(arch in QWEN3_5_HYBRID_ARCHS for arch in architectures)
 
 
 class HpuPlatform(Platform):
@@ -105,6 +122,18 @@ class HpuPlatform(Platform):
         cache_config = vllm_config.cache_config
         if not cache_config.user_specified_block_size:
             cache_config.block_size = 128
+        elif is_qwen3_5_hybrid_model(vllm_config.model_config) and cache_config.block_size != 128:
+            # Narrow the reset to Qwen3.5 hybrids. Other hybrid models may
+            # legitimately use a larger KV-manager block size and rely on
+            # virtual block splitting down to 128-token HPU kernels.
+            logger.info(
+                "Resetting Qwen3.5 hybrid block_size from %d to 128 "
+                "before Gaudi hybrid page-size realignment.",
+                cache_config.block_size,
+            )
+            cache_config.block_size = 128
+            if cache_config.mamba_cache_mode == "align":
+                cache_config.mamba_block_size = 128
         # Hybrid GDN/Mamba models: upstream HybridAttentionMambaModelConfig
         # already ran and computed block_size / mamba_page_size_padded for
         # GPU.  HPU overrode block_size to 128 above, so we must re-align
