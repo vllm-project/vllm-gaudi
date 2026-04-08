@@ -152,14 +152,16 @@ class HPUMLAAttention(MLAAttention):
                 weight_fp = weight.to(act_dtype)
                 if weight_fp.shape[0] != ws.shape[0]:
                     weight_fp = weight_fp.T
-                kv_b_proj_weight = (weight_fp * ws).T
+                assert weight_fp.shape[0] == ws.shape[0], (
+                    f"Scale shape {ws.shape} incompatible with weight shape {weight_fp.shape}")
+                kv_b_proj_weight = (weight_fp * ws).T.contiguous()
             else:
                 # Block FP8 (force_channel_fp8=False): use HPU block dequant.
                 from vllm_gaudi.extension.ops import dequant_block_fp8_weight_naive
                 orig_M = kv_b_proj.orig_M.item() if hasattr(kv_b_proj, 'orig_M') else None
                 orig_N = kv_b_proj.orig_N.item() if hasattr(kv_b_proj, 'orig_N') else None
                 kv_b_proj_weight = dequant_block_fp8_weight_naive(
-                    weight,
+                    weight.contiguous(),
                     weight_scale_inv,
                     kv_b_proj.weight_block_size,
                     dtype=act_dtype,
