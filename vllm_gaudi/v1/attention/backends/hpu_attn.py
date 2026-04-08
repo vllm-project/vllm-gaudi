@@ -35,9 +35,11 @@ class HPUAttentionBackendV1(HPUAttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[Union[int, MultipleOf]]:
-        # for mamba models we don't split block size across kernels
-        # kernel_block_sizes in InputBatch are the same as block_sizes
-        return [128]
+        # Accept any FlashAttention-aligned block size (multiple of 16) without
+        # virtual splitting.  This allows hybrid models to use their
+        # mamba-derived block sizes (e.g. 528 for granite-4.0-h-small) directly
+        # as the kernel block size.
+        return [MultipleOf(16)]
 
 
 @dataclass
