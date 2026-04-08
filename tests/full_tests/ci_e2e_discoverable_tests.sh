@@ -349,27 +349,27 @@ run_gsm8k_qwen3_30b_test() {
 run_gsm8k_qwen35_9b_test() {
     # Test case is temporary disabled due to #37975
     echo "➡️ Testing GSM8K on Qwen3.5-9B..."
-    #_QWEN35_OLD_TRANSFORMERS_VER=$(pip show transformers | grep Version | awk '{print $2}')
-    #_QWEN35_OLD_HF_HUB_VER=$(pip show huggingface_hub | grep Version | awk '{print $2}')
+    _QWEN35_OLD_TRANSFORMERS_VER=$(pip show transformers | grep Version | awk '{print $2}')
+    _QWEN35_OLD_HF_HUB_VER=$(pip show huggingface_hub | grep Version | awk '{print $2}')
 
     # Ensure old package versions are restored on exit (even on failure)
-    #_restore_qwen35_deps() {
-    #    if [ -n "$_QWEN35_OLD_TRANSFORMERS_VER" ] && [ -n "$_QWEN35_OLD_HF_HUB_VER" ]; then
-    #        echo "🔄 Restoring transformers==$_QWEN35_OLD_TRANSFORMERS_VER huggingface_hub==$_QWEN35_OLD_HF_HUB_VER ..."
-    #        pip install "transformers==$_QWEN35_OLD_TRANSFORMERS_VER" "huggingface_hub==$_QWEN35_OLD_HF_HUB_VER" --no-deps
-    #    else
-    #        echo "⚠️ Skipping restore: could not determine original package versions."
-    #    fi
-    #    trap - EXIT
-    #}
-    #trap _restore_qwen35_deps EXIT
+    _restore_qwen35_deps() {
+       if [ -n "$_QWEN35_OLD_TRANSFORMERS_VER" ] && [ -n "$_QWEN35_OLD_HF_HUB_VER" ]; then
+           echo "🔄 Restoring transformers==$_QWEN35_OLD_TRANSFORMERS_VER huggingface_hub==$_QWEN35_OLD_HF_HUB_VER ..."
+           pip install "transformers==$_QWEN35_OLD_TRANSFORMERS_VER" "huggingface_hub==$_QWEN35_OLD_HF_HUB_VER" --no-deps
+       else
+           echo "⚠️ Skipping restore: could not determine original package versions."
+       fi
+       trap - EXIT
+    }
+    trap _restore_qwen35_deps EXIT
 
-    #pip install transformers==5.3.0 huggingface_hub==1.7.1 --no-deps
+    pip install transformers==5.3.0 huggingface_hub==1.7.1 --no-deps
 
-    #VLLM_SKIP_WARMUP=True ENABLE_APC=False VLLM_FUSED_BLOCK_SOFTMAX_ADJUSTMENT=False VLLM_GRAPH_RESERVED_MEM=0.2 \
-    #pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen3.5-9b.yaml"
+    VLLM_SKIP_WARMUP=True ENABLE_APC=False VLLM_FUSED_BLOCK_SOFTMAX_ADJUSTMENT=False VLLM_GRAPH_RESERVED_MEM=0.2 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen3.5-9b.yaml"
 
-    #_restore_qwen35_deps
+    _restore_qwen35_deps
     echo "✅ Test with Qwen3.5-9B passed."
 }
 
