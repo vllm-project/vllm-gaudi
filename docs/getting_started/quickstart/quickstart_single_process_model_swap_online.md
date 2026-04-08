@@ -30,7 +30,6 @@ models:
     max_model_len: 4096
     enable_auto_tool_choice: true
     tool_call_parser: hermes
-    chat_template: ./chat_templates/qwen_tools.jinja
 ```
 
 ## Start Server
