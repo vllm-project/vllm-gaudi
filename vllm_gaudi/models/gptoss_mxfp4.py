@@ -106,7 +106,7 @@ def convert_moe_packed_tensors(
     return out
 
 
-def _load_weights_mxfp4_dequantize_hpu(
+def _load_weights_mxfp4_packed_hpu(
     self,
     ep_rank_end: int,
     ep_rank_start: int,
@@ -115,6 +115,11 @@ def _load_weights_mxfp4_dequantize_hpu(
     weights: Iterable[tuple[str, torch.Tensor]],
     stacked_params_mapping: list[tuple[str, ...]],
 ) -> set[str]:
+    """Load MXFP4 weights in packed format without dequantization.
+
+    Packed FP4 blocks and scales are stored directly as uint8 parameters.
+    Dequantization to BF16 happens at runtime in the MoE forward pass.
+    """
     params_dict = dict(self.named_parameters())
     loaded_params: set[str] = set()
 
@@ -138,76 +143,57 @@ def _load_weights_mxfp4_dequantize_hpu(
     tp_rank_start = tp_rank * per_rank_intermediate_size
     tp_rank_end = min((tp_rank + 1) * per_rank_intermediate_size, intermediate_size)
 
-    block_weight_dict = {}
-
     for name, weight in weights:
         # Skip layers on other devices.
         if is_pp_missing_parameter(name, self):
             continue
 
         if ".w13_weight_scale" in name:
-            # Handle MLP gate and up projection weights
-            # Extract gate and up projection parts
+            # Load scales directly into w13_scales parameter (no dequantization)
             if use_ep:
-                narrow_weight_scale = weight[ep_rank_start:ep_rank_end, ...]
+                narrow = weight[ep_rank_start:ep_rank_end, ...]
             else:
-                narrow_weight_scale = weight[:, 2 * tp_rank_start:2 * tp_rank_end, :]
-
-            narrow_weight_scale = narrow_weight_scale.contiguous()
-
-            # Read block weight
-            block_name = name.replace("weight_scale", "weight")
-            if block_name not in block_weight_dict:
-                raise ValueError(f"Expected block weight for {block_name} not found when processing {name}")
-            block_weight = block_weight_dict[block_name]
-            param = params_dict[block_name]
-
-            weight = convert_moe_packed_tensors(block_weight, narrow_weight_scale)
-            param[:, :2 * (tp_rank_end - tp_rank_start), :] = weight
-            del block_weight_dict[block_name]
+                narrow = weight[:, 2 * tp_rank_start:2 * tp_rank_end, :]
+            param_name = name.replace(".w13_weight_scale", ".w13_scales")
+            param = params_dict[param_name]
+            param.copy_(narrow.contiguous())
             loaded_params.add(name)
             continue
         elif ".w13_weight" in name:
+            # Load packed FP4 blocks directly into w13_packed parameter
             if use_ep:
-                narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
+                narrow = weight[ep_rank_start:ep_rank_end, ...]
             else:
-                narrow_weight = weight[:, 2 * tp_rank_start:2 * tp_rank_end, :, :]
-            narrow_weight = narrow_weight.contiguous()
-            block_weight_dict[name] = narrow_weight
+                narrow = weight[:, 2 * tp_rank_start:2 * tp_rank_end, :, :]
+            param_name = name.replace(".w13_weight", ".w13_packed")
+            param = params_dict[param_name]
+            param.copy_(narrow.contiguous())
             loaded_params.add(name)
             continue
         elif ".w2_weight_scale" in name:
-            # Handle MLP down projection weights
+            # Load scales directly into w2_scales parameter
             if use_ep:
-                narrow_weight_scale = weight[ep_rank_start:ep_rank_end, ...]
+                narrow = weight[ep_rank_start:ep_rank_end, ...]
             else:
-                narrow_weight_scale = weight[..., tp_rank_start // OCP_MX_BLOCK_SIZE:tp_rank_end // OCP_MX_BLOCK_SIZE]
-            narrow_weight_scale = narrow_weight_scale.contiguous()
-
-            # Read block weight
-            block_name = name.replace("weight_scale", "weight")
-            if block_name not in block_weight_dict:
-                raise ValueError(f"Expected block weight for {block_name} not found when processing {name}")
-            block_weight = block_weight_dict[block_name]
-            param = params_dict[block_name]
-
-            weight = convert_moe_packed_tensors(block_weight, narrow_weight_scale)
-            param[:, :, :(tp_rank_end - tp_rank_start)] = weight
-            del block_weight_dict[block_name]
+                narrow = weight[..., tp_rank_start // OCP_MX_BLOCK_SIZE:tp_rank_end // OCP_MX_BLOCK_SIZE]
+            param_name = name.replace(".w2_weight_scale", ".w2_scales")
+            param = params_dict[param_name]
+            param.copy_(narrow.contiguous())
             loaded_params.add(name)
             continue
         elif ".w2_weight" in name:
+            # Load packed FP4 blocks directly into w2_packed parameter
             if use_ep:
-                narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
+                narrow = weight[ep_rank_start:ep_rank_end, ...]
             else:
-                narrow_weight = weight[:, :, tp_rank_start // OCP_MX_BLOCK_SIZE:tp_rank_end // OCP_MX_BLOCK_SIZE, :]
-            narrow_weight = narrow_weight.contiguous()
-            block_weight_dict[name] = narrow_weight
+                narrow = weight[:, :, tp_rank_start // OCP_MX_BLOCK_SIZE:tp_rank_end // OCP_MX_BLOCK_SIZE, :]
+            param_name = name.replace(".w2_weight", ".w2_packed")
+            param = params_dict[param_name]
+            param.copy_(narrow.contiguous())
             loaded_params.add(name)
             continue
         elif ".w13_bias" in name:
-            # Handle MLP gate and up projection biases
-            # Extract gate and up projection bias parts
+            # Handle MLP gate and up projection biases (BF16, unchanged)
             if use_ep:
                 narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
             else:
@@ -219,7 +205,7 @@ def _load_weights_mxfp4_dequantize_hpu(
             loaded_params.add(name)
             continue
         elif ".w2_bias" in name:
-            # Handle MLP down projection bias
+            # Handle MLP down projection bias (BF16, unchanged)
             if use_ep:
                 weight = weight[ep_rank_start:ep_rank_end, ...]
             else:
@@ -287,7 +273,7 @@ def patched_load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> s
         ep_rank_start = ep_rank * experts_per_rank
         ep_rank_end = (ep_rank + 1) * experts_per_rank
 
-        return self._load_weights_mxfp4_dequantize_hpu(
+        return self._load_weights_mxfp4_packed_hpu(
             ep_rank_end,
             ep_rank_start,
             heads_per_rank,
@@ -303,5 +289,5 @@ def patched_load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> s
 # Apply monkey patches unconditionally
 # The wrappers check at runtime whether to use custom logic or delegate to original
 ModelArchConfigConvertorBase._normalize_quantization_config = _patched_normalize_quantization_config
-GptOssModel._load_weights_mxfp4_dequantize_hpu = _load_weights_mxfp4_dequantize_hpu
+GptOssModel._load_weights_mxfp4_packed_hpu = _load_weights_mxfp4_packed_hpu
 GptOssModel.load_weights = patched_load_weights

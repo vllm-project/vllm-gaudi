@@ -31,12 +31,26 @@ from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOp)
 from vllm_gaudi.extension.runtime import get_config
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_BLOCK_SIZE
 from vllm_gaudi.utils import has_quant_config
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
 
 
 def _normalize_moe_activation(activation):
     return activation.value if isinstance(activation, Enum) else activation
+
+
+def dequant_mxfp4_hpu(packed, scales, *, out):
+    """Dequantize MXFP4 packed weights on HPU into a pre-allocated output tensor.
+
+    Args:
+        packed: uint8 tensor of shape (E, rows, groups, block_half) — packed FP4 blocks
+        scales: uint8 tensor of shape (E, rows, groups) — per-group scales
+        out: pre-allocated BF16 tensor of shape (E, rows, groups * block_half * 2)
+    """
+    from vllm_gaudi.models.gptoss_mxfp4 import convert_moe_packed_tensors
+    result = convert_moe_packed_tensors(packed, scales, dtype=out.dtype)
+    out.copy_(result)
 
 
 @UnquantizedFusedMoEMethod.register_oot
@@ -81,6 +95,23 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         bias = has_bias if has_bias is True else None
 
+        if self.is_mxfp4 and self.model_type in ["gpt_oss"]:
+            # MXFP4 path: create moe_op for metadata only, set bias but NOT weights.
+            # Weights are stored as packed uint8 and dequantized at runtime in forward.
+            layer.moe_op = VllmMixtureOfExpertsOp(layer.global_num_experts, num_experts, experts_min, experts_max, bias,
+                                                  dispatch_fn)
+
+            if has_bias:
+                for expert_id in range(layer.local_num_experts):
+                    layer.moe_op.w13_list[expert_id].set_bias(layer.w13_bias.data[expert_id])
+                    layer.moe_op.w2_list[expert_id].set_bias(layer.w2_bias.data[expert_id])
+
+            # Pre-build bias tuples for direct torch.ops.hpu.mixture_of_experts calls
+            E = layer.local_num_experts
+            layer._w13_bias_tuple = tuple(layer.w13_bias.data[i] for i in range(E))
+            layer._w2_bias_tuple = tuple(layer.w2_bias.data[i] for i in range(E))
+            return
+
         is_bf16 = getattr(layer, 'w13_weight', None) is not None and layer.w13_weight.dtype == torch.bfloat16
 
         model_config = None
@@ -111,32 +142,45 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         if self.model_type in ["gpt_oss"] and self.is_mxfp4:
             from vllm.utils.math_utils import round_up
-            # Fused gate_up_proj (column parallel)
-            w13_weight = torch.nn.Parameter(torch.zeros(num_experts,
-                                                        2 * round_up(intermediate_size_per_partition, 32),
-                                                        hidden_size,
-                                                        dtype=params_dtype),
-                                            requires_grad=False)
-            layer.register_parameter("w13_weight", w13_weight)
-            set_weight_attrs(w13_weight, extra_weight_attrs)
+            groups_h = hidden_size // OCP_MX_BLOCK_SIZE
+            groups_i = intermediate_size_per_partition // OCP_MX_BLOCK_SIZE
+            block_half = OCP_MX_BLOCK_SIZE // 2  # 2 FP4 values packed per byte
 
-            w13_bias = torch.nn.Parameter(torch.zeros(num_experts,
-                                                      2 * round_up(intermediate_size_per_partition, 32),
-                                                      dtype=params_dtype),
-                                          requires_grad=False)
+            # Packed FP4 blocks for fused gate_up_proj (column parallel)
+            w13_packed = torch.nn.Parameter(torch.zeros(
+                num_experts, 2 * intermediate_size_per_partition, groups_h, block_half,
+                dtype=torch.uint8), requires_grad=False)
+            layer.register_parameter("w13_packed", w13_packed)
+            set_weight_attrs(w13_packed, extra_weight_attrs)
+
+            w13_scales = torch.nn.Parameter(torch.zeros(
+                num_experts, 2 * intermediate_size_per_partition, groups_h,
+                dtype=torch.uint8), requires_grad=False)
+            layer.register_parameter("w13_scales", w13_scales)
+            set_weight_attrs(w13_scales, extra_weight_attrs)
+
+            # Packed FP4 blocks for down_proj (row parallel)
+            w2_packed = torch.nn.Parameter(torch.zeros(
+                num_experts, hidden_size, groups_i, block_half,
+                dtype=torch.uint8), requires_grad=False)
+            layer.register_parameter("w2_packed", w2_packed)
+            set_weight_attrs(w2_packed, extra_weight_attrs)
+
+            w2_scales = torch.nn.Parameter(torch.zeros(
+                num_experts, hidden_size, groups_i,
+                dtype=torch.uint8), requires_grad=False)
+            layer.register_parameter("w2_scales", w2_scales)
+            set_weight_attrs(w2_scales, extra_weight_attrs)
+
+            # Bias stays BF16 (small ~2 MB/layer)
+            w13_bias = torch.nn.Parameter(torch.zeros(
+                num_experts, 2 * round_up(intermediate_size_per_partition, 32),
+                dtype=params_dtype), requires_grad=False)
             layer.register_parameter("w13_bias", w13_bias)
             set_weight_attrs(w13_bias, extra_weight_attrs)
 
-            # down_proj (row parallel)
-            w2_weight = torch.nn.Parameter(torch.zeros(num_experts,
-                                                       hidden_size,
-                                                       round_up(intermediate_size_per_partition, 32),
-                                                       dtype=params_dtype),
-                                           requires_grad=False)
-            layer.register_parameter("w2_weight", w2_weight)
-            set_weight_attrs(w2_weight, extra_weight_attrs)
-
-            w2_bias = torch.nn.Parameter(torch.zeros(num_experts, hidden_size, dtype=params_dtype), requires_grad=False)
+            w2_bias = torch.nn.Parameter(torch.zeros(
+                num_experts, hidden_size, dtype=params_dtype), requires_grad=False)
             layer.register_parameter("w2_bias", w2_bias)
             set_weight_attrs(w2_bias, extra_weight_attrs)
         else:
@@ -183,6 +227,32 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
+
+        if self.is_mxfp4 and hasattr(layer, '_shared_w13_workspace'):
+            # MXFP4 path: dequantize packed weights into shared workspace,
+            # then call HPU MoE op directly.
+            dequant_mxfp4_hpu(layer.w13_packed, layer.w13_scales,
+                              out=layer._shared_w13_workspace)
+            dequant_mxfp4_hpu(layer.w2_packed, layer.w2_scales,
+                              out=layer._shared_w2_workspace)
+
+            E = layer.local_num_experts
+            w13_list = tuple(layer._shared_w13_workspace[i] for i in range(E))
+            w2_list = tuple(layer._shared_w2_workspace[i] for i in range(E))
+
+            output = torch.ops.hpu.mixture_of_experts.bias_fused_weights(
+                hidden_states=x,
+                expert_routing_table=topk_ids,
+                router_weights=topk_weights,
+                w12=w13_list,
+                w3=w2_list,
+                w12_bias=layer._w13_bias_tuple,
+                w3_bias=layer._w2_bias_tuple,
+                permuted_weights=True,
+                experts_min=layer.moe_op.experts_min,
+                experts_max=layer.moe_op.experts_max,
+            )
+            return output.view(*input_shape)
 
         output = layer.moe_op(
             x,
@@ -236,6 +306,32 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
+
+        if self.is_mxfp4 and hasattr(layer, '_shared_w13_workspace'):
+            # MXFP4 path: dequantize packed weights into shared workspace,
+            # then call HPU MoE op directly.
+            dequant_mxfp4_hpu(layer.w13_packed, layer.w13_scales,
+                              out=layer._shared_w13_workspace)
+            dequant_mxfp4_hpu(layer.w2_packed, layer.w2_scales,
+                              out=layer._shared_w2_workspace)
+
+            E = layer.local_num_experts
+            w13_list = tuple(layer._shared_w13_workspace[i] for i in range(E))
+            w2_list = tuple(layer._shared_w2_workspace[i] for i in range(E))
+
+            output = torch.ops.hpu.mixture_of_experts.bias_fused_weights(
+                hidden_states=x,
+                expert_routing_table=topk_ids.to(torch.int64),
+                router_weights=topk_weights.to(x.dtype),
+                w12=w13_list,
+                w3=w2_list,
+                w12_bias=layer._w13_bias_tuple,
+                w3_bias=layer._w2_bias_tuple,
+                permuted_weights=True,
+                experts_min=layer.moe_op.experts_min,
+                experts_max=layer.moe_op.experts_max,
+            )
+            return output.view(*input_shape)
 
         if self.model_type in ["gpt_oss"]:
             return layer.moe_op(
