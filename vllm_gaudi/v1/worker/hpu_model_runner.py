@@ -5248,44 +5248,31 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 and not self.is_pooling_model
                 and not self.skip_warmup
                 and can_use_compile_only_mode):
-            # Pick one prompt bucket per unique query length (with
-            # non-zero context blocks) so that heterogeneous layers
-            # compile for every positions-tensor size.  Without this,
-            # layers with different attributes (e.g. nope/MoE) that
-            # were only traced in compile-only mode would recompile
-            # at runtime for unseen query lengths.
-            seen_ql: set[int] = set()
-            prompt_validation: list[tuple[int, int, int]] = []
-            for b in self.bucketing_manager.prompt_buckets:
-                if b[1] not in seen_ql and b[2] > 0:
-                    seen_ql.add(b[1])
-                    prompt_validation.append(b)
+            # Re-run ALL prompt and decode buckets outside compile-only
+            # mode so that heterogeneous layers (e.g. Llama4 with
+            # nope/MoE/residual variants and varying chunked_attn_bias
+            # shapes) produce real compilations for every bucket.
+            # Without this, compile-only tracing misses many guard
+            # combinations and they recompile at runtime.
+            prompt_validation = list(self.bucketing_manager.prompt_buckets)
             if prompt_validation:
-                # Remove from graphed_buckets so warmup_graphs actually
-                # re-runs them (compile-only mode already added them).
                 for b in prompt_validation:
                     self.graphed_buckets.discard(
                         (b[0], b[1], b[2], True))
                 logger.info(
-                    "Validation warmup (prompt): %d buckets (one per "
-                    "query length) outside compile-only mode",
+                    "Validation warmup (prompt): %d buckets "
+                    "outside compile-only mode",
                     len(prompt_validation))
                 self.warmup_graphs(prompt_validation, True, kv_caches)
 
-            # Pick one decode bucket per unique batch size.
-            seen_bs: set[int] = set()
-            decode_validation: list[tuple[int, int, int]] = []
-            for b in self.bucketing_manager.decode_buckets:
-                if b[0] not in seen_bs:
-                    seen_bs.add(b[0])
-                    decode_validation.append(b)
+            decode_validation = list(self.bucketing_manager.decode_buckets)
             if decode_validation:
                 for b in decode_validation:
                     self.graphed_buckets.discard(
                         (b[0], b[1], b[2], False))
                 logger.info(
-                    "Validation warmup (decode): %d buckets (one per "
-                    "batch size) outside compile-only mode",
+                    "Validation warmup (decode): %d buckets "
+                    "outside compile-only mode",
                     len(decode_validation))
                 self.warmup_graphs(decode_validation, False, kv_caches)
 
