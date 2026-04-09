@@ -395,10 +395,15 @@ jobs:
 
       - name: Setup Docker environment and build image
         run: |
+          docker image prune -f \
+            --filter "label=ci.owner=vllm-gaudi-pre-merge" \
+            --filter "until=24h" || true
           echo "Attempting to build Docker image..."
           docker build \
             --no-cache \
             --build-arg VLLM_COMMIT_ARG=${{ env.TEST_VLLM_COMMIT }} \
+            --label ci.owner=vllm-gaudi-pre-merge \
+            --label ci.head_sha=${{ needs.retrieve_head_sha.outputs.head_sha }} \
             -t hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }} \
             -f .github/Dockerfile.ci .
           echo "Docker image built successfully."
@@ -409,6 +414,26 @@ jobs:
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
+          clean: true
+      - name: Rebuild Docker image if not present
+        run: |
+          IMAGE_NAME="hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }}"
+          if ! docker image inspect "$IMAGE_NAME" > /dev/null 2>&1; then
+            echo "Image not found, rebuilding with commit: ${{ needs.pre_merge_hpu_test_build.outputs.target_commit }}"
+            docker build \
+              --no-cache \
+              --build-arg VLLM_COMMIT_ARG=${{ needs.pre_merge_hpu_test_build.outputs.target_commit }} \
+              --label ci.owner=vllm-gaudi-pre-merge \
+              --label ci.head_sha=${{ needs.retrieve_head_sha.outputs.head_sha }} \
+              -t "$IMAGE_NAME" \
+              -f .github/Dockerfile.ci .
+          else
+            echo "Image already present, skipping rebuild."
+          fi
       - name: Run pytest in tests/unit_tests
         run: |
           EXITCODE=1
@@ -433,6 +458,26 @@ jobs:
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
+          clean: true
+      - name: Rebuild Docker image if not present
+        run: |
+          IMAGE_NAME="hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }}"
+          if ! docker image inspect "$IMAGE_NAME" > /dev/null 2>&1; then
+            echo "Image not found, rebuilding with commit: ${{ needs.pre_merge_hpu_test_build.outputs.target_commit }}"
+            docker build \
+              --no-cache \
+              --build-arg VLLM_COMMIT_ARG=${{ needs.pre_merge_hpu_test_build.outputs.target_commit }} \
+              --label ci.owner=vllm-gaudi-pre-merge \
+              --label ci.head_sha=${{ needs.retrieve_head_sha.outputs.head_sha }} \
+              -t "$IMAGE_NAME" \
+              -f .github/Dockerfile.ci .
+          else
+            echo "Image already present, skipping rebuild."
+          fi
       - name: Run test scripts
         run: |
           EXITCODE=1
@@ -463,6 +508,26 @@ jobs:
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
+          clean: true
+      - name: Rebuild Docker image if not present
+        run: |
+          IMAGE_NAME="hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }}"
+          if ! docker image inspect "$IMAGE_NAME" > /dev/null 2>&1; then
+            echo "Image not found, rebuilding with commit: ${{ needs.pre_merge_hpu_test_build.outputs.target_commit }}"
+            docker build \
+              --no-cache \
+              --build-arg VLLM_COMMIT_ARG=${{ needs.pre_merge_hpu_test_build.outputs.target_commit }} \
+              --label ci.owner=vllm-gaudi-pre-merge \
+              --label ci.head_sha=${{ needs.retrieve_head_sha.outputs.head_sha }} \
+              -t "$IMAGE_NAME" \
+              -f .github/Dockerfile.ci .
+          else
+            echo "Image already present, skipping rebuild."
+          fi
       - name: Run test scripts
         run: |
           EXITCODE=1
@@ -488,6 +553,26 @@ jobs:
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
+          clean: true
+      - name: Rebuild Docker image if not present
+        run: |
+          IMAGE_NAME="hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }}"
+          if ! docker image inspect "$IMAGE_NAME" > /dev/null 2>&1; then
+            echo "Image not found, rebuilding with commit: ${{ needs.pre_merge_hpu_test_build.outputs.target_commit }}"
+            docker build \
+              --no-cache \
+              --build-arg VLLM_COMMIT_ARG=${{ needs.pre_merge_hpu_test_build.outputs.target_commit }} \
+              --label ci.owner=vllm-gaudi-pre-merge \
+              --label ci.head_sha=${{ needs.retrieve_head_sha.outputs.head_sha }} \
+              -t "$IMAGE_NAME" \
+              -f .github/Dockerfile.ci .
+          else
+            echo "Image already present, skipping rebuild."
+          fi
       - name: Run test scripts
         run: |
           EXITCODE=1
@@ -521,6 +606,26 @@ jobs:
         test_function: ${{ fromJson(needs.discover_tests.outputs.matrix) }}
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
+          clean: true
+      - name: Rebuild Docker image if not present
+        run: |
+          IMAGE_NAME="hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }}"
+          if ! docker image inspect "$IMAGE_NAME" > /dev/null 2>&1; then
+            echo "Image not found, rebuilding with commit: ${{ needs.pre_merge_hpu_test_build.outputs.target_commit }}"
+            docker build \
+              --no-cache \
+              --build-arg VLLM_COMMIT_ARG=${{ needs.pre_merge_hpu_test_build.outputs.target_commit }} \
+              --label ci.owner=vllm-gaudi-pre-merge \
+              --label ci.head_sha=${{ needs.retrieve_head_sha.outputs.head_sha }} \
+              -t "$IMAGE_NAME" \
+              -f .github/Dockerfile.ci .
+          else
+            echo "Image already present, skipping rebuild."
+          fi
       - name: Run test suite - ${{ matrix.test_function }}
         run: |
           EXITCODE=1
@@ -552,6 +657,26 @@ jobs:
         test_function: ${{ fromJson(needs.discover_calibration_tests.outputs.matrix) }}
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
+          clean: true
+      - name: Rebuild Docker image if not present
+        run: |
+          IMAGE_NAME="hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }}"
+          if ! docker image inspect "$IMAGE_NAME" > /dev/null 2>&1; then
+            echo "Image not found, rebuilding with commit: ${{ needs.pre_merge_hpu_test_build.outputs.target_commit }}"
+            docker build \
+              --no-cache \
+              --build-arg VLLM_COMMIT_ARG=${{ needs.pre_merge_hpu_test_build.outputs.target_commit }} \
+              --label ci.owner=vllm-gaudi-pre-merge \
+              --label ci.head_sha=${{ needs.retrieve_head_sha.outputs.head_sha }} \
+              -t "$IMAGE_NAME" \
+              -f .github/Dockerfile.ci .
+          else
+            echo "Image already present, skipping rebuild."
+          fi
       - name: Run calibration test - ${{ matrix.test_function }}
         run: |
           EXITCODE=1
@@ -578,6 +703,26 @@ jobs:
     needs: [pre_merge_hpu_test_build, discover_runner, retrieve_head_sha]
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
+          clean: true
+      - name: Rebuild Docker image if not present
+        run: |
+          IMAGE_NAME="hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }}"
+          if ! docker image inspect "$IMAGE_NAME" > /dev/null 2>&1; then
+            echo "Image not found, rebuilding with commit: ${{ needs.pre_merge_hpu_test_build.outputs.target_commit }}"
+            docker build \
+              --no-cache \
+              --build-arg VLLM_COMMIT_ARG=${{ needs.pre_merge_hpu_test_build.outputs.target_commit }} \
+              --label ci.owner=vllm-gaudi-pre-merge \
+              --label ci.head_sha=${{ needs.retrieve_head_sha.outputs.head_sha }} \
+              -t "$IMAGE_NAME" \
+              -f .github/Dockerfile.ci .
+          else
+            echo "Image already present, skipping rebuild."
+          fi
       - name: Run calibration arg parsing tests
         run: |
           EXITCODE=1
