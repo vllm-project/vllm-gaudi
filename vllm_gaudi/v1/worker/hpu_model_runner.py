@@ -249,6 +249,8 @@ def _move_remaining_tensors_to_device(model: torch.nn.Module, device: str) -> No
 
     moved = 0
     for mod in model.modules():
+        # Compute once per module; None if not an INC-patched module.
+        scale_members = getattr(mod, "scale_members", None)
         for attr_name in list(mod.__dict__.keys()):
             # Skip PyTorch's internal registry dicts and registered
             # parameters, buffers, and child modules — all of these
@@ -256,6 +258,10 @@ def _move_remaining_tensors_to_device(model: torch.nn.Module, device: str) -> No
             if attr_name in _SKIP_ATTRS:
                 continue
             if attr_name in mod._parameters or attr_name in mod._buffers or attr_name in mod._modules:
+                continue
+            # Skip INC FP8 scale tensors - they must remain on CPU
+            # as H2D const tensors for runtime scale patching.
+            if scale_members is not None and attr_name in scale_members:
                 continue
             obj = mod.__dict__[attr_name]
             new_obj, cnt, changed = _move_obj(obj)
