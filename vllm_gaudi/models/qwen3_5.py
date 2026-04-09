@@ -1,4 +1,5 @@
 import torch
+import vllm.model_executor.models.qwen3_5 as qwen3_5_module
 from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention
 from vllm.forward_context import get_forward_context
 
@@ -270,4 +271,4 @@ class HPUGatedDeltaNetAttention(GatedDeltaNetAttention):
 
 # Replace the class in the upstream module so that GatedDeltaNetAttention
 # instantiates GatedDeltaNetAttention instead of the original.
-GatedDeltaNetAttention = HPUGatedDeltaNetAttention
+qwen3_5_module.GatedDeltaNetAttention = HPUGatedDeltaNetAttention
