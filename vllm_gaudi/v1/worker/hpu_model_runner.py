@@ -3538,8 +3538,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     @torch.inference_mode()
     def run_defragmenter(self, scheduler_output: "SchedulerOutput", warmup_mode: bool = False):
-        if not (getattr(self, 'defragmenter', None) and self.defragmenter.enabled and self.kv_caches
-                and not warmup_mode):
+        if self.defragmenter is None:
+            return
+        if not (self.defragmenter.enabled and self.kv_caches and not warmup_mode):
             return
 
         new = {req.req_id: flatten(req.block_ids) for req in scheduler_output.scheduled_new_reqs if req.block_ids}
@@ -5246,7 +5247,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             )
 
         if not self.is_pooling_model and self.defrag_kv_caches:
-            self.defragmenter = OnlineDefragmenter(self.defrag_kv_caches, self.block_size)  # type: ignore[arg-type]
+            self.defragmenter = OnlineDefragmenter(self.defrag_kv_caches, self.block_size)
         # Profiling
         prompt_profile_cfg, decode_profile_cfg = self._read_profiling_cfg()
         if prompt_profile_cfg or decode_profile_cfg:
@@ -5329,7 +5330,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # reusing defragmenter used in warmup causes accuracy drops, which is why we re-create
         # and re-initialize it.
         if not self.is_pooling_model and self.defrag_kv_caches:
-            self.defragmenter = OnlineDefragmenter(self.defrag_kv_caches, self.block_size)  # type: ignore[arg-type]
+            self.defragmenter = OnlineDefragmenter(self.defrag_kv_caches, self.block_size)
 
     def shutdown_inc(self, suppress=suppress, finalize_calibration=finalize_calibration):
         global shutdown_inc_called
