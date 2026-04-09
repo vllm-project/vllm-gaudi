@@ -28,7 +28,7 @@ This document summarizes the features currently supported by the vLLM Hardware P
 | Multiprocessing backend   | The default distributed runtime in vLLM.   | [Documentation](https://docs.vllm.ai/en/v0.10.0/serving/distributed_serving.html)  |
 | Multimodal   | Supports inference for multi-modal models. It is not fully supported with the `t.compile` execution mode. |  [Documentation](https://docs.vllm.ai/en/latest/features/multimodal_inputs.html) |
 | Guided decode   | Supports a guided decoding backend for generating structured outputs.   | [Documentation](https://docs.vllm.ai/en/latest/features/structured_outputs.html)  |
-| Exponential bucketing | Supports exponential bucketing spacing instead of linear spacing, automating the configuration of the bucketing mechanism. This feature is enabled by default and can be disabled via `VLLM_EXPONENTIAL_BUCKETING=false` environment variable.   | N/A |
+| Configurable bucketing strategies | Supports exponential (`exp`), linear (`lin`), and padding-aware (`pad`) bucketing strategies, selected with `VLLM_BUCKETING_STRATEGY`. The default is `exp`.   | [Bucketing Mechanism](bucketing_mechanism.md) |
 | Data Parallel support | Replicates model weights across multiple instances or GPUs to process independent request batches. | [Documentation](https://docs.vllm.ai/en/stable/serving/data_parallel_deployment.html), [Example](https://docs.vllm.ai/en/latest/examples/offline_inference/data_parallel.html)  |
 | Row-Parallel Chunking | Overlaps computation with communication in RowParallelLinear layers by splitting input into chunks and launching async all-reduce operations. Improves throughput for tensor-parallel inference with long prefills. Configured via `VLLM_ROW_PARALLEL_CHUNKS` and `VLLM_ROW_PARALLEL_CHUNK_THRESHOLD` environment variables. | [Documentation](row_parallel_chunking.md) |
 
@@ -42,7 +42,7 @@ compilations triggered by varying constant scale values in quantized model layer
 You can reduce the FP8 warm-up time by setting the `RUNTIME_SCALE_PATCHING=1` environment variable and
 selecting a hardware-aligned per-tensor `scale_method` provided by the `INC JSON config <json-options>`.
 This feature is recommended for larger models, such as 70B and 405B. When combined with
-`VLLM_EXPONENTIAL_BUCKETING` for FP8 models, it can reduce warm-up time by up to 90%.
+`VLLM_BUCKETING_STRATEGY=exp` for FP8 models, it can reduce warm-up time by up to 90%.
 
 !!!note
     This feature reduces FP8 warm-up time but may lower model throughput by 5-20%. Future releases will improve performance and extend support to more options. Currently, the feature is supported with Lazy mode (`PT_HPU_LAZY_MODE=1`) and `torch.compile`. It supports Llama workloads using FP8 execution of Linear and FSDPA layers, and casting ops between BF16 and FP8. MoE and Convolution options are not yet supported.
