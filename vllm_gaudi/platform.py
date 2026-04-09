@@ -172,7 +172,8 @@ class HpuPlatform(Platform):
                         logger.info(
                             "Setting granitemoehybrid block_size to %d tokens "
                             "(16-token FA alignment, mamba_page_size=%d bytes).",
-                            attn_block_size, mamba_page_size,
+                            attn_block_size,
+                            mamba_page_size,
                         )
                         cache_config.block_size = attn_block_size
                         if cache_config.mamba_cache_mode == "align":
