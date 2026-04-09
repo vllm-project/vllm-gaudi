@@ -216,8 +216,10 @@ class RequestRunner:
         assert isinstance(manager, MagicMock)
         self.manager: MagicMock = manager
 
-        assert connector_scheduler.gpu_block_size == gpu_block_size
-        assert connector_scheduler.offloaded_block_size == offloaded_block_size
+        assert len(connector_scheduler.config.kv_group_configs) == 1
+        kv_group_config = connector_scheduler.config.kv_group_configs[0]
+        assert kv_group_config.gpu_block_size == gpu_block_size
+        assert kv_group_config.offloaded_block_size == offloaded_block_size
 
         # extract OffloadingSpec of worker_connector
         connector_worker = self.worker_connector.connector_worker
@@ -459,7 +461,7 @@ def request_runner():
 def generate_store_output(block_hashes: Iterable[BlockHash]):
     block_hashes = list(block_hashes)
     return PrepareStoreOutput(
-        block_hashes_to_store=list(block_hashes),
+        keys_to_store=list(block_hashes),
         store_spec=MockLoadStoreSpec(block_hashes),
-        block_hashes_evicted=[],
+        evicted_keys=[],
     )
