@@ -593,12 +593,12 @@ def _init_mxfp4_shared_workspace(model):
     E, I2, groups_h, block_half = ref.w13_packed.shape
     H = groups_h * OCP_MX_BLOCK_SIZE
     _, _, groups_i, _ = ref.w2_packed.shape
-    I = groups_i * OCP_MX_BLOCK_SIZE
+    intermediate_dim = groups_i * OCP_MX_BLOCK_SIZE
     device = ref.w13_packed.device
 
     # Single shared workspace reused across all layers (layers execute sequentially)
     shared_w13_ws = torch.empty(E, I2, H, dtype=torch.bfloat16, device=device)
-    shared_w2_ws = torch.empty(E, H, I, dtype=torch.bfloat16, device=device)
+    shared_w2_ws = torch.empty(E, H, intermediate_dim, dtype=torch.bfloat16, device=device)
 
     for layer in moe_layers:
         layer._shared_w13_workspace = shared_w13_ws

@@ -38,6 +38,7 @@ def convert_moe_packed_tensors(
     scales,
     *,
     dtype: torch.dtype = torch.bfloat16,
+    out: torch.Tensor | None = None,
     # Large default chosen to process many rows per kernel launch and reduce overhead;
     # lower this if you need to limit peak memory usage.
     rows_per_chunk: int = 32768 * 1024,
@@ -45,6 +46,10 @@ def convert_moe_packed_tensors(
     """
     Convert the mxfp4 weights, dequantize and make them compatible with the forward
     pass of GPT_OSS.
+
+    Args:
+        out: Optional pre-allocated output tensor. When provided, dequantized
+             values are written directly into it, avoiding an intermediate copy.
     """
     import math
 
@@ -82,7 +87,10 @@ def convert_moe_packed_tensors(
     blocks = blocks.reshape(rows_total, B)
     scales = scales.reshape(rows_total, 1)
 
-    out = torch.empty(rows_total, B * 2, dtype=dtype, device=blocks.device)
+    if out is not None:
+        out_buf = out.reshape(rows_total, B * 2)
+    else:
+        out_buf = torch.empty(rows_total, B * 2, dtype=dtype, device=blocks.device)
 
     for r0 in range(0, rows_total, rows_per_chunk):
         r1 = min(r0 + rows_per_chunk, rows_total)
@@ -90,20 +98,21 @@ def convert_moe_packed_tensors(
         blk = blocks[r0:r1]
         exp = scales[r0:r1]
 
-        # nibble indices -> int64
-        idx_lo = (blk & 0x0F).to(torch.long)
-        idx_hi = (blk >> 4).to(torch.long)
+        idx_lo = (blk & 0x0F).to(torch.int32)
+        idx_hi = (blk >> 4).to(torch.int32)
 
-        sub = out[r0:r1]
+        sub = out_buf[r0:r1]
         sub[:, 0::2] = lut[idx_lo]
         sub[:, 1::2] = lut[idx_hi]
 
         torch.ldexp(sub, exp, out=sub)
         del idx_lo, idx_hi, blk, exp, sub
 
-    out = out.reshape(*prefix_shape, G * B * 2).contiguous()
     del blocks, scales, lut
-    return out
+
+    if out is not None:
+        return out
+    return out_buf.reshape(*prefix_shape, G * B * 2).contiguous()
 
 
 def _load_weights_mxfp4_packed_hpu(
@@ -157,7 +166,7 @@ def _load_weights_mxfp4_packed_hpu(
             param_name = name.replace(".w13_weight_scale", ".w13_scales")
             param = params_dict[param_name]
             param.copy_(narrow.contiguous())
-            loaded_params.add(name)
+            loaded_params.add(param_name)
             continue
         elif ".w13_weight" in name:
             # Load packed FP4 blocks directly into w13_packed parameter
@@ -168,7 +177,7 @@ def _load_weights_mxfp4_packed_hpu(
             param_name = name.replace(".w13_weight", ".w13_packed")
             param = params_dict[param_name]
             param.copy_(narrow.contiguous())
-            loaded_params.add(name)
+            loaded_params.add(param_name)
             continue
         elif ".w2_weight_scale" in name:
             # Load scales directly into w2_scales parameter
@@ -179,7 +188,7 @@ def _load_weights_mxfp4_packed_hpu(
             param_name = name.replace(".w2_weight_scale", ".w2_scales")
             param = params_dict[param_name]
             param.copy_(narrow.contiguous())
-            loaded_params.add(name)
+            loaded_params.add(param_name)
             continue
         elif ".w2_weight" in name:
             # Load packed FP4 blocks directly into w2_packed parameter
@@ -190,7 +199,7 @@ def _load_weights_mxfp4_packed_hpu(
             param_name = name.replace(".w2_weight", ".w2_packed")
             param = params_dict[param_name]
             param.copy_(narrow.contiguous())
-            loaded_params.add(name)
+            loaded_params.add(param_name)
             continue
         elif ".w13_bias" in name:
             # Handle MLP gate and up projection biases (BF16, unchanged)

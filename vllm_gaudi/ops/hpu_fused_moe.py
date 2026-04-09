@@ -40,6 +40,7 @@ def _normalize_moe_activation(activation):
     return activation.value if isinstance(activation, Enum) else activation
 
 
+@torch.compiler.disable
 def dequant_mxfp4_hpu(packed, scales, *, out):
     """Dequantize MXFP4 packed weights on HPU into a pre-allocated output tensor.
 
@@ -49,8 +50,8 @@ def dequant_mxfp4_hpu(packed, scales, *, out):
         out: pre-allocated BF16 tensor of shape (E, rows, groups * block_half * 2)
     """
     from vllm_gaudi.models.gptoss_mxfp4 import convert_moe_packed_tensors
-    result = convert_moe_packed_tensors(packed, scales, dtype=out.dtype)
-    out.copy_(result)
+    # Single call for all experts; rows_per_chunk limits peak intermediate memory
+    convert_moe_packed_tensors(packed, scales, dtype=out.dtype, out=out, rows_per_chunk=8192)
 
 
 @UnquantizedFusedMoEMethod.register_oot
@@ -80,7 +81,9 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         return True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        super().process_weights_after_loading(layer)
+        # MXFP4 path has no w13_weight/w2_weight — skip parent's padding/setup
+        if not (self.is_mxfp4 and self.model_type in ["gpt_oss"]):
+            super().process_weights_after_loading(layer)
         # custom handling for HPU
         num_experts = layer.local_num_experts
         ep_shift = layer.ep_rank * num_experts
@@ -142,6 +145,11 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         if self.model_type in ["gpt_oss"] and self.is_mxfp4:
             from vllm.utils.math_utils import round_up
+            assert hidden_size % OCP_MX_BLOCK_SIZE == 0, \
+                f"hidden_size ({hidden_size}) must be divisible by OCP_MX_BLOCK_SIZE ({OCP_MX_BLOCK_SIZE})"
+            assert intermediate_size_per_partition % OCP_MX_BLOCK_SIZE == 0, \
+                f"intermediate_size_per_partition ({intermediate_size_per_partition}) must be divisible by " \
+                f"OCP_MX_BLOCK_SIZE ({OCP_MX_BLOCK_SIZE})"
             groups_h = hidden_size // OCP_MX_BLOCK_SIZE
             groups_i = intermediate_size_per_partition // OCP_MX_BLOCK_SIZE
             block_half = OCP_MX_BLOCK_SIZE // 2  # 2 FP4 values packed per byte
