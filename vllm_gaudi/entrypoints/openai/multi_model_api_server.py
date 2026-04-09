@@ -418,6 +418,15 @@ async def build_multi_model_engine_client(
 
     model_configs, default_model, model_frontend_overrides, model_quant_configs = _load_multi_model_config(config_path)
     _validate_model_frontend_overrides(args, model_frontend_overrides)
+
+    default_quant_config = model_quant_configs.get(default_model)
+    if default_quant_config is not None:
+        os.environ["QUANT_CONFIG"] = default_quant_config
+        logger.info("startup QUANT_CONFIG=%s (default_model=%s)", default_quant_config, default_model)
+    else:
+        os.environ.pop("QUANT_CONFIG", None)
+        logger.info("startup QUANT_CONFIG unset (default_model=%s)", default_model)
+
     manager = MultiModelAsyncLLM(
         model_configs,
         usage_context=usage_context,
