@@ -8,6 +8,11 @@ from typing import List, Tuple
 
 from vllm_gaudi.extension.logger import logger as logger
 from vllm_gaudi.extension.runtime import get_config
+from vllm_gaudi.extension.config import boolean
+from vllm_gaudi.extension.bucketing.exponential import ExponentialBucketingStrategy
+from vllm_gaudi.extension.bucketing.linear import LinearBucketingStrategy
+from vllm_gaudi.extension.bucketing.padding_aware import PaddingAwareBucketingStrategy
+from vllm_gaudi.extension.bucketing.file_strategy import FileBucketingStrategy
 
 LONG_CTX_THRESHOLD = 8192
 
@@ -93,23 +98,38 @@ class HPUBucketingManager():
 
     def read_from_file(self, is_prompt):
         file_name = get_config().VLLM_BUCKETING_FROM_FILE
-        from vllm_gaudi.extension.bucketing.file_strategy import (FileBucketingStrategy)
         strategy = FileBucketingStrategy()
         return strategy.get_buckets(file_name, is_prompt)
 
     def get_bucketing_strategy(self):
-        strategy = None
         # TODO - we can use different strategies for decode and prompt
-        use_exponential_bucketing = True if \
-                get_config().VLLM_EXPONENTIAL_BUCKETING == None else \
-                get_config().VLLM_EXPONENTIAL_BUCKETING
-
-        if use_exponential_bucketing:
-            from vllm_gaudi.extension.bucketing.exponential import (ExponentialBucketingStrategy)
+        bucketing_strategy = get_config().bucketing_strategy
+        if bucketing_strategy == 'exp':
             strategy = ExponentialBucketingStrategy()
-        else:
-            from vllm_gaudi.extension.bucketing.linear import LinearBucketingStrategy
+        elif bucketing_strategy == 'lin':
             strategy = LinearBucketingStrategy()
+        elif bucketing_strategy == 'pad':
+            strategy = PaddingAwareBucketingStrategy()
+        else:
+            raise ValueError(
+                f"Invalid bucketing strategy: {bucketing_strategy}, please choose from ['exp', 'lin', 'pad']")
+
+        # for backward compatibility - if VLLM_EXPONENTIAL_BUCKETING is set, it will override the bucketing strategy
+        exp_bucketing_env = os.getenv('VLLM_EXPONENTIAL_BUCKETING', None)
+        if exp_bucketing_env is not None:
+            logger().warning(
+                "VLLM_EXPONENTIAL_BUCKETING is deprecated and will be removed in a future release. Use VLLM_BUCKETING_STRATEGY='exp'|'lin'|'pad' instead."
+            )
+            use_exp_bucketing = boolean(exp_bucketing_env)
+            if use_exp_bucketing:
+                override_strategy = ExponentialBucketingStrategy()
+            else:
+                override_strategy = LinearBucketingStrategy()
+            if override_strategy.__class__ != strategy.__class__:
+                logger().warning(
+                    f"Overriding bucketing strategy {strategy.__class__.__name__} with {override_strategy.__class__.__name__} due to VLLM_EXPONENTIAL_BUCKETING={exp_bucketing_env}"
+                )
+                strategy = override_strategy
         return strategy
 
     def generate_prompt_buckets(self):
@@ -132,6 +152,9 @@ class HPUBucketingManager():
                 bs_range = strategy.get_range(bs_cfg)
                 query_range = strategy.get_range(query_cfg)
                 ctx_range = strategy.get_range(ctx_cfg)
+                logger().debug(f"Prompt BS range: {bs_range}")
+                logger().debug(f"Prompt query range: {query_range}")
+                logger().debug(f"Prompt context range: {ctx_range}")
 
             self.prompt_buckets = generate_buckets(bs_range, query_range, ctx_range, True, self.max_model_len,
                                                    self.max_num_seqs, self.max_num_prefill_seqs,
@@ -175,6 +198,10 @@ class HPUBucketingManager():
 
                 if get_config().use_contiguous_pa and ctx_range[-1] < self.num_hpu_blocks:
                     ctx_range.append(self.num_hpu_blocks)
+
+                logger().debug(f"Decode BS range: {bs_range}")
+                logger().debug(f"Decode query range: {query_range}")
+                logger().debug(f"Decode context range: {ctx_range}")
 
             self.decode_buckets = generate_buckets(bs_range, query_range, ctx_range, False, self.max_model_len,
                                                    self.max_num_seqs, self.max_num_prefill_seqs,
@@ -458,10 +485,8 @@ def generate_buckets(bs_range,
         phase = 'prompt' if is_prompt else 'decode'
         for bucket in omitted_buckets:
             logger().error(bucket)
-        raise RuntimeError(
-            "Generated 0 " + phase +
-            " buckets. Please use default exponential bucketing, VLLM_EXPONENTIAL_BUCKETING=true or generate linear warmup flags according to README"
-        )
+        raise RuntimeError("Generated 0 " + phase +
+                           " buckets. Please adjust the bucketing configuration according to README")
 
     return sorted(buckets)
 
