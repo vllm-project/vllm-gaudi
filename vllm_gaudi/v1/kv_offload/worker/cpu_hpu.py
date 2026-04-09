@@ -18,7 +18,7 @@ from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
     TransferSpec,
 )
-from vllm.v1.kv_offload.cpu import CPUOffloadingSpec
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.abstract import LoadStoreSpec
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.worker.cpu_gpu import (SingleDirectionOffloadingHandler, CpuGpuOffloadingHandlers)
