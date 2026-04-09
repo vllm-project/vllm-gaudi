@@ -50,7 +50,7 @@ VLLM_PROMPT_BS_BUCKET_MAX=256 \
 VLLM_DECODE_BS_BUCKET_MIN=128 \
 VLLM_DECODE_BS_BUCKET_STEP=128 \
 VLLM_DECODE_BS_BUCKET_MAX=128 \
-VLLM_PROMPT_SEQ_BUCKET_MAX=1024 \
+VLLM_PROMPT_QUERY_BUCKET_MAX=1024 \
 VLLM_DECODE_BLOCK_BUCKET_MAX=1024 \
 PT_HPU_WEIGHT_SHARING=0 PT_HPU_MAX_COMPOUND_OP_SIZE=30 PT_HPU_LAZY_MODE=1 PT_HPU_ENABLE_LAZY_COLLECTIVES=true vllm serve meta-llama/Llama-3.1-8B-instruct -tp 1 --weights-load-device cpu --max-model-len 8192
 ```
@@ -74,6 +74,6 @@ No changes are required in the Dockerfile as recipe cache is specific to the mod
 
 vLLM warm-up time is determined by the number of HPU graphs that must be compiled to support dynamic shapes. These shapes are influenced by the `batch_size`, `query_length`, and `num_context_blocks`. Setting them according to `max_num_batched_tokens` ensures that additional graphs are not compiled at runtime.
 
-## Exponential Bucketing
+## Bucketing Strategy Selection
 
-The `VLLM_EXPONENTIAL_BUCKETING=True` flag, enabled by default starting with the vLLM `1.21.0-post1` release, switches the bucketing strategy from linear to exponential. This can reduce the number of buckets and warm-up time by up to 80%, while generally maintaining comparable inference performance. In some configurations, however, it may lead to a slight performance drop due to increased padding. This setting is particularly effective for BF16 and FP8 models. To use linear bucketing instead, set `VLLM_EXPONENTIAL_BUCKETING=False`.
+Use `VLLM_BUCKETING_STRATEGY` to select how warm-up buckets are generated. The default `exp` strategy reduces the number of buckets and warm-up time, typically with more padding between prepared shapes. Use `lin` when you want explicit control over `MIN`, `STEP`, and `MAX` ranges, or `pad` when you want that same control plus `PAD_MAX` and `PAD_PERCENT` to bound padding overhead more tightly. For BF16 and FP8 workloads, `exp` is often the fastest warm-up option, while `lin` and `pad` are better suited to workload-specific tuning.

@@ -20,10 +20,15 @@ This document lists the supported diagnostic and profiling, as well as performan
 | Parameter name               | Description                                                   | Default value |
 | ---------------------------- | ------------------------------------------------------------- | ------------- |
 | `VLLM_GRAPH_RESERVED_MEM`    | Percentage of memory dedicated to HPUGraph capture.           | `0.1`         |
-| `VLLM_EXPONENTIAL_BUCKETING` | Enables exponential bucket spacing instead of linear spacing. | `true`        |
-| `VLLM_BUCKETING_FROM_FILE`   | Enables reading bucket configuration from file | `None`        |
+| `VLLM_BUCKETING_STRATEGY`    | Selects the bucketing strategy: `exp`, `lin`, or `pad`.      | `exp`         |
+| `VLLM_EXPONENTIAL_BUCKETING` | Deprecated compatibility flag. If set, it overrides `VLLM_BUCKETING_STRATEGY`: `true` forces `exp`, `false` forces `lin`. It cannot select `pad` and will be removed in a future release. | `None`        |
+| `VLLM_BUCKETING_FROM_FILE`   | Enables reading bucket configuration from file.              | `None`        |
 | `VLLM_ROW_PARALLEL_CHUNKS`   | Number of chunks to split input into for pipelining matmul with all-reduce in RowParallelLinear layers. Setting to a value greater than 1 enables chunking. See [Row-Parallel Chunking](../features/row_parallel_chunking.md). | `1` (disabled) |
 | `VLLM_ROW_PARALLEL_CHUNK_THRESHOLD` | Minimum number of tokens required to activate row-parallel chunking. Inputs below this threshold use the standard non-chunked path. | `8192` |
+
+Use `VLLM_BUCKETING_STRATEGY=exp` for the default exponential warm-up, `VLLM_BUCKETING_STRATEGY=lin` for explicitly configured linear ranges, or `VLLM_BUCKETING_STRATEGY=pad` for padding-aware ranges with absolute and relative padding limits.
+
+Leave `VLLM_EXPONENTIAL_BUCKETING` unset when using `VLLM_BUCKETING_STRATEGY`. The legacy flag is checked for backward compatibility and still overrides the selected strategy when present.
 
 ## Developer Mode Parameters
 
@@ -50,33 +55,48 @@ HPU PyTorch bridge environment variables impacting vLLM execution:
 | `VLLM_PROMPT_USE_FLEX_ATTENTION`   | Enabled only for the Llama model, allowing usage of `torch.nn.attention.flex_attention` instead of FusedSDPA. Requires `VLLM_PROMPT_USE_FUSEDSDPA=0`. | `false`                                          |
 | `RUNTIME_SCALE_PATCHING`           | Enables the runtime scale patching feature, which applies only to FP8 execution and is ignored for BF16.                                              | `true` (Torch Compile mode), `false` (Lazy mode) |
 
-## Additional Performance Tuning Parameters for Linear Bucketing Strategy
+## Additional Performance Tuning Parameters for Bucketing Strategies
 
-`VLLM_{phase}_{dim}_BUCKET_{param}` is a collection of environment variables configuring ranges of linear bucketing mechanism, where:
+`VLLM_{phase}_{dim}_BUCKET_{param}` is a collection of environment variables configuring user-defined bucket ranges, where:
 
-- `{phase}` is either `PROMPT` or `DECODE`
-- `{dim}` is either `BS`, `SEQ` or `BLOCK`
-- `{param}` is either `MIN`, `STEP` or `MAX`
+- `{phase}` is in `['PROMPT', 'DECODE']`.
+- `{dim}` is in `['BS', 'QUERY', 'CTX']` for `PROMPT` phase or in `['BS', 'BLOCK']` for `DECODE` phase.
+- `{param}` is in `['MIN', 'STEP', 'MAX']` for the `lin` strategy.
+- `{param}` is in `['MIN', 'STEP', 'MAX', 'PAD_MAX', 'PAD_PERCENT']` for the `pad` strategy.
 
-The following table lists the available variables with their default values:
+The following table lists the available variables with their default values. `PAD_MAX` and `PAD_PERCENT` are used only when `VLLM_BUCKETING_STRATEGY=pad`.
 
-| Phase  | Variable name                                     | Default value                                |
-| ------ | ------------------------------------------------- | -------------------------------------------- |
-| Prompt | batch size min (`VLLM_PROMPT_BS_BUCKET_MIN`)      | `1`                                          |
-| Prompt | batch size step (`VLLM_PROMPT_BS_BUCKET_STEP`)    | `1`                                          |
-| Prompt | batch size max (`VLLM_PROMPT_BS_BUCKET_MAX`)      | `max_num_prefill_seqs`                       |
-| Prompt | query length min (`VLLM_PROMPT_SEQ_BUCKET_MIN`)   | `block_size`                                 |
-| Prompt | query length step (`VLLM_PROMPT_SEQ_BUCKET_STEP`) | `block_size`                                 |
-| Prompt | query length max (`VLLM_PROMPT_SEQ_BUCKET_MAX`)   | `max_num_batched_tokens`                     |
-| Prompt | sequence ctx min (`VLLM_PROMPT_CTX_BUCKET_MIN`)   | `0`                                          |
-| Prompt | sequence ctx step (`VLLM_PROMPT_CTX_BUCKET_STEP`) | `1`                                          |
-| Prompt | sequence ctx max (`VLLM_PROMPT_CTX_BUCKET_MAX`)   | `(max_model_len - block_size) // block_size` |
-| Decode | batch size min (`VLLM_DECODE_BS_BUCKET_MIN`)      | `1`                                          |
-| Decode | batch size step (`VLLM_DECODE_BS_BUCKET_STEP`)    | `32`                                         |
-| Decode | batch size max (`VLLM_DECODE_BS_BUCKET_MAX`)      | `max_num_seqs`                               |
-| Decode | block size min (`VLLM_DECODE_BLOCK_BUCKET_MIN`)   | `1`                                 |
-| Decode | block size step (`VLLM_DECODE_BLOCK_BUCKET_STEP`) | `block_size`                                 |
-| Decode | block size max (`VLLM_DECODE_BLOCK_BUCKET_MAX`)   | `max_model_len * max_num_seqs // block_size` <br> by default or `max_blocks` <br> if `VLLM_CONTIGUOUS_PA = True` |
+| Phase  | Variable name                                                            | Default value                                                                                                       |
+|--------|--------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------|
+| Prompt | batch size min (`VLLM_PROMPT_BS_BUCKET_MIN`)                             | `1`                                                                                                                 |
+| Prompt | batch size step (`VLLM_PROMPT_BS_BUCKET_STEP`)                           | `1`                                                                                                                 |
+| Prompt | batch size max (`VLLM_PROMPT_BS_BUCKET_MAX`)                             | `max_num_prefill_seqs`                                                                                              |
+| Prompt | batch size max abs padding (`VLLM_PROMPT_BS_BUCKET_PAD_MAX`)             | `ceil(max_num_prefill_seqs / 4)`                                                                                    |
+| Prompt | batch size max padding percent (`VLLM_PROMPT_BS_BUCKET_PAD_PERCENT`)     | `25`                                                                                                                |
+| Prompt | query length min (`VLLM_PROMPT_QUERY_BUCKET_MIN`)                        | `block_size`                                                                                                        |
+| Prompt | query length step (`VLLM_PROMPT_QUERY_BUCKET_STEP`)                      | `block_size`                                                                                                        |
+| Prompt | query length max (`VLLM_PROMPT_QUERY_BUCKET_MAX`)                        | `max_num_batched_tokens`                                                                                            |
+| Prompt | query length max abs padding (`VLLM_PROMPT_QUERY_BUCKET_PAD_MAX`)        | `ceil(max_num_batched_tokens / 4)`                                                                                  |
+| Prompt | query length max padding percent (`VLLM_PROMPT_QUERY_BUCKET_PAD_PERCENT`)| `25`                                                                                                                |
+| Prompt | sequence ctx min (`VLLM_PROMPT_CTX_BUCKET_MIN`)                          | `0`                                                                                                                 |
+| Prompt | sequence ctx step (`VLLM_PROMPT_CTX_BUCKET_STEP`)                        | `2`                                                                                                                 |
+| Prompt | sequence ctx max (`VLLM_PROMPT_CTX_BUCKET_MAX`)                          | `ceil((max_model_len - VLLM_PROMPT_QUERY_BUCKET_MIN) / block_size)`                                                 |
+| Prompt | sequence ctx max abs padding (`VLLM_PROMPT_CTX_BUCKET_PAD_MAX`)          | `ceil(max_num_batched_tokens / block_size)`                                                                         |
+| Prompt | sequence ctx max padding percent (`VLLM_PROMPT_CTX_BUCKET_PAD_PERCENT`)  | `25`                                                                                                                |
+| Decode | batch size min (`VLLM_DECODE_BS_BUCKET_MIN`)                             | `1`                                                                                                                 |
+| Decode | batch size step (`VLLM_DECODE_BS_BUCKET_STEP`)                           | `2`                                                                                                                 |
+| Decode | batch size max (`VLLM_DECODE_BS_BUCKET_MAX`)                             | `max_num_seqs`                                                                                                      |
+| Decode | batch size max abs padding (`VLLM_DECODE_BS_BUCKET_PAD_MAX`)             | `ceil(max_num_seqs / 4)`                                                                                            |
+| Decode | batch size max padding percent (`VLLM_DECODE_BS_BUCKET_PAD_PERCENT`)     | `25`                                                                                                                |
+| Decode | num blocks min (`VLLM_DECODE_BLOCK_BUCKET_MIN`)                          | `block_size`                                                                                                        |
+| Decode | num blocks step (`VLLM_DECODE_BLOCK_BUCKET_STEP`)                        | `block_size`                                                                                                        |
+| Decode | num blocks max (`VLLM_DECODE_BLOCK_BUCKET_MAX`)                          | `ceil(max_model_len * max_num_seqs / block_size)` <br>by default or `max_blocks` <br>if `VLLM_CONTIGUOUS_PA = True` |
+| Decode | num blocks max abs padding (`VLLM_DECODE_BLOCK_BUCKET_PAD_MAX`)          | `ceil(VLLM_DECODE_BLOCK_BUCKET_MAX / 4)`                                                                            |
+| Decode | num blocks max padding percent (`VLLM_DECODE_BLOCK_BUCKET_PAD_PERCENT`)  | `25`                                                                                                                |
+
+The default value of `25` for `VLLM_*_BUCKET_PAD_PERCENT` is a balance of warmup duration and runtime performance. Using smaller value like `10` introduce more buckets and reduces the padding to get better runtime performance. Setting to `0` to fall back to the original linear bucketing with minimum padding. And setting to `50` is close to the exponential bucketing except for the corresponding  `VLLM_*_BUCKET_MIN` is not `0` nor `1`.
+
+Legacy `VLLM_PROMPT_SEQ_BUCKET_*` variables are still accepted as a fallback for prompt query settings when `VLLM_PROMPT_QUERY_BUCKET_*` is not set, but this compatibility path is deprecated and will be removed in a future release.
 
 When a deployed workload does not use the full context a model can handle, we
 recommend you to limit the maximum values upfront, based on the expected input
@@ -90,7 +110,7 @@ unnecessary and you can limit the values upfront. It reduces the startup time
 and warm-up. Recommended settings for this case are:
 
 - `--max_model_len`: `3072`, which is the sum of input and output sequences (1+2)*1024.  
-- `VLLM_PROMPT_SEQ_BUCKET_MAX`: `1024`, which is the maximum input token size that you expect to handle.
+- `VLLM_PROMPT_QUERY_BUCKET_MAX`: `1024`, which is the maximum input token size that you expect to handle.
 
 !!! note
     If the model config specifies a high `max_model_len`, set it to the sum of `input_tokens` and `output_tokens`, rounded up to a multiple of `block_size` according to actual requirements.
