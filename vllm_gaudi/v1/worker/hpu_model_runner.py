@@ -4347,28 +4347,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         can be one of two:
         1. Children of the nn.ModuleList
         2. Member of regional_compilation_layers_list
-
-        When split_moe_compilation is enabled, MoE decoder layers
-        have their sub-components (self_attn, mlp, layernorms) compiled
-        individually instead of as a single unit. This splits the large
-        attention+MoE graph into smaller pieces, dramatically reducing
-        compilation time in Synapse.
         """
         if isinstance(module, torch.nn.ModuleList):
             for children_name, children_module in module.named_children():
-                # Check if this is a decoder layer with a MoE MLP
-                if self._should_split_moe_layer(children_module):
-                    # Compile sub-components individually
-                    logger.info(
-                        "Split-compiling MoE decoder layer %s "
-                        "(sub-components: %s)",
-                        children_name,
-                        [n for n, _ in children_module.named_children()],
-                    )
-                    for sub_name, sub_module in children_module.named_children():
-                        self._compile_region(children_module, sub_name, sub_module)
-                else:
-                    self._compile_region(module, children_name, children_module)
+                self._compile_region(module, children_name, children_module)
         elif any(isinstance(module, layer) for layer in self.regional_compilation_layers_list):
             self._compile_region(
                 parent_module,
@@ -4378,39 +4360,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:
             for children_name, children_module in module.named_children():
                 self._regional_compilation(children_module, module, children_name)
-
-    def _should_split_moe_layer(self, module):
-        """
-        Decide whether to split-compile a decoder layer's sub-components.
-
-        Returns True when:
-        - VLLM_SPLIT_MOE_COMPILATION=true (explicit flag), OR
-        - The model has >= 64 MoE experts (auto-detect heuristic)
-
-        AND the module actually contains a MoE MLP.
-        """
-        mlp = getattr(module, 'mlp', None)
-        if mlp is None:
-            return False
-
-        # Check if the MLP is a MoE block
-        cls_name = type(mlp).__name__
-        is_moe = 'SparseMoe' in cls_name or 'MoE' in cls_name or 'Moe' in cls_name
-        if not is_moe:
-            return False
-
-        # Check explicit flag
-        if get_config().split_moe_compilation:
-            return True
-
-        # Auto-detect: split when num_experts >= 200
-        hf_config = getattr(self.model_config, 'hf_text_config', getattr(self.model_config, 'hf_config', None))
-        if hf_config is not None:
-            num_experts = getattr(hf_config, 'num_experts', getattr(hf_config, 'num_local_experts', 0))
-            if num_experts >= 200:
-                return True
-
-        return False
 
     def _compile_region(self, model, name, module):
         module = self._compile(module)
