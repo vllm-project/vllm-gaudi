@@ -153,7 +153,7 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             ws_channelwise = convert_to_channelwise(layer.weight_scale, layer.logical_widths)
             layer.weight_scale = torch.nn.Parameter(ws_channelwise, requires_grad=False)
         elif layer.scheme.strategy == QuantizationStrategy.BLOCK:
-            layer = hpu_ops.fp8_block_linear_postprocess_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
+            layer = hpu_ops.fp8_block_linear_postprocess_weights(layer, getattr(envs, 'VLLM_HPU_FORCE_CHANNEL_FP8', False))
         else:
             # required by torch.compile to be torch.nn.Parameter
             layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data, requires_grad=False)
@@ -324,7 +324,7 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
 
-        if self.block_quant and not envs.VLLM_HPU_FORCE_CHANNEL_FP8:
+        if self.block_quant and not getattr(envs, 'VLLM_HPU_FORCE_CHANNEL_FP8', False):
             layer.moe_op = VllmMixtureOfExpertsOpFP8(
                 layer.global_num_experts,
                 num_experts,
@@ -375,7 +375,7 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
 
         if self.block_quant:
             assert layer.weight_block_size is not None
-            layer = hpu_ops.fp8_block_moe_prepare_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
+            layer = hpu_ops.fp8_block_moe_prepare_weights(layer, getattr(envs, 'VLLM_HPU_FORCE_CHANNEL_FP8', False))
         else:
             layer = hpu_ops.fp8_channel_moe_prepare_weights(layer)
         return

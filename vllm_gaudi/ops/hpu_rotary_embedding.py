@@ -18,13 +18,14 @@ class HPURotaryEmbedding(RotaryEmbedding):
                         positions: torch.Tensor,
                         offsets: Optional[torch.Tensor] = None,
                         recompute_cos_sin: bool = False):
+        """Build cos/sin buffers for RoPE. Supports offsets (long-context, LoRA) and scaling (e.g. DeepSeek)."""
         self.recompute_cos_sin = recompute_cos_sin
         if offsets is not None:
             offsets = offsets.view(positions.shape[0], -1)
             positions = positions + offsets
         positions = positions.flatten()
         num_tokens = positions.shape[0]
-        cos_sin = self.cos_sin_cache.index_select(0, positions).view(num_tokens, 1, -1)
+        cos_sin = self.cos_sin_cache[positions.long()].view(num_tokens, 1, -1)
         cos, sin = cos_sin.chunk(2, dim=-1)
         if self.is_neox_style:
             cos = torch.cat((cos, cos), dim=-1)
@@ -44,8 +45,8 @@ class HPURotaryEmbedding(RotaryEmbedding):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from habana_frameworks.torch.hpex.kernels import (RotaryPosEmbeddingMode, apply_rotary_pos_emb)
 
-        # Prepare cos-sin caches for long-context + LoRA with offsets for every
-        # forward, since the offset information wasn't available previously
+        # Prepare cos/sin for long-context and LoRA (offsets) or when scaling is used
+        # (scaling_factors / scaling_factor for DeepSeek-style RoPE); recompute when needed.
         if not hasattr(self, "sin") or self.recompute_cos_sin:
             self.prepare_cos_sin(positions, offsets, recompute_cos_sin=True)
         if hasattr(self, "scaling_factors") or hasattr(self, "scaling_factor") or self.sin is None:
@@ -98,7 +99,7 @@ class HPULinearScalingRotaryEmbedding(LinearScalingRotaryEmbedding):
             positions = positions + offsets
         positions = positions.flatten()
         num_tokens = positions.shape[0]
-        cos_sin = self.cos_sin_cache.index_select(0, positions).view(num_tokens, 1, -1)
+        cos_sin = self.cos_sin_cache[positions.long()].view(num_tokens, 1, -1)
         cos, sin = cos_sin.chunk(2, dim=-1)
         if self.is_neox_style:
             cos = torch.cat((cos, cos), dim=-1)
@@ -172,7 +173,7 @@ class HPUDynamicNTKScalingRotaryEmbedding(DynamicNTKScalingRotaryEmbedding):
             positions = positions + offsets
         positions = positions.flatten()
         num_tokens = positions.shape[0]
-        cos_sin = self.cos_sin_cache.index_select(0, positions).view(num_tokens, 1, -1)
+        cos_sin = self.cos_sin_cache[positions.long()].view(num_tokens, 1, -1)
         cos, sin = cos_sin.chunk(2, dim=-1)
         if self.is_neox_style:
             cos = torch.cat((cos, cos), dim=-1)
@@ -246,7 +247,7 @@ class HPUYaRNScalingRotaryEmbedding(YaRNScalingRotaryEmbedding):
             positions = positions + offsets
         positions = positions.flatten()
         num_tokens = positions.shape[0]
-        cos_sin = self.cos_sin_cache.index_select(0, positions).view(num_tokens, 1, -1)
+        cos_sin = self.cos_sin_cache[positions.long()].view(num_tokens, 1, -1)
         cos, sin = cos_sin.chunk(2, dim=-1)
         if self.is_neox_style:
             cos = torch.cat((cos, cos), dim=-1)
@@ -320,7 +321,10 @@ class HPUDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
             positions = positions + offsets
         positions = positions.flatten()
         num_tokens = positions.shape[0]
-        cos_sin = self.cos_sin_cache.index_select(0, positions).view(num_tokens, 1, -1)
+        # Use direct indexing instead of index_select to avoid HPU graph
+        # accuracy issues (index_select in captured HPU graphs is flagged as
+        # inaccurate for large position values >65535 seen at 128K+ context).
+        cos_sin = self.cos_sin_cache[positions.long()].view(num_tokens, 1, -1)
         cos, sin = cos_sin.chunk(2, dim=-1)
         if self.is_neox_style:
             cos = torch.cat((cos, cos), dim=-1)
@@ -409,7 +413,7 @@ class HPULlama3RotaryEmbedding(Llama3RotaryEmbedding):
             positions = positions + offsets
         positions = positions.flatten()
         num_tokens = positions.shape[0]
-        cos_sin = self.cos_sin_cache.index_select(0, positions).view(num_tokens, 1, -1)
+        cos_sin = self.cos_sin_cache[positions.long()].view(num_tokens, 1, -1)
         cos, sin = cos_sin.chunk(2, dim=-1)
         if self.is_neox_style:
             cos = torch.cat((cos, cos), dim=-1)
@@ -483,7 +487,7 @@ class HPUPhi3LongRoPEScaledRotaryEmbedding(Phi3LongRoPEScaledRotaryEmbedding):
             positions = positions + offsets
         positions = positions.flatten()
         num_tokens = positions.shape[0]
-        cos_sin = self.long_short_cos_sin_cache.index_select(0, positions).view(num_tokens, 1, -1)
+        cos_sin = self.long_short_cos_sin_cache[positions.long()].view(num_tokens, 1, -1)
         cos, sin = cos_sin.chunk(2, dim=-1)
         cos = torch.cat((cos, cos), dim=-1)
         sin = torch.cat((sin, sin), dim=-1)
@@ -637,7 +641,7 @@ class HPUMRotaryEmbedding(MRotaryEmbedding):
             positions = positions + offsets
         positions = positions.flatten()
         num_tokens = positions.shape[0]
-        cos_sin = self.cos_sin_cache.index_select(0, positions).view(num_tokens, 1, -1)
+        cos_sin = self.cos_sin_cache[positions.long()].view(num_tokens, 1, -1)
         cos, sin = cos_sin.chunk(2, dim=-1)
         if self.is_neox_style:
             cos = torch.cat((cos, cos), dim=-1)

@@ -5,6 +5,28 @@ import sys
 from vllm_gaudi.platform import HpuPlatform
 
 
+def _patch_triton_compat():
+    """Patch triton.next_power_of_2 for triton >= 3.6 compatibility.
+
+    vLLM's fp8_utils.py calls triton.next_power_of_2() which was moved to
+    triton.runtime in triton 3.6+.  On HPU triton kernels are not executed,
+    but the function is still called during FP8 quantization setup.
+    """
+    try:
+        import triton
+        if not hasattr(triton, 'next_power_of_2'):
+            try:
+                from triton.runtime import next_power_of_2
+                triton.next_power_of_2 = next_power_of_2
+            except ImportError:
+                triton.next_power_of_2 = lambda n: 1 << (n - 1).bit_length()
+    except ImportError:
+        pass
+
+
+# Apply triton compatibility patch early, before any vLLM model code runs.
+_patch_triton_compat()
+
 def _uses_lmcache_connector() -> bool:
     """Check if lmcache is configured as the KV connector.
 
@@ -106,6 +128,8 @@ def register_ops():
     if row_parallel_chunks > 1:
         from vllm_gaudi.lora.layers.hpu_row_parallel_linear import register_hpu_lora_layers
         register_hpu_lora_layers()
+
+    import vllm_gaudi.ops.hpu_sparse_attn_indexer  # noqa: F401
 
 
 def register_models():

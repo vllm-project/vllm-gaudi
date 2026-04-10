@@ -53,6 +53,7 @@ class Softmax(torch.nn.Module):
 
 
 def get_kv_fetch_extra_args(**kwargs):
+    """Filter KV-fetch kwargs by runtime config (e.g. per-token scaling for FP8 / long context)."""
     if not get_config().per_token_kv_scaling_support:
         kwargs.pop('scales', None)
     return kwargs
@@ -77,7 +78,13 @@ class VLLMKVCache(torch.nn.Module):
         if self.use_contiguous_pa:
             return cache[:blocks.size(0)]
         else:
-            return cache.index_select(0, blocks)
+            # Clamp to valid range before indexing: blocks may contain _PAD_BLOCK_ID
+            # (= num_kv_blocks, out-of-bounds) for padding slots.  Clamping fetches
+            # the last valid block's data for padding entries; block_bias=-inf in
+            # pipelined_pa masks their contribution to zero regardless.
+            # index_select is avoided because it is flagged as having accuracy
+            # issues in captured HPU graphs.
+            return cache[blocks.clamp(0, cache.shape[0] - 1)]
 
 
 class VLLMFP8KVCache(VLLMKVCache):
@@ -172,14 +179,14 @@ class ModuleFusedSDPA(torch.nn.Module):
         window_size=None,
         sinks=None,
     ):
-        if window_size is not None:
-            return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode,
-                                                recompute_mode, valid_sequence_lengths, padding_side, False, False,
-                                                window_size, sinks)
-        else:
-            return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode,
-                                                recompute_mode, valid_sequence_lengths, padding_side, False, False,
-                                                (-1, -1), sinks)
+        ws = window_size if window_size is not None else (-1, -1)
+        base_args = [
+            query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode,
+            recompute_mode, valid_sequence_lengths, padding_side, False, False, ws
+        ]
+        if sinks is not None:
+            base_args.append(sinks)
+        return self._hpu_kernel_fsdpa.apply(*base_args)
 
 
 class ModuleFP8FusedSDPA(torch.nn.Module):

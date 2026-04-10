@@ -100,7 +100,13 @@ class HPUMLAAttentionBackend(HPUAttentionBackend):
 
 @dataclass
 class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
-    """Metadata for HPUAttentionbackend."""
+    """Metadata for HPU attention backends.
+
+    Chunked prefill / long-context (e.g. 16k, 32k) uses the chunked_* fields:
+    chunked_slot_mapping, chunked_attn_bias, chunked_block_mapping, chunked_block_list,
+    chunked_block_groups, chunked_block_usage. They describe the last-chunk KV blocks
+    and attention bias for models with attention_chunk_size (e.g. DeepSeek V3.2 sparse).
+    """
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
@@ -135,7 +141,8 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     chunked_block_usage: Optional[torch.Tensor] = None
     has_initial_states_p: Optional[torch.Tensor] = None
     last_chunk_indices_p: Optional[torch.Tensor] = None
-    state_indices_tensor: Optional[torch.Tensor] = None  # shape: [batch,]
+    load_indices_tensor: Optional[torch.Tensor] = None  # shape: [batch,]
+    store_indices_tensor: Optional[torch.Tensor] = None  # shape: [batch,]
 
 
 @dataclass
@@ -244,9 +251,9 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         ##### get prefix cache #####
         if attn_metadata.block_list is not None:
             current = latent_vec_k
-            # Patch for vllm-gaudi kv_cache tuple format.
-            if isinstance(k_cache, tuple):
-                k_cache = k_cache[0]  # Use only key_cache for MLA
+            # Extract tensor from kv_cache container for MLA
+            while isinstance(k_cache, (tuple, list)):
+                k_cache = k_cache[0]
             past = self.latent_cache_k.fetch_from_cache(k_cache.unflatten(0, (-1, attn_metadata.block_size)),
                                                         attn_metadata.block_list)
             past = past.view(-1, past.shape[-1])
@@ -281,12 +288,21 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         else:
             v_padded = v
 
-        output = ops.prompt_attention(impl=self.prefill_impl,
+        # Chunked prefill (16k/32k): For cross-chunk attention (prefix-cached context),
+        # FusedSDPA falls back to is_causal=False + valid_seq_lengths=None when
+        # attn_bias is present; behaviour with rectangular Q/KV (q_len < kv_len) is
+        # undefined, so we use naive_impl here for correctness. For the first chunk
+        # (no cached context), pass attn_bias=None so the backend uses is_causal=True
+        # + valid_seq_lengths.
+        has_context = attn_metadata.block_list is not None
+        impl = 'naive_impl' if has_context else self.prefill_impl
+        attn_bias_arg = attn_metadata.attn_bias if has_context else None
+        output = ops.prompt_attention(impl=impl,
                                       query=q,
                                       key=k,
                                       value=v_padded,
                                       is_causal=True,
-                                      attn_bias=attn_metadata.attn_bias,
+                                      attn_bias=attn_bias_arg,
                                       position_bias=None,
                                       valid_seq_lengths=attn_metadata.seq_lens_tensor,
                                       scale=self.scale,
@@ -304,11 +320,9 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
     def forward_mqa(  # type: ignore
             self, q_nope: torch.Tensor, q_pe: torch.Tensor, k_cache: torch.Tensor,
             attn_metadata: HPUAttentionMetadata) -> torch.Tensor:
-        if k_cache is not None and isinstance(k_cache, tuple):
-            key_cache, value_cache, k_scales, v_scales = \
-                HPUPagedAttention.split_kv_cache(k_cache, self.num_kv_heads, self.head_size)
-        if isinstance(k_cache, tuple):
-            k_cache = k_cache[0]  # Use only key_cache for MLA
+        # Extract tensor from kv_cache container (list/tuple) for MLA
+        while isinstance(k_cache, (tuple, list)):
+            k_cache = k_cache[0]
         query = torch.cat([q_nope, q_pe], dim=-1)
         key_cache = k_cache.unsqueeze(1) if k_cache is not None else None
         value_cache = None
@@ -534,7 +548,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         value_cache = None
         k_scales = None
         v_scales = None
-        if kv_cache is not None and isinstance(kv_cache, tuple):
+        if kv_cache is not None and isinstance(kv_cache, (tuple, list)):
             key_cache, value_cache, k_scales, v_scales = \
                 HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
             if key.dtype == torch.float32 and key.dtype != key_cache.dtype:
@@ -731,7 +745,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
 
         cross_slot_mapping = attn_metadata.cross_slot_mapping.flatten(
         ) if attn_metadata.cross_slot_mapping is not None else None
-        if kv_cache is not None and isinstance(kv_cache, tuple):
+        if kv_cache is not None and isinstance(kv_cache, (tuple, list)):
             key_cache, value_cache, k_scales, v_scales = \
                 HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
 
@@ -862,3 +876,5 @@ def _make_decode_alibi_bias(
     per_head_bias.mul_(alibi_slopes[None, :, None])
 
     return per_head_bias
+
+

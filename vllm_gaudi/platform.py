@@ -64,8 +64,22 @@ class HpuPlatform(Platform):
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: Optional[int] = None,
     ) -> str:
+        """Return the attention backend class name for the given config.
+
+        When use_sparse is True (e.g. DeepSeek V3.2), token selection is done in the
+        custom attention class before the backend; the backend sees already-selected
+        tokens. The regular HPUMLAAttentionBackend handles the computation.
+        """
         if attn_selector_config.use_sparse:
-            raise NotImplementedError("Sparse Attention is not supported on HPU.")
+            # DeepSeek V3.2 uses sparse attention on top of MLA.
+            # Sparse token selection is handled in the model's custom attention class
+            # before calling the backend — the backend sees already-selected tokens.
+            if attn_selector_config.use_mla:
+                logger.info("[HPU] Using HPUMLAAttentionBackend for sparse+MLA attention")
+                return ("vllm_gaudi.attention.backends.hpu_attn."
+                        "HPUMLAAttentionBackend")
+            else:
+                raise NotImplementedError("Sparse attention without MLA is not supported on HPU.")
 
         if attn_selector_config.use_mla:
             logger.info("Using HPUAttentionMLA backend.")
@@ -120,7 +134,7 @@ class HpuPlatform(Platform):
         # NOTE(kzawora): default block size for Gaudi should be 128
         # smaller sizes still work, but very inefficiently
         cache_config = vllm_config.cache_config
-        if not cache_config.user_specified_block_size:
+        if not getattr(cache_config, 'user_specified_block_size', False):
             cache_config.block_size = 128
         elif is_qwen3_5_hybrid_model(vllm_config.model_config) and cache_config.block_size != 128:
             # Narrow the reset to Qwen3.5 hybrids. Other hybrid models may
@@ -214,6 +228,11 @@ class HpuPlatform(Platform):
         if get_config().VLLM_CONTIGUOUS_PA:
             logger.warning("Using Contiguous PA, disabling prefix caching")
             vllm_config.cache_config.enable_prefix_caching = False
+
+        if (vllm_config.cache_config.enable_prefix_caching and vllm_config.cache_config.mamba_cache_mode == "all"):
+            vllm_config.cache_config.mamba_cache_mode = "align"
+            logger.info("[HPU] Overriding mamba_cache_mode from 'all' to 'align' "
+                        "to ensure block-aligned chunked prefill splits.")
 
         if compilation_config.mode != CompilationMode.NONE:
             logger.info("[HPU] Forcing CompilationMode.NONE "
@@ -353,7 +372,7 @@ class HpuPlatform(Platform):
         view_as_uint = original_src_dtype in [torch.float8_e4m3fn, torch.float8_e5m2]
         if view_as_uint:
             src_cache = src_cache.view(torch.uint8)
-        if isinstance(dst_cache, tuple):
+        if isinstance(dst_cache, (tuple, list)):
             _src_cache = src_cache[:, src_block_indices]
             _src_cache = _src_cache.to(dst_cache[0].device)
             dst_cache[0].index_copy_(0, dst_block_indices,
@@ -376,7 +395,7 @@ class HpuPlatform(Platform):
         dst_block_indices: torch.Tensor,
     ) -> None:
         """Copy blocks from HPU to host (CPU)."""
-        if isinstance(src_cache, tuple):
+        if isinstance(src_cache, (tuple, list)):
             _src_cache = torch.stack([c[src_block_indices] for c in src_cache], dim=0)
             dst_cache[:, dst_block_indices] = _src_cache.cpu()
         else:
