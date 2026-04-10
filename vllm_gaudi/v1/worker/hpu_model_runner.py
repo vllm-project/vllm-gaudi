@@ -249,6 +249,8 @@ def _move_remaining_tensors_to_device(model: torch.nn.Module, device: str) -> No
 
     moved = 0
     for mod in model.modules():
+        # Compute once per module; None if not an INC-patched module.
+        scale_members = getattr(mod, "scale_members", None)
         for attr_name in list(mod.__dict__.keys()):
             # Skip PyTorch's internal registry dicts and registered
             # parameters, buffers, and child modules — all of these
@@ -256,6 +258,10 @@ def _move_remaining_tensors_to_device(model: torch.nn.Module, device: str) -> No
             if attr_name in _SKIP_ATTRS:
                 continue
             if attr_name in mod._parameters or attr_name in mod._buffers or attr_name in mod._modules:
+                continue
+            # Skip INC FP8 scale tensors - they must remain on CPU
+            # as H2D const tensors for runtime scale patching.
+            if scale_members is not None and attr_name in scale_members:
                 continue
             obj = mod.__dict__[attr_name]
             new_obj, cnt, changed = _move_obj(obj)
@@ -2196,7 +2202,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                        seq_num_scheduled_tokens].tolist()
 
             num_blocks = round_up(seq_num_computed_tokens + seq_num_scheduled_tokens,
-                                  self.block_size) // self.block_size
+                                  self.attn_block_size) // self.attn_block_size
             blocks = block_table_cpu_tensor[batch_idx, :num_blocks].tolist()
             if not warmup:
                 blocks = [self._resolve_block(b) for b in blocks]
@@ -2247,7 +2253,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         dtype = self.dtype
         is_causal = True  # TODO: add support for non-causal tasks
         context_groups = torch.tensor(context_groups, device='cpu', dtype=torch.int16)
-        context_groups = context_groups.repeat_interleave(self.block_size, dim=-1)
+        context_groups = context_groups.repeat_interleave(self.attn_block_size, dim=-1)
         context_len = context_groups.size(-1)
         token_groups = torch.tensor(token_groups, device='cpu', dtype=torch.int16)
         num_queries = token_groups.size(-1)
@@ -2274,16 +2280,31 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         token_positions = [list(range(cl, cl + ql)) for cl, ql in zip(context_lens, query_lens)]
 
-        block_assignment = [[divmod(pos, self.block_size) for pos in positions] for positions in token_positions]
+        # Use attn_block_size for KV cache slot addressing so that the
+        # slot indices match the InputBatch block_table which is keyed
+        # by kernel_block_size (= attn_block_size on HPU).  self.block_size
+        # may be larger for hybrid models after page-size unification.
+        slot_block_size = self.attn_block_size
+        block_assignment = [[divmod(pos, slot_block_size) for pos in positions] for positions in token_positions]
 
-        token_slots = [[blocks[bi] * self.block_size + bo for bi, bo in assignment]
+        token_slots = [[blocks[bi] * slot_block_size + bo for bi, bo in assignment]
                        for blocks, assignment in zip(contents.blocks, block_assignment)]
         token_groups = [[i] * len(tid) for i, tid in enumerate(token_ids)]
-        num_context_blocks = [round_up(ctx_len, self.block_size) // self.block_size for ctx_len in context_lens]
+        # num_context_blocks for block_table indexing uses attn_block_size
+        # (matches kernel_block_size / InputBatch).
+        num_context_blocks = [round_up(ctx_len, slot_block_size) // slot_block_size for ctx_len in context_lens]
         context_blocks: list = [blocks[:num] for blocks, num in zip(contents.blocks, num_context_blocks)]
         num_context_blocks = [len(b) for b in context_blocks]
         context_groups = [[i] * b for i, b in enumerate(num_context_blocks)]
-        target_bs, target_seq, target_blocks = self._get_prompt_bucketing_fn()(query_lens, num_context_blocks)
+        # Bucketing uses self.block_size so that file-based buckets
+        # (generated at the original block_size) continue to match.
+        bucketing_ctx_blocks = [round_up(ctx_len, self.block_size) // self.block_size for ctx_len in context_lens]
+        target_bs, target_seq, target_blocks = self._get_prompt_bucketing_fn()(query_lens, bucketing_ctx_blocks)
+        # target_blocks is in self.block_size units (from the bucket file).
+        # Scale to attn_block_size units so context_blocks padding matches the
+        # block_table entries which use kernel_block_size = attn_block_size.
+        if self.attn_block_size != self.block_size:
+            target_blocks = target_blocks * (self.block_size // self.attn_block_size)
 
         target_bs += self.get_dp_padding(target_bs)
         target_seq += self.get_dp_padding(target_seq)
@@ -2479,7 +2500,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         query_len = 1 if has_kv_transfer_group() else 128
         prompt_tokens = 128
         token_ids = list(int(i) for i in range(query_len))
-        num_blocks = round_up(context_len + query_len, self.block_size) // self.block_size
+        num_blocks = round_up(context_len + query_len, self.attn_block_size) // self.attn_block_size
         blocks = [0] * num_blocks
         num_output_logits = context_len + query_len - prompt_tokens + 1
         logits_positions = list(range(query_len - num_output_logits, query_len))
@@ -5821,7 +5842,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.bucketing_manager.num_hpu_blocks = num_blocks
 
         self._PAD_BLOCK_ID = num_blocks
-        self._PAD_SLOT_ID = num_blocks * self.block_size
+        self._PAD_SLOT_ID = num_blocks * self.attn_block_size
         self._MAMBA_PAD_BLOCK_ID = num_blocks
         self._dummy_num_blocks = num_blocks
 
