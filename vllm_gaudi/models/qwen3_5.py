@@ -12,6 +12,12 @@ from vllm_gaudi.ops.hpu_gdn_pytorch import (
     hpu_fused_recurrent_gated_delta_rule,
 )
 
+# Replace the class in the upstream modules so that both Qwen3-Next and
+# Qwen3.5 model definitions instantiate HPUGatedDeltaNetAttention.
+import vllm.model_executor.layers.mamba.gdn_linear_attn as _gdn_module
+import vllm.model_executor.models.qwen3_next as _qwen3_next_module
+import vllm.model_executor.models.qwen3_5 as _qwen3_5_module
+
 
 def _save_ssm_state(core_attn_out, final_state, ssm_state, state_indices):
     """Persist GDN final_state into ssm_state cache for chunked prefill.
@@ -149,9 +155,7 @@ class HPUGatedDeltaNetAttention(GatedDeltaNetAttention):
 
             if self.gqa_interleaved_layout:
                 # Qwen3-Next: unpack the interleaved GQA layout
-                query, key, value, z, b, a = self.fix_query_key_value_ordering(
-                    mixed_qkvz, ba
-                )
+                query, key, value, z, b, a = self.fix_query_key_value_ordering(mixed_qkvz, ba)
                 # Pure-torch flatten instead of einops rearrange (graph breaks)
                 query = query.reshape(query.size(0), -1)
                 key = key.reshape(key.size(0), -1)
@@ -290,12 +294,6 @@ class HPUGatedDeltaNetAttention(GatedDeltaNetAttention):
         output_flat = output.view(-1, output.size(-1))
         output_flat[:num_tokens], _ = self.out_proj(core_attn_out)
 
-
-# Replace the class in the upstream modules so that both Qwen3-Next and
-# Qwen3.5 model definitions instantiate HPUGatedDeltaNetAttention.
-import vllm.model_executor.layers.mamba.gdn_linear_attn as _gdn_module
-import vllm.model_executor.models.qwen3_next as _qwen3_next_module
-import vllm.model_executor.models.qwen3_5 as _qwen3_5_module
 
 _gdn_module.GatedDeltaNetAttention = HPUGatedDeltaNetAttention
 _qwen3_next_module.GatedDeltaNetAttention = HPUGatedDeltaNetAttention
