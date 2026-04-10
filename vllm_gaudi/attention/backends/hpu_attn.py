@@ -17,7 +17,7 @@ from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, B2BMatmul, ModuleFuse
                                         VLLMFP8KVCache, VLLMKVCache)
 
 from vllm.v1.attention.backend import (AttentionBackend, AttentionImpl, AttentionLayer, AttentionMetadata,
-                                       AttentionType)
+                                       AttentionType, MultipleOf)
 from vllm.model_executor.layers.attention.mla_attention import (MLACommonImpl)
 from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention, HPUPagedAttentionMetadata,
                                                      HPUPagedAttentionMetadataBuilder)
@@ -71,6 +71,10 @@ class HPUAttentionBackend(AttentionBackend):
         src_to_dsts: torch.Tensor,
     ) -> None:
         HPUPagedAttention.copy_blocks(kv_caches, src_to_dsts)
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [128]
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "HPU_MLA")

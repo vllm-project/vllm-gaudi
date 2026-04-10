@@ -279,9 +279,7 @@ class HpuPlatform(Platform):
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
-        # TODO: HPU still sets block_size in check_and_update_config.
-        # Move that logic here so block_size is chosen by the backend.
-        pass
+        super().update_block_size_for_backend(vllm_config)
 
     @classmethod
     def is_pin_memory_available(cls):
