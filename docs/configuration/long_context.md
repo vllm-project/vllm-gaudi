@@ -72,15 +72,15 @@ For `granite-4.0-h-small` (5 attention layers, 35 Mamba layers, TP=1, BF16):
 ### Maximum Batch Size at 128K Context
 
 The following table shows the estimated maximum batch size (concurrent 128K sequences)
-for `granite-4.0-h-small` on a single HPU card with `VLLM_GRAPH_RESERVED_MEM=0.1`:
+for `granite-4.0-h-small` on a single HPU card:
 
-| `gpu_memory_utilization` | Gaudi 3 (128 GiB) | Gaudi 2 (96 GiB) |
-|:------------------------:|:------------------:|:-----------------:|
-| 0.50 | 12 | 8 |
-| 0.70 | 16 | 12 |
-| 0.80 | 19 | 14 |
-| 0.90 | 21 | 16 |
-| 0.95 | 23 | 16 |
+| `gpu_memory_utilization` | `VLLM_GRAPH_RESERVED_MEM` | Gaudi 3 (128 GiB) | Gaudi 2 (96 GiB) |
+|:------------------------:|:-------------------------:|:------------------:|:-----------------:|
+| 0.50 | 0.1 | 12 | 8 |
+| 0.70 | 0.1 | 16 | 12 |
+| 0.80 | 0.1 | 19 | 14 |
+| 0.90 | 0.1 | 21 | 16 |
+| 0.95 | 0.1 | 23 | 16 |
 
 !!! note
     These are theoretical upper bounds.  Actual batch sizes may be lower due to

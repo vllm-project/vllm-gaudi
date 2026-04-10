@@ -125,7 +125,9 @@ class ModelSpec:
     mamba_n_groups: int = 1
     mamba_expand: int = 2
 
-    # Context
+    # Context – maximum position embeddings supported by the model.
+    # At runtime the actual context length is set via --max-model-len
+    # in RuntimeConfig.max_model_len.
     max_position_embeddings: int = 131072
 
     # Weight size (total model in GiB)
@@ -480,6 +482,7 @@ def main(argv: list[str] | None = None) -> None:
             mamba_d_state=args.mamba_d_state,
             mamba_n_groups=args.mamba_n_groups,
             mamba_expand=args.mamba_expand,
+            max_position_embeddings=args.max_model_len,
             model_weights_gib=args.model_weights_gib,
             dtype_bytes=args.dtype_bytes,
             cache_dtype_bytes=cache_dtype,
