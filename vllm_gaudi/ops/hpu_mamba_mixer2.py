@@ -36,9 +36,9 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_gaudi.ops.causal_conv1d_pytorch import (
-    hpu_causal_conv1d_fn,
-    hpu_causal_conv1d_update,
+from vllm_gaudi.ops.granite_causal_conv1d import (
+    granite_causal_conv1d_fn,
+    granite_causal_conv1d_update,
 )
 from vllm_gaudi.ops.ssd_combined import hpu_mamba_chunk_scan_combined_varlen
 from vllm_gaudi.ops.ops_selector import get_selective_state_update_impl
@@ -370,7 +370,6 @@ class HPUMambaMixer2(MambaMixer2):
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
 
         assert self.cache_config is not None
-        mamba_block_size = self.cache_config.mamba_block_size
         assert not self.cache_config.enable_prefix_caching
         if attn_metadata is not None:
             self_kv_cache = self.kv_cache
@@ -397,32 +396,15 @@ class HPUMambaMixer2(MambaMixer2):
         has_prefill = attn_metadata.is_prompt
         has_decode = not attn_metadata.is_prompt
 
-        block_idx_last_computed_token = None
-        block_idx_last_scheduled_token = None
-        block_idx_first_scheduled_token_p = None
-        num_computed_tokens_p = None
-
         # Process prefill requests
         if has_prefill:
             # 2. Convolution sequence transformation
-            # - It will read the initial states for every sequence,
-            #   that has "has_initial_states_p" == True,
-            #   from "cache_indices", using "state_indices_tensor".
-            # - It updates the "conv_state" cache in positions pointed
-            #   to by "state_indices_tensor".
-            #   In particular, it will always write the state at the
-            #   sequence end.
-            #   In addition, "block_idx_first_scheduled_token_p" and
-            #   "block_idx_last_computed_token"
-            #   are provided (which are pointers into
-            #   "state_indices_tensor"), it will write additional cache
-            #   states aligned at "block_size_to_align".
             assert padding_mask_flat is not None
             x = hidden_states_B_C.transpose(0, 1)  # this is the form that causal-conv see
             hidden_states_B_C = hidden_states_B_C * padding_mask_flat
             dt = dt * padding_mask_flat
 
-            hidden_states_B_C = hpu_causal_conv1d_fn(
+            hidden_states_B_C = granite_causal_conv1d_fn(
                 x,
                 self.conv_weights,
                 self.conv1d.bias,
@@ -430,11 +412,6 @@ class HPUMambaMixer2(MambaMixer2):
                 conv_states=conv_state,
                 has_initial_state=has_initial_states_p,
                 cache_indices=state_indices_tensor,
-                block_idx_first_scheduled_token=block_idx_first_scheduled_token_p,
-                block_idx_last_scheduled_token=block_idx_last_scheduled_token,
-                initial_state_idx=block_idx_last_computed_token,
-                num_computed_tokens=num_computed_tokens_p,
-                block_size_to_align=mamba_block_size,
                 metadata=attn_metadata,
                 query_start_loc=query_start_loc_p,
                 is_prompt=True,
@@ -480,15 +457,13 @@ class HPUMambaMixer2(MambaMixer2):
         # Process decode requests
         if has_decode:
             # 2. Convolution sequence transformation
-            hidden_states_B_C = hpu_causal_conv1d_update(
+            hidden_states_B_C = granite_causal_conv1d_update(
                 hidden_states_B_C,
                 conv_state,
                 self.conv_weights,
                 self.conv1d.bias,
                 self.activation,
                 conv_state_indices=state_indices_tensor,
-                block_idx_last_scheduled_token=block_idx_last_computed_token,
-                initial_state_idx=block_idx_last_computed_token,
                 query_start_loc=query_start_loc_p,
             )
 
