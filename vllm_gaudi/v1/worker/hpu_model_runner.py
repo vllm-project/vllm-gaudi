@@ -1011,9 +1011,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:
             self.max_encoder_len = 0
 
-        model_type = self._get_model_type() or ""
-        self._requires_bool_mm_mask_for_merge = model_type.startswith("qwen")
-
         mamba_like = ["mamba", "gdn_attention", "linear_attention"]
 
         self.num_mamba_like_layers = sum(
@@ -1788,11 +1785,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 req_start_idx += num_scheduled_tokens
 
         # Convert bool tensor to index tensor for merge embedding statically if optimized mm
-
-        # Qwen3.5 multimodal merge path requires a boolean placeholder mask.
-        # Converting the mask to index form here can break placeholder-to-embedding
-        # alignment for Qwen3.5, so keep bool form for that model family.
-        if self.uses_mrope and not self._requires_bool_mm_mask_for_merge:
+        if self.uses_mrope:
             is_mm_embed_index = torch.nonzero(is_mm_embed[:total_num_scheduled_tokens], as_tuple=True)[0]
             # Bounds validation on CPU
             if len(is_mm_embed_index) > 0 and is_mm_embed_index.max() >= total_num_scheduled_tokens:

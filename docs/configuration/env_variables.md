@@ -54,6 +54,7 @@ HPU PyTorch bridge environment variables impacting vLLM execution:
 | `PT_HPUGRAPH_DISABLE_TENSOR_CACHE` | Must be set to `false` for LLaVA, Qwen, and RoBERTa models.                                                                                           | `false`                                          |
 | `VLLM_PROMPT_USE_FLEX_ATTENTION`   | Enabled only for the Llama model, allowing usage of `torch.nn.attention.flex_attention` instead of FusedSDPA. Requires `VLLM_PROMPT_USE_FUSEDSDPA=0`. | `false`                                          |
 | `RUNTIME_SCALE_PATCHING`           | Enables the runtime scale patching feature, which applies only to FP8 execution and is ignored for BF16.                                              | `true` (Torch Compile mode), `false` (Lazy mode) |
+| `ENABLE_EXPERIMENTAL_FLAGS` and `ENABLE_SKIP_REMOVAL_OF_GRAPH_INPUT_IDENTITY_NODES` | Must both be set to `true` for Qwen3.5 (GDN hybrid) models to improve graph compilation performance. | `false`                                          |
 
 ## Additional Performance Tuning Parameters for Bucketing Strategies
 
