@@ -6,6 +6,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, FusedMoEConfig)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from compressed_tensors.quantization import (QuantizationArgs, QuantizationStrategy)
 
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import convert_to_channelwise, all_close_1d
@@ -422,6 +423,29 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
         else:
             layer = hpu_ops.fp8_channel_moe_prepare_weights(layer)
         return
+
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig | None:
+        # On HPU, block quantization renames w13_weight_scale/w2_weight_scale
+        # to w13_weight_scale_inv/w2_weight_scale_inv via _hpu_weight_scale_alias.
+        # Use the renamed attributes for block quant.
+        if self.block_quant:
+            w13_scale = layer.w13_weight_scale_inv
+            w2_scale = layer.w2_weight_scale_inv
+        else:
+            w13_scale = layer.w13_weight_scale
+            w2_scale = layer.w2_weight_scale
+
+        is_per_token = self.input_quant.strategy == QuantizationStrategy.TOKEN
+        return FusedMoEQuantConfig.make(
+            quant_dtype=self.fp8_backend,
+            w1_scale=w13_scale,
+            w2_scale=w2_scale,
+            a1_scale=layer.w13_input_scale,
+            a2_scale=layer.w2_input_scale,
+            per_act_token_quant=is_per_token,
+            per_out_ch_quant=is_per_token,
+            block_shape=self.weight_block_size,
+        )
 
     def apply_monolithic(
         self,
