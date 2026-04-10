@@ -142,10 +142,9 @@ class HPUCompressedTensorsLinearMethod(OrigCompressedTensorsLinearMethod):
         elif layer.scheme.strategy == QuantizationStrategy.BLOCK:
             if hasattr(layer, "updated_fp8_weight") and layer.updated_fp8_weight:
                 return layer.weight
-            weight_scale = layer.weight_scale_inv if hasattr(layer, "weight_scale_inv") else layer.weight_scale
             dequant_weight = hpu_ops.dequant_block_fp8_weight_naive(
-                layer.weight.t(),
-                weight_scale.data,
+                layer.weight,
+                layer.weight_scale_inv.data,
                 layer.weight_block_size,
                 original_M=layer.orig_M,
                 original_N=layer.orig_N,
@@ -182,9 +181,12 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         elif layer.scheme.strategy == QuantizationStrategy.BLOCK:
             # Rename blockwise quantization scales to match fp8_block_linear_postprocess_weights
             # Needed for models like Mistral-Large-3-675B
+            assert self.is_static_input_scheme is False
             _hpu_weight_scale_alias(layer, "weight_scale", "weight_scale_inv")
             layer.quant_config.weight_block_size = self.weight_block_size
             layer = hpu_ops.fp8_block_linear_postprocess_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
+            input_scale = None
+            return
         else:
             # required by torch.compile to be torch.nn.Parameter
             layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data, requires_grad=False)
@@ -279,15 +281,26 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             layer.register_parameter("input_scale", input_scale)
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor, bias: Optional[torch.Tensor] = None):
+        if self.weight_block_size is not None and layer.weight.dtype == torch.float8_e4m3fn:
+            return hpu_ops.apply_block_fp8_linear_hpu(
+                input=x,
+                layer=layer,
+                block_size=self.weight_block_size,
+                bias=bias,
+                do_unpad=True,
+                force_channel_fp8=envs.VLLM_HPU_FORCE_CHANNEL_FP8,
+            )
         weight_scale = layer.weight_scale_inv if hasattr(layer, "weight_scale_inv") else layer.weight_scale
         weight_scale = weight_scale.transpose(0, 1) if weight_scale.dim() > 1 else weight_scale
         input_scale = getattr(layer, 'input_scale', None)
-        return hpu_ops.apply_fp8_linear_hpu(input=x,
-                                            weight=layer.weight,
-                                            weight_scale=weight_scale,
-                                            input_scale=input_scale,
-                                            bias=bias,
-                                            trans_B=False)
+        input_2d = x.view(-1, x.shape[-1])
+        output = hpu_ops.apply_fp8_linear_hpu(input=input_2d,
+                                              weight=layer.weight,
+                                              weight_scale=weight_scale,
+                                              input_scale=input_scale,
+                                              bias=bias,
+                                              trans_B=False)
+        return output.view(*x.shape[:-1], -1)
 
 
 @CustomOp.register_oot(name='CompressedTensorsW8A8Fp8MoEMethod')
