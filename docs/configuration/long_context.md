@@ -9,6 +9,7 @@ Long context feature enables support for a token context window exceeding 128K t
 - [meta-llama/Meta-Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct)
 - [meta-llama/Meta-Llama-3-70B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-70B-Instruct)
 - [meta-llama/Meta-Llama-3.1-70B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B-Instruct)
+- [ibm-granite/granite-4.0-h-small](https://huggingface.co/ibm-granite/granite-4.0-h-small)
 
 ## Environment Variables Settings
 
@@ -48,4 +49,94 @@ An example of a warning message:
 
 ```bash
 Sequence group cmpl-3cbf19b0c6d74b3f90b5d5db2ed2385e-0 is preempted by PreemptionMode.RECOMPUTE mode because there is not enough KV cache space. This can affect the end-to-end performance. Increase gpu_memory_utilization or tensor_parallel_size to provide more KV cache memory.
+```
+
+## Granite 4.0 Hybrid Models (128K Context)
+
+Granite 4.0 models (`GraniteMoeHybridForCausalLM`) use a hybrid architecture combining
+attention layers with Mamba2 state-space layers and MoE (Mixture of Experts).  This
+architecture provides a significant advantage for long context: only the attention layers
+consume KV-cache memory that grows with sequence length, while Mamba layers use a
+fixed-size recurrent state that is shared across layers.
+
+### Memory Layout
+
+For `granite-4.0-h-small` (5 attention layers, 35 Mamba layers, TP=1, BF16):
+
+| Component | Per block (128 tokens) | Per sequence (128K) |
+|-----------|----------------------|---------------------|
+| Attention KV cache (5 layers) | 2,560 KiB | 2.50 GiB |
+| Mamba state (1 shared tensor) | 2,084 KiB | 2.04 GiB |
+| **Total** | **4,644 KiB** | **~4.54 GiB** |
+
+### Maximum Batch Size at 128K Context
+
+The following table shows the estimated maximum batch size (concurrent 128K sequences)
+for `granite-4.0-h-small` on a single HPU card with `VLLM_GRAPH_RESERVED_MEM=0.1`:
+
+| `gpu_memory_utilization` | Gaudi 3 (128 GiB) | Gaudi 2 (96 GiB) |
+|:------------------------:|:------------------:|:-----------------:|
+| 0.50 | 12 | 8 |
+| 0.70 | 16 | 12 |
+| 0.80 | 19 | 14 |
+| 0.90 | 21 | 16 |
+| 0.95 | 23 | 16 |
+
+!!! note
+    These are theoretical upper bounds.  Actual batch sizes may be lower due to
+    warm-up graph memory overhead, bucketing alignment, and runtime allocations.
+    Use the analysis tool `tools/granite4_long_context_analysis.py` to explore
+    different configurations.
+
+### Recommended Settings
+
+```bash
+# Required for long context
+VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+VLLM_ENGINE_ITERATION_TIMEOUT_S=3600
+VLLM_RPC_TIMEOUT=100000
+
+# Granite 4.0 specific
+VLLM_CONTIGUOUS_PA=false
+PT_HPU_LAZY_MODE=0
+```
+
+Example server launch for 128K context on Gaudi 3:
+
+```bash
+VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
+VLLM_ENGINE_ITERATION_TIMEOUT_S=3600 \
+VLLM_CONTIGUOUS_PA=false \
+PT_HPU_LAZY_MODE=0 \
+python -m vllm.entrypoints.openai.api_server \
+    --model ibm-granite/granite-4.0-h-small \
+    --block-size 128 \
+    --dtype bfloat16 \
+    --tensor-parallel-size 1 \
+    --max-model-len 131072 \
+    --gpu-memory-utilization 0.9 \
+    --max-num-seqs 21 \
+    --max-num-batched-tokens 8192 \
+    --enable-chunked-prefill \
+    --no-enable-prefix-caching
+```
+
+### Analysis Tool
+
+Use `tools/granite4_long_context_analysis.py` to compute batch-size limits for
+different Granite 4.0 variants, context lengths, and hardware configurations:
+
+```bash
+# Default analysis (granite-4.0-h-small, Gaudi 3, 128K)
+python tools/granite4_long_context_analysis.py
+
+# Use a specific preset
+python tools/granite4_long_context_analysis.py \
+    --preset granite-4.0-h-small --device GAUDI3
+
+# Custom model parameters
+python tools/granite4_long_context_analysis.py \
+    --num-attention-layers 10 --num-mamba-layers 30 \
+    --num-kv-heads 8 --head-dim 128 \
+    --max-model-len 131072 --device GAUDI3
 ```
