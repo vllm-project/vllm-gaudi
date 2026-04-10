@@ -358,10 +358,14 @@ def generate_buckets(bs_range,
     # filter rules for buckets
     # prompt
     def not_over_max_model_len(bs, query, ctx):
-        smaller_than_limit = (query + ctx * block_size) <= max_model_len
+        # With chunked prefill, the actual query in the last chunk can be
+        # shorter than the bucket query size (due to padding to the next
+        # query bucket). The real constraint is that context blocks fit
+        # within max_model_len with at least 1 remaining token for query.
+        smaller_than_limit = (ctx * block_size) < max_model_len
         if not smaller_than_limit:
             omitted_buckets.add(
-                ("condition: (query + ctx * block_size) <= max_model_len", "-> bs, query, ctx: ", bs, query, ctx))
+                ("condition: (ctx * block_size) < max_model_len", "-> bs, query, ctx: ", bs, query, ctx))
         return smaller_than_limit
 
     def not_over_max_num_batched_tokens(bs, query, ctx):

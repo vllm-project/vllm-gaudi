@@ -3849,7 +3849,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             htorch.core.mark_step()
             for idx, (req_id, prompt_len, token_ids, position_ids, attn_metadata, logits_indices,
                       logits_requests) in enumerate(zip(*shallow_tuple(prefill_data))):
-
                 # Prepare multimodal inputs if any
                 inputs_embeds, model_mm_kwargs = self._get_model_mm_inputs(
                     token_ids,
@@ -5000,12 +4999,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 prompt_ctx_len = prompt_num_blocks * self.block_size
                 prompt_total_tokens = [prompt_query_len + prompt_ctx_len]
                 prompt_num_context_blocks = [prompt_num_blocks]
-                if self.max_model_len < sum(prompt_total_tokens) \
-                    and self.use_merged_prefill:
-                    # split query and ctx in merged prefill case
-                    prompt_total_tokens, prompt_num_context_blocks = \
-                         self.get_merged_prefill_seq_lens(prompt_query_len,
-                                                     prompt_num_blocks)
+                if self.max_model_len < sum(prompt_total_tokens):
+                    if self.use_merged_prefill:
+                        # split query and ctx in merged prefill case
+                        prompt_total_tokens, prompt_num_context_blocks = \
+                             self.get_merged_prefill_seq_lens(prompt_query_len,
+                                                         prompt_num_blocks)
+                    else:
+                        # With chunked prefill, query bucket + ctx * block_size
+                        # can exceed max_model_len when the bucket pads beyond
+                        # the actual last chunk size. Cap total_tokens to
+                        # max_model_len; bucketing still selects the correct
+                        # bucket since ceil(context_len / block_size) yields
+                        # the original ctx_blocks value.
+                        prompt_total_tokens = [self.max_model_len]
             for _ in range(prompt_bs):
                 for tokens, context_len in zip(prompt_total_tokens, prompt_num_context_blocks):
                     if self.speculative_config and self.speculative_config.use_eagle():
