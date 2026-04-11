@@ -1776,8 +1776,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     req_start_pos = (batch_row * padded_seq_len + start_pos - num_computed_tokens)
                 else:
                     req_start_pos = (req_start_idx + start_pos - num_computed_tokens)
-                is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
-                    = True
+                if is_embed is None:
+                    is_mm_embed[req_start_pos + start_idx:req_start_pos + end_idx] = True
+                else:
+                    is_mm_embed[req_start_pos + start_idx:req_start_pos + end_idx] |= is_embed
 
                 # Only whole mm items are processed
                 mm_embeds.append(mm_embeds_item)
