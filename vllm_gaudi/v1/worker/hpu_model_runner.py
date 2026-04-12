@@ -1017,13 +1017,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.model_config.get_num_layers_by_block_type(self.parallel_config, block_type)
             for block_type in mamba_like)
 
+        self.num_gdn = 0
         if self.num_mamba_like_layers > 0:
             # Auto-enable hybrid cache for GDN/mamba-like models.
             gdn_types = ["gdn_attention", "linear_attention"]
-            num_gdn = sum(
+            self.num_gdn = sum(
                 vllm_config.model_config.get_num_layers_by_block_type(vllm_config.parallel_config, bt)
                 for bt in gdn_types)
-            if num_gdn > 0:
+            if self.num_gdn > 0:
                 # Default: hybrid=1, compact=1, naive_mamba_sharing=0
                 # Only set if user hasn't explicitly provided a value.
                 if not os.environ.get("VLLM_USE_HYBRID_CACHE"):
@@ -1044,7 +1045,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     "GDN layers detected (%d): "
                     "VLLM_USE_HYBRID_CACHE=%s, "
                     "VLLM_USE_NAIVE_MAMBA_CACHE_SHARING=%s, "
-                    "VLLM_COMPACT_GDN=%s", num_gdn, os.environ["VLLM_USE_HYBRID_CACHE"],
+                    "VLLM_COMPACT_GDN=%s", self.num_gdn, os.environ["VLLM_USE_HYBRID_CACHE"],
                     os.environ["VLLM_USE_NAIVE_MAMBA_CACHE_SHARING"], os.environ["VLLM_COMPACT_GDN"])
 
         hf_text_config = self.model_config.hf_text_config
@@ -5497,31 +5498,39 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.num_mamba_like_layers > 0:
             maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
-        kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, self.attn_groups)
-        self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
 
-        kernel_block_size_by_gid: dict[int, int] = {}
-        kernel_idx = 0
-        for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-            kv_cache_spec = kv_cache_group.kv_cache_spec
-            if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
-                continue
-            kernel_block_size_by_gid[gid] = kernel_block_sizes[kernel_idx]
-            kernel_idx += 1
+        # For GDN/linear_attention, we reinitialize the input batch with the kernel block size,
+        # which is determined by the KV cache config.
+        #kernel_block_sizes: list[int] = []
+        if self.num_gdn > 0:
+            kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, self.attn_groups)
+            self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
 
-        selected_attn_kernel_sizes = [
-            kernel_block_size_by_gid[gid] for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups)
-            if isinstance(kv_cache_group.kv_cache_spec, FullAttentionSpec)
-        ]
-        if selected_attn_kernel_sizes:
-            self.attn_block_size = selected_attn_kernel_sizes[0]
-            if len(set(selected_attn_kernel_sizes)) > 1:
-                logger.warning(
-                    "Multiple FullAttention kernel block sizes selected: %s. "
-                    "Using %d for decode metadata.",
-                    selected_attn_kernel_sizes,
-                    self.attn_block_size,
-                )
+            kernel_block_size_by_gid: dict[int, int] = {}
+            kernel_idx = 0
+            for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+                kv_cache_spec = kv_cache_group.kv_cache_spec
+                if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+                    continue
+                kernel_block_size_by_gid[gid] = kernel_block_sizes[kernel_idx]
+                kernel_idx += 1
+
+            selected_attn_kernel_sizes = [
+                kernel_block_size_by_gid[gid] for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups)
+                if isinstance(kv_cache_group.kv_cache_spec, FullAttentionSpec)
+            ]
+            if selected_attn_kernel_sizes:
+                self.attn_block_size = selected_attn_kernel_sizes[0]
+                if len(set(selected_attn_kernel_sizes)) > 1:
+                    logger.warning(
+                        "Multiple FullAttention kernel block sizes selected: %s. "
+                        "Using %d for decode metadata.",
+                        selected_attn_kernel_sizes,
+                        self.attn_block_size,
+                    )
+        elif self.is_encoder_only_attn:
+            kernel_block_sizes = []
+            self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
 
         kv_caches: dict[str, torch.Tensor] = {}
         num_blocks = 0
