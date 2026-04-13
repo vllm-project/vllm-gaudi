@@ -88,6 +88,10 @@ class HpuPlatform(Platform):
         return
 
     @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        torch.hpu.random.manual_seed_all(seed)
+
+    @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         return cls.device_name
 
