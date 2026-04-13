@@ -559,7 +559,7 @@ def test_compressed_tensors_w8a8fp8_block_moe_method(default_vllm_config: None, 
     mock_ctx = MagicMock(spec=["dp_metadata"])
     mock_ctx.dp_metadata = None
     with override_forward_context(mock_ctx):
-        out = oot_op.runner._forward_impl(oot_op, hidden_states, router_logits, hidden_states)
+        out = oot_op.runner.forward_impl(oot_op, hidden_states, router_logits, hidden_states)
 
     assert out.shape == hidden_states.shape
     assert out.dtype == torch.bfloat16
