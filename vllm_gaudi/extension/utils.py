@@ -624,6 +624,18 @@ class ModuleFP8FusedSDPA(ModuleFusedSDPABase):
                                                      self.d_scale_v, self.d_scale_output, self.scale_amax,
                                                      self.descale_amax, self._with_graph_breaks)
 
+    def _sync_sliced_module_scales(self) -> None:
+        if not self.enable_slicing:
+            return
+        # Scales can be reassigned after module construction (e.g. during
+        # post-load quantization setup), so keep sliced-module references in sync.
+        self._sliced_module.d_scale_q = self.d_scale_q
+        self._sliced_module.d_scale_k = self.d_scale_k
+        self._sliced_module.d_scale_v = self.d_scale_v
+        self._sliced_module.d_scale_output = self.d_scale_output
+        self._sliced_module.scale_amax = self.scale_amax
+        self._sliced_module.descale_amax = self.descale_amax
+
     def quant_input(self, x, scale):
         return torch.ops.hpu.cast_to_fp8_v2(x, scale, False, False, torch.float8_e4m3fn)[0]
 
