@@ -179,7 +179,6 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             _hpu_weight_scale_alias(layer, "weight_scale", "weight_scale_inv")
             layer.quant_config.weight_block_size = self.weight_block_size
             layer = hpu_ops.fp8_block_linear_postprocess_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
-            input_scale = None
             return
         else:
             # required by torch.compile to be torch.nn.Parameter
