@@ -1,18 +1,17 @@
 name: Basic HPU test suite
 
+run-name: "PR #${{ inputs.pr_number }} [${{ inputs.head_sha }}]"
+
 on:
-  pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
-    branches:
-      - main
-      - releases/**
-
-  # Trigger workflow for merge queue
-  merge_group:
-    types: [checks_requested]
-
-  # Allow manual triggering for testing purposes
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      pr_number:  { description: 'PR number',                     required: false, type: string }
+      head_sha:   { description: 'PR head commit SHA',            required: false, type: string }
+      base_ref:   { description: 'PR target branch',              required: false, type: string }
+      pr_title:   { description: 'PR title',                      required: false, type: string }
+      is_draft:   { description: 'Draft PR (true/false)',         required: false, type: string, default: 'false' }
+      skip_tests:     { description: 'Skip Gaudi tests (true/false)',    required: false, type: string, default: 'false' }
+      is_merge_group: { description: 'Triggered from merge queue (true/false)', required: false, type: string, default: 'false' }
 
 permissions:
   pull-requests: write
@@ -20,7 +19,7 @@ permissions:
   checks: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.pr_number || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -32,7 +31,7 @@ jobs:
       - name: Set Head SHA Output
         id: set_sha
         run: |
-          echo "head_sha=${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}" >> "$GITHUB_OUTPUT"
+          echo "head_sha=${{ inputs.head_sha || github.event.pull_request.head.sha || github.event.merge_group.head_sha }}" >> "$GITHUB_OUTPUT"
 
   gatekeeper:
     needs: retrieve_head_sha
@@ -62,7 +61,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [[ "${{ github.event_name }}" == "merge_group" ]]; then
+          if [[ "${{ inputs.is_merge_group }}" == "true" ]]; then
             echo "Merge group event detected. Skipping gatekeeper checks."
             echo "run_ci=true" >> "$GITHUB_OUTPUT"
             exit 0
@@ -73,8 +72,8 @@ jobs:
           # --- New check to see if the PR is behind the base branch ---
           echo "Checking if the PR is behind the base branch..."
           # Fetch just the latest commit from the base branch for comparison
-          git fetch origin ${{ github.event.pull_request.base.ref }} --depth=1
-          behind_count=$(git rev-list --count HEAD..origin/${{ github.event.pull_request.base.ref }})
+          git fetch origin ${{ inputs.base_ref || github.event.pull_request.base.ref }} --depth=1
+          behind_count=$(git rev-list --count HEAD..origin/${{ inputs.base_ref || github.event.pull_request.base.ref }})
 
           if_pr_is_behind="false"
           if [[ $behind_count -gt 0 ]]; then
@@ -86,7 +85,8 @@ jobs:
           # --- End of new check ---
 
 
-          if [[ "${{ github.event.pull_request.draft }}" == "true" ]]; then
+          PR_DRAFT="${{ inputs.is_draft || github.event.pull_request.draft }}"
+          if [[ "$PR_DRAFT" == "true" ]]; then
             BLOCKING_REASON="This is a **Draft PR**. Please mark it as 'Ready for Review' to trigger the CI."
 
           # Use the 'gh' CLI to fetch the LIVE mergeable state after the sleep
@@ -110,11 +110,10 @@ jobs:
       - name: Post comment if CI is blocked
         # This ensures that even if commenting fails, the next step will run
         continue-on-error: true
-        # Only run this step if the check failed and we're in a pull_request_target event
-        if: github.event_name == 'pull_request_target' && steps.check_conditions.outputs.run_ci == 'false'
+        if: steps.check_conditions.outputs.run_ci == 'false'
         uses: peter-evans/create-or-update-comment@v4
         with:
-          issue-number: ${{ github.event.pull_request.number }}
+          issue-number: ${{ inputs.pr_number }}
           body: |
             ### 🚧 CI Blocked
 
@@ -122,7 +121,7 @@ jobs:
             > ${{ steps.check_conditions.outputs.reason }}
 
       - name: Fail the job to block downstream CI
-        if: github.event_name == 'pull_request_target' && steps.check_conditions.outputs.run_ci == 'false'
+        if: inputs.is_merge_group != 'true' && steps.check_conditions.outputs.run_ci == 'false'
         run: |
           echo "Failing this job to prevent the main CI from running."
           exit 1
@@ -133,7 +132,7 @@ jobs:
   # If PR title contains [FIX_FOR_VLLM_LATEST], it uses the hourly-ci runner pool.
   discover_runner:
     needs: gatekeeper
-    runs-on: ${{ contains(github.event.pull_request.title, '[FIX_FOR_VLLM_LATEST]') && 'hourly-ci' || 'pr-ci' }}
+    runs-on: ${{ contains(inputs.pr_title || github.event.pull_request.title, '[FIX_FOR_VLLM_LATEST]') && 'hourly-ci' || 'pr-ci' }}
     outputs:
       runner_name: ${{ steps.get_name.outputs.name }}
     steps:
@@ -205,56 +204,29 @@ jobs:
     needs: [gatekeeper, retrieve_head_sha]
     runs-on: ubuntu-latest
     outputs:
-      pr_number: ${{ steps.get_pr_info.outputs.pr_number }}
-      pr_title: ${{ steps.get_pr_info.outputs.pr_title }}
-      pr_labels: ${{ steps.get_pr_info.outputs.pr_labels }}
-      pr_base_ref: ${{ steps.get_pr_info.outputs.pr_base_ref }}
-      skip_gaudi_tests: ${{ steps.get_pr_info.outputs.skip_gaudi_tests }}
+      pr_number: ${{ steps.set_info.outputs.pr_number }}
+      pr_title: ${{ steps.set_info.outputs.pr_title }}
+      pr_labels: ${{ steps.set_info.outputs.pr_labels }}
+      pr_base_ref: ${{ steps.set_info.outputs.pr_base_ref }}
+      skip_gaudi_tests: ${{ steps.set_info.outputs.skip_gaudi_tests }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
-          clean: true # Ensure a clean workspace before checkout
-
-      - name: Retrieve source Pull Request information
-        id: get_pr_info
-        uses: ./.github/actions/get-pr-details
-        with:
-          event_name: ${{ github.event_name }}
-          pr_number: ${{ github.event.pull_request.number }}
-          merge_group_head_ref: ${{ github.event.merge_group.head_ref }}
-
-      - name: Validate PR info was retrieved
-        shell: bash
-        env:
-          PR_NUMBER: ${{ steps.get_pr_info.outputs.pr_number }}
-          PR_TITLE: ${{ steps.get_pr_info.outputs.pr_title }}
-          PR_BASE_REF: ${{ steps.get_pr_info.outputs.pr_base_ref }}
+      - name: Set PR info from dispatch inputs
+        id: set_info
         run: |
-          set -euo pipefail
+          {
+            echo "pr_number=${{ inputs.pr_number }}"
+            echo "pr_title=${{ inputs.pr_title }}"
+            echo "pr_labels="
+            echo "pr_base_ref=${{ inputs.base_ref }}"
+            echo "skip_gaudi_tests=${{ inputs.skip_tests }}"
+          } >> "$GITHUB_OUTPUT"
 
-          if [[ -z "$PR_NUMBER" || -z "$PR_TITLE" || -z "$PR_BASE_REF" ]]; then
-            echo "::error::retrieve_pr_info failed: missing required outputs from get-pr-details."
-            echo "pr_number='$PR_NUMBER'"
-            echo "pr_title='$PR_TITLE'"
-            echo "pr_base_ref='$PR_BASE_REF'"
-            exit 1
-          fi
-
-      - name: Display retrieved PR information
-        env:
-          PR_NUMBER: ${{ steps.get_pr_info.outputs.pr_number }}
-          PR_TITLE: ${{ steps.get_pr_info.outputs.pr_title }}
-          PR_LABELS: ${{ steps.get_pr_info.outputs.pr_labels }}
-          PR_BASE_REF: ${{ steps.get_pr_info.outputs.pr_base_ref }}
-          SKIP_GAUDI_TESTS: ${{ steps.get_pr_info.outputs.skip_gaudi_tests }}
+      - name: Display PR information
         run: |
-          echo "PR Number: $PR_NUMBER"
-          echo "PR Title: $PR_TITLE"
-          echo "PR Labels: $PR_LABELS"
-          echo "PR Base Ref: $PR_BASE_REF"
-          echo "Skip Gaudi Tests: $SKIP_GAUDI_TESTS"
+          echo "PR Number: ${{ inputs.pr_number }}"
+          echo "PR Title: ${{ inputs.pr_title }}"
+          echo "PR Base Ref: ${{ inputs.base_ref }}"
+          echo "Skip Gaudi Tests: ${{ inputs.skip_tests }}"
 
   pre-commit:
     # This job runs in parallel with the build job
@@ -597,7 +569,7 @@ jobs:
   # Build-test production Dockerfiles when they are modified
   check_dockerfile_changes:
     needs: [retrieve_head_sha]
-    if: github.event_name == 'pull_request_target'
+    if: inputs.is_merge_group != 'true'
     runs-on: ubuntu-latest
     outputs:
       nixl_changed: ${{ steps.check.outputs.nixl_changed }}
@@ -611,7 +583,7 @@ jobs:
         id: check
         run: |
           # Compare PR head against merge base to find changed files
-          CHANGED=$(git diff --name-only origin/${{ github.event.pull_request.base.ref }}...HEAD -- '.cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest')
+          CHANGED=$(git diff --name-only origin/${{ inputs.base_ref || github.event.pull_request.base.ref }}...HEAD -- '.cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest')
           if [ -n "$CHANGED" ]; then
             echo "nixl_changed=true" >> "$GITHUB_OUTPUT"
             echo "Nixl Dockerfile was modified"
@@ -663,10 +635,10 @@ jobs:
       pull-requests: write
     steps:
       - name: Post Comment on Success
-        if: github.event_name != 'merge_group' && needs.pre_merge_hpu_test.result == 'success'
+        if: inputs.is_merge_group != 'true' && needs.pre_merge_hpu_test.result == 'success'
         uses: peter-evans/create-or-update-comment@v4
         with:
-          issue-number: ${{ github.event.pull_request.number }}
+          issue-number: ${{ inputs.pr_number }}
           body: |
             ### ✅ CI Passed
             All checks passed successfully against the following vllm commit:
@@ -681,4 +653,4 @@ jobs:
       - name: Remove Docker image to free up space
         run: |
           echo "Cleaning up Docker images created by this workflow run..."
-          docker rmi -f hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} || true
+          docker rmi -f hpu-plugin-v1-test-env-pre-merge-${{ inputs.head_sha }} || true
