@@ -69,8 +69,12 @@ class HPUGatedDeltaNetAttention(GatedDeltaNetAttention):
         return query, key, value
 
     def _resolve_state_indices(self, attn_metadata):
-        """Resolve state_indices_tensor, handling 2-D cache-group case."""
-        indices = attn_metadata.state_indices_tensor
+        """Resolve load_indices_tensor, handling 2-D cache-group case.
+
+        For Qwen 3.5 (GDN), load and store indices are identical
+        so using load_indices_tensor is sufficient.
+        """
+        indices = attn_metadata.load_indices_tensor
         if indices is not None and indices.dim() > 1:
             cg = self.cache_group_idx
             assert cg is not None
