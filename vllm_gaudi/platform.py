@@ -113,7 +113,14 @@ class HpuPlatform(Platform):
             model_type = getattr(vllm_config.model_config.hf_config, "model_type", None)
             if model_type == "granitemoehybrid":
                 from vllm.model_executor.models.config import HybridAttentionMambaModelConfig
+                # Reset mamba_cache_mode so the upstream re-run takes
+                # the "all" path (computing the chunk-aligned block_size)
+                # rather than the "else" / non-PC path (which gives 528).
+                saved_mode = cache_config.mamba_cache_mode
+                if cache_config.enable_prefix_caching and saved_mode == "align":
+                    cache_config.mamba_cache_mode = "all"
                 HybridAttentionMambaModelConfig.verify_and_update_config(vllm_config)
+                cache_config.mamba_cache_mode = saved_mode
             else:
                 # Other hybrid models (e.g. Qwen3.5): preserve the original manual
                 # re-alignment that was already in place.
@@ -188,6 +195,18 @@ class HpuPlatform(Platform):
         if get_config().VLLM_CONTIGUOUS_PA:
             logger.warning("Using Contiguous PA, disabling prefix caching")
             vllm_config.cache_config.enable_prefix_caching = False
+
+        if (vllm_config.cache_config.enable_prefix_caching and vllm_config.cache_config.mamba_cache_mode == "all"):
+            vllm_config.cache_config.mamba_cache_mode = "align"
+            logger.info("[HPU] Overriding mamba_cache_mode from 'all' to 'align' "
+                        "to ensure block-aligned chunked prefill splits.")
+
+        if (vllm_config.model_config is not None and vllm_config.model_config.is_hybrid):
+            logger.debug(
+                "[HPU] Hybrid model cache config: block_size=%s, "
+                "mamba_block_size=%s, mamba_cache_mode=%s, "
+                "enable_prefix_caching=%s", cache_config.block_size, getattr(cache_config, "mamba_block_size", None),
+                getattr(cache_config, "mamba_cache_mode", None), cache_config.enable_prefix_caching)
 
         if compilation_config.mode != CompilationMode.NONE:
             logger.info("[HPU] Forcing CompilationMode.NONE "
