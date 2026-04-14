@@ -1041,22 +1041,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:
             self.max_encoder_len = 0
 
-        model_type = self._get_model_type() or ""
-        self._requires_bool_mm_mask_for_merge = model_type.startswith("qwen")
-
         mamba_like = ["mamba", "gdn_attention", "linear_attention"]
 
         self.num_mamba_like_layers = sum(
             self.model_config.get_num_layers_by_block_type(self.parallel_config, block_type)
             for block_type in mamba_like)
 
+        self.num_gdn = 0
         if self.num_mamba_like_layers > 0:
             # Auto-enable hybrid cache for GDN/mamba-like models.
             gdn_types = ["gdn_attention", "linear_attention"]
-            num_gdn = sum(
+            self.num_gdn = sum(
                 vllm_config.model_config.get_num_layers_by_block_type(vllm_config.parallel_config, bt)
                 for bt in gdn_types)
-            if num_gdn > 0:
+            if self.num_gdn > 0:
                 # Default: hybrid=1, compact=1, naive_mamba_sharing=0
                 # Only set if user hasn't explicitly provided a value.
                 if not os.environ.get("VLLM_USE_HYBRID_CACHE"):
@@ -1077,7 +1075,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     "GDN layers detected (%d): "
                     "VLLM_USE_HYBRID_CACHE=%s, "
                     "VLLM_USE_NAIVE_MAMBA_CACHE_SHARING=%s, "
-                    "VLLM_COMPACT_GDN=%s", num_gdn, os.environ["VLLM_USE_HYBRID_CACHE"],
+                    "VLLM_COMPACT_GDN=%s", self.num_gdn, os.environ["VLLM_USE_HYBRID_CACHE"],
                     os.environ["VLLM_USE_NAIVE_MAMBA_CACHE_SHARING"], os.environ["VLLM_COMPACT_GDN"])
 
         hf_text_config = self.model_config.hf_text_config
@@ -1835,8 +1833,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     req_start_pos = (batch_row * padded_seq_len + start_pos - num_computed_tokens)
                 else:
                     req_start_pos = (req_start_idx + start_pos - num_computed_tokens)
-                is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
-                    = True
+                if is_embed is None:
+                    is_mm_embed[req_start_pos + start_idx:req_start_pos + end_idx] = True
+                else:
+                    is_mm_embed[req_start_pos + start_idx:req_start_pos + end_idx] |= is_embed
 
                 # Only whole mm items are processed
                 mm_embeds.append(mm_embeds_item)
@@ -1844,11 +1844,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 req_start_idx += num_scheduled_tokens
 
         # Convert bool tensor to index tensor for merge embedding statically if optimized mm
-
-        # Qwen3.5 multimodal merge path requires a boolean placeholder mask.
-        # Converting the mask to index form here can break placeholder-to-embedding
-        # alignment for Qwen3.5, so keep bool form for that model family.
-        if self.uses_mrope and not self._requires_bool_mm_mask_for_merge:
+        if self.uses_mrope:
             is_mm_embed_index = torch.nonzero(is_mm_embed[:total_num_scheduled_tokens], as_tuple=True)[0]
             # Bounds validation on CPU
             if len(is_mm_embed_index) > 0 and is_mm_embed_index.max() >= total_num_scheduled_tokens:
@@ -4506,28 +4502,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         can be one of two:
         1. Children of the nn.ModuleList
         2. Member of regional_compilation_layers_list
-
-        When split_moe_compilation is enabled, MoE decoder layers
-        have their sub-components (self_attn, mlp, layernorms) compiled
-        individually instead of as a single unit. This splits the large
-        attention+MoE graph into smaller pieces, dramatically reducing
-        compilation time in Synapse.
         """
         if isinstance(module, torch.nn.ModuleList):
             for children_name, children_module in module.named_children():
-                # Check if this is a decoder layer with a MoE MLP
-                if self._should_split_moe_layer(children_module):
-                    # Compile sub-components individually
-                    logger.info(
-                        "Split-compiling MoE decoder layer %s "
-                        "(sub-components: %s)",
-                        children_name,
-                        [n for n, _ in children_module.named_children()],
-                    )
-                    for sub_name, sub_module in children_module.named_children():
-                        self._compile_region(children_module, sub_name, sub_module)
-                else:
-                    self._compile_region(module, children_name, children_module)
+                self._compile_region(module, children_name, children_module)
         elif any(isinstance(module, layer) for layer in self.regional_compilation_layers_list):
             self._compile_region(
                 parent_module,
@@ -4537,39 +4515,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:
             for children_name, children_module in module.named_children():
                 self._regional_compilation(children_module, module, children_name)
-
-    def _should_split_moe_layer(self, module):
-        """
-        Decide whether to split-compile a decoder layer's sub-components.
-
-        Returns True when:
-        - VLLM_SPLIT_MOE_COMPILATION=true (explicit flag), OR
-        - The model has >= 64 MoE experts (auto-detect heuristic)
-
-        AND the module actually contains a MoE MLP.
-        """
-        mlp = getattr(module, 'mlp', None)
-        if mlp is None:
-            return False
-
-        # Check if the MLP is a MoE block
-        cls_name = type(mlp).__name__
-        is_moe = 'SparseMoe' in cls_name or 'MoE' in cls_name or 'Moe' in cls_name
-        if not is_moe:
-            return False
-
-        # Check explicit flag
-        if get_config().split_moe_compilation:
-            return True
-
-        # Auto-detect: split when num_experts >= 200
-        hf_config = getattr(self.model_config, 'hf_text_config', getattr(self.model_config, 'hf_config', None))
-        if hf_config is not None:
-            num_experts = getattr(hf_config, 'num_experts', getattr(hf_config, 'num_local_experts', 0))
-            if num_experts >= 200:
-                return True
-
-        return False
 
     def _compile_region(self, model, name, module):
         module = self._compile(module)
@@ -5694,31 +5639,41 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.num_mamba_like_layers > 0:
             maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
-        kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, self.attn_groups)
-        self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
 
-        kernel_block_size_by_gid: dict[int, int] = {}
-        kernel_idx = 0
-        for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-            kv_cache_spec = kv_cache_group.kv_cache_spec
-            if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
-                continue
-            kernel_block_size_by_gid[gid] = kernel_block_sizes[kernel_idx]
-            kernel_idx += 1
+        # Reinitialize the input batch with the correct block sizes for all
+        # KV cache groups.  For GDN/linear_attention we additionally compute
+        # kernel block sizes; for other hybrid (mamba) models we still need to
+        # reinitialize so that MultiGroupBlockTable has one entry per group.
+        #kernel_block_sizes: list[int] = []
+        if self.num_gdn > 0 or self.num_mamba_like_layers > 0:
+            kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, self.attn_groups)
+            self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
 
-        selected_attn_kernel_sizes = [
-            kernel_block_size_by_gid[gid] for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups)
-            if isinstance(kv_cache_group.kv_cache_spec, FullAttentionSpec)
-        ]
-        if selected_attn_kernel_sizes:
-            self.attn_block_size = selected_attn_kernel_sizes[0]
-            if len(set(selected_attn_kernel_sizes)) > 1:
-                logger.warning(
-                    "Multiple FullAttention kernel block sizes selected: %s. "
-                    "Using %d for decode metadata.",
-                    selected_attn_kernel_sizes,
-                    self.attn_block_size,
-                )
+            kernel_block_size_by_gid: dict[int, int] = {}
+            kernel_idx = 0
+            for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+                kv_cache_spec = kv_cache_group.kv_cache_spec
+                if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+                    continue
+                kernel_block_size_by_gid[gid] = kernel_block_sizes[kernel_idx]
+                kernel_idx += 1
+
+            selected_attn_kernel_sizes = [
+                kernel_block_size_by_gid[gid] for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups)
+                if isinstance(kv_cache_group.kv_cache_spec, FullAttentionSpec)
+            ]
+            if selected_attn_kernel_sizes:
+                self.attn_block_size = selected_attn_kernel_sizes[0]
+                if len(set(selected_attn_kernel_sizes)) > 1:
+                    logger.warning(
+                        "Multiple FullAttention kernel block sizes selected: %s. "
+                        "Using %d for decode metadata.",
+                        selected_attn_kernel_sizes,
+                        self.attn_block_size,
+                    )
+        elif self.is_encoder_only_attn:
+            kernel_block_sizes = []
+            self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
 
         kv_caches: dict[str, torch.Tensor] = {}
         num_blocks = 0
