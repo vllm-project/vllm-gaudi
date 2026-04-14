@@ -1168,7 +1168,8 @@ print(len(glob.glob('.graph_dumps/*PreGraph*')))
 
 def _count_graphs(lazy_mode: int, graph_breaks: bool, dtype: str = "BF16", mode: str = 'eager') -> int:
     """Run slicing in a subprocess with GRAPH_VISUALIZATION=1 and return graph count."""
-    dump_dir = os.path.join(os.getcwd(), '.graph_dumps')
+    project_root = str(pathlib.Path(__file__).resolve().parents[2])
+    dump_dir = os.path.join(project_root, '.graph_dumps')
     if os.path.isdir(dump_dir):
         shutil.rmtree(dump_dir)
 
@@ -1184,7 +1185,7 @@ def _count_graphs(lazy_mode: int, graph_breaks: bool, dtype: str = "BF16", mode:
         [sys.executable, '-c', script],
         capture_output=True,
         text=True,
-        cwd=os.getcwd(),
+        cwd=project_root,
         env=env,
         timeout=120,
     )
