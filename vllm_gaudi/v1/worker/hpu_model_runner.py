@@ -5502,7 +5502,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # kernel block sizes; for other hybrid (mamba) models we still need to
         # reinitialize so that MultiGroupBlockTable has one entry per group.
         #kernel_block_sizes: list[int] = []
-        if self.num_gdn > 0:
+        if self.num_gdn > 0 or self.num_mamba_like_layers > 0:
             kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, self.attn_groups)
             self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
 
@@ -5528,11 +5528,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         selected_attn_kernel_sizes,
                         self.attn_block_size,
                     )
-        elif self.num_mamba_like_layers > 0:
-            # Standard mamba hybrid models (e.g. granite-4.0-h) also need
-            # the input batch reinitialized for multiple kv_cache_groups.
-            kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, self.attn_groups)
-            self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
         elif self.is_encoder_only_attn:
             kernel_block_sizes = []
             self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
