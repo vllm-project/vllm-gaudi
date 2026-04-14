@@ -5,6 +5,7 @@
 # Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/mamba_mixer2.py
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from vllm.v1.attention.backend import AttentionMetadata
@@ -35,9 +36,9 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_gaudi.ops.causal_conv1d_pytorch import (
-    hpu_causal_conv1d_fn,
-    hpu_causal_conv1d_update,
+from vllm_gaudi.ops.granite_causal_conv1d import (
+    granite_causal_conv1d_fn,
+    granite_causal_conv1d_update,
 )
 from vllm_gaudi.ops.ssd_combined import hpu_mamba_chunk_scan_combined_varlen
 from vllm_gaudi.ops.ops_selector import get_selective_state_update_impl
@@ -261,6 +262,8 @@ class HPUMambaMixer2(MambaMixer2):
         self.tped_conv_size = self.conv_dim // self.tp_size
         self.tped_dt_size = self.num_heads // self.tp_size
 
+        self._split_weights_ready = False
+
         self.split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
             hidden_states_B_C,
             [
@@ -278,12 +281,21 @@ class HPUMambaMixer2(MambaMixer2):
     ):
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
-        # 1. Gated MLP's linear projection
-        projected_states, _ = self.in_proj(hidden_states)
-        if mup_vector is not None:
-            projected_states = projected_states * mup_vector
+        # 1. Split in_proj into two GEMMs for TPC/MME pipelining.
+        #    GEMM 1 (states: x,B,C,dt) is dispatched to the MME first;
+        #    GEMM 2 (gate) is dispatched second.  The Gaudi runtime can
+        #    overlap GEMM 2 on the MME with conv+SSM TPC work that
+        #    depends only on GEMM 1.
+        states_proj = F.linear(hidden_states, self._states_weight, self._states_bias)
 
-        # 2. Prepare inputs for conv + SSM
+        gate = F.linear(hidden_states, self._gate_weight, self._gate_bias)
+
+        if mup_vector is not None:
+            gate_size = self.tped_intermediate_size
+            states_proj = states_proj * mup_vector[gate_size:]
+            gate = gate * mup_vector[:gate_size]
+
+        # 2. Prepare output buffer for conv + SSM
         ssm_output = torch.empty(
             [
                 hidden_states.shape[0],
@@ -293,19 +305,10 @@ class HPUMambaMixer2(MambaMixer2):
             device=hidden_states.device,
         )
 
-        # 3. conv + SSM
-        # (split `projected_states` into hidden_states_B_C, dt in the custom op to
-        # ensure it is not treated as an intermediate tensor by torch compile)
-        self.conv_ssm_forward(
-            projected_states,
-            ssm_output,
-        )
+        # 3. conv + SSM on TPC — overlaps with GEMM 2 on MME
+        self.conv_ssm_forward(states_proj, ssm_output)
 
-        # 4. gated MLP
-        # GatedRMSNorm internally applying SiLU to the gate
-        # SiLU is applied internally before normalization, unlike standard
-        # norm usage
-        gate = projected_states[..., :self.tped_intermediate_size]
+        # 4. gated MLP (needs both gate from GEMM 2 and ssm_output)
         hidden_states_varlen = self.norm(ssm_output, gate)
 
         # 5. Final linear projection
@@ -318,13 +321,43 @@ class HPUMambaMixer2(MambaMixer2):
 
         return output
 
+    # ------------------------------------------------------------------
+    # Pre-clone weight slices as standalone contiguous tensors so that
+    # F.linear sees them as independent parameters.  The Habana bridge
+    # recognises F.linear and maps it to an optimised MME recipe that
+    # does NOT require a separate TPC transpose of the weight, unlike
+    # a raw torch.mm or a non-contiguous view.
+    #
+    # Must be called AFTER checkpoint weights have been loaded into
+    # self.in_proj.weight and BEFORE PT_COMPILE_ONLY_MODE warmup,
+    # because .clone() does not copy data in compile-only mode.
+    # Called from apply_model_specific_patches() in hpu_model_runner.
+    # ------------------------------------------------------------------
+    def _init_split_weights(self):
+        gate_size = self.tped_intermediate_size
+        w = self.in_proj.weight  # [total_out, hidden_size]
+        b = self.in_proj.bias  # [total_out] or None
+
+        self._states_weight = w[gate_size:].clone()  # [states_out, hidden]
+        self._gate_weight = w[:gate_size].clone()  # [gate_out, hidden]
+
+        if b is not None:
+            self._states_bias = b[gate_size:].clone()
+            self._gate_bias = b[:gate_size].clone()
+        else:
+            self._states_bias = None
+            self._gate_bias = None
+
+        self._split_weights_ready = True
+
     def conv_ssm_forward(
         self,
-        projected_states: torch.Tensor,
+        states_proj: torch.Tensor,
         output: torch.Tensor,
     ):
+        # states_proj contains [x, B, C, dt] (gate already split off).
         hidden_states_B_C, dt = torch.split(
-            projected_states[..., self.tped_intermediate_size:],
+            states_proj,
             [self.tped_conv_size, self.tped_dt_size],
             dim=-1,
         )
@@ -337,10 +370,9 @@ class HPUMambaMixer2(MambaMixer2):
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
 
         assert self.cache_config is not None
-        mamba_block_size = self.cache_config.mamba_block_size
         assert not self.cache_config.enable_prefix_caching
         if attn_metadata is not None:
-            self_kv_cache = self.kv_cache[0]
+            self_kv_cache = self.kv_cache
             # conv_state = (..., dim, width-1) yet contiguous along 'dim'
             conv_state = self_kv_cache[0]
             ssm_state = self_kv_cache[1]
@@ -364,32 +396,15 @@ class HPUMambaMixer2(MambaMixer2):
         has_prefill = attn_metadata.is_prompt
         has_decode = not attn_metadata.is_prompt
 
-        block_idx_last_computed_token = None
-        block_idx_last_scheduled_token = None
-        block_idx_first_scheduled_token_p = None
-        num_computed_tokens_p = None
-
         # Process prefill requests
         if has_prefill:
             # 2. Convolution sequence transformation
-            # - It will read the initial states for every sequence,
-            #   that has "has_initial_states_p" == True,
-            #   from "cache_indices", using "state_indices_tensor".
-            # - It updates the "conv_state" cache in positions pointed
-            #   to by "state_indices_tensor".
-            #   In particular, it will always write the state at the
-            #   sequence end.
-            #   In addition, "block_idx_first_scheduled_token_p" and
-            #   "block_idx_last_computed_token"
-            #   are provided (which are pointers into
-            #   "state_indices_tensor"), it will write additional cache
-            #   states aligned at "block_size_to_align".
             assert padding_mask_flat is not None
             x = hidden_states_B_C.transpose(0, 1)  # this is the form that causal-conv see
             hidden_states_B_C = hidden_states_B_C * padding_mask_flat
             dt = dt * padding_mask_flat
 
-            hidden_states_B_C = hpu_causal_conv1d_fn(
+            hidden_states_B_C = granite_causal_conv1d_fn(
                 x,
                 self.conv_weights,
                 self.conv1d.bias,
@@ -397,11 +412,6 @@ class HPUMambaMixer2(MambaMixer2):
                 conv_states=conv_state,
                 has_initial_state=has_initial_states_p,
                 cache_indices=state_indices_tensor,
-                block_idx_first_scheduled_token=block_idx_first_scheduled_token_p,
-                block_idx_last_scheduled_token=block_idx_last_scheduled_token,
-                initial_state_idx=block_idx_last_computed_token,
-                num_computed_tokens=num_computed_tokens_p,
-                block_size_to_align=mamba_block_size,
                 metadata=attn_metadata,
                 query_start_loc=query_start_loc_p,
                 is_prompt=True,
@@ -447,15 +457,13 @@ class HPUMambaMixer2(MambaMixer2):
         # Process decode requests
         if has_decode:
             # 2. Convolution sequence transformation
-            hidden_states_B_C = hpu_causal_conv1d_update(
+            hidden_states_B_C = granite_causal_conv1d_update(
                 hidden_states_B_C,
                 conv_state,
                 self.conv_weights,
                 self.conv1d.bias,
                 self.activation,
                 conv_state_indices=state_indices_tensor,
-                block_idx_last_scheduled_token=block_idx_last_computed_token,
-                initial_state_idx=block_idx_last_computed_token,
                 query_start_loc=query_start_loc_p,
             )
 
@@ -463,8 +471,7 @@ class HPUMambaMixer2(MambaMixer2):
 
             # 3. State Space Model sequence transformation
             n_groups = self.n_groups // self.tp_size
-            A_d = (self.A[:, None, ...][:, :, None].expand(-1, self.head_dim,
-                                                           self.ssm_state_size).to(dtype=torch.float32))
+            A_d = self.A.to(dtype=torch.float32)  # (nheads,) — keep compact, no expand
             dt = dt[:, :, None].expand(-1, -1, self.head_dim)
             dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
             D_d = self.D[:, None, ...].expand(-1, self.head_dim)

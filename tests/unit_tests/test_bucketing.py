@@ -9,8 +9,11 @@ import pytest
 from unittest.mock import patch
 
 import vllm_gaudi.extension.bucketing.linear as linear
-from vllm_gaudi.extension.bucketing.common import generate_buckets, calc_fallback_value
+import vllm_gaudi.extension.bucketing.padding_aware as padding_aware
+from vllm_gaudi.extension.bucketing.common import HPUBucketingManager, generate_buckets, calc_fallback_value
 from vllm_gaudi.extension.bucketing.exponential import (ExponentialBucketingStrategy, warmup_range_with_limit)
+from vllm_gaudi.extension.bucketing.linear import LinearBucketingStrategy
+from vllm_gaudi.extension.bucketing.padding_aware import PaddingAwareBucketingStrategy
 from vllm_gaudi.extension.runtime import get_config, clear_config
 
 
@@ -20,6 +23,84 @@ def default_config():
     get_config()
     yield
     clear_config()
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected_type"),
+    [
+        ("exp", ExponentialBucketingStrategy),
+        ("lin", LinearBucketingStrategy),
+        ("pad", PaddingAwareBucketingStrategy),
+    ],
+)
+def test_get_bucketing_strategy_selected_by_env(monkeypatch, env_value, expected_type):
+    monkeypatch.setenv("VLLM_BUCKETING_STRATEGY", env_value)
+    clear_config()
+
+    manager = HPUBucketingManager.__new__(HPUBucketingManager)
+    strategy = manager.get_bucketing_strategy()
+
+    assert isinstance(strategy, expected_type)
+
+
+def test_get_bucketing_strategy_default_when_env_not_set(monkeypatch):
+    monkeypatch.delenv("VLLM_BUCKETING_STRATEGY", raising=False)
+    clear_config()
+
+    manager = HPUBucketingManager.__new__(HPUBucketingManager)
+    strategy = manager.get_bucketing_strategy()
+
+    assert isinstance(strategy, ExponentialBucketingStrategy)
+
+
+@patch('vllm_gaudi.extension.bucketing.common.logger')
+def test_get_bucketing_strategy_deprecated_env_overrides_to_exponential(mock_logger, monkeypatch):
+    monkeypatch.setenv("VLLM_BUCKETING_STRATEGY", "lin")
+    monkeypatch.setenv("VLLM_EXPONENTIAL_BUCKETING", "true")
+    clear_config()
+
+    manager = HPUBucketingManager.__new__(HPUBucketingManager)
+    strategy = manager.get_bucketing_strategy()
+
+    assert isinstance(strategy, ExponentialBucketingStrategy)
+
+    warnings = [call.args[0] for call in mock_logger.return_value.warning.call_args_list]
+    assert any("deprecated" in message for message in warnings)
+    assert any("Overriding bucketing strategy LinearBucketingStrategy with ExponentialBucketingStrategy" in message
+               for message in warnings)
+
+
+@patch('vllm_gaudi.extension.bucketing.common.logger')
+def test_get_bucketing_strategy_deprecated_env_overrides_to_linear(mock_logger, monkeypatch):
+    monkeypatch.setenv("VLLM_BUCKETING_STRATEGY", "pad")
+    monkeypatch.setenv("VLLM_EXPONENTIAL_BUCKETING", "false")
+    clear_config()
+
+    manager = HPUBucketingManager.__new__(HPUBucketingManager)
+    strategy = manager.get_bucketing_strategy()
+
+    assert isinstance(strategy, LinearBucketingStrategy)
+
+    warnings = [call.args[0] for call in mock_logger.return_value.warning.call_args_list]
+    assert any("deprecated" in message for message in warnings)
+    assert any("Overriding bucketing strategy PaddingAwareBucketingStrategy with LinearBucketingStrategy" in message
+               for message in warnings)
+
+
+@patch('vllm_gaudi.extension.bucketing.common.logger')
+def test_get_bucketing_strategy_deprecated_env_without_override_logs_only_deprecation(mock_logger, monkeypatch):
+    monkeypatch.setenv("VLLM_BUCKETING_STRATEGY", "exp")
+    monkeypatch.setenv("VLLM_EXPONENTIAL_BUCKETING", "true")
+    clear_config()
+
+    manager = HPUBucketingManager.__new__(HPUBucketingManager)
+    strategy = manager.get_bucketing_strategy()
+
+    assert isinstance(strategy, ExponentialBucketingStrategy)
+
+    warnings = [call.args[0] for call in mock_logger.return_value.warning.call_args_list]
+    assert any("deprecated" in message for message in warnings)
+    assert not any("Overriding bucketing strategy" in message for message in warnings)
 
 
 def test_read_bucket_settings(monkeypatch):
@@ -235,7 +316,7 @@ _REAL_BUGGY_MAX_DECODE_BLOCKS = 183808  # min(91964//128*256, 3593*256//4)
 def test_real_scenario_decode_cfg_matches_fixed_log(mock_get_config):
     """Verify decode bucket config matches expected values for real scenario.
 
-    With max_blocks * 3: block config should be [1, 256, 10779, 14]
+    With max_blocks * 3: block config should be [1, 256, 10779, 9]
     """
     mock_get_config.return_value = _MockConfig(use_contiguous_pa=False)
     strategy = ExponentialBucketingStrategy()
@@ -246,13 +327,15 @@ def test_real_scenario_decode_cfg_matches_fixed_log(mock_get_config):
                                                max_model_len=_REAL_MAX_MODEL_LEN,
                                                max_blocks=_REAL_MAX_BLOCKS)
 
-    # Expected: [1, 256, 10779, 14]
+    # Expected: [1, 256, 10779, 9]
     assert block_cfg[0] == 1, f"block min: expected 1, got {block_cfg[0]}"
     assert block_cfg[1] == _REAL_MAX_NUM_SEQS, (f"block step: expected {_REAL_MAX_NUM_SEQS}, got {block_cfg[1]}")
     assert block_cfg[2] == _REAL_FIXED_MAX_DECODE_BLOCKS, (
         f"block max: expected {_REAL_FIXED_MAX_DECODE_BLOCKS}, got {block_cfg[2]}")
     import math
-    expected_limit = math.ceil(math.log2(_REAL_MAX_BLOCKS * 3)) + 1  # 14
+    uncapped_limit = math.ceil(math.log2(_REAL_MAX_BLOCKS * 3)) + 1
+    decode_bs_limit = math.ceil(math.log2(_REAL_MAX_NUM_SEQS)) + 1
+    expected_limit = min(uncapped_limit, max(6, decode_bs_limit))  # min(15, 9) = 9
     assert block_cfg[3] == expected_limit, (f"block limit: expected {expected_limit}, got {block_cfg[3]}")
 
 
@@ -450,3 +533,151 @@ def test_real_scenario_fallback_ctx_7408_not_truncated():
 
     assert new_ctx >= 7408, (f"Fallback ctx {new_ctx} < 7408: tensor/graph size mismatch.")
     assert new_ctx == calc_fallback_value(7408, 32), (f"Fallback ctx {new_ctx} should equal calc_fallback_value result")
+
+
+def test_exponential_decode_block_limit_cap(monkeypatch):
+    """Verify that the decode block limit is capped to avoid excessive warmup.
+
+    Reproduces the GAUDISW-247226 scenario: max_num_seqs=21 with a large KV
+    cache (65536 blocks) previously produced ~126 decode buckets and ~30 min
+    warmup.  With the cap the block dimension should have at most 6 exponential
+    steps, giving significantly fewer total buckets.
+    """
+    monkeypatch.setenv("VLLM_EXPONENTIAL_BUCKETING", "true")
+    monkeypatch.setenv("VLLM_CONTIGUOUS_PA", "true")
+    clear_config()
+    get_config()
+
+    strategy = ExponentialBucketingStrategy()
+    max_num_seqs = 21
+    block_size = 128
+    max_num_batched_tokens = 8192
+    max_model_len = 131072
+    max_blocks = 65536
+
+    bs_cfg, query_cfg, block_cfg = strategy.get_decode_cfgs(max_num_seqs, block_size, max_num_batched_tokens,
+                                                            max_model_len, max_blocks)
+
+    bs_range = strategy.get_range(bs_cfg)
+    block_range = strategy.get_range(block_cfg)
+
+    # decode_bs_limit = ceil(log2(21)) + 1 = 6
+    # cap = max(6, 6) = 6  →  block_limit capped at 6
+    assert block_cfg[3] == 6
+
+    # Block range: 6 exponential values + 1 (bmin_origin=1) ≤ 7 unique values
+    assert len(block_range) <= 7
+
+    # Total decode buckets (Cartesian product) should be much less than
+    # the uncapped ~126.
+    total = len(bs_range) * len(block_range)
+    assert total <= 50
+
+
+# --- Padding-aware bucketing tests ---
+
+
+def test_padding_aware_read_bucket_settings_query_seq_fallback(monkeypatch):
+    monkeypatch.setenv("VLLM_PROMPT_SEQ_BUCKET_MIN", "64")
+    monkeypatch.setenv("VLLM_PROMPT_SEQ_BUCKET_STEP", "128")
+    monkeypatch.setenv("VLLM_PROMPT_SEQ_BUCKET_MAX", "1024")
+    monkeypatch.setenv("VLLM_PROMPT_SEQ_BUCKET_PAD_MAX", "256")
+    monkeypatch.setenv("VLLM_PROMPT_SEQ_BUCKET_PAD_PERCENT", "10")
+
+    config = padding_aware.read_bucket_settings("prompt",
+                                                "query",
+                                                min=32,
+                                                step=32,
+                                                max=2048,
+                                                pad_max=512,
+                                                pad_percent=25)
+
+    assert config == [64, 128, 1024, 256, 10]
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        ((0, 8, 64, 64, 0), [0, 1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64]),
+        ((0, 8, 64, 64, 50), [0, 1, 2, 4, 8, 16, 32, 64]),
+        ((0, 8, 64, 16, 50), [0, 1, 2, 4, 8, 16, 32, 48, 64]),
+        ((16, 16, 128, 32, 25), [16, 32, 48, 64, 80, 96, 128]),
+    ],
+)
+def test_padding_aware_warmup_range_with_limits_examples(config, expected):
+    assert padding_aware.warmup_range_with_limits(config) == expected
+
+
+def test_padding_aware_prompt_cfgs_defaults():
+    strategy = PaddingAwareBucketingStrategy()
+
+    bs_cfg, query_cfg, ctx_cfg = strategy.get_prompt_cfgs(max_num_prefill_seqs=16,
+                                                          block_size=128,
+                                                          max_num_batched_tokens=2048,
+                                                          max_model_len=4096)
+
+    assert bs_cfg == [1, 1, 16, 4, 25]
+    assert query_cfg == [128, 128, 2048, 512, 25]
+    assert ctx_cfg == [0, 2, 31, 16, 25]
+
+
+@patch('vllm_gaudi.extension.bucketing.padding_aware.logger')
+@patch('vllm_gaudi.extension.bucketing.padding_aware.get_config')
+def test_padding_aware_prompt_cfgs_merged_prefill_overrides_defaults(mock_get_config, mock_logger):
+    mock_get_config.return_value = _MockConfig(merged_prefill=True)
+    strategy = PaddingAwareBucketingStrategy()
+
+    bs_cfg, query_cfg, ctx_cfg = strategy.get_prompt_cfgs(max_num_prefill_seqs=16,
+                                                          block_size=128,
+                                                          max_num_batched_tokens=2048,
+                                                          max_model_len=4096)
+
+    assert bs_cfg == (1, 1, 1, 4, 25)
+    assert query_cfg == (128, 512, 2048, 512, 25)
+    assert ctx_cfg == [0, 4, 496, 16, 25]
+
+    info_messages = [call.args[0] for call in mock_logger.return_value.info.call_args_list]
+    assert any('Merged prefill is enabled!' in message for message in info_messages)
+    assert any('prompt bs cfg: (1, 1, 16, 4, 25) -> (1, 1, 1, 4, 25)' in message for message in info_messages)
+    assert any('prompt query cfg: (128, 128, 2048, 512, 25) -> (128, 512, 2048, 512, 25)' in message
+               for message in info_messages)
+    assert any('prompt ctx cfg: (0, 2, 31, 16, 25) -> [0, 4, 496, 16, 25]' in message for message in info_messages)
+
+
+@patch('vllm_gaudi.extension.bucketing.padding_aware.get_config')
+def test_padding_aware_prompt_cfgs_merged_prefill_preserves_user_padding_limits(mock_get_config, monkeypatch):
+    mock_get_config.return_value = _MockConfig(merged_prefill=True)
+    monkeypatch.setenv("VLLM_PROMPT_BS_BUCKET_PAD_MAX", "8")
+    monkeypatch.setenv("VLLM_PROMPT_BS_BUCKET_PAD_PERCENT", "10")
+    monkeypatch.setenv("VLLM_PROMPT_QUERY_BUCKET_STEP", "256")
+    monkeypatch.setenv("VLLM_PROMPT_QUERY_BUCKET_PAD_MAX", "640")
+    monkeypatch.setenv("VLLM_PROMPT_QUERY_BUCKET_PAD_PERCENT", "15")
+    monkeypatch.setenv("VLLM_PROMPT_CTX_BUCKET_PAD_MAX", "32")
+    monkeypatch.setenv("VLLM_PROMPT_CTX_BUCKET_PAD_PERCENT", "5")
+
+    strategy = PaddingAwareBucketingStrategy()
+    bs_cfg, query_cfg, ctx_cfg = strategy.get_prompt_cfgs(max_num_prefill_seqs=16,
+                                                          block_size=128,
+                                                          max_num_batched_tokens=2048,
+                                                          max_model_len=4096)
+
+    assert bs_cfg == (1, 1, 1, 8, 10)
+    assert query_cfg == (128, 1024, 2048, 640, 15)
+    assert ctx_cfg == [0, 4, 496, 32, 5]
+
+
+@patch('vllm_gaudi.extension.bucketing.padding_aware.get_config')
+def test_padding_aware_decode_cfgs_contiguous_pa_clamps_block_range(mock_get_config, monkeypatch):
+    mock_get_config.return_value = _MockConfig(use_contiguous_pa=True)
+    monkeypatch.setenv("VLLM_DECODE_BLOCK_BUCKET_MIN", "4096")
+    monkeypatch.setenv("VLLM_DECODE_BLOCK_BUCKET_STEP", "128")
+    monkeypatch.setenv("VLLM_DECODE_BLOCK_BUCKET_MAX", "8192")
+
+    strategy = PaddingAwareBucketingStrategy()
+    _, _, block_cfg = strategy.get_decode_cfgs(max_num_seqs=64,
+                                               block_size=128,
+                                               max_num_batched_tokens=2048,
+                                               max_model_len=4096,
+                                               max_blocks=3593)
+
+    assert block_cfg == [3465, 128, 3593, 899, 25]

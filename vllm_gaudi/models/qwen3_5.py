@@ -1,6 +1,5 @@
 import torch
-import vllm.model_executor.models.qwen3_5 as qwen3_5_module
-from vllm.model_executor.models.qwen3_5 import Qwen3_5GatedDeltaNet
+from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention
 from vllm.forward_context import get_forward_context
 
 from vllm_gaudi.ops.causal_conv1d_pytorch import (
@@ -14,7 +13,20 @@ from vllm_gaudi.ops.hpu_gdn_pytorch import (
 )
 
 
-class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
+def _save_ssm_state(core_attn_out, final_state, ssm_state, state_indices):
+    """Persist GDN final_state into ssm_state cache for chunked prefill.
+
+    Must be @torch._dynamo.disable because HPU torch.compile silently
+    drops in-place index_copy_ to aliased state tensors.  Returns
+    core_attn_out as a pass-through so the compiled graph consumes
+    the call — HPU drops dynamo-disabled calls whose results are unused.
+    """
+    safe_si = torch.remainder(state_indices, ssm_state.shape[0]).long()
+    ssm_state.index_copy_(0, safe_si, final_state.to(device=ssm_state.device, dtype=ssm_state.dtype))
+    return core_attn_out
+
+
+class HPUGatedDeltaNetAttention(GatedDeltaNetAttention):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -28,6 +40,9 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         has_explicit = (hf_text_config is not None and (getattr(hf_text_config, "mamba_chunk_size", None) is not None
                                                         or getattr(hf_text_config, "chunk_size", None) is not None))
         self.mamba_chunk_size = (self.model_config.get_mamba_chunk_size() if has_explicit else 128)
+
+        self.qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
+        self.z_size = self.value_dim // self.tp_size
 
     def rearrange_mixed_qkv(self, mixed_qkv):
         """Pure-torch rearrange – avoids einops graph breaks on HPU."""
@@ -120,9 +135,7 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
         # === Part 1: Input Projection ================================
         mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-        z_size = self.value_dim // self.tp_size
-        mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
+        mixed_qkv, z = mixed_qkvz.split([self.qkv_size, self.z_size], dim=-1)
         z = z.reshape(z.size(0), -1, self.head_v_dim)
         ba, _ = self.in_proj_ba(hidden_states)
         b, a = ba.chunk(2, dim=-1)
@@ -179,20 +192,27 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 g = g * token_mask_h
                 beta = beta * token_mask_h
 
-            core_attn_out_result, final_state = \
-                hpu_chunk_gated_delta_rule(
-                    q=query, k=key, v=value, g=g, beta=beta,
-                    initial_state=initial_state,
-                    output_final_state=True,
-                    use_qk_l2norm_in_kernel=True,
-                    chunk_size=self.mamba_chunk_size,
-                    prefill_num_seqs=prefill_num_seqs,
-                    prefill_seq_len=prefill_seq_len,
-                )
-
-            assert final_state is not None
-            ssm_state.index_copy_(0, state_indices.long(), final_state.to(device=ssm_state.device,
-                                                                          dtype=ssm_state.dtype))
+            core_attn_out_result, final_state = hpu_chunk_gated_delta_rule(
+                q=query,
+                k=key,
+                v=value,
+                g=g,
+                beta=beta,
+                initial_state=initial_state,
+                output_final_state=True,
+                use_qk_l2norm_in_kernel=True,
+                chunk_size=self.mamba_chunk_size,
+                prefill_num_seqs=prefill_num_seqs,
+                prefill_seq_len=prefill_seq_len,
+            )
+            # State save in dynamo-disabled wrapper — index_copy_ is
+            # silently dropped by HPU torch.compile on aliased tensors.
+            core_attn_out_result = _save_ssm_state(
+                core_attn_out_result,
+                final_state,
+                ssm_state,
+                state_indices,
+            )
 
             non_spec_out = core_attn_out_result.squeeze(0)
             core_attn_out[:non_spec_out.shape[0]] = non_spec_out
@@ -248,6 +268,6 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         output_flat[:num_tokens], _ = self.out_proj(core_attn_out)
 
 
-# Replace the class in the upstream module so that Qwen3_5DecoderLayer
-# instantiates HPUQwen3_5GatedDeltaNet instead of the original.
-qwen3_5_module.Qwen3_5GatedDeltaNet = HPUQwen3_5GatedDeltaNet
+# Replace the class in the upstream module so that GatedDeltaNetAttention
+# instantiates GatedDeltaNetAttention instead of the original.
+GatedDeltaNetAttention = HPUGatedDeltaNetAttention
