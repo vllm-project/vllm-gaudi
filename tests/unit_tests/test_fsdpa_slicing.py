@@ -9,6 +9,7 @@ import math
 import torch
 import json
 import os
+import pathlib
 import shutil
 import subprocess
 import sys
@@ -890,6 +891,9 @@ print(json.dumps({{'cos_sim': cos_sim, 'max_abs_diff': max_abs_diff}}))
 def _run_accuracy_subprocess(dtype, q_len, ctx_len, chunk_size, graph_breaks, mode):
     """Run accuracy test in subprocess with appropriate PT_HPU_LAZY_MODE."""
     lazy_mode = 1 if mode in ('lazy', 'hpu_graph') else 0
+    # Resolve project root from this file's location so the subprocess
+    # can always find the ``tests`` package regardless of the caller's cwd.
+    project_root = str(pathlib.Path(__file__).resolve().parents[2])
     script = _ACCURACY_SCRIPT.format(
         dtype=dtype,
         q_len=q_len,
@@ -904,7 +908,7 @@ def _run_accuracy_subprocess(dtype, q_len, ctx_len, chunk_size, graph_breaks, mo
         [sys.executable, '-c', script],
         capture_output=True,
         text=True,
-        cwd=os.getcwd(),
+        cwd=project_root,
         env=env,
         timeout=120,
     )
