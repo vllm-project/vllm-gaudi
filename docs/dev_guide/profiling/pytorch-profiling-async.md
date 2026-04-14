@@ -24,7 +24,7 @@ While you can collect hardware traces, we do not recommend doing so during profi
 3. Start the vLLM server. The following example uses the `facebook/opt-125m` model, `TP=1`, and the maximum batch size `128`.
 
     ```bash
-    VLLM_PROMPT_SEQ_BUCKET_MAX=128 VLLM_PROMPT_SEQ_BUCKET_MIN=128 \
+    VLLM_PROMPT_QUERY_BUCKET_MAX=128 VLLM_PROMPT_QUERY_BUCKET_MIN=128 \
     python3 -m vllm.entrypoints.openai.api_server --port 8080 \
         --model "facebook/opt-125m" --tensor-parallel-size 1 \
         --max-num-seqs 128 --dtype bfloat16 \
@@ -73,7 +73,7 @@ While you can collect hardware traces, we do not recommend doing so during profi
 3. Start the vLLM server. The following example uses the `facebook/opt-125m` model, `TP=1`, and the maximum batch size `128`.
 
     ```bash
-    VLLM_PROMPT_SEQ_BUCKET_MAX=128 VLLM_PROMPT_SEQ_BUCKET_MIN=128 \
+    VLLM_PROMPT_QUERY_BUCKET_MAX=128 VLLM_PROMPT_QUERY_BUCKET_MIN=128 \
     python3 -m vllm.entrypoints.openai.api_server --port 8080 \
         --model "facebook/opt-125m" --tensor-parallel-size 1 \
         --max-num-seqs 128 --dtype bfloat16 \

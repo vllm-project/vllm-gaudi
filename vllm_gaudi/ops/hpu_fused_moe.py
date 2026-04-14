@@ -22,6 +22,8 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
     FusedTopKRouter, )
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
     GroupedTopKRouter, )
+from vllm.model_executor.layers.fused_moe.runner.moe_runner_base import (
+    get_layer_from_name, )
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     EMPTY_EPLB_STATE, )
 from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
@@ -78,6 +80,18 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             dispatch_fn = None
 
         bias = has_bias if has_bias is True else None
+
+        is_bf16 = getattr(layer, 'w13_weight', None) is not None and layer.w13_weight.dtype == torch.bfloat16
+
+        model_config = None
+        if getattr(layer, "vllm_config", None) is not None:
+            model_config = getattr(layer.vllm_config, "model_config", None)
+
+        is_unquantized = (model_config is None) or (not has_quant_config(model_config))
+
+        cache_weight_lists = bool(is_bf16 and is_unquantized)
+
+        # Pass cache flag into moe_op (requires ops.py __init__ signature update)
         layer.moe_op = VllmMixtureOfExpertsOp(layer.global_num_experts, num_experts, experts_min, experts_max, bias,
                                               dispatch_fn)
 
@@ -87,6 +101,10 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             if has_bias:
                 layer.moe_op.w13_list[expert_id].set_bias(layer.w13_bias.data[expert_id])
                 layer.moe_op.w2_list[expert_id].set_bias(layer.w2_bias.data[expert_id])
+
+        # Build cache once AFTER weights/bias are set (BF16 + unquantized only)
+        if cache_weight_lists and hasattr(layer.moe_op, "_cache_weight_lists"):
+            layer.moe_op._cache_weight_lists()
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int, params_dtype: torch.dtype, **extra_weight_attrs):
@@ -253,38 +271,17 @@ def patched_fused_moe_forward(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
 ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-    """
-    Patched forward method that bypasses the custom op to avoid recompilation issues.
-    """
-    og_hidden_states = hidden_states.shape[-1]
-    original_hidden_states = hidden_states
-    if self.moe_config.hidden_dim != og_hidden_states:
-        hidden_states = torch.nn.functional.pad(hidden_states, (0, self.hidden_size - og_hidden_states),
-                                                mode='constant',
-                                                value=0.0)
+    """Patched forward with upstream-aligned MoE dispatch flow."""
+    hidden_states, shared_experts_input = self.apply_routed_input_transform(hidden_states)
+    hidden_states, og_hidden_dims = self._maybe_pad_hidden_states(shared_experts_input, hidden_states)
 
-    use_direct_implementation = self.moe_config.dp_size == 1
-    if self.shared_experts is None:
-        if use_direct_implementation:
-            fused_output = self.layer.runner.forward_impl(self.layer, hidden_states, router_logits,
-                                                          original_hidden_states)
-            assert not isinstance(fused_output, tuple)
-            return reduce_output(self, fused_output)[..., :og_hidden_states]
-        else:
-            fused_output = torch.ops.vllm.moe_forward(hidden_states, router_logits, original_hidden_states,
-                                                      self.layer_name)
-
-        return fused_output[..., :og_hidden_states]
+    if self.moe_config.dp_size == 1:
+        layer = get_layer_from_name(self.layer_name)
+        fused_output = self.forward_dispatch(layer, hidden_states, router_logits, shared_experts_input)
     else:
-        if use_direct_implementation:
-            shared_output, fused_output = self.layer.runner.forward_impl(self.layer, hidden_states, router_logits,
-                                                                         original_hidden_states)
-            shared_output = reduce_output(self, shared_output)
-            fused_output = reduce_output(self, fused_output)
-        else:
-            shared_output, fused_output = torch.ops.vllm.moe_forward_shared(hidden_states, router_logits,
-                                                                            original_hidden_states, self.layer_name)
-        return (shared_output[..., :og_hidden_states], fused_output[..., :og_hidden_states])
+        fused_output = self.forward_entry(hidden_states, router_logits, shared_experts_input, self._encode_layer_name())
+
+    return self._maybe_reduce_output(fused_output, og_hidden_dims)
 
 
 def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
@@ -445,7 +442,7 @@ def create_fused_moe_router(
 
 
 # Apply patches
-# Ensure DefaultMoERunner keeps a reference to its layer for defensive redirects.
+# Keep runner forward patch compatible with upstream layer_name-based dispatch.
 _orig_default_moe_runner_init = DefaultMoERunner.__init__
 _orig_default_moe_runner_forward = DefaultMoERunner.forward
 
@@ -456,9 +453,8 @@ _orig_default_moe_runner_forward = DefaultMoERunner.forward
 _MOE_COMPILE = os.getenv("HPU_FUSED_MOE", "1") == "1"
 
 
-def _patched_default_moe_runner_init(self, layer, *args, **kwargs):
-    self.layer = layer
-    return _orig_default_moe_runner_init(self, layer, *args, **kwargs)
+def _patched_default_moe_runner_init(self, layer_name, *args, **kwargs):
+    return _orig_default_moe_runner_init(self, layer_name, *args, **kwargs)
 
 
 def _patched_default_moe_runner_forward(self, *args, **kwargs):

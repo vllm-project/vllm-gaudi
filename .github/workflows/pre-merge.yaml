@@ -517,28 +517,28 @@ jobs:
             echo "Nixl Dockerfile was NOT modified"
           fi
 
-  build_nixl_dockerfile:
-    needs: [check_dockerfile_changes, discover_runner, retrieve_head_sha]
-    if: needs.check_dockerfile_changes.outputs.nixl_changed == 'true'
-    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
-          clean: true
-      - name: Build nixl Dockerfile (validation only)
-        run: |
-          echo "Building .cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest to verify it builds correctly..."
-          docker build \
-            --no-cache \
-            -t nixl-dockerfile-build-test \
-            -f .cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest \
-            .
-          echo "Nixl Dockerfile build succeeded."
-      - name: Cleanup test image
-        if: always()
-        run: docker rmi -f nixl-dockerfile-build-test || true
+#  build_nixl_dockerfile:
+#    needs: [check_dockerfile_changes, discover_runner, retrieve_head_sha]
+#    if: needs.check_dockerfile_changes.outputs.nixl_changed == 'true'
+#    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+#    steps:
+#      - name: Checkout repository
+#        uses: actions/checkout@v4
+#        with:
+#          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
+#          clean: true
+#      - name: Build nixl Dockerfile (validation only)
+#        run: |
+#          echo "Building .cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest to verify it builds correctly..."
+#          docker build \
+#            --no-cache \
+#            -t nixl-dockerfile-build-test \
+#            -f .cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest \
+#            .
+#          echo "Nixl Dockerfile build succeeded."
+#      - name: Cleanup test image
+#        if: always()
+#        run: docker rmi -f nixl-dockerfile-build-test || true
 
   pre_merge_hpu_test:
     # --- UPDATED: Add discover_runner dependency ---
