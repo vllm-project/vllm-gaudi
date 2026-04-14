@@ -299,9 +299,10 @@ class TestWarmupTimeRegressions:
     def test_gaudisw_247226_small_batch_131k_context(self):
         """GAUDISW-247226: max_num_seqs=21, max_model_len=131072.
 
-        Without decode block limit cap, this produced 17-18 block buckets
-        × 6 bs buckets = ~126 decode graphs → 30+ min warmup.
-        With the cap: block limit <= max(6, bs_limit) = max(6, 6) = 6.
+        With PR #1122, block limit is no longer capped. The
+        num_ctx_tokens_less_or_equal_batched_max_model_len filter in
+        generate_buckets() controls excessive warmup buckets instead.
+        The raw Cartesian product is larger but filtered buckets are bounded.
         """
         with patch('vllm_gaudi.extension.bucketing.exponential.get_config') as mock:
             mock.return_value = _MockConfig(use_contiguous_pa=True)
@@ -319,22 +320,23 @@ class TestWarmupTimeRegressions:
             block_range = strategy.get_range(block_cfg)
             decode_cartesian = len(bs_range) * len(block_range)
 
-        # The cap ensures block_cfg[3] (limit) is bounded
-        decode_bs_limit = math.ceil(math.log2(21)) + 1  # 6
-        expected_block_limit = max(6, decode_bs_limit)  # 6
-        assert block_cfg[3] <= expected_block_limit, (f"Block limit {block_cfg[3]} exceeds cap {expected_block_limit}")
+        # With uncapped limit, Cartesian product is larger but still reasonable
+        max_decode_blocks = min(65536, math.ceil(131072 / 128) * 21)
+        expected_limit = math.ceil(math.log2(max_decode_blocks)) + 1
+        assert block_cfg[3] == expected_limit, (f"Block limit should be {expected_limit}, got {block_cfg[3]}")
 
-        # Total decode buckets should be well under the old 126
-        assert decode_cartesian <= 50, (f"Decode Cartesian product {decode_cartesian} "
-                                        f"(bs={len(bs_range)}, block={len(block_range)}) "
-                                        f"is too high — would cause 30+ min warmup")
+        # Raw Cartesian is larger but generate_buckets() filter reduces it
+        assert decode_cartesian <= 150, (f"Decode Cartesian product {decode_cartesian} "
+                                         f"(bs={len(bs_range)}, block={len(block_range)}) "
+                                         f"exceeds reasonable bound")
 
     def test_256k_non_contiguous_decode_not_exploding(self):
-        """256K context with non-contiguous PA: decode buckets must not explode.
+        """256K context with non-contiguous PA: decode Cartesian product
+        should remain bounded even with the uncapped formula.
 
-        Before fix: max_blocks = ceil(262144/128) × 256 = 524288 blocks
-        → log2(524288) + 1 = 20 block buckets × 9 bs = 180 decode graphs.
-        After fix: max_blocks = 3593 × 3 = 10779, capped limit.
+        PR #1122 uses ceil(max_model_len/block_size)*max_num_seqs as
+        max_decode_blocks for non-contiguous PA, with filtering in
+        generate_buckets() to control actual warmup count.
         """
         with patch('vllm_gaudi.extension.bucketing.exponential.get_config') as mock:
             mock.return_value = _MockConfig(use_contiguous_pa=False)
@@ -351,25 +353,24 @@ class TestWarmupTimeRegressions:
             bs_range = strategy.get_range(bs_cfg)
             block_range = strategy.get_range(block_cfg)
 
-        # The buggy formula: ceil(262144/128)*256 = 524288
-        buggy_max = math.ceil(262144 / 128) * 256
-        assert block_cfg[2] < buggy_max, (f"Block max {block_cfg[2]} matches buggy formula {buggy_max}")
+        # With PR #1122: max_decode_blocks = ceil(262144/128)*256 = 524288
+        expected_max = math.ceil(262144 / 128) * 256
+        assert block_cfg[2] == expected_max, (f"Block max should be {expected_max}, got {block_cfg[2]}")
 
-        # Must stay under budget
+        # Raw Cartesian product - generate_buckets() filter reduces this
         decode_total = len(bs_range) * len(block_range)
-        assert decode_total <= 100, (f"Decode buckets {decode_total} "
+        assert decode_total <= 200, (f"Decode buckets {decode_total} "
                                      f"(bs={len(bs_range)}, block={len(block_range)}) too high")
 
     @patch('vllm_gaudi.extension.bucketing.exponential.get_config')
-    def test_block_limit_cap_prevents_uncapped_explosion(self, mock_get_config):
-        """Without the decode_block_limit_cap, large KV caches produce
-        too many block buckets.
+    def test_block_limit_uncapped_with_ctx_filter(self, mock_get_config):
+        """With PR #1122, block limit is no longer capped. Excessive warmup
+        buckets are controlled by the num_ctx_tokens_less_or_equal_batched_max_model_len
+        filter in generate_buckets() instead.
 
-        With max_blocks=65536 and no cap:
-          uncapped_limit = ceil(log2(65536)) + 1 = 17
-          17 block buckets × 9 bs buckets = 153 decode graphs
-        With cap: min(17, max(6, 9)) = 9
-          ≤ 9 block buckets → manageable warmup.
+        For contiguous PA with max_blocks=65536:
+          max_decode_blocks = min(65536, ceil(131072/128)*256) = min(65536, 262144) = 65536
+          limit = ceil(log2(65536)) + 1 = 17
         """
         mock_get_config.return_value = _MockConfig(use_contiguous_pa=True)
         strategy = ExponentialBucketingStrategy()
@@ -382,18 +383,14 @@ class TestWarmupTimeRegressions:
             max_blocks=65536,
         )
 
-        decode_bs_limit = math.ceil(math.log2(256)) + 1  # 9
-        expected_cap = max(6, decode_bs_limit)  # 9
-        uncapped = math.ceil(math.log2(65536)) + 1  # 17
+        max_decode_blocks = min(65536, math.ceil(131072 / 128) * 256)
+        expected_limit = math.ceil(math.log2(max_decode_blocks)) + 1
 
-        assert block_cfg[3] == min(
-            uncapped, expected_cap), (f"Block limit should be capped: expected {min(uncapped, expected_cap)}, "
-                                      f"got {block_cfg[3]}")
+        assert block_cfg[3] == expected_limit, (f"Block limit should be {expected_limit}, got {block_cfg[3]}")
 
         block_range = strategy.get_range(block_cfg)
-        # With cap, block range should have ≤ expected_cap unique values
-        assert len(block_range) <= expected_cap + 1, (f"Block range has {len(block_range)} values, expected <= "
-                                                      f"{expected_cap + 1}")
+        assert len(block_range) <= expected_limit + 1, (f"Block range has {len(block_range)} values, expected <= "
+                                                        f"{expected_limit + 1}")
 
 
 ###############################################################################
@@ -594,16 +591,18 @@ class TestRangeSizeSanity:
                                                      f"entries, expected <= {expected_max}")
 
     @pytest.mark.parametrize("scenario_name", list(_SCENARIOS.keys()))
-    def test_decode_block_range_bounded(self, scenario_name):
-        """Decode block range should be capped by decode_block_limit_cap."""
+    def test_decode_block_range_logarithmic(self, scenario_name):
+        """Decode block range should have O(log(max_decode_blocks)) entries."""
         model_len, seqs, blk_sz, tokens, blocks = _SCENARIOS[scenario_name]
         ranges = _get_range_counts_exp(model_len, seqs, blk_sz, tokens, blocks)
 
-        decode_bs_limit = math.ceil(math.log2(seqs)) + 1
-        cap = max(6, decode_bs_limit)
-        # Block range size should be <= cap + 1 (for the 0/1 origin bucket)
-        assert ranges['decode_block'] <= cap + 2, (f"[{scenario_name}] Decode block range has {ranges['decode_block']} "
-                                                   f"entries, expected <= {cap + 2}")
+        # With PR #1122: no cap, limit = ceil(log2(max_decode_blocks)) + 1
+        # For non-contiguous: max_decode_blocks = ceil(model_len/blk_sz)*seqs
+        max_decode_blocks = math.ceil(model_len / blk_sz) * seqs
+        expected_limit = math.ceil(math.log2(max_decode_blocks)) + 1
+        assert ranges['decode_block'] <= expected_limit + 2, (
+            f"[{scenario_name}] Decode block range has {ranges['decode_block']} "
+            f"entries, expected <= {expected_limit + 2}")
 
     @pytest.mark.parametrize("scenario_name", list(_SCENARIOS.keys()))
     def test_prompt_query_range_logarithmic(self, scenario_name):

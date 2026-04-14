@@ -1,3 +1,4 @@
+import logging
 import os
 import bisect
 import math
@@ -421,6 +422,14 @@ def generate_buckets(bs_range,
             omitted_buckets.add(("condition: bs <= ctx, ", "-> bs, query, ctx: ", bs, query, ctx))
         return bs <= ctx
 
+    def num_ctx_tokens_less_or_equal_batched_max_model_len(bs, query, ctx):
+        is_valid = ctx <= math.ceil(max_model_len / block_size) * bs if ctx > ctx_range[0] else True
+        if not is_valid:
+            omitted_buckets.add(
+                ("condition: ctx <= math.ceil(max_model_len / block_size) * bs if ctx > ctx_range[0] else True",
+                 "-> bs, query, ctx: ", bs, query, ctx))
+        return is_valid
+
     filters_map = {
         "prompt": {
             # depends only on merged_prefill
@@ -429,8 +438,8 @@ def generate_buckets(bs_range,
         },
         "decode": {
             # depends only on contiguous PA
-            True: [],
-            False: [batch_size_smaller_than_blocks],
+            True: [num_ctx_tokens_less_or_equal_batched_max_model_len],
+            False: [batch_size_smaller_than_blocks, num_ctx_tokens_less_or_equal_batched_max_model_len],
         }
     }
 
@@ -487,6 +496,12 @@ def generate_buckets(bs_range,
             logger().error(bucket)
         raise RuntimeError("Generated 0 " + phase +
                            " buckets. Please adjust the bucketing configuration according to README")
+
+    if logger().getEffectiveLevel() <= logging.DEBUG and omitted_buckets:
+        phase = "prompt" if is_prompt else "decode"
+        omitted_buckets_str = "\n".join(map(str, sorted(omitted_buckets)))
+        msg = f"Omitted {len(omitted_buckets)} {phase} buckets:\n{omitted_buckets_str}"
+        logger().debug(msg)
 
     return sorted(buckets)
 

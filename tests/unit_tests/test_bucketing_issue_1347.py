@@ -322,11 +322,11 @@ class TestPR1122DecodeBucketFormula:
     # -- Exponential decode config formula changes --
 
     @patch('vllm_gaudi.extension.bucketing.exponential.get_config')
-    def test_exp_decode_non_contiguous_pa_uses_3x_headroom(self, mock_get_config):
-        """Current main: non-contiguous PA decode max = max_blocks * 3.
+    def test_exp_decode_non_contiguous_pa_formula(self, mock_get_config):
+        """Non-contiguous PA decode max = ceil(max_model_len/block_size) * max_num_seqs.
 
-        PR #1122 will change this to ceil(max_model_len/block_size) * max_num_seqs.
-        This test documents the current behaviour so we can see the delta.
+        This is the PR #1122 formula. Actual bounding of generated buckets
+        happens via filters in generate_buckets().
         """
         mock_get_config.return_value = _MockConfig(use_contiguous_pa=False)
         strategy = ExponentialBucketingStrategy()
@@ -340,10 +340,10 @@ class TestPR1122DecodeBucketFormula:
             max_blocks=max_blocks,
         )
 
-        current_expected = max_blocks * 3  # 10779
-        assert block_cfg[2] == current_expected, (
-            f"Current non-contiguous PA max should be max_blocks*3={current_expected}, "
-            f"got {block_cfg[2]}. Has the formula changed?")
+        expected = math.ceil(_LONG_CTX_MAX_MODEL_LEN / _LONG_CTX_BLOCK_SIZE) * _LONG_CTX_MAX_NUM_SEQS
+        assert block_cfg[2] == expected, (
+            f"Non-contiguous PA max should be ceil(max_model_len/block_size)*max_num_seqs={expected}, "
+            f"got {block_cfg[2]}")
 
     @patch('vllm_gaudi.extension.bucketing.exponential.get_config')
     def test_exp_decode_contiguous_pa_unchanged(self, mock_get_config):
@@ -364,10 +364,11 @@ class TestPR1122DecodeBucketFormula:
     # -- Block limit cap --
 
     @patch('vllm_gaudi.extension.bucketing.exponential.get_config')
-    def test_exp_decode_block_limit_is_capped(self, mock_get_config):
-        """Current main: block limit is capped to max(6, decode_bs_limit).
+    def test_exp_decode_block_limit_is_uncapped(self, mock_get_config):
+        """PR #1122: block limit is computed from log2(max_decode_blocks) without cap.
 
-        PR #1122 removes this cap. This test captures the current behaviour.
+        Excessive warmup buckets are controlled by filters in generate_buckets()
+        rather than by capping the block limit in get_decode_cfgs().
         """
         mock_get_config.return_value = _MockConfig(use_contiguous_pa=False)
         strategy = ExponentialBucketingStrategy()
@@ -380,13 +381,10 @@ class TestPR1122DecodeBucketFormula:
             max_blocks=_LONG_CTX_MAX_BLOCKS_GAUDI2,
         )
 
-        decode_bs_limit = math.ceil(math.log2(_LONG_CTX_MAX_NUM_SEQS)) + 1  # 9
-        expected_cap = max(6, decode_bs_limit)  # 9
-        max_decode_blocks = _LONG_CTX_MAX_BLOCKS_GAUDI2 * 3
-        uncapped_limit = math.ceil(math.log2(max_decode_blocks)) + 1  # 15
-        expected_limit = min(uncapped_limit, expected_cap)  # min(15, 9) = 9
+        max_decode_blocks = math.ceil(_LONG_CTX_MAX_MODEL_LEN / _LONG_CTX_BLOCK_SIZE) * _LONG_CTX_MAX_NUM_SEQS
+        expected_limit = math.ceil(math.log2(max_decode_blocks)) + 1
 
-        assert block_cfg[3] == expected_limit, (f"Block limit should be capped at {expected_limit}, got {block_cfg[3]}")
+        assert block_cfg[3] == expected_limit, (f"Block limit should be {expected_limit}, got {block_cfg[3]}")
 
     # -- Generate buckets filter: batch_size_smaller_than_blocks --
 
@@ -415,10 +413,9 @@ class TestPR1122DecodeBucketFormula:
                                f"for non-contiguous PA")
 
     def test_decode_contiguous_pa_no_bs_ctx_filter(self):
-        """Contiguous PA decode: no batch_size_smaller_than_blocks filter.
+        """Contiguous PA decode: has num_ctx_tokens_less_or_equal_batched_max_model_len filter.
 
-        PR #1122 will add num_ctx_tokens_less_or_equal_batched_max_model_len.
-        This test verifies current main has no filters for contiguous PA decode.
+        PR #1122 added this filter to control excessive warmup buckets.
         """
         bs_range = [1, 4, 16]
         query_range = [1]
@@ -439,21 +436,21 @@ class TestPR1122DecodeBucketFormula:
                 max_blocks=1024,
             )
 
-        # With contiguous PA on current main, there are no decode filters,
-        # so all Cartesian product entries survive (with neighbor expansion)
+        # With contiguous PA, num_ctx_tokens filter is applied
         assert len(buckets) > 0
-        # Verify that buckets with bs > ctx exist (which non-contiguous would filter out)
-        has_bs_gt_ctx = any(bs > ctx for bs, _, ctx in buckets)
-        assert has_bs_gt_ctx, ("Contiguous PA should allow bs > ctx buckets (no filter applied)")
+        # Verify filter: ctx <= ceil(max_model_len/block_size) * bs
+        for bs, _, ctx in buckets:
+            if ctx > ctx_range[0]:
+                assert ctx <= math.ceil(8192 / 128) * bs, (
+                    f"Bucket ({bs}, _, {ctx}): ctx exceeds batched max_model_len limit")
 
     # -- Linear strategy decode block overflow (PR #1122 fix) --
 
     @patch('vllm_gaudi.extension.bucketing.linear.get_config')
-    def test_linear_decode_block_max_clamped_non_contiguous(self, mock_get_config):
-        """Linear strategy: non-contiguous PA block max should NOT be clamped to max_blocks.
+    def test_linear_decode_block_max_unclamped_non_contiguous(self, mock_get_config):
+        """Linear strategy: non-contiguous PA block max is NOT clamped to max_blocks.
 
-        On current main, the clamp always applies. PR #1122 gates it on contiguous_pa.
-        This test captures the current behaviour.
+        PR #1122 gates the clamp on contiguous_pa only.
         """
         mock_get_config.return_value = _MockConfig(use_contiguous_pa=False)
         strategy = LinearBucketingStrategy()
@@ -466,14 +463,13 @@ class TestPR1122DecodeBucketFormula:
             max_blocks=1024,
         )
 
-        # On current main: max_decode_blocks = max(ceil(32768*256/128), 128) = 65536
-        # Then it gets clamped to max_blocks=1024 because the check is unconditional
-        # After PR #1122: only contiguous PA clamps
+        # raw max_decode_blocks = max(ceil(32768*256/128), 128) = 65536
+        # With PR #1122: non-contiguous PA does NOT clamp to max_blocks
         raw_max = max(math.ceil(32768 * 256 // 128), 128)
         assert raw_max > 1024, "Sanity: raw max should exceed max_blocks"
-        # Current behaviour: clamped
-        assert block_cfg[2] == 1024, (f"Current main: block max should be clamped to max_blocks=1024, "
-                                      f"got {block_cfg[2]}")
+        # After PR #1122: unclamped for non-contiguous PA
+        assert block_cfg[2] == raw_max, (f"Non-contiguous PA: block max should be unclamped raw_max={raw_max}, "
+                                         f"got {block_cfg[2]}")
 
     # -- generate_seq_lengths clamp (PR #1122) --
 
@@ -505,9 +501,10 @@ class TestPR1122DecodeBucketFormula:
 
     # -- Warmup scenario: large decode bucket vs physical blocks --
 
-    def test_decode_block_range_respects_physical_limits(self):
+    def test_decode_block_range_within_cfg_max(self):
         """For 256K context, exponential block range should stay within
-        max_blocks * 3 (current main) and not produce the buggy 183K+ value."""
+        the configured max_decode_blocks = ceil(max_model_len/block_size)*max_num_seqs.
+        Actual bounding per (bs, ctx) pair happens via filters in generate_buckets()."""
         with patch('vllm_gaudi.extension.bucketing.exponential.get_config') as mock:
             mock.return_value = _MockConfig(use_contiguous_pa=False)
             strategy = ExponentialBucketingStrategy()
@@ -521,13 +518,9 @@ class TestPR1122DecodeBucketFormula:
             )
             block_range = strategy.get_range(block_cfg)
 
-        # Buggy value would be ceil(262144/128)*256 = 524288
-        buggy_value = math.ceil(_LONG_CTX_MAX_MODEL_LEN / _LONG_CTX_BLOCK_SIZE) * _LONG_CTX_MAX_NUM_SEQS
-        assert max(block_range) < buggy_value, (
-            f"Block range max {max(block_range)} matches buggy formula {buggy_value}")
-        assert max(block_range) <= _LONG_CTX_MAX_BLOCKS_GAUDI2 * 3, (
-            f"Block range max {max(block_range)} exceeds bounded "
-            f"{_LONG_CTX_MAX_BLOCKS_GAUDI2 * 3}")
+        expected_max = math.ceil(_LONG_CTX_MAX_MODEL_LEN / _LONG_CTX_BLOCK_SIZE) * _LONG_CTX_MAX_NUM_SEQS
+        assert max(block_range) <= expected_max, (
+            f"Block range max {max(block_range)} exceeds cfg max {expected_max}")
 
 
 ###############################################################################
@@ -715,11 +708,11 @@ class TestPR1346HPUGraphCaptureSkip:
     # -- Bucket generation for decode warmup: blocks vs physical KV cache --
 
     def test_decode_warmup_buckets_blocks_can_exceed_physical(self):
-        """With non-contiguous PA on current main, decode bucket block values
-        can exceed num_hpu_blocks (because max = max_blocks * 3).
+        """With non-contiguous PA (PR #1122), decode bucket block values can
+        exceed num_hpu_blocks because max = ceil(max_model_len/block_size)*max_num_seqs.
 
-        PR #1122 clamps _generate_seq_lengths, and PR #1346 skips graph capture.
-        This test shows the scenario that motivated those PRs.
+        PR #1122 clamps _generate_seq_lengths to avoid OOM during warmup,
+        and PR #1346 skips graph capture for long prefills.
         """
         with patch('vllm_gaudi.extension.bucketing.exponential.get_config') as mock:
             mock.return_value = _MockConfig(use_contiguous_pa=False)
@@ -736,8 +729,8 @@ class TestPR1346HPUGraphCaptureSkip:
 
         # Some block values exceed physical max_blocks
         exceeds_physical = [b for b in block_range if b > _LONG_CTX_MAX_BLOCKS_GAUDI2]
-        assert len(exceeds_physical) > 0, ("With 3x headroom, some block buckets should exceed physical blocks. "
-                                           "This is the scenario PR #1122 clamp addresses.")
+        assert len(exceeds_physical) > 0, ("With non-contiguous PA, some block buckets should exceed physical blocks. "
+                                           "PR #1122 clamps _generate_seq_lengths to handle this.")
 
     def test_prompt_buckets_long_context_includes_short_and_long(self):
         """For 256K models, prompt buckets should span from short (block_size)
