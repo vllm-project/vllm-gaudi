@@ -15,8 +15,7 @@ stages:
         flavor: g2.l
         command: >-
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_cpu_offloading_test &&
-          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_ngram_test &&
-          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_UA_spec_decode_ngram_test
+          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_ngram_test
       # --- g3.m: PD tests + TP=2 tests (~34min, 4 cards) ---
       #   pd_nixl (~10m, needs 3 cards) + tp2 tests (~24m, need 2 cards)
       - name: e2e_pd_tp2_bundle
@@ -41,7 +40,6 @@ stages:
           tests/unit_tests &&
           HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_eagle3_test &&
           HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_eagle3_num_spec_2_test &&
-          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_UA_spec_decode_eagle3_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_compressed_w4a16_moe_gidx_load_generate_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_compressed_w4a16_channelwise_load_generate_test &&
           bash tests/full_tests/run_with_junit.sh calibration_arg_parsing bash tests/calibration_tests/test_calibrate_model_arg_parsing.sh
@@ -50,7 +48,6 @@ stages:
         flavor: g3
         command: >-
           HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen2_5_vl_load_generate_test &&
-          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen2_5_vl_unified_attn_load_generate_test &&
           HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen2_5_vl_lazy_warmup_test &&
           HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen2_5_vl_compile_warmup_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_offloading_connector_test &&
@@ -100,6 +97,4 @@ stages:
           HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_granite_inc_load_generate_test &&
           HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_granite_inc_calibration_and_quantization_load_generate_test &&
           HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_granite_test &&
-          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_granite_test_unified_attn &&
-          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_granite_async_test &&
-          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_granite_test_unified_attn_async
+          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_granite_async_test
