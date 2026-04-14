@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   retrieve_head_sha:
-    runs-on: ubuntu-latest
+    runs-on: ['sandbox']
     outputs:
       head_sha: ${{ steps.set_sha.outputs.head_sha }}
     steps:
@@ -35,7 +35,7 @@ jobs:
 
   gatekeeper:
     needs: retrieve_head_sha
-    runs-on: ubuntu-latest
+    runs-on: ["sandbox.prod.amr.dind"]
     permissions:
       # Required to read the status of checks and PR details
       checks: read
@@ -198,7 +198,7 @@ jobs:
 
   retrieve_pr_info:
     needs: [gatekeeper, retrieve_head_sha]
-    runs-on: ubuntu-latest
+    runs-on: ["sandbox.prod.amr.dind"]
     outputs:
       pr_number: ${{ steps.set_info.outputs.pr_number }}
       pr_title: ${{ steps.set_info.outputs.pr_title }}
@@ -227,7 +227,7 @@ jobs:
   pre-commit:
     # This job runs in parallel with the build job
     needs: [gatekeeper, retrieve_head_sha]
-    runs-on: ubuntu-latest
+    runs-on: ["sandbox.prod.amr.dind"]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -564,7 +564,7 @@ jobs:
   check_dockerfile_changes:
     needs: [retrieve_head_sha]
     if: inputs.is_merge_group != 'true'
-    runs-on: ubuntu-latest
+    runs-on: ["sandbox.prod.amr.dind"]
     outputs:
       nixl_changed: ${{ steps.check.outputs.nixl_changed }}
     steps:
@@ -623,7 +623,7 @@ jobs:
     name: Post PR Comment
     # This job runs after hpu-test-suite completes
     needs: [pre_merge_hpu_test, pre_merge_hpu_test_build]
-    runs-on: ubuntu-latest
+    runs-on: ["sandbox.prod.amr.dind"]
     permissions:
       # Permissions are required on a per-job basis
       pull-requests: write
