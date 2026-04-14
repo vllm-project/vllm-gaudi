@@ -22,13 +22,20 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     SparsityCompressionConfig,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors_moe)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
+    compressed_tensors_moe_w8a8_fp8,
+    compressed_tensors_moe_wna16,
+    compressed_tensors_moe_wna16_marlin,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (  # noqa: E501
     CompressedTensorsScheme, CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_TYPES_MAP)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (find_matched_target)
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
-    CompressedTensorsW8A8Fp8MoEMethod, CompressedTensorsWNA16MarlinMoEMethod)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8 import (  # noqa: E501
+    CompressedTensorsW8A8Fp8MoEMethod)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16_marlin import (  # noqa: E501
+    CompressedTensorsWNA16MarlinMoEMethod)
 from vllm.model_executor.kernels.linear.mixed_precision import (
     MPLinearKernel,
     MPLinearLayerConfig,
@@ -1001,10 +1008,16 @@ compressed_tensors.CompressedTensorsLinearMethod = \
     HPUCompressedTensorsLinearMethod
 compressed_tensors_moe.CompressedTensorsW8A8Fp8MoEMethod = \
     HPUCompressedTensorsW8A8Fp8MoEMethod
+compressed_tensors_moe_w8a8_fp8.CompressedTensorsW8A8Fp8MoEMethod = \
+    HPUCompressedTensorsW8A8Fp8MoEMethod
 compressed_tensors_moe.CompressedTensorsWNA16MoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod
 compressed_tensors_moe.CompressedTensorsWNA16MarlinMoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod # Override default WNA16 MoE method
+compressed_tensors_moe_wna16.CompressedTensorsWNA16MoEMethod = \
+    HPUCompressedTensorsWNA16MoEMethod
+compressed_tensors_moe_wna16_marlin.CompressedTensorsWNA16MarlinMoEMethod = \
+    HPUCompressedTensorsWNA16MoEMethod
 compressed_tensors.CompressedTensorsConfig = HPUCompressedTensorsConfig
 
 # support weight_loader_v2

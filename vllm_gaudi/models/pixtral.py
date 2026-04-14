@@ -98,7 +98,8 @@ class HPUAttention(Attention):
     def forward(self, x: torch.Tensor, mask: torch.Tensor, cos_sin_cache: torch.Tensor) -> torch.Tensor:
         batch, patches, _ = x.shape
 
-        q, k, v = self.wq(x), self.wk(x), self.wv(x)
+        qkv, _ = self.qkv_proj(x)
+        q, k, v = qkv.chunk(3, dim=-1)
         q = q.reshape(batch, patches, self.n_heads, self.head_dim)
         k = k.reshape(batch, patches, self.n_heads, self.head_dim)
         v = v.reshape(batch, patches, self.n_heads, self.head_dim)
@@ -112,7 +113,8 @@ class HPUAttention(Attention):
         out = out.transpose(1, 2)
 
         out = out.reshape(batch, patches, self.n_heads * self.head_dim)
-        return self.wo(out)
+        out, _ = self.o_proj(out)
+        return out
 
 
 class HPUTransformerBlock(TransformerBlock):

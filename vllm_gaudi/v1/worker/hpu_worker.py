@@ -285,22 +285,31 @@ class HPUWorker(WorkerBase):
         gc.collect()
         available = cache_size_bytes - dummy_block_headroom
 
-        # For hybrid GDN/linear_attention + ATN models, GPU shares one raw
-        # buffer across spec types, but HPU allocates separate tensors per
-        # spec (torch.compile can't handle as_strided mixed-dtype views).
-        # Reduce reported memory so the scheduler computes fewer num_blocks
-        # that fit the HPU separate-allocation model.
-        # NOTE: Only applies to GDN/linear_attention; standard Mamba2 + ATN
-        # uses the raw shared buffer path and is left unchanged.
+        # For hybrid models (attention + recurrent layers), the GPU
+        # backend shares a single raw buffer across spec types via
+        # as_strided, but HPU allocates separate tensors per spec
+        # (torch.compile can't handle as_strided mixed-dtype views).
+        # Reduce reported memory so the scheduler computes fewer
+        # num_blocks that fit the HPU separate-allocation model.
         has_attn = any(isinstance(s, FullAttentionSpec) for s in kv_cache_spec.values())
         has_gdn = any(
             isinstance(s, MambaSpec) and s.mamba_type in ("gdn_attention", "linear_attention")
             for s in kv_cache_spec.values())
-        if has_attn and has_gdn:
-            # All specs share the same padded page_size_bytes after
-            # HybridAttentionMambaModelConfig unification.
+        has_standard_mamba = any(
+            isinstance(s, MambaSpec) and s.mamba_type not in ("gdn_attention", "linear_attention")
+            for s in kv_cache_spec.values())
+        compact_gdn = os.environ.get("VLLM_COMPACT_GDN", "0").strip().lower() in ("1", "true")
+        if has_attn and has_gdn and not compact_gdn:
+            # When compact GDN is OFF, GDN state scales with num_blocks
+            # just like ATN.  GPU shares one raw buffer via as_strided,
+            # but HPU allocates separate tensors per spec type, so the
+            # total per-block cost is real_attn + real_mamba (not
+            # max(real_attn, real_mamba)).  Reduce reported memory so
+            # the scheduler computes fewer num_blocks that fit.
+            # When compact GDN is ON, GDN state is a small fixed
+            # allocation (max_reqs * num_groups + 2), independent of
+            # num_blocks, so no adjustment is needed.
             padded_page = next(iter(kv_cache_spec.values())).page_size_bytes
-            # Compute real (unpadded) page size for each spec type.
             real_attn = next(s.real_page_size_bytes for s in kv_cache_spec.values() if isinstance(s, FullAttentionSpec))
             real_mamba = next(
                 sum(math.prod(sh) * get_dtype_size(dt) for sh, dt in zip(s.shapes, s.dtypes))
@@ -316,6 +325,26 @@ class HPUWorker(WorkerBase):
                     "per-spec allocations (padded_page=%s, "
                     "real_attn=%s, real_mamba=%s).", (1 - factor) * 100, factor, format_bytes(padded_page),
                     format_bytes(real_attn), format_bytes(real_mamba))
+                available = adjusted
+
+        if has_attn and has_standard_mamba:
+            # Standard Mamba2 + ATN hybrids (e.g. Granite): the
+            # naive_mamba_cache_sharing path allocates independent
+            # tensors per layer type, so the real per-block cost is
+            # attn_page + mamba_state (not max(attn, mamba)).
+            attn_page_size = next(s.page_size_bytes for s in kv_cache_spec.values() if isinstance(s, FullAttentionSpec))
+            mamba_state_per_block = next(
+                sum(math.prod(sh) * get_dtype_size(dt) for sh, dt in zip(s.shapes, s.dtypes))
+                for s in kv_cache_spec.values()
+                if isinstance(s, MambaSpec) and s.mamba_type not in ("gdn_attention", "linear_attention"))
+            if attn_page_size > 0:
+                ratio = attn_page_size / (attn_page_size + mamba_state_per_block)
+                adjusted = int(available * ratio)
+                logger.info(
+                    "Hybrid model (standard Mamba2 + ATN): adjusted "
+                    "usable KV cache from %s to %s (attn_page=%d, "
+                    "mamba_state=%d, ratio=%.3f)", format_bytes(available), format_bytes(adjusted), attn_page_size,
+                    mamba_state_per_block, ratio)
                 available = adjusted
 
         return available
@@ -339,9 +368,17 @@ class HPUWorker(WorkerBase):
             self.model_runner.initialize_kv_cache(kv_cache_config)
             torch.hpu.synchronize()
         if len(self.model_runner.kv_caches) > 0:
+            # Find the first ATN layer's tensor shape for a meaningful
+            # block count (compact GDN layers have a much smaller dim-0).
+            alloc_blocks = None
+            for kv in self.model_runner.kv_caches:
+                t = kv[0] if not isinstance(kv[0], tuple) else kv[0][0]
+                dim0 = t.shape[0]
+                if alloc_blocks is None or dim0 > alloc_blocks:
+                    alloc_blocks = dim0
             msg = (f"Usable num_blocks: {kv_cache_config.num_blocks}, "
-                   f"actual allocated num_blocks: "
-                   f"{self.model_runner.kv_caches[0][0].shape[0]} "
+                   f"actual allocated num_blocks (max across layers): "
+                   f"{alloc_blocks} "
                    f"(_PAD_BLOCK_ID={self.model_runner._PAD_BLOCK_ID}, "
                    f"_PAD_SLOT_ID={self.model_runner._PAD_SLOT_ID})")
             logger.info(msg)

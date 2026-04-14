@@ -4,7 +4,6 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.utils import encode_image_url, encode_video_url
-from dataclasses import asdict
 from typing import Union, Any
 from PIL import Image
 from dataclasses import dataclass
@@ -89,8 +88,7 @@ def run_model(model_name: str, inputs: Union[dict, list[dict]], modality: str, *
 
     engine_args = EngineArgs(model=model_name, **extra_engine_args)
 
-    engine_args = asdict(engine_args)
-    llm = LLM(**engine_args)
+    llm = LLM.from_engine_args(engine_args)
 
     outputs = llm.chat(
         inputs,

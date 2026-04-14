@@ -24,11 +24,11 @@ The following table lists the available variables:
 | `MAX_MODEL_LEN`                 | Sets the maximum supported sequence length for the model.                                 |
 | `MAX_NUM_SEQS`                  | Specifies the maximum number of sequences processed concurrently.                         |
 | `TENSOR_PARALLEL_SIZE`          | Defines the degree of tensor parallelism.                                                 |
-| `VLLM_EXPONENTIAL_BUCKETING`    | Enables or disables exponential bucketing for warm-up strategy.                            |
+| `VLLM_BUCKETING_STRATEGY`       | Selects the bucketing strategy used for warm-up: `exp`, `lin`, or `pad`.                  |
 | `VLLM_DECODE_BLOCK_BUCKET_STEP` | Configures the step size for decode block allocation, affecting memory granularity.       |
 | `VLLM_DECODE_BS_BUCKET_STEP`    | Sets the batch size step for decode operations, impacting how decode batches are grouped. |
 | `VLLM_PROMPT_BS_BUCKET_STEP`    | Adjusts the batch size step for prompt processing.                                        |
-| `VLLM_PROMPT_SEQ_BUCKET_STEP`   | Controls the step size for prompt sequence allocation.                                    |
+| `VLLM_PROMPT_QUERY_BUCKET_STEP` | Controls the step size for prompt query-length allocation.                                |
 | `EXTRA_ARGS`                    | Additional vLLM serve args for the server bringup e.g., " --served-model-name model_name" |
 
 Set the preferred variable when running the vLLM server using Docker Compose, as presented in the following example:

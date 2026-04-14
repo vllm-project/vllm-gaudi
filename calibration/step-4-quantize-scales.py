@@ -26,6 +26,8 @@ if __name__ == "__main__":
         "For single node calibration use the default multiprocessing backend. " \
         "For multi-node calibration use ray backend"
     )
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    parser.add_argument("--max-model-len", type=int, default=128)
 
     args = parser.parse_args()
 
@@ -35,8 +37,9 @@ if __name__ == "__main__":
         enforce_eager=args.enforce_eager,
         dtype=torch.bfloat16,
         kv_cache_dtype="fp8_inc",
-        max_model_len=128,
+        max_model_len=args.max_model_len,
         trust_remote_code=True,
         distributed_executor_backend=args.distributed_executor_backend,
         enable_expert_parallel=args.expert_parallel,
+        gpu_memory_utilization=args.gpu_memory_utilization,
     )
