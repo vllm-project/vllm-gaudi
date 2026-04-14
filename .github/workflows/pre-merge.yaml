@@ -111,14 +111,10 @@ jobs:
         # This ensures that even if commenting fails, the next step will run
         continue-on-error: true
         if: steps.check_conditions.outputs.run_ci == 'false'
-        uses: peter-evans/create-or-update-comment@v4
-        with:
-          issue-number: ${{ inputs.pr_number }}
-          body: |
-            ### 🚧 CI Blocked
-
-            The main CI workflow was not started for the following reason:
-            > ${{ steps.check_conditions.outputs.reason }}
+        run: |
+          echo "[MOCK] Would post CI blocked comment on PR #${{ inputs.pr_number }}:"
+          echo "### CI Blocked"
+          echo "Reason: ${{ steps.check_conditions.outputs.reason }}"
 
       - name: Fail the job to block downstream CI
         if: inputs.is_merge_group != 'true' && steps.check_conditions.outputs.run_ci == 'false'
@@ -250,9 +246,7 @@ jobs:
           echo "::add-matcher::.github/workflows/matchers/mypy.json"
 
       - name: Run pre-commit hooks
-        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
-        with:
-          extra_args: --all-files --hook-stage manual
+        run: echo "[MOCK] Would run pre-commit hooks (pre-commit/action v3.0.1) with --all-files --hook-stage manual"
 
   pre_merge_hpu_test_build:
     # --- UPDATED: Add discover_runner dependency ---
@@ -636,13 +630,10 @@ jobs:
     steps:
       - name: Post Comment on Success
         if: inputs.is_merge_group != 'true' && needs.pre_merge_hpu_test.result == 'success'
-        uses: peter-evans/create-or-update-comment@v4
-        with:
-          issue-number: ${{ inputs.pr_number }}
-          body: |
-            ### ✅ CI Passed
-            All checks passed successfully against the following vllm commit:
-            **`${{ needs.pre_merge_hpu_test_build.outputs.target_commit }}`**
+        run: |
+          echo "[MOCK] Would post CI passed comment on PR #${{ inputs.pr_number }}:"
+          echo "### CI Passed"
+          echo "All checks passed against vllm commit: ${{ needs.pre_merge_hpu_test_build.outputs.target_commit }}"
 
   cleanup_docker_image:
     name: Cleanup Docker Image

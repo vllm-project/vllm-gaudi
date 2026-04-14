@@ -402,13 +402,10 @@ jobs:
           echo "SUBJECT=$SUBJECT" >> "$GITHUB_ENV"
 
       - name: "Create GitHub Issue with Summary"
-        uses: peter-evans/create-issue-from-file@v5
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          title: ${{ env.SUBJECT }}
-          content-filepath: ./report.md
-          # Optional: Add labels to the issue
-          labels: release-report, automated
+        run: |
+          echo "[MOCK] Would create GitHub issue titled: ${{ env.SUBJECT }}"
+          echo "--- Report Contents ---"
+          cat ./report.md
 
   cleanup_docker_image:
     name: Cleanup Docker Image
