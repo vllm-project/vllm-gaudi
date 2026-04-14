@@ -88,6 +88,10 @@ class HpuPlatform(Platform):
         return
 
     @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        torch.hpu.random.manual_seed_all(seed)
+
+    @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         return cls.device_name
 
@@ -148,7 +152,7 @@ class HpuPlatform(Platform):
                 if cache_config.cache_dtype == "auto":
                     kv_dtype = model_config.dtype
                 else:
-                    from vllm.config.model import STR_DTYPE_TO_TORCH_DTYPE
+                    from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
                     kv_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
                 attn_1tok = FullAttentionSpec(
                     block_size=1,
@@ -422,7 +426,7 @@ class HpuPlatform(Platform):
     @classmethod
     def patch_for_pt27(cls) -> None:
 
-        from vllm.utils import is_torch_equal_or_newer
+        from vllm.utils.torch_utils import is_torch_equal_or_newer
         if is_torch_equal_or_newer("2.8.0"):
             return
 
@@ -437,5 +441,5 @@ class HpuPlatform(Platform):
                 return NotImplemented
             return parent_torch_function(func, types, args, kwargs)
 
-        BasevLLMParameter.__torch_function__ = classmethod(torch_function)
+        BasevLLMParameter.__torch_function__ = staticmethod(torch_function)  # type: ignore[assignment]
         return

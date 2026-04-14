@@ -69,19 +69,7 @@ class HPUMLAAttention(MLAAttention):
             #    self.kv_cache_dtype,
             #    self._k_scale,
             #)
-            if self.attn_backend.accept_output_buffer:
-                output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-                self.forward_impl(
-                    q,
-                    kv_c_normed,
-                    k_pe,
-                    self_kv_cache,
-                    attn_metadata,
-                    output=output,
-                )
-                return output
-            else:
-                return self.forward_impl(q, kv_c_normed, k_pe, self_kv_cache, attn_metadata)
+            return self.forward_impl(q, kv_c_normed, k_pe, self_kv_cache, attn_metadata)
         else:
             kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed,
@@ -90,25 +78,16 @@ class HPUMLAAttention(MLAAttention):
                 self.kv_cache_dtype,
                 self._k_scale,
             )
-            if self.attn_backend.accept_output_buffer:
-                output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-                torch.ops.vllm.unified_mla_attention_with_output(
-                    q,
-                    kv_c_normed,
-                    k_pe,
-                    output,
-                    self.layer_name,
-                    kv_cache_dummy_dep=kv_cache_dummy_dep,
-                )
-                return output
-            else:
-                return torch.ops.vllm.unified_mla_attention(
-                    q,
-                    kv_c_normed,
-                    k_pe,
-                    self.layer_name,
-                    kv_cache_dummy_dep=kv_cache_dummy_dep,
-                )
+            output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
+            torch.ops.vllm.unified_mla_attention_with_output(
+                q,
+                kv_c_normed,
+                k_pe,
+                output,
+                self.layer_name,
+                kv_cache_dummy_dep=kv_cache_dummy_dep,
+            )
+            return output
 
     def forward_impl(
         self,
@@ -121,9 +100,6 @@ class HPUMLAAttention(MLAAttention):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if output is not None:
-            raise NotImplementedError("output is not yet supported for MLAImplBase")
-
         is_prefill = attn_metadata.is_prompt
 
         if not is_prefill:
@@ -173,14 +149,14 @@ class HPUMLAAttention(MLAAttention):
                 # Channel-wise FP8 (produced by VLLM_HPU_FORCE_CHANNEL_FP8=True):
                 # one scale per output channel; dequant via simple broadcast multiply.
                 ws = weight_scale_inv.view(-1, 1).to(act_dtype)  # [N_out, 1]
-                kv_b_proj_weight = (weight.to(act_dtype) * ws).T
+                kv_b_proj_weight = (weight.to(act_dtype) * ws).T.contiguous()
             else:
                 # Block FP8 (force_channel_fp8=False): use HPU block dequant.
                 from vllm_gaudi.extension.ops import dequant_block_fp8_weight_naive
                 orig_M = kv_b_proj.orig_M.item() if hasattr(kv_b_proj, 'orig_M') else None
                 orig_N = kv_b_proj.orig_N.item() if hasattr(kv_b_proj, 'orig_N') else None
                 kv_b_proj_weight = dequant_block_fp8_weight_naive(
-                    weight,
+                    weight.contiguous(),
                     weight_scale_inv,
                     kv_b_proj.weight_block_size,
                     dtype=act_dtype,
