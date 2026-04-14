@@ -122,7 +122,7 @@ There are two ways to install vLLM Hardware Plugin for Intel Gaudi from source: 
         git clone https://github.com/vllm-project/vllm
         cd vllm
         git checkout $VLLM_COMMIT_HASH
-        pip install -r <(sed '/^torch/d' requirements/build.txt)
+        pip install -r <(sed '/^torch/d' requirements/build/cuda.txt)
         VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
         cd ..
   
@@ -173,7 +173,7 @@ To install vLLM Hardware Plugin for Intel Gaudi and NIXL using a Dockerfile:
         git clone https://github.com/vllm-project/vllm
         cd vllm
         git checkout $VLLM_COMMIT_HASH
-        pip install -r <(sed '/^torch/d' requirements/build.txt)
+        pip install -r <(sed '/^torch/d' requirements/build/cuda.txt)
         VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
         cd ..
 
