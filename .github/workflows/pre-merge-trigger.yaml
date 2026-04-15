@@ -52,21 +52,21 @@ jobs:
               baseRef      = mergeGroup.base_ref.replace('refs/heads/', '');
               // Extract PR number from head_ref: refs/heads/gh-readonly-queue/main/pr-123-<sha>
               const match  = mergeGroup.head_ref.match(/\/pr-(\d+)-/);
-              prNumber     = match ? match[1] : '';
+              if (!match) {
+                core.setFailed(`Cannot extract PR number from merge_group head_ref: '${mergeGroup.head_ref}'. Expected format: refs/heads/gh-readonly-queue/<branch>/pr-<number>-<sha>`);
+                return;
+              }
+              prNumber     = match[1];
               prTitle      = '';
               isDraft      = 'false';
               isMergeGroup = 'true';
               // Check skip-gaudi-tests label via API (label is not in the merge_group payload)
-              if (prNumber) {
-                const { data: pullRequest } = await github.rest.pulls.get({
-                  owner: context.repo.owner,
-                  repo:  context.repo.repo,
-                  pull_number: parseInt(prNumber, 10),
-                });
-                skipTests = String(pullRequest.labels.some(l => l.name === 'skip-gaudi-tests'));
-              } else {
-                skipTests = 'false';
-              }
+              const { data: pullRequest } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                pull_number: parseInt(prNumber, 10),
+              });
+              skipTests = String(pullRequest.labels.some(l => l.name === 'skip-gaudi-tests'));
             }
 
             // 1. Dispatch to base branch

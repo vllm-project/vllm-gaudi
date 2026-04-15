@@ -19,7 +19,7 @@ permissions:
   checks: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.pr_number || github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.head_sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -67,8 +67,8 @@ jobs:
           # --- New check to see if the PR is behind the base branch ---
           echo "Checking if the PR is behind the base branch..."
           # Fetch just the latest commit from the base branch for comparison
-          git fetch origin ${{ inputs.base_ref }} --depth=1
-          behind_count=$(git rev-list --count HEAD..origin/${{ inputs.base_ref }})
+          git fetch origin "${{ inputs.base_ref }}" --depth=1
+          behind_count=$(git rev-list --count "HEAD..origin/${{ inputs.base_ref }}")
 
           if_pr_is_behind="false"
           if [[ $behind_count -gt 0 ]]; then
@@ -106,7 +106,7 @@ jobs:
         # This ensures that even if commenting fails, the next step will run
         continue-on-error: true
         # Only run this step if the check failed and we're in a pull_request_target event
-        if: inputs.is_merge_group != 'true' && steps.check_conditions.outputs.run_ci == 'false'
+        if: inputs.is_merge_group != 'true' && inputs.pr_number != '' && steps.check_conditions.outputs.run_ci == 'false'
         uses: peter-evans/create-or-update-comment@v4
         with:
           issue-number: ${{ inputs.pr_number }}
@@ -551,7 +551,7 @@ jobs:
         id: check
         run: |
           # Compare PR head against merge base to find changed files
-          CHANGED=$(git diff --name-only origin/${{ inputs.base_ref }}...HEAD -- '.cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest')
+          CHANGED=$(git diff --name-only "origin/${{ inputs.base_ref }}...HEAD" -- '.cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest')
           if [ -n "$CHANGED" ]; then
             echo "nixl_changed=true" >> "$GITHUB_OUTPUT"
             echo "Nixl Dockerfile was modified"
@@ -603,7 +603,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Post Comment on Success
-        if: inputs.is_merge_group != 'true' && needs.pre_merge_hpu_test.result == 'success'
+        if: inputs.is_merge_group != 'true' && inputs.pr_number != '' && needs.pre_merge_hpu_test.result == 'success'
         uses: peter-evans/create-or-update-comment@v4
         with:
           issue-number: ${{ inputs.pr_number }}
