@@ -151,7 +151,13 @@ class FP8Matmul(torch.nn.Module):
         return output
 
 
-class ModuleFusedSDPABase(torch.nn.Module):
+class SlicedFusedSDPABase(torch.nn.Module):
+    """Base class for sliced FusedSDPA modules.
+
+    Encapsulates the common slicing initialization (chunk size, padded chunk
+    counts, graph-break setup) shared by :class:`SlicedFusedSDPA` and
+    :class:`SlicedFP8FusedSDPA`.
+    """
 
     def __init__(self):
         super().__init__()
@@ -211,13 +217,13 @@ class ModuleFusedSDPABase(torch.nn.Module):
         self.slice_thld = slice_thld
         self.chunk_size = chunk_size
 
-        max_query_pad_default = math.ceil(max_num_batched_tokens /
-                                          4)  # should align with the default in PaddingAwareBucketingStrategy
+        # should align with the default in PaddingAwareBucketingStrategy
+        max_query_pad_default = math.ceil(max_num_batched_tokens / 4)
         max_query_pad = int(os.getenv("VLLM_PROMPT_QUERY_BUCKET_PAD_MAX", str(max_query_pad_default)))
         self.num_padded_query_chunks = math.ceil(max_query_pad / self.chunk_size)
 
-        max_ctx_pad_default = math.ceil(max_num_batched_tokens /
-                                        block_size)  # should align with the default in PaddingAwareBucketingStrategy
+        # should align with the default in PaddingAwareBucketingStrategy
+        max_ctx_pad_default = math.ceil(max_num_batched_tokens / block_size)
         max_ctx_pad = int(os.getenv("VLLM_PROMPT_CTX_BUCKET_PAD_MAX", str(max_ctx_pad_default)))
         self.num_padded_ctx_chunks = math.ceil(max_ctx_pad * block_size / self.chunk_size)
 
@@ -229,10 +235,21 @@ class ModuleFusedSDPABase(torch.nn.Module):
                f"chunk size {self.chunk_size}, num padded query chunks {self.num_padded_query_chunks}, "
                f"num padded ctx chunks {self.num_padded_ctx_chunks}, with graph breaks {self._with_graph_breaks}.")
         logger().debug(msg)
+
+        if self._with_graph_breaks:
+            if ht.utils.internal.is_lazy():
+                self._break_graph = ht.core.mark_step
+            else:
+                self._break_graph = torch._dynamo.graph_break
+
         return True
 
+    def maybe_break_graph(self):
+        if self._with_graph_breaks:
+            self._break_graph()
 
-class SlicedFusedSDPA(torch.nn.Module):
+
+class SlicedFusedSDPA(SlicedFusedSDPABase):
     """Standalone module for BF16 sliced FusedSDPA.
 
     Extracting the sliced attention path into its own ``nn.Module`` allows it
@@ -240,23 +257,6 @@ class SlicedFusedSDPA(torch.nn.Module):
     any other module-level wrapper independently of the dispatch logic in
     :class:`ModuleFusedSDPA`.
     """
-
-    def __init__(self, chunk_size, num_padded_query_chunks, num_padded_ctx_chunks, with_graph_breaks=False):
-        super().__init__()
-        self.chunk_size = chunk_size
-        self.num_padded_query_chunks = num_padded_query_chunks
-        self.num_padded_ctx_chunks = num_padded_ctx_chunks
-        self._with_graph_breaks = with_graph_breaks
-        if with_graph_breaks:
-            import habana_frameworks.torch as ht
-            if ht.utils.internal.is_lazy():
-                self._break_graph = ht.core.mark_step
-            else:
-                self._break_graph = torch._dynamo.graph_break
-
-    def maybe_break_graph(self):
-        if self._with_graph_breaks:
-            self._break_graph()
 
     def forward(self, query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode):
         assert is_causal and attn_mask is not None
@@ -380,15 +380,13 @@ class SlicedFusedSDPA(torch.nn.Module):
         return output.to(q.dtype)
 
 
-class ModuleFusedSDPA(ModuleFusedSDPABase):
+class ModuleFusedSDPA(torch.nn.Module):
 
     def __init__(self, fusedSDPA):
         super().__init__()
         assert fusedSDPA is not None, f'fusedSDPA kernel is None'
         self._hpu_kernel_fsdpa = fusedSDPA
-        if self.enable_slicing:
-            self._sliced_module = SlicedFusedSDPA(self.chunk_size, self.num_padded_query_chunks,
-                                                  self.num_padded_ctx_chunks, self._with_graph_breaks)
+        self._sliced_module = SlicedFusedSDPA()
 
     def forward(
         self,
@@ -409,7 +407,7 @@ class ModuleFusedSDPA(ModuleFusedSDPABase):
         bs = query.shape[0]
         q_len = query.shape[-2]
         kv_len = key.shape[-2]
-        if (self.enable_slicing and kv_len >= self.slice_thld \
+        if (self._sliced_module.enable_slicing and kv_len >= self._sliced_module.slice_thld \
                 and bs == 1  # bs should be 1 for chunked prefill
                 and q_len != kv_len  # normal causal prefill route to the default dispatch for better performance
                 and is_causal and attn_mask is not None  # only supports causal attention with mask
@@ -434,7 +432,7 @@ class ModuleFusedSDPA(ModuleFusedSDPABase):
                                                 (-1, -1), sinks)
 
 
-class SlicedFP8FusedSDPA(torch.nn.Module):
+class SlicedFP8FusedSDPA(SlicedFusedSDPABase):
     """Standalone module for FP8 sliced FusedSDPA.
 
     Like :class:`SlicedFusedSDPA`, extracting the sliced path enables
@@ -443,41 +441,14 @@ class SlicedFP8FusedSDPA(torch.nn.Module):
     BF16/FP32 before the online-softmax rescaling merge.
     """
 
-    def __init__(self,
-                 chunk_size,
-                 num_padded_query_chunks,
-                 num_padded_ctx_chunks,
-                 d_scale_q,
-                 d_scale_k,
-                 d_scale_v,
-                 d_scale_output,
-                 scale_amax,
-                 descale_amax,
-                 with_graph_breaks=False):
+    def __init__(self, parent):
         super().__init__()
-        self.chunk_size = chunk_size
-        self.num_padded_query_chunks = num_padded_query_chunks
-        self.num_padded_ctx_chunks = num_padded_ctx_chunks
-        self.d_scale_q = d_scale_q
-        self.d_scale_k = d_scale_k
-        self.d_scale_v = d_scale_v
-        self.d_scale_output = d_scale_output
-        self.scale_amax = scale_amax
-        self.descale_amax = descale_amax
-        self._with_graph_breaks = with_graph_breaks
-        if with_graph_breaks:
-            import habana_frameworks.torch as ht
-            if ht.utils.internal.is_lazy():
-                self._break_graph = ht.core.mark_step
-            else:
-                self._break_graph = torch._dynamo.graph_break
+        # Store parent reference without registering as a submodule
+        # to avoid circular module graph while sharing scale tensors.
+        object.__setattr__(self, '_parent', parent)
 
-    def maybe_break_graph(self):
-        if self._with_graph_breaks:
-            self._break_graph()
-
-    def dequant_output(self, output, scale):
-        return torch.ops.hpu.cast_from_fp8(output, scale, torch.bfloat16)
+    def dequant_output(self, output):
+        return torch.ops.hpu.cast_from_fp8(output, self._parent.d_scale_output, torch.bfloat16)
 
     def fp8_fsdpa_fwd(self, q, k, v, attn_mask, dropout_p, scale, is_causal, softmax_mode):
         results = torch.ops.hpu.fp8_sdpa_recomp_fwd(
@@ -490,12 +461,12 @@ class SlicedFP8FusedSDPA(torch.nn.Module):
             is_causal,
             True,  # requires_backward
             softmax_mode,
-            self.d_scale_q,
-            self.d_scale_k,
-            self.d_scale_v,
-            self.scale_amax,
-            self.d_scale_output,
-            self.descale_amax,
+            self._parent.d_scale_q,
+            self._parent.d_scale_k,
+            self._parent.d_scale_v,
+            self._parent.scale_amax,
+            self._parent.d_scale_output,
+            self._parent.descale_amax,
             False,  # is_amax_s
             False,  # is_amax_o
             None,  # valid_seq_len
@@ -557,7 +528,7 @@ class SlicedFP8FusedSDPA(torch.nn.Module):
                 chunk_out, chunk_m, chunk_linv = (gqa_output_reshape(x) if gqa else x for x in chunk_res[:3])
                 chunk_m = chunk_m.to(torch.float32)
                 chunk_linv = chunk_linv.to(torch.float32) * (128.0 if softmax_mode == "fast" else 1.0)
-                chunk_out = self.dequant_output(chunk_out, self.d_scale_output).to(torch.float32)
+                chunk_out = self.dequant_output(chunk_out).to(torch.float32)
 
                 if last_out is None or last_m is None or last_linv is None:
                     last_out = chunk_out
@@ -591,7 +562,7 @@ class SlicedFP8FusedSDPA(torch.nn.Module):
                 chunk_out, chunk_m, chunk_linv = (gqa_output_reshape(x) if gqa else x for x in chunk_res[:3])
                 chunk_m = chunk_m.to(torch.float32)
                 chunk_linv = chunk_linv.to(torch.float32) * (128.0 if softmax_mode == "fast" else 1.0)
-                chunk_out = self.dequant_output(chunk_out, self.d_scale_output).to(torch.float32)
+                chunk_out = self.dequant_output(chunk_out).to(torch.float32)
 
                 assert not (last_out is None or last_m is None or last_linv is None)
                 new_m = torch.maximum(last_m, chunk_m)
@@ -608,7 +579,7 @@ class SlicedFP8FusedSDPA(torch.nn.Module):
         return torch.cat(chunk_outputs, dim=-2)
 
 
-class ModuleFP8FusedSDPA(ModuleFusedSDPABase):
+class ModuleFP8FusedSDPA(torch.nn.Module):
 
     def __init__(self, fusedSDPA):
         super().__init__()
@@ -625,23 +596,7 @@ class ModuleFP8FusedSDPA(ModuleFusedSDPABase):
         self.d_scale_k = torch.tensor(1.0, dtype=torch.float32)
         self.d_scale_v = torch.tensor(1.0, dtype=torch.float32)
         self.d_scale_output = torch.tensor(1.0, dtype=torch.float32)
-        if self.enable_slicing:
-            self._sliced_module = SlicedFP8FusedSDPA(self.chunk_size, self.num_padded_query_chunks,
-                                                     self.num_padded_ctx_chunks, self.d_scale_q, self.d_scale_k,
-                                                     self.d_scale_v, self.d_scale_output, self.scale_amax,
-                                                     self.descale_amax, self._with_graph_breaks)
-
-    def _sync_sliced_module_scales(self) -> None:
-        if not self.enable_slicing:
-            return
-        # Scales can be reassigned after module construction (e.g. during
-        # post-load quantization setup), so keep sliced-module references in sync.
-        self._sliced_module.d_scale_q = self.d_scale_q
-        self._sliced_module.d_scale_k = self.d_scale_k
-        self._sliced_module.d_scale_v = self.d_scale_v
-        self._sliced_module.d_scale_output = self.d_scale_output
-        self._sliced_module.scale_amax = self.scale_amax
-        self._sliced_module.descale_amax = self.descale_amax
+        self._sliced_module = SlicedFP8FusedSDPA(parent=self)
 
     def quant_input(self, x, scale):
         return torch.ops.hpu.cast_to_fp8_v2(x, scale, False, False, torch.float8_e4m3fn)[0]
@@ -669,7 +624,7 @@ class ModuleFP8FusedSDPA(ModuleFusedSDPABase):
         bs = query.shape[0]
         q_len = query.shape[-2]
         kv_len = key.shape[-2]
-        if (self.enable_slicing and kv_len >= self.slice_thld \
+        if (self._sliced_module.enable_slicing and kv_len >= self._sliced_module.slice_thld \
                 and bs == 1  # bs should be 1 for chunked prefill
                 and q_len != kv_len  # normal causal prefill route to the default dispatch for better performance
                 and is_causal and attn_mask is not None  # only supports causal attention with mask
