@@ -121,7 +121,8 @@ def get_features():
               env_var_type=boolean),
         Value('use_hpu_aligned_scale', False, env_var='HPU_ALIGNED_SCALE', env_var_type=boolean),
         Value('enable_fsdpa_slicing',
-              All(Eq('bucketing_strategy', 'pad'), Disabled('merged_prefill'), Kernel(fsdpa)),
+              All(Eq('use_bucketing', True), Eq('bucketing_strategy', 'pad'), Disabled('merged_prefill'),
+                  Kernel(fsdpa)),
               env_var='VLLM_HPU_FSDPA_SLICE_ENABLED',
               env_var_type=boolean),
     ]
