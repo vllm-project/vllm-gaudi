@@ -19,7 +19,7 @@ permissions:
   checks: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.pr_number || github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.pr_number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -31,7 +31,7 @@ jobs:
       - name: Set Head SHA Output
         id: set_sha
         run: |
-          echo "head_sha=${{ inputs.head_sha || github.event.pull_request.head.sha || github.event.merge_group.head_sha }}" >> "$GITHUB_OUTPUT"
+          echo "head_sha=${{ inputs.head_sha }}" >> "$GITHUB_OUTPUT"
 
   gatekeeper:
     needs: retrieve_head_sha
@@ -72,8 +72,8 @@ jobs:
           # --- New check to see if the PR is behind the base branch ---
           echo "Checking if the PR is behind the base branch..."
           # Fetch just the latest commit from the base branch for comparison
-          git fetch origin ${{ inputs.base_ref || github.event.pull_request.base.ref }} --depth=1
-          behind_count=$(git rev-list --count HEAD..origin/${{ inputs.base_ref || github.event.pull_request.base.ref }})
+          git fetch origin ${{ inputs.base_ref }} --depth=1
+          behind_count=$(git rev-list --count HEAD..origin/${{ inputs.base_ref }})
 
           if_pr_is_behind="false"
           if [[ $behind_count -gt 0 ]]; then
@@ -85,7 +85,7 @@ jobs:
           # --- End of new check ---
 
 
-          PR_DRAFT="${{ inputs.is_draft || github.event.pull_request.draft }}"
+          PR_DRAFT="${{ inputs.is_draft }}"
           if [[ "$PR_DRAFT" == "true" ]]; then
             BLOCKING_REASON="This is a **Draft PR**. Please mark it as 'Ready for Review' to trigger the CI."
 
@@ -133,7 +133,7 @@ jobs:
   # If PR title contains [FIX_FOR_VLLM_LATEST], it uses the hourly-ci runner pool.
   discover_runner:
     needs: gatekeeper
-    runs-on: ${{ contains(inputs.pr_title || github.event.pull_request.title, '[FIX_FOR_VLLM_LATEST]') && 'hourly-ci' || 'pr-ci' }}
+    runs-on: ${{ contains(inputs.pr_title, '[FIX_FOR_VLLM_LATEST]') && 'hourly-ci' || 'pr-ci' }}
     outputs:
       runner_name: ${{ steps.get_name.outputs.name }}
     steps:
@@ -583,7 +583,7 @@ jobs:
         id: check
         run: |
           # Compare PR head against merge base to find changed files
-          CHANGED=$(git diff --name-only origin/${{ inputs.base_ref || github.event.pull_request.base.ref }}...HEAD -- '.cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest')
+          CHANGED=$(git diff --name-only origin/${{ inputs.base_ref }}...HEAD -- '.cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest')
           if [ -n "$CHANGED" ]; then
             echo "nixl_changed=true" >> "$GITHUB_OUTPUT"
             echo "Nixl Dockerfile was modified"
