@@ -92,7 +92,7 @@ class AWQHPUConfig(QuantizationConfig):
         return cls(weight_bits, group_size, zero_point, modules_to_not_convert)
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg, user_quant) -> Optional[str]:
+    def override_quantization_method(cls, hf_quant_cfg, user_quant, hf_config=None) -> Optional[str]:
 
         is_valid_user_quant = user_quant == "awq_hpu"
 

@@ -12,12 +12,23 @@ from concurrent.futures import Future, ThreadPoolExecutor
 import msgspec
 import numpy as np
 
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (TransferHandle, ReqId, ReqMeta,
-                                                                         _NIXL_SUPPORTED_DEVICE, NixlAgentMetadata,
-                                                                         NixlConnector, NixlConnectorWorker,
-                                                                         NixlConnectorScheduler, NixlConnectorMetadata,
-                                                                         NixlHandshakePayload, NixlKVConnectorStats,
-                                                                         compute_nixl_compatibility_hash)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
+    NixlAgentMetadata,
+    NixlConnector,
+    NixlConnectorMetadata,
+    NixlConnectorScheduler,
+    NixlConnectorWorker,
+    NixlHandshakePayload,
+    NixlKVConnectorStats,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    TransferHandle,
+    ReqId,
+    ReqMeta,
+    compute_nixl_compatibility_hash,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
+    _NIXL_SUPPORTED_DEVICE, )
 from vllm_gaudi.platform import logger
 
 from vllm import envs
