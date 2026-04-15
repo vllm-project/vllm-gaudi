@@ -114,7 +114,7 @@ jobs:
         if: inputs.is_merge_group != 'true' && steps.check_conditions.outputs.run_ci == 'false'
         uses: peter-evans/create-or-update-comment@v4
         with:
-          issue-number: ${{ github.event.pull_request.number }}
+          issue-number: ${{ inputs.pr_number }}
           body: |
             ### 🚧 CI Blocked
 
@@ -638,7 +638,7 @@ jobs:
         if: inputs.is_merge_group != 'true' && needs.pre_merge_hpu_test.result == 'success'
         uses: peter-evans/create-or-update-comment@v4
         with:
-          issue-number: ${{ github.event.pull_request.number }}
+          issue-number: ${{ inputs.pr_number }}
           body: |
             ### ✅ CI Passed
             All checks passed successfully against the following vllm commit:

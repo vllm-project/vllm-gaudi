@@ -52,8 +52,18 @@ jobs:
               prNumber     = match ? match[1] : '';
               prTitle      = '';
               isDraft      = 'false';
-              skipTests    = 'false';
               isMergeGroup = 'true';
+              // Check skip-gaudi-tests label via API (label is not in the merge_group payload)
+              if (prNumber) {
+                const { data: pullRequest } = await github.rest.pulls.get({
+                  owner: context.repo.owner,
+                  repo:  context.repo.repo,
+                  pull_number: parseInt(prNumber, 10),
+                });
+                skipTests = String(pullRequest.labels.some(l => l.name === 'skip-gaudi-tests'));
+              } else {
+                skipTests = 'false';
+              }
             }
 
             // 1. Dispatch to base branch
