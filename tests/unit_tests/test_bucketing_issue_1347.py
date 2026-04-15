@@ -519,8 +519,7 @@ class TestPR1122DecodeBucketFormula:
             block_range = strategy.get_range(block_cfg)
 
         expected_max = math.ceil(_LONG_CTX_MAX_MODEL_LEN / _LONG_CTX_BLOCK_SIZE) * _LONG_CTX_MAX_NUM_SEQS
-        assert max(block_range) <= expected_max, (
-            f"Block range max {max(block_range)} exceeds cfg max {expected_max}")
+        assert max(block_range) <= expected_max, (f"Block range max {max(block_range)} exceeds cfg max {expected_max}")
 
 
 ###############################################################################
