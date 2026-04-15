@@ -4570,6 +4570,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             num_blocks = attn_metadata.num_blocks()
             total_tokens = (batch_size * seq_len + num_blocks * attn_metadata.block_size)
             if total_tokens > self.max_cudagraph_capture_size:
+                logger.debug_once(f"Skipping HPU graph capture for prompt with [bs, query, num_blocks] = "
+                                  f"[{batch_size}, {seq_len}, {num_blocks}] due to total token count "
+                                  f"{total_tokens} exceeding the threshold of {self.max_cudagraph_capture_size}.")
                 return False
         return True
 
