@@ -2,7 +2,7 @@
 
 ## Overview
 
-This release is based on [vLLM v0.17.1](https://github.com/vllm-project/vllm/releases/tag/v0.17.1) and supports [Intel® Gaudi® Software v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
+This release is based on [vLLM v0.17.1](https://github.com/vllm-project/vllm/releases/tag/v0.17.1) and supports [Intel® Gaudi® Software v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html) and [Intel® Gaudi® Software v1.24.0](https://docs.habana.ai/en/v1.24.0/Release_Notes/GAUDI_Release_Notes.html).
 
 ---
 
