@@ -52,7 +52,7 @@ Notes:
 - `VLLM_ALLOW_INSECURE_SERIALIZATION=1` is currently required because the in-process reconfigure hook uses `cloudpickle` internally. Use this mode only in trusted/internal deployments.
 - Frontend settings can now be set per model in the YAML config for `enable_auto_tool_choice`, `tool_call_parser`, and `chat_template`.
 - Per-model `chat_template` values can be absolute paths or paths relative to the multi-model config file.
-- Per-model `quant_config` path can be specified to modify `QUANT_CONFIG` env variable. 
+- Per-model `quant_config` path can be specified to modify `QUANT_CONFIG` env variable.
 - If a per-model setting is absent, the server falls back to the corresponding CLI value.
 
 ## Online Flow (Smoke Test)
