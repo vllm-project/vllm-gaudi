@@ -113,7 +113,7 @@ class HpuPlatform(Platform):
 
         return total_hpu_memory
 
-   @classmethod
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
 
