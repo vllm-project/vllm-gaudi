@@ -80,10 +80,6 @@ class MultiModelEngineClient(EngineClient):
         return self._engine.renderer
 
     @property
-    def io_processor(self):
-        return self._engine.io_processor
-
-    @property
     def input_processor(self):
         return self._engine.input_processor
 
@@ -483,7 +479,6 @@ async def _init_multi_model_state(
     state.openai_serving_render = OpenAIServingRender(
         model_config=engine_client.model_config,
         renderer=engine_client.renderer,
-        io_processor=engine_client.io_processor,
         model_registry=state.openai_serving_models.registry,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
