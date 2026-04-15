@@ -108,13 +108,16 @@ class MultiModelAsyncLLM:
         (switch_model), so that each worker process inherits / uses the
         correct quantization calibration file for the target model.
         """
-        quant_config_path = self.model_quant_configs.get(model_name)
-        if quant_config_path is not None:
-            os.environ["QUANT_CONFIG"] = quant_config_path
-            logger.info("[quant_config] QUANT_CONFIG=%s (model=%s)", quant_config_path, model_name)
+        if model_name in self.model_quant_configs:
+            quant_config_path = self.model_quant_configs[model_name]
+            if quant_config_path is not None:
+                os.environ["QUANT_CONFIG"] = quant_config_path
+                logger.info("[quant_config] QUANT_CONFIG=%s (model=%s)", quant_config_path, model_name)
+            else:
+                os.environ.pop("QUANT_CONFIG", None)
+                logger.info("[quant_config] QUANT_CONFIG unset (model=%s)", model_name)
         else:
-            os.environ.pop("QUANT_CONFIG", None)
-            logger.info("[quant_config] QUANT_CONFIG unset (model=%s)", model_name)
+            logger.info("[quant_config] QUANT_CONFIG preserved from environment (model=%s)", model_name)
 
     @property
     def current_model(self) -> str | None:
@@ -303,13 +306,19 @@ class MultiModelAsyncLLM:
                 # Step 2: Reconfigure engine core and scheduler in-process
                 logger.info("Reconfiguring engine for: %s", model_name)
                 serialized_config = cloudpickle.dumps(self._vllm_configs[model_name])
-                quant_config_path = self.model_quant_configs.get(model_name)
                 reconfigure_start = time.perf_counter()
-                reconfigure_result = await self._engine.engine_core.call_utility_async(
-                    "gaudi_reconfigure_engine",
-                    serialized_config,
-                    quant_config_path,
-                )
+                if model_name in self.model_quant_configs:
+                    quant_config_path = self.model_quant_configs[model_name]
+                    reconfigure_result = await self._engine.engine_core.call_utility_async(
+                        "gaudi_reconfigure_engine",
+                        serialized_config,
+                        quant_config_path,
+                    )
+                else:
+                    reconfigure_result = await self._engine.engine_core.call_utility_async(
+                        "gaudi_reconfigure_engine",
+                        serialized_config,
+                    )
                 reconfigure_s = time.perf_counter() - reconfigure_start
                 logger.info(
                     "[gaudi_reconfigure] caller complete: to=%s elapsed=%.2fs",

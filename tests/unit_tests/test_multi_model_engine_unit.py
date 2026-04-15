@@ -75,7 +75,7 @@ def test_load_multi_model_config_success(tmp_path):
         "llama": api_server.ModelFrontendOverrides(),
         "qwen": api_server.ModelFrontendOverrides(),
     }
-    assert model_quant_configs == {"llama": None, "qwen": None}
+    assert model_quant_configs == {}
 
 
 def test_load_multi_model_config_falls_back_to_model_env(tmp_path, monkeypatch):
@@ -124,7 +124,7 @@ def test_load_multi_model_config_extracts_frontend_overrides(tmp_path):
             str(cfg_path))
 
     assert set(model_configs.keys()) == {"a", "b"}
-    assert model_quant_configs == {"a": None, "b": None}
+    assert model_quant_configs == {}
     assert model_frontend_overrides["a"] == api_server.ModelFrontendOverrides(
         enable_auto_tool_choice=True,
         tool_call_parser="granite",
@@ -157,7 +157,29 @@ def test_load_multi_model_config_extracts_quant_configs(tmp_path):
 
     expected_path = str((tmp_path / "quant" / "maxabs.json").resolve())
     assert model_quant_configs["quantized"] == expected_path
-    assert model_quant_configs["plain"] is None
+    assert "plain" not in model_quant_configs
+
+
+def test_load_multi_model_config_extracts_explicit_quant_config_null(tmp_path):
+    cfg_path = tmp_path / "multi.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump({
+            "default_model": "a",
+            "models": {
+                "a": {
+                    "model": "meta-llama/Llama-3.1-8B-Instruct",
+                    "quant_config": None,
+                },
+                "b": {
+                    "model": "Qwen/Qwen3-0.6B",
+                },
+            },
+        }))
+
+    with patch.object(api_server, "AsyncEngineArgs", _FakeAsyncEngineArgs):
+        _, _, _, model_quant_configs = api_server._load_multi_model_config(str(cfg_path))
+
+    assert model_quant_configs == {"a": None}
 
 
 def test_resolve_frontend_settings_uses_model_override_then_cli():
@@ -203,13 +225,38 @@ async def test_initialize_and_switch_reconfigures_engine(mock_engine):
                return_value=mock_engine), patch.object(MultiModelAsyncLLM,
                                                        "_refresh_engine_frontend_config",
                                                        new_callable=AsyncMock):
-        manager = MultiModelAsyncLLM(model_configs)
+        manager = MultiModelAsyncLLM(model_configs, model_quant_configs={"qwen": "/tmp/qwen_quant.json"})
         await manager.initialize("llama")
         await manager.switch_model("qwen", drain_timeout=1)
 
     assert manager.current_model == "qwen"
     mock_engine.wait_for_requests_to_drain.assert_awaited_once()
-    mock_engine.engine_core.call_utility_async.assert_awaited_once()
+    mock_engine.engine_core.call_utility_async.assert_awaited_once_with(
+        "gaudi_reconfigure_engine",
+        cloudpickle.dumps(manager.get_vllm_config("qwen")),
+        "/tmp/qwen_quant.json",
+    )
+
+
+@pytest.mark.asyncio
+async def test_switch_preserves_quant_config_when_not_specified(mock_engine):
+    model_configs = {
+        "llama": _FakeAsyncEngineArgs("meta-llama/Llama-3.1-8B-Instruct"),
+        "qwen": _FakeAsyncEngineArgs("Qwen/Qwen3-0.6B"),
+    }
+
+    with patch("vllm_gaudi.v1.engine.multi_model_async_llm.AsyncLLM.from_engine_args",
+               return_value=mock_engine), patch.object(MultiModelAsyncLLM,
+                                                       "_refresh_engine_frontend_config",
+                                                       new_callable=AsyncMock):
+        manager = MultiModelAsyncLLM(model_configs, model_quant_configs={"llama": "/tmp/llama_quant.json"})
+        await manager.initialize("llama")
+        await manager.switch_model("qwen", drain_timeout=1)
+
+    mock_engine.engine_core.call_utility_async.assert_awaited_once_with(
+        "gaudi_reconfigure_engine",
+        cloudpickle.dumps(manager.get_vllm_config("qwen")),
+    )
 
 
 @pytest.mark.asyncio

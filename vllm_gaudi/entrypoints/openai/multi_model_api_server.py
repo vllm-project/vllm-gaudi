@@ -366,14 +366,13 @@ def _load_multi_model_config(
 
         model_frontend_overrides[name] = overrides
 
-        quant_config: str | None = None
         if "quant_config" in raw_cfg_copy:
             quant_config = raw_cfg_copy.pop("quant_config")
             if quant_config is not None and not isinstance(quant_config, str):
                 raise ValueError(f"Model '{name}' field 'quant_config' must be a string path.")
             if isinstance(quant_config, str) and not os.path.isabs(quant_config):
                 quant_config = os.path.abspath(os.path.join(config_dir, quant_config))
-        model_quant_configs[name] = quant_config
+            model_quant_configs[name] = quant_config
 
         try:
             model_configs[name] = AsyncEngineArgs(**raw_cfg_copy)
@@ -415,13 +414,16 @@ async def build_multi_model_engine_client(
     model_configs, default_model, model_frontend_overrides, model_quant_configs = _load_multi_model_config(config_path)
     _validate_model_frontend_overrides(args, model_frontend_overrides)
 
-    default_quant_config = model_quant_configs.get(default_model)
-    if default_quant_config is not None:
-        os.environ["QUANT_CONFIG"] = default_quant_config
-        logger.info("startup QUANT_CONFIG=%s (default_model=%s)", default_quant_config, default_model)
+    if default_model in model_quant_configs:
+        default_quant_config = model_quant_configs[default_model]
+        if default_quant_config is not None:
+            os.environ["QUANT_CONFIG"] = default_quant_config
+            logger.info("startup QUANT_CONFIG=%s (default_model=%s)", default_quant_config, default_model)
+        else:
+            os.environ.pop("QUANT_CONFIG", None)
+            logger.info("startup QUANT_CONFIG unset (default_model=%s)", default_model)
     else:
-        os.environ.pop("QUANT_CONFIG", None)
-        logger.info("startup QUANT_CONFIG unset (default_model=%s)", default_model)
+        logger.info("startup QUANT_CONFIG preserved from environment (default_model=%s)", default_model)
 
     manager = MultiModelAsyncLLM(
         model_configs,

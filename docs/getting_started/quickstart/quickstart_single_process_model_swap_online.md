@@ -53,7 +53,9 @@ Notes:
 - Frontend settings can now be set per model in the YAML config for `enable_auto_tool_choice`, `tool_call_parser`, and `chat_template`.
 - Per-model `chat_template` values can be absolute paths or paths relative to the multi-model config file.
 - Per-model `quant_config` path can be specified to modify `QUANT_CONFIG` env variable.
-- If a per-model setting is absent, the server falls back to the corresponding CLI value.
+- If frontend settings are absent per model, the server falls back to the corresponding CLI values.
+- If `quant_config` is absent for a model, the existing `QUANT_CONFIG` environment value is preserved.
+- Set `quant_config: null` for a model to explicitly clear `QUANT_CONFIG` when that model is active.
 
 ## Online Flow (Smoke Test)
 

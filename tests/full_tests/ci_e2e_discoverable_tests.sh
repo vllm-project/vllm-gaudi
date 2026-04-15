@@ -534,6 +534,7 @@ launch_all_tests() {
     run_cpu_offloading_test
     run_offloading_connector_test
     run_sleep_mode_test
+    run_online_model_swap_test
     run_structured_output_test
     echo "🎉 All test suites passed successfully!"
 }
