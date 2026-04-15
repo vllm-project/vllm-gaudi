@@ -57,15 +57,15 @@ jobs:
                 return;
               }
               prNumber     = match[1];
-              prTitle      = '';
               isDraft      = 'false';
               isMergeGroup = 'true';
-              // Check skip-gaudi-tests label via API (label is not in the merge_group payload)
+              // Fetch PR details via API (title and labels are not in the merge_group payload)
               const { data: pullRequest } = await github.rest.pulls.get({
                 owner: context.repo.owner,
                 repo:  context.repo.repo,
                 pull_number: parseInt(prNumber, 10),
               });
+              prTitle   = pullRequest.title;
               skipTests = String(pullRequest.labels.some(l => l.name === 'skip-gaudi-tests'));
             }
 

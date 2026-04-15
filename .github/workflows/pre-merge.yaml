@@ -105,7 +105,7 @@ jobs:
       - name: Post comment if CI is blocked
         # This ensures that even if commenting fails, the next step will run
         continue-on-error: true
-        # Only run this step if the check failed and we're in a pull_request_target event
+        # Only run this step for non-merge-group PRs where a PR number is available
         if: inputs.is_merge_group != 'true' && inputs.pr_number != '' && steps.check_conditions.outputs.run_ci == 'false'
         uses: peter-evans/create-or-update-comment@v4
         with:
