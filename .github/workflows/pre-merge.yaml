@@ -319,9 +319,9 @@ jobs:
           git remote remove vllm-upstream || true
           echo "add vllm-upstream remote..."
           git remote add vllm-upstream https://github.com/vllm-project/vllm.git
-          echo "Checking out code from '${{ env.TARGET_COMMIT }}'..."
+          echo "Checking out code from '$TARGET_COMMIT'..."
           git fetch vllm-upstream --depth=100
-          git checkout "${{ env.TARGET_COMMIT }}"
+          git checkout "$TARGET_COMMIT"
           COMMIT_ID=$(git rev-parse HEAD)
           echo "TEST_VLLM_COMMIT=$COMMIT_ID" >> "$GITHUB_OUTPUT"
           echo "TEST_VLLM_COMMIT=$COMMIT_ID" >> "$GITHUB_ENV"
@@ -338,7 +338,7 @@ jobs:
           echo "Attempting to build Docker image..."
           docker build \
             --no-cache \
-            --build-arg VLLM_COMMIT_ARG=${{ env.TEST_VLLM_COMMIT }} \
+            --build-arg "VLLM_COMMIT_ARG=$TEST_VLLM_COMMIT" \
             -t hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }} \
             -f .github/Dockerfile.ci .
           echo "Docker image built successfully."
