@@ -173,6 +173,11 @@ class ModuleFusedSDPABase(torch.nn.Module):
                 'FusedSDPA slicing is not compatible with merged prefill, slicing in FusedSDPA will be disabled.')
             return False
 
+        if not get_config().use_bucketing:
+            logger().warning_once(
+                'FusedSDPA slicing requires bucketing to be enabled, slicing in FusedSDPA will be disabled.')
+            return False
+
         from vllm_gaudi.extension.bucketing.common import get_bucketing_manager
         bucketing_manager = get_bucketing_manager()
         assert bucketing_manager is not None and bucketing_manager.initialized, 'Bucketing manager should be instantiated and initialized to enable FusedSDPA slicing.'
