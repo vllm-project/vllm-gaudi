@@ -41,11 +41,6 @@ jobs:
       checks: read
       # Add this line to allow posting comments on PRs
       pull-requests: write
-    outputs:
-      # This output will be used to signal if the main CI should run
-      run_ci: ${{ steps.check_conditions.outputs.run_ci }}
-      reason: ${{ steps.check_conditions.outputs.reason }}
-
     steps:
       # Add this checkout step
       - name: Checkout repository
@@ -201,33 +196,6 @@ jobs:
           fi
           echo "matrix=$TEST_FUNCTIONS" >> "$GITHUB_OUTPUT"
 
-  retrieve_pr_info:
-    needs: [gatekeeper, retrieve_head_sha]
-    runs-on: ubuntu-latest
-    outputs:
-      pr_number: ${{ steps.set_info.outputs.pr_number }}
-      pr_title: ${{ steps.set_info.outputs.pr_title }}
-      pr_labels: ${{ steps.set_info.outputs.pr_labels }}
-      pr_base_ref: ${{ steps.set_info.outputs.pr_base_ref }}
-      skip_gaudi_tests: ${{ steps.set_info.outputs.skip_gaudi_tests }}
-    steps:
-      - name: Set PR info from dispatch inputs
-        id: set_info
-        run: |
-          {
-            echo "pr_number=${{ inputs.pr_number }}"
-            echo "pr_title=${{ inputs.pr_title }}"
-            echo "pr_base_ref=${{ inputs.base_ref }}"
-            echo "skip_gaudi_tests=${{ inputs.skip_tests }}"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Display PR information
-        run: |
-          echo "PR Number: ${{ inputs.pr_number }}"
-          echo "PR Title: ${{ inputs.pr_title }}"
-          echo "PR Base Ref: ${{ inputs.base_ref }}"
-          echo "Skip Gaudi Tests: ${{ inputs.skip_tests }}"
-
   pre-commit:
     # This job runs in parallel with the build job
     needs: [gatekeeper, retrieve_head_sha]
@@ -256,8 +224,8 @@ jobs:
 
   pre_merge_hpu_test_build:
     # --- UPDATED: Add discover_runner dependency ---
-    needs: [pre-commit, discover_tests, discover_calibration_tests, discover_runner, retrieve_pr_info, retrieve_head_sha]
-    if: needs.retrieve_pr_info.outputs.skip_gaudi_tests != 'true'
+    needs: [pre-commit, discover_tests, discover_calibration_tests, discover_runner, retrieve_head_sha]
+    if: inputs.skip_tests != 'true'
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     permissions:
@@ -313,7 +281,7 @@ jobs:
       - name: Determine Target Commit Based on PR Title
         id: determine_commit
         env:
-          PR_TITLE_ENV: ${{ needs.retrieve_pr_info.outputs.pr_title }}
+          PR_TITLE_ENV: ${{ inputs.pr_title }}
         run: |
           # Default to the stable commit from the previous step
           FINAL_TARGET="${VLLM_STABLE_COMMIT}"
