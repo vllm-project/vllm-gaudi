@@ -923,6 +923,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.use_contiguous_pa = get_config().use_contiguous_pa
         self.skip_warmup = get_config().skip_warmup
 
+        # Context-aware batch splitting: when a request's total sequence
+        # length (context_len + scheduled_tokens) exceeds this threshold,
+        # it is isolated into its own prefill sub-batch.  This allows the
+        # scheduler to advertise max_num_seqs=32 while the model runner
+        # transparently splits long-context requests into smaller sub-batches
+        # so they don't blow HPU memory.  0 = disabled.
+        self.long_context_split_threshold = get_config().long_context_split_threshold
+        self.long_context_max_batch_size = get_config().long_context_max_batch_size
+
         model_config = self.model_config
         cache_config = self.cache_config
         scheduler_config = self.scheduler_config
@@ -2173,6 +2182,40 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # This locks the batch once it contains history (likely for decode phase or chunked prefill).
         if lhs_has_history:
             return False
+
+        # --- Context-aware batch splitting ---
+        # When VLLM_LONG_CONTEXT_SPLIT_THRESHOLD > 0, requests whose total
+        # sequence length (context_len + scheduled_tokens) exceeds the
+        # threshold are considered "long".  Long requests are isolated into
+        # sub-batches of at most long_context_max_batch_size entries.
+        # Short requests merge freely up to the normal max_prefill_batch_size.
+        # This lets the scheduler advertise max_num_seqs=32 while the model
+        # runner transparently protects HPU memory for long sequences.
+        split_threshold = self.long_context_split_threshold
+        if split_threshold > 0:
+            max_long_bs = self.long_context_max_batch_size
+
+            def _is_long(batch_contents):
+                for ctx, tids in zip(batch_contents.context_lens,
+                                     batch_contents.token_ids):
+                    if ctx + len(tids) > split_threshold:
+                        return True
+                return False
+
+            rhs_is_long = _is_long(rhs)
+            lhs_is_long = _is_long(lhs)
+
+            if rhs_is_long or lhs_is_long:
+                # If either side contains a long request, enforce the
+                # reduced max batch size for this sub-batch.
+                combined_count = len(lhs.req_ids) + len(rhs.req_ids)
+                if combined_count > max_long_bs:
+                    return False
+
+            # Prevent mixing long and short requests in the same sub-batch
+            # to avoid padding waste (short seqs padded to long seq length).
+            if lhs_is_not_empty and (rhs_is_long != lhs_is_long):
+                return False
 
         combined_num_tokens = lhs.get_num_tokens() + rhs.get_num_tokens()
         bucketing_fn = self._get_prompt_bucketing_fn()

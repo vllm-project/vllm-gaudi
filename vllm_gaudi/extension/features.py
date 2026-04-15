@@ -40,6 +40,10 @@ def get_user_flags():
         Env('PT_HPU_WEIGHT_SHARING', str),
         Env('RUNTIME_SCALE_PATCHING', str),
 
+        # Context-aware batch splitting
+        Env('VLLM_LONG_CONTEXT_SPLIT_THRESHOLD', int),
+        Env('VLLM_LONG_CONTEXT_MAX_BATCH_SIZE', int),
+
         # Sliding window flags
         Env('PT_HPU_SDPA_QKV_SLICE_MODE_FWD', boolean),
         Env('PT_HPU_SDPA_BC_FACTOR', int),
@@ -102,6 +106,8 @@ def get_features():
         Value('split_moe_compilation', False, env_var='VLLM_SPLIT_MOE_COMPILATION', env_var_type=boolean),
         Value('row_parallel_chunks', 1, env_var='VLLM_ROW_PARALLEL_CHUNKS', env_var_type=int),
         Value('row_parallel_chunk_threshold', 8192, env_var='VLLM_ROW_PARALLEL_CHUNK_THRESHOLD', env_var_type=int),
+        Value('long_context_split_threshold', 0, env_var='VLLM_LONG_CONTEXT_SPLIT_THRESHOLD', env_var_type=int),
+        Value('long_context_max_batch_size', 1, env_var='VLLM_LONG_CONTEXT_MAX_BATCH_SIZE', env_var_type=int),
         Value('use_dispatch_fn',
               All(VersionRange(">=1.24.0.460"), MinPackageVersion("neural_compressor_pt", "3.7")),
               env_var_type=boolean),
