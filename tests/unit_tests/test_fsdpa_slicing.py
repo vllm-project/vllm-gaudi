@@ -496,7 +496,12 @@ def _make_sliced_fp8(chunk_size,
 
     # Create a lightweight parent-like namespace to hold scale tensors
     class _ScaleHolder:
-        pass
+        d_scale_q: torch.Tensor
+        d_scale_k: torch.Tensor
+        d_scale_v: torch.Tensor
+        d_scale_output: torch.Tensor
+        scale_amax: torch.Tensor
+        descale_amax: torch.Tensor
 
     parent = _ScaleHolder()
     parent.d_scale_q = d_scale_q
