@@ -198,13 +198,15 @@ class ModuleFusedSDPABase(torch.nn.Module):
                 f'The FusedSDPA slice sequence length threshold {slice_thld} is less than the default {slice_thld_default} which is not recommended.'
             )
 
+        assert slice_thld > 1024, 'The FusedSDPA slice sequence length threshold should be greater than 1024 to ensure the chunk sizes are valid for the attention kernel.'
+
         # default to half of the threshold and round up by 1024
         chunk_size_default = math.ceil(slice_thld // 2 / 1024) * 1024
         chunk_size = int(os.getenv("VLLM_HPU_FSDPA_SLICE_CHUNK_SIZE", str(chunk_size_default)))
-        assert chunk_size > block_size and chunk_size <= slice_thld, 'Invalid FusedSDPA slice chunk size, the chunk size should be between the block size and the slice sequence length threshold.'
         if chunk_size % 1024 != 0:
             chunk_size = math.ceil(chunk_size / 1024) * 1024
             logger().warning_once('Rounded up the chunk size for FusedSDPA slicing to the next multiple of 1024.')
+        assert chunk_size > block_size and chunk_size <= slice_thld, 'Invalid FusedSDPA slice chunk size, the chunk size should be between the block size and the slice sequence length threshold.'
 
         self.slice_thld = slice_thld
         self.chunk_size = chunk_size
