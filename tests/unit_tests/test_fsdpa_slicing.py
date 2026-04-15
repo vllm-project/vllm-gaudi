@@ -415,6 +415,147 @@ class TestSetupSlicing:
         assert result is True
         assert base._with_graph_breaks is True
 
+    @patch('vllm_gaudi.extension.utils.get_config')
+    @patch('vllm_gaudi.extension.bucketing.common.HPUBucketingManager.get_instance')
+    def test_disabled_when_bucketing_off(self, mock_get_instance, mock_get_config):
+        mock_get_config.return_value = _make_config(use_bucketing=False)
+        mock_get_instance.return_value = None
+
+        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
+        base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
+        result = base._setup_slicing()
+        assert result is False
+
+    @patch('habana_frameworks.torch.utils.internal.is_lazy', return_value=False)
+    @patch('vllm_gaudi.extension.utils.get_config')
+    @patch('vllm_gaudi.extension.bucketing.common.HPUBucketingManager.get_instance')
+    def test_threshold_lte_block_size_raises(self, mock_get_instance, mock_get_config, mock_is_lazy, monkeypatch):
+        """slice_thld must be greater than block_size."""
+        monkeypatch.setenv("VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD", "128")
+        mock_get_config.return_value = _make_config()
+        mock_get_instance.return_value = _MockBucketingManager(max_num_batched_tokens=8192, block_size=128)
+
+        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
+        base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
+        with pytest.raises(AssertionError):
+            base._setup_slicing()
+
+    @patch('habana_frameworks.torch.utils.internal.is_lazy', return_value=False)
+    @patch('vllm_gaudi.extension.utils.get_config')
+    @patch('vllm_gaudi.extension.bucketing.common.HPUBucketingManager.get_instance')
+    def test_threshold_lte_1024_raises(self, mock_get_instance, mock_get_config, mock_is_lazy, monkeypatch):
+        """slice_thld must be greater than 1024."""
+        monkeypatch.setenv("VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD", "1024")
+        mock_get_config.return_value = _make_config()
+        mock_get_instance.return_value = _MockBucketingManager(max_num_batched_tokens=8192, block_size=128)
+
+        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
+        base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
+        with pytest.raises(AssertionError):
+            base._setup_slicing()
+
+
+# ---------------------------------------------------------------------------
+# Manual module construction tests (simulates production _setup_slicing result)
+# ---------------------------------------------------------------------------
+
+
+def _make_sliced_bf16(chunk_size, num_padded_query_chunks=0, num_padded_ctx_chunks=0, with_graph_breaks=False):
+    """Build a SlicedFusedSDPA bypassing _setup_slicing (for testing / HPU accuracy)."""
+    from vllm_gaudi.extension.utils import SlicedFusedSDPA
+    with patch('vllm_gaudi.extension.utils.SlicedFusedSDPABase._setup_slicing', return_value=True):
+        module = SlicedFusedSDPA()
+    module.enable_slicing = True
+    module.chunk_size = chunk_size
+    module.slice_thld = 0
+    module.num_padded_query_chunks = num_padded_query_chunks
+    module.num_padded_ctx_chunks = num_padded_ctx_chunks
+    module._with_graph_breaks = with_graph_breaks
+    if with_graph_breaks:
+        import habana_frameworks.torch as ht
+        if ht.utils.internal.is_lazy():
+            module._break_graph = ht.core.mark_step
+        else:
+            module._break_graph = torch._dynamo.graph_break
+    return module
+
+
+def _make_sliced_fp8(chunk_size,
+                     num_padded_query_chunks=0,
+                     num_padded_ctx_chunks=0,
+                     *,
+                     d_scale_q,
+                     d_scale_k,
+                     d_scale_v,
+                     d_scale_output,
+                     scale_amax,
+                     descale_amax,
+                     with_graph_breaks=False):
+    """Build a SlicedFP8FusedSDPA bypassing _setup_slicing (for testing / HPU accuracy)."""
+    from vllm_gaudi.extension.utils import SlicedFP8FusedSDPA
+
+    # Create a lightweight parent-like namespace to hold scale tensors
+    class _ScaleHolder:
+        pass
+
+    parent = _ScaleHolder()
+    parent.d_scale_q = d_scale_q
+    parent.d_scale_k = d_scale_k
+    parent.d_scale_v = d_scale_v
+    parent.d_scale_output = d_scale_output
+    parent.scale_amax = scale_amax
+    parent.descale_amax = descale_amax
+
+    with patch('vllm_gaudi.extension.utils.SlicedFusedSDPABase._setup_slicing', return_value=True):
+        module = SlicedFP8FusedSDPA(parent)
+    module.enable_slicing = True
+    module.chunk_size = chunk_size
+    module.slice_thld = 0
+    module.num_padded_query_chunks = num_padded_query_chunks
+    module.num_padded_ctx_chunks = num_padded_ctx_chunks
+    module._with_graph_breaks = with_graph_breaks
+    if with_graph_breaks:
+        import habana_frameworks.torch as ht
+        if ht.utils.internal.is_lazy():
+            module._break_graph = ht.core.mark_step
+        else:
+            module._break_graph = torch._dynamo.graph_break
+    return module
+
+
+class TestManualModuleConstruction:
+    """Tests for building sliced modules with manual attribute setup (bypassing _setup_slicing)."""
+
+    def test_bf16_manual_init_sets_attributes(self):
+        module = _make_sliced_bf16(chunk_size=4096,
+                                   num_padded_query_chunks=1,
+                                   num_padded_ctx_chunks=2,
+                                   with_graph_breaks=False)
+        assert module.enable_slicing is True
+        assert module.chunk_size == 4096
+        assert module.num_padded_query_chunks == 1
+        assert module.num_padded_ctx_chunks == 2
+        assert module._with_graph_breaks is False
+
+    def test_fp8_manual_init_sets_scales(self):
+        scales = {
+            'd_scale_q': torch.tensor(1.0),
+            'd_scale_k': torch.tensor(1.0),
+            'd_scale_v': torch.tensor(1.0),
+            'd_scale_output': torch.tensor(1.0),
+            'scale_amax': torch.tensor(1.0),
+            'descale_amax': torch.tensor(1.0),
+        }
+        module = _make_sliced_fp8(chunk_size=4096, num_padded_query_chunks=1, num_padded_ctx_chunks=2, **scales)
+        assert module.chunk_size == 4096
+        assert module._parent.d_scale_q is scales['d_scale_q']
+
+    def test_bf16_defaults_for_optional_params(self):
+        module = _make_sliced_bf16(chunk_size=2048)
+        assert module.num_padded_query_chunks == 0
+        assert module.num_padded_ctx_chunks == 0
+        assert module._with_graph_breaks is False
+
 
 # ---------------------------------------------------------------------------
 # ModuleFusedSDPA.forward dispatch tests
@@ -695,6 +836,60 @@ class TestModuleFP8FusedSDPAForwardDispatch:
         assert call_kwargs['is_causal'] is False
         assert call_kwargs['valid_seq_len'] is None
 
+    def test_default_path_when_q_len_equals_kv_len(self):
+        import torch
+        module = self._patch_quant(self._make_module())
+        q = torch.randn(1, 4, 4096, 64)
+        k = torch.randn(1, 4, 4096, 64)  # q_len == kv_len
+        v = torch.randn(1, 4, 4096, 64)
+        mask = torch.zeros(1, 1, 4096, 4096)
+
+        module.forward(q, k, v, mask, 0.0, True, None, 'fast', True, None, padding_side='right')
+        module._sliced_module.assert_not_called()
+
+    def test_default_path_when_not_causal(self):
+        import torch
+        module = self._patch_quant(self._make_module())
+        q = torch.randn(1, 4, 2048, 64)
+        k = torch.randn(1, 4, 8192, 64)
+        v = torch.randn(1, 4, 8192, 64)
+        mask = torch.zeros(1, 1, 2048, 8192)
+
+        module.forward(q, k, v, mask, 0.0, False, None, 'fast', True, None, padding_side='right')
+        module._sliced_module.assert_not_called()
+
+    def test_default_path_when_no_attn_mask(self):
+        import torch
+        module = self._patch_quant(self._make_module())
+        q = torch.randn(1, 4, 2048, 64)
+        k = torch.randn(1, 4, 8192, 64)
+        v = torch.randn(1, 4, 8192, 64)
+
+        module.forward(q, k, v, None, 0.0, True, None, 'fast', True, None, padding_side='right')
+        module._sliced_module.assert_not_called()
+
+    def test_default_path_when_padding_side_left(self):
+        import torch
+        module = self._patch_quant(self._make_module())
+        q = torch.randn(1, 4, 2048, 64)
+        k = torch.randn(1, 4, 8192, 64)
+        v = torch.randn(1, 4, 8192, 64)
+        mask = torch.zeros(1, 1, 2048, 8192)
+
+        module.forward(q, k, v, mask, 0.0, True, None, 'fast', True, None, padding_side='left')
+        module._sliced_module.assert_not_called()
+
+    def test_default_path_when_kv_len_below_threshold(self):
+        import torch
+        module = self._patch_quant(self._make_module(slice_thld=8192))
+        q = torch.randn(1, 4, 2048, 64)
+        k = torch.randn(1, 4, 4096, 64)  # kv_len < threshold
+        v = torch.randn(1, 4, 4096, 64)
+        mask = torch.zeros(1, 1, 2048, 4096)
+
+        module.forward(q, k, v, mask, 0.0, True, None, 'fast', True, None, padding_side='right')
+        module._sliced_module.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # User flag registration tests
@@ -921,9 +1116,8 @@ class TestFsdpaSlicingAccuracyBF16:
     @staticmethod
     def _run_sliced(q, k, v, attn_mask, slice_thld, chunk_size, q_pad, ctx_pad, graph_breaks=False, mode='eager'):
         """Sliced path via SlicedFusedSDPA module."""
-        from vllm_gaudi.extension.utils import SlicedFusedSDPA
-        module = SlicedFusedSDPA(chunk_size, math.ceil(q_pad / chunk_size), math.ceil(ctx_pad / chunk_size),
-                                 graph_breaks)
+        module = _make_sliced_bf16(chunk_size, math.ceil(q_pad / chunk_size), math.ceil(ctx_pad / chunk_size),
+                                   graph_breaks)
         module = module.to('hpu')
         if mode == 'compile':
             torch._dynamo.reset()
@@ -1025,23 +1219,22 @@ class TestFsdpaSlicingAccuracyFP8:
         Uses dynamic_quant for FP8 quantization following FP8BucketSDPA.__init__
         in profile_fsdpa_apc.py.
         """
-        from vllm_gaudi.extension.utils import SlicedFP8FusedSDPA
         from vllm_gaudi.extension.ops import dynamic_quant
 
         q_fp8, scale_q = dynamic_quant(q, single_scale=True)
         k_fp8, scale_k = dynamic_quant(k, single_scale=True)
         v_fp8, scale_v = dynamic_quant(v, single_scale=True)
 
-        module = SlicedFP8FusedSDPA(chunk_size,
-                                    math.ceil(q_pad / chunk_size),
-                                    math.ceil(ctx_pad / chunk_size),
-                                    d_scale_q=scale_q.to(torch.float32),
-                                    d_scale_k=scale_k.to(torch.float32),
-                                    d_scale_v=scale_v.to(torch.float32),
-                                    d_scale_output=torch.tensor([1.0], dtype=torch.float32, device='hpu'),
-                                    scale_amax=torch.tensor([1.0], dtype=torch.float32, device='hpu'),
-                                    descale_amax=torch.tensor([1.0], dtype=torch.float32, device='hpu'),
-                                    with_graph_breaks=graph_breaks)
+        module = _make_sliced_fp8(chunk_size,
+                                  math.ceil(q_pad / chunk_size),
+                                  math.ceil(ctx_pad / chunk_size),
+                                  d_scale_q=scale_q.to(torch.float32),
+                                  d_scale_k=scale_k.to(torch.float32),
+                                  d_scale_v=scale_v.to(torch.float32),
+                                  d_scale_output=torch.tensor([1.0], dtype=torch.float32, device='hpu'),
+                                  scale_amax=torch.tensor([1.0], dtype=torch.float32, device='hpu'),
+                                  descale_amax=torch.tensor([1.0], dtype=torch.float32, device='hpu'),
+                                  with_graph_breaks=graph_breaks)
         module = module.to('hpu')
         if mode == 'compile':
             torch._dynamo.reset()

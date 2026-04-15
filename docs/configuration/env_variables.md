@@ -125,7 +125,7 @@ FusedSDPA can be split into smaller chunks to improve performance while using th
 
 | Parameter name                           | Description                                                                                  | Default value                               |
 | ---------------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------- |
-| `VLLM_HPU_FSDPA_SLICE_ENABLED`           | Enable the slicing.                                                                          | `True` for padding-aware bucketing strategy |
+| `VLLM_HPU_FSDPA_SLICE_ENABLED`           | Enable the slicing.                                                                          | `True` when using padding-aware bucketing strategy with bucketing enabled, merged prefill disabled, and FusedSDPA kernel available |
 | `VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD`      | KV length threshold above which slicing is applied.                                          | `min(max_num_batched_tokens, 8192)`         |
 | `VLLM_HPU_FSDPA_SLICE_CHUNK_SIZE`        | Chunk size for `q_len` and `kv_len` in each chunk. Rounded up to the next multiple of 1024.  | `VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD // 2`    |
 | `VLLM_HPU_FSDPA_SLICE_WITH_GRAPH_BREAKS` | Places each chunk in a separate graph to reduce compilation time.                            | `true` for lazy mode and `false` otherwise  |
@@ -133,9 +133,9 @@ FusedSDPA can be split into smaller chunks to improve performance while using th
 !!! note
     These parameters are effective only with the padding-aware bucketing strategy set by `VLLM_BUCKETING_STRATEGY="pad"`.
 
-The slicing only activated if all the following additional conditions are satisfied:
+The slicing is only activated if all the following additional conditions are satisfied:
 - The batch size should be 1.
 - The query length and KV length should be different, i.e. the normal causal prefill will route to the default dispatch for better performance.
-- It's causal attention model.
+- It's a causal attention model.
 - The padding side is 'right'.
-- no sliding window nor sinks.
+- No sliding window nor sinks (BF16 only; FP8 does not support sinks).

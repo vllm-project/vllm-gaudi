@@ -248,30 +248,37 @@ class SlicedFusedSDPABase(torch.nn.Module):
         if self._with_graph_breaks:
             self._break_graph()
 
+    @staticmethod
+    def _merge_chunk(last_out, last_m, last_linv, chunk_out, chunk_m, chunk_linv):
+        """Online softmax rescaling merge of two attention chunks."""
+        if last_out is None or last_m is None or last_linv is None:
+            return chunk_out, chunk_m, chunk_linv
+        new_m = torch.maximum(last_m, chunk_m)
+        last_linv_rescaled = (1.0 / last_linv) * torch.exp(last_m - new_m)
+        chunk_linv_rescaled = (1.0 / chunk_linv) * torch.exp(chunk_m - new_m)
+        new_linv = 1.0 / (last_linv_rescaled + chunk_linv_rescaled)
+        new_out = (last_linv_rescaled * new_linv) * last_out + (chunk_linv_rescaled * new_linv) * chunk_out
+        return new_out, new_m, new_linv
 
-class SlicedFusedSDPA(SlicedFusedSDPABase):
-    """Standalone module for BF16 sliced FusedSDPA.
+    def _chunked_attention(self, q, k, v, attn_mask, dropout_p, scale, softmax_mode, chunk_kernel_fn):
+        """Run chunked attention with online softmax rescaling.
 
-    Extracting the sliced attention path into its own ``nn.Module`` allows it
-    to be wrapped with ``torch.compile``, ``ht.hpu.wrap_in_hpu_graph``, or
-    any other module-level wrapper independently of the dispatch logic in
-    :class:`ModuleFusedSDPA`.
-    """
+        Args:
+            q, k, v: Query, key, value tensors (after GQA reshape if needed).
+            attn_mask: Attention mask tensor.
+            dropout_p: Dropout probability.
+            scale: Attention scale factor.
+            softmax_mode: Softmax mode string.
+            chunk_kernel_fn: Callable
+                ``(q, k, v, mask, dropout_p, scale, is_causal, softmax_mode)``
+                returning ``(out, m, linv)`` all as float32.
 
-    def forward(self, query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode):
-        assert is_causal and attn_mask is not None
-
-        from habana_frameworks.torch.hpex.kernels.FusedSDPA import is_gqa, gqa_input_reshape_fwd, gqa_output_reshape
-        gqa = is_gqa(query, key)
-        if gqa:
-            q, k, v, attn_mask = gqa_input_reshape_fwd(query, key, value, attn_mask)
-        else:
-            q, k, v, attn_mask = (query, key, value, attn_mask)
+        Returns:
+            Concatenated output tensor in float32.
+        """
         q_len = q.shape[-2]
         kv_len = k.shape[-2]
         prefix_len = kv_len - q_len
-        if scale is None:
-            scale = 1.0 / (query.shape[-1]**0.5)
 
         chunk_outputs = []
         num_q_chunks = math.ceil(q_len / self.chunk_size)
@@ -305,34 +312,11 @@ class SlicedFusedSDPA(SlicedFusedSDPABase):
 
                 self.maybe_break_graph()
 
-                chunk_res = torch.ops.hpu.sdpa_recomp_fwd(
-                    q_chunk,
-                    k_chunk,
-                    v_chunk,
-                    mask_chunk,
-                    dropout_p,
-                    scale,
-                    is_causal_chunk,
-                    True,  # requires_backward
-                    softmax_mode,
-                    None,  # valid_seq_len
-                    'right',  # padding_side
-                )
-                chunk_out, chunk_m, chunk_linv = ((gqa_output_reshape(x) if gqa else x).to(torch.float32)
-                                                  for x in (chunk_res[:3]))
+                chunk_out, chunk_m, chunk_linv = chunk_kernel_fn(q_chunk, k_chunk, v_chunk, mask_chunk, dropout_p,
+                                                                 scale, is_causal_chunk, softmax_mode)
 
-                if last_out is None or last_m is None or last_linv is None:
-                    last_out = chunk_out
-                    last_m = chunk_m
-                    last_linv = chunk_linv
-                else:
-                    new_m = torch.maximum(last_m, chunk_m)
-                    last_linv_rescaled = (1.0 / last_linv) * torch.exp(last_m - new_m)
-                    chunk_linv_rescaled = (1.0 / chunk_linv) * torch.exp(chunk_m - new_m)
-                    last_linv = 1.0 / (last_linv_rescaled + chunk_linv_rescaled)
-                    last_out = (last_linv_rescaled * last_linv) * last_out + \
-                              (chunk_linv_rescaled * last_linv) * chunk_out
-                    last_m = new_m
+                last_out, last_m, last_linv = self._merge_chunk(last_out, last_m, last_linv, chunk_out, chunk_m,
+                                                                chunk_linv)
 
                 self.maybe_break_graph()
 
@@ -349,34 +333,45 @@ class SlicedFusedSDPA(SlicedFusedSDPABase):
 
                 self.maybe_break_graph()
 
-                chunk_res = torch.ops.hpu.sdpa_recomp_fwd(
-                    q_chunk,
-                    k_chunk,
-                    v_chunk,
-                    mask_chunk,
-                    dropout_p,
-                    scale,
-                    False,  # is_causal
-                    True,  # requires_backward
-                    softmax_mode,
-                    None,  # valid_seq_len
-                    'right',  # padding_side
-                )
-                chunk_out, chunk_m, chunk_linv = ((gqa_output_reshape(x) if gqa else x).to(torch.float32)
-                                                  for x in chunk_res[:3])
+                chunk_out, chunk_m, chunk_linv = chunk_kernel_fn(q_chunk, k_chunk, v_chunk, mask_chunk, dropout_p,
+                                                                 scale, False, softmax_mode)
 
                 assert not (last_out is None or last_m is None or last_linv is None)
-                new_m = torch.maximum(last_m, chunk_m)
-                last_linv_rescaled = (1.0 / last_linv) * torch.exp(last_m - new_m)
-                chunk_linv_rescaled = (1.0 / chunk_linv) * torch.exp(chunk_m - new_m)
-                last_linv = 1.0 / (last_linv_rescaled + chunk_linv_rescaled)
-                last_out = (last_linv_rescaled * last_linv) * last_out + (chunk_linv_rescaled * last_linv) * chunk_out
-                last_m = new_m
+                last_out, last_m, last_linv = self._merge_chunk(last_out, last_m, last_linv, chunk_out, chunk_m,
+                                                                chunk_linv)
 
                 self.maybe_break_graph()
             chunk_outputs.append(last_out)
         chunk_outputs = list(reversed(chunk_outputs))
-        output = torch.cat(chunk_outputs, dim=-2)
+        return torch.cat(chunk_outputs, dim=-2)
+
+
+class SlicedFusedSDPA(SlicedFusedSDPABase):
+    """Standalone module for BF16 sliced FusedSDPA.
+
+    Extracting the sliced attention path into its own ``nn.Module`` allows it
+    to be wrapped with ``torch.compile``, ``ht.hpu.wrap_in_hpu_graph``, or
+    any other module-level wrapper independently of the dispatch logic in
+    :class:`ModuleFusedSDPA`.
+    """
+
+    def forward(self, query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode):
+        assert is_causal and attn_mask is not None
+
+        from habana_frameworks.torch.hpex.kernels.FusedSDPA import is_gqa, gqa_input_reshape_fwd, gqa_output_reshape
+        gqa = is_gqa(query, key)
+        if gqa:
+            q, k, v, attn_mask = gqa_input_reshape_fwd(query, key, value, attn_mask)
+        else:
+            q, k, v, attn_mask = (query, key, value, attn_mask)
+        if scale is None:
+            scale = 1.0 / (query.shape[-1]**0.5)
+
+        def chunk_kernel(q_c, k_c, v_c, mask_c, dp, sc, is_c, sm):
+            res = torch.ops.hpu.sdpa_recomp_fwd(q_c, k_c, v_c, mask_c, dp, sc, is_c, True, sm, None, 'right')
+            return tuple((gqa_output_reshape(x) if gqa else x).to(torch.float32) for x in res[:3])
+
+        output = self._chunked_attention(q, k, v, attn_mask, dropout_p, scale, softmax_mode, chunk_kernel)
         return output.to(q.dtype)
 
 
@@ -447,10 +442,10 @@ class SlicedFP8FusedSDPA(SlicedFusedSDPABase):
         # to avoid circular module graph while sharing scale tensors.
         object.__setattr__(self, '_parent', parent)
 
-    def dequant_output(self, output):
+    def _dequant_output(self, output):
         return torch.ops.hpu.cast_from_fp8(output, self._parent.d_scale_output, torch.bfloat16)
 
-    def fp8_fsdpa_fwd(self, q, k, v, attn_mask, dropout_p, scale, is_causal, softmax_mode):
+    def _fp8_fsdpa_fwd(self, q, k, v, attn_mask, dropout_p, scale, is_causal, softmax_mode):
         results = torch.ops.hpu.fp8_sdpa_recomp_fwd(
             q,
             k,
@@ -470,9 +465,9 @@ class SlicedFP8FusedSDPA(SlicedFusedSDPABase):
             False,  # is_amax_s
             False,  # is_amax_o
             None,  # valid_seq_len
-            "right",
-            (-1, -1),
-            None,
+            "right",  # padding_side
+            (-1, -1),  # window_size
+            None,  # sinks
         )
         return results
 
@@ -485,98 +480,19 @@ class SlicedFP8FusedSDPA(SlicedFusedSDPABase):
             q, k, v, attn_mask = gqa_input_reshape_fwd(query, key, value, attn_mask)
         else:
             q, k, v, attn_mask = (query, key, value, attn_mask)
-        q_len = query.shape[-2]
-        kv_len = key.shape[-2]
-        prefix_len = kv_len - q_len
         softmax_mode = softmax_mode if softmax_mode == "fp32" else "fast"
         if scale is None:
             scale = 1.0 / (query.shape[-1]**0.5)
 
-        chunk_outputs = []
-        num_q_chunks = math.ceil(q_len / self.chunk_size)
-        num_prefix_chunks = math.ceil(prefix_len / self.chunk_size)
-        for q_chunk_idx in range(num_q_chunks):
-            q_start = q_len - (q_chunk_idx + 1) * self.chunk_size
-            q_start = max(q_start, 0)
-            q_end = q_len - q_chunk_idx * self.chunk_size
-            q_chunk_size = q_end - q_start
-            q_chunk = q[..., q_start:q_end, :].contiguous()
+        def chunk_kernel(q_c, k_c, v_c, mask_c, dp, sc, is_c, sm):
+            res = self._fp8_fsdpa_fwd(q_c, k_c, v_c, mask_c, dp, sc, is_c, sm)
+            out, m, linv = (gqa_output_reshape(x) if gqa else x for x in res[:3])
+            m = m.to(torch.float32)
+            linv = linv.to(torch.float32) * (128.0 if sm == "fast" else 1.0)
+            out = self._dequant_output(out).to(torch.float32)
+            return out, m, linv
 
-            last_out = None
-            last_m = None
-            last_linv = None
-
-            # the causal part
-            for kv_chunk_idx in range(0, num_q_chunks - q_chunk_idx):
-                kv_start = prefix_len + q_end - (kv_chunk_idx + 1) * self.chunk_size
-                kv_start = max(kv_start, prefix_len)
-                kv_end = prefix_len + q_end - kv_chunk_idx * self.chunk_size
-                kv_chunk_size = kv_end - kv_start
-                k_chunk = k[..., kv_start:kv_end, :].contiguous()
-                v_chunk = v[..., kv_start:kv_end, :].contiguous()
-
-                is_causal_chunk = kv_chunk_idx == 0 and q_chunk_idx >= self.num_padded_query_chunks
-                is_causal_chunk = is_causal_chunk and q_chunk_size % 1024 == 0 and kv_chunk_size % 1024 == 0
-                mask_chunk = (attn_mask[..., q_start:q_end, kv_start:kv_end].contiguous()
-                              if kv_chunk_idx < self.num_padded_query_chunks and not is_causal_chunk else None)
-
-                self.maybe_break_graph()
-
-                chunk_res = self.fp8_fsdpa_fwd(q_chunk, k_chunk, v_chunk, mask_chunk, dropout_p, scale, is_causal_chunk,
-                                               softmax_mode)
-
-                chunk_out, chunk_m, chunk_linv = (gqa_output_reshape(x) if gqa else x for x in chunk_res[:3])
-                chunk_m = chunk_m.to(torch.float32)
-                chunk_linv = chunk_linv.to(torch.float32) * (128.0 if softmax_mode == "fast" else 1.0)
-                chunk_out = self.dequant_output(chunk_out).to(torch.float32)
-
-                if last_out is None or last_m is None or last_linv is None:
-                    last_out = chunk_out
-                    last_m = chunk_m
-                    last_linv = chunk_linv
-                else:
-                    new_m = torch.maximum(last_m, chunk_m)
-                    last_linv_rescaled = (1.0 / last_linv) * torch.exp(last_m - new_m)
-                    chunk_linv_rescaled = (1.0 / chunk_linv) * torch.exp(chunk_m - new_m)
-                    last_linv = 1.0 / (last_linv_rescaled + chunk_linv_rescaled)
-                    last_out = (last_linv_rescaled * last_linv) * last_out + \
-                              (chunk_linv_rescaled * last_linv) * chunk_out
-                    last_m = new_m
-
-                self.maybe_break_graph()
-
-            # the context part
-            for kv_chunk_idx in range(num_prefix_chunks):
-                kv_start = prefix_len - (kv_chunk_idx + 1) * self.chunk_size
-                kv_start = max(kv_start, 0)
-                kv_end = prefix_len - kv_chunk_idx * self.chunk_size
-                k_chunk = k[..., kv_start:kv_end, :].contiguous()
-                v_chunk = v[..., kv_start:kv_end, :].contiguous()
-                mask_chunk = (attn_mask[..., q_start:q_end, kv_start:kv_end].contiguous()
-                              if kv_chunk_idx < self.num_padded_ctx_chunks else None)
-
-                self.maybe_break_graph()
-
-                chunk_res = self.fp8_fsdpa_fwd(q_chunk, k_chunk, v_chunk, mask_chunk, dropout_p, scale, False,
-                                               softmax_mode)
-                chunk_out, chunk_m, chunk_linv = (gqa_output_reshape(x) if gqa else x for x in chunk_res[:3])
-                chunk_m = chunk_m.to(torch.float32)
-                chunk_linv = chunk_linv.to(torch.float32) * (128.0 if softmax_mode == "fast" else 1.0)
-                chunk_out = self.dequant_output(chunk_out).to(torch.float32)
-
-                assert not (last_out is None or last_m is None or last_linv is None)
-                new_m = torch.maximum(last_m, chunk_m)
-                last_linv_rescaled = (1.0 / last_linv) * torch.exp(last_m - new_m)
-                chunk_linv_rescaled = (1.0 / chunk_linv) * torch.exp(chunk_m - new_m)
-                last_linv = 1.0 / (last_linv_rescaled + chunk_linv_rescaled)
-                last_out = (last_linv_rescaled * last_linv) * last_out + (chunk_linv_rescaled * last_linv) * chunk_out
-                last_m = new_m
-
-                self.maybe_break_graph()
-
-            chunk_outputs.append(last_out)
-        chunk_outputs = list(reversed(chunk_outputs))
-        return torch.cat(chunk_outputs, dim=-2)
+        return self._chunked_attention(q, k, v, attn_mask, dropout_p, scale, softmax_mode, chunk_kernel)
 
 
 class ModuleFP8FusedSDPA(torch.nn.Module):
