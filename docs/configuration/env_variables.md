@@ -132,3 +132,10 @@ FusedSDPA can be split into smaller chunks to improve performance while using th
 
 !!! note
     These parameters are effective only with the padding-aware bucketing strategy set by `VLLM_BUCKETING_STRATEGY="pad"`.
+
+The slicing only activated if all the following additional conditions are satisfied:
+- The batch size should be 1.
+- The query length and KV length should be different, i.e. the normal causal prefill will route to the default dispatch for better performance.
+- It's causal attention model.
+- The padding side is 'right'.
+- no sliding window nor sinks.
