@@ -38,7 +38,7 @@ class HPUAttentionBackendV1(HPUAttentionBackend):
         # 128 is the standard HPU kernel block size; 528 is required for
         # Granite 4.0-H (granitemoehybrid) which uses 16-token FA alignment
         # (16 * ceil(mamba_page_size / (16 * attn_1token_bytes)) = 528).
-        return [128, 528]
+        return [MultipleOf(16)]
 
     @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:
