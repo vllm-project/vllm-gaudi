@@ -2066,9 +2066,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # round up via calc_fallback_value so the shape changes
             # infrequently instead of every single step.
             if block_bucket_size < len(block_list):
-                block_bucket_size = calc_fallback_value(
-                    len(block_list),
-                    self.bucketing_manager.fallback_blocks_base_step)
+                block_bucket_size = calc_fallback_value(len(block_list),
+                                                        self.bucketing_manager.fallback_blocks_base_step)
 
             def padding_fn(tensor, pad_value):
                 return pad_list(tensor, block_bucket_size, itertools.repeat(pad_value))

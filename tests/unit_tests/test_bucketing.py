@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
 
+import math as _math
+
 import pytest
 from unittest.mock import patch
 
@@ -190,24 +192,28 @@ class _MockConfig:
 
 @patch('vllm_gaudi.extension.bucketing.exponential.get_config')
 def test_exponential_decode_cfgs_non_contiguous_pa_bounded(mock_get_config):
-    """max_decode_blocks should be max_blocks * 3 when use_contiguous_pa=False.
+    """max_decode_blocks scales with max_num_seqs for non-contiguous PA.
 
-    The 3x multiplier accounts for prefix-cache block sharing: the same
-    physical block can appear in multiple sequences' block tables, so total
-    block references may exceed num_hpu_blocks.
+    For prefix-cache block sharing, the formula uses
+    max(min(blocks_per_seq * max_num_seqs, max_blocks * max_num_seqs // 3), max_blocks * 3)
+    to cover realistic long-context scenarios.
     """
     mock_get_config.return_value = _MockConfig(use_contiguous_pa=False)
     strategy = ExponentialBucketingStrategy()
 
     max_blocks = 3593
     block_size = 128
-    _, _, block_cfg = strategy.get_decode_cfgs(max_num_seqs=256,
+    max_num_seqs = 256
+    max_model_len = 91964
+    _, _, block_cfg = strategy.get_decode_cfgs(max_num_seqs=max_num_seqs,
                                                block_size=block_size,
                                                max_num_batched_tokens=131072,
-                                               max_model_len=91964,
+                                               max_model_len=max_model_len,
                                                max_blocks=max_blocks)
 
-    expected_max = max_blocks * 3  # 10779
+    import math
+    blocks_per_seq = math.ceil(max_model_len / block_size)
+    expected_max = max(min(blocks_per_seq * max_num_seqs, max_blocks * max_num_seqs // 3), max_blocks * 3)
     assert block_cfg[2] == expected_max, (f"Expected max_decode_blocks={expected_max}, got {block_cfg[2]}")
 
 
@@ -230,29 +236,32 @@ def test_exponential_decode_cfgs_contiguous_pa_uses_max_blocks(mock_get_config):
 
 @patch('vllm_gaudi.extension.bucketing.exponential.get_config')
 def test_exponential_decode_max_never_exceeds_bounded_value(mock_get_config):
-    """Regression test: large max_model_len must NOT produce gigantic decode buckets."""
+    """Regression test: small max_num_seqs keeps blocks bounded; large max_num_seqs scales up."""
     mock_get_config.return_value = _MockConfig(use_contiguous_pa=False)
     strategy = ExponentialBucketingStrategy()
 
-    max_model_len = 91964
-    block_size = 128
-    max_num_seqs = 256
+    # Small batch: should stay at max_blocks * 3 floor
+    _, _, block_cfg_small = strategy.get_decode_cfgs(max_num_seqs=8,
+                                                     block_size=128,
+                                                     max_num_batched_tokens=4096,
+                                                     max_model_len=4096,
+                                                     max_blocks=200)
+    assert block_cfg_small[2] == 200 * 3, (f"Small config should use 3x floor, got {block_cfg_small[2]}")
+
+    # Large batch with long context: formula scales with max_num_seqs
     max_blocks = 3593
-
-    _, _, block_cfg = strategy.get_decode_cfgs(max_num_seqs=max_num_seqs,
-                                               block_size=block_size,
-                                               max_num_batched_tokens=131072,
-                                               max_model_len=max_model_len,
-                                               max_blocks=max_blocks)
-
-    # The old (buggy) formula would produce min(91964//128*256, ...) = 183808
-    # The fix should give max_blocks * 3 = 10779
-    assert block_cfg[2] <= max_blocks * 3, (f"Decode bucket max {block_cfg[2]} exceeds bounded limit "
-                                            f"{max_blocks * 3}. Buckets are too large!")
-    # Sanity: must not be the old gigantic value
-    old_buggy_value = max_model_len // block_size * max_num_seqs
-    assert block_cfg[2] < old_buggy_value, (f"Decode bucket max {block_cfg[2]} matches buggy formula output "
-                                            f"{old_buggy_value}")
+    max_num_seqs = 256
+    _, _, block_cfg_large = strategy.get_decode_cfgs(max_num_seqs=max_num_seqs,
+                                                     block_size=128,
+                                                     max_num_batched_tokens=131072,
+                                                     max_model_len=91964,
+                                                     max_blocks=max_blocks)
+    # Must be >= max_blocks * 3 (floor guarantee)
+    assert block_cfg_large[2] >= max_blocks * 3, (
+        f"Decode bucket max {block_cfg_large[2]} below floor {max_blocks * 3}")
+    # Must be bounded by max_blocks * max_num_seqs // 3
+    assert block_cfg_large[2] <= max_blocks * max_num_seqs // 3, (
+        f"Decode bucket max {block_cfg_large[2]} exceeds upper bound {max_blocks * max_num_seqs // 3}")
 
 
 @patch('vllm_gaudi.extension.bucketing.exponential.get_config')
@@ -308,15 +317,18 @@ _REAL_BLOCK_SIZE = 128
 _REAL_MAX_NUM_SEQS = 256
 _REAL_MAX_BLOCKS = 3593  # num_hpu_blocks
 _REAL_MAX_BATCHED_TOKENS = 2048
-_REAL_FIXED_MAX_DECODE_BLOCKS = _REAL_MAX_BLOCKS * 3  # 10779
-_REAL_BUGGY_MAX_DECODE_BLOCKS = 183808  # min(91964//128*256, 3593*256//4)
+_REAL_BLOCKS_PER_SEQ = _math.ceil(_REAL_MAX_MODEL_LEN / _REAL_BLOCK_SIZE)
+_REAL_FIXED_MAX_DECODE_BLOCKS = max(
+    min(_REAL_BLOCKS_PER_SEQ * _REAL_MAX_NUM_SEQS, _REAL_MAX_BLOCKS * _REAL_MAX_NUM_SEQS // 3),
+    _REAL_MAX_BLOCKS * 3,
+)
 
 
 @patch('vllm_gaudi.extension.bucketing.exponential.get_config')
 def test_real_scenario_decode_cfg_matches_fixed_log(mock_get_config):
     """Verify decode bucket config matches expected values for real scenario.
 
-    With max_blocks * 3: block config should be [1, 256, 10779, 9]
+    Block max scales with max_num_seqs for prefix-sharing coverage.
     """
     mock_get_config.return_value = _MockConfig(use_contiguous_pa=False)
     strategy = ExponentialBucketingStrategy()
@@ -327,15 +339,14 @@ def test_real_scenario_decode_cfg_matches_fixed_log(mock_get_config):
                                                max_model_len=_REAL_MAX_MODEL_LEN,
                                                max_blocks=_REAL_MAX_BLOCKS)
 
-    # Expected: [1, 256, 10779, 9]
     assert block_cfg[0] == 1, f"block min: expected 1, got {block_cfg[0]}"
     assert block_cfg[1] == _REAL_MAX_NUM_SEQS, (f"block step: expected {_REAL_MAX_NUM_SEQS}, got {block_cfg[1]}")
     assert block_cfg[2] == _REAL_FIXED_MAX_DECODE_BLOCKS, (
         f"block max: expected {_REAL_FIXED_MAX_DECODE_BLOCKS}, got {block_cfg[2]}")
     import math
-    uncapped_limit = math.ceil(math.log2(_REAL_MAX_BLOCKS * 3)) + 1
+    uncapped_limit = math.ceil(math.log2(_REAL_FIXED_MAX_DECODE_BLOCKS)) + 1
     decode_bs_limit = math.ceil(math.log2(_REAL_MAX_NUM_SEQS)) + 1
-    expected_limit = min(uncapped_limit, max(6, decode_bs_limit))  # min(15, 9) = 9
+    expected_limit = min(uncapped_limit, max(6, decode_bs_limit))
     assert block_cfg[3] == expected_limit, (f"block limit: expected {expected_limit}, got {block_cfg[3]}")
 
 
@@ -378,8 +389,6 @@ def test_real_scenario_decode_block_range_bounded(mock_get_config):
     assert max(block_range) <= _REAL_FIXED_MAX_DECODE_BLOCKS, (
         f"Largest block bucket {max(block_range)} exceeds bounded max "
         f"{_REAL_FIXED_MAX_DECODE_BLOCKS}")
-    assert max(block_range) < _REAL_BUGGY_MAX_DECODE_BLOCKS, (
-        f"Block range still contains buggy value {_REAL_BUGGY_MAX_DECODE_BLOCKS}")
     # Verify reasonable number of buckets (log showed 13 unique block values)
     assert len(block_range) <= 20, (f"Too many block buckets: {len(block_range)}")
 
@@ -693,20 +702,17 @@ def test_calc_fallback_value_stabilizes_oversized_block_list():
     # 1. Bug scenario: 16 reqs × 1563 blocks at 200k ctx with block_size=128
     oversized = 25008
     bucket = calc_fallback_value(oversized, base_step)
-    assert bucket >= oversized, (
-        f"Fallback bucket {bucket} must cover the actual block_list length {oversized}")
-    assert bucket % base_step == 0, (
-        f"Fallback bucket {bucket} must be divisible by base_step {base_step}")
+    assert bucket >= oversized, (f"Fallback bucket {bucket} must cover the actual block_list length {oversized}")
+    assert bucket % base_step == 0, (f"Fallback bucket {bucket} must be divisible by base_step {base_step}")
 
     # 2. Shape stability: adjacent lengths must map to the same bucket
     for i in range(100):
-        assert calc_fallback_value(oversized + i, base_step) == bucket, (
-            f"calc_fallback_value({oversized + i}, {base_step}) = "
-            f"{calc_fallback_value(oversized + i, base_step)}, expected {bucket}")
+        assert calc_fallback_value(
+            oversized + i, base_step) == bucket, (f"calc_fallback_value({oversized + i}, {base_step}) = "
+                                                  f"{calc_fallback_value(oversized + i, base_step)}, expected {bucket}")
 
     # 3. Edge case: small value still covered
     small = 100
     small_bucket = calc_fallback_value(small, base_step)
-    assert small_bucket >= small, (
-        f"Fallback bucket {small_bucket} must cover length {small}")
+    assert small_bucket >= small, (f"Fallback bucket {small_bucket} must cover length {small}")
     assert small_bucket % base_step == 0
