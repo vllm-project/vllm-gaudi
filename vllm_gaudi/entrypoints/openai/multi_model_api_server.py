@@ -287,13 +287,25 @@ def _resolve_frontend_settings(
     active_model_name: str,
 ) -> FrontendSettings:
     model_overrides = model_frontend_overrides.get(active_model_name, ModelFrontendOverrides())
+    enable_auto_tool_choice = (
+        model_overrides.enable_auto_tool_choice
+        if model_overrides.enable_auto_tool_choice is not None
+        else args.enable_auto_tool_choice
+    )
+    tool_call_parser = (
+        model_overrides.tool_call_parser
+        if model_overrides.tool_call_parser is not None
+        else args.tool_call_parser
+    )
+    chat_template = (
+        model_overrides.chat_template
+        if model_overrides.chat_template is not None
+        else args.chat_template
+    )
     return FrontendSettings(
-        enable_auto_tool_choice=(model_overrides.enable_auto_tool_choice if model_overrides.enable_auto_tool_choice
-                                 is not None else args.enable_auto_tool_choice),
-        tool_call_parser=(model_overrides.tool_call_parser
-                          if model_overrides.tool_call_parser is not None else args.tool_call_parser),
-        chat_template=(model_overrides.chat_template
-                       if model_overrides.chat_template is not None else args.chat_template),
+        enable_auto_tool_choice=enable_auto_tool_choice,
+        tool_call_parser=tool_call_parser,
+        chat_template=chat_template,
     )
 
 
@@ -321,7 +333,13 @@ def _validate_model_frontend_overrides(
 
 
 def _load_multi_model_config(
-    path: str, ) -> tuple[dict[str, AsyncEngineArgs], str, dict[str, ModelFrontendOverrides], dict[str, str | None]]:
+    path: str,
+) -> tuple[
+    dict[str, AsyncEngineArgs],
+    str,
+    dict[str, ModelFrontendOverrides],
+    dict[str, str | None],
+]:
     with open(path) as f:
         data = yaml.safe_load(f)
 

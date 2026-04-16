@@ -140,9 +140,10 @@ def install_engine_core_patch() -> None:
         return
 
     def gaudi_reconfigure_engine(
-            self: Any,
-            vllm_config_bytes: bytes,
-            quant_config_path: str | None | object = _QUANT_CONFIG_UNCHANGED) -> dict[str, float | None]:
+        self: Any,
+        vllm_config_bytes: bytes,
+        quant_config_path: str | None | object = _QUANT_CONFIG_UNCHANGED,
+    ) -> dict[str, float | None]:
         """Reconfigure EngineCore for a new model/config in-process.
 
         This rebuilds KV cache configs, scheduler, and related runtime state
