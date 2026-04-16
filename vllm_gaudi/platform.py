@@ -258,8 +258,6 @@ class HpuPlatform(Platform):
         # vLLM default (16) and flag it as "user-specified" to prevent phase 1
         # of super().update_block_size_for_backend from overriding it, then
         # let _align_hybrid_block_size compute the correct 528-token size.
-        import fpdb
-        fpdb.ForkedPdb().set_trace()
         is_granite_hybrid = (model_config is not None
                              and getattr(model_config.hf_config, "model_type", None) == "granitemoehybrid")
         if is_granite_hybrid:
