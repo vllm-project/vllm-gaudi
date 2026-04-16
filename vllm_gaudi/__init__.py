@@ -66,6 +66,12 @@ def register():
 def register_utils():
     """Register utility functions for the HPU platform."""
     import vllm_gaudi.utils  # noqa: F401
+    # Install the in-process EngineCore reconfigure hook only when
+    # multi-model mode is requested, to avoid heavy imports for all users.
+    import os
+    if os.environ.get("VLLM_HPU_MULTI_MODEL_CONFIG"):
+        from vllm_gaudi.v1.engine.core_patch import install_engine_core_patch
+        install_engine_core_patch()
 
 
 def register_ops():

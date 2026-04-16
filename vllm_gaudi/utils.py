@@ -289,4 +289,4 @@ class HPUCompileConfig:
             return {'backend': 'hpu_backend', 'fullgraph': self.fullgraph, 'dynamic': False}
 
 
-_async_sched_module.AsyncScheduler = HPUAsyncScheduler
+_async_sched_module.AsyncScheduler = HPUAsyncScheduler  # type: ignore[misc]
