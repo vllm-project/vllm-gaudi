@@ -8,111 +8,111 @@ This release is based on [vLLM v0.19.0](https://github.com/vllm-project/vllm/rel
 
 ## Highlights
 
-- Upgraded platform compatibility to **Intel® Gaudi® Software v1.24.0** and **PyTorch 2.10**, advancing from the v1.23.0 / PT 2.9 baseline used in previous releases.
-- Added initial **Qwen 3.5** model support with compact mode for improved memory utilization (#1153, #1235, #1312).
-- Introduced **Mamba prefix caching** support for hybrid SSM-Transformer models on v0.19.0 (#1330).
-- Added **MxFP4 weight loading and dequantization** for next-generation quantization formats (#1156).
-- Integrated **LMCache** support via monkey-patching for external cache backends (#1176).
-- Introduced **custom depthwise conv1d TPC kernel** for MambaMixer2 to improve hybrid model performance (#1092).
-- Adapted the **online defragmenter for torch.compile** mode, enabling memory defragmentation in compiled execution (#986).
-- Improved warmup performance by **capping decode block bucket limits** (#1160).
+- Upgraded platform compatibility to **Intel® Gaudi® Software v1.24.0** and **PyTorch 2.10**.
+- Introduced **Qwen 3.5** model support with compact mode for improved memory utilization.
+- Introduced **Mamba prefix caching** support for hybrid SSM-Transformer models on v0.19.0.
+- Added **MxFP4 weight loading and dequantization** for next-generation quantization formats.
+- Integrated **LMCache** support via monkey-patching for external cache backends.
+- Introduced **custom depthwise conv1d TPC kernel** for MambaMixer2 to improve hybrid model performance.
+- Adapted the **online defragmenter for torch.compile** mode, enabling memory defragmentation in compiled execution.
+- Improved warmup performance by **capping decode block bucket limits**.
 
 ---
 
 ## New Model Support
 
-- Qwen 3.5 initial enablement ([#1153](https://github.com/vllm-project/vllm-gaudi/pull/1153))
-- Qwen 3.5 compact mode ([#1235](https://github.com/vllm-project/vllm-gaudi/pull/1235))
-- Qwen 3.5 additional changes and fixes ([#1312](https://github.com/vllm-project/vllm-gaudi/pull/1312))
+- Added initial Qwen 3.5 model support. ([#1153](https://github.com/vllm-project/vllm-gaudi/pull/1153))
+- Added Qwen 3.5 compact mode. ([#1235](https://github.com/vllm-project/vllm-gaudi/pull/1235))
+- Added Qwen 3.5 additional changes and fixes. ([#1312](https://github.com/vllm-project/vllm-gaudi/pull/1312))
 
 ---
 
 ## Performance
 
-- Creating custom depthwise conv1d kernel for MambaMixer2 ([#1092](https://github.com/vllm-project/vllm-gaudi/pull/1092))
-- Adapt Online defragmenter for torch compile ([#986](https://github.com/vllm-project/vllm-gaudi/pull/986))
-- Set reserved memory for Torch compile ([#1093](https://github.com/vllm-project/vllm-gaudi/pull/1093))
-- Cap decode block bucket limit to reduce warmup time ([#1160](https://github.com/vllm-project/vllm-gaudi/pull/1160))
-- Optimize selective_state_update ([#1295](https://github.com/vllm-project/vllm-gaudi/pull/1295))
-- Optimizing visible block number for Hybrid kv_cache ([#1319](https://github.com/vllm-project/vllm-gaudi/pull/1319))
+- Created a custom depthwise conv1d kernel for MambaMixer2. ([#1092](https://github.com/vllm-project/vllm-gaudi/pull/1092))
+- Adapted the online defragmenter for torch.compile. ([#986](https://github.com/vllm-project/vllm-gaudi/pull/986))
+- Set reserved memory for torch.compile. ([#1093](https://github.com/vllm-project/vllm-gaudi/pull/1093))
+- Capped the decode block bucket limit to reduce warmup time. ([#1160](https://github.com/vllm-project/vllm-gaudi/pull/1160))
+- Optimized `selective_state_update`. ([#1295](https://github.com/vllm-project/vllm-gaudi/pull/1295))
+- Optimized the visible block number for hybrid KV cache. ([#1319](https://github.com/vllm-project/vllm-gaudi/pull/1319))
 
 ---
 
 ## Attention & KV Cache
 
-- Mamba prefix caching support for v0.19.0 ([#1330](https://github.com/vllm-project/vllm-gaudi/pull/1330))
-- Fix for proper KV cache slot addressing for Hybrid models ([#1323](https://github.com/vllm-project/vllm-gaudi/pull/1323))
-- Resolving kv_cache access in HPUMambaMixer2 and reintroducing Granite4.0 in CI ([#1287](https://github.com/vllm-project/vllm-gaudi/pull/1287))
-- Remove dead Unified Attention (UA) code ([#1226](https://github.com/vllm-project/vllm-gaudi/pull/1226))
-- Fix KV cache memory regression from unconditional RowParallelLinear OOT registration ([#1146](https://github.com/vllm-project/vllm-gaudi/pull/1146))
-- Exclude dummy block from NIXL KV cache registration ([#1140](https://github.com/vllm-project/vllm-gaudi/pull/1140))
+- Added Mamba prefix caching support for v0.19.0. ([#1330](https://github.com/vllm-project/vllm-gaudi/pull/1330))
+- Fixed proper KV cache slot addressing for hybrid models. ([#1323](https://github.com/vllm-project/vllm-gaudi/pull/1323))
+- Resolved KV cache access in HPUMambaMixer2 and reintroduced Granite4.0 in CI. ([#1287](https://github.com/vllm-project/vllm-gaudi/pull/1287))
+- Removed dead Unified Attention (UA) code. ([#1226](https://github.com/vllm-project/vllm-gaudi/pull/1226))
+- Fixed a KV cache memory regression caused by unconditional RowParallelLinear OOT registration. ([#1146](https://github.com/vllm-project/vllm-gaudi/pull/1146))
+- Excluded dummy block from NIXL KV cache registration. ([#1140](https://github.com/vllm-project/vllm-gaudi/pull/1140))
 
 ---
 
 ## Quantization
 
-- Load and Dequant MxFP4 Weights ([#1156](https://github.com/vllm-project/vllm-gaudi/pull/1156))
-- Fix INC FP8 dynamic quantization for MoE models on HPU ([#1183](https://github.com/vllm-project/vllm-gaudi/pull/1183))
-- Fix FP8 block-to-channel conversion breaking MLA weight loading ([#1220](https://github.com/vllm-project/vllm-gaudi/pull/1220))
-- Fix INC/MLA alias-path quantization failures ([#1222](https://github.com/vllm-project/vllm-gaudi/pull/1222))
-- Granite-4.0-h Calibration config ([#1221](https://github.com/vllm-project/vllm-gaudi/pull/1221))
-- Fix Synapse GC compile failure for FP8-quantized models ([#1334](https://github.com/vllm-project/vllm-gaudi/pull/1334))
+- Loaded and dequantized MxFP4 weights. ([#1156](https://github.com/vllm-project/vllm-gaudi/pull/1156))
+- Fixed INC FP8 dynamic quantization for MoE models on HPU. ([#1183](https://github.com/vllm-project/vllm-gaudi/pull/1183))
+- Fixed FP8 block-to-channel conversion breaking MLA weight loading. ([#1220](https://github.com/vllm-project/vllm-gaudi/pull/1220))
+- Fixed INC/MLA alias-path quantization failures. ([#1222](https://github.com/vllm-project/vllm-gaudi/pull/1222))
+- Added Granite-4.0-h calibration config. ([#1221](https://github.com/vllm-project/vllm-gaudi/pull/1221))
+- Fixed Synapse GC compile failure for FP8-quantized models. ([#1334](https://github.com/vllm-project/vllm-gaudi/pull/1334))
 
 ---
 
 ## Plugin Core
 
-- Patch for LMCache ([#1176](https://github.com/vllm-project/vllm-gaudi/pull/1176))
-- Remove aggregate module HpuDeepseekOCRVisual ([#1102](https://github.com/vllm-project/vllm-gaudi/pull/1102))
-- Remove deprecated virtual_engine from ForwardContext ([#1187](https://github.com/vllm-project/vllm-gaudi/pull/1187))
-- Fix CPUOffloadingSpec import path and remove obsolete roberta patch ([#1229](https://github.com/vllm-project/vllm-gaudi/pull/1229))
-- Separate conv1d for Granite 4.0 (v0.17.1-style) ([#1320](https://github.com/vllm-project/vllm-gaudi/pull/1320))
-- Add num_spec field to MambaMixer2 for upstream compatibility ([#1141](https://github.com/vllm-project/vllm-gaudi/pull/1141))
-- Fix include all sub-packages in setuptools package discovery ([#1212](https://github.com/vllm-project/vllm-gaudi/pull/1212))
+- Added a patch for LMCache. ([#1176](https://github.com/vllm-project/vllm-gaudi/pull/1176))
+- Removed aggregate module HpuDeepseekOCRVisual. ([#1102](https://github.com/vllm-project/vllm-gaudi/pull/1102))
+- Removed deprecated `virtual_engine` from `ForwardContext`. ([#1187](https://github.com/vllm-project/vllm-gaudi/pull/1187))
+- Fixed CPUOffloadingSpec import path and removed obsolete roberta patch. ([#1229](https://github.com/vllm-project/vllm-gaudi/pull/1229))
+- Separated conv1d for Granite 4.0 (v0.17.1-style). ([#1320](https://github.com/vllm-project/vllm-gaudi/pull/1320))
+- Added the `num_spec` field to MambaMixer2 for upstream compatibility. ([#1141](https://github.com/vllm-project/vllm-gaudi/pull/1141))
+- Fixed setuptools package discovery to include all sub-packages. ([#1212](https://github.com/vllm-project/vllm-gaudi/pull/1212))
 
 ---
 
 ## Serving & Infrastructure
 
-- Parameterize EXTRA_INDEX_URL in Dockerfiles ([#1131](https://github.com/vllm-project/vllm-gaudi/pull/1131))
-- Add VLLM_REPO and VLLM_GAUDI_REPO args to RHEL UBI Dockerfile ([#1225](https://github.com/vllm-project/vllm-gaudi/pull/1225))
-- Add real context length to the high-level profile ([#1169](https://github.com/vllm-project/vllm-gaudi/pull/1169))
-- Add more than 2 models to sleep mode model swapping test ([#1100](https://github.com/vllm-project/vllm-gaudi/pull/1100))
-- Add AI agents config files ([#1123](https://github.com/vllm-project/vllm-gaudi/pull/1123))
-- Update quickstart guide and supported model list ([#1173](https://github.com/vllm-project/vllm-gaudi/pull/1173))
+- Parameterized EXTRA_INDEX_URL in Dockerfiles. ([#1131](https://github.com/vllm-project/vllm-gaudi/pull/1131))
+- Added VLLM_REPO and VLLM_GAUDI_REPO arguments to RHEL UBI Dockerfile. ([#1225](https://github.com/vllm-project/vllm-gaudi/pull/1225))
+- Added real context length to the high-level profile. ([#1169](https://github.com/vllm-project/vllm-gaudi/pull/1169))
+- Added more than 2 models to the sleep mode model swapping test. ([#1100](https://github.com/vllm-project/vllm-gaudi/pull/1100))
+- Added AI agents config files. ([#1123](https://github.com/vllm-project/vllm-gaudi/pull/1123))
+- Updated the quickstart guide and supported model list. ([#1173](https://github.com/vllm-project/vllm-gaudi/pull/1173))
 
 ---
 
 ## Fixes
 
-- Fix OOM crashes during high-concurrency inference ([#1124](https://github.com/vllm-project/vllm-gaudi/pull/1124))
-- Fix multimodal prefill batching for 2D padded inputs ([#1126](https://github.com/vllm-project/vllm-gaudi/pull/1126))
-- Fix M-RoPE position tensor shape for batched multimodal prefill (BS>1) ([#1216](https://github.com/vllm-project/vllm-gaudi/pull/1216))
-- Fix preempted prompts and prefill/decoding splitting ([#830](https://github.com/vllm-project/vllm-gaudi/pull/830))
-- Fix grammar bitmask corruption in mixed structured-output batches ([#1200](https://github.com/vllm-project/vllm-gaudi/pull/1200))
-- Fix Qwen Out of HOST memory (OOM) ([#1247](https://github.com/vllm-project/vllm-gaudi/pull/1247))
-- Fix SharedFusedMoE attribute error for Llama4 MoE layers ([#1172](https://github.com/vllm-project/vllm-gaudi/pull/1172))
-- Fix false-positive cross-layer block detection for MLA in NIXL ([#1205](https://github.com/vllm-project/vllm-gaudi/pull/1205))
-- Fix block size setting for granite 4.0h ([#1318](https://github.com/vllm-project/vllm-gaudi/pull/1318))
-- Granite4.0h fallback bucket padding fix ([#1207](https://github.com/vllm-project/vllm-gaudi/pull/1207))
-- Fix wrong AI Lab names in validated_models.md ([#1282](https://github.com/vllm-project/vllm-gaudi/pull/1282))
-- Fix -u flag requiring argument in calibrate_model.sh ([#1121](https://github.com/vllm-project/vllm-gaudi/pull/1121))
+- Fixed OOM crashes during high-concurrency inference. ([#1124](https://github.com/vllm-project/vllm-gaudi/pull/1124))
+- Fixed multimodal prefill batching for 2D padded inputs. ([#1126](https://github.com/vllm-project/vllm-gaudi/pull/1126))
+- Fixed M-RoPE position tensor shape for batched multimodal prefill (BS>1). ([#1216](https://github.com/vllm-project/vllm-gaudi/pull/1216))
+- Fixed preempted prompts and prefill/decoding splitting. ([#830](https://github.com/vllm-project/vllm-gaudi/pull/830))
+- Fixed grammar bitmask corruption in mixed structured-output batches. ([#1200](https://github.com/vllm-project/vllm-gaudi/pull/1200))
+- Fixed Qwen out of host memory (OOM) errors. ([#1247](https://github.com/vllm-project/vllm-gaudi/pull/1247))
+- Fixed a `SharedFusedMoE` attribute error for Llama4 MoE layers. ([#1172](https://github.com/vllm-project/vllm-gaudi/pull/1172))
+- Fixed false-positive cross-layer block detection for MLA in NIXL. ([#1205](https://github.com/vllm-project/vllm-gaudi/pull/1205))
+- Fixed block size setting for Granite 4.0h. ([#1318](https://github.com/vllm-project/vllm-gaudi/pull/1318))
+- Fixed Granite4.0h fallback bucket padding. ([#1207](https://github.com/vllm-project/vllm-gaudi/pull/1207))
+- Fixed wrong AI Lab names in validated_models.md. ([#1282](https://github.com/vllm-project/vllm-gaudi/pull/1282))
+- Fixed the `-u` flag requiring an argument in calibrate_model.sh. ([#1121](https://github.com/vllm-project/vllm-gaudi/pull/1121))
 
 ---
 
 ## Security
 
-- Coverity fix including security, null-like values, duplicates and typos ([#1164](https://github.com/vllm-project/vllm-gaudi/pull/1164))
-- SDL secure error handling fixes ([#1245](https://github.com/vllm-project/vllm-gaudi/pull/1245))
+- Fixed coverity issues, including security, null-like values, duplicates, and typos. ([#1164](https://github.com/vllm-project/vllm-gaudi/pull/1164))
+- Fixed SDL secure error handling issues. ([#1245](https://github.com/vllm-project/vllm-gaudi/pull/1245))
 
 ---
 
 ## Deprecation & Breaking Changes
 
-- Upgraded to **Intel® Gaudi® Software v1.24.0** and **PyTorch 2.10** — users must update their Gaudi software stack from v1.23.0 to v1.24.0.
-- Removed dead Unified Attention (UA) code ([#1226](https://github.com/vllm-project/vllm-gaudi/pull/1226)).
-- Removed aggregate module HpuDeepseekOCRVisual ([#1102](https://github.com/vllm-project/vllm-gaudi/pull/1102)).
-- Removed deprecated `virtual_engine` from `ForwardContext` ([#1187](https://github.com/vllm-project/vllm-gaudi/pull/1187)).
+- Upgraded to **Intel® Gaudi® Software v1.24.0** and **PyTorch 2.10**, which requires users to update their Intel Gaudi software stack from v1.23.0 to v1.24.0.
+- Removed unused Unified Attention (UA) code. ([#1226](https://github.com/vllm-project/vllm-gaudi/pull/1226)).
+- Removed the aggregate module `HpuDeepseekOCRVisual`. ([#1102](https://github.com/vllm-project/vllm-gaudi/pull/1102)).
+- Removed deprecated `virtual_engine` from `ForwardContext`. ([#1187](https://github.com/vllm-project/vllm-gaudi/pull/1187)).
 
 ---
 

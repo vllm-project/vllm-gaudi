@@ -10,104 +10,104 @@ This release is based on [vLLM v0.17.1](https://github.com/vllm-project/vllm/rel
 
 - Added validated support for **Ernie4.5-VL**, **GPT-OSS** (20B/120B), and **reranking models** (Bert-based, Roberta-based, and Qwen3-based).
 - Introduced **MxFP4 weight loading and dequantization** support for Gaudi, enabling GPT-OSS model inference.
-- Major **Mamba/Granite 4.0-h** improvements including prefix caching support, custom depthwise conv1d TPC kernels, and precision enhancements.
+- Introduced major **Mamba/Granite 4.0-h** improvements, including prefix caching support, custom depthwise conv1d TPC kernels, and precision enhancements.
 - Enhanced **RowParallel NIC chunking** for better distributed inference performance.
 - Added **logprobs** output functionality and **Granite tool calling** accuracy improvements.
-- Improved stability through grammar bitmask corruption fixes.
+- Improved stability by fixing grammar bitmask corruption.
 
 ---
 
 ## New Model Support
 
-- Add Support for **Ernie4.5-VL** ([#813](https://github.com/vllm-project/vllm-gaudi/pull/813))
-- Ported reranking models: Bert-based, Roberta-based and Qwen3-based ([#1001](https://github.com/vllm-project/vllm-gaudi/pull/1001))
-- Added support for **GPT-OSS** models (lmsys/gpt-oss-20b-bf16, lmsys/gpt-oss-120b-bf16, openai/gpt-oss-20b, openai/gpt-oss-120b) via MxFP4 weight dequantization ([#1251](https://github.com/vllm-project/vllm-gaudi/pull/1251))
-- Enable caching for Qwen3 MoE op ([#1249](https://github.com/vllm-project/vllm-gaudi/pull/1249))
+- Added support for **Ernie4.5-VL**. ([#813](https://github.com/vllm-project/vllm-gaudi/pull/813))
+- Ported the following reranking models: Bert-based, Roberta-based, and Qwen3-based. ([#1001](https://github.com/vllm-project/vllm-gaudi/pull/1001))
+- Added support for **GPT-OSS** models (lmsys/gpt-oss-20b-bf16, lmsys/gpt-oss-120b-bf16, openai/gpt-oss-20b, and openai/gpt-oss-120b) via MxFP4 weight dequantization. ([#1251](https://github.com/vllm-project/vllm-gaudi/pull/1251))
+- Enabled caching for Qwen3 MoE op. ([#1249](https://github.com/vllm-project/vllm-gaudi/pull/1249))
 
 ---
 
 ## Performance
 
-- Optimization of `selective_state_update` ref in MambaMixer2 decode ([#1244](https://github.com/vllm-project/vllm-gaudi/pull/1244))
-- Replacing fancy indexing with select and copy for Granite4 state update ([#1210](https://github.com/vllm-project/vllm-gaudi/pull/1210))
-- Creating custom depthwise conv1d kernel for MambaMixer2 ([#1175](https://github.com/vllm-project/vllm-gaudi/pull/1175))
-- Improving precision of `_depthwise_conv1d_tpc` for bf16 ([#1203](https://github.com/vllm-project/vllm-gaudi/pull/1203))
-- hpu_mamba_chunk_scan_combined_varlen improvements ([#997](https://github.com/vllm-project/vllm-gaudi/pull/997))
-- RowParallel NIC chunking ([#896](https://github.com/vllm-project/vllm-gaudi/pull/896))
-- Adding `compute_logits` to `_compile_methods` ([#1081](https://github.com/vllm-project/vllm-gaudi/pull/1081))
-- Blocking B2BMatmul in dynamic quantization ([#1002](https://github.com/vllm-project/vllm-gaudi/pull/1002))
+- Optimized the `selective_state_update` reference in MambaMixer2 decode. ([#1244](https://github.com/vllm-project/vllm-gaudi/pull/1244))
+- Replaced fancy indexing with select and copy for Granite4 state updates. ([#1210](https://github.com/vllm-project/vllm-gaudi/pull/1210))
+- Created a custom depthwise conv1d kernel for `MambaMixer2`. ([#1175](https://github.com/vllm-project/vllm-gaudi/pull/1175))
+- Improved bf16 precision of `_depthwise_conv1d_tpc`. ([#1203](https://github.com/vllm-project/vllm-gaudi/pull/1203))
+- Improved `hpu_mamba_chunk_scan_combined_varlen`. ([#997](https://github.com/vllm-project/vllm-gaudi/pull/997))
+- Improved RowParallel NIC chunking. ([#896](https://github.com/vllm-project/vllm-gaudi/pull/896))
+- Added `compute_logits` to `_compile_methods`. ([#1081](https://github.com/vllm-project/vllm-gaudi/pull/1081))
+- Blocked `B2BMatmul` in dynamic quantization. ([#1002](https://github.com/vllm-project/vllm-gaudi/pull/1002))
 
 ---
 
 ## Attention & KV Cache
 
-- Instead of changing KV cache shape, transpose state in conv1d ([#1025](https://github.com/vllm-project/vllm-gaudi/pull/1025))
-- Fix KV cache memory regression from unconditional RowParallelLinear OOT registration ([#1215](https://github.com/vllm-project/vllm-gaudi/pull/1215))
-- Prefix caching support for HPUMambaMixer2 ([#1198](https://github.com/vllm-project/vllm-gaudi/pull/1198))
+- Transposed state in `conv1d` instead of changing the KV cache shape. ([#1025](https://github.com/vllm-project/vllm-gaudi/pull/1025))
+- Fixed a KV cache memory regression caused by unconditional `RowParallelLinear` OOT registration. ([#1215](https://github.com/vllm-project/vllm-gaudi/pull/1215))
+- Added prefix caching support for `HPUMambaMixer2`. ([#1198](https://github.com/vllm-project/vllm-gaudi/pull/1198))
 
 ---
 
 ## Quantization
 
-- Load and Dequant MxFP4 Weights ([#1251](https://github.com/vllm-project/vllm-gaudi/pull/1251))
-- Granite-4.0-h Calibration config ([#1221](https://github.com/vllm-project/vllm-gaudi/pull/1221))
-- Force CPU loading for INC quantization to prevent OOM during weight loading ([#1006](https://github.com/vllm-project/vllm-gaudi/pull/1006))
-- Fix type mismatch in DeepSeek with fp8_fused_sdpa for mla prefill ([#978](https://github.com/vllm-project/vllm-gaudi/pull/978))
+- Loaded and dequantized MxFP4 weights. ([#1251](https://github.com/vllm-project/vllm-gaudi/pull/1251))
+- Added a Granite-4.0-h calibration config. ([#1221](https://github.com/vllm-project/vllm-gaudi/pull/1221))
+- Forced CPU loading for INC quantization to prevent OOM during weight loading. ([#1006](https://github.com/vllm-project/vllm-gaudi/pull/1006))
+- Fixed a type mismatch in DeepSeek with fp8_fused_sdpa for MLA prefill. ([#978](https://github.com/vllm-project/vllm-gaudi/pull/978))
 
 ---
 
 ## Plugin Core
 
-- Add `num_spec` field to MambaMixer2 for upstream compatibility ([#1142](https://github.com/vllm-project/vllm-gaudi/pull/1142))
-- Fix SharedFusedMoE attribute error for Llama4 MoE layers ([#1172](https://github.com/vllm-project/vllm-gaudi/pull/1172))
-- Fixing redundant transpose in HPUMambaMixer2 ([#999](https://github.com/vllm-project/vllm-gaudi/pull/999))
-- Fix HPUMambaMixer2 inheritance dependency ([#1017](https://github.com/vllm-project/vllm-gaudi/pull/1017))
-- Fix mamba cumsum padded calculations ([#1009](https://github.com/vllm-project/vllm-gaudi/pull/1009))
-- `use_qk_norm` parameter sourced directly from config ([#972](https://github.com/vllm-project/vllm-gaudi/pull/972))
-- Replace mm dummy options ([#1085](https://github.com/vllm-project/vllm-gaudi/pull/1085))
-- Logprobs functionality ([#1101](https://github.com/vllm-project/vllm-gaudi/pull/1101))
-- Granite accuracy for tool calling ([#1018](https://github.com/vllm-project/vllm-gaudi/pull/1018))
-- Add torch inference decorator back to warmup ([#1104](https://github.com/vllm-project/vllm-gaudi/pull/1104))
-- Added mechanism for adding events to tlparse ([#1054](https://github.com/vllm-project/vllm-gaudi/pull/1054))
-- Fix to gemma3 UT — replaced tuple operation by TC friendly equivalent ([#1083](https://github.com/vllm-project/vllm-gaudi/pull/1083))
+- Added the `num_spec` field to MambaMixer2 for upstream compatibility. ([#1142](https://github.com/vllm-project/vllm-gaudi/pull/1142))
+- Fixed a `SharedFusedMoE` attribute error for Llama4 MoE layers. ([#1172](https://github.com/vllm-project/vllm-gaudi/pull/1172))
+- Removed a redundant transpose in `HPUMambaMixer2`. ([#999](https://github.com/vllm-project/vllm-gaudi/pull/999))
+- Fixed an `HPUMambaMixer2` inheritance dependency. ([#1017](https://github.com/vllm-project/vllm-gaudi/pull/1017))
+- Fixed Mamba cumsum padded calculations. ([#1009](https://github.com/vllm-project/vllm-gaudi/pull/1009))
+- Sourced the `use_qk_norm` parameter directly from the config. ([#972](https://github.com/vllm-project/vllm-gaudi/pull/972))
+- Replaced MM dummy options. ([#1085](https://github.com/vllm-project/vllm-gaudi/pull/1085))
+- Added the `logprobs` functionality. ([#1101](https://github.com/vllm-project/vllm-gaudi/pull/1101))
+- Improved Granite tool-calling accuracy. ([#1018](https://github.com/vllm-project/vllm-gaudi/pull/1018))
+- Added the torch inference decorator back to warmup. ([#1104](https://github.com/vllm-project/vllm-gaudi/pull/1104))
+- Added a mechanism for adding events to `tlparse`. ([#1054](https://github.com/vllm-project/vllm-gaudi/pull/1054))
+- Fixed the `gemma3` UT by replacing a tuple operation with a TC-friendly equivalent. ([#1083](https://github.com/vllm-project/vllm-gaudi/pull/1083))
 
 ---
 
 ## Serving & Infrastructure
 
-- Set docker auto calc rules for reserved memory in Torch compile mode ([#1170](https://github.com/vllm-project/vllm-gaudi/pull/1170))
-- Improve docker autocalc linear recipe for long contexts ([#959](https://github.com/vllm-project/vllm-gaudi/pull/959))
-- Fix Dockerfile for RHEL 9.6 build by updating package installation order ([#1008](https://github.com/vllm-project/vllm-gaudi/pull/1008))
-- Install torchaudio from CPU wheel to match PyTorch version in Dockerfile ([#1110](https://github.com/vllm-project/vllm-gaudi/pull/1110))
-- Moved inline Dockerfile to a separate file and added torchaudio ([#1050](https://github.com/vllm-project/vllm-gaudi/pull/1050))
-- Install torchaudio in CD Dockerfiles ([#1051](https://github.com/vllm-project/vllm-gaudi/pull/1051))
-- Add PT_VERSION argument and install torchaudio in Dockerfile ([#1043](https://github.com/vllm-project/vllm-gaudi/pull/1043))
-- UBI image: remove pt_fork and duplicated package ([#1066](https://github.com/vllm-project/vllm-gaudi/pull/1066))
-- Restore default `temperature=0` for the server after #32723 ([#1039](https://github.com/vllm-project/vllm-gaudi/pull/1039))
-- Fix setuptools package discovery to include sub-packages ([#1219](https://github.com/vllm-project/vllm-gaudi/pull/1219))
-- Fix `-u` flag requiring argument in `calibrate_model.sh` ([#1167](https://github.com/vllm-project/vllm-gaudi/pull/1167))
+- Set docker autocalc rules for reserved memory in Torch compile mode. ([#1170](https://github.com/vllm-project/vllm-gaudi/pull/1170))
+- Improved the docker autocalc linear recipe for long contexts. ([#959](https://github.com/vllm-project/vllm-gaudi/pull/959))
+- Fixed the Dockerfile for RHEL 9.6 builds by updating the package installation order. ([#1008](https://github.com/vllm-project/vllm-gaudi/pull/1008))
+- Installed `torchaudio` from the CPU wheel to match the PyTorch version in the Dockerfile. ([#1110](https://github.com/vllm-project/vllm-gaudi/pull/1110))
+- Moved the inline Dockerfile to a separate file and added `torchaudio`. ([#1050](https://github.com/vllm-project/vllm-gaudi/pull/1050))
+- Installed `torchaudio` in CD Dockerfiles. ([#1051](https://github.com/vllm-project/vllm-gaudi/pull/1051))
+- Added the `PT_VERSION` argument and installed `torchaudio` in the Dockerfile. ([#1043](https://github.com/vllm-project/vllm-gaudi/pull/1043))
+- Removed `pt_fork` and a duplicated package from the UBI image. ([#1066](https://github.com/vllm-project/vllm-gaudi/pull/1066))
+- Restored the server default `temperature=0` after #32723. ([#1039](https://github.com/vllm-project/vllm-gaudi/pull/1039))
+- Fixed `setuptools` package discovery to include sub-packages. ([#1219](https://github.com/vllm-project/vllm-gaudi/pull/1219))
+- Fixed the `-u` flag requiring an argument in `calibrate_model.sh`. ([#1167](https://github.com/vllm-project/vllm-gaudi/pull/1167))
 
 ---
 
 ## Fixes
 
-- Fix OOM crashes during high-concurrency inference ([#1252](https://github.com/vllm-project/vllm-gaudi/pull/1252))
-- Fix of Qwen Out of HOST memory (OOM) ([#1256](https://github.com/vllm-project/vllm-gaudi/pull/1256))
-- Fix grammar bitmask corruption in mixed structured-output batches ([#1199](https://github.com/vllm-project/vllm-gaudi/pull/1199))
-- Granite4.0h fallback bucket padding fix ([#1207](https://github.com/vllm-project/vllm-gaudi/pull/1207))
-- Fix prefill bucket mismatch when prefills with no context are padded ([#1064](https://github.com/vllm-project/vllm-gaudi/pull/1064))
-- Fix for default max decode blocks in exponential ([#1091](https://github.com/vllm-project/vllm-gaudi/pull/1091))
-- Fix import error for MultiModalBudget ([#1062](https://github.com/vllm-project/vllm-gaudi/pull/1062))
-- Qwen3-VL WarmUp Fix ([#994](https://github.com/vllm-project/vllm-gaudi/pull/994))
-- Server doesn't crash when request is canceled ([#990](https://github.com/vllm-project/vllm-gaudi/pull/990))
-- Fix param mismatch for `compute_nixl_compatibility_hash()` ([#1224](https://github.com/vllm-project/vllm-gaudi/pull/1224))
+- Fixed OOM crashes during high-concurrency inference. ([#1252](https://github.com/vllm-project/vllm-gaudi/pull/1252))
+- Fixed Qwen Out of Host Memory (OOM) errors. ([#1256](https://github.com/vllm-project/vllm-gaudi/pull/1256))
+- Fixed grammar bitmask corruption in mixed structured-output batches. ([#1199](https://github.com/vllm-project/vllm-gaudi/pull/1199))
+- Fixed Granite4.0h fallback bucket padding. ([#1207](https://github.com/vllm-project/vllm-gaudi/pull/1207))
+- Fixed a prefill bucket mismatch when prefills with no context were padded. ([#1064](https://github.com/vllm-project/vllm-gaudi/pull/1064))
+- Fixed default max decode blocks in exponential. ([#1091](https://github.com/vllm-project/vllm-gaudi/pull/1091))
+- Fixed an import error for MultiModalBudget. ([#1062](https://github.com/vllm-project/vllm-gaudi/pull/1062))
+- Fixed Qwen3-VL warmup. ([#994](https://github.com/vllm-project/vllm-gaudi/pull/994))
+- Prevented server crashes when requests were canceled. ([#990](https://github.com/vllm-project/vllm-gaudi/pull/990))
+- Fixed a parameter mismatch for `compute_nixl_compatibility_hash()`. ([#1224](https://github.com/vllm-project/vllm-gaudi/pull/1224))
 
 ---
 
 ## Security
 
-- SDL secure error handling fixes ([#1246](https://github.com/vllm-project/vllm-gaudi/pull/1246))
-- Coverity fix including security, null-like values, duplicates and typos ([#1163](https://github.com/vllm-project/vllm-gaudi/pull/1163))
+- Fixed SDL secure error handling issues. ([#1246](https://github.com/vllm-project/vllm-gaudi/pull/1246))
+- Fixed coverity issues, including security, null-like values, duplicates, and typos. ([#1163](https://github.com/vllm-project/vllm-gaudi/pull/1163))
 
 ---
 

@@ -4,9 +4,9 @@ This document provides an overview of the features, changes, and fixes introduce
 
 ## 0.19.0
 
-This version is based on [vLLM 0.19.0](https://github.com/vllm-project/vllm/releases/tag/v0.19.0) and supports [Intel® Gaudi® Software v1.24.0](https://docs.habana.ai/en/v1.24.0/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.10.
+This version is based on [vLLM 0.19.0](https://github.com/vllm-project/vllm/releases/tag/v0.19.0) and supports the latest [Intel® Gaudi® Software v1.24.0](https://docs.habana.ai/en/v1.24.0/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.10.
 
-This release upgrades the platform to Intel® Gaudi® Software v1.24.0 with PyTorch 2.10. It introduces Qwen 3.5 model support with compact mode, Mamba prefix caching for hybrid models, MxFP4 weight loading and dequantization, LMCache integration, and a custom depthwise conv1d TPC kernel for MambaMixer2. Performance improvements include torch.compile-compatible online defragmentation, reduced warmup time via decode bucket capping, and optimized hybrid KV cache visibility. Multiple stability fixes address OOM crashes, multimodal prefill batching, grammar bitmask corruption, and FP8 quantization issues.
+This release introduces Qwen 3.5 model support with compact mode, Mamba prefix caching for hybrid models, MxFP4 weight loading and dequantization, LMCache integration, and a custom depthwise conv1d TPC kernel for MambaMixer2. Performance improvements include torch.compile-compatible online defragmentation, reduced warmup time via decode bucket capping, and optimized hybrid KV cache visibility. Multiple stability fixes address OOM crashes, multimodal prefill batching, grammar bitmask corruption, and FP8 quantization issues.
 
 For a full list of changes, see the [Detailed Release Notes](release_notes_v0.19.0.md).
 
