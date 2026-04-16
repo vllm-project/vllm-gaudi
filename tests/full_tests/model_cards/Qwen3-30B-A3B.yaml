@@ -1,5 +1,5 @@
 model_card:
-  model_name: Qwen/Qwen3-30B-A3B
+  model_name: /mnt/weka/data/pytorch/Qwen/Qwen3-30B-A3B
   tasks: gsm8k
   num_fewshot: 5
   trust_remote_code: true

@@ -265,7 +265,7 @@ run_granite_4_h_load_generate_test() {
     VLLM_SKIP_WARMUP=true \
     PT_HPU_LAZY_MODE=0 \
     python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" \
-        --model ibm-granite/granite-4.0-h-small \
+        --model /mnt/weka/data/pytorch/RedHatAI/granite-4.0-h-small \
         --block-size 128 \
         --dtype bfloat16 \
         --tensor-parallel-size 1 \
