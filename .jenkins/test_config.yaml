@@ -22,7 +22,7 @@ stages:
         flavor: g3.m
         command: >-
           pip install lm-eval[api] &&
-          bash tests/full_tests/run_with_junit.sh pd_nixl_ucx VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_pd_disaggregate_nixl_ucx_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/run_with_junit.sh pd_nixl_ucx bash tests/full_tests/ci_e2e_discoverable_tests.sh run_pd_disaggregate_nixl_ucx_test &&
           bash -c 'cd tests/unit_tests && ./run_accuracy_test.sh' &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_deepseek_v2_inc_dynamic_tp2_load_generate_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_qwen3_30b_test &&
