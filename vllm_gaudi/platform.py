@@ -258,10 +258,8 @@ class HpuPlatform(Platform):
         # user-specified causes Phase 1 to be skipped; Phase 2
         # (_align_hybrid_block_size) then validates block_size=528 without
         # reducing it and correctly sets mamba_page_size_padded.
-        is_granite_hybrid = (
-            model_config is not None
-            and getattr(model_config.hf_config, "model_type", None) == "granitemoehybrid"
-        )
+        is_granite_hybrid = (model_config is not None
+                             and getattr(model_config.hf_config, "model_type", None) == "granitemoehybrid")
         if is_granite_hybrid and not cache_config.user_specified_block_size:
             cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
             cache_config.user_specified_block_size = True
