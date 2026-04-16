@@ -306,6 +306,101 @@ class HPUBucketingManager():
 
         return sorted(buckets)
 
+    def generate_pool_prompt_buckets(self, pool_max_num_seqs, pool_max_model_len):
+        """Generate prompt buckets scoped to a specific split-pool config.
+
+        The buckets are appended to the main ``prompt_buckets`` list so
+        that warmup compiles graphs for all pool-specific shapes.
+
+        Returns the newly generated bucket list (not the merged one).
+        """
+        if not self.initialized:
+            return []
+
+        strategy = self.get_bucketing_strategy()
+        pool_prefill_seqs = pool_max_num_seqs
+
+        bs_cfg, query_cfg, ctx_cfg = strategy.get_prompt_cfgs(
+            max_num_prefill_seqs=pool_prefill_seqs,
+            block_size=self.block_size,
+            max_num_batched_tokens=min(self.max_num_batched_tokens,
+                                       pool_max_num_seqs * pool_max_model_len),
+            max_model_len=pool_max_model_len)
+
+        bs_range = strategy.get_range(bs_cfg)
+        query_range = strategy.get_range(query_cfg)
+        ctx_range = strategy.get_range(ctx_cfg)
+
+        pool_buckets = generate_buckets(
+            bs_range, query_range, ctx_range, True, pool_max_model_len,
+            pool_max_num_seqs, pool_prefill_seqs,
+            min(self.max_num_batched_tokens,
+                pool_max_num_seqs * pool_max_model_len),
+            self.block_size, self.num_hpu_blocks, None,
+            self.mamba_chunk_size, self.mamba_chunk_size_is_explicit)
+
+        # Merge into the main bucket list (deduplicated)
+        existing = set(self.prompt_buckets)
+        new_buckets = [b for b in pool_buckets if b not in existing]
+        self.prompt_buckets.extend(new_buckets)
+        self.prompt_buckets.sort()
+
+        logger().info(
+            "Split-pool prompt buckets (max_seqs=%d, max_len=%d): "
+            "%d new buckets added (%d total)",
+            pool_max_num_seqs, pool_max_model_len,
+            len(new_buckets), len(self.prompt_buckets))
+        return pool_buckets
+
+    def generate_pool_decode_buckets(self, pool_max_num_seqs, pool_max_model_len):
+        """Generate decode buckets scoped to a specific split-pool config.
+
+        Returns the newly generated bucket list.
+        """
+        if not self.initialized:
+            return []
+
+        strategy = self.get_bucketing_strategy()
+
+        max_blocks = self.num_hpu_blocks
+        bs_cfg, query_cfg, ctx_cfg = strategy.get_decode_cfgs(
+            max_num_seqs=pool_max_num_seqs,
+            block_size=self.block_size,
+            max_num_batched_tokens=min(self.max_num_batched_tokens,
+                                       pool_max_num_seqs * pool_max_model_len),
+            max_model_len=pool_max_model_len,
+            max_blocks=max_blocks)
+
+        bs_range = strategy.get_range(bs_cfg)
+        query_range = strategy.get_range(query_cfg)
+        ctx_range = strategy.get_range(ctx_cfg)
+
+        pool_buckets = generate_buckets(
+            bs_range, query_range, ctx_range, False, pool_max_model_len,
+            pool_max_num_seqs, pool_max_num_seqs,
+            min(self.max_num_batched_tokens,
+                pool_max_num_seqs * pool_max_model_len),
+            self.block_size, max_blocks, None,
+            self.mamba_chunk_size, self.mamba_chunk_size_is_explicit)
+
+        # Merge into the main bucket list (deduplicated)
+        existing = set(self.decode_buckets)
+        new_buckets = [b for b in pool_buckets if b not in existing]
+        self.decode_buckets.extend(new_buckets)
+        self.decode_buckets.sort()
+
+        # Update fallback safety cap
+        if self.decode_buckets:
+            self._fallback_max_ctx = max(
+                (ctx for _, _, ctx in self.decode_buckets), default=0)
+
+        logger().info(
+            "Split-pool decode buckets (max_seqs=%d, max_len=%d): "
+            "%d new buckets added (%d total)",
+            pool_max_num_seqs, pool_max_model_len,
+            len(new_buckets), len(self.decode_buckets))
+        return pool_buckets
+
     @classmethod
     def get_instance(cls):
         """

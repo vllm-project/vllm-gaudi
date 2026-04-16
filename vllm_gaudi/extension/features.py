@@ -44,6 +44,9 @@ def get_user_flags():
         Env('VLLM_LONG_CONTEXT_SPLIT_THRESHOLD', int),
         Env('VLLM_LONG_CONTEXT_MAX_BATCH_SIZE', int),
 
+        # Split KV cache pools (JSON config)
+        Env('VLLM_SPLIT_POOLS_CONFIG', str),
+
         # Sliding window flags
         Env('PT_HPU_SDPA_QKV_SLICE_MODE_FWD', boolean),
         Env('PT_HPU_SDPA_BC_FACTOR', int),

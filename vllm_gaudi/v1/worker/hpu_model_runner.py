@@ -29,6 +29,7 @@ import torch.nn as nn
 import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 from vllm_gaudi.extension.defragmentation import OnlineDefragmenter
+from vllm_gaudi.extension.split_pool_config import get_split_pool_config
 from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler, HabanaMemoryProfiler, HabanaProfilerCounterHelper,
                                            format_bytes, setup_profiler)
 from vllm_gaudi.extension.runtime import finalize_config, get_config
@@ -931,6 +932,23 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # so they don't blow HPU memory.  0 = disabled.
         self.long_context_split_threshold = get_config().long_context_split_threshold
         self.long_context_max_batch_size = get_config().long_context_max_batch_size
+
+        # Split KV cache pools: when enabled, automatically configures
+        # context-aware batch splitting from pool definitions.
+        self.split_pool_config = get_split_pool_config()
+        if self.split_pool_config.enabled:
+            sp = self.split_pool_config
+            # Auto-configure long_context_split from pool config
+            if self.long_context_split_threshold == 0:
+                self.long_context_split_threshold = sp.threshold
+                logger.info(
+                    "Split pools: auto-set long_context_split_threshold=%d",
+                    self.long_context_split_threshold)
+            if self.long_context_max_batch_size == 1:
+                self.long_context_max_batch_size = sp.long_pool.max_num_seqs
+                logger.info(
+                    "Split pools: auto-set long_context_max_batch_size=%d",
+                    self.long_context_max_batch_size)
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -2195,6 +2213,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if split_threshold > 0:
             max_long_bs = self.long_context_max_batch_size
 
+            # When split pools are enabled, also enforce a short-pool BS cap
+            sp_cfg = getattr(self, 'split_pool_config', None)
+            sp_enabled = sp_cfg is not None and getattr(sp_cfg, 'enabled', False)
+            max_short_bs = (sp_cfg.short_pool.max_num_seqs
+                            if sp_enabled else self.max_prefill_batch_size)
+
             def _is_long(batch_contents):
                 for ctx, tids in zip(batch_contents.context_lens,
                                      batch_contents.token_ids):
@@ -2210,6 +2234,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # reduced max batch size for this sub-batch.
                 combined_count = len(lhs.req_ids) + len(rhs.req_ids)
                 if combined_count > max_long_bs:
+                    return False
+            elif sp_enabled:
+                # Both sides are short — enforce short-pool BS cap
+                combined_count = len(lhs.req_ids) + len(rhs.req_ids)
+                if combined_count > max_short_bs:
                     return False
 
             # Prevent mixing long and short requests in the same sub-batch
@@ -5280,6 +5309,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.bucketing_manager.generate_decode_buckets()
         else:
             self.bucketing_manager.decode_buckets = []
+
+        # Generate pool-specific buckets when split pools are enabled.
+        # This ensures warmup compiles HPU graphs for both short-context
+        # (high BS, short seq) and long-context (low BS, long seq) shapes.
+        if self.split_pool_config.enabled:
+            sp = self.split_pool_config
+            for pool in (sp.short_pool, sp.long_pool):
+                self.bucketing_manager.generate_pool_prompt_buckets(
+                    pool.max_num_seqs, pool.max_model_len)
+                if not self.is_pooling_model:
+                    self.bucketing_manager.generate_pool_decode_buckets(
+                        pool.max_num_seqs, pool.max_model_len)
 
         if self.supports_mm_inputs:
             # Delayed multimodal buckets during warmup until model is loaded.

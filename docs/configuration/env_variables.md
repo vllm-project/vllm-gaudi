@@ -24,6 +24,9 @@ This document lists the supported diagnostic and profiling, as well as performan
 | `VLLM_BUCKETING_FROM_FILE`   | Enables reading bucket configuration from file | `None`        |
 | `VLLM_ROW_PARALLEL_CHUNKS`   | Number of chunks to split input into for pipelining matmul with all-reduce in RowParallelLinear layers. Setting to a value greater than 1 enables chunking. See [Row-Parallel Chunking](../features/row_parallel_chunking.md). | `1` (disabled) |
 | `VLLM_ROW_PARALLEL_CHUNK_THRESHOLD` | Minimum number of tokens required to activate row-parallel chunking. Inputs below this threshold use the standard non-chunked path. | `8192` |
+| `VLLM_LONG_CONTEXT_SPLIT_THRESHOLD` | Token count threshold for context-aware batch splitting. Requests with total sequence length (context + scheduled tokens) above this threshold are isolated into separate sub-batches with a reduced batch size. `0` disables the feature. | `0` (disabled) |
+| `VLLM_LONG_CONTEXT_MAX_BATCH_SIZE` | Maximum number of long-context requests allowed in a single prefill sub-batch when `VLLM_LONG_CONTEXT_SPLIT_THRESHOLD` is active. | `1` |
+| `VLLM_SPLIT_POOLS_CONFIG` | JSON string defining split KV cache pools for mixed short/long context workloads. When set, automatically configures `VLLM_LONG_CONTEXT_SPLIT_THRESHOLD` and generates pool-specific HPU graph buckets during warmup. See [Split KV Cache Pools](#split-kv-cache-pools) below. | `None` (disabled) |
 
 ## Developer Mode Parameters
 
@@ -94,3 +97,42 @@ and warm-up. Recommended settings for this case are:
 
 !!! note
     If the model config specifies a high `max_model_len`, set it to the sum of `input_tokens` and `output_tokens`, rounded up to a multiple of `block_size` according to actual requirements.
+
+## Split KV Cache Pools
+
+When serving mixed workloads with both short-context (&lt;8K tokens) and long-context (~128K tokens) requests on a single vLLM-Gaudi instance, the `VLLM_SPLIT_POOLS_CONFIG` environment variable enables pool-aware batch splitting and bucket generation.
+
+This avoids the OOM scenario where configuring `max_num_seqs=32` with `max_model_len=128K` exhausts HPU memory, by ensuring:
+
+- **Short-context requests** batch at high batch sizes (24-32) with small sequence lengths
+- **Long-context requests** batch at low batch sizes (1-8) with large sequence lengths
+- **No mixing** of short and long requests in the same prefill sub-batch
+
+### Configuration
+
+Set `VLLM_SPLIT_POOLS_CONFIG` to a JSON string with `short` and `long` pool definitions:
+
+```bash
+export VLLM_SPLIT_POOLS_CONFIG='{
+    "short": {"max_model_len": 8192, "max_num_seqs": 32, "memory_fraction": 0.40},
+    "long":  {"max_model_len": 131072, "max_num_seqs": 8, "memory_fraction": 0.55},
+    "threshold": 8192
+}'
+```
+
+| Field | Description |
+|-------|-------------|
+| `short.max_model_len` | Maximum sequence length for the short pool |
+| `short.max_num_seqs` | Maximum batch size for short-context prefill sub-batches |
+| `short.memory_fraction` | Fraction of KV cache memory budgeted for short requests |
+| `long.max_model_len` | Maximum sequence length for the long pool |
+| `long.max_num_seqs` | Maximum batch size for long-context prefill sub-batches |
+| `long.memory_fraction` | Fraction of KV cache memory budgeted for long requests |
+| `threshold` | Token count boundary (defaults to `short.max_model_len`). Requests with more prompt tokens are routed to the long pool |
+
+### How it works
+
+1. **Auto-configuration**: Sets `VLLM_LONG_CONTEXT_SPLIT_THRESHOLD` and `VLLM_LONG_CONTEXT_MAX_BATCH_SIZE` from pool parameters if not already set
+2. **Pool-aware bucketing**: During warmup, generates HPU graph buckets for both pool configurations (high BS / short seq + low BS / long seq)
+3. **Batch isolation**: The model runner splits prefill batches so short and long requests never co-exist in the same sub-batch
+4. **Memory budgeting**: Logs recommended block allocations per pool based on available HPU memory

@@ -31,6 +31,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCach
 from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerOutput)
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.utils import is_fake_hpu
+from vllm_gaudi.extension.split_pool_config import get_split_pool_config
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
 
@@ -346,6 +347,29 @@ class HPUWorker(WorkerBase):
                     "mamba_state=%d, ratio=%.3f)", format_bytes(available), format_bytes(adjusted), attn_page_size,
                     mamba_state_per_block, ratio)
                 available = adjusted
+
+        # Log split-pool memory budget breakdown when enabled
+        split_cfg = get_split_pool_config()
+        if split_cfg.enabled and single_kv_block_size_bytes > 0:
+            short_bytes = int(available * split_cfg.short_pool.memory_fraction)
+            long_bytes = int(available * split_cfg.long_pool.memory_fraction)
+            short_blocks = short_bytes // single_kv_block_size_bytes
+            long_blocks = long_bytes // single_kv_block_size_bytes
+            short_seqs = min(
+                split_cfg.short_pool.max_num_seqs,
+                short_blocks // max(1, split_cfg.short_pool.max_model_len // self.cache_config.block_size))
+            long_seqs = min(
+                split_cfg.long_pool.max_num_seqs,
+                long_blocks // max(1, split_cfg.long_pool.max_model_len // self.cache_config.block_size))
+            logger.info(
+                "Split-pool memory budget: "
+                "short(%s, ~%d blocks, ~%d seqs @ %d tokens) + "
+                "long(%s, ~%d blocks, ~%d seqs @ %d tokens) = %s",
+                format_bytes(short_bytes), short_blocks, short_seqs,
+                split_cfg.short_pool.max_model_len,
+                format_bytes(long_bytes), long_blocks, long_seqs,
+                split_cfg.long_pool.max_model_len,
+                format_bytes(short_bytes + long_bytes))
 
         return available
 
