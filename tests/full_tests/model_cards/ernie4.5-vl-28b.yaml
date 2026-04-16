@@ -11,6 +11,7 @@ test_config:
         min_pixels: 784
         max_pixels: 1003520
       trust_remote_code: true
+      revision: "refs/pr/17"
     input_data_config:
       num_prompts: 4
       media_source: default
