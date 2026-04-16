@@ -36,8 +36,8 @@ repos:
   rev: 0.6.17
   hooks:
     - id: pip-compile
-      args: [requirements/test.in, -o, requirements/test.txt, --index-strategy, unsafe-best-match, --torch-backend, cu128]
-      files: ^requirements/test\.(in|txt)$
+      args: [requirements/test/cuda.in, -o, requirements/test/cuda.txt, --index-strategy, unsafe-best-match, --torch-backend, cu128]
+      files: ^requirements/test/cuda\.(in|txt)$
 - repo: local
   hooks:
   - id: mypy-local
