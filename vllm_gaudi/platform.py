@@ -284,7 +284,6 @@ class HpuPlatform(Platform):
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
 
-        from vllm.config import CacheConfig
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
 
@@ -300,7 +299,6 @@ class HpuPlatform(Platform):
         is_granite_hybrid = (model_config is not None
                              and getattr(model_config.hf_config, "model_type", None) == "granitemoehybrid")
         if is_granite_hybrid and not cache_config.user_specified_block_size:
-            cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
             cache_config.user_specified_block_size = True
             try:
                 super().update_block_size_for_backend(vllm_config)
