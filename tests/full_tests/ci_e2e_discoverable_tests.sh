@@ -632,11 +632,8 @@ launch_all_tests() {
     run_longbench_qwen3_30b_fp8_static_test
     run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_lazy_test
     run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_lazy_test
-    # Compile-mode LongBench variants are intentionally excluded from launch_all_tests
-    # due to a known runtime error: RuntimeError("Not Implemented") in PT_HPU_LAZY_MODE=0.
-    # Keep these discoverable for manual/debug runs:
-    #   run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test
-    #   run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test
+    run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test
+    run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test
     run_preemption_test
     run_spec_decode_ngram_test
     run_spec_decode_eagle3_test
