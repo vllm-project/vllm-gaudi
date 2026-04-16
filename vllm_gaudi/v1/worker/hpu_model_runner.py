@@ -581,6 +581,35 @@ def apply_model_specific_patches(model_runner):
     _init_mamba_split_weights(model_runner.model)
 
 
+def compute_prefix_caching_block_indices(num_reqs: int, num_computed_tokens, num_scheduled_tokens,
+                                         mamba_block_size: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+    num_computed_tokens = torch.tensor(num_computed_tokens, dtype=torch.int32)
+    num_scheduled_tokens = torch.tensor(num_scheduled_tokens, dtype=torch.int32)
+
+    if num_computed_tokens.numel() > num_reqs:
+        num_computed_tokens = num_computed_tokens[:num_reqs]
+    if num_scheduled_tokens.numel() > num_reqs:
+        num_scheduled_tokens = num_scheduled_tokens[:num_reqs]
+
+    # Block index of the last computed token
+    block_idx_last_computed_token = cdiv(num_computed_tokens, mamba_block_size) - 1
+    # which is <= block index for the first scheduled token
+    block_idx_first_scheduled_token = (cdiv(num_computed_tokens + 1, mamba_block_size) - 1)
+    # which is <= block index of the last scheduled token
+    block_idx_last_scheduled_token = (cdiv(num_computed_tokens + num_scheduled_tokens, mamba_block_size) - 1)
+    # -1 in case it's non-computed and causes later issues with indexing
+    block_idx_last_computed_token = torch.clamp(block_idx_last_computed_token, min=0)
+    # -1 in the case we have a padded request (0 seq-len)
+    block_idx_last_scheduled_token = torch.clamp(block_idx_last_scheduled_token, min=0)
+
+    return (
+        block_idx_last_computed_token,
+        block_idx_first_scheduled_token,
+        block_idx_last_scheduled_token,
+    )
+
+
 class HpuKVConnectorModelRunnerMixin(KVConnectorModelRunnerMixin):
 
     def __init__(self):
@@ -813,8 +842,9 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
         'slot_mapping', 'is_prompt', 'block_size', 'block_groups', 'window_block_list', 'window_block_mapping',
         'window_block_usage', 'window_block_groups', 'window_attn_bias', 'chunked_block_mapping', 'chunked_attn_bias',
         'chunked_block_list', 'chunked_block_usage', 'chunked_block_groups', 'prep_initial_states',
-        'has_initial_states_p', 'last_chunk_indices_p', 'state_indices_tensor', 'query_start_loc', 'query_start_loc_p',
-        'padding_mask_flat'
+        'has_initial_states_p', 'last_chunk_indices_p', 'load_indices_tensor', 'store_indices_tensor',
+        'query_start_loc', 'query_start_loc_p', 'padding_mask_flat', 'blocks_caching_range',
+        'mamba_chunks_to_block_mapping', 'seqlens_offsets_for_blocks'
     ])
     return attention_metadata
 
@@ -1020,22 +1050,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:
             self.max_encoder_len = 0
 
-        model_type = self._get_model_type() or ""
-        self._requires_bool_mm_mask_for_merge = model_type.startswith("qwen")
-
         mamba_like = ["mamba", "gdn_attention", "linear_attention"]
 
         self.num_mamba_like_layers = sum(
             self.model_config.get_num_layers_by_block_type(self.parallel_config, block_type)
             for block_type in mamba_like)
 
+        self.num_gdn = 0
         if self.num_mamba_like_layers > 0:
             # Auto-enable hybrid cache for GDN/mamba-like models.
             gdn_types = ["gdn_attention", "linear_attention"]
-            num_gdn = sum(
+            self.num_gdn = sum(
                 vllm_config.model_config.get_num_layers_by_block_type(vllm_config.parallel_config, bt)
                 for bt in gdn_types)
-            if num_gdn > 0:
+            if self.num_gdn > 0:
                 # Default: hybrid=1, compact=1, naive_mamba_sharing=0
                 # Only set if user hasn't explicitly provided a value.
                 if not os.environ.get("VLLM_USE_HYBRID_CACHE"):
@@ -1056,7 +1084,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     "GDN layers detected (%d): "
                     "VLLM_USE_HYBRID_CACHE=%s, "
                     "VLLM_USE_NAIVE_MAMBA_CACHE_SHARING=%s, "
-                    "VLLM_COMPACT_GDN=%s", num_gdn, os.environ["VLLM_USE_HYBRID_CACHE"],
+                    "VLLM_COMPACT_GDN=%s", self.num_gdn, os.environ["VLLM_USE_HYBRID_CACHE"],
                     os.environ["VLLM_USE_NAIVE_MAMBA_CACHE_SHARING"], os.environ["VLLM_COMPACT_GDN"])
 
         hf_text_config = self.model_config.hf_text_config
@@ -1246,6 +1274,32 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     def _make_buffer(self, *size: Union[int, torch.SymInt], dtype: torch.dtype, numpy: bool = True) -> CpuGpuBuffer:
         return CpuGpuBuffer(*size, dtype=dtype, device=self.device, pin_memory=self.pin_memory, with_numpy=numpy)
+
+    def prepare_mamba_state_idxs(self, req_indices, block_table_offsets, target_bs):
+        num_indices = len(req_indices)
+        all_state_indices_cpu = []
+        for group_idx in range(len(self.input_batch.block_table.block_tables)):
+            if group_idx in self._compact_gdn_group_ids:
+                g_offset = self._compact_gdn_group_offset[group_idx]
+                state_indices_cpu = torch.zeros(num_indices, dtype=torch.int32)
+                for i, req_idx in enumerate(req_indices):
+                    req_id = self.input_batch.req_ids[req_idx]
+                    base_slot = self._gdn_req_to_base_slot[req_id]
+                    state_indices_cpu[i] = base_slot * self._num_gdn_groups + g_offset + 1
+            else:
+                block_table_cpu_tensor = self.input_batch.block_table[group_idx].get_cpu_tensor()
+                state_indices_cpu = block_table_cpu_tensor[req_indices, block_table_offsets].clone()
+
+            if num_indices < target_bs:
+                padding = torch.full((target_bs - num_indices, ),
+                                     self._MAMBA_PAD_BLOCK_ID,
+                                     dtype=torch.int32,
+                                     device='cpu')
+                state_indices_cpu = torch.cat([state_indices_cpu, padding])
+
+            all_state_indices_cpu.append(state_indices_cpu)
+
+        return torch.stack(all_state_indices_cpu, dim=0)  # Shape: [num_groups, target_bs]
 
     def create_lora_mask(self, input_tokens: torch.Tensor, lora_ids: list[int], is_prompt: bool):
         '''
@@ -1788,8 +1842,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     req_start_pos = (batch_row * padded_seq_len + start_pos - num_computed_tokens)
                 else:
                     req_start_pos = (req_start_idx + start_pos - num_computed_tokens)
-                is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
-                    = True
+                if is_embed is None:
+                    is_mm_embed[req_start_pos + start_idx:req_start_pos + end_idx] = True
+                else:
+                    is_mm_embed[req_start_pos + start_idx:req_start_pos + end_idx] |= is_embed
 
                 # Only whole mm items are processed
                 mm_embeds.append(mm_embeds_item)
@@ -1797,11 +1853,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 req_start_idx += num_scheduled_tokens
 
         # Convert bool tensor to index tensor for merge embedding statically if optimized mm
-
-        # Qwen3.5 multimodal merge path requires a boolean placeholder mask.
-        # Converting the mask to index form here can break placeholder-to-embedding
-        # alignment for Qwen3.5, so keep bool form for that model family.
-        if self.uses_mrope and not self._requires_bool_mm_mask_for_merge:
+        if self.uses_mrope:
             is_mm_embed_index = torch.nonzero(is_mm_embed[:total_num_scheduled_tokens], as_tuple=True)[0]
             # Bounds validation on CPU
             if len(is_mm_embed_index) > 0 and is_mm_embed_index.max() >= total_num_scheduled_tokens:
@@ -2453,33 +2505,95 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             assert nphysical_chunks > 0, (f"target_seq={target_seq} must be >= chunk_size={chunk_size}")
             last_chunk_indices = [nphysical_chunks - 1 for _ in range(len(contents.req_ids))]
 
-            num_prefill_reqs = len(contents.req_ids)
-            all_state_indices_cpu = []
-            for group_idx in range(len(self.input_batch.block_table.block_tables)):
-                state_indices_cpu = torch.zeros(num_prefill_reqs, dtype=torch.int32)
+            mamba_block_size = self.cache_config.mamba_block_size
+            (block_idx_last_computed_token_cpu,
+             block_idx_first_scheduled_token_cpu,
+             block_idx_last_scheduled_token_cpu) = \
+                compute_prefix_caching_block_indices(
+                    len(contents.req_ids),
+                    context_lens,
+                    query_lens,
+                    mamba_block_size
+                )
 
-                if group_idx in self._compact_gdn_group_ids:
-                    g_offset = self._compact_gdn_group_offset[group_idx]
-                    for i, req_id in enumerate(contents.req_ids):
-                        base_slot = self._gdn_req_to_base_slot[req_id]
-                        state_indices_cpu[i] = base_slot * self._num_gdn_groups + g_offset + 1
-                else:
+            req_indices = [self.input_batch.req_id_to_index[req_id] for req_id in contents.req_ids]
+            if self.use_prefix_caching:
+                load_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_computed_token_cpu,
+                                                                       target_bs)
+                store_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_scheduled_token_cpu,
+                                                                        target_bs)
+            else:
+                zeros = [0] * len(req_indices)
+                load_state_indices_cpu = store_state_indices_cpu = \
+                    self.prepare_mamba_state_idxs(req_indices, zeros, target_bs)
+
+            if self.use_prefix_caching:
+                assert len(contents.req_ids) == 1
+                assert mamba_block_size % self.mamba_chunk_size == 0
+                assert context_lens[0] % self.mamba_chunk_size == 0
+
+                chunk_stride = mamba_block_size // self.mamba_chunk_size
+                # Max mamba blocks to cache for this bucket (upper bound)
+                max_cached_blocks = cdiv(target_seq, mamba_block_size) + 1
+
+                # chunk_offset: scheduled-chunk index of the last chunk
+                # of the first block to cache. Block boundaries fall at
+                # absolute chunk (block+1)*chunk_stride-1; subtract the
+                # first scheduled absolute chunk to get the local index.
+                first_sched_chunk_abs = context_lens[0] // self.mamba_chunk_size
+                first_block = block_idx_first_scheduled_token_cpu[0].item()
+                chunk_offset = (first_block + 1) * chunk_stride - 1 - first_sched_chunk_abs
+
+                all_blocks_caching_ranges_cpu = []
+                all_mamba_chunks_to_block_mappings_cpu = []
+                for group_idx in range(len(self.input_batch.block_table.block_tables)):
                     block_table_cpu_tensor = self.input_batch.block_table[group_idx].get_cpu_tensor()
-                    for i, req_id in enumerate(contents.req_ids):
-                        req_idx = self.input_batch.req_id_to_index[req_id]
-                        first_block = block_table_cpu_tensor[req_idx, 0]
-                        state_indices_cpu[i] = first_block
+                    first = block_idx_first_scheduled_token_cpu[0]
+                    last = block_idx_last_scheduled_token_cpu[0]
+                    blocks_caching_range = block_table_cpu_tensor[req_indices[0], first:last + 1].clone()
+                    n_blocks = blocks_caching_range.shape[0]
 
-                if num_prefill_reqs < target_bs:
-                    padding = torch.full((target_bs - num_prefill_reqs, ),
-                                         self._MAMBA_PAD_BLOCK_ID,
-                                         dtype=torch.int32,
-                                         device='cpu')
-                    state_indices_cpu = torch.cat([state_indices_cpu, padding])
+                    # Compute scheduled-chunk index for each block's last chunk;
+                    # clamp so partial last block maps to the last physical chunk.
+                    chunk_indices = torch.arange(n_blocks, dtype=torch.int64) * chunk_stride + chunk_offset
+                    chunk_indices = torch.clamp(chunk_indices, max=nphysical_chunks - 1)
 
-                all_state_indices_cpu.append(state_indices_cpu)
+                    mamba_chunks_to_block_mapping_cpu = torch.full((nphysical_chunks, ),
+                                                                   self._MAMBA_PAD_BLOCK_ID,
+                                                                   dtype=torch.int32,
+                                                                   device='cpu')
+                    mamba_chunks_to_block_mapping_cpu[chunk_indices] = blocks_caching_range
 
-            all_state_indices_cpu = torch.stack(all_state_indices_cpu, dim=0)  # Shape: [num_groups, target_bs]
+                    # Pad blocks_caching_range to fixed size for stable graph shapes
+                    bcr_padded = torch.full((max_cached_blocks, ),
+                                            self._MAMBA_PAD_BLOCK_ID,
+                                            dtype=torch.int32,
+                                            device='cpu')
+                    bcr_padded[:n_blocks] = blocks_caching_range
+
+                    all_blocks_caching_ranges_cpu.append(bcr_padded)
+                    all_mamba_chunks_to_block_mappings_cpu.append(mamba_chunks_to_block_mapping_cpu)
+
+                all_blocks_caching_ranges_cpu = torch.stack(all_blocks_caching_ranges_cpu, dim=0)
+                all_mamba_chunks_to_block_mappings_cpu = torch.stack(all_mamba_chunks_to_block_mappings_cpu, dim=0)
+
+                computed_tokens = context_lens[0]
+                scheduled_tokens = query_lens[0]
+                # Offsets index into seq_input = [init_state | scheduled_tokens],
+                # so they must be relative to the scheduled portion, not absolute.
+                offset = mamba_block_size - computed_tokens % mamba_block_size
+                seqlens_offsets_for_blocks_cpu = []
+                while offset < scheduled_tokens:
+                    seqlens_offsets_for_blocks_cpu.append(offset)
+                    offset += mamba_block_size
+                seqlens_offsets_for_blocks_cpu.append(scheduled_tokens)
+                # Pad to fixed size for stable graph shapes
+                pad_val = seqlens_offsets_for_blocks_cpu[-1]
+                while len(seqlens_offsets_for_blocks_cpu) < max_cached_blocks:
+                    seqlens_offsets_for_blocks_cpu.append(pad_val)
+                seqlens_offsets_for_blocks_cpu = torch.tensor(seqlens_offsets_for_blocks_cpu,
+                                                              dtype=torch.int32,
+                                                              device='cpu')
 
             # CREATE PADDING MASK HERE using target_bs and target_seq
             # Create mask on CPU: [target_bs, target_seq]
@@ -2499,7 +2613,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # Flatten to [target_bs * target_seq, 1] for easy multiplication
             padding_mask_flat_cpu = padding_mask_cpu.view(-1, 1)
 
-            state_indices_tensor = async_h2d_copy(all_state_indices_cpu, device=self.device)
+            load_indices_tensor = async_h2d_copy(load_state_indices_cpu, device=self.device)
+            store_indices_tensor = async_h2d_copy(store_state_indices_cpu, device=self.device)
 
             has_initial_states_p = async_h2d_copy(has_initial_states_cpu, dtype=torch.int32)
             last_chunk_indices_p = async_h2d_copy(last_chunk_indices, dtype=torch.int32)
@@ -2507,13 +2622,27 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             padding_mask_flat = async_h2d_copy(padding_mask_flat_cpu, device=self.device)
             query_start_loc_p = async_h2d_copy(query_start_loc_p_cpu, dtype=torch.int32)
 
+            if self.use_prefix_caching:
+                blocks_caching_range = async_h2d_copy(all_blocks_caching_ranges_cpu, device=self.device)
+                mamba_chunks_to_block_mapping = async_h2d_copy(all_mamba_chunks_to_block_mappings_cpu,
+                                                               device=self.device)
+                seqlens_offsets_for_blocks = async_h2d_copy(seqlens_offsets_for_blocks_cpu, device=self.device)
+            else:
+                blocks_caching_range = None
+                mamba_chunks_to_block_mapping = None
+                seqlens_offsets_for_blocks = None
+
         else:
             prep_initial_states = None
-            state_indices_tensor = None
+            load_indices_tensor = None
+            store_indices_tensor = None
             has_initial_states_p = None
             last_chunk_indices_p = None
             padding_mask_flat = None
             query_start_loc_p = None
+            blocks_caching_range = None
+            seqlens_offsets_for_blocks = None
+            mamba_chunks_to_block_mapping = None
 
         query_lens = async_h2d_copy(query_lens, dtype=torch.int32)
         token_ids = async_h2d_copy(token_ids, dtype=torch.int32)
@@ -2524,18 +2653,23 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         context_blocks_t: Optional[torch.tensor]
         context_blocks_t = async_h2d_copy(context_blocks, dtype=torch.int32).flatten() if target_blocks > 0 else None
 
-        attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(seq_lens_tensor=query_lens,
-                                                                     context_lens_tensor=context_lens,
-                                                                     slot_mapping=token_slots,
-                                                                     block_list=context_blocks_t,
-                                                                     attn_bias=attn_bias,
-                                                                     block_size=self.attn_block_size,
-                                                                     prep_initial_states=prep_initial_states,
-                                                                     has_initial_states_p=has_initial_states_p,
-                                                                     last_chunk_indices_p=last_chunk_indices_p,
-                                                                     state_indices_tensor=state_indices_tensor,
-                                                                     query_start_loc=query_start_loc_p,
-                                                                     padding_mask_flat=padding_mask_flat)
+        attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
+            seq_lens_tensor=query_lens,
+            context_lens_tensor=context_lens,
+            slot_mapping=token_slots,
+            block_list=context_blocks_t,
+            attn_bias=attn_bias,
+            block_size=self.attn_block_size,
+            prep_initial_states=prep_initial_states,
+            has_initial_states_p=has_initial_states_p,
+            last_chunk_indices_p=last_chunk_indices_p,
+            load_indices_tensor=load_indices_tensor,
+            store_indices_tensor=store_indices_tensor,
+            query_start_loc=query_start_loc_p,
+            padding_mask_flat=padding_mask_flat,
+            blocks_caching_range=blocks_caching_range,
+            mamba_chunks_to_block_mapping=mamba_chunks_to_block_mapping,
+            seqlens_offsets_for_blocks=seqlens_offsets_for_blocks)
         return PrefillInputData(request_ids=[req_ids],
                                 prompt_lens=[query_lens],
                                 token_ids=[token_ids],
@@ -2770,27 +2904,27 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     block_size=decode_block_size)
 
         if self.num_mamba_like_layers > 0:
-            all_state_indices_cpu = []
-            for group_idx in range(len(self.input_batch.block_table.block_tables)):
-                if group_idx in self._compact_gdn_group_ids:
-                    g_offset = self._compact_gdn_group_offset[group_idx]
-                    base_slots = torch.tensor(
-                        [self._gdn_req_to_base_slot[self.input_batch.req_ids[i]] for i in range(num_decodes)],
-                        dtype=torch.int32)
-                    state_indices_cpu = base_slots * self._num_gdn_groups + g_offset + 1
-                else:
-                    block_table_cpu_tensor = self.input_batch.block_table[group_idx].get_cpu_tensor()
-                    state_indices_cpu = block_table_cpu_tensor[:num_decodes, 0].clone()
-                if num_decodes < padded_batch_size:
-                    padding = torch.full((padded_batch_size - num_decodes, ),
-                                         self._MAMBA_PAD_BLOCK_ID,
-                                         dtype=torch.int32,
-                                         device='cpu')
-                    state_indices_cpu = torch.cat([state_indices_cpu, padding])
+            mamba_block_size = self.cache_config.mamba_block_size
+            (block_idx_last_computed_token_cpu,
+             block_idx_first_scheduled_token_cpu,
+             block_idx_last_scheduled_token_cpu) = \
+                compute_prefix_caching_block_indices(
+                    num_decodes,
+                    context_lens,
+                    num_scheduled_tokens,
+                    mamba_block_size
+                )
 
-                all_state_indices_cpu.append(state_indices_cpu)
-
-            all_state_indices_cpu = torch.stack(all_state_indices_cpu, dim=0)  # Shape: [num_groups, target_bs]
+            req_indices = list(range(num_decodes))
+            if self.use_prefix_caching:
+                load_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_computed_token_cpu,
+                                                                       padded_batch_size)
+                store_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_scheduled_token_cpu,
+                                                                        padded_batch_size)
+            else:
+                zeros = [0] * len(req_indices)
+                load_state_indices_cpu = store_state_indices_cpu = \
+                    self.prepare_mamba_state_idxs(req_indices, zeros, padded_batch_size)
 
             seq_lens_cpu = torch.tensor(num_tokens_per_req, dtype=torch.int32, device='cpu', pin_memory=self.pin_memory)
 
@@ -2801,12 +2935,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             query_start_loc_p_cpu[1:] = torch.cumsum(seq_lens_cpu.clone().to(dtype=torch.int32), dim=0)
 
             seq_lens_tensor = async_h2d_copy(seq_lens_cpu, device=self.device)
-            state_indices_tensor = async_h2d_copy(all_state_indices_cpu, device=self.device)
+            load_indices_tensor = async_h2d_copy(load_state_indices_cpu, device=self.device)
+            store_indices_tensor = async_h2d_copy(store_state_indices_cpu, device=self.device)
             query_start_loc_p = async_h2d_copy(query_start_loc_p_cpu, dtype=torch.int32)
 
         else:
             seq_lens_tensor = None
-            state_indices_tensor = None
+            load_indices_tensor = None
+            store_indices_tensor = None
             query_start_loc_p = None
 
         # CPU<>HPU sync *should not* happen here.
@@ -2869,7 +3005,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             chunked_block_list=chunked_block_list_device,
             chunked_block_usage=chunked_block_usage_device,
             chunked_block_groups=chunked_block_groups_device,
-            state_indices_tensor=state_indices_tensor,
+            load_indices_tensor=load_indices_tensor,
+            store_indices_tensor=store_indices_tensor,
             seq_lens_tensor=seq_lens_tensor,
             query_start_loc=query_start_loc_p,
         )
@@ -4408,28 +4545,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         can be one of two:
         1. Children of the nn.ModuleList
         2. Member of regional_compilation_layers_list
-
-        When split_moe_compilation is enabled, MoE decoder layers
-        have their sub-components (self_attn, mlp, layernorms) compiled
-        individually instead of as a single unit. This splits the large
-        attention+MoE graph into smaller pieces, dramatically reducing
-        compilation time in Synapse.
         """
         if isinstance(module, torch.nn.ModuleList):
             for children_name, children_module in module.named_children():
-                # Check if this is a decoder layer with a MoE MLP
-                if self._should_split_moe_layer(children_module):
-                    # Compile sub-components individually
-                    logger.info(
-                        "Split-compiling MoE decoder layer %s "
-                        "(sub-components: %s)",
-                        children_name,
-                        [n for n, _ in children_module.named_children()],
-                    )
-                    for sub_name, sub_module in children_module.named_children():
-                        self._compile_region(children_module, sub_name, sub_module)
-                else:
-                    self._compile_region(module, children_name, children_module)
+                self._compile_region(module, children_name, children_module)
         elif any(isinstance(module, layer) for layer in self.regional_compilation_layers_list):
             self._compile_region(
                 parent_module,
@@ -4439,39 +4558,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:
             for children_name, children_module in module.named_children():
                 self._regional_compilation(children_module, module, children_name)
-
-    def _should_split_moe_layer(self, module):
-        """
-        Decide whether to split-compile a decoder layer's sub-components.
-
-        Returns True when:
-        - VLLM_SPLIT_MOE_COMPILATION=true (explicit flag), OR
-        - The model has >= 64 MoE experts (auto-detect heuristic)
-
-        AND the module actually contains a MoE MLP.
-        """
-        mlp = getattr(module, 'mlp', None)
-        if mlp is None:
-            return False
-
-        # Check if the MLP is a MoE block
-        cls_name = type(mlp).__name__
-        is_moe = 'SparseMoe' in cls_name or 'MoE' in cls_name or 'Moe' in cls_name
-        if not is_moe:
-            return False
-
-        # Check explicit flag
-        if get_config().split_moe_compilation:
-            return True
-
-        # Auto-detect: split when num_experts >= 200
-        hf_config = getattr(self.model_config, 'hf_text_config', getattr(self.model_config, 'hf_config', None))
-        if hf_config is not None:
-            num_experts = getattr(hf_config, 'num_experts', getattr(hf_config, 'num_local_experts', 0))
-            if num_experts >= 200:
-                return True
-
-        return False
 
     def _compile_region(self, model, name, module):
         module = self._compile(module)
@@ -5596,31 +5682,41 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.num_mamba_like_layers > 0:
             maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
-        kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, self.attn_groups)
-        self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
 
-        kernel_block_size_by_gid: dict[int, int] = {}
-        kernel_idx = 0
-        for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-            kv_cache_spec = kv_cache_group.kv_cache_spec
-            if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
-                continue
-            kernel_block_size_by_gid[gid] = kernel_block_sizes[kernel_idx]
-            kernel_idx += 1
+        # Reinitialize the input batch with the correct block sizes for all
+        # KV cache groups.  For GDN/linear_attention we additionally compute
+        # kernel block sizes; for other hybrid (mamba) models we still need to
+        # reinitialize so that MultiGroupBlockTable has one entry per group.
+        #kernel_block_sizes: list[int] = []
+        if self.num_gdn > 0 or self.num_mamba_like_layers > 0:
+            kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, self.attn_groups)
+            self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
 
-        selected_attn_kernel_sizes = [
-            kernel_block_size_by_gid[gid] for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups)
-            if isinstance(kv_cache_group.kv_cache_spec, FullAttentionSpec)
-        ]
-        if selected_attn_kernel_sizes:
-            self.attn_block_size = selected_attn_kernel_sizes[0]
-            if len(set(selected_attn_kernel_sizes)) > 1:
-                logger.warning(
-                    "Multiple FullAttention kernel block sizes selected: %s. "
-                    "Using %d for decode metadata.",
-                    selected_attn_kernel_sizes,
-                    self.attn_block_size,
-                )
+            kernel_block_size_by_gid: dict[int, int] = {}
+            kernel_idx = 0
+            for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+                kv_cache_spec = kv_cache_group.kv_cache_spec
+                if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+                    continue
+                kernel_block_size_by_gid[gid] = kernel_block_sizes[kernel_idx]
+                kernel_idx += 1
+
+            selected_attn_kernel_sizes = [
+                kernel_block_size_by_gid[gid] for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups)
+                if isinstance(kv_cache_group.kv_cache_spec, FullAttentionSpec)
+            ]
+            if selected_attn_kernel_sizes:
+                self.attn_block_size = selected_attn_kernel_sizes[0]
+                if len(set(selected_attn_kernel_sizes)) > 1:
+                    logger.warning(
+                        "Multiple FullAttention kernel block sizes selected: %s. "
+                        "Using %d for decode metadata.",
+                        selected_attn_kernel_sizes,
+                        self.attn_block_size,
+                    )
+        elif self.is_encoder_only_attn:
+            kernel_block_sizes = []
+            self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
 
         kv_caches: dict[str, torch.Tensor] = {}
         num_blocks = 0
