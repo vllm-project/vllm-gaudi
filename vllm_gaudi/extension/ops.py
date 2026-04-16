@@ -412,6 +412,10 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
     recompute_mode = True
     assert attn_bias is not None or valid_seq_lengths is not None, \
         'Either attn_bias or valid_seq_lengths must be != None'
+    if is_causal and attn_bias is not None:
+        # TODO: causal + attn_bias is not yet supported
+        is_causal = False
+        valid_seq_lengths = None
 
     args = [
         query, key, value, attn_bias, 0.0, is_causal, scale, softmax_mode, recompute_mode, valid_seq_lengths,
