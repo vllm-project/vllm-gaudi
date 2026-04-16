@@ -109,7 +109,7 @@ from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm_gaudi.extension.ops import LoraMask as LoraMask
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiKVConnectorMetadata
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl import NixlConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import OffloadingConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.v1.core.sched.output import GrammarOutput
@@ -700,6 +700,13 @@ class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
                                                                                input_ids.size(0), input_ids.size(1),
                                                                                input_ids.device, self.dtype,
                                                                                model_has_chunked_attention)
+        # Avoid 0/1 size specialization on block_list dim 0 for MoE models.
+        # Must be outside compiled regions — mark_unbacked is a forbidden callable.
+        if self.flatten_input:
+            attn_md = kwargs.get('attn_metadata')
+            if (attn_md is not None and getattr(attn_md, 'is_prompt', False)
+                    and getattr(attn_md, 'block_list', None) is not None):
+                _mark_unbacked_dim0(attn_md.block_list)
         if self._rotary_prepare_cos_sin is not None:
             self._rotary_prepare_cos_sin(kwargs['positions'], recompute_cos_sin=self.recompute_cos_sin)
         attn_meta = kwargs.pop('attn_metadata', None)
@@ -749,6 +756,11 @@ class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
     # @property
     # def sampler(self):
     #    return self.model.sampler
+
+
+@torch.compiler.disable
+def _mark_unbacked_dim0(tensor: torch.Tensor):
+    torch._dynamo.decorators.mark_unbacked(tensor, 0)
 
 
 def _maybe_wrap_in_hpu_graph(*args, **kwargs):
