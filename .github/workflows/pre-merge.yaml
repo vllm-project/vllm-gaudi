@@ -572,7 +572,7 @@ jobs:
   cleanup_docker_image:
     name: Cleanup Docker Image
     if: always()
-    needs: [discover_runner, hpu_pd_tests, hpu_dp_tests, hpu_nixl_e2e_tests, calibration_tests]
+    needs: [discover_runner, hpu_pd_tests, hpu_dp_tests, hpu_nixl_e2e_tests, calibration_tests, build_nixl_dockerfile]
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Remove Docker image to free up space
