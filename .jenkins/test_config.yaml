@@ -16,13 +16,12 @@ stages:
         command: >-
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_cpu_offloading_test &&
           HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_ngram_test
-      # --- g3.m: PD tests + TP=2 tests (~34min, 4 cards) ---
-      #   pd_nixl (~10m, needs 3 cards) + tp2 tests (~24m, need 2 cards)
-      - name: e2e_pd_tp2_bundle
+      # --- g3.m: accuracy + TP=2 tests (~24min, 4 cards) ---
+      #   pd_nixl removed — requires RDMA/privileged access (stays in GH Actions CI)
+      - name: e2e_accuracy_tp2_bundle
         flavor: g3.m
         command: >-
           pip install lm-eval[api] &&
-          VLLM_GAUDI_PREFIX=. bash tests/full_tests/run_with_junit.sh pd_nixl_ucx bash tests/full_tests/ci_e2e_discoverable_tests.sh run_pd_disaggregate_nixl_ucx_test &&
           bash -c 'cd tests/unit_tests && ./run_accuracy_test.sh' &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_deepseek_v2_inc_dynamic_tp2_load_generate_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_qwen3_30b_test &&
