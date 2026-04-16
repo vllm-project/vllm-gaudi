@@ -53,7 +53,7 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.platforms import current_platform
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem)
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -5207,6 +5207,49 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             return self.model.model.visual.patch_size
         return 1
 
+    def _get_dummy_mm_inputs_with_options(
+        self,
+        modality: str,
+        count: int,
+        width: int | None = None,
+        height: int | None = None,
+        num_frames: int | None = None,
+    ):
+        """Helper to get dummy multimodal inputs with custom options."""
+
+        # Create custom mm_options with specific width/height
+        mm_options = None
+        if width is not None and height is not None:
+            if modality == 'image':
+                mm_options = {"image": ImageDummyOptions(count=count, width=width, height=height)}
+            elif modality == 'video':
+                mm_options = {
+                    "video":
+                    VideoDummyOptions(count=count,
+                                     width=width,
+                                     height=height,
+                                     num_frames=num_frames if num_frames is not None else 100)
+                }
+
+        # Use the registry's API with custom mm_options
+        if mm_options is not None:
+            processor = self.mm_registry.create_processor(self.model_config)
+            processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
+                seq_len=self.model_config.max_model_len,
+                mm_counts={modality: count},
+                mm_options=mm_options,
+            )
+            from vllm.multimodal.processing import TimingContext
+            dummy_mm_inputs = processor.apply(processor_inputs, timing_ctx=TimingContext(enabled=False))
+        else:
+            # Fallback to default options
+            dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
+                self.model_config,
+                mm_counts={modality: count},
+            )
+
+        return dummy_mm_inputs
+
     def _get_mm_dummy_batch(
         self,
         modality: str,
@@ -5216,26 +5259,29 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
         assert self.mm_budget is not None
-        num_frames = 100
-        count = 1
         if self.get_model().vision_bucket_manager.is_batch_based:
             batch = image_args
+            count = 1
         else:
             mm_options = self.model_config.get_multimodal_config().limit_per_prompt.get(modality)
-            count = mm_options.count if mm_options and hasattr(mm_options, 'count') else count
+            count = mm_options.count if mm_options and hasattr(mm_options, 'count') else 1
             batch = count
-        if modality == 'image':
-            mm_options = {"image": ImageDummyOptions(count=count, width=width, height=height), "video": None}
-        elif modality == 'video':
-            num_frames = mm_options.num_frames if mm_options and hasattr(mm_options, 'num_frames') else num_frames
-            mm_options = {
-                "image": None,
-                "video": VideoDummyOptions(count=count, num_frames=num_frames, width=width, height=height)
-            }
-        else:
-            raise NotImplementedError(f"Modality '{modality}' is not supported")
 
-        dummy_mm_inputs = MultiModalRegistry().get_dummy_mm_inputs(self.model_config_copy, mm_counts={modality: count})
+        # Get num_frames for video modality
+        num_frames = None
+        if modality == 'video':
+            mm_config_options = self.model_config.get_multimodal_config().limit_per_prompt.get(modality)
+            if mm_config_options and hasattr(mm_config_options, 'num_frames'):
+                num_frames = mm_config_options.num_frames
+
+        # Use the common helper to get dummy inputs with custom dimensions
+        dummy_mm_inputs = self._get_dummy_mm_inputs_with_options(
+            modality=modality,
+            count=count,
+            width=width,
+            height=height,
+            num_frames=num_frames,
+        )
 
         dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
         # We use the cache so that the item is saved to the cache,
@@ -5264,21 +5310,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                            and "image" in self.mm_budget.mm_limits and self.mm_budget.mm_limits['image'] != 0)
         is_video_warmup = (mm_config is not None and mm_config.limit_per_prompt.get("video") is not None
                            and "video" in self.mm_budget.mm_limits and self.mm_budget.mm_limits['video'] != 999)
-        warmup_configs = {
-            "image": (0, lambda: mm_config.limit_per_prompt.get("image")),
-            "video": (999, lambda: mm_config.limit_per_prompt.get("video"))
-        }
-        width = height = None
+        # Get width/height from config if available for warmup_lists
         warmup_lists = []
-        for modality, (limit_value, get_options) in warmup_configs.items():
-            if (mm_config and mm_config.limit_per_prompt.get(modality) is not None
-                    and modality in self.mm_budget.mm_limits and self.mm_budget.mm_limits[modality] != limit_value):
-                options = get_options()
-                width = options.width if hasattr(options, 'width') else None
-                height = options.height if hasattr(options, 'height') else None
-                if width is not None and height is not None:
-                    warmup_lists.append((width, height))
-                break
+        if not is_batch_based and mm_config:
+            # Try to get dimensions from first available modality config
+            for modality in ["image", "video"]:
+                mm_options = mm_config.limit_per_prompt.get(modality)
+                if mm_options:
+                    width = getattr(mm_options, 'width', None)
+                    height = getattr(mm_options, 'height', None)
+                    if width is not None and height is not None:
+                        warmup_lists.append((width, height))
+                    break
         if not is_batch_based and len(buckets) > 0:
             patch_size = int(self.get_patch_size_from_model())
             warmup_lists = warmup_lists + \
@@ -5377,10 +5420,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         start_mem = HabanaMemoryProfiler.current_device_memory_usage()
         start_time = time.perf_counter()
 
-        # Most model's multimodal embedding has to be run without COMPILE ONLY mode.
-        if self.supports_mm_inputs:
-            self.warmup_multimodal_graphs(self.get_model().vision_bucket_manager.multimodal_buckets)
-
         compile_only_mode_context = functools.partial(bc.env_setting, "PT_COMPILE_ONLY_MODE", True)
         can_use_compile_only_mode = True
         try:
@@ -5393,6 +5432,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                            'Warmup time will be negatively impacted. '
                            'Please update Gaudi Software Suite.')
         with compile_only_mode_context() if can_use_compile_only_mode else contextlib.nullcontext():
+            if self.supports_mm_inputs:
+                self.warmup_multimodal_graphs(self.get_model().vision_bucket_manager.multimodal_buckets)
+
             if not self.model_config.enforce_eager and not self.is_pooling_model:
                 assert self.mem_margin is not None, \
                     ("HabanaWorker.determine_num_available_blocks needs "
