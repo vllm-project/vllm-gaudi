@@ -8,8 +8,7 @@ from tests.unit_tests.kv_offload.offloading_connector.utils import (
     generate_store_output, )
 from tests.unit_tests.kv_offload.utils import EOS_TOKEN_ID
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
-from vllm.v1.core.kv_cache_utils import BlockHash
-from vllm.v1.kv_offload.abstract import OffloadingEvent
+from vllm.v1.kv_offload.abstract import OffloadingEvent, OffloadKey, make_offload_key
 from vllm.v1.request import RequestStatus
 
 
@@ -108,20 +107,20 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_loaded_gpu_block_indexes=(3, 4, 5))
 
     # test take_events
-    def to_hashes(int_hashes: list[int]) -> list[BlockHash]:
-        return [BlockHash(str(i).encode()) for i in int_hashes]
+    def to_keys(int_ids: list[int]) -> list[OffloadKey]:
+        return [make_offload_key(str(i).encode(), 0) for i in int_ids]
 
     def take_events() -> Iterable[OffloadingEvent]:
-        yield OffloadingEvent(block_hashes=to_hashes([1, 2, 3]), block_size=16, medium="A", removed=False)
-        yield OffloadingEvent(block_hashes=to_hashes([4, 5, 6]), block_size=32, medium="B", removed=True)
+        yield OffloadingEvent(keys=to_keys([1, 2, 3]), medium="A", removed=False)
+        yield OffloadingEvent(keys=to_keys([4, 5, 6]), medium="B", removed=True)
 
     runner.manager.take_events.side_effect = take_events
     events = list(runner.scheduler_connector.take_events())
     assert len(events) == 2
     event = events[0]
     assert isinstance(event, BlockStored)
-    assert event.block_hashes == to_hashes([1, 2, 3])
-    assert event.block_size == 16
+    assert event.block_hashes == [str(i).encode() for i in [1, 2, 3]]
+    assert event.block_size == 0
     assert event.medium == "A"
     assert event.token_ids == []
     assert event.parent_block_hash is None
@@ -129,7 +128,7 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     assert event.lora_name is None
     event = events[1]
     assert isinstance(event, BlockRemoved)
-    assert event.block_hashes == to_hashes([4, 5, 6])
+    assert event.block_hashes == [str(i).encode() for i in [4, 5, 6]]
     assert event.medium == "B"
 
 

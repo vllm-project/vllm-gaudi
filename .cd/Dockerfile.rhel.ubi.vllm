@@ -209,7 +209,7 @@ RUN set -e && \
     git remote add upstream $VLLM_REPO && \
     git fetch upstream --tags && \
     git checkout ${VLLM_PROJECT_COMMIT} && \
-    pip install --no-cache-dir -r <(sed '/^torch/d' requirements/build.txt) && \
+    pip install --no-cache-dir -r <(sed '/^torch/d' requirements/build/cuda.txt) && \
     VLLM_TARGET_DEVICE=empty pip install --no-cache-dir --no-build-isolation . && \
     cd $VLLM_PATH2 && \
     git checkout ${VLLM_GAUDI_COMMIT} && \

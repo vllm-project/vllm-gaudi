@@ -102,7 +102,7 @@ class GPTQHPUConfig(QuantizationConfig):
         return cls(weight_bits, group_size, desc_act, lm_head_quantized)
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg, user_quant) -> Optional[str]:
+    def override_quantization_method(cls, hf_quant_cfg, user_quant, hf_config=None) -> Optional[str]:
 
         is_valid_user_quant = user_quant == "gptq_hpu"
 

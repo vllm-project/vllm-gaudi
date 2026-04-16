@@ -109,7 +109,7 @@ from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm_gaudi.extension.ops import LoraMask as LoraMask
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiKVConnectorMetadata
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl import NixlConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import OffloadingConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.v1.core.sched.output import GrammarOutput
@@ -249,6 +249,8 @@ def _move_remaining_tensors_to_device(model: torch.nn.Module, device: str) -> No
 
     moved = 0
     for mod in model.modules():
+        # Compute once per module; None if not an INC-patched module.
+        scale_members = getattr(mod, "scale_members", None)
         for attr_name in list(mod.__dict__.keys()):
             # Skip PyTorch's internal registry dicts and registered
             # parameters, buffers, and child modules — all of these
@@ -256,6 +258,10 @@ def _move_remaining_tensors_to_device(model: torch.nn.Module, device: str) -> No
             if attr_name in _SKIP_ATTRS:
                 continue
             if attr_name in mod._parameters or attr_name in mod._buffers or attr_name in mod._modules:
+                continue
+            # Skip INC FP8 scale tensors - they must remain on CPU
+            # as H2D const tensors for runtime scale patching.
+            if scale_members is not None and attr_name in scale_members:
                 continue
             obj = mod.__dict__[attr_name]
             new_obj, cnt, changed = _move_obj(obj)
@@ -694,6 +700,13 @@ class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
                                                                                input_ids.size(0), input_ids.size(1),
                                                                                input_ids.device, self.dtype,
                                                                                model_has_chunked_attention)
+        # Avoid 0/1 size specialization on block_list dim 0 for MoE models.
+        # Must be outside compiled regions — mark_unbacked is a forbidden callable.
+        if self.flatten_input:
+            attn_md = kwargs.get('attn_metadata')
+            if (attn_md is not None and getattr(attn_md, 'is_prompt', False)
+                    and getattr(attn_md, 'block_list', None) is not None):
+                _mark_unbacked_dim0(attn_md.block_list)
         if self._rotary_prepare_cos_sin is not None:
             self._rotary_prepare_cos_sin(kwargs['positions'], recompute_cos_sin=self.recompute_cos_sin)
         attn_meta = kwargs.pop('attn_metadata', None)
@@ -743,6 +756,11 @@ class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
     # @property
     # def sampler(self):
     #    return self.model.sampler
+
+
+@torch.compiler.disable
+def _mark_unbacked_dim0(tensor: torch.Tensor):
+    torch._dynamo.decorators.mark_unbacked(tensor, 0)
 
 
 def _maybe_wrap_in_hpu_graph(*args, **kwargs):
@@ -2203,7 +2221,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                        seq_num_scheduled_tokens].tolist()
 
             num_blocks = round_up(seq_num_computed_tokens + seq_num_scheduled_tokens,
-                                  self.block_size) // self.block_size
+                                  self.attn_block_size) // self.attn_block_size
             blocks = block_table_cpu_tensor[batch_idx, :num_blocks].tolist()
             if not warmup:
                 blocks = [self._resolve_block(b) for b in blocks]
@@ -2254,7 +2272,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         dtype = self.dtype
         is_causal = True  # TODO: add support for non-causal tasks
         context_groups = torch.tensor(context_groups, device='cpu', dtype=torch.int16)
-        context_groups = context_groups.repeat_interleave(self.block_size, dim=-1)
+        context_groups = context_groups.repeat_interleave(self.attn_block_size, dim=-1)
         context_len = context_groups.size(-1)
         token_groups = torch.tensor(token_groups, device='cpu', dtype=torch.int16)
         num_queries = token_groups.size(-1)
@@ -2281,16 +2299,31 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         token_positions = [list(range(cl, cl + ql)) for cl, ql in zip(context_lens, query_lens)]
 
-        block_assignment = [[divmod(pos, self.block_size) for pos in positions] for positions in token_positions]
+        # Use attn_block_size for KV cache slot addressing so that the
+        # slot indices match the InputBatch block_table which is keyed
+        # by kernel_block_size (= attn_block_size on HPU).  self.block_size
+        # may be larger for hybrid models after page-size unification.
+        slot_block_size = self.attn_block_size
+        block_assignment = [[divmod(pos, slot_block_size) for pos in positions] for positions in token_positions]
 
-        token_slots = [[blocks[bi] * self.block_size + bo for bi, bo in assignment]
+        token_slots = [[blocks[bi] * slot_block_size + bo for bi, bo in assignment]
                        for blocks, assignment in zip(contents.blocks, block_assignment)]
         token_groups = [[i] * len(tid) for i, tid in enumerate(token_ids)]
-        num_context_blocks = [round_up(ctx_len, self.block_size) // self.block_size for ctx_len in context_lens]
+        # num_context_blocks for block_table indexing uses attn_block_size
+        # (matches kernel_block_size / InputBatch).
+        num_context_blocks = [round_up(ctx_len, slot_block_size) // slot_block_size for ctx_len in context_lens]
         context_blocks: list = [blocks[:num] for blocks, num in zip(contents.blocks, num_context_blocks)]
         num_context_blocks = [len(b) for b in context_blocks]
         context_groups = [[i] * b for i, b in enumerate(num_context_blocks)]
-        target_bs, target_seq, target_blocks = self._get_prompt_bucketing_fn()(query_lens, num_context_blocks)
+        # Bucketing uses self.block_size so that file-based buckets
+        # (generated at the original block_size) continue to match.
+        bucketing_ctx_blocks = [round_up(ctx_len, self.block_size) // self.block_size for ctx_len in context_lens]
+        target_bs, target_seq, target_blocks = self._get_prompt_bucketing_fn()(query_lens, bucketing_ctx_blocks)
+        # target_blocks is in self.block_size units (from the bucket file).
+        # Scale to attn_block_size units so context_blocks padding matches the
+        # block_table entries which use kernel_block_size = attn_block_size.
+        if self.attn_block_size != self.block_size:
+            target_blocks = target_blocks * (self.block_size // self.attn_block_size)
 
         target_bs += self.get_dp_padding(target_bs)
         target_seq += self.get_dp_padding(target_seq)
@@ -2486,7 +2519,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         query_len = 1 if has_kv_transfer_group() else 128
         prompt_tokens = 128
         token_ids = list(int(i) for i in range(query_len))
-        num_blocks = round_up(context_len + query_len, self.block_size) // self.block_size
+        num_blocks = round_up(context_len + query_len, self.attn_block_size) // self.attn_block_size
         blocks = [0] * num_blocks
         num_output_logits = context_len + query_len - prompt_tokens + 1
         logits_positions = list(range(query_len - num_output_logits, query_len))
@@ -4344,28 +4377,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         can be one of two:
         1. Children of the nn.ModuleList
         2. Member of regional_compilation_layers_list
-
-        When split_moe_compilation is enabled, MoE decoder layers
-        have their sub-components (self_attn, mlp, layernorms) compiled
-        individually instead of as a single unit. This splits the large
-        attention+MoE graph into smaller pieces, dramatically reducing
-        compilation time in Synapse.
         """
         if isinstance(module, torch.nn.ModuleList):
             for children_name, children_module in module.named_children():
-                # Check if this is a decoder layer with a MoE MLP
-                if self._should_split_moe_layer(children_module):
-                    # Compile sub-components individually
-                    logger.info(
-                        "Split-compiling MoE decoder layer %s "
-                        "(sub-components: %s)",
-                        children_name,
-                        [n for n, _ in children_module.named_children()],
-                    )
-                    for sub_name, sub_module in children_module.named_children():
-                        self._compile_region(children_module, sub_name, sub_module)
-                else:
-                    self._compile_region(module, children_name, children_module)
+                self._compile_region(module, children_name, children_module)
         elif any(isinstance(module, layer) for layer in self.regional_compilation_layers_list):
             self._compile_region(
                 parent_module,
@@ -4375,39 +4390,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:
             for children_name, children_module in module.named_children():
                 self._regional_compilation(children_module, module, children_name)
-
-    def _should_split_moe_layer(self, module):
-        """
-        Decide whether to split-compile a decoder layer's sub-components.
-
-        Returns True when:
-        - VLLM_SPLIT_MOE_COMPILATION=true (explicit flag), OR
-        - The model has >= 64 MoE experts (auto-detect heuristic)
-
-        AND the module actually contains a MoE MLP.
-        """
-        mlp = getattr(module, 'mlp', None)
-        if mlp is None:
-            return False
-
-        # Check if the MLP is a MoE block
-        cls_name = type(mlp).__name__
-        is_moe = 'SparseMoe' in cls_name or 'MoE' in cls_name or 'Moe' in cls_name
-        if not is_moe:
-            return False
-
-        # Check explicit flag
-        if get_config().split_moe_compilation:
-            return True
-
-        # Auto-detect: split when num_experts >= 200
-        hf_config = getattr(self.model_config, 'hf_text_config', getattr(self.model_config, 'hf_config', None))
-        if hf_config is not None:
-            num_experts = getattr(hf_config, 'num_experts', getattr(hf_config, 'num_local_experts', 0))
-            if num_experts >= 200:
-                return True
-
-        return False
 
     def _compile_region(self, model, name, module):
         module = self._compile(module)
@@ -5879,7 +5861,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.bucketing_manager.num_hpu_blocks = num_blocks
 
         self._PAD_BLOCK_ID = num_blocks
-        self._PAD_SLOT_ID = num_blocks * self.block_size
+        self._PAD_SLOT_ID = num_blocks * self.attn_block_size
         self._MAMBA_PAD_BLOCK_ID = num_blocks
         self._dummy_num_blocks = num_blocks
 

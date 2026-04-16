@@ -16,8 +16,9 @@ from vllm_gaudi.utils import has_quant_config
 from vllm_gaudi.ops.hpu_fused_moe import _normalize_moe_activation
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
 
-from vllm.model_executor.kernels.linear import _POSSIBLE_FP8_KERNELS
+from vllm.model_executor.kernels.linear import _POSSIBLE_FP8_BLOCK_KERNELS, _POSSIBLE_FP8_KERNELS
 from vllm.platforms import PlatformEnum
+from vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
 from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
     PerTensorTorchFP8ScaledMMLinearKernel,
     ChannelWiseTorchFP8ScaledMMLinearKernel,
@@ -38,10 +39,34 @@ class HPUChannelWiseTorchFP8ScaledMMLinearKernel(ChannelWiseTorchFP8ScaledMMLine
         return True, None
 
 
+class HPUFp8BlockScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
+    """HPU stub for block-scaled FP8 linear.
+
+    The actual computation is handled by HPU-specific ops in
+    Fp8LinearMethod.apply(), so this kernel only needs to satisfy
+    the kernel selection interface.
+    """
+
+    @classmethod
+    def is_supported(cls, compute_capability: int | None = None) -> tuple[bool, str | None]:
+        return True, None
+
+    def apply_weights(self, layer, x, bias=None):
+        raise NotImplementedError("HPU uses Fp8LinearMethod.apply() directly")
+
+    def apply_block_scaled_mm(self, A, B, As, Bs):
+        raise NotImplementedError("HPU uses Fp8LinearMethod.apply() directly")
+
+
 if PlatformEnum.OOT not in _POSSIBLE_FP8_KERNELS:
     _POSSIBLE_FP8_KERNELS[PlatformEnum.OOT] = [
         HPUPerTensorTorchFP8ScaledMMLinearKernel,
         HPUChannelWiseTorchFP8ScaledMMLinearKernel,
+    ]
+
+if PlatformEnum.OOT not in _POSSIBLE_FP8_BLOCK_KERNELS:
+    _POSSIBLE_FP8_BLOCK_KERNELS[PlatformEnum.OOT] = [
+        HPUFp8BlockScaledMMLinearKernel,
     ]
 
 
