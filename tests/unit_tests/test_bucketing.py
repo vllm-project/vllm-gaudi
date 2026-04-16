@@ -681,3 +681,32 @@ def test_padding_aware_decode_cfgs_contiguous_pa_clamps_block_range(mock_get_con
                                                max_blocks=3593)
 
     assert block_cfg == [3465, 128, 3593, 899, 25]
+
+
+def test_calc_fallback_value_stabilizes_oversized_block_list():
+    """GAUDISW-247865: decode block_list that exceeds the max bucket must be
+    rounded up via calc_fallback_value so that the padded shape is stable
+    across adjacent lengths (no recompilation storm)."""
+
+    base_step = 32
+
+    # 1. Bug scenario: 16 reqs × 1563 blocks at 200k ctx with block_size=128
+    oversized = 25008
+    bucket = calc_fallback_value(oversized, base_step)
+    assert bucket >= oversized, (
+        f"Fallback bucket {bucket} must cover the actual block_list length {oversized}")
+    assert bucket % base_step == 0, (
+        f"Fallback bucket {bucket} must be divisible by base_step {base_step}")
+
+    # 2. Shape stability: adjacent lengths must map to the same bucket
+    for i in range(100):
+        assert calc_fallback_value(oversized + i, base_step) == bucket, (
+            f"calc_fallback_value({oversized + i}, {base_step}) = "
+            f"{calc_fallback_value(oversized + i, base_step)}, expected {bucket}")
+
+    # 3. Edge case: small value still covered
+    small = 100
+    small_bucket = calc_fallback_value(small, base_step)
+    assert small_bucket >= small, (
+        f"Fallback bucket {small_bucket} must cover length {small}")
+    assert small_bucket % base_step == 0
