@@ -349,6 +349,7 @@ run_longbench_qwen3_30b_fp8_static_test() {
     echo "➡️ Testing LongBench (longbench_qasper) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only..."
     pip install 'lm_eval[longbench]' --quiet
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 TP_SIZE=2 \
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=600 \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/Qwen3-30B-A3B-FP8-Static-longbench.yaml"
     echo "✅ LongBench test with Intel/Qwen3-30B-A3B-FP8-Static-Test-Only passed."
 }
@@ -362,6 +363,7 @@ run_longbench_qwen3_30b_fp8_static_fsdpa_slicing_test() {
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 TP_SIZE=2 \
     VLLM_BUCKETING_STRATEGY=pad VLLM_HPU_FSDPA_SLICE_ENABLED=true \
     VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD=4096 VLLM_HPU_FSDPA_SLICE_CHUNK_SIZE=2048 \
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=600 \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/Qwen3-30B-A3B-FP8-Static-longbench.yaml"
     echo "✅ LongBench test with Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + enable_fsdpa_slicing passed."
 }
@@ -374,6 +376,7 @@ run_longbench_qwen3_30b_fp8_static_fp8kv_test() {
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 TP_SIZE=2 KV_CACHE_DTYPE=fp8_inc \
     VLLM_BUCKETING_STRATEGY=pad VLLM_HPU_FSDPA_SLICE_ENABLED=true \
     VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD=4096 VLLM_HPU_FSDPA_SLICE_CHUNK_SIZE=2048 \
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=600 \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/Qwen3-30B-A3B-FP8-Static-longbench.yaml"
     echo "✅ LongBench test with Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + KV_CACHE_DTYPE=fp8_inc + enable_fsdpa_slicing passed."
 }
@@ -386,6 +389,7 @@ run_longbench_qwen3_30b_fp8_static_fsdpa_slicing_compile_test() {
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=0 TP_SIZE=2 \
     VLLM_BUCKETING_STRATEGY=pad VLLM_HPU_FSDPA_SLICE_ENABLED=true \
     VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD=4096 VLLM_HPU_FSDPA_SLICE_CHUNK_SIZE=2048 \
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=600 \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/Qwen3-30B-A3B-FP8-Static-longbench.yaml"
     echo "✅ LongBench test with Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=0 passed."
 }
@@ -398,6 +402,7 @@ run_longbench_qwen3_30b_fp8_static_fp8kv_compile_test() {
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=0 TP_SIZE=2 KV_CACHE_DTYPE=fp8_inc \
     VLLM_BUCKETING_STRATEGY=pad VLLM_HPU_FSDPA_SLICE_ENABLED=true \
     VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD=4096 VLLM_HPU_FSDPA_SLICE_CHUNK_SIZE=2048 \
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=600 \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/Qwen3-30B-A3B-FP8-Static-longbench.yaml"
     echo "✅ LongBench test with Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + KV_CACHE_DTYPE=fp8_inc + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=0 passed."
 }
