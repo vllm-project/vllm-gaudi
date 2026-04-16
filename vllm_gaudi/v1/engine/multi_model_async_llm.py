@@ -103,10 +103,9 @@ class MultiModelAsyncLLM:
     def _apply_quant_config_env(self, model_name: str) -> None:
         """Set or unset QUANT_CONFIG in the current process for *model_name*.
 
-        Call it before the workers are spawned (initialize) or
-        before gaudi_reconfigure_engine sends load_model to the workers
-        (switch_model), so that each worker process inherits / uses the
-        correct quantization calibration file for the target model.
+        Call it before workers are spawned during ``initialize()``,
+        so child processes inherit the correct quantization calibration file for the 
+        selected model. Models switches update worker state through the reconfiguration path.
         """
         if model_name in self.model_quant_configs:
             quant_config_path = self.model_quant_configs[model_name]
