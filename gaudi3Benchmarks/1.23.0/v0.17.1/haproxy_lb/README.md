@@ -14,6 +14,19 @@ Load-balances multiple vLLM instances serving `ibm-granite/granite-4.0-h-small` 
 ## Prerequisites
 ```bash
 yum install -y haproxy procps-ng
+
+#incase above does not work, manual download step
+cd /tmp
+curl -LO https://www.haproxy.org/download/2.8/src/haproxy-2.8.10.tar.gz
+tar xzf haproxy-2.8.10.tar.gz
+cd haproxy-2.8.10
+make TARGET=linux-glibc USE_OPENSSL=1 USE_PCRE= -j$(nproc)
+cp haproxy /usr/local/sbin/haproxy
+/usr/local/sbin/haproxy -v
+
+ln -s /usr/local/sbin/haproxy /usr/local/bin/haproxy
+haproxy -v
+
 ```
 
 

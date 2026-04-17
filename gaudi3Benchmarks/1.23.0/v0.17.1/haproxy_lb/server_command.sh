@@ -1,3 +1,5 @@
+export HF_HUB_OFFLINE=0 \
+export VLLM_BUILD=1.23.0.0 \
 export VLLM_BUCKET_FILENAME=$(mktemp) && \
 cat > "$VLLM_BUCKET_FILENAME" <<'BUCKETS'
 (1, [256, 512, 1024, 2048, 4096, 8192], [0, 1, 2, 4, 8, 16])
