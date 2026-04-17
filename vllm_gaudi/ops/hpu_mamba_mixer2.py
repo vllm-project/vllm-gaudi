@@ -348,6 +348,16 @@ class HPUMambaMixer2(MambaMixer2):
             self._states_bias = None
             self._gate_bias = None
 
+        # Pre-compute decode-path constants so every decode step reuses
+        # the same tensor objects, producing stable graph recipes and
+        # skipping per-step expand() allocations on HPU.  self.A is
+        # already float32 so .to(float32) is a no-op in terms of cast
+        # but the cached reference avoids a node in the Synapse graph.
+        # expand() returns a view; caching the view is free.
+        self._A_fp32 = self.A.to(dtype=torch.float32)
+        self._D_expanded = self.D[:, None].expand(-1, self.head_dim)
+        self._dt_bias_expanded = self.dt_bias[:, None].expand(-1, self.head_dim)
+
         self._split_weights_ready = True
 
     def conv_ssm_forward(
@@ -478,10 +488,12 @@ class HPUMambaMixer2(MambaMixer2):
 
             # 3. State Space Model sequence transformation
             n_groups = self.n_groups // self.tp_size
-            A_d = self.A.to(dtype=torch.float32)  # (nheads,) — keep compact, no expand
+            # Reuse constants pre-computed in _init_split_weights to avoid
+            # re-casting / re-expanding every decode step.
+            A_d = self._A_fp32
             dt = dt[:, :, None].expand(-1, -1, self.head_dim)
-            dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
-            D_d = self.D[:, None, ...].expand(-1, self.head_dim)
+            dt_bias = self._dt_bias_expanded
+            D_d = self._D_expanded
             B_d = B_d.view(-1, n_groups, B_d.shape[1] // n_groups)
             C_d = C_d.view(-1, n_groups, C_d.shape[1] // n_groups)
             hidden_states_d = hidden_states_d.view(-1, self.num_heads // self.tp_size, self.head_dim)
