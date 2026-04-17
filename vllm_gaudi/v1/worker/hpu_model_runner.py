@@ -1212,6 +1212,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.graphed_multimodal_buckets: set[Any] = set()
         else:
             logger.info("Bucketing is OFF.")
+        self._mm_warmup_processor = None
 
         self._PAD_SLOT_ID = -1
         self._PAD_BLOCK_ID = -1
@@ -5226,14 +5227,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 mm_options = {
                     "video":
                     VideoDummyOptions(count=count,
-                                     width=width,
-                                     height=height,
-                                     num_frames=num_frames if num_frames is not None else 100)
+                                      width=width,
+                                      height=height,
+                                      num_frames=num_frames if num_frames is not None else 100)
                 }
 
         # Use the registry's API with custom mm_options
         if mm_options is not None:
-            processor = self.mm_registry.create_processor(self.model_config)
+            processor = self._get_mm_warmup_processor()
             processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
                 seq_len=self.model_config.max_model_len,
                 mm_counts={modality: count},
@@ -5246,9 +5247,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
                 self.model_config,
                 mm_counts={modality: count},
+                processor=self._get_mm_warmup_processor(),
             )
 
         return dummy_mm_inputs
+
+    def _get_mm_warmup_processor(self):
+        if self._mm_warmup_processor is None:
+            self._mm_warmup_processor = self.mm_registry.create_processor(self.model_config)
+
+        return self._mm_warmup_processor
 
     def _get_mm_dummy_batch(
         self,
@@ -5420,6 +5428,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         start_mem = HabanaMemoryProfiler.current_device_memory_usage()
         start_time = time.perf_counter()
 
+        # In lazy mode, run MM warmup outside PT_COMPILE_ONLY_MODE
+        # to avoid GC errors. In torch.compile mode, run it inside
+        # for faster recipe-only compilation.
+        use_torch_compile = (not htorch.utils.internal.is_lazy() and not self.model_config.enforce_eager)
+        if self.supports_mm_inputs and not use_torch_compile:
+            self.warmup_multimodal_graphs(self.get_model().vision_bucket_manager.multimodal_buckets)
+
         compile_only_mode_context = functools.partial(bc.env_setting, "PT_COMPILE_ONLY_MODE", True)
         can_use_compile_only_mode = True
         try:
@@ -5432,7 +5447,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                            'Warmup time will be negatively impacted. '
                            'Please update Gaudi Software Suite.')
         with compile_only_mode_context() if can_use_compile_only_mode else contextlib.nullcontext():
-            if self.supports_mm_inputs:
+            if self.supports_mm_inputs and use_torch_compile:
                 self.warmup_multimodal_graphs(self.get_model().vision_bucket_manager.multimodal_buckets)
 
             if not self.model_config.enforce_eager and not self.is_pooling_model:
