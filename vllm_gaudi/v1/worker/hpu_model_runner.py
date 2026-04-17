@@ -2485,9 +2485,33 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     self.prepare_mamba_state_idxs(req_indices, zeros, target_bs)
 
             if self.use_prefix_caching:
-                assert len(contents.req_ids) == 1
-                assert mamba_block_size % self.mamba_chunk_size == 0
-                assert context_lens[0] % self.mamba_chunk_size == 0
+                # TODO(mkuligowski): Multi-request Mamba prefix caching.
+                # The scatter/gather tensors (blocks_caching_range,
+                # mamba_chunks_to_block_mapping, seqlens_offsets_for_blocks)
+                # are currently built for one sequence because the conv1d
+                # and SSM kernels consume them without a batch dim.  To lift
+                # this, promote them to shape (bs, ...) along a new leading
+                # dim, update granite_causal_conv1d_fn's prefix-cache branch
+                # to iterate over that dim (or reshape to (bs, dim, L) +
+                # gather as in the no-prefix-cache batched path), and pass
+                # per-request computed_tokens / scheduled_tokens.  Until
+                # that kernel work lands this stays single-request.
+                if len(contents.req_ids) != 1:
+                    raise RuntimeError(
+                        "Mamba prefix caching currently supports a single request per prefill step. "
+                        f"Got {len(contents.req_ids)} requests in this batch. "
+                        "Workarounds: lower VLLM_PROMPT_BS_BUCKET_MAX to 1, or disable prefix caching "
+                        "(--no-enable-prefix-caching).")
+                if mamba_block_size % self.mamba_chunk_size != 0:
+                    raise RuntimeError(
+                        f"Mamba prefix caching requires mamba_block_size ({mamba_block_size}) "
+                        f"to be a multiple of mamba_chunk_size ({self.mamba_chunk_size}).")
+                if context_lens[0] % self.mamba_chunk_size != 0:
+                    raise RuntimeError(
+                        f"Mamba prefix caching requires cached context "
+                        f"({context_lens[0]}) to be aligned to mamba_chunk_size "
+                        f"({self.mamba_chunk_size}).  Consider disabling prefix caching "
+                        "or ensure block-aligned chunked prefill splits.")
 
                 chunk_stride = mamba_block_size // self.mamba_chunk_size
                 # Max mamba blocks to cache for this bucket (upper bound)
