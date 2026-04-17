@@ -199,14 +199,13 @@ class SlicedFusedSDPABase(torch.nn.Module):
         slice_thld_default = min(max_num_batched_tokens, 8192)
         slice_thld = int(os.getenv("VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD", str(slice_thld_default)))
         assert slice_thld > block_size, 'Invalid FusedSDPA slice sequence length threshold, the threshold should be greater than the block size.'
+        assert slice_thld > 1024, 'The FusedSDPA slice sequence length threshold should be greater than 1024 to ensure the chunk sizes are valid for the attention kernel.'
         if slice_thld < slice_thld_default:
             logger().warning_once(
                 f'The FusedSDPA slice sequence length threshold {slice_thld} is less than the default {slice_thld_default} which is not recommended.'
             )
 
-        assert slice_thld > 1024, 'The FusedSDPA slice sequence length threshold should be greater than 1024 to ensure the chunk sizes are valid for the attention kernel.'
-
-        # default to half of the threshold and round up by 1024
+        # defaults to half of the threshold and round up by 1024
         chunk_size_default = math.ceil(slice_thld // 2 / 1024) * 1024
         chunk_size = int(os.getenv("VLLM_HPU_FSDPA_SLICE_CHUNK_SIZE", str(chunk_size_default)))
         if chunk_size % 1024 != 0:
@@ -217,12 +216,12 @@ class SlicedFusedSDPABase(torch.nn.Module):
         self.slice_thld = slice_thld
         self.chunk_size = chunk_size
 
-        # should align with the default in PaddingAwareBucketingStrategy
+        # should align with the default value in PaddingAwareBucketingStrategy
         max_query_pad_default = math.ceil(max_num_batched_tokens / 4)
         max_query_pad = int(os.getenv("VLLM_PROMPT_QUERY_BUCKET_PAD_MAX", str(max_query_pad_default)))
         self.num_padded_query_chunks = math.ceil(max_query_pad / self.chunk_size)
 
-        # should align with the default in PaddingAwareBucketingStrategy
+        # should align with the default value in PaddingAwareBucketingStrategy
         max_ctx_pad_default = math.ceil(max_num_batched_tokens / block_size)
         max_ctx_pad = int(os.getenv("VLLM_PROMPT_CTX_BUCKET_PAD_MAX", str(max_ctx_pad_default)))
         self.num_padded_ctx_chunks = math.ceil(max_ctx_pad * block_size / self.chunk_size)
@@ -231,16 +230,16 @@ class SlicedFusedSDPABase(torch.nn.Module):
         is_lazy = ht.utils.internal.is_lazy()
         self._with_graph_breaks = os.getenv("VLLM_HPU_FSDPA_SLICE_WITH_GRAPH_BREAKS",
                                             str(is_lazy)).strip().lower() in ['true', 't', '1', 'yes', 'y', 'on']
-        msg = (f"FusedSDPA slicing is enabled with sequence length threshold {slice_thld}, "
-               f"chunk size {self.chunk_size}, num padded query chunks {self.num_padded_query_chunks}, "
-               f"num padded ctx chunks {self.num_padded_ctx_chunks}, with graph breaks {self._with_graph_breaks}.")
-        logger().debug(msg)
-
         if self._with_graph_breaks:
-            if ht.utils.internal.is_lazy():
+            if is_lazy:
                 self._break_graph = ht.core.mark_step
             else:
                 self._break_graph = torch._dynamo.graph_break
+
+        msg = (f"FusedSDPA slicing is enabled with sequence length threshold {slice_thld}, "
+               f"chunk size {self.chunk_size}, num padded query chunks {self.num_padded_query_chunks}, "
+               f"num padded ctx chunks {self.num_padded_ctx_chunks}, with graph breaks {self._with_graph_breaks}.")
+        logger().debug_once(msg)
 
         return True
 
