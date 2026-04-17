@@ -24,6 +24,7 @@ class HPURMSNorm(RMSNorm):
         x = HPUFusedRMSNorm.apply(x, self.weight, self.variance_epsilon)
         return x
 
+
 @GemmaRMSNorm.register_oot
 class HPUGemmaRMSNorm(GemmaRMSNorm):
 
