@@ -79,7 +79,17 @@ def new_chunk_state(B_expanded, x_chunked, dt_t, dA_cumsum_t, states_in_fp32=Tru
     return state
 
 
-def new_chunk_scan(cb, x_chunked, dt_t, dA_cumsum_t, C, states, output, D=None, z=None, initial_states=None):
+def new_chunk_scan(cb,
+                   x_chunked,
+                   dt_t,
+                   dA_cumsum_t,
+                   C,
+                   states,
+                   output,
+                   D=None,
+                   z=None,
+                   initial_states=None,
+                   chunks_per_sequence=None):
     """
     Arguments:
         cb: Tensor - (nchunks, ngroups, chunk_size, chunk_size) - already causally masked
@@ -91,7 +101,8 @@ def new_chunk_scan(cb, x_chunked, dt_t, dA_cumsum_t, C, states, output, D=None, 
         output: Tensor - (seqlen, nheads, hdim)
         D: Optional Tensor - (nheads, hdim) or (nheads)
         z: Optional Tensor - (seqlen, nheads, hdim)
-        initial_states: Optional Tensor - (1, nheads, hdim, dstate)
+        initial_states: Optional Tensor - (batch, nheads, hdim, dstate)
+        chunks_per_sequence: Optional int - for multi-sequence batched prefill
 
     Return:
         output: Tensor - (seqlen, nheads, hdim)
@@ -113,8 +124,22 @@ def new_chunk_scan(cb, x_chunked, dt_t, dA_cumsum_t, C, states, output, D=None, 
                   chunk_size).expand(nchunks, ngroups, nheads_ngroups_ratio, chunk_size,
                                      chunk_size).reshape(nchunks, nheads, chunk_size, chunk_size))
     states = states.float()
-    init = torch.zeros_like(states[:1]) if initial_states is None else initial_states.float()
-    prev_states = torch.cat([init, states[:-1]], dim=0)
+    # Construct prev_states: the state entering each chunk.
+    # For multi-sequence batched prefill, insert per-sequence initial
+    # states at sequence boundaries instead of one global init.
+    if chunks_per_sequence is not None and chunks_per_sequence < nchunks:
+        batch_size = nchunks // chunks_per_sequence
+        cps = chunks_per_sequence
+        if initial_states is None:
+            init = torch.zeros(batch_size, 1, nheads, *states.shape[2:], device=states.device, dtype=states.dtype)
+        else:
+            init = initial_states.float().unsqueeze(1)  # [B, 1, H, D, S]
+        states_seq = states.view(batch_size, cps, nheads, *states.shape[2:])
+        prev_states = torch.cat([init, states_seq[:, :-1]], dim=1)  # [B, cps, H, D, S]
+        prev_states = prev_states.reshape(nchunks, nheads, *states.shape[2:])
+    else:
+        init = torch.zeros_like(states[:1]) if initial_states is None else initial_states.float()
+        prev_states = torch.cat([init, states[:-1]], dim=0)
     if D is not None:
         D = D.float()
     if z is not None:
@@ -137,19 +162,22 @@ def new_chunk_scan(cb, x_chunked, dt_t, dA_cumsum_t, C, states, output, D=None, 
     output.copy_(out)
 
 
-def new_ssd_state_passing(states, dA_cumsum, initial_states=None, out_dtype=None):
+def new_ssd_state_passing(states, dA_cumsum, initial_states=None, out_dtype=None, chunks_per_sequence=None):
     """
     Arguments:
         states: Tensor - (nchunks, nheads, hdim)
         dA_cumsum: Tensor - (nheads, nchunks, chunk_size)
-        initial_states: Optional Tensor - (1, nheads, hdim)
+        initial_states: Optional Tensor - (batch, nheads, hdim)
         out_dtype: Optional dtype
+        chunks_per_sequence: Optional int - if set, treats the input as
+            multiple independent sequences each with this many chunks.
+            Enables batched prefill for hybrid Mamba models.
     Return:
         output: Tensor - (nchunks, nheads, hdim)
 
     Note:
         This implementation uses a parallel prefix-sum approach via a full
-        (nheads, nchunks+1, nchunks+1) decay matrix and batched matmul,
+        decay matrix and batched matmul,
         trading O(nchunks^2) memory for O(1) sequential depth (fully parallel).
         This is intentional for performancel. For extremely large nchunks,
         memory usage may become significant; in such cases, consider chunking
@@ -160,6 +188,51 @@ def new_ssd_state_passing(states, dA_cumsum, initial_states=None, out_dtype=None
     out_dtype = states.dtype if out_dtype is None else out_dtype
     device = states.device
 
+    # Multi-sequence batched path: treat as B independent sequences
+    if chunks_per_sequence is not None and chunks_per_sequence < nchunks:
+        batch_size = nchunks // chunks_per_sequence
+        cps = chunks_per_sequence
+        n = cps + 1  # +1 for prepended initial state per sequence
+
+        # Reshape states: [nchunks, H, D] -> [B, cps, H, D]
+        states_seq = states.view(batch_size, cps, nheads, hdim)
+
+        # Per-sequence initial states
+        if initial_states is not None:
+            init = initial_states  # (batch, nheads, hdim)
+        else:
+            init = torch.zeros(batch_size, nheads, hdim, device=device, dtype=states.dtype)
+
+        # Prepend init per sequence: [B, cps+1, H, D]
+        init_expanded = init.unsqueeze(1)  # [B, 1, H, D]
+        all_states_seq = torch.cat([init_expanded, states_seq], dim=1)
+
+        # Per-sequence dA_last: [H, nchunks] -> [H, B, cps]
+        dA_last = dA_cumsum[:, :, -1]
+        dA_last_seq = dA_last.view(nheads, batch_size, cps)
+
+        # Build per-sequence decay matrices: [H, B, n, n]
+        dA_padded = F.pad(dA_last_seq, (1, 0))  # [H, B, cps+1]
+        cumsum_seq = torch.cumsum(dA_padded, dim=-1)  # [H, B, n]
+        segsum = cumsum_seq.unsqueeze(-1) - cumsum_seq.unsqueeze(-2)  # [H, B, n, n]
+        decay = torch.tril(torch.exp(segsum))  # [H, B, n, n]
+
+        # Flatten H*B for batched matmul
+        HB = nheads * batch_size
+        decay_flat = decay.view(HB, n, n)
+        all_states_t = all_states_seq.permute(2, 0, 1, 3)  # [H, B, n, D]
+        all_states_flat = all_states_t.reshape(HB, n, hdim)
+
+        new_states_flat = torch.bmm(decay_flat, all_states_flat)  # [HB, n, D]
+        new_states = new_states_flat.view(nheads, batch_size, n, hdim)
+
+        # Extract output: skip init position (index 0)
+        out = new_states[:, :, 1:, :].permute(1, 2, 0, 3)  # [B, cps, H, D]
+        out = out.reshape(nchunks, nheads, hdim)
+
+        return out.to(out_dtype)
+
+    # Original single-sequence path
     # Per-chunk total decay: dA_cumsum[:, c, -1] gives the cumulative
     # log-decay across all positions within chunk c.
     dA_last = dA_cumsum[:, :, -1]  # (nheads, nchunks)
