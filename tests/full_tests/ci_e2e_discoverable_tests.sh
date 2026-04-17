@@ -347,7 +347,7 @@ run_gsm8k_qwen3_30b_test() {
 # we can remove the pip version pinning and restoration in this test and just rely on the environment having the right versions.
 run_gsm8k_qwen35_35b_a3b_test() {
     echo "➡️ Testing GSM8K on Qwen3.5-35B-A3B..."
-    VLLM_SKIP_WARMUP=True ENABLE_APC=False VLLM_FUSED_BLOCK_SOFTMAX_ADJUSTMENT=False VLLM_GRAPH_RESERVED_MEM=0.5 \
+    VLLM_SKIP_WARMUP=True ENABLE_APC=False VLLM_FUSED_BLOCK_SOFTMAX_ADJUSTMENT=False VLLM_GRAPH_RESERVED_MEM=0.8 \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen3.5-35b-a3b.yaml"
     echo "✅ Test with Qwen3.5-35B-A3B passed."
 }
