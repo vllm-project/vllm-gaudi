@@ -4973,7 +4973,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         # the actual last chunk size. Recompute context blocks
                         # so that ctx * block_size + query_len <= max_model_len
                         # and scheduled tokens == prompt_query_len exactly.
-                        capped_ctx = ((self.max_model_len - prompt_query_len) // self.block_size)
+                        capped_ctx = max(0, (self.max_model_len - prompt_query_len) // self.block_size)
                         prompt_num_context_blocks = [capped_ctx]
                         prompt_total_tokens = [capped_ctx * self.block_size + prompt_query_len]
             for _ in range(prompt_bs):

@@ -252,7 +252,7 @@ class HPUBucketingManager():
             if is_prompt:
                 # For prompt buckets, cap to the theoretical max number of
                 # context blocks derived from max_model_len.
-                max_prompt_ctx = math.ceil(self.max_model_len / self.block_size)
+                max_prompt_ctx = math.ceil((self.max_model_len - 1) / self.block_size)
                 if new_ctx > max_prompt_ctx:
                     logger().warning(f"Fallback prompt ctx {new_ctx} exceeds theoretical "
                                      f"max {max_prompt_ctx} (max_model_len="
