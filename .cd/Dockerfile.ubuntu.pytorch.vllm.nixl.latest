@@ -67,7 +67,13 @@ RUN \
 # Install torchaudio (CPU wheel, matching PyTorch version in base image)
 RUN pip install --no-cache-dir --no-deps --extra-index-url https://download.pytorch.org/whl/cpu torchaudio==${PT_VERSION}
 
-# Install additional Python packages
+# Workaround: Gaudi base image bundles HPU-patched PyTorch (e.g. 2.10.0a0+git...)
+# which doesn't satisfy torchvision/torchaudio's strict torch==X.Y.Z pin.
+# Relax the requirement in installed package metadata so pip check passes.
+RUN SITE=$(python3 -c "import site; print(site.getsitepackages()[0])") && \
+    TORCH_VER=$(python3 -c "import torch; v=torch.__version__.split('+')[0].split('a')[0]; print(v)") && \
+    find "$SITE" \( -path "*/torchvision*.dist-info/METADATA" -o -path "*/torchaudio*.dist-info/METADATA" \) \
+      -exec sed -i "s/Requires-Dist: torch (==${TORCH_VER})/Requires-Dist: torch (>=${TORCH_VER}a0,<${TORCH_VER%.*}.$((${TORCH_VER##*.}+1)))/" {} +
 RUN pip install datasets && \
     pip install pandas && pip install lm-eval lm-eval[api] && \
     pip install pytest pytest_asyncio pytest-timeout
