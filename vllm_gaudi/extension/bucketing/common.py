@@ -488,6 +488,14 @@ def generate_buckets(bs_range,
                         ctx = edge_ctx
                 if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
                     buckets.add(corrector(bs, query, ctx))
+    if file_buckets and omitted_buckets:
+        phase = 'prompt' if is_prompt else 'decode'
+        logger().warning(
+            "The following %s buckets from custom bucketing file "
+            "(VLLM_BUCKETING_FROM_FILE) were omitted during warmup:", phase)
+        for bucket in sorted(omitted_buckets):
+            logger().warning("  %s", bucket)
+
     if not buckets:
         phase = 'prompt' if is_prompt else 'decode'
         for bucket in omitted_buckets:
