@@ -279,6 +279,10 @@ class HPUMambaMixer2(MambaMixer2):
         hidden_states: torch.Tensor,
         mup_vector: torch.Tensor | None = None,
     ):
+        # Save original batch shape for output reshape.
+        # Input is [batch_size, seq_len, hidden] for prefill or
+        # [num_tokens, 1, hidden] / [num_tokens, hidden] for decode.
+        prefill_shape = hidden_states.shape[:-1]  # (batch_size, seq_len) or (num_tokens,) etc.
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
         # 1. Split in_proj into two GEMMs for TPC/MME pipelining.
@@ -315,9 +319,9 @@ class HPUMambaMixer2(MambaMixer2):
         output, _ = self.out_proj(hidden_states_varlen)
 
         if get_forward_context().attn_metadata.is_prompt:
-            output = output.view(1, output.shape[0], output.shape[1])
+            output = output.view(*prefill_shape, output.shape[-1])
         else:
-            output = output.view(output.shape[0], 1, output.shape[1])
+            output = output.view(output.shape[0], 1, output.shape[-1])
 
         return output
 
@@ -404,6 +408,9 @@ class HPUMambaMixer2(MambaMixer2):
             hidden_states_B_C = hidden_states_B_C * padding_mask_flat
             dt = dt * padding_mask_flat
 
+            # Determine batch size for multi-sequence prefill
+            prefill_batch_size = query_start_loc_p.numel() - 1
+
             hidden_states_B_C = granite_causal_conv1d_fn(
                 x,
                 self.conv_weights,
@@ -430,6 +437,20 @@ class HPUMambaMixer2(MambaMixer2):
                     0,
                 )
 
+            # For multi-batch prefill (BS > 1), the flattened tensor is in
+            # padded layout: [BS * target_seq, dim].  The SSM must treat
+            # each target_seq block as an independent sequence.
+            ssm_cu_seqlens = query_start_loc_p
+            chunks_per_sequence = None
+            if prefill_batch_size > 1:
+                total_tokens = hidden_states_B_C.shape[0]
+                target_seq = total_tokens // prefill_batch_size
+                # Padded cu_seqlens: [0, target_seq, 2*target_seq, ...]
+                ssm_cu_seqlens = (
+                    torch.arange(prefill_batch_size + 1, device=hidden_states_B_C.device, dtype=torch.int32) *
+                    target_seq)
+                chunks_per_sequence = target_seq // chunk_size
+
             # NOTE: final output is an in-place update of out tensor
             varlen_states = hpu_mamba_chunk_scan_combined_varlen(
                 hidden_states_p.view(hidden_states_p.shape[0], self.num_heads // self.tp_size, self.head_dim),
@@ -441,7 +462,7 @@ class HPUMambaMixer2(MambaMixer2):
                 D=self.D,
                 z=None,
                 dt_bias=self.dt_bias,
-                cu_seqlens=query_start_loc_p,
+                cu_seqlens=ssm_cu_seqlens,
                 last_chunk_indices=last_chunk_indices_p,
                 initial_states=initial_states,
                 dt_softplus=True,
@@ -449,6 +470,7 @@ class HPUMambaMixer2(MambaMixer2):
                 out=output.view(output.shape[0], -1, self.head_dim),
                 state_dtype=ssm_state.dtype,
                 padding_mask=padding_mask_flat,
+                chunks_per_sequence=chunks_per_sequence,
             )[last_chunk_indices_p]
             output = output * padding_mask_flat.view(output.shape[0], 1)
 

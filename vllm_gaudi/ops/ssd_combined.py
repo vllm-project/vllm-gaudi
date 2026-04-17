@@ -36,6 +36,7 @@ def _mamba_chunk_scan_combined_fwd(
         dt_limit=(0.0, float("inf")),
         state_dtype=None,
         padding_mask=None,
+        chunks_per_sequence=None,
 ):
     assert is_int_pow_2(chunk_size), "chunk_size must be integer power of 2"
     seqlen, nheads, headdim = x.shape
@@ -106,6 +107,7 @@ def _mamba_chunk_scan_combined_fwd(
         initial_states=initial_states.flatten(-2)
         if initial_states is not None else None,  # (batch, nheads, headdim*dstate)
         out_dtype=state_dtype if state_dtype is not None else C.dtype,
+        chunks_per_sequence=chunks_per_sequence,
     )
     states = states.view(states.shape[0], states.shape[1], -1, dstate)
 
@@ -130,6 +132,7 @@ def _mamba_chunk_scan_combined_fwd(
         D=D,
         z=z,
         initial_states=initial_states,
+        chunks_per_sequence=chunks_per_sequence,
     )
 
     return states
@@ -153,6 +156,7 @@ def hpu_mamba_chunk_scan_combined_varlen(
         dt_limit=(0.0, float("inf")),
         state_dtype=None,
         padding_mask=None,
+        chunks_per_sequence=None,
 ):
     """
     Argument:
@@ -172,6 +176,7 @@ def hpu_mamba_chunk_scan_combined_varlen(
         dt_softplus: Whether to apply softplus to dt
         out: (seqlen, nheads, headdim) preallocated output tensor
         state_dtype: The data type of the ssm state
+        chunks_per_sequence: Optional int - for multi-sequence batched prefill
     Return:
         varlen_states: (batch, nheads, headdim, dstate)
     """
@@ -196,6 +201,7 @@ def hpu_mamba_chunk_scan_combined_varlen(
         dt_limit=dt_limit,
         state_dtype=state_dtype,
         padding_mask=padding_mask,
+        chunks_per_sequence=chunks_per_sequence,
     )
 
     return varlen_states

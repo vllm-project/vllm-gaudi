@@ -2420,7 +2420,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             assert chunk_size > 0
             nphysical_chunks = target_seq // chunk_size
             assert nphysical_chunks > 0, (f"target_seq={target_seq} must be >= chunk_size={chunk_size}")
-            last_chunk_indices = [nphysical_chunks - 1 for _ in range(len(contents.req_ids))]
+            # For multi-batch prefill (BS>1), the SSM processes
+            # BS * target_seq tokens.  Each sequence occupies
+            # nphysical_chunks chunks in the flattened layout, so
+            # sequence i's last chunk is at (i+1)*nphysical_chunks - 1.
+            last_chunk_indices = [(i + 1) * nphysical_chunks - 1 for i in range(len(contents.req_ids))]
 
             num_prefill_reqs = len(contents.req_ids)
             all_state_indices_cpu = []

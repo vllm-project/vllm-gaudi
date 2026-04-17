@@ -55,26 +55,48 @@ def granite_causal_conv1d_fn(
     assert qsl is not None
 
     padded_batch = qsl.numel() - 1
-    if padded_batch != 1:
-        raise ValueError(f"'padded_batch' must be 1 but we get {padded_batch}")
     dim, cu_seqlen = x_work.shape
     _, width = weight_work.shape
     state_len = max(width - 1, 0)
 
-    if validate_data:
-        if x_work.dim() != 2:
-            raise ValueError("'x' must be 2-D (dim, cu_seq_len).")
-        if weight_work.shape != (dim, width):
-            raise ValueError("'weight' must have shape (dim, width).")
-        if bias_work is not None and bias_work.shape != (dim, ):
-            raise ValueError("'bias' must match the feature dimension.")
-        if not ((x_work.stride(0) == 1) or (x_work.stride(1) == 1)):
-            raise ValueError("Input tensor must be in channel-last or "
-                             "channel-first memory layout.")
-        if has_initial_state is not None \
-                and has_initial_state.numel() != padded_batch:
-            raise ValueError("'has_initial_state' must align with 'query_start_loc'.")
+    # --- Batched path for prefill BS > 1 ---
+    if padded_batch > 1:
+        target_seq = cu_seqlen // padded_batch
 
+        # Reshape from [dim, BS*target_seq] -> [BS, dim, target_seq]
+        x_batch = x_work.view(dim, padded_batch, target_seq).permute(1, 0, 2)
+
+        # Load per-sequence init states: [BS, state_len, dim]
+        if has_initial_state is not None:
+            raw_states = conv_states[cache_indices, -state_len:, :]  # [BS, state_len, dim]
+            mask = has_initial_state.view(-1, 1, 1).to(dtype=raw_states.dtype)
+            init_states = raw_states * mask  # zero out where no initial state
+        else:
+            init_states = torch.zeros(padded_batch, state_len, dim, device=x_work.device, dtype=work_dtype)
+        init_states = init_states.transpose(-1, -2)  # [BS, dim, state_len]
+
+        # Concatenate: [BS, dim, state_len + target_seq]
+        seq_input = torch.cat([init_states, x_batch], dim=2)
+
+        # Gather new states per-sequence at actual_len positions
+        actual_lens = (qsl[1:padded_batch + 1] - qsl[:padded_batch]).clamp(min=0)
+        col_offsets = torch.arange(state_len, device=x_work.device, dtype=torch.int64)
+        col_indices = (actual_lens.unsqueeze(-1).to(torch.int64) + col_offsets.unsqueeze(0))  # [BS, state_len]
+        col_indices = col_indices.unsqueeze(1).expand(-1, dim, -1)
+        new_states = torch.gather(seq_input, 2, col_indices)  # [BS, dim, state_len]
+
+        # Store new conv states (skip padding entries with actual_len==0)
+        conv_states[cache_indices, -state_len:, :] = new_states.transpose(-1, -2)
+
+        # Apply batched depthwise conv1d
+        seq_out = _depthwise_conv1d_tpc(seq_input, weight_work, bias_work)
+        seq_out = _apply_activation(seq_out, activation)
+
+        # Reshape back: [BS, dim, target_seq] -> [dim, BS*target_seq]
+        result = seq_out.permute(1, 0, 2).reshape(dim, cu_seqlen)
+        return result.to(original_dtype)
+
+    # --- Original single-sequence path (BS == 1) ---
     seq_x = x_work[:, :]
 
     # Get init_state for all batch
