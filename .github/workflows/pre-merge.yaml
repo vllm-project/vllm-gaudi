@@ -19,7 +19,7 @@ permissions:
   checks: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.head_sha || github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.pr_number || inputs.head_sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
