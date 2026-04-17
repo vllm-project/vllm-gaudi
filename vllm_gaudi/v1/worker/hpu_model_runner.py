@@ -700,6 +700,13 @@ class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
                                                                                input_ids.size(0), input_ids.size(1),
                                                                                input_ids.device, self.dtype,
                                                                                model_has_chunked_attention)
+        # Avoid 0/1 size specialization on block_list dim 0 for MoE models.
+        # Must be outside compiled regions — mark_unbacked is a forbidden callable.
+        if self.flatten_input:
+            attn_md = kwargs.get('attn_metadata')
+            if (attn_md is not None and getattr(attn_md, 'is_prompt', False)
+                    and getattr(attn_md, 'block_list', None) is not None):
+                _mark_unbacked_dim0(attn_md.block_list)
         if self._rotary_prepare_cos_sin is not None:
             self._rotary_prepare_cos_sin(kwargs['positions'], recompute_cos_sin=self.recompute_cos_sin)
         attn_meta = kwargs.pop('attn_metadata', None)
@@ -749,6 +756,11 @@ class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
     # @property
     # def sampler(self):
     #    return self.model.sampler
+
+
+@torch.compiler.disable
+def _mark_unbacked_dim0(tensor: torch.Tensor):
+    torch._dynamo.decorators.mark_unbacked(tensor, 0)
 
 
 def _maybe_wrap_in_hpu_graph(*args, **kwargs):
@@ -5500,6 +5512,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.is_encoder_only_attn = False
         self.may_add_encoder_only_layers_to_kv_cache_config()
         if self.num_mamba_like_layers > 0:
+            # Reassign block size for hybrid models after platform.py alignments
+            self.block_size = self.vllm_config.cache_config.block_size
             maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
         kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, self.attn_groups)
