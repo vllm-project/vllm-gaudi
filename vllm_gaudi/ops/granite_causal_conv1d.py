@@ -59,8 +59,9 @@ def granite_causal_conv1d_fn(
     assert qsl is not None
 
     padded_batch = qsl.numel() - 1
-    if padded_batch != 1:
-        raise ValueError(f"'padded_batch' must be 1 but we get {padded_batch}")
+    if padded_batch != 1 and enable_prefix_caching:
+        raise ValueError("Granite conv1d prefix caching currently supports a single "
+                         f"sequence per batch (padded_batch={padded_batch}).")
     dim, cu_seqlen = x_work.shape
     _, width = weight_work.shape
     state_len = max(width - 1, 0)
@@ -78,6 +79,59 @@ def granite_causal_conv1d_fn(
         if has_initial_state is not None \
                 and has_initial_state.numel() != padded_batch:
             raise ValueError("'has_initial_state' must align with 'query_start_loc'.")
+
+    # Fast batched path — bucketed prefill pads every sequence to the same
+    # length, so we can reshape to (B, dim, L) and process all sequences in
+    # one shot.  Used when prefix caching is off (which already constrains
+    # padded_batch == 1 above).
+    if padded_batch > 1 and cu_seqlen % padded_batch == 0 and not enable_prefix_caching:
+        seq_len_each = cu_seqlen // padded_batch
+
+        # (dim, B*L) -> (B, dim, L)
+        x_batch = x_work.reshape(dim, padded_batch, seq_len_each).permute(1, 0, 2)
+
+        # Gather initial conv state per sequence: (B, state_len, dim) -> (B, dim, state_len)
+        assert load_cache_indices is not None
+        if has_initial_state is not None:
+            raw_states = (conv_states.index_select(0, load_cache_indices.to(torch.int64))[:, -state_len:, :].transpose(
+                -1, -2))
+            his = has_initial_state
+            if his.numel() < padded_batch:
+                his = torch.nn.functional.pad(his, (0, padded_batch - his.numel()), value=0)
+            mask = his[:padded_batch].reshape(-1, 1, 1).to(dtype=raw_states.dtype)
+            init_states = raw_states * mask
+        else:
+            init_states = torch.zeros(padded_batch, dim, state_len, device=x_work.device, dtype=work_dtype)
+
+        seq_input = torch.cat([init_states, x_batch], dim=2)  # (B, dim, state_len + L)
+
+        # Gather new conv state from the ACTUAL end of each sequence
+        # (rather than the padded end) using per-sequence query lengths.
+        actual_qlens = (qsl[1:padded_batch + 1] - qsl[:padded_batch]).clamp(min=0)
+        col_offsets = torch.arange(state_len, device=x_work.device, dtype=torch.int64)
+        col_indices = actual_qlens.unsqueeze(-1).to(torch.int64) + col_offsets.unsqueeze(0)
+        col_indices = col_indices.unsqueeze(1).expand(-1, dim, -1)
+        new_states = torch.gather(seq_input, 2, col_indices)  # (B, dim, state_len)
+
+        # Convolve batched: (B, dim, L)
+        seq_out_batch = _depthwise_conv1d_tpc(seq_input, weight_work, bias_work)
+        seq_out_batch = _apply_activation(seq_out_batch, activation)
+
+        # (B, dim, L) -> (dim, B*L)
+        seq_out = seq_out_batch.permute(1, 0, 2).reshape(dim, cu_seqlen)
+
+        # Write back conv states only for sequences with real tokens.
+        assert store_cache_indices is not None
+        store_idx_long = store_cache_indices.to(torch.int64)
+        update_mask = (actual_qlens > 0).view(-1, 1, 1)
+        new_states_t = new_states.transpose(-1, -2)  # (B, state_len, dim)
+        existing_states = conv_states.index_select(0, store_idx_long)[:, -state_len:, :]
+        conv_states[store_idx_long, -state_len:, :] = torch.where(update_mask, new_states_t, existing_states)
+
+        return seq_out.to(original_dtype)
+
+    if padded_batch != 1:
+        raise ValueError(f"'padded_batch' must be 1 but we get {padded_batch}")
 
     seq_x = x_work[:, :]
 
