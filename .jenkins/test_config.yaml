@@ -1,7 +1,7 @@
 # test_config.yaml
 #
 # Bundle optimization (based on build #482 actual timings):
-#   - Original 23 pods consolidated to 8 pods (23 cards total)
+#   - Original 23 pods consolidated to 7 pods (22 cards total)
 #   - Card sizes: g3=1, g3.s=2, g3.l=8, g2.l=8
 #   - All bundles target ≤37min wall-clock
 #   - Tests grouped by flavor compatibility
@@ -16,19 +16,19 @@ stages:
         command: >-
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_cpu_offloading_test &&
           HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_ngram_test
-      # --- g3.s: accuracy + TP=2 tests (~20min, 2 cards) ---
-      #   pd_nixl removed — requires RDMA/privileged access (stays in GH Actions CI)
+      # --- g3.s: TP=2 tests (~15min, 2 cards) ---
+      #   run_accuracy_test moved to calib bundle (needs 3+ cards for NIXL PD TP=2)
       - name: e2e_accuracy_tp2_bundle
         flavor: g3.s
         command: >-
           pip install lm-eval[api] &&
-          bash -c 'cd tests/unit_tests && ./run_accuracy_test.sh' &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_deepseek_v2_inc_dynamic_tp2_load_generate_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_qwen3_30b_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_tp2_load_generate_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_vl_load_generate_test
-      # --- g3.l Bin A: unit_tests + eagle3 + w4a16 + calibration (~34min, 8 cards) ---
+      # --- g3.l: unit_tests + eagle3 + w4a16 + calibration + accuracy (~37min, 8 cards) ---
       #   Uses g3.l because unit_tests needs 8 cards for offloading test
+      #   run_accuracy_test (NIXL PD) moved here — needs 3+ cards for prefill + decode TP=2
       - name: e2e_unittests_eagle3_calib_bundle
         flavor: g3.l
         command: >-
@@ -40,9 +40,11 @@ stages:
           HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_eagle3_num_spec_2_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_compressed_w4a16_moe_gidx_load_generate_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_compressed_w4a16_channelwise_load_generate_test &&
-          bash tests/full_tests/run_with_junit.sh calibration_arg_parsing bash tests/calibration_tests/test_calibrate_model_arg_parsing.sh
-      # --- g3 Bin B: multimodal (qwen2.5-vl, mistral3) + offloading + embedding (~30min, 1 card) ---
-      - name: e2e_multimodal_offloading_embedding_bundle
+          bash tests/full_tests/run_with_junit.sh calibration_arg_parsing bash tests/calibration_tests/test_calibrate_model_arg_parsing.sh &&
+          pip install lm-eval[api] &&
+          bash -c 'cd tests/unit_tests && ./run_accuracy_test.sh'
+      # --- g3 Bin A: multimodal + offloading + embedding + quantization + gemma3 + ernie (~35min, 1 card) ---
+      - name: e2e_multimodal_quant_bundle
         flavor: g3
         command: >-
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen2_5_vl_load_generate_test &&
@@ -50,18 +52,14 @@ stages:
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen2_5_vl_compile_warmup_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_offloading_connector_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_embedding_model_test &&
-          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_mistral3_load_generate_test
-      # --- g3 Bin C: quantization (awq, gptq, inc) + gemma3 + ernie_vl (~31min, 1 card) ---
-      - name: e2e_quant_gemma3_llama70b_ernie_bundle
-        flavor: g3
-        command: >-
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_mistral3_load_generate_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gptq_load_generate_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_awq_load_generate_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gemma3_load_generate_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_basic_load_generate_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_llama3_70b_inc_dynamic_quant_load_generate_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_ernie4.5_vl_test
-      # --- g3 Bin D: qwen3_moe + deepseek_v2 + gsm8k (~31min, 1 card) ---
+      # --- g3 Bin B: qwen3_moe + deepseek_v2 + gsm8k (~31min, 1 card) ---
       - name: e2e_qwen3moe_deepseek_bundle
         flavor: g3
         command: >-
@@ -72,7 +70,7 @@ stages:
           HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_mla_moe_load_generate_test &&
           HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_deepseek_v2_inc_load_generate_test &&
           HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_deepseek_test
-      # --- g3 Bin E: perf + fp8 (qwen3, dsv2_blockfp8) (~34min, 1 card) ---
+      # --- g3 Bin C: perf + fp8 (qwen3, dsv2_blockfp8) (~34min, 1 card) ---
       - name: e2e_perf_fp8_blockfp8_bundle
         flavor: g3
         command: >-
@@ -82,7 +80,7 @@ stages:
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_dsv2_blockfp8_static_scaling_fp8kv_load_generate_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test
-      # --- g3 Bin F: granite + scaling + sleep + structured_output + preemption (~33min, 1 card) ---
+      # --- g3 Bin D: granite + scaling + sleep + structured_output + preemption (~33min, 1 card) ---
       - name: e2e_granite_scaling_sleep_preemption_bundle
         flavor: g3
         command: >-
