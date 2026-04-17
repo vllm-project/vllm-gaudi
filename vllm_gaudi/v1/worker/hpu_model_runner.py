@@ -1104,6 +1104,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # index is `s * num_gdn_groups + g + 1` (1-based, slot 0 unused).
         # Tensor size: max_num_reqs * num_gdn_groups + 2.
         self._compact_gdn_enabled = os.environ.get("VLLM_COMPACT_GDN", "1").strip().lower() in ("1", "true")
+        # VLLM_COMPACT_MAMBA2: opt-in compact slot allocation for standard
+        # Mamba2 state tensors (conv_state, ssm_state).  When enabled, the
+        # state table is sized by max_num_reqs (like GDN compact) instead
+        # of num_blocks, freeing HBM at long context.  Incompatible with
+        # prefix caching (which relies on block-indexed state scatter) —
+        # disabled automatically when prefix caching is on.  EXPERIMENTAL.
+        self._compact_mamba2_enabled = (
+            os.environ.get("VLLM_COMPACT_MAMBA2", "0").strip().lower() in ("1", "true")
+            and not self.vllm_config.cache_config.enable_prefix_caching)
+        if (os.environ.get("VLLM_COMPACT_MAMBA2", "0").strip().lower() in ("1", "true")
+                and self.vllm_config.cache_config.enable_prefix_caching):
+            logger.warning("VLLM_COMPACT_MAMBA2 disabled: incompatible with prefix caching.")
         self._compact_gdn_group_ids: set[int] = set()
         self._compact_gdn_group_offset: dict[int, int] = {}  # {group_idx: g_offset}
         self._num_gdn_groups = 0  # set during initialize_kv_cache
@@ -5685,6 +5697,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 1 for g in kv_cache_config.kv_cache_groups
                 if isinstance(g.kv_cache_spec, MambaSpec) and g.kv_cache_spec.mamba_type in ("gdn_attention",
                                                                                              "linear_attention"))
+        # When compact Mamba2 is enabled, fold Mamba2 groups into the
+        # shared compact group counter so prepare_mamba_state_idxs' slot
+        # offset math stays consistent (slot = base * num_compact + g_offset + 1).
+        if self.num_mamba_like_layers > 0 and self._compact_mamba2_enabled:
+            num_mamba2 = sum(1 for g in kv_cache_config.kv_cache_groups
+                             if isinstance(g.kv_cache_spec, MambaSpec) and g.kv_cache_spec.mamba_type == "mamba2")
+            self._num_gdn_groups = getattr(self, "_num_gdn_groups", 0) + num_mamba2
         # Profiling may request more sequences than max_num_seqs
         # (e.g. VLLM_PROFILE_DECODE=16,64 with max_num_seqs=1).
         # Ensure GDN compact tensors and free-list are large enough.
@@ -5720,6 +5739,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         continue
                     if isinstance(spec, MambaSpec) and \
                             spec.mamba_type in ("gdn_attention", "linear_attention"):
+                        continue
+                    if isinstance(spec, MambaSpec) and \
+                            spec.mamba_type == "mamba2" and \
+                            self._compact_mamba2_enabled:
+                        # Compact Mamba2 allocates its own contiguous tensors,
+                        # so no raw as_strided buffer is required.
                         continue
                     # Standard Mamba2 or unknown spec — needs raw buffer
                     return True
@@ -5804,6 +5829,32 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             target_shape = (num_blocks + 1, *shape)
                             tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
                             state_tensors.append(tensor)
+                        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+                            if layer_name not in kv_cache_tensor.shared_by:
+                                continue
+                            for shared_layer in kv_cache_tensor.shared_by:
+                                kv_caches[shared_layer] = tuple(state_tensors)
+                            break
+                    elif isinstance(kv_cache_spec, MambaSpec) and \
+                            kv_cache_spec.mamba_type == "mamba2" and \
+                            self._compact_mamba2_enabled:
+                        # Mamba2 compact allocation (EXPERIMENTAL).
+                        # Mirrors GDN compact path: allocate max_num_reqs *
+                        # num_compact_groups + 2 slots instead of num_blocks+1,
+                        # decoupling Mamba state HBM from attention block count.
+                        # Requires prefix caching disabled (guarded at flag init).
+                        self._compact_gdn_group_ids.add(group_idx)
+                        if isinstance(kv_caches.get(layer_name), tuple):
+                            continue
+                        compact_max_reqs = getattr(self, "_gdn_max_reqs", self.max_num_reqs)
+                        compact_total = compact_max_reqs * self._num_gdn_groups + 2
+                        state_tensors = []
+                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                            target_shape = (compact_total, *shape)
+                            tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
+                            state_tensors.append(tensor)
+                        logger.debug("Mamba2 compact tensor: %d slots (max_reqs=%d * groups=%d + 2) vs baseline %d",
+                                     compact_total, compact_max_reqs, self._num_gdn_groups, num_blocks + 1)
                         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
                             if layer_name not in kv_cache_tensor.shared_by:
                                 continue
