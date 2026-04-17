@@ -244,7 +244,32 @@ class HpuPlatform(Platform):
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
-        super().update_block_size_for_backend(vllm_config)
+
+        cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
+
+        # Granite 4.0-H (granitemoehybrid) needs FA-style 16-token block
+        # alignment so that the minimum KV-cache block fitting the mamba page
+        # is 528 tokens, matching GPU behaviour.  The upstream
+        # _align_hybrid_block_size derives the alignment from
+        #   max(min(supported_kernel_block_sizes), cache_config.block_size)
+        # which is pinned at 128 because HPU sets block_size=128 in
+        # check_and_update_config.  We temporarily lower block_size to the
+        # vLLM default (16) and flag it as "user-specified" to prevent phase 1
+        # of super().update_block_size_for_backend from overriding it, then
+        # let _align_hybrid_block_size compute the correct 528-token size.
+        is_granite_hybrid = (model_config is not None
+                             and getattr(model_config.hf_config, "model_type", None) == "granitemoehybrid")
+        if is_granite_hybrid:
+            cache_config.block_size = 16
+            if not cache_config.user_specified_block_size:
+                cache_config.user_specified_block_size = True
+                super().update_block_size_for_backend(vllm_config)
+                cache_config.user_specified_block_size = False
+            else:
+                super().update_block_size_for_backend(vllm_config)
+        else:
+            super().update_block_size_for_backend(vllm_config)
 
     @classmethod
     def is_pin_memory_available(cls):

@@ -4215,21 +4215,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         return model_runner_output
 
-    def _post_process_module(self, model: torch.nn.Module) -> None:
-        # Recursively invoke _post_process_weight for all submodules that have it.
-        # NOTE: We cannot use model.apply() here because some layers (e.g.
-        # LoRA's base_linear) override apply() as a forward-pass method,
-        # which would incorrectly treat the callback as a tensor input.
-        # Instead we use model.modules() which yields all submodules without
-        # calling any overridden apply() method.
-        cnt_post_process = 0
-        for module in model.modules():
-            if hasattr(module, "_post_process_weight") and callable(module._post_process_weight):
-                cnt_post_process += 1
-                module._post_process_weight()  # type: ignore[attr-defined]
-        if cnt_post_process > 0:
-            logger.info("Invoked _post_process_weight for %d modules.", cnt_post_process)
-
     @with_thread_limits()
     def load_model(self) -> None:
         import habana_frameworks.torch.core as htcore
@@ -4283,7 +4268,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             logger.info("Preparing model with INC took %.4f GB", self.model_memory_usage / float(2**30))
         elif not is_fake_hpu():
             self.model = self.model.to("hpu")
-            self._post_process_module(self.model)
             htcore.mark_step()
 
         apply_model_specific_patches(self)
@@ -5528,6 +5512,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.is_encoder_only_attn = False
         self.may_add_encoder_only_layers_to_kv_cache_config()
         if self.num_mamba_like_layers > 0:
+            # Reassign block size for hybrid models after platform.py alignments
+            self.block_size = self.vllm_config.cache_config.block_size
             maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
         kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, self.attn_groups)
