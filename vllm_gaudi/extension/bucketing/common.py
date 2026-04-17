@@ -401,6 +401,30 @@ def generate_buckets(bs_range,
             omitted_buckets.add(("condition: bs <= ctx, ", "-> bs, query, ctx: ", bs, query, ctx))
         return bs <= ctx
 
+    # Optional HBM-budget decode filter.  Set VLLM_DECODE_BS_CTX_BUDGET to
+    # limit the bs * ctx product (in blocks) across all decode buckets.
+    # This lets a single server handle both short-context large-batch and
+    # long-context small-batch workloads by generating buckets across a
+    # wide bs range (via VLLM_DECODE_BS_BUCKET_MAX) while capping HBM use:
+    # e.g. budget=65536 with block_size=128 allows bs=64 @ ctx=1024 blocks
+    # (~131k tokens worth) or bs=8 @ ctx=8192 blocks from the same bucket
+    # set.  At runtime find_decode_bucket naturally routes each request to
+    # the closest equal-or-greater (bs, ctx) tuple.
+    _decode_bs_ctx_budget_env = os.environ.get("VLLM_DECODE_BS_CTX_BUDGET")
+    try:
+        _decode_bs_ctx_budget = int(_decode_bs_ctx_budget_env) if _decode_bs_ctx_budget_env else 0
+    except ValueError:
+        _decode_bs_ctx_budget = 0
+
+    def bs_ctx_under_budget(bs, query, ctx):
+        if _decode_bs_ctx_budget <= 0:
+            return True
+        within = bs * ctx <= _decode_bs_ctx_budget
+        if not within:
+            omitted_buckets.add(
+                ("condition: bs * ctx <= VLLM_DECODE_BS_CTX_BUDGET", "-> bs, query, ctx: ", bs, query, ctx))
+        return within
+
     filters_map = {
         "prompt": {
             # depends only on merged_prefill
@@ -409,8 +433,8 @@ def generate_buckets(bs_range,
         },
         "decode": {
             # depends only on contiguous PA
-            True: [],
-            False: [batch_size_smaller_than_blocks],
+            True: [bs_ctx_under_budget],
+            False: [batch_size_smaller_than_blocks, bs_ctx_under_budget],
         }
     }
 
