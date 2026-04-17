@@ -251,7 +251,8 @@ def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", 
                 # If remote_blocks and num_external_tokens = 0, we have
                 # a full prefix cache hit on the D worker. We need to call
                 # send_notif in _read_blocks to free the memory on the P.
-                local_block_ids = (blocks.get_unhashed_block_ids_all_groups() if num_external_tokens > 0 else [])
+                local_block_ids = (blocks.get_unhashed_block_ids_all_groups() if num_external_tokens > 0 else ())
+                local_block_ids = self.get_sw_clipped_blocks(local_block_ids)
                 # Get unhashed blocks to pull from remote.
                 self._reqs_need_recv[request.request_id] = (
                     request,
@@ -338,7 +339,7 @@ def build_connector_meta(
 def request_finished(
     self,
     request: "Request",
-    block_ids: list[int],
+    block_ids,
 ) -> tuple[bool, dict[str, Any] | None]:
     """
     Once a request is finished, determine whether request blocks
