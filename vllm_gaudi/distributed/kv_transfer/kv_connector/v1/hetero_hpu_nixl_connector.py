@@ -170,10 +170,14 @@ def wait_for_save(self):
         self.connector_worker.kv_caches_postprocess(self._connector_metadata)
 
 
-def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str):
+def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config):
     """Implementation of Scheduler side methods"""
 
     self.vllm_config = vllm_config
+    self.kv_cache_config = kv_cache_config
+    self._is_hma_required = False
+    self._has_mamba = False
+    self.blocks_per_sw = []
     self.block_size = vllm_config.cache_config.block_size
     self.kv_cache_layout = get_kv_cache_layout()
     self.engine_id: EngineId = engine_id  # type: ignore[misc]
@@ -413,7 +417,7 @@ def request_finished(
     )
 
 
-def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
+def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config):
     """Implementation of Worker side methods"""
 
     if NixlWrapper is None:
@@ -424,6 +428,13 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
 
     # Config.
     self.vllm_config = vllm_config
+    self.kv_cache_config = kv_cache_config
+    self._is_hma_required = False
+    self._has_mamba = False
+    self._is_mamba_group = []
+    self._mamba_ssm_size = (0, 0)
+    self._layer_specs = {}
+    self.hma_group_size = 1
     self.block_size = vllm_config.cache_config.block_size
 
     if vllm_config.kv_transfer_config is None:
@@ -589,7 +600,7 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
         remote_block_size=self._block_size,  # shared state
         is_mla=self.use_mla,
         total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
-        attn_backend=backend,
+        attn_backends=[backend],
     )
     self.compat_hash = compute_nixl_compatibility_hash(self.vllm_config, self.backend_name,
                                                        self.kv_topo.cross_layers_blocks)
@@ -752,6 +763,7 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         block_lens=block_len_per_layer_on_save,
         kv_cache_layout=self.kv_cache_layout_on_save if not self.use_host_buffer else self.host_buffer_kv_cache_layout,
         block_size=self.block_size_on_save,
+        ssm_sizes=(0, 0),
     )
     # Wrap metadata in payload with hash for defensive decoding
     encoder = msgspec.msgpack.Encoder()
