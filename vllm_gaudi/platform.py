@@ -407,7 +407,7 @@ class HpuPlatform(Platform):
     @classmethod
     def patch_for_pt27(cls) -> None:
 
-        from vllm.utils import is_torch_equal_or_newer
+        from vllm.utils.torch_utils import is_torch_equal_or_newer
         if is_torch_equal_or_newer("2.8.0"):
             return
 
@@ -422,5 +422,5 @@ class HpuPlatform(Platform):
                 return NotImplemented
             return parent_torch_function(func, types, args, kwargs)
 
-        BasevLLMParameter.__torch_function__ = classmethod(torch_function)
+        BasevLLMParameter.__torch_function__ = staticmethod(torch_function)  # type: ignore[assignment]
         return
