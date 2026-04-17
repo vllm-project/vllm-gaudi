@@ -405,7 +405,10 @@ class HPUMambaMixer2(MambaMixer2):
         if has_prefill:
             assert padding_mask_flat is not None
             x = hidden_states_B_C.transpose(0, 1)
-            hidden_states_B_C = hidden_states_B_C * padding_mask_flat
+            # NOTE: a prior mask of `hidden_states_B_C` before the conv was
+            # dead code — `x` already references the un-masked storage via
+            # transpose(), and `hidden_states_B_C` is rebound to the conv
+            # output below.  Only `dt` and the post-conv output need masking.
             dt = dt * padding_mask_flat
 
             hidden_states_B_C = granite_causal_conv1d_fn(
