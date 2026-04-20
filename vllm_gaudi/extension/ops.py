@@ -651,8 +651,13 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
         """Build and cache weight/bias *views only* (no torch.stack / no extra allocation)."""
         experts_range = range(self.num_experts)
 
-        self._cached_w13_views = tuple(self.w13_list[i].weight.squeeze() for i in experts_range)
-        self._cached_w2_views = tuple(self.w2_list[i].weight.squeeze() for i in experts_range)
+        # MXFP4 path: weights are not set in MoeMatmul (dequantized at runtime)
+        if hasattr(self.w13_list[0], 'weight') and self.w13_list[0].weight is not None:
+            self._cached_w13_views = tuple(self.w13_list[i].weight.squeeze() for i in experts_range)
+            self._cached_w2_views = tuple(self.w2_list[i].weight.squeeze() for i in experts_range)
+        else:
+            self._cached_w13_views = None
+            self._cached_w2_views = None
 
         # optional bias views (no copy)
         if self.bias is not None:

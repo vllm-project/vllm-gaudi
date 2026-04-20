@@ -574,11 +574,46 @@ def _init_mamba_split_weights(model):
             module._init_split_weights()
 
 
+def _init_mxfp4_shared_workspace(model):
+    """Allocate a shared BF16 workspace for MXFP4 MoE runtime dequantization.
+
+    Called after model.to("hpu"). All FusedMoE layers with MXFP4 packed weights
+    share a single workspace to minimize HBM usage (~5.94 GB instead of ~214 GB).
+    """
+    from vllm.model_executor.layers.fused_moe import FusedMoE
+    from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_BLOCK_SIZE
+
+    moe_layers = [m for m in model.modules()
+                  if isinstance(m, FusedMoE) and hasattr(m, 'w13_packed')]
+    if not moe_layers:
+        return
+
+    # All MoE layers have identical shapes — derive dimensions from the first
+    ref = moe_layers[0]
+    E, I2, groups_h, block_half = ref.w13_packed.shape
+    H = groups_h * OCP_MX_BLOCK_SIZE
+    _, _, groups_i, _ = ref.w2_packed.shape
+    intermediate_dim = groups_i * OCP_MX_BLOCK_SIZE
+    device = ref.w13_packed.device
+
+    # Single shared workspace reused across all layers (layers execute sequentially)
+    shared_w13_ws = torch.empty(E, I2, H, dtype=torch.bfloat16, device=device)
+    shared_w2_ws = torch.empty(E, H, intermediate_dim, dtype=torch.bfloat16, device=device)
+
+    for layer in moe_layers:
+        layer._shared_w13_workspace = shared_w13_ws
+        layer._shared_w2_workspace = shared_w2_ws
+
+    logger.info("MXFP4 shared workspace allocated: w13=%.2f GB, w2=%.2f GB (%d MoE layers sharing)",
+                shared_w13_ws.nbytes / 2**30, shared_w2_ws.nbytes / 2**30, len(moe_layers))
+
+
 def apply_model_specific_patches(model_runner):
     """The function applies model-specific monkey patches."""
     maybe_set_chunked_attention_layers(model_runner)
     patch_llama4_get_attn_scale(model_runner.model)
     _init_mamba_split_weights(model_runner.model)
+    _init_mxfp4_shared_workspace(model_runner.model)
 
 
 class HpuKVConnectorModelRunnerMixin(KVConnectorModelRunnerMixin):
