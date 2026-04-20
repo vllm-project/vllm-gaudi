@@ -346,7 +346,7 @@ run_gsm8k_qwen3_30b_test() {
 # LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only (baseline, no fsdpa_slicing)
 # Requires: pip install 'lm_eval[longbench]'
 run_longbench_qwen3_30b_fp8_static_test() {
-    echo "➡️ Testing LongBench (longbench_qasper) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only..."
+    echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only..."
     pip install 'lm_eval[longbench]' --quiet
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 TP_SIZE=2 \
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=600 \
@@ -358,7 +358,7 @@ run_longbench_qwen3_30b_fp8_static_test() {
 # Validates accuracy of the new fsdpa_slicing feature for long-context inference
 # Requires: pip install 'lm_eval[longbench]'
 run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_lazy_test() {
-    echo "➡️ Testing LongBench (longbench_qasper) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with BF16 KV cache + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=1..."
+    echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with BF16 KV cache + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=1..."
     pip install 'lm_eval[longbench]' --quiet
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 TP_SIZE=2 \
     VLLM_BUCKETING_STRATEGY=pad VLLM_HPU_FSDPA_SLICE_ENABLED=true \
@@ -371,7 +371,7 @@ run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_lazy_test() {
 # LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with FP8 KV cache and fsdpa slicing in lazy mode
 # Requires: pip install 'lm_eval[longbench]'
 run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_lazy_test() {
-    echo "➡️ Testing LongBench (longbench_qasper) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with KV_CACHE_DTYPE=fp8_inc + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=1..."
+    echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with KV_CACHE_DTYPE=fp8_inc + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=1..."
     pip install 'lm_eval[longbench]' --quiet
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 TP_SIZE=2 KV_CACHE_DTYPE=fp8_inc \
     VLLM_BUCKETING_STRATEGY=pad VLLM_HPU_FSDPA_SLICE_ENABLED=true \
@@ -384,7 +384,7 @@ run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_lazy_test() {
 # LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with BF16 KV cache and fsdpa slicing in torch.compile mode
 # Requires: pip install 'lm_eval[longbench]'
 run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test() {
-    echo "➡️ Testing LongBench (longbench_qasper) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with BF16 KV cache + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=0..."
+    echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with BF16 KV cache + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=0..."
     pip install 'lm_eval[longbench]' --quiet
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=0 TP_SIZE=2 \
     VLLM_BUCKETING_STRATEGY=pad VLLM_HPU_FSDPA_SLICE_ENABLED=true \
@@ -397,7 +397,7 @@ run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test() {
 # LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with FP8 KV cache and fsdpa slicing in torch.compile mode
 # Requires: pip install 'lm_eval[longbench]'
 run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test() {
-    echo "➡️ Testing LongBench (longbench_qasper) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with KV_CACHE_DTYPE=fp8_inc + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=0..."
+    echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with KV_CACHE_DTYPE=fp8_inc + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=0..."
     pip install 'lm_eval[longbench]' --quiet
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=0 TP_SIZE=2 KV_CACHE_DTYPE=fp8_inc \
     VLLM_BUCKETING_STRATEGY=pad VLLM_HPU_FSDPA_SLICE_ENABLED=true \
