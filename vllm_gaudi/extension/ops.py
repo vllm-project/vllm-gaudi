@@ -397,11 +397,11 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
     assert attn_bias is not None or valid_seq_lengths is not None, \
         'Either attn_bias or valid_seq_lengths must be != None'
 
-    # moved to ModuleFusedSDPA and ModuleFP8FusedSDPA after the dispatching for sliced FusedSDPA
-    # if is_causal and attn_bias is not None:
-    #     # TODO: causal + attn_bias is not yet supported
-    #     is_causal = False
-    #     valid_seq_lengths = None
+    # moved to ModuleFusedSDPA and ModuleFP8FusedSDPA after the dispatching for sliced FusedSDPA when INC is not used
+    if is_causal and attn_bias is not None and os.getenv("QUANT_CONFIG") is not None:
+        # TODO: causal + attn_bias is not yet supported
+        is_causal = False
+        valid_seq_lengths = None
 
     args = [
         query, key, value, attn_bias, 0.0, is_causal, scale, softmax_mode, recompute_mode, valid_seq_lengths,
