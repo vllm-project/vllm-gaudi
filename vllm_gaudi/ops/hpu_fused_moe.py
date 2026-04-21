@@ -261,13 +261,6 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             return output.view(*input_shape)
 
 
-def reduce_output(self, states: torch.Tensor) -> torch.Tensor:
-    if (not self.moe_config.is_sequence_parallel and not self.use_dp_chunking and self.reduce_results
-            and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)):
-        states = self.maybe_all_reduce_tensor_model_parallel(states)
-    return states
-
-
 def patched_fused_moe_forward(
     self,
     hidden_states: torch.Tensor,

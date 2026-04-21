@@ -4,7 +4,7 @@ from vllm.model_executor.models.qwen3_next import (
     Qwen3NextSparseMoeBlock,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
-from vllm.distributed import tensor_model_parallel_all_gather
+from vllm.distributed import tensor_model_parallel_all_gather, tensor_model_parallel_all_reduce
 
 # Save original forwards before patching
 _orig_qwen3next_attention_forward = Qwen3NextAttention.forward
@@ -95,7 +95,7 @@ def _hpu_qwen3next_sparse_moe_forward(
         final_hidden_states = tensor_model_parallel_all_gather(final_hidden_states, 0)
         final_hidden_states = final_hidden_states[:num_tokens]
     elif self.tp_size > 1:
-        final_hidden_states = (self.experts.maybe_all_reduce_tensor_model_parallel(final_hidden_states))
+        final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
     return final_hidden_states.reshape(orig_shape)
 
