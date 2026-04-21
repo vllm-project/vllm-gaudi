@@ -47,7 +47,7 @@ from vllm.platforms import current_platform
 
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
-    TpKVTopology,
+    TransferTopology,
     get_current_attn_backend,
     yield_req_data,
 )
@@ -593,17 +593,18 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
     self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
     self.xfer_stats = NixlKVConnectorStats()
 
-    self.kv_topo = TpKVTopology(
+    self.transfer_topo = TransferTopology(
         tp_rank=self.tp_rank,
+        tp_size=self.world_size,
+        block_size=self.block_size,
         engine_id=self.engine_id,
-        remote_tp_size=self._tp_size,  # shared state
-        remote_block_size=self._block_size,  # shared state
         is_mla=self.use_mla,
+        is_mamba=False,
         total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
-        attn_backend=backend,
+        attn_backends=[backend],
     )
     self.compat_hash = compute_nixl_compatibility_hash(self.vllm_config, self.backend_name,
-                                                       self.kv_topo.cross_layers_blocks)
+                                                       self.transfer_topo.cross_layers_blocks)
     self._physical_blocks_per_logical_kv_block = 1
 
 
@@ -639,7 +640,7 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
     # (roughly 8KB vs 5KB).
     # Conversely for FlashInfer, K and V are registered in the same region
     # to better exploit the memory layout (ie num_blocks is the first dim).
-    split_k_and_v = self.kv_topo.split_k_and_v
+    split_k_and_v = self.transfer_topo.split_k_and_v
     tensor_size_bytes = None
 
     # TODO (NickLucche): Get kernel_block_size in a cleaner way
@@ -711,7 +712,7 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
 
     self.device_kv_caches = kv_caches
     self.dst_num_blocks[self.engine_id] = self.num_blocks
-    if self.kv_topo.is_kv_layout_blocks_first:
+    if self.transfer_topo.is_kv_layout_blocks_first:
         for i in range(len(self.slot_size_per_layer)):
             assert self.slot_size_per_layer[i] % 2 == 0
             self.slot_size_per_layer[i] //= 2
@@ -799,7 +800,7 @@ def register_local_xfer_handler(
             # (addr, len, device id)
             blocks_data.append((addr, kv_block_len, self.device_id))
 
-        if self.kv_topo.is_kv_layout_blocks_first:
+        if self.transfer_topo.is_kv_layout_blocks_first:
             # Separate and interleave K/V regions to maintain the same
             # descs ordering. This is needed for selecting contiguous heads
             # when split across TP ranks.
@@ -847,7 +848,7 @@ def post_process_device_kv_on_save(self, block_ids: list[int]):
     if len(block_ids) == 0:
         return
     target_block_size = self.block_size_on_save
-    split_k_and_v = self.kv_topo.split_k_and_v
+    split_k_and_v = self.transfer_topo.split_k_and_v
     sample_cache = list(self.device_kv_caches.values())[0][0]
     indices = torch.tensor(block_ids, device=sample_cache.device)
 
@@ -877,7 +878,7 @@ def _read_blocks(
     Post a READ point-to-point xfer request from a single local worker to
     a single remote worker.
     """
-    block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(dst_engine_id)
+    block_size_ratio = self.transfer_topo.block_size_ratio(self._block_size[dst_engine_id])
     if block_size_ratio > 1:
         # NOTE:
         # get_mapped_blocks will always expand block_ids for n times.
