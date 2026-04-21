@@ -579,8 +579,10 @@ def apply_model_specific_patches(model_runner):
     maybe_set_chunked_attention_layers(model_runner)
     patch_llama4_get_attn_scale(model_runner.model)
     _init_mamba_split_weights(model_runner.model)
-    from vllm_gaudi.models.llama4 import is_hpu_llama4_model
+    from vllm_gaudi.models.llama4 import (apply_hpu_llama4_post_load_patches,
+                                          is_hpu_llama4_model)
     model_runner._has_heterogeneous_layers = is_hpu_llama4_model(model_runner.model)
+    apply_hpu_llama4_post_load_patches(model_runner.model)
 
 
 class HpuKVConnectorModelRunnerMixin(KVConnectorModelRunnerMixin):

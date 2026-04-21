@@ -16,7 +16,6 @@ This module provides:
      to eliminate torch._dynamo type guards across layers.
 """
 
-import logging
 import types
 from itertools import islice
 
@@ -25,6 +24,7 @@ import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
+from vllm.logger import init_logger
 from vllm.model_executor.models.llama4 import (
     Llama4ForCausalLM as UpstreamLlama4ForCausalLM,
     Llama4Model as UpstreamLlama4Model,
@@ -33,7 +33,7 @@ from vllm.model_executor.models.mllama4 import (
     Llama4ForConditionalGeneration as UpstreamLlama4ForConditionalGeneration, )
 from vllm.sequence import IntermediateTensors
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 
 class HpuLlama4Model(UpstreamLlama4Model):
@@ -91,17 +91,17 @@ class HpuLlama4ForCausalLM(UpstreamLlama4ForCausalLM):
         self.model.__class__ = HpuLlama4Model
 
         # Apply branch-free attention patches (only in compile mode)
+        # Note: _unify_feed_forward_types is deferred to post-load via
+        # apply_hpu_llama4_post_load_patches() to avoid breaking weight loading
+        # (wrapping changes named_parameters() keys and hides .experts attribute).
         if not htorch.utils.internal.is_lazy():
             layers = getattr(self.model, "layers", [])
             _apply_branch_free_attention(layers)
             unified = _unify_attention_types(layers)
-            ff_unified = _unify_feed_forward_types(layers)
             logger.info(
                 "HpuLlama4ForCausalLM: applied branch-free attention patches, "
-                "unified %d ChunkedLocalAttention -> Attention, "
-                "unified %d feed_forward modules",
+                "unified %d ChunkedLocalAttention -> Attention",
                 unified,
-                ff_unified,
             )
 
 
@@ -122,6 +122,11 @@ def _apply_branch_free_attention(layers):
         logger.warning("No RoPE layer found to reference rotary_emb from")
         return
 
+    # If no layer has qk_norm (use_qk_norm=False), install nn.Identity()
+    # so the branchfree forward can call self.qk_norm() unconditionally.
+    if ref_qk_norm is None:
+        ref_qk_norm = nn.Identity()
+
     patched = 0
     for layer in layers:
         attn = layer.self_attn
@@ -137,12 +142,15 @@ def _apply_branch_free_attention(layers):
 def _patch_attention_module(attn, ref_rotary_emb, ref_qk_norm):
     """Patch a single Llama4Attention module to be branch-free."""
     if attn.rotary_emb is None:
-        attn.rotary_emb = ref_rotary_emb
+        # Use object.__setattr__ to avoid nn.Module registering a shared
+        # reference as a submodule under multiple parent paths, which would
+        # confuse tools that walk named_modules() (quantization, FX tracing).
+        object.__setattr__(attn, "rotary_emb", ref_rotary_emb)
 
     # QK norm: install reference on NoPE layers that have None
     has_qk_norm = attn.qk_norm is not None
     if not has_qk_norm and ref_qk_norm is not None:
-        attn.qk_norm = ref_qk_norm
+        object.__setattr__(attn, "qk_norm", ref_qk_norm)
 
     device = next(attn.parameters()).device
     attn.register_buffer(
@@ -153,7 +161,7 @@ def _patch_attention_module(attn, ref_rotary_emb, ref_qk_norm):
     attn.register_buffer(
         "_apply_temp_tuning",
         torch.tensor(
-            getattr(attn, "attn_temperature_tuning", False) and attn.nope,
+            getattr(attn, "attn_temperature_tuning", False),
             dtype=torch.bool,
             device=device,
         ),
@@ -208,6 +216,11 @@ def _unify_attention_types(layers):
 
     Since ChunkedLocalAttention does NOT override forward(), the __class__
     swap is behaviorally identical. get_kv_cache_spec is preserved as instance method.
+
+    WARNING: After this swap, isinstance(x, ChunkedLocalAttention) returns False.
+    Currently safe because maybe_set_chunked_attention_layers uses string matching
+    on backend names. If upstream ever switches to isinstance checks, this will
+    need updating. A _was_chunked_local marker is set for future detection.
     """
     from vllm.model_executor.layers.attention.attention import Attention
     from vllm.model_executor.layers.attention.chunked_local_attention import (
@@ -219,6 +232,7 @@ def _unify_attention_types(layers):
     for layer in layers:
         attn_inner = layer.self_attn.attn
         if type(attn_inner) is ChunkedLocalAttention:
+            attn_inner._was_chunked_local = True
             attn_inner.__class__ = Attention
             attn_inner.get_kv_cache_spec = types.MethodType(chunked_get_kv_cache_spec, attn_inner)
             unified_count += 1
@@ -270,25 +284,48 @@ class HpuLlama4ForConditionalGeneration(UpstreamLlama4ForConditionalGeneration):
         self.language_model.model.__class__ = HpuLlama4Model
 
         # Apply branch-free attention patches (only in compile mode)
+        # Note: _unify_feed_forward_types is deferred to post-load via
+        # apply_hpu_llama4_post_load_patches() to avoid breaking weight loading.
         if not htorch.utils.internal.is_lazy():
             layers = getattr(self.language_model.model, "layers", [])
             _apply_branch_free_attention(layers)
             unified = _unify_attention_types(layers)
-            ff_unified = _unify_feed_forward_types(layers)
             logger.info(
                 "HpuLlama4ForConditionalGeneration: applied branch-free attention, "
-                "unified %d ChunkedLocalAttention -> Attention, "
-                "unified %d feed_forward modules",
+                "unified %d ChunkedLocalAttention -> Attention",
                 unified,
-                ff_unified,
             )
 
 
+def apply_hpu_llama4_post_load_patches(model) -> None:
+    """Apply patches that must run after load_weights().
+
+    _unify_feed_forward_types wraps feed_forward modules in a unified type.
+    This must happen after weight loading because the wrapper changes
+    named_parameters() keys (adds .inner.) and hides .experts attribute,
+    which would break load_moe_expert_weights() in upstream Llama4Model.
+
+    Called from apply_model_specific_patches() in hpu_model_runner.py.
+    """
+    if not is_hpu_llama4_model(model):
+        return
+    if htorch.utils.internal.is_lazy():
+        return
+
+    # Get layers from ConditionalGeneration or CausalLM
+    if isinstance(model, HpuLlama4ForConditionalGeneration):
+        layers = getattr(model.language_model.model, "layers", [])
+    else:
+        layers = getattr(model.model, "layers", [])
+
+    ff_unified = _unify_feed_forward_types(layers)
+    if ff_unified > 0:
+        logger.info("Post-load: unified %d feed_forward modules", ff_unified)
+
+
 def is_hpu_llama4_model(model) -> bool:
-    """Check if the model is an HpuLlama4ForCausalLM (has heterogeneous layers).
+    """Check if the model is an HPU Llama4 model (has heterogeneous layers).
 
     Called from hpu_model_runner.py to set _has_heterogeneous_layers flag.
     """
-    # Check the outer ConditionalGeneration model or inner CausalLM
-    return (isinstance(model, HpuLlama4ForConditionalGeneration)
-            or isinstance(getattr(model, "language_model", model), HpuLlama4ForCausalLM))
+    return isinstance(model, HpuLlama4ForConditionalGeneration)
