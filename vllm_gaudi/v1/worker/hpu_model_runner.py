@@ -2425,12 +2425,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         if self.num_mamba_like_layers > 0:
             # COMPUTE query_start_loc (similar to GPU)
-            # This is a cumulative sum of query lengths
-            query_start_loc_p_cpu = torch.zeros(len(query_lens) + 1,
+            # This is a cumulative sum of query lengths.
+            # We size to target_bs + 1 so that padding entries repeat the
+            # final cumulative value; this makes qsl diffs equal to 0 for
+            # padding positions and keeps the batched prefill paths
+            # (conv1d / SSM) internally consistent with other tensors
+            # (state_indices_tensor, has_initial_states_p, ...) that are
+            # padded to target_bs.
+            query_start_loc_p_cpu = torch.zeros(target_bs + 1,
                                                 dtype=torch.int32,
                                                 device='cpu',
                                                 pin_memory=self.pin_memory)
-            query_start_loc_p_cpu[1:] = torch.cumsum(torch.tensor(query_lens, dtype=torch.int32), dim=0)
+            cumsum_lens = torch.cumsum(torch.tensor(query_lens, dtype=torch.int32), dim=0)
+            query_start_loc_p_cpu[1:len(query_lens) + 1] = cumsum_lens
+            if len(query_lens) < target_bs:
+                # Repeat the final cumulative value for padding entries
+                # so that (qsl[i+1] - qsl[i]) == 0 for padding positions.
+                last_cumsum = cumsum_lens[-1] if len(query_lens) > 0 else 0
+                query_start_loc_p_cpu[len(query_lens) + 1:] = last_cumsum
 
             num_computed_tokens_p_cpu = torch.zeros(len(contents.req_ids), dtype=torch.int32)
 
@@ -2461,10 +2473,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             nphysical_chunks = target_seq // chunk_size
             assert nphysical_chunks > 0, (f"target_seq={target_seq} must be >= chunk_size={chunk_size}")
             # For multi-batch prefill (BS>1), the SSM processes
-            # BS * target_seq tokens.  Each sequence occupies
-            # nphysical_chunks chunks in the flattened layout, so
-            # sequence i's last chunk is at (i+1)*nphysical_chunks - 1.
-            last_chunk_indices = [(i + 1) * nphysical_chunks - 1 for i in range(len(contents.req_ids))]
+            # target_bs * target_seq tokens.  Each sequence slot (including
+            # padding) occupies nphysical_chunks chunks in the flattened
+            # layout, so slot i's last chunk is at (i+1)*nphysical_chunks - 1.
+            # We size this over the full padded batch (target_bs) so that
+            # downstream indexing aligns with state_indices_tensor (which
+            # is also padded to target_bs).
+            last_chunk_indices = [(i + 1) * nphysical_chunks - 1 for i in range(target_bs)]
 
             mamba_block_size = self.cache_config.mamba_block_size
             (block_idx_last_computed_token_cpu,
