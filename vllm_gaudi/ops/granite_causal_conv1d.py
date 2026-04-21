@@ -59,6 +59,22 @@ def granite_causal_conv1d_fn(
     _, width = weight_work.shape
     state_len = max(width - 1, 0)
 
+    if validate_data:
+        if x_work.dim() != 2:
+            raise ValueError("'x' must be 2-D (dim, cu_seq_len).")
+        if weight_work.shape != (dim, width):
+            raise ValueError("'weight' must have shape (dim, width).")
+        if bias_work is not None and bias_work.shape != (dim, ):
+            raise ValueError("'bias' must match the feature dimension.")
+        if not ((x_work.stride(0) == 1) or (x_work.stride(1) == 1)):
+            raise ValueError("Input tensor must be in channel-last or "
+                             "channel-first memory layout.")
+        if has_initial_state is not None \
+                and has_initial_state.numel() != padded_batch:
+            raise ValueError("'has_initial_state' must align with 'query_start_loc'.")
+        if padded_batch > 1 and cu_seqlen % padded_batch != 0:
+            raise ValueError("For batched prefill, 'cu_seqlen' must be divisible by padded_batch.")
+
     # --- Batched path for prefill BS > 1 ---
     if padded_batch > 1:
         target_seq = cu_seqlen // padded_batch
@@ -85,8 +101,16 @@ def granite_causal_conv1d_fn(
         col_indices = col_indices.unsqueeze(1).expand(-1, dim, -1)
         new_states = torch.gather(seq_input, 2, col_indices)  # [BS, dim, state_len]
 
-        # Store new conv states (skip padding entries with actual_len==0)
-        conv_states[cache_indices, -state_len:, :] = new_states.transpose(-1, -2)
+        # Store new conv states. For padding entries (actual_len == 0),
+        # cache_indices may contain repeated PAD block ids; advanced-index
+        # assignment with duplicate indices is undefined in general. To
+        # keep the write deterministic, zero the content of padding rows
+        # so that every duplicate write stores the same value. Real
+        # (non-padding) cache_indices are unique per request.
+        new_states_T = new_states.transpose(-1, -2)  # [BS, state_len, dim]
+        active_mask = (actual_lens > 0).view(-1, 1, 1)
+        new_states_T = torch.where(active_mask, new_states_T, torch.zeros_like(new_states_T))
+        conv_states[cache_indices, -state_len:, :] = new_states_T
 
         # Apply batched depthwise conv1d
         seq_out = _depthwise_conv1d_tpc(seq_input, weight_work, bias_work)
