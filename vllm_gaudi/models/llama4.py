@@ -86,23 +86,28 @@ class HpuLlama4ForCausalLM(UpstreamLlama4ForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        _apply_hpu_llama4_init_patches(self.model)
 
-        # Swap inner model class for residual=zeros fix
-        self.model.__class__ = HpuLlama4Model
 
-        # Apply branch-free attention patches (only in compile mode)
-        # Note: _unify_feed_forward_types is deferred to post-load via
-        # apply_hpu_llama4_post_load_patches() to avoid breaking weight loading
-        # (wrapping changes named_parameters() keys and hides .experts attribute).
-        if not htorch.utils.internal.is_lazy():
-            layers = getattr(self.model, "layers", [])
-            _apply_branch_free_attention(layers)
-            unified = _unify_attention_types(layers)
-            logger.info(
-                "HpuLlama4ForCausalLM: applied branch-free attention patches, "
-                "unified %d ChunkedLocalAttention -> Attention",
-                unified,
-            )
+def _apply_hpu_llama4_init_patches(model_root: nn.Module) -> None:
+    """Shared init-time patches for both CausalLM and ConditionalGeneration.
+
+    Swaps the inner model class for the residual=zeros fix and applies
+    branch-free attention + attention type unification in compile mode.
+    _unify_feed_forward_types is deferred to post-load via
+    apply_hpu_llama4_post_load_patches() to avoid breaking weight loading.
+    """
+    model_root.__class__ = HpuLlama4Model
+
+    if not htorch.utils.internal.is_lazy():
+        layers = getattr(model_root, "layers", [])
+        _apply_branch_free_attention(layers)
+        unified = _unify_attention_types(layers)
+        logger.info(
+            "HpuLlama4: applied branch-free attention patches, "
+            "unified %d ChunkedLocalAttention -> Attention",
+            unified,
+        )
 
 
 def _apply_branch_free_attention(layers):
@@ -279,22 +284,7 @@ class HpuLlama4ForConditionalGeneration(UpstreamLlama4ForConditionalGeneration):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-
-        # Swap inner model class for residual=zeros fix
-        self.language_model.model.__class__ = HpuLlama4Model
-
-        # Apply branch-free attention patches (only in compile mode)
-        # Note: _unify_feed_forward_types is deferred to post-load via
-        # apply_hpu_llama4_post_load_patches() to avoid breaking weight loading.
-        if not htorch.utils.internal.is_lazy():
-            layers = getattr(self.language_model.model, "layers", [])
-            _apply_branch_free_attention(layers)
-            unified = _unify_attention_types(layers)
-            logger.info(
-                "HpuLlama4ForConditionalGeneration: applied branch-free attention, "
-                "unified %d ChunkedLocalAttention -> Attention",
-                unified,
-            )
+        _apply_hpu_llama4_init_patches(self.language_model.model)
 
 
 def apply_hpu_llama4_post_load_patches(model) -> None:
