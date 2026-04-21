@@ -230,11 +230,12 @@ class SlicedFusedSDPABase(torch.nn.Module):
         is_lazy = ht.utils.internal.is_lazy()
         self._with_graph_breaks = os.getenv("VLLM_HPU_FSDPA_SLICE_WITH_GRAPH_BREAKS",
                                             str(is_lazy)).strip().lower() in ['true', 't', '1', 'yes', 'y', 'on']
+        if self._with_graph_breaks and not is_lazy:
+            logger().warning_once('FusedSDPA slicing graph breaks are only supported in lazy mode. '
+                                  'Disabling graph breaks for eager/compile mode to avoid Synapse compiler failures.')
+            self._with_graph_breaks = False
         if self._with_graph_breaks:
-            if is_lazy:
-                self._break_graph = ht.core.mark_step
-            else:
-                self._break_graph = torch._dynamo.graph_break
+            self._break_graph = ht.core.mark_step
 
         msg = (f"FusedSDPA slicing is enabled with sequence length threshold {slice_thld}, "
                f"chunk size {self.chunk_size}, num padded query chunks {self.num_padded_query_chunks}, "
