@@ -27,7 +27,7 @@ import torch.distributed
 import torch.nn.functional as F
 import torch.nn as nn
 import vllm_gaudi.extension.environment as environment
-from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
+from vllm_gaudi.extension.bucketing.common import HPUBucketingManager, calc_fallback_value
 from vllm_gaudi.extension.defragmentation import OnlineDefragmenter
 from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler, HabanaMemoryProfiler, HabanaProfilerCounterHelper,
                                            format_bytes, setup_profiler)
@@ -2101,6 +2101,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self.bucketing_manager.find_decode_bucket(batch_size,
                                                           len(block_list))[2]
             block_bucket_size += self.get_dp_padding(block_bucket_size)
+            if block_bucket_size < len(block_list):
+                block_bucket_size = calc_fallback_value(len(block_list),
+                                                        self.bucketing_manager.fallback_blocks_base_step)
 
             def padding_fn(tensor, pad_value):
                 return pad_list(tensor, block_bucket_size, itertools.repeat(pad_value))
