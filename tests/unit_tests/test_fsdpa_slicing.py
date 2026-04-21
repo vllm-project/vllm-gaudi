@@ -444,9 +444,9 @@ class TestSetupSlicing:
     @patch('habana_frameworks.torch.utils.internal.is_lazy', return_value=False)
     @patch('vllm_gaudi.extension.utils.get_config')
     @patch('vllm_gaudi.extension.bucketing.common.HPUBucketingManager.get_instance')
-    def test_threshold_lte_1024_raises(self, mock_get_instance, mock_get_config, mock_is_lazy, monkeypatch):
-        """slice_thld must be greater than 1024."""
-        monkeypatch.setenv("VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD", "1024")
+    def test_threshold_lt_1024_raises(self, mock_get_instance, mock_get_config, mock_is_lazy, monkeypatch):
+        """slice_thld must be greater than or equal to 1024."""
+        monkeypatch.setenv("VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD", "512")
         mock_get_config.return_value = _make_config()
         mock_get_instance.return_value = _MockBucketingManager(max_num_batched_tokens=8192, block_size=128)
 
