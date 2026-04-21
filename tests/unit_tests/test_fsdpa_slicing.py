@@ -405,7 +405,9 @@ class TestSetupSlicing:
     @patch('habana_frameworks.torch.utils.internal.is_lazy', return_value=False)
     @patch('vllm_gaudi.extension.utils.get_config')
     @patch('vllm_gaudi.extension.bucketing.common.HPUBucketingManager.get_instance')
-    def test_graph_breaks_override_from_env(self, mock_get_instance, mock_get_config, mock_is_lazy, monkeypatch):
+    def test_graph_breaks_override_from_env_ignored_in_eager(self, mock_get_instance, mock_get_config, mock_is_lazy,
+                                                             monkeypatch):
+        """Env override to enable graph breaks is ignored in non-lazy mode."""
         monkeypatch.setenv("VLLM_HPU_FSDPA_SLICE_WITH_GRAPH_BREAKS", "true")
         mock_get_config.return_value = _make_config()
         mock_get_instance.return_value = _MockBucketingManager(max_num_batched_tokens=8192, block_size=128)
@@ -414,7 +416,7 @@ class TestSetupSlicing:
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         result = base._setup_slicing()
         assert result is True
-        assert base._with_graph_breaks is True
+        assert base._with_graph_breaks is False
 
     @patch('vllm_gaudi.extension.utils.get_config')
     @patch('vllm_gaudi.extension.bucketing.common.HPUBucketingManager.get_instance')
@@ -474,10 +476,7 @@ def _make_sliced_bf16(chunk_size, num_padded_query_chunks=0, num_padded_ctx_chun
     module._with_graph_breaks = with_graph_breaks
     if with_graph_breaks:
         import habana_frameworks.torch as ht
-        if ht.utils.internal.is_lazy():
-            module._break_graph = ht.core.mark_step
-        else:
-            module._break_graph = torch._dynamo.graph_break
+        module._break_graph = ht.core.mark_step
     return module
 
 
@@ -522,10 +521,7 @@ def _make_sliced_fp8(chunk_size,
     module._with_graph_breaks = with_graph_breaks
     if with_graph_breaks:
         import habana_frameworks.torch as ht
-        if ht.utils.internal.is_lazy():
-            module._break_graph = ht.core.mark_step
-        else:
-            module._break_graph = torch._dynamo.graph_break
+        module._break_graph = ht.core.mark_step
     return module
 
 
@@ -1146,6 +1142,8 @@ class TestFsdpaSlicingAccuracyBF16:
         (1024, 8192, 4096),
     ])
     def test_bf16_accuracy(self, q_len, ctx_len, chunk_size, graph_breaks, mode):
+        if graph_breaks and mode == 'compile':
+            pytest.skip('graph breaks are not supported with torch.compile')
         if mode in ('lazy', 'hpu_graph'):
             cos_sim, max_abs_diff = _run_accuracy_subprocess('BF16', q_len, ctx_len, chunk_size, graph_breaks, mode)
         else:
@@ -1263,9 +1261,8 @@ class TestFsdpaSlicingAccuracyFP8:
         (1024, 8192, 4096),
     ])
     def test_fp8_accuracy(self, q_len, ctx_len, chunk_size, graph_breaks, mode):
-        if mode == 'compile' and graph_breaks:
-            pytest.skip("FP8 fp8_sdpa_recomp_fwd not supported across "
-                        "graph break boundaries in torch.compile")
+        if graph_breaks and mode == 'compile':
+            pytest.skip('graph breaks are not supported with torch.compile')
         if mode in ('lazy', 'hpu_graph'):
             cos_sim, max_abs_diff = _run_accuracy_subprocess('FP8', q_len, ctx_len, chunk_size, graph_breaks, mode)
         else:
@@ -1377,9 +1374,10 @@ class TestGraphBreaksSplitGraphs:
     In eager mode (PT_HPU_LAZY_MODE=0), ``torch._dynamo.graph_break`` is
     a no-op outside ``torch.compile``, so the graph count is unchanged.
 
-    In eager + torch.compile mode, ``torch._dynamo.graph_break`` forces
-    TorchDynamo to split the traced graph at each call site, producing
-    more compiled graph segments.
+    Graph breaks are not supported in ``torch.compile`` mode because the
+    Synapse compiler cannot create ``fp8_sdpa_recomp_fwd`` nodes in
+    standalone graph segments produced by TorchDynamo re-entry after a
+    graph break.  The constraint is enforced in ``_setup_slicing``.
     """
 
     @pytest.mark.parametrize("dtype", ["BF16", "FP8"])
@@ -1400,12 +1398,7 @@ class TestGraphBreaksSplitGraphs:
                                  f"{n_gb} (gb) != {n_no_gb} (no gb)")
 
     @pytest.mark.parametrize("dtype", ["BF16", "FP8"])
-    def test_compile_graph_breaks_split_graphs(self, dtype):
-        """In eager + torch.compile mode, graph_breaks should split graphs."""
+    def test_compile_no_graph_breaks(self, dtype):
+        """In compile mode, graph breaks are disabled; verify single graph."""
         n_no_gb = _count_graphs(lazy_mode=0, graph_breaks=False, dtype=dtype, mode='compile')
-        if dtype == "FP8":
-            pytest.skip("FP8 fp8_sdpa_recomp_fwd not supported across "
-                        "graph break boundaries in torch.compile")
-        n_gb = _count_graphs(lazy_mode=0, graph_breaks=True, dtype=dtype, mode='compile')
-        assert n_gb > n_no_gb, (f"graph_breaks should split compiled graph into more segments: "
-                                f"{n_gb} (gb) should be > {n_no_gb} (no gb)")
+        assert n_no_gb >= 1, f"Expected at least 1 compiled graph, got {n_no_gb}"
