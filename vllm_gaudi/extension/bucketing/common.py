@@ -403,11 +403,13 @@ def generate_buckets(bs_range,
         # The -1 reserves at least 1 token for query so that when
         # max_model_len is exactly divisible by block_size, the ceiling
         # ctx is not over-counted.
+        # Also reject buckets whose query alone exceeds max_model_len,
+        # since such a prompt chunk is never reachable at runtime.
         max_ctx_blocks = math.ceil((max_model_len - 1) / block_size)
-        smaller_than_limit = ctx <= max_ctx_blocks
+        smaller_than_limit = ctx <= max_ctx_blocks and query <= max_model_len
         if not smaller_than_limit:
-            omitted_buckets.add(
-                ("condition: ctx <= ceil((max_model_len - 1) / block_size)", "-> bs, query, ctx: ", bs, query, ctx))
+            omitted_buckets.add(("condition: ctx <= ceil((max_model_len - 1) / block_size) and query <= max_model_len",
+                                 "-> bs, query, ctx: ", bs, query, ctx))
         return smaller_than_limit
 
     def not_over_max_num_batched_tokens(bs, query, ctx):
