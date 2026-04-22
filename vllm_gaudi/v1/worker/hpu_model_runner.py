@@ -5231,12 +5231,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                       height=height,
                                       num_frames=num_frames if num_frames is not None else 100)
                 }
+            else:
+                logger.warning("Unsupported modality '%s' for custom mm_options, "
+                               "falling back to default options.", modality)
 
         # Use the registry's API with custom mm_options
         if mm_options is not None:
             processor = self._get_mm_warmup_processor()
             processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
-                seq_len=self.model_config.max_model_len,
+                seq_len=self.model_config_copy.max_model_len,
                 mm_counts={modality: count},
                 mm_options=mm_options,
             )
@@ -5245,7 +5248,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:
             # Fallback to default options
             dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
-                self.model_config,
+                self.model_config_copy,
                 mm_counts={modality: count},
                 processor=self._get_mm_warmup_processor(),
             )
@@ -5254,7 +5257,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     def _get_mm_warmup_processor(self):
         if self._mm_warmup_processor is None:
-            self._mm_warmup_processor = self.mm_registry.create_processor(self.model_config)
+            self._mm_warmup_processor = self.mm_registry.create_processor(self.model_config_copy)
 
         return self._mm_warmup_processor
 
@@ -5321,15 +5324,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Get width/height from config if available for warmup_lists
         warmup_lists = []
         if not is_batch_based and mm_config:
-            # Try to get dimensions from first available modality config
+            # Try to get dimensions from enabled modality config
             for modality in ["image", "video"]:
+                if modality == "image" and not is_image_warmup:
+                    continue
+                if modality == "video" and not is_video_warmup:
+                    continue
                 mm_options = mm_config.limit_per_prompt.get(modality)
                 if mm_options:
                     width = getattr(mm_options, 'width', None)
                     height = getattr(mm_options, 'height', None)
                     if width is not None and height is not None:
                         warmup_lists.append((width, height))
-                    break
+                        break
         if not is_batch_based and len(buckets) > 0:
             patch_size = int(self.get_patch_size_from_model())
             warmup_lists = warmup_lists + \
