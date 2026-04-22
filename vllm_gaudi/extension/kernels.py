@@ -5,21 +5,22 @@
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
 
-from functools import cache
-
 
 def _kernel(name):
 
     def loader(fn):
+        result = []
 
-        @cache
         def loader_impl():
-            try:
-                return fn()
-            except (ImportError, AttributeError):
-                from .utils import logger
-                logger().warning(f"Could not import HPU {name} kernel. "
-                                 "vLLM will use native implementation")
+            if not result:
+                try:
+                    result.append(fn())
+                except (ImportError, AttributeError):
+                    from .utils import logger
+                    logger().warning(f"Could not import HPU {name} kernel. "
+                                     "vLLM will use native implementation")
+                    result.append(None)
+            return result[0]
 
         return loader_impl
 

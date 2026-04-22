@@ -272,6 +272,12 @@ class HPUBucketingManager():
 
     def find_decode_bucket(self, batch_size, num_blocks, seed_buckets: bool = False):
         if self.initialized:
+            # Cap num_blocks to the max prepared ctx so that previously-added
+            # capped fallback buckets are found on subsequent lookups, avoiding
+            # an infinite loop of "was not prepared" warnings.
+            if self._fallback_max_ctx > 0 and num_blocks > self._fallback_max_ctx:
+                num_blocks = self._fallback_max_ctx
+
             if seed_buckets and self.seed_decode_buckets is not None:
                 found_bucket = find_equal_or_closest_greater_config(self.seed_decode_buckets,
                                                                     (batch_size, 1, num_blocks))
@@ -281,10 +287,11 @@ class HPUBucketingManager():
             found_bucket = find_equal_or_closest_greater_config(self.decode_buckets, (batch_size, 1, num_blocks))
             if found_bucket is None:
                 new_bucket = self.generate_fallback_bucket(batch_size, 1, num_blocks)
-                logger().warning(f"Decode bucket for {batch_size, 1, num_blocks}"
-                                 f" was not prepared. Adding new bucket: {new_bucket}")
-                self.decode_buckets.append(new_bucket)
-                self.decode_buckets.sort()
+                if new_bucket not in self.decode_buckets:
+                    logger().warning(f"Decode bucket for {batch_size, 1, num_blocks}"
+                                     f" was not prepared. Adding new bucket: {new_bucket}")
+                    self.decode_buckets.append(new_bucket)
+                    self.decode_buckets.sort()
                 return new_bucket
             return found_bucket
         return (batch_size, 1, num_blocks)

@@ -138,13 +138,34 @@ class HPUGatedDeltaNetAttention(GatedDeltaNetAttention):
          initial_state) = self._extract_metadata(num_tokens)
 
         # === Part 1: Input Projection ================================
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        mixed_qkv, z = mixed_qkvz.split([self.qkv_size, self.z_size], dim=-1)
-        z = z.reshape(z.size(0), -1, self.head_v_dim)
-        ba, _ = self.in_proj_ba(hidden_states)
-        b, a = ba.chunk(2, dim=-1)
-        b = b.contiguous()
-        a = a.contiguous()
+        if hasattr(self, 'in_proj_qkv'):
+            # LoRA path (Qwen3.5 only): separate in_proj_qkv and in_proj_z
+            mixed_qkv, _ = self.in_proj_qkv(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
+            z, _ = self.in_proj_z(hidden_states)
+            z = z.reshape(z.size(0), -1, self.head_v_dim)
+            b, a = ba.chunk(2, dim=-1)
+            b = b.contiguous()
+            a = a.contiguous()
+        else:
+            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
+
+            if self.gqa_interleaved_layout:
+                # Qwen3-Next: unpack the interleaved GQA layout
+                query, key, value, z, b, a = self.fix_query_key_value_ordering(mixed_qkvz, ba)
+                # Pure-torch flatten instead of einops rearrange (graph breaks)
+                query = query.reshape(query.size(0), -1)
+                key = key.reshape(key.size(0), -1)
+                value = value.reshape(value.size(0), -1)
+                mixed_qkv = torch.cat((query, key, value), dim=-1)
+            else:
+                # Qwen3.5: weights already in [q, k, v, z] and [b, a] order
+                mixed_qkv, z = mixed_qkvz.split([self.qkv_size, self.z_size], dim=-1)
+                z = z.reshape(z.size(0), -1, self.head_v_dim)
+                b, a = ba.chunk(2, dim=-1)
+                b = b.contiguous()
+                a = a.contiguous()
 
         core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
@@ -272,6 +293,12 @@ class HPUGatedDeltaNetAttention(GatedDeltaNetAttention):
         output_flat[:num_tokens], _ = self.out_proj(core_attn_out)
 
 
-# Replace the class in the upstream module so that GatedDeltaNetAttention
-# instantiates GatedDeltaNetAttention instead of the original.
-GatedDeltaNetAttention = HPUGatedDeltaNetAttention
+# Replace the class in the upstream modules so that both Qwen3-Next and
+# Qwen3.5 model definitions instantiate HPUGatedDeltaNetAttention.
+import vllm.model_executor.layers.mamba.gdn_linear_attn as _gdn_module  # noqa: E402
+import vllm.model_executor.models.qwen3_next as _qwen3_next_module  # noqa: E402
+import vllm.model_executor.models.qwen3_5 as _qwen3_5_module  # noqa: E402
+
+_gdn_module.GatedDeltaNetAttention = HPUGatedDeltaNetAttention
+_qwen3_next_module.GatedDeltaNetAttention = HPUGatedDeltaNetAttention
+_qwen3_5_module.GatedDeltaNetAttention = HPUGatedDeltaNetAttention
