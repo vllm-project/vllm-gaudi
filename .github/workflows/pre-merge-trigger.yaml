@@ -119,7 +119,7 @@ jobs:
               );
             }
 
-            // Only maintainers may steer runner pool or override upstream vllm commit.
+            // Only maintainers may steer runner pool or override upstream vllm ref.
             const TRUSTED = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
             const assoc   = pr ? pr.author_association : 'NONE';
             const trusted = TRUSTED.has(assoc) || isMergeGroup === 'true';
@@ -127,15 +127,6 @@ jobs:
             const useHourlyRunner = String(
               trusted && /\[FIX_FOR_VLLM_LATEST\]/.test(prTitle),
             );
-
-            let vllmCommitOverride = '';
-            const m = /\[VLLM_COMMIT:([a-f0-9]{7,40})\]/.exec(prTitle);
-            if (m && trusted) {
-              vllmCommitOverride = m[1];
-            } else if (m && !trusted) {
-              core.setFailed(`[VLLM_COMMIT:...] in PR title from untrusted author (${assoc})`);
-              return;
-            }
 
             // [FIX_FOR_VLLM_CUSTOM=<ref>] — override upstream vllm checkout ref.
             // Gated on trusted author; value validated against a conservative
@@ -189,7 +180,6 @@ jobs:
                 skip_tests:           skipTests,
                 is_merge_group:       isMergeGroup,
                 use_hourly_runner:    useHourlyRunner,
-                vllm_commit_override: vllmCommitOverride,
                 vllm_ref_override:    vllmRefOverride,
               },
             });

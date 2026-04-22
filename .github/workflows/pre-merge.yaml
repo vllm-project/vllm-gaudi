@@ -15,8 +15,7 @@ on:
       skip_tests:           { description: 'Skip Gaudi tests (true/false)',                  required: true,  type: string, default: 'false' }
       is_merge_group:       { description: 'Triggered from merge queue (true/false)',        required: true,  type: string, default: 'false' }
       use_hourly_runner:    { description: 'Use hourly-ci pool (maintainers only)',          required: false, type: string, default: 'false' }
-      vllm_commit_override: { description: 'Override upstream vllm commit (7-40 hex; maintainers only)', required: false, type: string, default: '' }
-      vllm_ref_override:    { description: 'Override upstream vllm checkout ref (branch/tag/ref; maintainers only)', required: false, type: string, default: '' }
+      vllm_ref_override:    { description: 'Override upstream vllm checkout ref (branch/tag/SHA; maintainers only)', required: false, type: string, default: '' }
 
 permissions:
   pull-requests: write
@@ -289,11 +288,9 @@ jobs:
       - name: Determine Target Commit
         id: determine_commit
         env:
-          # [VLLM_COMMIT:...] and [FIX_FOR_VLLM_CUSTOM=...] are parsed and
-          # gated on author_association in pre-merge-trigger.yaml and arrive
-          # here as vllm_commit_override / vllm_ref_override.
+          # [FIX_FOR_VLLM_CUSTOM=...] is parsed and gated on author_association
+          # in pre-merge-trigger.yaml and arrives here as vllm_ref_override.
           PR_TITLE_ENV:         ${{ inputs.pr_title }}
-          VLLM_COMMIT_OVERRIDE: ${{ inputs.vllm_commit_override }}
           VLLM_REF_OVERRIDE:    ${{ inputs.vllm_ref_override }}
           USE_HOURLY_RUNNER:    ${{ inputs.use_hourly_runner }}
         run: |
@@ -301,18 +298,7 @@ jobs:
           PR_TITLE="$PR_TITLE_ENV"
           echo "Pull Request Title: \"${PR_TITLE}\""
 
-          if [[ -n "$VLLM_COMMIT_OVERRIDE" ]]; then
-            if [[ "$VLLM_COMMIT_OVERRIDE" =~ ^[a-f0-9]{7,40}$ ]]; then
-              echo "✅ Maintainer override: vllm commit = $VLLM_COMMIT_OVERRIDE"
-              FINAL_TARGET="$VLLM_COMMIT_OVERRIDE"
-            else
-              echo "::error::Invalid vllm_commit_override: $VLLM_COMMIT_OVERRIDE"
-              exit 1
-            fi
-          elif [[ "$USE_HOURLY_RUNNER" == "true" ]]; then
-            echo "✅ [FIX_FOR_VLLM_LATEST] honoured; target = vllm-upstream/main"
-            FINAL_TARGET="vllm-upstream/main"
-          elif [[ -n "$VLLM_REF_OVERRIDE" ]]; then
+          if [[ -n "$VLLM_REF_OVERRIDE" ]]; then
             if [[ "$VLLM_REF_OVERRIDE" =~ ^[A-Za-z0-9._/-]+$ ]]; then
               echo "✅ [FIX_FOR_VLLM_CUSTOM] honoured; target = $VLLM_REF_OVERRIDE"
               FINAL_TARGET="$VLLM_REF_OVERRIDE"
@@ -320,6 +306,9 @@ jobs:
               echo "::error::Invalid vllm_ref_override: $VLLM_REF_OVERRIDE"
               exit 1
             fi
+          elif [[ "$USE_HOURLY_RUNNER" == "true" ]]; then
+            echo "✅ [FIX_FOR_VLLM_LATEST] honoured; target = vllm-upstream/main"
+            FINAL_TARGET="vllm-upstream/main"
           elif [ -z "$FINAL_TARGET" ]; then
             echo "⚠️ No stable commit; defaulting to vllm-upstream/main"
             FINAL_TARGET="vllm-upstream/main"
