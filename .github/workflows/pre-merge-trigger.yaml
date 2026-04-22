@@ -50,7 +50,7 @@ jobs:
                   e => e.event === 'labeled' && e.label?.name === 'skip-gaudi-tests',
                 );
                 if (!last?.actor?.login) {
-                  core.warning('skip-gaudi-tests present but labeler unknown; ignoring');
+                  core.setFailed('skip-gaudi-tests present but labeler unknown; ignoring');
                   return 'false';
                 }
                 const { data: perm } = await github.rest.repos.getCollaboratorPermissionLevel({
@@ -63,7 +63,7 @@ jobs:
                 );
                 return String(allowed);
               } catch (e) {
-                core.warning(`Could not verify skip-gaudi-tests labeler: ${e.message}; ignoring label`);
+                core.setFailed(`Could not verify skip-gaudi-tests labeler: ${e.message}; ignoring label`);
                 return 'false';
               }
             }
@@ -132,7 +132,8 @@ jobs:
             if (m && trusted) {
               vllmCommitOverride = m[1];
             } else if (m && !trusted) {
-              core.warning(`Ignoring [VLLM_COMMIT:...] in PR title from untrusted author (${assoc})`);
+              core.setFailed(`[VLLM_COMMIT:...] in PR title from untrusted author (${assoc})`);
+              return;
             }
 
             // 0. Sweep any previous in-flight pre-merge.yaml runs for this PR.
