@@ -272,6 +272,11 @@ def patched_fused_moe_forward(
     ensure_moe_quant_config_init, and _sequence_parallel_context — all of
     which access ForwardContext and cause torch.compile graph breaks), we
     cache the layer reference and call _forward_impl directly.
+
+    The post-forward reduction sequence mirrors upstream
+    MoERunnerBase.forward (vllm/model_executor/layers/fused_moe/runner/
+    moe_runner_base.py) so we stay in sync with the new shared/fused
+    output combination logic introduced by upstream PR #35949.
     """
     hidden_states, shared_experts_input = self.apply_routed_input_transform(hidden_states)
     hidden_states, og_hidden_dims = self._maybe_pad_hidden_states(shared_experts_input, hidden_states)
@@ -289,11 +294,24 @@ def patched_fused_moe_forward(
         if self.gate is not None:
             router_logits, _ = self.gate(hidden_states)
 
-        fused_output = self._forward_impl(self._hpu_cached_layer, hidden_states, router_logits, shared_experts_input)
+        result = self._forward_impl(self._hpu_cached_layer, hidden_states, router_logits, shared_experts_input)
     else:
-        fused_output = self.forward_entry(hidden_states, router_logits, shared_experts_input, self._encode_layer_name())
+        result = self._forward_entry(hidden_states, router_logits, shared_experts_input, self._encode_layer_name())
 
-    return self._maybe_reduce_output(fused_output, og_hidden_dims)
+    # Mirror upstream MoERunnerBase.forward post-_forward_entry pipeline.
+    if isinstance(result, tuple):
+        shared_output, fused_output = result
+    else:
+        shared_output, fused_output = None, result
+
+    shared_output = self._maybe_reduce_shared_expert_output(shared_output)
+    shared_output, fused_output = self._maybe_apply_routed_scale_to_output(shared_output, fused_output)
+    fused_output = self.apply_routed_output_transform(fused_output)
+
+    combined = (shared_output + fused_output) if shared_output is not None else fused_output
+
+    combined = self._maybe_reduce_final_output(combined, og_hidden_dims)
+    return self._maybe_add_zero_expert_output(combined)
 
 
 def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
