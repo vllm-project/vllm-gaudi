@@ -5102,12 +5102,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 prompt_ctx_len = prompt_num_blocks * self.block_size
                 prompt_total_tokens = [prompt_query_len + prompt_ctx_len]
                 prompt_num_context_blocks = [prompt_num_blocks]
-                if self.max_model_len < sum(prompt_total_tokens) \
-                    and self.use_merged_prefill:
-                    # split query and ctx in merged prefill case
-                    prompt_total_tokens, prompt_num_context_blocks = \
-                         self.get_merged_prefill_seq_lens(prompt_query_len,
-                                                     prompt_num_blocks)
+                if self.max_model_len < sum(prompt_total_tokens):
+                    if self.use_merged_prefill:
+                        # split query and ctx in merged prefill case
+                        prompt_total_tokens, prompt_num_context_blocks = \
+                             self.get_merged_prefill_seq_lens(prompt_query_len,
+                                                         prompt_num_blocks)
+                    else:
+                        # With chunked prefill, query bucket + ctx * block_size
+                        # can exceed max_model_len when the bucket pads beyond
+                        # the actual last chunk size. Recompute context blocks
+                        # so that ctx * block_size + query_len <= max_model_len
+                        # and scheduled tokens == prompt_query_len exactly.
+                        capped_ctx = max(0, (self.max_model_len - prompt_query_len) // self.block_size)
+                        prompt_num_context_blocks = [capped_ctx]
+                        prompt_total_tokens = [capped_ctx * self.block_size + prompt_query_len]
             for _ in range(prompt_bs):
                 for tokens, context_len in zip(prompt_total_tokens, prompt_num_context_blocks):
                     if self.speculative_config and self.speculative_config.use_eagle():
