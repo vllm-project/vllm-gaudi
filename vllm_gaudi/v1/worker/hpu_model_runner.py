@@ -579,6 +579,9 @@ def apply_model_specific_patches(model_runner):
     maybe_set_chunked_attention_layers(model_runner)
     patch_llama4_get_attn_scale(model_runner.model)
     _init_mamba_split_weights(model_runner.model)
+    from vllm_gaudi.models.llama4 import (apply_hpu_llama4_post_load_patches, is_hpu_llama4_model)
+    model_runner._has_heterogeneous_layers = is_hpu_llama4_model(model_runner.model)
+    apply_hpu_llama4_post_load_patches(model_runner.model)
 
 
 def compute_prefix_caching_block_indices(num_reqs: int, num_computed_tokens, num_scheduled_tokens,
@@ -977,6 +980,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
         self.kv_cache_dtype_str = HPU_TORCH_DTYPE_TO_STR_DTYPE[self.kv_cache_dtype]
         self.is_pooling_model = model_config.pooler_config is not None
+        self._has_heterogeneous_layers: bool = False
 
         self.sliding_window = model_config.get_sliding_window()
         self.interleaved_sliding_window = (is_interleaved(vllm_config.model_config.hf_text_config)
@@ -1053,22 +1057,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:
             self.max_encoder_len = 0
 
-        model_type = self._get_model_type() or ""
-        self._requires_bool_mm_mask_for_merge = model_type.startswith("qwen")
-
         mamba_like = ["mamba", "gdn_attention", "linear_attention"]
 
         self.num_mamba_like_layers = sum(
             self.model_config.get_num_layers_by_block_type(self.parallel_config, block_type)
             for block_type in mamba_like)
 
+        self.num_gdn = 0
         if self.num_mamba_like_layers > 0:
             # Auto-enable hybrid cache for GDN/mamba-like models.
             gdn_types = ["gdn_attention", "linear_attention"]
-            num_gdn = sum(
+            self.num_gdn = sum(
                 vllm_config.model_config.get_num_layers_by_block_type(vllm_config.parallel_config, bt)
                 for bt in gdn_types)
-            if num_gdn > 0:
+            if self.num_gdn > 0:
                 # Default: hybrid=1, compact=1, naive_mamba_sharing=0
                 # Only set if user hasn't explicitly provided a value.
                 if not os.environ.get("VLLM_USE_HYBRID_CACHE"):
@@ -1089,7 +1091,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     "GDN layers detected (%d): "
                     "VLLM_USE_HYBRID_CACHE=%s, "
                     "VLLM_USE_NAIVE_MAMBA_CACHE_SHARING=%s, "
-                    "VLLM_COMPACT_GDN=%s", num_gdn, os.environ["VLLM_USE_HYBRID_CACHE"],
+                    "VLLM_COMPACT_GDN=%s", self.num_gdn, os.environ["VLLM_USE_HYBRID_CACHE"],
                     os.environ["VLLM_USE_NAIVE_MAMBA_CACHE_SHARING"], os.environ["VLLM_COMPACT_GDN"])
 
         hf_text_config = self.model_config.hf_text_config
@@ -1847,8 +1849,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     req_start_pos = (batch_row * padded_seq_len + start_pos - num_computed_tokens)
                 else:
                     req_start_pos = (req_start_idx + start_pos - num_computed_tokens)
-                is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
-                    = True
+                if is_embed is None:
+                    is_mm_embed[req_start_pos + start_idx:req_start_pos + end_idx] = True
+                else:
+                    is_mm_embed[req_start_pos + start_idx:req_start_pos + end_idx] |= is_embed
 
                 # Only whole mm items are processed
                 mm_embeds.append(mm_embeds_item)
@@ -1856,11 +1860,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 req_start_idx += num_scheduled_tokens
 
         # Convert bool tensor to index tensor for merge embedding statically if optimized mm
-
-        # Qwen3.5 multimodal merge path requires a boolean placeholder mask.
-        # Converting the mask to index form here can break placeholder-to-embedding
-        # alignment for Qwen3.5, so keep bool form for that model family.
-        if self.uses_mrope and not self._requires_bool_mm_mask_for_merge:
+        if self.uses_mrope:
             is_mm_embed_index = torch.nonzero(is_mm_embed[:total_num_scheduled_tokens], as_tuple=True)[0]
             # Bounds validation on CPU
             if len(is_mm_embed_index) > 0 and is_mm_embed_index.max() >= total_num_scheduled_tokens:
@@ -5431,6 +5431,25 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                           self.bucketing_manager.decode_buckets, False, kv_caches)
                     self.log_graph_warmup_summary(self.bucketing_manager.decode_buckets, False, mem_post_decode)
 
+        # Validation warmup: run smallest buckets outside compile-only mode
+        # to trigger torch.compile guard specializations for heterogeneous layers
+        # (e.g. Llama4 mix of MoE/MLP feed_forward types).
+        if (can_use_compile_only_mode and not self.model_config.enforce_eager and not self.is_pooling_model
+                and self._has_heterogeneous_layers):
+            logger.info("Running validation warmup to trigger guard specializations...")
+            saved_graphed = self.graphed_buckets.copy()
+            self.graphed_buckets.clear()
+            prompt_buckets = self.bucketing_manager.prompt_buckets
+            if prompt_buckets:
+                validation_prompt_buckets = [prompt_buckets[0]]
+                if len(prompt_buckets) > 1:
+                    validation_prompt_buckets.append(prompt_buckets[-1])
+                self.warmup_graphs(validation_prompt_buckets, True, kv_caches)
+            if self.bucketing_manager.decode_buckets:
+                self.warmup_graphs([self.bucketing_manager.decode_buckets[0]], False, kv_caches)
+            self.graphed_buckets = saved_graphed
+            logger.info("Validation warmup complete.")
+
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
         if os.getenv('VLLM_FULL_WARMUP', 'false').strip().lower() in ("1", "true"):
@@ -5659,31 +5678,41 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self.bucketing_manager.block_size = self.block_size
             maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
-        kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, self.attn_groups)
-        self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
 
-        kernel_block_size_by_gid: dict[int, int] = {}
-        kernel_idx = 0
-        for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-            kv_cache_spec = kv_cache_group.kv_cache_spec
-            if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
-                continue
-            kernel_block_size_by_gid[gid] = kernel_block_sizes[kernel_idx]
-            kernel_idx += 1
+        # Reinitialize the input batch with the correct block sizes for all
+        # KV cache groups.  For GDN/linear_attention we additionally compute
+        # kernel block sizes; for other hybrid (mamba) models we still need to
+        # reinitialize so that MultiGroupBlockTable has one entry per group.
+        #kernel_block_sizes: list[int] = []
+        if self.num_gdn > 0 or self.num_mamba_like_layers > 0:
+            kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, self.attn_groups)
+            self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
 
-        selected_attn_kernel_sizes = [
-            kernel_block_size_by_gid[gid] for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups)
-            if isinstance(kv_cache_group.kv_cache_spec, FullAttentionSpec)
-        ]
-        if selected_attn_kernel_sizes:
-            self.attn_block_size = selected_attn_kernel_sizes[0]
-            if len(set(selected_attn_kernel_sizes)) > 1:
-                logger.warning(
-                    "Multiple FullAttention kernel block sizes selected: %s. "
-                    "Using %d for decode metadata.",
-                    selected_attn_kernel_sizes,
-                    self.attn_block_size,
-                )
+            kernel_block_size_by_gid: dict[int, int] = {}
+            kernel_idx = 0
+            for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+                kv_cache_spec = kv_cache_group.kv_cache_spec
+                if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+                    continue
+                kernel_block_size_by_gid[gid] = kernel_block_sizes[kernel_idx]
+                kernel_idx += 1
+
+            selected_attn_kernel_sizes = [
+                kernel_block_size_by_gid[gid] for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups)
+                if isinstance(kv_cache_group.kv_cache_spec, FullAttentionSpec)
+            ]
+            if selected_attn_kernel_sizes:
+                self.attn_block_size = selected_attn_kernel_sizes[0]
+                if len(set(selected_attn_kernel_sizes)) > 1:
+                    logger.warning(
+                        "Multiple FullAttention kernel block sizes selected: %s. "
+                        "Using %d for decode metadata.",
+                        selected_attn_kernel_sizes,
+                        self.attn_block_size,
+                    )
+        elif self.is_encoder_only_attn:
+            kernel_block_sizes = []
+            self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
 
         kv_caches: dict[str, torch.Tensor] = {}
         num_blocks = 0
