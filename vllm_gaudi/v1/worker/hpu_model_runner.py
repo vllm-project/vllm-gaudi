@@ -579,6 +579,9 @@ def apply_model_specific_patches(model_runner):
     maybe_set_chunked_attention_layers(model_runner)
     patch_llama4_get_attn_scale(model_runner.model)
     _init_mamba_split_weights(model_runner.model)
+    from vllm_gaudi.models.llama4 import (apply_hpu_llama4_post_load_patches, is_hpu_llama4_model)
+    model_runner._has_heterogeneous_layers = is_hpu_llama4_model(model_runner.model)
+    apply_hpu_llama4_post_load_patches(model_runner.model)
 
 
 def compute_prefix_caching_block_indices(num_reqs: int, num_computed_tokens, num_scheduled_tokens,
@@ -977,6 +980,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
         self.kv_cache_dtype_str = HPU_TORCH_DTYPE_TO_STR_DTYPE[self.kv_cache_dtype]
         self.is_pooling_model = model_config.pooler_config is not None
+        self._has_heterogeneous_layers: bool = False
 
         self.sliding_window = model_config.get_sliding_window()
         self.interleaved_sliding_window = (is_interleaved(vllm_config.model_config.hf_text_config)
@@ -5430,6 +5434,25 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                       self.warmup_graphs(
                           self.bucketing_manager.decode_buckets, False, kv_caches)
                     self.log_graph_warmup_summary(self.bucketing_manager.decode_buckets, False, mem_post_decode)
+
+        # Validation warmup: run smallest buckets outside compile-only mode
+        # to trigger torch.compile guard specializations for heterogeneous layers
+        # (e.g. Llama4 mix of MoE/MLP feed_forward types).
+        if (can_use_compile_only_mode and not self.model_config.enforce_eager and not self.is_pooling_model
+                and self._has_heterogeneous_layers):
+            logger.info("Running validation warmup to trigger guard specializations...")
+            saved_graphed = self.graphed_buckets.copy()
+            self.graphed_buckets.clear()
+            prompt_buckets = self.bucketing_manager.prompt_buckets
+            if prompt_buckets:
+                validation_prompt_buckets = [prompt_buckets[0]]
+                if len(prompt_buckets) > 1:
+                    validation_prompt_buckets.append(prompt_buckets[-1])
+                self.warmup_graphs(validation_prompt_buckets, True, kv_caches)
+            if self.bucketing_manager.decode_buckets:
+                self.warmup_graphs([self.bucketing_manager.decode_buckets[0]], False, kv_caches)
+            self.graphed_buckets = saved_graphed
+            logger.info("Validation warmup complete.")
 
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
