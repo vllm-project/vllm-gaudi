@@ -1217,6 +1217,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self._PAD_BLOCK_ID = -1
         self._MAMBA_PAD_BLOCK_ID = -1
         self._dummy_num_blocks = 0
+        self._max_cache_blocks = 0
 
         if self.vllm_config.parallel_config.data_parallel_size > 1 and htorch.utils.internal.is_lazy(
         ) and not self.model_config.enforce_eager:
@@ -2082,11 +2083,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         block_bucket_size: int
         if self.use_contiguous_pa:
             actual_blocks_needed = max(block_list) + 1 if block_list else 0
+            actual_blocks_needed = min(actual_blocks_needed,
+                                       self._max_cache_blocks)
 
             block_bucket_size = \
                 self.bucketing_manager.find_decode_bucket(batch_size,
                                                           actual_blocks_needed)[2]
             block_bucket_size += self.get_dp_padding(block_bucket_size)
+            if actual_blocks_needed > block_bucket_size:
+                block_bucket_size = min(
+                    calc_fallback_value(
+                        actual_blocks_needed,
+                        self.bucketing_manager.fallback_blocks_base_step),
+                    self._max_cache_blocks)
             block_bucket_size = max(block_bucket_size, actual_blocks_needed)
 
             indices: list[Any]
@@ -6002,6 +6011,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self._PAD_SLOT_ID = num_blocks * self.attn_block_size
         self._MAMBA_PAD_BLOCK_ID = num_blocks
         self._dummy_num_blocks = num_blocks
+
+        # Compute the max cache block count across all layers.
+        # Hybrid models (attention + mamba) may have layers with different
+        # cache sizes; contiguous PA slices cache[:N] so N must not exceed
+        # the actual cache dimension.
+        max_dim0 = 0
+        for kv in self.kv_caches:
+            t = kv[0] if not isinstance(kv[0], tuple) else kv[0][0]
+            if t.shape[0] > max_dim0:
+                max_dim0 = t.shape[0]
+        self._max_cache_blocks = max_dim0 // self.block_size if self.block_size else 0
 
         # Initialize the GDN compact slot free-list.
         # The free-list contains base-slot IDs [0..max_num_reqs-1].

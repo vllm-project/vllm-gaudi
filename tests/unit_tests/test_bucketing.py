@@ -489,6 +489,46 @@ def test_calc_fallback_value_stabilizes_oversized_block_list():
     assert small_bucket % base_step == 0
 
 
+def test_calc_fallback_value_contiguous_pa_capped_by_cache():
+    """GAUDISW-247865: contiguous PA fallback must not exceed the physical
+    cache block count.  When calc_fallback_value rounds up past the cache
+    limit, the caller should cap it.  Verify the cap arithmetic works.
+
+    The model runner logic is:
+        actual_blocks_needed = min(max(block_list)+1, _max_cache_blocks)
+        if actual_blocks_needed > bucket:
+            block_bucket_size = min(calc_fallback_value(...), _max_cache_blocks)
+        block_bucket_size = max(block_bucket_size, actual_blocks_needed)
+    """
+
+    base_step = 32
+    max_cache_blocks = 77036  # 9860608 / 128 for hybrid model
+
+    # Simulate: actual_blocks_needed is capped at max_cache_blocks first
+    for raw_actual in [77000, 77035, 77036, 77040, 78000]:
+        actual = min(raw_actual, max_cache_blocks)  # cap as model runner does
+        fallback = calc_fallback_value(actual, base_step)
+        capped = min(fallback, max_cache_blocks)
+        result = max(capped, actual)
+        assert result <= max_cache_blocks, (
+            f"raw_actual={raw_actual}: result {result} exceeds cache limit {max_cache_blocks}")
+        assert result >= actual, (
+            f"raw_actual={raw_actual}: result {result} smaller than capped actual {actual}")
+
+    # Stability near cache limit: adjacent values map to same bucket
+    results = set()
+    for i in range(200):
+        actual = min(76900 + i, max_cache_blocks)
+        v = min(calc_fallback_value(actual, base_step), max_cache_blocks)
+        v = max(v, actual)
+        results.add(v)
+    # Near the cap, everything converges to max_cache_blocks
+    assert max_cache_blocks in results, (
+        f"max_cache_blocks {max_cache_blocks} should be in result set")
+    assert len(results) <= 3, (
+        f"Too many distinct buckets near cache limit: {len(results)}")
+
+
 def test_exponential_decode_block_limit_cap(monkeypatch):
     """Verify that the decode block limit is capped to avoid excessive warmup.
 
