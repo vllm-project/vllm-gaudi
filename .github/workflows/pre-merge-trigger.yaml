@@ -19,6 +19,7 @@ concurrency:
 jobs:
   execute_pre_merge:
     runs-on: ubuntu-latest
+    timeout-minutes: 720
     permissions:
       actions: write       # dispatch workflows, read run status, cancel orphaned runs
       pull-requests: read  # read PR labels for skip-gaudi-tests check
@@ -26,7 +27,7 @@ jobs:
     steps:
       - name: Dispatch, find run, and wait for result
         id: dispatch
-        uses: actions/github-script@v7
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
         with:
           script: |
             const pr         = context.payload.pull_request;
@@ -50,7 +51,7 @@ jobs:
                   e => e.event === 'labeled' && e.label?.name === 'skip-gaudi-tests',
                 );
                 if (!last?.actor?.login) {
-                  core.setFailed('skip-gaudi-tests present but labeler unknown; ignoring');
+                  core.setFailed('skip-gaudi-tests present but labeler unknown');
                   return 'false';
                 }
                 const { data: perm } = await github.rest.repos.getCollaboratorPermissionLevel({
@@ -118,7 +119,7 @@ jobs:
               );
             }
 
-            // Only maintainers may steer runner pool or override upstream vllm commit.
+            // Only maintainers may steer runner pool or override upstream vllm ref.
             const TRUSTED = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
             const assoc   = pr ? pr.author_association : 'NONE';
             const trusted = TRUSTED.has(assoc) || isMergeGroup === 'true';
@@ -127,12 +128,21 @@ jobs:
               trusted && /\[FIX_FOR_VLLM_LATEST\]/.test(prTitle),
             );
 
-            let vllmCommitOverride = '';
-            const m = /\[VLLM_COMMIT:([a-f0-9]{7,40})\]/.exec(prTitle);
-            if (m && trusted) {
-              vllmCommitOverride = m[1];
-            } else if (m && !trusted) {
-              core.setFailed(`[VLLM_COMMIT:...] in PR title from untrusted author (${assoc})`);
+            // [FIX_FOR_VLLM_CUSTOM=<ref>] — override upstream vllm checkout ref.
+            // Gated on trusted author; value validated against a conservative
+            // git-ref charset. Passed through to pre-merge.yaml as the
+            // vllm_ref_override workflow_dispatch input.
+            let vllmRefOverride = '';
+            const rm = /\[FIX_FOR_VLLM_CUSTOM=([^\]]+)\]/.exec(prTitle);
+            if (rm && trusted) {
+              const candidate = rm[1];
+              if (!/^[A-Za-z0-9._/-]+$/.test(candidate)) {
+                core.setFailed(`[FIX_FOR_VLLM_CUSTOM=...] invalid ref: '${candidate}'`);
+                return;
+              }
+              vllmRefOverride = candidate;
+            } else if (rm && !trusted) {
+              core.setFailed(`[FIX_FOR_VLLM_CUSTOM=...] in PR title from untrusted author (${assoc})`);
               return;
             }
 
@@ -143,9 +153,10 @@ jobs:
               const { data: prev } = await github.rest.actions.listWorkflowRuns({
                 owner: context.repo.owner, repo: context.repo.repo,
                 workflow_id: 'pre-merge.yaml', branch: baseRef,
-                event: 'workflow_dispatch', status: 'in_progress', per_page: 50,
+                event: 'workflow_dispatch', per_page: 50,
               });
               for (const r of prev.workflow_runs) {
+                if (['completed', 'cancelled'].includes(r.status)) continue;
                 if (r.display_title?.includes(`#${prNumber} `)) {
                   await cancelDispatchedRun(r.id, 'superseded by new push');
                 }
@@ -169,17 +180,17 @@ jobs:
                 skip_tests:           skipTests,
                 is_merge_group:       isMergeGroup,
                 use_hourly_runner:    useHourlyRunner,
-                vllm_commit_override: vllmCommitOverride,
+                vllm_ref_override:    vllmRefOverride,
               },
             });
 
             // 2. Find the dispatched run. Match on PR# + SHA so two PRs sharing
-            //    a head SHA can't be confused.
+            //    a head SHA can't be confused. Initial "not yet listed" window
+            //    is capped at 30 × 1 s before falling back to the slower poll.
             const titleKey = `#${prNumber} [${headSha}]`;
-            await new Promise(r => setTimeout(r, 15000)); // let GitHub register the run
 
             let runId;
-            for (let i = 0; i < 12; i++) {
+            for (let i = 0; i < 30; i++) {
               try {
                 const { data } = await github.rest.actions.listWorkflowRuns({
                   owner: context.repo.owner, repo: context.repo.repo,
@@ -193,11 +204,11 @@ jobs:
                   core.setOutput('run_id', String(runId));
                   break;
                 }
-                core.info(`Run not found yet (attempt ${i + 1}/12)`);
+                core.info(`Run not yet listed (attempt ${i + 1}/30)`);
               } catch (e) {
                 core.warning(`listWorkflowRuns transient error: ${e.message}`);
               }
-              await new Promise(r => setTimeout(r, 10000));
+              await new Promise(r => setTimeout(r, 1000));
             }
 
             if (!runId) {
@@ -206,9 +217,10 @@ jobs:
                 const { data } = await github.rest.actions.listWorkflowRuns({
                   owner: context.repo.owner, repo: context.repo.repo,
                   workflow_id: 'pre-merge.yaml', branch: baseRef,
-                  event: 'workflow_dispatch', status: 'in_progress', per_page: 50,
+                  event: 'workflow_dispatch', per_page: 50,
                 });
                 for (const r of data.workflow_runs) {
+                  if (['completed', 'cancelled'].includes(r.status)) continue;
                   if (r.display_title?.includes(titleKey)) {
                     await cancelDispatchedRun(r.id, 'lookup timeout, late match');
                   }
@@ -216,7 +228,7 @@ jobs:
               } catch (e) {
                 core.warning(`Fallback cancel lookup failed: ${e.message}`);
               }
-              core.setFailed('Could not find dispatched run within 2 minutes');
+              core.setFailed('Could not find dispatched run within 30 seconds');
               return;
             }
 
@@ -242,7 +254,7 @@ jobs:
 
       - name: Cancel dispatched run if trigger was cancelled or failed
         if: always() && steps.dispatch.outputs.run_id != ''
-        uses: actions/github-script@v7
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
         env:
           RUN_ID: ${{ steps.dispatch.outputs.run_id }}
           TRIGGER_STATUS: ${{ job.status }}
