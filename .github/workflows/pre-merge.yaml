@@ -16,6 +16,7 @@ on:
       is_merge_group:       { description: 'Triggered from merge queue (true/false)',        required: true,  type: string, default: 'false' }
       use_hourly_runner:    { description: 'Use hourly-ci pool (maintainers only)',          required: false, type: string, default: 'false' }
       vllm_commit_override: { description: 'Override upstream vllm commit (7-40 hex; maintainers only)', required: false, type: string, default: '' }
+      vllm_ref_override:    { description: 'Override upstream vllm checkout ref (branch/tag/ref; maintainers only)', required: false, type: string, default: '' }
 
 permissions:
   pull-requests: write
@@ -288,10 +289,12 @@ jobs:
       - name: Determine Target Commit
         id: determine_commit
         env:
-          # [VLLM_COMMIT:...] is parsed and gated on author_association in
-          # pre-merge-trigger.yaml and arrives here as vllm_commit_override.
+          # [VLLM_COMMIT:...] and [FIX_FOR_VLLM_CUSTOM=...] are parsed and
+          # gated on author_association in pre-merge-trigger.yaml and arrive
+          # here as vllm_commit_override / vllm_ref_override.
           PR_TITLE_ENV:         ${{ inputs.pr_title }}
           VLLM_COMMIT_OVERRIDE: ${{ inputs.vllm_commit_override }}
+          VLLM_REF_OVERRIDE:    ${{ inputs.vllm_ref_override }}
           USE_HOURLY_RUNNER:    ${{ inputs.use_hourly_runner }}
         run: |
           FINAL_TARGET="${VLLM_STABLE_COMMIT}"
@@ -309,10 +312,14 @@ jobs:
           elif [[ "$USE_HOURLY_RUNNER" == "true" ]]; then
             echo "✅ [FIX_FOR_VLLM_LATEST] honoured; target = vllm-upstream/main"
             FINAL_TARGET="vllm-upstream/main"
-          elif [[ "$PR_TITLE" == *"[FIX_FOR_VLLM_CUSTOM"* ]]; then
-            PRE_FINAL_TARGET=$(echo "$PR_TITLE" | cut -d '=' -f 2)
-            FINAL_TARGET=$(echo "$PRE_FINAL_TARGET" | cut -d ']' -f 1)
-            echo "[FIX_FOR_VLLM_CUSTOM] target = $FINAL_TARGET"
+          elif [[ -n "$VLLM_REF_OVERRIDE" ]]; then
+            if [[ "$VLLM_REF_OVERRIDE" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+              echo "✅ [FIX_FOR_VLLM_CUSTOM] honoured; target = $VLLM_REF_OVERRIDE"
+              FINAL_TARGET="$VLLM_REF_OVERRIDE"
+            else
+              echo "::error::Invalid vllm_ref_override: $VLLM_REF_OVERRIDE"
+              exit 1
+            fi
           elif [ -z "$FINAL_TARGET" ]; then
             echo "⚠️ No stable commit; defaulting to vllm-upstream/main"
             FINAL_TARGET="vllm-upstream/main"
