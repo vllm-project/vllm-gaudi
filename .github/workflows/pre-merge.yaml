@@ -1,5 +1,7 @@
 name: Basic HPU test suite
 
+# NOTE: run-name MUST contain both "#<pr_number>" and "[<head_sha>]".
+# pre-merge-trigger.yaml relies on this format to correlate dispatched runs.
 run-name: "PR #${{ inputs.pr_number }} [${{ inputs.head_sha }}]"
 
 on:
@@ -10,8 +12,10 @@ on:
       base_ref:   { description: 'PR target branch',              required: true, type: string }
       pr_title:   { description: 'PR title',                      required: false, type: string }
       is_draft:   { description: 'Draft PR (true/false)',         required: true, type: string, default: 'false' }
-      skip_tests:     { description: 'Skip Gaudi tests (true/false)',    required: true, type: string, default: 'false' }
-      is_merge_group: { description: 'Triggered from merge queue (true/false)', required: true, type: string, default: 'false' }
+      skip_tests:           { description: 'Skip Gaudi tests (true/false)',                  required: true,  type: string, default: 'false' }
+      is_merge_group:       { description: 'Triggered from merge queue (true/false)',        required: true,  type: string, default: 'false' }
+      use_hourly_runner:    { description: 'Use hourly-ci pool (maintainers only)',          required: false, type: string, default: 'false' }
+      vllm_commit_override: { description: 'Override upstream vllm commit (7-40 hex; maintainers only)', required: false, type: string, default: '' }
 
 permissions:
   pull-requests: write
@@ -55,8 +59,11 @@ jobs:
         # Provide the GITHUB_TOKEN for the gh CLI to authenticate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IS_MERGE_GROUP: ${{ inputs.is_merge_group }}
+          BASE_REF: ${{ inputs.base_ref }}
+          IS_DRAFT: ${{ inputs.is_draft }}
         run: |
-          if [[ "${{ inputs.is_merge_group }}" == "true" ]]; then
+          if [[ "$IS_MERGE_GROUP" == "true" ]]; then
             echo "Merge group event detected. Skipping gatekeeper checks."
             echo "run_ci=true" >> "$GITHUB_OUTPUT"
             exit 0
@@ -67,8 +74,8 @@ jobs:
           # --- New check to see if the PR is behind the base branch ---
           echo "Checking if the PR is behind the base branch..."
           # Fetch just the latest commit from the base branch for comparison
-          git fetch origin "${{ inputs.base_ref }}" --depth=1
-          behind_count=$(git rev-list --count "HEAD..origin/${{ inputs.base_ref }}")
+          git fetch origin "$BASE_REF" --depth=1
+          behind_count=$(git rev-list --count "HEAD..origin/$BASE_REF")
 
           if_pr_is_behind="false"
           if [[ $behind_count -gt 0 ]]; then
@@ -80,8 +87,7 @@ jobs:
           # --- End of new check ---
 
 
-          PR_DRAFT="${{ inputs.is_draft }}"
-          if [[ "$PR_DRAFT" == "true" ]]; then
+          if [[ "$IS_DRAFT" == "true" ]]; then
             BLOCKING_REASON="This is a **Draft PR**. Please mark it as 'Ready for Review' to trigger the CI."
 
           # Use the 'gh' CLI to fetch the LIVE mergeable state after the sleep
@@ -125,10 +131,11 @@ jobs:
   # --- NEW JOB ---
   # This job runs first on the self-hosted pool, picks a runner,
   # and outputs its name so all other jobs can target it.
-  # If PR title contains [FIX_FOR_VLLM_LATEST], it uses the hourly-ci runner pool.
+  # hourly-ci is selected by the trigger when a maintainer's PR title contains
+  # [FIX_FOR_VLLM_LATEST]; the boolean arrives as inputs.use_hourly_runner.
   discover_runner:
     needs: gatekeeper
-    runs-on: ${{ contains(inputs.pr_title, '[FIX_FOR_VLLM_LATEST]') && 'hourly-ci' || 'pr-ci' }}
+    runs-on: ${{ inputs.use_hourly_runner == 'true' && 'hourly-ci' || 'pr-ci' }}
     outputs:
       runner_name: ${{ steps.get_name.outputs.name }}
     steps:
@@ -278,40 +285,43 @@ jobs:
 
           # 3. Export the final result
           echo "VLLM_STABLE_COMMIT=$COMMIT_HASH" >> "$GITHUB_ENV"
-      - name: Determine Target Commit Based on PR Title
+      - name: Determine Target Commit
         id: determine_commit
         env:
-          PR_TITLE_ENV: ${{ inputs.pr_title }}
+          # [VLLM_COMMIT:...] is parsed and gated on author_association in
+          # pre-merge-trigger.yaml and arrives here as vllm_commit_override.
+          PR_TITLE_ENV:         ${{ inputs.pr_title }}
+          VLLM_COMMIT_OVERRIDE: ${{ inputs.vllm_commit_override }}
+          USE_HOURLY_RUNNER:    ${{ inputs.use_hourly_runner }}
         run: |
-          # Default to the stable commit from the previous step
           FINAL_TARGET="${VLLM_STABLE_COMMIT}"
-          # ⬇️ 2. Read the title from the safe environment variable
           PR_TITLE="$PR_TITLE_ENV"
-
           echo "Pull Request Title: \"${PR_TITLE}\""
 
-          # Check if the title contains the special flag
-          if [[ "$PR_TITLE" == *"[FIX_FOR_VLLM_LATEST]"* ]]; then
-            echo "✅ Flag '[FIX_FOR_VLLM_LATEST]' found in title."
-            echo "Setting target to 'main'."
+          if [[ -n "$VLLM_COMMIT_OVERRIDE" ]]; then
+            if [[ "$VLLM_COMMIT_OVERRIDE" =~ ^[a-f0-9]{7,40}$ ]]; then
+              echo "✅ Maintainer override: vllm commit = $VLLM_COMMIT_OVERRIDE"
+              FINAL_TARGET="$VLLM_COMMIT_OVERRIDE"
+            else
+              echo "::error::Invalid vllm_commit_override: $VLLM_COMMIT_OVERRIDE"
+              exit 1
+            fi
+          elif [[ "$USE_HOURLY_RUNNER" == "true" ]]; then
+            echo "✅ [FIX_FOR_VLLM_LATEST] honoured; target = vllm-upstream/main"
             FINAL_TARGET="vllm-upstream/main"
           elif [[ "$PR_TITLE" == *"[FIX_FOR_VLLM_CUSTOM"* ]]; then
-            echo "[FIX_FOR_VLLM_CUSTOM]' found in title."
             PRE_FINAL_TARGET=$(echo "$PR_TITLE" | cut -d '=' -f 2)
-            echo "Setting target to ${PRE_FINAL_TARGET}"
             FINAL_TARGET=$(echo "$PRE_FINAL_TARGET" | cut -d ']' -f 1)
-            echo "Setting target to ${FINAL_TARGET}"
+            echo "[FIX_FOR_VLLM_CUSTOM] target = $FINAL_TARGET"
           elif [ -z "$FINAL_TARGET" ]; then
-            # This is the corrected check for a missing commit hash
-            echo "⚠️ Stable commit was not found. Defaulting target to 'main'."
+            echo "⚠️ No stable commit; defaulting to vllm-upstream/main"
             FINAL_TARGET="vllm-upstream/main"
           else
-            echo "Using stable commit: ${FINAL_TARGET}"
+            echo "Using stable commit: $FINAL_TARGET"
           fi
 
-          # Export the result to an environment variable for subsequent steps
-          echo "TARGET_COMMIT=${FINAL_TARGET}" >> "$GITHUB_ENV"
-          echo "commit_ref=${FINAL_TARGET}" >> "$GITHUB_OUTPUT"
+          echo "TARGET_COMMIT=$FINAL_TARGET" >> "$GITHUB_ENV"
+          echo "commit_ref=$FINAL_TARGET"   >> "$GITHUB_OUTPUT"
       - name: Add vLLM upstream as a remote and checkout target commit
         id: checkout_vllm_upstream
         run: |
@@ -549,9 +559,11 @@ jobs:
           fetch-depth: 0
       - name: Detect changed Dockerfiles
         id: check
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
         run: |
           # Compare PR head against merge base to find changed files
-          CHANGED=$(git diff --name-only "origin/${{ inputs.base_ref }}...HEAD" -- '.cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest')
+          CHANGED=$(git diff --name-only "origin/$BASE_REF...HEAD" -- '.cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest')
           if [ -n "$CHANGED" ]; then
             echo "nixl_changed=true" >> "$GITHUB_OUTPUT"
             echo "Nixl Dockerfile was modified"
@@ -619,6 +631,8 @@ jobs:
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Remove Docker image to free up space
+        env:
+          HEAD_SHA: ${{ inputs.head_sha }}
         run: |
           echo "Cleaning up Docker images created by this workflow run..."
-          docker rmi -f hpu-plugin-v1-test-env-pre-merge-${{ inputs.head_sha }} || true
+          docker rmi -f "hpu-plugin-v1-test-env-pre-merge-$HEAD_SHA" || true
