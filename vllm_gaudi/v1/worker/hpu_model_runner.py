@@ -2248,8 +2248,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             max_long_bs = self.long_context_max_batch_size
 
             def _is_long(batch_contents):
-                for ctx, tids in zip(batch_contents.context_lens,
-                                     batch_contents.token_ids):
+                for ctx, tids in zip(batch_contents.context_lens, batch_contents.token_ids):
                     if ctx + len(tids) > split_threshold:
                         return True
                 return False
