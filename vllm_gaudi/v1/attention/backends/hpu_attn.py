@@ -35,9 +35,10 @@ class HPUAttentionBackendV1(HPUAttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[Union[int, MultipleOf]]:
-        # for mamba models we don't split block size across kernels
-        # kernel_block_sizes in InputBatch are the same as block_sizes
-        return [128]
+        # HPU doesn't split blocks across kernels; the kernel block size
+        # equals the KV manager block size (whatever it is). MultipleOf(1)
+        # signals that any block size is accepted.
+        return [MultipleOf(1)]
 
 
 @dataclass
