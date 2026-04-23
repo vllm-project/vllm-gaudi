@@ -512,8 +512,7 @@ def test_calc_fallback_value_contiguous_pa_capped_by_cache():
         result = max(capped, actual)
         assert result <= max_cache_blocks, (
             f"raw_actual={raw_actual}: result {result} exceeds cache limit {max_cache_blocks}")
-        assert result >= actual, (
-            f"raw_actual={raw_actual}: result {result} smaller than capped actual {actual}")
+        assert result >= actual, (f"raw_actual={raw_actual}: result {result} smaller than capped actual {actual}")
 
     # Stability near cache limit: adjacent values map to same bucket
     results = set()
@@ -523,10 +522,8 @@ def test_calc_fallback_value_contiguous_pa_capped_by_cache():
         v = max(v, actual)
         results.add(v)
     # Near the cap, everything converges to max_cache_blocks
-    assert max_cache_blocks in results, (
-        f"max_cache_blocks {max_cache_blocks} should be in result set")
-    assert len(results) <= 3, (
-        f"Too many distinct buckets near cache limit: {len(results)}")
+    assert max_cache_blocks in results, (f"max_cache_blocks {max_cache_blocks} should be in result set")
+    assert len(results) <= 3, (f"Too many distinct buckets near cache limit: {len(results)}")
 
 
 def test_exponential_decode_block_limit_cap(monkeypatch):

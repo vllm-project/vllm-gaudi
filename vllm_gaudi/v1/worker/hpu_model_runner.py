@@ -2083,17 +2083,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         block_bucket_size: int
         if self.use_contiguous_pa:
             actual_blocks_needed = max(block_list) + 1 if block_list else 0
-            actual_blocks_needed = min(actual_blocks_needed,
-                                       self._max_cache_blocks)
+            actual_blocks_needed = min(actual_blocks_needed, self._max_cache_blocks)
 
             block_bucket_size = \
                 self.bucketing_manager.find_decode_bucket(batch_size,
                                                           actual_blocks_needed)[2]
             if actual_blocks_needed > block_bucket_size:
                 block_bucket_size = min(
-                    calc_fallback_value(
-                        actual_blocks_needed,
-                        self.bucketing_manager.fallback_blocks_base_step),
+                    calc_fallback_value(actual_blocks_needed, self.bucketing_manager.fallback_blocks_base_step),
                     self._max_cache_blocks)
             block_bucket_size = max(block_bucket_size, actual_blocks_needed)
             block_bucket_size += self.get_dp_padding(block_bucket_size)
