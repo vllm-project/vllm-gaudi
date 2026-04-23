@@ -19,7 +19,7 @@ PROMPTS = [
 @pytest.mark.parametrize(
     "model",
     [
-        "intfloat/e5-mistral-7b-instruct",
+        "/mnt/weka/data/huggingface-models/intfloat/e5-mistral-7b-instruct",
         # "ssmits/Qwen2-7B-Instruct-embed-base",
         # "BAAI/bge-multilingual-gemma2",
     ])

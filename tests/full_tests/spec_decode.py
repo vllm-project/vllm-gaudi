@@ -18,6 +18,26 @@ logging.basicConfig(
 os.environ["VLLM_SKIP_WARMUP"] = "true"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+WEKA_MODEL_MAP = {
+    "/mnt/weka/data/huggingface-models/qwen/Qwen3-4B": "Qwen/Qwen3-4B",
+    "/mnt/weka/data/huggingface-models/yuhuili/EAGLE3-LLaMA3.1-Instruct-8B": "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
+    "/mnt/weka/data/huggingface-models/JackFram/llama-68m": "JackFram/llama-68m",
+    "/mnt/weka/data/huggingface-models/abhigoyal/vllm-medusa-llama-68m-random":
+    "abhigoyal/vllm-medusa-llama-68m-random",
+    "/mnt/weka/data/pytorch/DeepSeek-R1": "deepseek-ai/DeepSeek-R1",
+}
+
+
+def resolve_model_path(weka_path):
+    """Use weka path if available, otherwise fall back to HF model ID."""
+    if os.path.isdir(weka_path):
+        return weka_path
+    hf_id = WEKA_MODEL_MAP.get(weka_path)
+    if hf_id:
+        logging.info("Weka path %s not found, falling back to HF: %s", weka_path, hf_id)
+        return hf_id
+    return weka_path
+
 
 def time_generation(llm: LLM,
                     prompts: Optional[list[str]],
@@ -118,8 +138,9 @@ def create_error_result(e: Exception) -> dict:
 
 def test_ngram(is_enable, args, prompts, sampling_params, task_key, result_queue):
     VLLM_CLS = LLM if prompts is not None else VLLM
-    kwargs = {"model":"Qwen/Qwen3-4B",} if prompts is not None \
-        else {"pretrained":"Qwen/Qwen3-4B","batch_size":"16"}
+    ngram_model = resolve_model_path("/mnt/weka/data/huggingface-models/qwen/Qwen3-4B")
+    kwargs = {"model": ngram_model} if prompts is not None \
+        else {"pretrained": ngram_model, "batch_size": "16"}
     try:
         if not is_enable:
             llm = VLLM_CLS(
@@ -154,8 +175,8 @@ def test_ngram(is_enable, args, prompts, sampling_params, task_key, result_queue
 
 def test_eagle_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
     VLLM_CLS = LLM if prompts is not None else VLLM
-    kwargs = {"model":"meta-llama/Meta-Llama-3-8B-Instruct"} if prompts is not None \
-        else {"pretrained":"meta-llama/Meta-Llama-3-8B-Instruct","batch_size":"16"}
+    kwargs = {"model":"meta-llama/Llama-3.1-8B-Instruct"} if prompts is not None \
+        else {"pretrained":"meta-llama/Llama-3.1-8B-Instruct","batch_size":"16"}
     try:
         if not is_enable:
             llm = VLLM_CLS(
@@ -190,8 +211,8 @@ def test_eagle_model(is_enable, args, prompts, sampling_params, task_key, result
 
 def test_eagle3_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
     VLLM_CLS = LLM if prompts is not None else VLLM
-    kwargs = {"model":"meta-llama/Meta-Llama-3-8B-Instruct",} if prompts is not None \
-        else {"pretrained":"meta-llama/Meta-Llama-3-8B-Instruct","batch_size":"16"}
+    kwargs = {"model":"meta-llama/Llama-3.1-8B-Instruct",} if prompts is not None \
+        else {"pretrained":"meta-llama/Llama-3.1-8B-Instruct","batch_size":"16"}
     try:
         if not is_enable:
             llm = VLLM_CLS(
@@ -203,7 +224,8 @@ def test_eagle3_model(is_enable, args, prompts, sampling_params, task_key, resul
             llm = VLLM_CLS(
                 **kwargs,
                 speculative_config={
-                    "model": "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
+                    "model":
+                    resolve_model_path("/mnt/weka/data/huggingface-models/yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"),
                     "num_speculative_tokens": args.num_spec_tokens,
                     "method": "eagle3",
                 },
@@ -227,8 +249,9 @@ def test_eagle3_model(is_enable, args, prompts, sampling_params, task_key, resul
 
 def test_medusa_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
     VLLM_CLS = LLM if prompts is not None else VLLM
-    kwargs = {"model":"JackFram/llama-68m",} if prompts is not None \
-        else {"pretrained":"JackFram/llama-68m",}
+    medusa_model = resolve_model_path("/mnt/weka/data/huggingface-models/JackFram/llama-68m")
+    kwargs = {"model": medusa_model} if prompts is not None \
+        else {"pretrained": medusa_model}
     try:
         if not is_enable:
             llm = VLLM_CLS(
@@ -240,7 +263,8 @@ def test_medusa_model(is_enable, args, prompts, sampling_params, task_key, resul
             llm = VLLM_CLS(
                 **kwargs,
                 speculative_config={
-                    "model": "abhigoyal/vllm-medusa-llama-68m-random",
+                    "model":
+                    resolve_model_path("/mnt/weka/data/huggingface-models/abhigoyal/vllm-medusa-llama-68m-random"),
                     "num_speculative_tokens": args.num_spec_tokens,
                 },
                 disable_log_stats=False,
@@ -297,8 +321,9 @@ def test_eaglemtp_model(is_enable, args, prompts, sampling_params, task_key, res
 
 def test_mtp_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
     VLLM_CLS = LLM if prompts is not None else VLLM
-    kwargs = {"model":"/mnt/weka/data/pytorch/DeepSeek-R1",} if prompts is not None \
-        else {"pretrained":"/mnt/weka/data/pytorch/DeepSeek-R1",}
+    mtp_model = resolve_model_path("/mnt/weka/data/pytorch/DeepSeek-R1")
+    kwargs = {"model": mtp_model} if prompts is not None \
+        else {"pretrained": mtp_model}
     try:
         if not is_enable:
             llm = VLLM_CLS(

@@ -20,7 +20,7 @@ def create_parser():
 
     # Set defaults for pooling/embedding
     parser.set_defaults(
-        model="intfloat/e5-mistral-7b-instruct",
+        model="/mnt/weka/data/huggingface-models/intfloat/e5-mistral-7b-instruct",
         runner="pooling",
         enforce_eager=False,
     )

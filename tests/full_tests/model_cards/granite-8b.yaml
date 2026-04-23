@@ -1,5 +1,5 @@
 model_card:
-  model_name: "ibm-granite/granite-3.3-2b-instruct"
+  model_name: "/mnt/weka/data/huggingface-models/ibm-granite/granite-3.3-2b-instruct"
   tasks: gsm8k_cot
   num_fewshot: 8
   limit: 500

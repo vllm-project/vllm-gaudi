@@ -1,123 +1,87 @@
 # test_config.yaml
+#
+# Bundle optimization (based on build #482 actual timings):
+#   - Original 23 pods consolidated to 5 pods (19 cards total)
+#   - Card sizes: g3=1, g3.l=8, g2.l=8
+#   - Tests grouped by flavor compatibility
+#
 stages:
-  - name: smoke_tests
+  - name: first_stage
     steps:
-      - name: gsm8k_small_g3_tp1
+      # --- g2.l: cpu_offloading + spec_decode_ngram (~12min, 8 cards) ---
+      #   Uses g2 due to accuracy issue on g3
+      - name: e2e_g2_offloading_specdec_bundle
+        flavor: g2.l
+        command: >-
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_cpu_offloading_test &&
+          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_ngram_test
+      # --- g3.l: unit_tests + eagle3 + w4a16 + calibration + accuracy + TP=2 tests (~50min, 8 cards) ---
+      #   Uses g3.l because unit_tests needs 8 cards for offloading test
+      #   run_accuracy_test (NIXL PD) needs 3+ cards for prefill + decode TP=2
+      #   TP=2 tests from accuracy bundle also run here
+      - name: e2e_unittests_eagle3_calib_accuracy_bundle
+        flavor: g3.l
+        command: >-
+          pip install pytest-timeout &&
+          HABANA_VISIBLE_DEVICES=all pytest -vvv --timeout=300 --durations=10 --durations-min=1.0
+          -o junit_family=xunit1 --junitxml=\${TEST_RESULTS_DIR}/test_unit_tests.xml
+          tests/unit_tests &&
+          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_eagle3_test &&
+          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_eagle3_num_spec_2_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_compressed_w4a16_moe_gidx_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_compressed_w4a16_channelwise_load_generate_test &&
+          bash tests/full_tests/run_with_junit.sh calibration_arg_parsing bash tests/calibration_tests/test_calibrate_model_arg_parsing.sh &&
+          pip install lm-eval[api] &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_deepseek_v2_inc_dynamic_tp2_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_qwen3_30b_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_tp2_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_vl_load_generate_test &&
+          bash -c 'cd tests/unit_tests && ./run_accuracy_test.sh'
+      # --- g3 Bin A: qwen3_moe + deepseek_v2 + gsm8k (~31min, 1 card) ---
+      - name: e2e_qwen3moe_deepseek_bundle
         flavor: g3
         command: >-
-          export PT_HPU_LAZY_MODE=1 &&  cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 1
-      - name: gsm8k_small_g3_tp2
-        flavor: g3.s
-        command: >-
-          export PT_HPU_LAZY_MODE=1 && 
-          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 2
-      - name: gsm8k_small_g2_tp1
-        flavor: g2
-        command: >-
-          export PT_HPU_LAZY_MODE=1 && 
-          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 1
-      - name: gsm8k_small_g2_tp2
-        flavor: g2.s
-        command: >-
-          export PT_HPU_LAZY_MODE=1 && 
-          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 2
-  - name: full_test_suite
-    steps:
-      - name: gsm8k_small_g3_tp1_apc
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_moe_compressed_tensor_dynamic_scaling_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_moe_compressed_tensor_static_scaling_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_compressed_tensor_dynamic_scaling_load_generate_test &&
+          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_mla_moe_load_generate_test &&
+          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_deepseek_v2_inc_load_generate_test &&
+          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_deepseek_test
+      # --- g3 Bin B: multimodal + quant + perf + fp8 (~65min, 1 card) ---
+      - name: e2e_multimodal_quant_perf_fp8_bundle
         flavor: g3
         command: >-
-          export VLLM_CONTIGUOUS_PA=false && 
-          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 1 -a
-      - name: gsm8k_small_g2_tp1_apc
-        flavor: g2
-        command: >-
-          export VLLM_CONTIGUOUS_PA=false && 
-          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 1 -a
-      - name: gsm8k_medium_g3_tp1
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen2_5_vl_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen2_5_vl_lazy_warmup_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen2_5_vl_compile_warmup_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_offloading_connector_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_embedding_model_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_mistral3_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gptq_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_awq_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gemma3_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_basic_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_llama3_70b_inc_dynamic_quant_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_ernie4.5_vl_test &&
+          bash tests/full_tests/run_with_junit.sh perf_tests bash tests/full_tests/ci_perf_tests.sh &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_inc_dynamic_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_blockfp8_dynamic_scaling_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_dsv2_blockfp8_static_scaling_fp8kv_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test
+      # --- g3 Bin C: granite + scaling + sleep + structured_output + preemption (~33min, 1 card) ---
+      - name: e2e_granite_scaling_sleep_preemption_bundle
         flavor: g3
         command: >-
-          export PT_HPU_LAZY_MODE=1 &&  cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-medium.txt -t 1
-      - name: gsm8k_medium_g3_tp2
-        flavor: g3.s
-        command: >-
-          export PT_HPU_LAZY_MODE=1 && 
-          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-medium.txt -t 2
-      # Chendi: Failed on G2 due to Qwen3-30B might be too large
-      # - name: gsm8k_medium_g2_tp1
-      #   flavor: g2
-      #   command: >-
-      #     export PT_HPU_LAZY_MODE=1 && 
-      #     cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-medium.txt -t 1
-      - name: gsm8k_medium_g2_tp2
-        flavor: g2.s
-        command: >-
-          export PT_HPU_LAZY_MODE=1 && 
-          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-medium.txt -t 2
-      - name: gsm8k_large_g3_tp2
-        flavor: g3.s
-        command: >-
-          export PT_HPU_LAZY_MODE=1 && 
-          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-large.txt -t 2
-      - name: gsm8k_large_g2_tp4
-        flavor: g2.m
-        command: >-
-          export PT_HPU_LAZY_MODE=1 && 
-          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-large.txt -t 4
-      # Chendi: comment firstly since this one takes longest time and might fail on resource
-      # - name: gsm8k_huge_g3_tp8
-      #   flavor: g3.l
-      #   command: >-
-      #     export PT_HPU_LAZY_MODE=1 && 
-      #     cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-huge.txt -t 8
-      - name: gsm8k_small_g3_tp1_fp8
-        flavor: g3
-        command: >-
-          cd .jenkins/lm-eval-harness && 
-          PT_HPU_LAZY_MODE=1 
-          bash run-tests.sh -c configs/models-fp8-g3-tp1.txt -t 1
-      - name: gsm8k_small_g3_tp2_fp8
-        flavor: g3.s
-        command: >-
-          cd .jenkins/lm-eval-harness && 
-          PT_HPU_LAZY_MODE=1 
-          bash run-tests.sh -c configs/models-fp8.txt -t 2
-      - name: gsm8k_fp8_llama4_scout_g3_tp2_compressed_tensor
-        flavor: g3.s
-        command: >-
-          cd .jenkins/lm-eval-harness && 
-          VLLM_WEIGHT_LOAD_FORCE_SYNC=1 VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 
-          bash run-tests.sh -c configs/models-fp8-compressedtensor.txt -t 2
-      # Chendi: crash on model weight loading, need to fix
-      # - name: gsm8k_fp8_qwen3_30B_g3_tp1_block_scale_dynamic
-      #   flavor: g3
-      #   command: >-
-      #     cd .jenkins/lm-eval-harness && 
-      #     VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1  
-      #     bash run-tests.sh -c configs/models-fp8-blockfp8.txt -t 1
-      # Chendi: crash on model weight loading, need to fix
-      # - name: gsm8k_fp8_qwen3_30B_g3_tp1_block_scale_dequant
-      #   flavor: g3
-      #   command: >-
-      #     cd .jenkins/lm-eval-harness && 
-      #     VLLM_CONTIGUOUS_PA=False PT_HPU_LAZY_MODE=1 VLLM_HPU_FORCE_CHANNEL_FP8=0 
-      #     bash run-tests.sh -c configs/models-fp8-blockfp8.txt -t 1
-      - name: multimodal_llama4_scout_g3_tp2_ep
-        flavor: g3.s
-        command: >-
-          cd .jenkins/vision && 
-          PT_HPU_LAZY_MODE=1 VLLM_WEIGHT_LOAD_FORCE_SYNC=1 
-          bash run-tests.sh -c configs/models-llama4-scout.txt -t 2
-      - name: gsm8k_qwen35_g3_tp1
-        flavor: g3
-        command: >-
-          # Qwen3.5 has dependency on newer transformers, which is not compatible with vllm's current version, 
-          # so we need to temporarily upgrade it for this test and then restore the original version after the test.
-          # Will be removed once vllm supports newer transformers
-          export OLD_TRANSFORMERS_VER=$(pip show transformers | grep Version | awk '{print $2}') &&
-          export OLD_HF_HUB_VER=$(pip show huggingface_hub | grep Version | awk '{print $2}') &&
-          pip install transformers==5.3.0 huggingface_hub==1.7.1 --no-deps &&
-          cd .jenkins/lm-eval-harness &&
-          VLLM_FUSED_BLOCK_SOFTMAX_ADJUSTMENT=False VLLM_GRAPH_RESERVED_MEM=0.2
-          bash run-tests.sh -c configs/models-qwen3.5.txt -t 1 ;
-          pip install transformers==$OLD_TRANSFORMERS_VER huggingface_hub==$OLD_HF_HUB_VER --no-deps
-
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_sleep_mode_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_structured_output_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_deepseek_ocr_vl_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_granite_inc_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_granite_inc_calibration_and_quantization_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_granite_4_h_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_granite_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_granite_async_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_llama3_per_tensor_scaling_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_llama3_modelopt_per_tensor_scaling_load_generate_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_preemption_test

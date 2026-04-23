@@ -1,4 +1,4 @@
-model_name: "google/gemma-3-4b-it"
+model_name: "/mnt/weka/data/pytorch/gemma/gemma-3-4b-it"
 test_config:                                # List of test configurations. - modality is test for <modality>
   - modality: image                         # modality (currently supports image and video)
     extra_engine_args:                      # Optional extra arguments for the engine

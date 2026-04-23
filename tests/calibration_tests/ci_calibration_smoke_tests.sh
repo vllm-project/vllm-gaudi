@@ -32,7 +32,7 @@ run_granite_calibration_test() {
     cleanup_calibration_output
 
     PT_HPU_LAZY_MODE=1 "${VLLM_GAUDI_PREFIX}/calibration/calibrate_model.sh" \
-        -m ibm-granite/granite-3.3-2b-instruct \
+        -m /mnt/weka/data/huggingface-models/ibm-granite/granite-3.3-2b-instruct \
         -d "${CALIBRATION_DATASET}" \
         -o "${CALIBRATION_OUTPUT_DIR}" \
         -b ${BATCH_SIZE} \

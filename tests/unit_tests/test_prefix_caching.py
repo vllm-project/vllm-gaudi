@@ -15,8 +15,8 @@ DEVICE = current_platform.device_type
 
 def get_vllm_config():
     model_config = ModelConfig(
-        model="facebook/opt-125m",
-        tokenizer="facebook/opt-125m",
+        model="/mnt/weka/data/huggingface-models/facebook/opt-125m",
+        tokenizer="/mnt/weka/data/huggingface-models/facebook/opt-125m",
         tokenizer_mode="auto",
         trust_remote_code=True,
         dtype="bfloat16",

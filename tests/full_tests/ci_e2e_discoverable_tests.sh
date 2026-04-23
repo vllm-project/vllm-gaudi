@@ -1,8 +1,18 @@
 #!/bin/bash
 
-# Exit immediately if a command exits with a non-zero status.
-# This ensures that if any test fails, the script will stop.
-set -e
+# Allow sourcing this script to import helper functions (write_junit_xml, etc.)
+# without executing any test or modifying shell options.
+# Usage: source ci_e2e_discoverable_tests.sh __source_only__
+# This guard MUST stay before 'set -e' to avoid altering the caller's shell.
+if [[ "${1:-}" == "__source_only__" ]]; then
+  # Skip set -e and the entrypoint; only define the functions below.
+  _CI_E2E_SOURCE_ONLY=1
+else
+  _CI_E2E_SOURCE_ONLY=0
+  # Exit immediately if a command exits with a non-zero status.
+  # This ensures that if any test fails, the script will stop.
+  set -e
+fi
 
 # --- Configuration ---
 # Defines the path to the vllm-gaudi directory.
@@ -10,6 +20,75 @@ set -e
 VLLM_GAUDI_PREFIX=${VLLM_GAUDI_PREFIX:-"vllm-gaudi"}
 echo $VLLM_GAUDI_PREFIX
 
+# --- JUnit XML Reporting ---
+# When TEST_RESULTS_DIR is set (e.g. by Jenkins), generate JUnit XML reports
+# so that Jenkins can parse and display test results.
+# This mirrors the behavior of .jenkins/lm-eval-harness/run-tests.sh.
+
+# Returns pytest JUnit XML flags for a given test name.
+# Usage: pytest ... $(get_pytest_junit_args "test_name")
+get_pytest_junit_args() {
+    local test_name="$1"
+    if [[ -n "$TEST_RESULTS_DIR" ]]; then
+        local random_suffix
+        random_suffix=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 4; echo)
+        local log_path="${TEST_RESULTS_DIR}/test_${test_name}_${random_suffix}.xml"
+        echo "-o junit_family=xunit1 --junitxml=${log_path}"
+    fi
+}
+
+# Writes a JUnit XML result file for non-pytest tests (plain python scripts).
+# Usage: write_junit_xml "test_name" exit_code elapsed_seconds "optional error message"
+write_junit_xml() {
+    local test_name="$1"
+    local exit_code="$2"
+    local elapsed="${3:-0}"
+    local error_msg="${4:-}"
+    if [[ -z "$TEST_RESULTS_DIR" ]]; then
+        return
+    fi
+    local random_suffix
+    random_suffix=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 4; echo)
+    local log_path="${TEST_RESULTS_DIR}/test_${test_name}_${random_suffix}.xml"
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S")
+    if [[ "$exit_code" -eq 0 ]]; then
+        cat > "$log_path" <<EOF
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+  <testsuite name="${test_name}" tests="1" errors="0" failures="0" skipped="0" timestamp="${timestamp}" time="${elapsed}">
+    <testcase classname="e2e_tests" name="${test_name}" time="${elapsed}"/>
+  </testsuite>
+</testsuites>
+EOF
+    else
+        cat > "$log_path" <<EOF
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+  <testsuite name="${test_name}" tests="1" errors="0" failures="1" skipped="0" timestamp="${timestamp}" time="${elapsed}">
+    <testcase classname="e2e_tests" name="${test_name}" time="${elapsed}">
+      <failure message="Test failed with exit code ${exit_code}">${error_msg}</failure>
+    </testcase>
+  </testsuite>
+</testsuites>
+EOF
+    fi
+}
+
+# Runs a non-pytest python command and generates JUnit XML for the result.
+# Usage: run_with_junit "test_name" command [args...]
+run_with_junit() {
+    local test_name="$1"
+    shift
+    local start_time=$SECONDS
+    local exit_code=0
+    "$@" || exit_code=$?
+    local elapsed=$(( SECONDS - start_time ))
+    write_junit_xml "$test_name" "$exit_code" "$elapsed"
+    if [[ "$exit_code" -ne 0 ]]; then
+        return "$exit_code"
+    fi
+}
 
 
 # --- Loading and Generation tests ---
@@ -34,14 +113,14 @@ run_gemma3_load_generate_test() {
 # Basic model test
 run_basic_load_generate_test() {
     echo "➡️ Testing basic model with vllm-hpu plugin v1..."
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model facebook/opt-125m
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model /mnt/weka/data/huggingface-models/facebook/opt-125m
     echo "✅ Test with basic model passed."
 }
 
 # Tensor parallel size 2
 run_tp2_load_generate_test() {
     echo "➡️ Testing tensor parallel size 2 with vllm-hpu plugin v1..."
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model facebook/opt-125m --tensor-parallel-size 2
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model /mnt/weka/data/huggingface-models/facebook/opt-125m --tensor-parallel-size 2
     echo "✅ Test with tensor parallel size 2 passed."
 }
 
@@ -56,7 +135,7 @@ run_mla_moe_load_generate_test() {
 run_granite_inc_load_generate_test() {
     echo "➡️ Testing granite-8b + inc with vllm-hpu plugin v1..."
     QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_unit_scale_quant.json" \
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model ibm-granite/granite-3.3-2b-instruct --trust-remote-code --quantization inc --kv_cache_dtype fp8_inc
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model /mnt/weka/data/huggingface-models/ibm-granite/granite-3.3-2b-instruct --trust-remote-code --quantization inc --kv_cache_dtype fp8_inc
     echo "✅ Test with granite + inc passed."
 }
 
@@ -81,7 +160,7 @@ run_qwen3_inc_dynamic_load_generate_test() {
     echo "➡️ Testing Qwen3-8B-FP8 + inc requant FP8 model + dynamic quant..."
     QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_dynamic_quant.json" VLLM_HPU_FORCE_CHANNEL_FP8=false \
     HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 \
-    python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Qwen/Qwen3-8B-FP8 --trust-remote-code
+    python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model /mnt/weka/data/huggingface-models/qwen/Qwen3-8B-FP8 --trust-remote-code
     echo "✅ Test with Qwen3-8B-FP8 + inc requant FP8 model + dynamic quant passed."
 }
 
@@ -89,7 +168,7 @@ run_qwen3_inc_dynamic_load_generate_test() {
 # The lazy mode works on 1.24.0-272
 run_dsv2_blockfp8_static_scaling_fp8kv_load_generate_test() {
     echo "➡️ Testing Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 KV..."
-    PT_HPU_LAZY_MODE=0 HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model INC4AI/DeepSeek-V2-Lite-Chat-BF16-FP8-STATIC-FP8-KV-TEST-ONLY --trust-remote-code
+    PT_HPU_LAZY_MODE=0 HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model /mnt/weka/data/huggingface-models/INC4AI/DeepSeek-V2-Lite-Chat-BF16-FP8-STATIC-FP8-KV-TEST-ONLY --trust-remote-code
     echo "✅ Test with Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 KV successful."
 }
 
@@ -97,7 +176,7 @@ run_dsv2_blockfp8_static_scaling_fp8kv_load_generate_test() {
 # The lazy mode works on 1.24.0-272
 run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test() {
     echo "➡️ Testing Qwen3-8B + static scaling + FP8 Attn..."
-    PT_HPU_LAZY_MODE=0 HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model INC4AI/Qwen3-8B-FP8_STATIC-FP8-Attn-LLMC-Test-Only --trust-remote-code --kv_cache_dtype fp8_inc
+    PT_HPU_LAZY_MODE=0 HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model /mnt/weka/data/huggingface-models/INC4AI/Qwen3-8B-FP8_STATIC-FP8-Attn-LLMC-Test-Only --trust-remote-code --kv_cache_dtype fp8_inc
     echo "✅ Test with Qwen3-8B + static scaling + FP8 Attn successful."
 }
 
@@ -105,55 +184,55 @@ run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test() {
 # The lazy mode works on 1.24.0-272
 run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test() {
     echo "➡️ Testing Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 QKV..."
-    PT_HPU_LAZY_MODE=0 HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/DeepSeek-V2-Lite-Chat-BF16-FP8-STATIC-FP8-QKV-TEST-ONLY --trust-remote-code --kv_cache_dtype fp8_inc
+    PT_HPU_LAZY_MODE=0 HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model /mnt/weka/data/huggingface-models/Intel/DeepSeek-V2-Lite-Chat-BF16-FP8-STATIC-FP8-QKV-TEST-ONLY --trust-remote-code --kv_cache_dtype fp8_inc
     echo "✅ Test with Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 QKV successful."
 }
 
 # QWEN3 + blockfp8 + dynamic scaling
 run_qwen3_blockfp8_dynamic_scaling_load_generate_test() {
     echo "➡️ Testing Qwen3-8B-FP8 + blockfp8 + dynamic scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Qwen/Qwen3-8B-FP8 --trust-remote-code
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model /mnt/weka/data/huggingface-models/qwen/Qwen3-8B-FP8 --trust-remote-code
     echo "✅ Test with Qwen3-8B-FP8 + blockfp8 + dynamic scaling successful."
 }
 
 # QWEN3 compressed tensor + dynamic scaling
 run_qwen3_compressed_tensor_dynamic_scaling_load_generate_test() {
     echo "➡️ Testing Qwen3-8B-FP8-dynamic + compressed-tensor + dynamic scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Qwen3-8B-FP8-dynamic --trust-remote-code
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model /mnt/weka/data/pytorch/RedHatAI/Qwen3-8B-FP8-dynamic --trust-remote-code
     echo "✅ Test with Qwen3-8B-FP8-dynamic + compressed-tensor + dynamic scaling successful."
 }
 
 # QWEN3 FP8 + MOE compressed tensor + dynamic scaling
 run_qwen3_moe_compressed_tensor_dynamic_scaling_load_generate_test() {
     echo "➡️ Testing Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 + moe + compressed-tensor + dynamic scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 --trust-remote-code --max-model-len 131072
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model /mnt/weka/data/huggingface-models/qwen/Qwen3-30B-A3B-Instruct-2507-FP8 --trust-remote-code --max-model-len 131072
     echo "✅ Test with Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 + moe + compressed-tensor + dynamic scaling successful."
 }
 
 run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_load_generate_test() {
     echo "➡️ Testing Intel/Qwen3-30B-A3B-FP8-Test-Only + moe + compressed-tensor + static scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model /mnt/weka/data/huggingface-models/Intel/Qwen3-30B-A3B-FP8-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
     echo "✅ Test with Intel/Qwen3-30B-A3B-FP8-Test-Only + moe + compressed-tensor + static scaling successful."
 }
 
 # QWEN3 FP8 + MOE compressed tensor + static scaling (weight per-channel, activation per-tensor)
 run_qwen3_moe_compressed_tensor_static_scaling_load_generate_test() {
     echo "➡️ Testing Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + moe + compressed-tensor + static scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Static-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model /mnt/weka/data/huggingface-models/Intel/Qwen3-30B-A3B-FP8-Static-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
     echo "✅ Test with Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + moe + compressed-tensor + static scaling successful."
 }
 
 # RedHatAI/Meta-Llama-3-8B-Instruct-FP8 Per-tensor F8 static scales
 run_llama3_per_tensor_scaling_load_generate_test() {
     echo "➡️ Testing RedHatAI/Meta-Llama-3-8B-Instruct-FP8 + per tensor scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Meta-Llama-3-8B-Instruct-FP8 --trust-remote-code
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model /mnt/weka/data/pytorch/RedHatAI/Meta-Llama-3-8B-Instruct-FP8 --trust-remote-code
     echo "✅ Test with RedHatAI/Meta-Llama-3-8B-Instruct-FP8 + per tensor scaling successful."
 }
 
 # nvidia/Llama-3.1-8B-Instruct-FP8 Per-tensor F8 static scales
 run_llama3_modelopt_per_tensor_scaling_load_generate_test() {
     echo "➡️ Testing nvidia/Llama-3.1-8B-Instruct-FP8 + per tensor scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model nvidia/Llama-3.1-8B-Instruct-FP8 --trust-remote-code --kv_cache_dtype fp8_inc
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model /mnt/weka/data/huggingface-models/nvidia/Llama-3.1-8B-Instruct-FP8 --trust-remote-code --kv_cache_dtype fp8_inc
     echo "✅ Test with nvidia/Llama-3.1-8B-Instruct-FP8 + per tensor scaling successful."
 }
 
@@ -163,7 +242,7 @@ run_llama3_modelopt_per_tensor_scaling_load_generate_test() {
 run_granite_inc_calibration_and_quantization_load_generate_test() {
     echo "Testing inc calibration on granite"
     QUANT_CONFIG=${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_measure.json VLLM_CONTIGUOUS_PA=False HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 \
-    python -u ${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py --model ibm-granite/granite-3.3-2b-instruct --trust-remote-code --quantization inc
+    python -u ${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py --model /mnt/weka/data/huggingface-models/ibm-granite/granite-3.3-2b-instruct --trust-remote-code --quantization inc
     if [ $? -ne 0 ]; then
         echo "Error: Test failed for inc calibration on granite" >&2
         exit -1
@@ -172,7 +251,7 @@ run_granite_inc_calibration_and_quantization_load_generate_test() {
 
     echo "Testing inc quantization with hw aligned scales on granite"
     QUANT_CONFIG=${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_maxabs_hw_quant.json VLLM_CONTIGUOUS_PA=False HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 \
-    python -u ${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py --model ibm-granite/granite-3.3-2b-instruct --trust-remote-code --quantization inc --kv_cache_dtype fp8_inc
+    python -u ${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py --model /mnt/weka/data/huggingface-models/ibm-granite/granite-3.3-2b-instruct --trust-remote-code --quantization inc --kv_cache_dtype fp8_inc
     if [ $? -ne 0 ]; then
         echo "Error: Test failed for inc quantization with hw aligned scales on granite" >&2
         exit -1
@@ -186,7 +265,7 @@ run_granite_4_h_load_generate_test() {
     VLLM_SKIP_WARMUP=true \
     PT_HPU_LAZY_MODE=0 \
     python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" \
-        --model ibm-granite/granite-4.0-h-small \
+        --model /mnt/weka/data/pytorch/RedHatAI/granite-4.0-h-small \
         --block-size 128 \
         --dtype bfloat16 \
         --tensor-parallel-size 1 \
@@ -203,28 +282,28 @@ run_granite_4_h_load_generate_test() {
 # AWQ test
 run_awq_load_generate_test() {
     echo "➡️ Testing awq inference with vllm-hpu plugin v1..."
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model TheBloke/Llama-2-7B-Chat-AWQ --dtype bfloat16 --quantization awq_hpu
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model /mnt/weka/data/huggingface-models/TheBloke/Llama-2-7B-Chat-AWQ --dtype bfloat16 --quantization awq_hpu
     echo "✅ Test with awq passed."
 }
 
 # GPTQ test
 run_gptq_load_generate_test() {
     echo "➡️ Testing gptq inference with vllm-hpu plugin v1..."
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model TheBloke/Llama-2-7B-Chat-GPTQ --dtype bfloat16 --quantization gptq_hpu
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model /mnt/weka/data/huggingface-models/TheBloke/Llama-2-7B-Chat-GPTQ --dtype bfloat16 --quantization gptq_hpu
     echo "✅ Test with gptq passed."
 }
 
 # Compressed w4a16 channelwise
 run_compressed_w4a16_channelwise_load_generate_test() {
     echo "➡️ Testing compressed w4a16 (channelwise) inference..."
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model nm-testing/tinyllama-oneshot-w4a16-channel-v2 --dtype bfloat16
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model /mnt/weka/data/huggingface-models/nm-testing/tinyllama-oneshot-w4a16-channel-v2 --dtype bfloat16
     echo "✅ Test with compressed w4a16 (channelwise) passed."
 }
 
 # Compressed w4a16 MoE with g_idx
 run_compressed_w4a16_moe_gidx_load_generate_test() {
     echo "➡️ Testing compressed w4a16 MoE with g_idx inference..."
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model nm-testing/test-w4a16-mixtral-actorder-group --dtype bfloat16
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model /mnt/weka/data/huggingface-models/nm-testing/test-w4a16-mixtral-actorder-group --dtype bfloat16
     echo "✅ Test with compressed w4a16 MoE with g_idx passed."
 }
 
@@ -233,7 +312,7 @@ run_llama3_70b_inc_dynamic_quant_load_generate_test() {
     echo "➡️ Testing Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode ..."
     QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_maxabs_dynamic_quant.json" \
     HABANA_VISIBLE_DEVICES=all RUNTIME_SCALE_PATCHING=0 VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 \
-    python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic --max-model-len 2048
+    python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model /mnt/weka/data/pytorch/RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic --max-model-len 2048
     echo "✅ Test with Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode passed."
 }
 
@@ -298,7 +377,7 @@ run_llama3_70b_inc_dynamic_quant_test() {
     echo "➡️ Testing Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode ..."
     QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_maxabs_dynamic_quant.json" \
     HABANA_VISIBLE_DEVICES=all RUNTIME_SCALE_PATCHING=0 VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 \
-    python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic --max-model-len 2048
+    python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model /mnt/weka/data/pytorch/RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic --max-model-len 2048
     echo "✅ Test with Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode passed."
 }
 
@@ -404,7 +483,7 @@ run_spec_decode_eagle3_num_spec_2_test() {
 # Embedding-model-support for v1
 run_embedding_model_test() {
    echo "➡️ Testing Embedding-model-support for v1..."
-   HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=false PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/pooling.py" --model intfloat/e5-mistral-7b-instruct --trust-remote-code
+   HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=false PT_HPU_LAZY_MODE=1 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/pooling.py" --model /mnt/weka/data/huggingface-models/intfloat/e5-mistral-7b-instruct --trust-remote-code
    echo "✅ Embedding-model-support for v1 successful."
 }
 
@@ -444,7 +523,7 @@ run_offloading_connector_test() {
 # sleep mode
 run_sleep_mode_test() {
     echo "Testing basic model with sleep mode / wake up functionality"
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 VLLM_ENABLE_V1_MULTIPROCESSING=0 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/sleep_mode.py" --model facebook/opt-125m
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 VLLM_ENABLE_V1_MULTIPROCESSING=0 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/sleep_mode.py" --model /mnt/weka/data/huggingface-models/facebook/opt-125m
     echo "✅ Test with sleep mode passed."
 }
 
@@ -524,15 +603,46 @@ usage() {
 
 # --- Script Entry Point ---
 
+# If sourced with __source_only__, stop here — functions are defined, nothing to run.
+if [[ "$_CI_E2E_SOURCE_ONLY" -eq 1 ]]; then
+  return 0 2>/dev/null || true
+fi
+
 # Default to 'run_all_tests' if no function name is provided as an argument.
 # The ${1:-run_all_tests} syntax means "use $1 if it exists, otherwise use 'run_all_tests'".
 FUNCTION_TO_RUN=${1:-launch_all_tests}
 
+# Set up JUnit XML reporting for pytest invocations within the test function.
+# When TEST_RESULTS_DIR is set (by Jenkins), any pytest call will automatically
+# produce a JUnit XML report, matching the behavior of .jenkins/lm-eval-harness/run-tests.sh.
+if [[ -n "${TEST_RESULTS_DIR:-}" ]]; then
+  mkdir -p "$TEST_RESULTS_DIR"
+  JUNIT_XML_PATH="${TEST_RESULTS_DIR}/test_${FUNCTION_TO_RUN}.xml"
+  export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} -o junit_family=xunit1 --junitxml=${JUNIT_XML_PATH}"
+  echo "JUnit XML reporting enabled: ${JUNIT_XML_PATH}"
+fi
+
 # Check if the provided argument corresponds to a declared function in this script.
 if declare -f "$FUNCTION_TO_RUN" > /dev/null
 then
-  # If the function exists, call it.
-  "$FUNCTION_TO_RUN"
+  # Run the function in a subshell with set -e re-enabled so that multi-command
+  # test functions correctly fail on the FIRST failing command rather than
+  # silently continuing (set +e in the parent would otherwise disable errexit
+  # inside the function body).
+  local_start=$SECONDS
+  set +e
+  (set -e; "$FUNCTION_TO_RUN")
+  TEST_EXIT_CODE=$?
+  set -e
+  ELAPSED=$(( SECONDS - local_start ))
+
+  # For non-pytest tests (python scripts), generate JUnit XML from the exit code.
+  # If pytest already wrote the XML file, this is a no-op (write_junit_xml checks TEST_RESULTS_DIR).
+  if [[ -n "${TEST_RESULTS_DIR:-}" && ! -f "$JUNIT_XML_PATH" ]]; then
+    write_junit_xml "$FUNCTION_TO_RUN" "$TEST_EXIT_CODE" "$ELAPSED"
+  fi
+
+  exit $TEST_EXIT_CODE
 else
   # If the function doesn't exist, show an error and the usage guide.
   echo "❌ Error: Function '${FUNCTION_TO_RUN}' is not defined."
