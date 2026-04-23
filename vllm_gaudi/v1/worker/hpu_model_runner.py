@@ -2204,37 +2204,57 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     def _can_merge_prefill_contents(self, lhs, rhs):
         # --- Logic to handle chunked prefill/prefix caching for HPU ---
-        # 1. Check basic states of LHS (accumulated batch) and RHS (incoming request).
-        # lhs_is_not_empty: Check if the accumulated batch actually contains any requests.
-        # lhs_has_history: Check if any request in the accumulated batch has a non-zero context (history).
-        lhs_is_not_empty = len(lhs.context_lens) > 0
-        lhs_has_history = any(length > 0 for length in lhs.context_lens)
+        # Cheap checks first: reject obvious mismatches without touching the
+        # bucketing manager or allocating intermediate lists. This matters a
+        # lot when prompt lengths span a wide range (e.g. up to 128k), where
+        # most merge attempts are rejected by the capacity constraint.
+        lhs_num_reqs = len(lhs.context_lens)
+        lhs_is_not_empty = lhs_num_reqs > 0
 
-        # 2. Check if RHS (the incoming request) has context_len > 0 (history).
-        rhs_has_history = any(length > 0 for length in rhs.context_lens)
+        # RHS is always a freshly-built single-request batch in the calling
+        # code path, but don't rely on that strictly.
+        rhs_has_history = any(c > 0 for c in rhs.context_lens)
 
-        # 3. Apply merging restrictions based on history states:
-
-        # Condition A: If the accumulated batch is not empty, we cannot append a request that has history.
-        # This implies that a request with history (e.g., prefix caching hit) must start as a new batch.
+        # Condition A: a request with history (prefix-cache hit / chunked
+        # prefill continuation) must start a new batch.
         if lhs_is_not_empty and rhs_has_history:
             return False
 
-        # Condition B: If the accumulated batch already contains requests with history,
-        # we cannot append *any* new request (regardless of whether RHS has history or not).
-        # This locks the batch once it contains history (likely for decode phase or chunked prefill).
-        if lhs_has_history:
+        # Condition B: once LHS contains any request with history, the batch
+        # is locked. Thanks to Condition A, only the *first* request in LHS
+        # could have history, so this check is O(1) instead of O(n).
+        if lhs_is_not_empty and lhs.context_lens[0] > 0:
             return False
 
-        combined_num_tokens = lhs.get_num_tokens() + rhs.get_num_tokens()
+        # Capacity pre-check: bypass the bucket lookup when merging cannot
+        # possibly fit. `target_bs * target_seq` is monotonic in both the
+        # batch size and the max sequence length, so a lower bound already
+        # exceeding `max_num_tokens` is sufficient to reject.
+        lhs_token_lens = lhs.get_num_tokens()
+        rhs_token_lens = rhs.get_num_tokens()
+        combined_bs = lhs_num_reqs + len(rhs_token_lens)
+        if combined_bs > self.max_prefill_batch_size:
+            return False
+
+        if self.use_merged_prefill:
+            # Merged prefill flattens into one sequence: only total tokens matter.
+            combined_total = sum(lhs_token_lens) + sum(rhs_token_lens)
+            if combined_total > self.max_num_tokens:
+                return False
+        else:
+            lhs_max = max(lhs_token_lens) if lhs_token_lens else 0
+            rhs_max = max(rhs_token_lens) if rhs_token_lens else 0
+            if combined_bs * max(lhs_max, rhs_max) > self.max_num_tokens:
+                return False
+
+        combined_num_tokens = lhs_token_lens + rhs_token_lens
         bucketing_fn = self._get_prompt_bucketing_fn()
         try:
-            target_bs, target_seq, target_blocks = bucketing_fn(combined_num_tokens, [])
+            target_bs, target_seq, _ = bucketing_fn(combined_num_tokens, [])
         except BucketingFailedException:
             return False
-        target_bs, target_seq, target_blocks = bucketing_fn(combined_num_tokens, [])
-        return target_bs <= self.max_prefill_batch_size and\
-            target_bs * target_seq <= self.max_num_tokens
+        return (target_bs <= self.max_prefill_batch_size
+                and target_bs * target_seq <= self.max_num_tokens)
 
     def _get_attention_group_id_for_hybrid(self):
         if self.num_mamba_like_layers == 0 or len(self.kv_cache_config.kv_cache_groups) == 0:
