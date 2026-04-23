@@ -390,9 +390,9 @@ class HPUWorker(WorkerBase):
             graph_reserved_mem = 0.0 if self.model_config.enforce_eager else 0.1
             logger.warning("Invalid VLLM_GRAPH_RESERVED_MEM value, using default %s", graph_reserved_mem)
         graph_headroom = 1 - graph_reserved_mem
-        available_hpu_memory = free_hpu_memory * \
-            self.cache_config.gpu_memory_utilization
-        hpu_memory_margin = free_hpu_memory * (1 - self.cache_config.gpu_memory_utilization)
+        available_hpu_memory = free_hpu_memory * 0.9
+            #self.cache_config.gpu_memory_utilization
+        hpu_memory_margin = free_hpu_memory * (1 - 0.9)#self.cache_config.gpu_memory_utilization)
         self.model_runner.mem_margin = hpu_memory_margin  # type: ignore[union-attr]
         cache_size_bytes = available_hpu_memory * graph_headroom
         graph_headroom_bytes = available_hpu_memory * (1 - graph_headroom)
