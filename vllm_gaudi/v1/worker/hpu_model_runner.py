@@ -2089,7 +2089,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             block_bucket_size = \
                 self.bucketing_manager.find_decode_bucket(batch_size,
                                                           actual_blocks_needed)[2]
-            block_bucket_size += self.get_dp_padding(block_bucket_size)
             if actual_blocks_needed > block_bucket_size:
                 block_bucket_size = min(
                     calc_fallback_value(
@@ -2097,6 +2096,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         self.bucketing_manager.fallback_blocks_base_step),
                     self._max_cache_blocks)
             block_bucket_size = max(block_bucket_size, actual_blocks_needed)
+            block_bucket_size += self.get_dp_padding(block_bucket_size)
 
             indices: list[Any]
             indices = [None] * block_bucket_size
@@ -2109,10 +2109,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             block_bucket_size = \
                 self.bucketing_manager.find_decode_bucket(batch_size,
                                                           len(block_list))[2]
-            block_bucket_size += self.get_dp_padding(block_bucket_size)
             if block_bucket_size < len(block_list):
                 block_bucket_size = calc_fallback_value(len(block_list),
                                                         self.bucketing_manager.fallback_blocks_base_step)
+            block_bucket_size += self.get_dp_padding(block_bucket_size)
 
             def padding_fn(tensor, pad_value):
                 return pad_list(tensor, block_bucket_size, itertools.repeat(pad_value))
