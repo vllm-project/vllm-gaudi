@@ -2,7 +2,7 @@ import torch
 from torch import nn
 
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group, tensor_model_parallel_all_gather, tensor_model_parallel_all_reduce
+from vllm.distributed import get_pp_group, tensor_model_parallel_all_gather
 from vllm.model_executor.models.qwen3_moe import (
     Qwen3MoeForCausalLM as UpstreamQwen3MoeForCausalLM,
     Qwen3MoeModel as UpstreamQwen3MoeModel,
@@ -50,11 +50,6 @@ class HpuQwen3MoeSparseMoeBlock(UpstreamQwen3MoeSparseMoeBlock):
         if is_seq_parallel:
             out = tensor_model_parallel_all_gather(out, 0)
             out = out[:num_tokens]
-        else:
-            # from upstream : TP>1 may require a reduction here.
-            tp_size = getattr(self, "tp_size", 1)
-            if tp_size > 1:
-                out = tensor_model_parallel_all_reduce(out)
 
         return out.reshape(*orig_shape[:-1], hidden_dim)
 
