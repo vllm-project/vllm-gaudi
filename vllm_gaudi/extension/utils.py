@@ -255,9 +255,11 @@ class SlicedFusedSDPABase(torch.nn.Module):
             return chunk_out, chunk_m, chunk_linv
         eps = 1e-8
         new_m = torch.maximum(last_m, chunk_m)
-        last_linv_rescaled = (1.0 / (last_linv + eps)) * torch.exp(last_m - new_m)
-        chunk_linv_rescaled = (1.0 / (chunk_linv + eps)) * torch.exp(chunk_m - new_m)
-        new_linv = 1.0 / (last_linv_rescaled + chunk_linv_rescaled)
+        # When both m values are -inf (fully masked rows), the diff -inf - (-inf) = NaN.
+        # Replace NaN with -inf so that exp(-inf) = 0, giving zero contribution.
+        last_linv_rescaled = (1.0 / (last_linv + eps)) * torch.exp(torch.nan_to_num(last_m - new_m, float('-inf')))
+        chunk_linv_rescaled = (1.0 / (chunk_linv + eps)) * torch.exp(torch.nan_to_num(chunk_m - new_m, float('-inf')))
+        new_linv = 1.0 / (last_linv_rescaled + chunk_linv_rescaled + eps)
         new_out = (last_linv_rescaled * new_linv) * last_out + (chunk_linv_rescaled * new_linv) * chunk_out
         return new_out, new_m, new_linv
 
@@ -370,7 +372,13 @@ class SlicedFusedSDPA(SlicedFusedSDPABase):
 
         def chunk_kernel(q_c, k_c, v_c, mask_c, dp, sc, is_c, sm):
             res = torch.ops.hpu.sdpa_recomp_fwd(q_c, k_c, v_c, mask_c, dp, sc, is_c, True, sm, None, 'right')
-            return tuple((gqa_output_reshape(x) if gqa else x).to(torch.float32) for x in res[:3])
+            out, m, linv = tuple((gqa_output_reshape(x) if gqa else x).to(torch.float32) for x in res[:3])
+            # Sanitize NaN from fully-masked rows: the kernel returns NaN when all
+            # attention scores are -inf (padding positions).  Replace with safe
+            # defaults so the online-softmax merge treats them as zero-contribution.
+            out = torch.nan_to_num(out, 0.0)
+            linv = torch.nan_to_num(linv, 0.0)
+            return out, m, linv
 
         output = self._chunked_attention(q, k, v, attn_mask, dropout_p, scale, softmax_mode, chunk_kernel)
         return output.to(q.dtype)
@@ -491,6 +499,9 @@ class SlicedFP8FusedSDPA(SlicedFusedSDPABase):
             m = m.to(torch.float32)
             linv = linv.to(torch.float32) * (128.0 if sm == "fast" else 1.0)
             out = self._dequant_output(out).to(torch.float32)
+            # Sanitize NaN from fully-masked rows (same as BF16 path).
+            out = torch.nan_to_num(out, 0.0)
+            linv = torch.nan_to_num(linv, 0.0)
             return out, m, linv
 
         return self._chunked_attention(q, k, v, attn_mask, dropout_p, scale, softmax_mode, chunk_kernel)
