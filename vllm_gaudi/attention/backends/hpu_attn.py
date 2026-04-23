@@ -565,10 +565,17 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                            block_size=attn_metadata.block_size,
                                            is_prompt=attn_metadata.is_prompt)
 
-        if attn_metadata.is_prompt:
+        if attn_metadata.is_prompt or seq_len > 1:
             # Prompt run.
+            # NOTE: The `seq_len > 1` guard is a compile-safe fallback.
+            # flat_pa (decode attention) only supports single-token queries.
+            # Under torch.compile on HPU, attn_metadata.is_prompt may not
+            # trigger graph recompilation when switching between prompt and
+            # decode phases during warmup.  Tensor shapes are always guarded
+            # correctly, so routing multi-token inputs through the prompt
+            # path prevents a shape mismatch inside flat_pa's batch2block.
             query_shape = (batch_size, seq_len, self.num_heads, self.head_size)
-            kv_shape = (batch_size, seq_len_kv, self.num_kv_heads, self.head_size)
+            kv_shape = (batch_size, -1, self.num_kv_heads, self.head_size)
 
             attn_bias = attn_metadata.attn_bias
             position_bias = None

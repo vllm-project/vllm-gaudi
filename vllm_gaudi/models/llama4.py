@@ -101,11 +101,15 @@ def _apply_hpu_llama4_init_patches(model_root: nn.Module) -> None:
 
     if not htorch.utils.internal.is_lazy():
         layers = getattr(model_root, "layers", [])
-        _apply_branch_free_attention(layers)
+        # NOTE: _apply_branch_free_attention is SKIPPED.
+        # The branchfree attention forward is incompatible with torch.compile
+        # on HPU: 3D hidden_states (batch, seq, hidden) cause FakeTensor
+        # validation errors when batch==seq==1 during decode warmup (symbols
+        # unify).  Regional compilation handles the NoPE/RoPE if/else graph
+        # breaks in upstream Llama4Attention.forward.
         unified = _unify_attention_types(layers)
         logger.info(
-            "HpuLlama4: applied branch-free attention patches, "
-            "unified %d ChunkedLocalAttention -> Attention",
+            "HpuLlama4: unified %d ChunkedLocalAttention -> Attention",
             unified,
         )
 
@@ -187,6 +191,13 @@ def _branchfree_attention_forward(self, positions, hidden_states):
     All layers execute identical code. Boolean buffer masks + torch.where
     select RoPE'd/un-RoPE'd, norm'd/un-norm'd, and scaled/un-scaled
     at the data level — no Python if/else guards for torch.compile.
+
+    NOTE: This function is currently NOT applied to the model (see
+    _apply_hpu_llama4_init_patches).  The 3D hidden_states (batch, seq,
+    hidden) cause torch.compile FakeTensor validation errors when
+    batch==seq==1 during decode warmup (symbolic variables unify).
+    Regional compilation handles the NoPE/RoPE if/else graph breaks
+    in upstream Llama4Attention.forward instead.
     """
     qkv, _ = self.qkv_proj(hidden_states)
     q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
