@@ -44,6 +44,10 @@ def register_model():
     from vllm_gaudi.models.qwen3_moe import HpuQwen3MoeForCausalLM  # noqa: F401
     ModelRegistry.register_model("Qwen3MoeForCausalLM", "vllm_gaudi.models.qwen3_moe:HpuQwen3MoeForCausalLM")
 
+    from vllm_gaudi.models.llama4 import HpuLlama4ForConditionalGeneration  # noqa: F401
+    ModelRegistry.register_model("Llama4ForConditionalGeneration",
+                                 "vllm_gaudi.models.llama4:HpuLlama4ForConditionalGeneration")
+
     import vllm_gaudi.models.deepseek_v2  # noqa: F401
 
     from vllm_gaudi.models.deepseek_ocr import HpuDeepseekOCRForCausalLM  # noqa: F401
