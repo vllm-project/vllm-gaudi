@@ -4,8 +4,8 @@ from functools import partial
 import os
 from typing import Union
 
-from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
-    MoERunner, )
+from vllm.model_executor.layers.fused_moe.runner.moe_runner_base import (
+    MoERunnerBase, )
 import torch
 import vllm
 import vllm.envs as envs
@@ -22,7 +22,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
     FusedTopKRouter, )
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
     GroupedTopKRouter, )
-from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+from vllm.model_executor.layers.fused_moe.runner.moe_runner_base import (
     get_layer_from_name, )
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     EMPTY_EPLB_STATE, )
@@ -500,8 +500,8 @@ def create_fused_moe_router(
 
 # Apply patches
 # Keep runner forward patch compatible with upstream layer_name-based dispatch.
-_orig_default_moe_runner_init = MoERunner.__init__
-_orig_default_moe_runner_forward = MoERunner.forward
+_orig_default_moe_runner_init = MoERunnerBase.__init__
+_orig_default_moe_runner_forward = MoERunnerBase.forward
 
 # When enabled, bypasses the opaque torch.ops.vllm.moe_forward_shared custom
 # op wrapper so that torch.ops.hpu.mixture_of_experts is captured directly in
@@ -521,9 +521,9 @@ def _patched_default_moe_runner_forward(self, *args, **kwargs):
     return _orig_default_moe_runner_forward(self, *args, **kwargs)
 
 
-MoERunner.__init__ = _patched_default_moe_runner_init
+MoERunnerBase.__init__ = _patched_default_moe_runner_init
 
-MoERunner.forward = _patched_default_moe_runner_forward
+MoERunnerBase.forward = _patched_default_moe_runner_forward
 
 vllm.model_executor.layers.fused_moe.layer.get_compressed_expert_map = \
     get_compressed_expert_map
