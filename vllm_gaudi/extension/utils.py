@@ -253,9 +253,10 @@ class SlicedFusedSDPABase(torch.nn.Module):
         """Online softmax rescaling merge of two attention chunks."""
         if last_out is None or last_m is None or last_linv is None:
             return chunk_out, chunk_m, chunk_linv
+        eps = 1e-8
         new_m = torch.maximum(last_m, chunk_m)
-        last_linv_rescaled = (1.0 / last_linv) * torch.exp(last_m - new_m)
-        chunk_linv_rescaled = (1.0 / chunk_linv) * torch.exp(chunk_m - new_m)
+        last_linv_rescaled = (1.0 / (last_linv + eps)) * torch.exp(last_m - new_m)
+        chunk_linv_rescaled = (1.0 / (chunk_linv + eps)) * torch.exp(chunk_m - new_m)
         new_linv = 1.0 / (last_linv_rescaled + chunk_linv_rescaled)
         new_out = (last_linv_rescaled * new_linv) * last_out + (chunk_linv_rescaled * new_linv) * chunk_out
         return new_out, new_m, new_linv
@@ -486,7 +487,7 @@ class SlicedFP8FusedSDPA(SlicedFusedSDPABase):
 
         def chunk_kernel(q_c, k_c, v_c, mask_c, dp, sc, is_c, sm):
             res = self._fp8_fsdpa_fwd(q_c, k_c, v_c, mask_c, dp, sc, is_c, sm)
-            out, m, linv = (gqa_output_reshape(x) if gqa else x for x in res[:3])
+            out, m, linv = tuple(gqa_output_reshape(x) if gqa else x for x in res[:3])
             m = m.to(torch.float32)
             linv = linv.to(torch.float32) * (128.0 if sm == "fast" else 1.0)
             out = self._dequant_output(out).to(torch.float32)
