@@ -27,7 +27,7 @@ import torch.distributed
 import torch.nn.functional as F
 import torch.nn as nn
 import vllm_gaudi.extension.environment as environment
-from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
+from vllm_gaudi.extension.bucketing.common import HPUBucketingManager, calc_fallback_value
 from vllm_gaudi.extension.defragmentation import OnlineDefragmenter
 from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler, HabanaMemoryProfiler, HabanaProfilerCounterHelper,
                                            format_bytes, setup_profiler)
@@ -53,7 +53,7 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.platforms import current_platform
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem)
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -1212,11 +1212,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.graphed_multimodal_buckets: set[Any] = set()
         else:
             logger.info("Bucketing is OFF.")
+        self._mm_warmup_processor = None
 
         self._PAD_SLOT_ID = -1
         self._PAD_BLOCK_ID = -1
         self._MAMBA_PAD_BLOCK_ID = -1
         self._dummy_num_blocks = 0
+        self._max_cache_blocks = 0
 
         if self.vllm_config.parallel_config.data_parallel_size > 1 and htorch.utils.internal.is_lazy(
         ) and not self.model_config.enforce_eager:
@@ -2082,12 +2084,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         block_bucket_size: int
         if self.use_contiguous_pa:
             actual_blocks_needed = max(block_list) + 1 if block_list else 0
+            actual_blocks_needed = min(actual_blocks_needed, self._max_cache_blocks)
 
             block_bucket_size = \
                 self.bucketing_manager.find_decode_bucket(batch_size,
                                                           actual_blocks_needed)[2]
-            block_bucket_size += self.get_dp_padding(block_bucket_size)
+            if actual_blocks_needed > block_bucket_size:
+                block_bucket_size = min(
+                    calc_fallback_value(actual_blocks_needed, self.bucketing_manager.fallback_blocks_base_step),
+                    self._max_cache_blocks)
             block_bucket_size = max(block_bucket_size, actual_blocks_needed)
+            block_bucket_size += self.get_dp_padding(block_bucket_size)
 
             indices: list[Any]
             indices = [None] * block_bucket_size
@@ -2100,6 +2107,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             block_bucket_size = \
                 self.bucketing_manager.find_decode_bucket(batch_size,
                                                           len(block_list))[2]
+            if block_bucket_size < len(block_list):
+                block_bucket_size = calc_fallback_value(len(block_list),
+                                                        self.bucketing_manager.fallback_blocks_base_step)
             block_bucket_size += self.get_dp_padding(block_bucket_size)
 
             def padding_fn(tensor, pad_value):
@@ -5202,6 +5212,59 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             return self.model.model.visual.patch_size
         return 1
 
+    def _get_dummy_mm_inputs_with_options(
+        self,
+        modality: str,
+        count: int,
+        width: int | None = None,
+        height: int | None = None,
+        num_frames: int | None = None,
+    ):
+        """Helper to get dummy multimodal inputs with custom options."""
+
+        # Create custom mm_options with specific width/height
+        mm_options = None
+        if width is not None and height is not None:
+            if modality == 'image':
+                mm_options = {"image": ImageDummyOptions(count=count, width=width, height=height)}
+            elif modality == 'video':
+                mm_options = {
+                    "video":
+                    VideoDummyOptions(count=count,
+                                      width=width,
+                                      height=height,
+                                      num_frames=num_frames if num_frames is not None else 100)
+                }
+            else:
+                logger.warning("Unsupported modality '%s' for custom mm_options, "
+                               "falling back to default options.", modality)
+
+        # Use the registry's API with custom mm_options
+        if mm_options is not None:
+            processor = self._get_mm_warmup_processor()
+            processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
+                seq_len=self.model_config_copy.max_model_len,
+                mm_counts={modality: count},
+                mm_options=mm_options,
+            )
+            from vllm.multimodal.processing import TimingContext
+            dummy_mm_inputs = processor.apply(processor_inputs, timing_ctx=TimingContext(enabled=False))
+        else:
+            # Fallback to default options
+            dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
+                self.model_config_copy,
+                mm_counts={modality: count},
+                processor=self._get_mm_warmup_processor(),
+            )
+
+        return dummy_mm_inputs
+
+    def _get_mm_warmup_processor(self):
+        if self._mm_warmup_processor is None:
+            self._mm_warmup_processor = self.mm_registry.create_processor(self.model_config_copy)
+
+        return self._mm_warmup_processor
+
     def _get_mm_dummy_batch(
         self,
         modality: str,
@@ -5211,26 +5274,29 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
         assert self.mm_budget is not None
-        num_frames = 100
-        count = 1
         if self.get_model().vision_bucket_manager.is_batch_based:
             batch = image_args
+            count = 1
         else:
             mm_options = self.model_config.get_multimodal_config().limit_per_prompt.get(modality)
-            count = mm_options.count if mm_options and hasattr(mm_options, 'count') else count
+            count = mm_options.count if mm_options and hasattr(mm_options, 'count') else 1
             batch = count
-        if modality == 'image':
-            mm_options = {"image": ImageDummyOptions(count=count, width=width, height=height), "video": None}
-        elif modality == 'video':
-            num_frames = mm_options.num_frames if mm_options and hasattr(mm_options, 'num_frames') else num_frames
-            mm_options = {
-                "image": None,
-                "video": VideoDummyOptions(count=count, num_frames=num_frames, width=width, height=height)
-            }
-        else:
-            raise NotImplementedError(f"Modality '{modality}' is not supported")
 
-        dummy_mm_inputs = MultiModalRegistry().get_dummy_mm_inputs(self.model_config_copy, mm_counts={modality: count})
+        # Get num_frames for video modality
+        num_frames = None
+        if modality == 'video':
+            mm_config_options = self.model_config.get_multimodal_config().limit_per_prompt.get(modality)
+            if mm_config_options and hasattr(mm_config_options, 'num_frames'):
+                num_frames = mm_config_options.num_frames
+
+        # Use the common helper to get dummy inputs with custom dimensions
+        dummy_mm_inputs = self._get_dummy_mm_inputs_with_options(
+            modality=modality,
+            count=count,
+            width=width,
+            height=height,
+            num_frames=num_frames,
+        )
 
         dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
         # We use the cache so that the item is saved to the cache,
@@ -5259,21 +5325,22 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                            and "image" in self.mm_budget.mm_limits and self.mm_budget.mm_limits['image'] != 0)
         is_video_warmup = (mm_config is not None and mm_config.limit_per_prompt.get("video") is not None
                            and "video" in self.mm_budget.mm_limits and self.mm_budget.mm_limits['video'] != 999)
-        warmup_configs = {
-            "image": (0, lambda: mm_config.limit_per_prompt.get("image")),
-            "video": (999, lambda: mm_config.limit_per_prompt.get("video"))
-        }
-        width = height = None
+        # Get width/height from config if available for warmup_lists
         warmup_lists = []
-        for modality, (limit_value, get_options) in warmup_configs.items():
-            if (mm_config and mm_config.limit_per_prompt.get(modality) is not None
-                    and modality in self.mm_budget.mm_limits and self.mm_budget.mm_limits[modality] != limit_value):
-                options = get_options()
-                width = options.width if hasattr(options, 'width') else None
-                height = options.height if hasattr(options, 'height') else None
-                if width is not None and height is not None:
-                    warmup_lists.append((width, height))
-                break
+        if not is_batch_based and mm_config:
+            # Try to get dimensions from enabled modality config
+            for modality in ["image", "video"]:
+                if modality == "image" and not is_image_warmup:
+                    continue
+                if modality == "video" and not is_video_warmup:
+                    continue
+                mm_options = mm_config.limit_per_prompt.get(modality)
+                if mm_options:
+                    width = getattr(mm_options, 'width', None)
+                    height = getattr(mm_options, 'height', None)
+                    if width is not None and height is not None:
+                        warmup_lists.append((width, height))
+                        break
         if not is_batch_based and len(buckets) > 0:
             patch_size = int(self.get_patch_size_from_model())
             warmup_lists = warmup_lists + \
@@ -5372,8 +5439,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         start_mem = HabanaMemoryProfiler.current_device_memory_usage()
         start_time = time.perf_counter()
 
-        # Most model's multimodal embedding has to be run without COMPILE ONLY mode.
-        if self.supports_mm_inputs:
+        # In lazy mode, run MM warmup outside PT_COMPILE_ONLY_MODE
+        # to avoid GC errors. In torch.compile mode, run it inside
+        # for faster recipe-only compilation.
+        use_torch_compile = (not htorch.utils.internal.is_lazy() and not self.model_config.enforce_eager)
+        if self.supports_mm_inputs and not use_torch_compile:
             self.warmup_multimodal_graphs(self.get_model().vision_bucket_manager.multimodal_buckets)
 
         compile_only_mode_context = functools.partial(bc.env_setting, "PT_COMPILE_ONLY_MODE", True)
@@ -5388,6 +5458,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                            'Warmup time will be negatively impacted. '
                            'Please update Gaudi Software Suite.')
         with compile_only_mode_context() if can_use_compile_only_mode else contextlib.nullcontext():
+            if self.supports_mm_inputs and use_torch_compile:
+                self.warmup_multimodal_graphs(self.get_model().vision_bucket_manager.multimodal_buckets)
+
             if not self.model_config.enforce_eager and not self.is_pooling_model:
                 assert self.mem_margin is not None, \
                     ("HabanaWorker.determine_num_available_blocks needs "
@@ -5994,6 +6067,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self._PAD_SLOT_ID = num_blocks * self.attn_block_size
         self._MAMBA_PAD_BLOCK_ID = num_blocks
         self._dummy_num_blocks = num_blocks
+
+        # Compute the max cache block count across all layers.
+        # Hybrid models (attention + mamba) may have layers with different
+        # cache sizes; contiguous PA slices cache[:N] so N must not exceed
+        # the actual cache dimension.
+        max_dim0 = 0
+        for kv in self.kv_caches:
+            t = kv[0] if not isinstance(kv[0], tuple) else kv[0][0]
+            if t.shape[0] > max_dim0:
+                max_dim0 = t.shape[0]
+        self._max_cache_blocks = max_dim0 // self.block_size if self.block_size else 0
 
         # Initialize the GDN compact slot free-list.
         # The free-list contains base-slot IDs [0..max_num_reqs-1].
