@@ -2832,12 +2832,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             )
 
         if self.interleaved_sliding_window:
-            sliding_block_size = (self.sliding_window // decode_block_size)
-
-            # Adjust sliding block size for specific model types
-            model_type = self._get_model_type()
-            if model_type is not None and model_type in ["gpt_oss"]:
-                sliding_block_size += 1
+            sliding_block_size = (self.sliding_window // decode_block_size) + 1
 
             window_block_tables = [block_table[-sliding_block_size:] for block_table in block_tables_list]
             window_block_list, window_block_groups, window_block_usage = \
