@@ -6,9 +6,9 @@
 """Granite 4.0 specific causal conv1d implementation.
 
 This is a simplified conv1d implementation based on the v0.17.1 code,
-adapted for the v0.19.0 metadata interface (single cache_indices instead
-of separate load/store indices).  It processes one sequence at a time
-(padded_batch == 1) and does not support prefix caching.
+adapted for the v0.19.0 metadata interface (separate load/store
+cache indices).  It processes one sequence at a time
+(padded_batch == 1) and supports prefix caching.
 
 Used exclusively by hpu_mamba_mixer2.py (Granite 4.0).  Other models
 continue to use causal_conv1d_pytorch.py.
@@ -33,7 +33,11 @@ def granite_causal_conv1d_fn(
     bias: torch.Tensor | None,
     conv_states: torch.Tensor | None,
     query_start_loc: torch.Tensor,
-    cache_indices: torch.Tensor | None = None,
+    enable_prefix_caching: bool = False,
+    load_cache_indices: torch.Tensor | None = None,
+    store_cache_indices: torch.Tensor | None = None,
+    blocks_caching_range: torch.Tensor | None = None,
+    seqlens_offsets_for_blocks: torch.Tensor | None = None,
     has_initial_state: torch.Tensor | None = None,
     activation: str | None = "silu",
     metadata=None,
@@ -79,7 +83,7 @@ def granite_causal_conv1d_fn(
 
     # Get init_state for all batch
     if has_initial_state is not None:
-        init_state = torch.where(has_initial_state, conv_states[cache_indices, -state_len:, :],
+        init_state = torch.where(has_initial_state, conv_states[load_cache_indices, -state_len:, :],
                                  torch.zeros(padded_batch, state_len, dim, device=x_work.device, dtype=work_dtype))
     else:
         init_state = torch.zeros(padded_batch, state_len, dim, device=x_work.device, dtype=work_dtype)
@@ -87,12 +91,23 @@ def granite_causal_conv1d_fn(
     init_state = init_state.squeeze()
 
     seq_input = torch.cat([init_state, seq_x], dim=1)
+    if enable_prefix_caching:
+        assert seqlens_offsets_for_blocks is not None
+        assert blocks_caching_range is not None
+        offset = torch.arange(state_len, device=x.device)  # [state_len]
+        indices = seqlens_offsets_for_blocks.unsqueeze(1) + offset  # [N, state_len]
 
-    # Store new state at the end of the sequence
-    end = qsl[-1]
-    idx = torch.arange(state_len, device=x_work.device) + end
-    new_state = seq_input.index_select(dim=1, index=idx)
-    conv_states[cache_indices, -state_len:, :] = new_state.transpose(-1, -2)
+        # Gather all slices at once: seq_input is [dim, seq_len+state_len],
+        # indices is [N, state_len] -> new_states is [N, dim, state_len]
+        new_states = seq_input[:, indices].permute(1, 0, 2)
+
+        # Scatter all updates at once
+        conv_states[blocks_caching_range, -state_len:, :] = new_states.transpose(-1, -2)
+    else:
+        end = qsl[-1]
+        idx = torch.arange(state_len, device=x_work.device) + end
+        new_state = seq_input.index_select(dim=1, index=idx)
+        conv_states[store_cache_indices, -state_len:, :] = new_state.transpose(-1, -2)
 
     # Apply depthwise convolution using element-wise TPC ops.
     seq_input = seq_input.unsqueeze(0)
@@ -108,7 +123,8 @@ def granite_causal_conv1d_update(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
     activation: bool | str | None = None,
-    conv_state_indices: torch.Tensor | None = None,
+    load_cache_indices: torch.Tensor | None = None,
+    store_cache_indices: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
     validate_data: bool = False,
 ):
@@ -123,7 +139,8 @@ def granite_causal_conv1d_update(
         bias,
         conv_state,
         qsl,
-        cache_indices=conv_state_indices,
+        load_cache_indices=load_cache_indices,
+        store_cache_indices=store_cache_indices,
         has_initial_state=None,
         activation=activation,
         metadata=None,
@@ -140,7 +157,8 @@ def granite_causal_conv1d_fn_update(
     bias: torch.Tensor | None,
     conv_states: torch.Tensor | None,
     query_start_loc: torch.Tensor,
-    cache_indices: torch.Tensor | None = None,
+    load_cache_indices: torch.Tensor | None = None,
+    store_cache_indices: torch.Tensor | None = None,
     has_initial_state: torch.Tensor | None = None,
     activation: str | None = "silu",
     metadata=None,
@@ -180,7 +198,7 @@ def granite_causal_conv1d_fn_update(
                 and has_initial_state.numel() != padded_batch:
             raise ValueError("'has_initial_state' must align with 'query_start_loc'.")
 
-    init_state = conv_states[cache_indices, -state_len:, :]
+    init_state = conv_states[load_cache_indices, -state_len:, :]
     init_state = init_state.transpose(-1, -2)
 
     seq_input = torch.cat([init_state, x_work], dim=2)
@@ -190,6 +208,6 @@ def granite_causal_conv1d_fn_update(
     seq_out = _depthwise_conv1d_tpc(seq_input, weight_work, bias_work)
     seq_out = _apply_activation(seq_out, activation)
 
-    conv_states[cache_indices, -state_len:, :] = new_state.transpose(-1, -2)
+    conv_states[store_cache_indices, -state_len:, :] = new_state.transpose(-1, -2)
 
     return seq_out.to(original_dtype)

@@ -273,13 +273,30 @@ def patched_fused_moe_forward(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
 ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-    """Patched forward with upstream-aligned MoE dispatch flow."""
+    """Patched forward that avoids graph breaks from ForwardContext lookups.
+
+    Instead of calling forward_dispatch (which uses get_layer_from_name,
+    ensure_moe_quant_config_init, and _sequence_parallel_context — all of
+    which access ForwardContext and cause torch.compile graph breaks), we
+    cache the layer reference and call _forward_impl directly.
+    """
     hidden_states, shared_experts_input = self.apply_routed_input_transform(hidden_states)
     hidden_states, og_hidden_dims = self._maybe_pad_hidden_states(shared_experts_input, hidden_states)
 
     if self.moe_config.dp_size == 1:
-        layer = get_layer_from_name(self.layer_name)
-        fused_output = self.forward_dispatch(layer, hidden_states, router_logits, shared_experts_input)
+        # Cache layer ref to avoid per-forward get_layer_from_name graph break
+        if self._hpu_cached_layer is None:
+            self._hpu_cached_layer = get_layer_from_name(self.layer_name)
+            self._hpu_cached_layer.ensure_moe_quant_config_init()
+
+        # Replicate the remaining forward_dispatch logic that we bypass:
+        # 1. Sync shared experts stream for multi-stream overlap
+        self._maybe_sync_shared_experts_stream(shared_experts_input)
+        # 2. Apply gate if the runner owns it (internal router mode)
+        if self.gate is not None:
+            router_logits, _ = self.gate(hidden_states)
+
+        fused_output = self._forward_impl(self._hpu_cached_layer, hidden_states, router_logits, shared_experts_input)
     else:
         fused_output = self.forward_entry(hidden_states, router_logits, shared_experts_input, self._encode_layer_name())
 
@@ -483,6 +500,7 @@ _MOE_COMPILE = os.getenv("HPU_FUSED_MOE", "1") == "1"
 
 
 def _patched_default_moe_runner_init(self, layer_name, *args, **kwargs):
+    self._hpu_cached_layer = None
     return _orig_default_moe_runner_init(self, layer_name, *args, **kwargs)
 
 
