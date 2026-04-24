@@ -530,8 +530,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         else:
             batch_size, seq_len, hidden_size = query.shape
 
-        seq_len_kv = key.shape[0] // batch_size if key.dim() == 2 else key.shape[1]
-
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
         slot_mapping = attn_metadata.slot_mapping.flatten() if attn_metadata.slot_mapping is not None else None
