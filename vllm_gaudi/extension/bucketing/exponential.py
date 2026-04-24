@@ -91,11 +91,19 @@ class ExponentialBucketingStrategy():
         decode_query_bucket_cfg = [1, 1, 1, 1]
         # With non-contiguous PA, total block references across all sequences
         # can exceed physical num_hpu_blocks (same physical block appears in
-        # multiple sequence block tables).  Use 3x headroom so prepared buckets
-        # cover realistic prefix-sharing scenarios and avoid costly HPU graph
-        # recompilation at high KV-cache utilization.
-        max_decode_blocks = max_blocks if use_contiguous_pa else \
-                            max_blocks * 3
+        # multiple sequence block tables).  Scale with both context
+        # length and batch size so prepared buckets cover long-context
+        # prefix-sharing scenarios and avoid costly HPU graph recompilation.
+        # The min() prevents excessive warmup when model_len is very large,
+        # and the outer max() guarantees at least 3x headroom for small configs.
+        if use_contiguous_pa:
+            max_decode_blocks = max_blocks
+        else:
+            blocks_per_seq = math.ceil(max_model_len / block_size)
+            max_decode_blocks = max(
+                min(blocks_per_seq * max_num_seqs, max_blocks * max_num_seqs // 3),
+                max_blocks * 3,
+            )
         max_decode_block_limit = math.ceil(math.log2(max_decode_blocks)) + 1
         decode_block_bucket_cfg = [1, max_num_seqs, max_decode_blocks, max_decode_block_limit]
 
