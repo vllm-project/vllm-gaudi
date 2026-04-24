@@ -10,6 +10,7 @@ from argparse import Namespace
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import uvloop
 import yaml
@@ -55,6 +56,13 @@ class FrontendSettings:
     enable_auto_tool_choice: bool
     tool_call_parser: str | None
     chat_template: str | None
+
+
+class MultiModelConfigLoadResult(NamedTuple):
+    model_configs: dict[str, AsyncEngineArgs]
+    default_model: str
+    model_frontend_overrides: dict[str, ModelFrontendOverrides]
+    model_quant_configs: dict[str, str | None]
 
 
 class MultiModelEngineClient(EngineClient):
@@ -322,13 +330,7 @@ def _validate_model_frontend_overrides(
             load_chat_template(override.chat_template)
 
 
-def _load_multi_model_config(
-    path: str, ) -> tuple[
-        dict[str, AsyncEngineArgs],
-        str,
-        dict[str, ModelFrontendOverrides],
-        dict[str, str | None],
-    ]:
+def _load_multi_model_config(path: str, ) -> MultiModelConfigLoadResult:
     with open(path) as f:
         data = yaml.safe_load(f)
 
@@ -393,7 +395,12 @@ def _load_multi_model_config(
         raise ValueError(f"Default model '{default_model}' not found in config models: "
                          f"{list(model_configs.keys())}")
 
-    return model_configs, default_model, model_frontend_overrides, model_quant_configs
+    return MultiModelConfigLoadResult(
+        model_configs=model_configs,
+        default_model=default_model,
+        model_frontend_overrides=model_frontend_overrides,
+        model_quant_configs=model_quant_configs,
+    )
 
 
 def _build_model_registry(manager: MultiModelAsyncLLM) -> tuple[dict[str, BaseModelPath], dict[str, int]]:
@@ -418,25 +425,25 @@ async def build_multi_model_engine_client(
         raise ValueError("A multi-model config path must be set when multi-model mode is enabled. "
                          "Supported env var: VLLM_HPU_MULTI_MODEL_CONFIG.")
 
-    model_configs, default_model, model_frontend_overrides, model_quant_configs = _load_multi_model_config(config_path)
-    _validate_model_frontend_overrides(args, model_frontend_overrides)
+    config = _load_multi_model_config(config_path)
+    _validate_model_frontend_overrides(args, config.model_frontend_overrides)
 
     manager = MultiModelAsyncLLM(
-        model_configs,
+        config.model_configs,
         usage_context=usage_context,
         disable_log_stats=args.disable_log_stats,
         enable_log_requests=args.enable_log_requests,
-        model_quant_configs=model_quant_configs,
+        model_quant_configs=config.model_quant_configs,
     )
 
-    await manager.initialize(default_model)
+    await manager.initialize(config.default_model)
     engine_client = MultiModelEngineClient(manager)
     await engine_client.reset_mm_cache()
 
     all_model_paths, model_max_lens = _build_model_registry(manager)
 
     try:
-        yield engine_client, manager, all_model_paths, model_max_lens, model_frontend_overrides
+        yield engine_client, manager, all_model_paths, model_max_lens, config.model_frontend_overrides
     finally:
         manager.shutdown()
 

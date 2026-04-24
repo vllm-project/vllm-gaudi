@@ -66,16 +66,15 @@ def test_load_multi_model_config_success(tmp_path):
         }))
 
     with patch.object(api_server, "AsyncEngineArgs", _FakeAsyncEngineArgs):
-        (model_configs, default_model, model_frontend_overrides,
-         model_quant_configs) = api_server._load_multi_model_config(str(cfg_path))
+        config = api_server._load_multi_model_config(str(cfg_path))
 
-    assert default_model == "llama"
-    assert set(model_configs.keys()) == {"llama", "qwen"}
-    assert model_frontend_overrides == {
+    assert config.default_model == "llama"
+    assert set(config.model_configs.keys()) == {"llama", "qwen"}
+    assert config.model_frontend_overrides == {
         "llama": api_server.ModelFrontendOverrides(),
         "qwen": api_server.ModelFrontendOverrides(),
     }
-    assert model_quant_configs == {}
+    assert config.model_quant_configs == {}
 
 
 def test_load_multi_model_config_falls_back_to_model_env(tmp_path, monkeypatch):
@@ -94,9 +93,9 @@ def test_load_multi_model_config_falls_back_to_model_env(tmp_path, monkeypatch):
     monkeypatch.setenv("MODEL", "qwen")
 
     with patch.object(api_server, "AsyncEngineArgs", _FakeAsyncEngineArgs):
-        _, default_model, _, _ = api_server._load_multi_model_config(str(cfg_path))
+        config = api_server._load_multi_model_config(str(cfg_path))
 
-    assert default_model == "qwen"
+    assert config.default_model == "qwen"
 
 
 def test_load_multi_model_config_extracts_frontend_overrides(tmp_path):
@@ -120,17 +119,16 @@ def test_load_multi_model_config_extracts_frontend_overrides(tmp_path):
         }))
 
     with patch.object(api_server, "AsyncEngineArgs", _FakeAsyncEngineArgs):
-        model_configs, _, model_frontend_overrides, model_quant_configs = api_server._load_multi_model_config(
-            str(cfg_path))
+        config = api_server._load_multi_model_config(str(cfg_path))
 
-    assert set(model_configs.keys()) == {"a", "b"}
-    assert model_quant_configs == {}
-    assert model_frontend_overrides["a"] == api_server.ModelFrontendOverrides(
+    assert set(config.model_configs.keys()) == {"a", "b"}
+    assert config.model_quant_configs == {}
+    assert config.model_frontend_overrides["a"] == api_server.ModelFrontendOverrides(
         enable_auto_tool_choice=True,
         tool_call_parser="granite",
         chat_template=str((tmp_path / "templates" / "tool_a.jinja").resolve()),
     )
-    assert model_frontend_overrides["b"] == api_server.ModelFrontendOverrides()
+    assert config.model_frontend_overrides["b"] == api_server.ModelFrontendOverrides()
 
 
 def test_load_multi_model_config_extracts_quant_configs(tmp_path):
@@ -153,11 +151,11 @@ def test_load_multi_model_config_extracts_quant_configs(tmp_path):
         }))
 
     with patch.object(api_server, "AsyncEngineArgs", _FakeAsyncEngineArgs):
-        _, _, _, model_quant_configs = api_server._load_multi_model_config(str(cfg_path))
+        config = api_server._load_multi_model_config(str(cfg_path))
 
     expected_path = str((tmp_path / "quant" / "maxabs.json").resolve())
-    assert model_quant_configs["quantized"] == expected_path
-    assert "plain" not in model_quant_configs
+    assert config.model_quant_configs["quantized"] == expected_path
+    assert "plain" not in config.model_quant_configs
 
 
 def test_load_multi_model_config_extracts_explicit_quant_config_null(tmp_path):
@@ -177,9 +175,9 @@ def test_load_multi_model_config_extracts_explicit_quant_config_null(tmp_path):
         }))
 
     with patch.object(api_server, "AsyncEngineArgs", _FakeAsyncEngineArgs):
-        _, _, _, model_quant_configs = api_server._load_multi_model_config(str(cfg_path))
+        config = api_server._load_multi_model_config(str(cfg_path))
 
-    assert model_quant_configs == {"a": None}
+    assert config.model_quant_configs == {"a": None}
 
 
 def test_resolve_frontend_settings_uses_model_override_then_cli():
