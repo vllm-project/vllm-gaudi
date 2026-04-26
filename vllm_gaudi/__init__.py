@@ -2,13 +2,6 @@ import os
 import json
 import sys
 
-# Ensure transformers is fully initialized before HPU platform hooks
-# are installed.  vLLM CLI may pre-load transformers in a background
-# thread; Python's per-module import lock guarantees this call blocks
-# until the module is complete, preventing partial-init races with
-# habana_frameworks.torch hooks.
-import transformers  # noqa: F401
-
 from vllm_gaudi.platform import HpuPlatform
 
 
