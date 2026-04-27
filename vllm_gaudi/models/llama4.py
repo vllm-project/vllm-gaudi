@@ -93,7 +93,7 @@ def _apply_hpu_llama4_init_patches(model_root: nn.Module) -> None:
     """Shared init-time patches for both CausalLM and ConditionalGeneration.
 
     Swaps the inner model class for the residual=zeros fix and applies
-    branch-free attention + attention type unification in compile mode.
+    attention type unification in compile mode.
     _unify_feed_forward_types is deferred to post-load via
     apply_hpu_llama4_post_load_patches() to avoid breaking weight loading.
     """
