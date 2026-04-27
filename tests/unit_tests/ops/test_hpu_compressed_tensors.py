@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import CompressedTensorsConfig
 from vllm_gaudi.ops.hpu_compressed_tensors import (HPUCompressedTensorsLinearMethod, HPUCompressedTensorsW8A8Fp8,
                                                    HPUCompressedTensorsWNA16, HPUCompressedTensorsWNA16MoEMethod,
+                                                   HPUCompressedTensorsW8A8Int8_BF16Fallback,
                                                    HPUCompressedTensorsW8A8Fp8MoEMethod)
 from vllm_gaudi.utils import HPUCompileConfig
 from vllm.forward_context import override_forward_context
@@ -563,3 +564,70 @@ def test_compressed_tensors_w8a8fp8_block_moe_method(default_vllm_config: None, 
 
     assert out.shape == hidden_states.shape
     assert out.dtype == torch.bfloat16
+
+
+def test_compressed_tensors_linear_method_w8a8int8_bf16fallback_static_per_channel(default_vllm_config: None,
+                                                                                   dist_init):
+
+    config = {
+        "config_groups": {
+            "group_0": {
+                "input_activations": {
+                    "actorder": None,
+                    "block_structure": None,
+                    "dynamic": True,
+                    "group_size": None,
+                    "num_bits": 8,
+                    "observer": None,
+                    "observer_kwargs": {},
+                    "strategy": "token",
+                    "symmetric": True,
+                    "type": "int"
+                },
+                "output_activations": None,
+                "targets": ["Linear"],
+                "weights": {
+                    "actorder": None,
+                    "block_structure": None,
+                    "dynamic": False,
+                    "group_size": None,
+                    "num_bits": 8,
+                    "observer": "mse",
+                    "observer_kwargs": {},
+                    "strategy": "channel",
+                    "symmetric": True,
+                    "type": "int"
+                }
+            }
+        },
+        "format": "int-quantized",
+        "global_compression_ratio": 1.5302466391371097,
+        "ignore": ["lm_head"],
+        "kv_cache_scheme": None,
+        "quant_method": "compressed-tensors",
+        "quantization_status": "compressed"
+    }
+
+    oot_quant_config = CompressedTensorsConfig.from_config(config)
+    oot_op = create_row_parallel_linear(input_size=128, output_size=64, quant_config=oot_quant_config).to("hpu")
+
+    assert isinstance(oot_op.quant_method, HPUCompressedTensorsLinearMethod)
+    assert isinstance(oot_op.scheme, HPUCompressedTensorsW8A8Int8_BF16Fallback)
+    """
+    The fixture was made by sampling BF16 random weight/input, per-row quantizing weight to INT8
+    with a per-output-channel weight_scale, then computing ref_output = input @ dequant(weight, weight_scale)^T
+    (saved alongside all tensors in a .safetensors).
+    """
+    with safe_open(get_data_path("data/compressed_tensors/linear_w8a8int8_bf16fallback_static_per_channel.safetensors"),
+                   framework="pt",
+                   device="hpu") as f:
+        oot_op.weight.copy_(f.get_tensor("weight"))
+        oot_op.weight_scale.copy_(f.get_tensor("weight_scale"))
+        input = f.get_tensor("input")
+        ref_output = f.get_tensor("ref_output")
+
+    oot_op.quant_method.process_weights_after_loading(oot_op)
+
+    sut_output = oot_op(input)
+
+    torch.testing.assert_close(ref_output, sut_output.float(), atol=1e-3, rtol=1e-3)
