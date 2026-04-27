@@ -555,6 +555,8 @@ def test_exponential_decode_block_limit_uncapped(monkeypatch):
     assert block_cfg[2] == expected_max_decode_blocks, (
         f"Expected max_decode_blocks={expected_max_decode_blocks}, got {block_cfg[2]}")
     assert block_cfg[3] == expected_limit, (f"Expected decode_blocks_limit={expected_limit}, got {block_cfg[3]}")
+
+
 # --- Padding-aware bucketing tests ---
 
 
@@ -662,3 +664,66 @@ def test_padding_aware_decode_cfgs_contiguous_pa_clamps_block_range(mock_get_con
                                                max_blocks=3593)
 
     assert block_cfg == [3465, 128, 3593, 899, 25]
+
+
+# --- Tests that num_ctx_tokens_less_or_equal_batched_max_model_len filter is applied ---
+
+
+@pytest.mark.parametrize("use_contiguous_pa", [True, False], ids=["contiguous_pa", "non_contiguous_pa"])
+@pytest.mark.parametrize(
+    ("max_model_len", "block_size", "max_num_seqs", "max_blocks", "max_num_batched_tokens"),
+    [
+        (91964, 128, 256, 3593, 2048),  # Qwen3-32B real scenario
+        (4096, 128, 64, 500, 2048),  # small model
+        (131072, 128, 21, 65536, 8192),  # long context
+    ],
+    ids=["qwen3_32b", "small_model", "long_ctx"],
+)
+def test_decode_buckets_satisfy_ctx_filter(monkeypatch, use_contiguous_pa, max_model_len, block_size, max_num_seqs,
+                                           max_blocks, max_num_batched_tokens):
+    """Every decode bucket returned by generate_buckets must satisfy
+    num_ctx_tokens_less_or_equal_batched_max_model_len:
+        ctx <= ceil(max_model_len / block_size) * bs   (when ctx > ctx_range[0])
+    """
+    monkeypatch.setenv("VLLM_CONTIGUOUS_PA", str(use_contiguous_pa).lower())
+    clear_config()
+    get_config()
+
+    strategy = ExponentialBucketingStrategy()
+
+    bs_cfg, query_cfg, block_cfg = strategy.get_decode_cfgs(
+        max_num_seqs=max_num_seqs,
+        block_size=block_size,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_model_len=max_model_len,
+        max_blocks=max_blocks,
+    )
+    bs_range = strategy.get_range(bs_cfg)
+    query_range = strategy.get_range(query_cfg)
+    ctx_range = strategy.get_range(block_cfg)
+
+    buckets = generate_buckets(
+        bs_range=bs_range,
+        query_range=query_range,
+        ctx_range=ctx_range,
+        is_prompt=False,
+        max_model_len=max_model_len,
+        max_num_seqs=max_num_seqs,
+        max_num_prefill_seqs=1,
+        max_num_batched_tokens=max_num_batched_tokens,
+        block_size=block_size,
+        max_blocks=max_blocks,
+    )
+
+    ctx_min = ctx_range[0]
+    max_blocks_per_seq = math.ceil(max_model_len / block_size)
+
+    violations = []
+    for bs, query, ctx in buckets:
+        if ctx > ctx_min and ctx > max_blocks_per_seq * bs:
+            violations.append((bs, query, ctx))
+
+    assert not violations, (f"Found {len(violations)} decode bucket(s) violating "
+                            f"ctx <= ceil(max_model_len/block_size) * bs "
+                            f"(max_blocks_per_seq={max_blocks_per_seq}):\n" +
+                            "\n".join(f"  bs={bs}, query={query}, ctx={ctx}" for bs, query, ctx in violations[:20]))
