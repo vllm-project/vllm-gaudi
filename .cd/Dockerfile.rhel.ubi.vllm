@@ -16,8 +16,8 @@ ARG PT_MODULES_REPO_NAME=gaudi-pt-modules
 ARG PT_PACKAGE_NAME_NON_DEFAULT_PYTHON_SUBSTRING=
 ARG PYPI_INDEX_URL="https://pypi.org/simple/"
 ARG HABANA_RPM_REPO_PATH="rhel/9/${OS_VERSION}"
-ARG VLLM_GAUDI_COMMIT=v0.19.0
-ARG VLLM_PROJECT_COMMIT=v0.19.0
+ARG VLLM_GAUDI_COMMIT=main
+ARG VLLM_PROJECT_COMMIT=
 ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
 ARG VLLM_GAUDI_REPO="https://github.com/vllm-project/vllm-gaudi.git"
 

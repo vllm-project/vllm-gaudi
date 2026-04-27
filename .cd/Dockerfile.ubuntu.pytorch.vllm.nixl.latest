@@ -15,8 +15,8 @@ FROM ${DOCKER_URL}/${VERSION}/${BASE_NAME}/${REPO_TYPE}/pytorch-${TORCH_TYPE_SUF
 # Parameterize commit/branch for vllm-project & vllm-gaudi checkout
 # leave empty to use last-good-commit-for-vllm-gaudi
 ARG PT_VERSION
-ARG VLLM_PROJECT_COMMIT=v0.19.0
-ARG VLLM_GAUDI_COMMIT=v0.19.0
+ARG VLLM_PROJECT_COMMIT=
+ARG VLLM_GAUDI_COMMIT=main
 
 ENV OMPI_MCA_btl_vader_single_copy_mechanism=none
 
