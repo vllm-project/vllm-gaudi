@@ -212,7 +212,7 @@ def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str, 
     # Requests that need to start recv/send.
     # New requests are added by update_state_after_alloc in
     # the scheduler. Used to make metadata passed to Worker.
-    self._reqs_need_recv: dict[ReqId, tuple[Request, list[int]]] = {}  # type: ignore[misc]
+    self._reqs_need_recv: dict[ReqId, tuple[Request, BlockIds] = {}  # type: ignore[misc]
     self._reqs_need_save: dict[ReqId, Request] = {}  # type: ignore[misc]
     # Reqs to send and their expiration time
     self._reqs_need_send: dict[ReqId, float] = {}  # type: ignore[misc]
@@ -339,7 +339,7 @@ def build_connector_meta(
 def request_finished(
     self,
     request: "Request",
-    block_ids,
+    block_ids: BlockIds,
 ) -> tuple[bool, dict[str, Any] | None]:
     """
     Once a request is finished, determine whether request blocks
@@ -767,7 +767,7 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         block_lens=block_len_per_layer_on_save,
         kv_cache_layout=self.kv_cache_layout_on_save if not self.use_host_buffer else self.host_buffer_kv_cache_layout,
         block_size=self.block_size_on_save,
-        ssm_sizes=(0, 0),
+        ssm_sizes=self._mamba_ssm_size,
     )
     # Wrap metadata in payload with hash for defensive decoding
     encoder = msgspec.msgpack.Encoder()
