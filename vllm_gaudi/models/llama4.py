@@ -101,11 +101,14 @@ def _apply_hpu_llama4_init_patches(model_root: nn.Module) -> None:
 
     if not htorch.utils.internal.is_lazy():
         layers = getattr(model_root, "layers", [])
-        _apply_branch_free_attention(layers)
+        # NOTE: _apply_branch_free_attention is SKIPPED.
+        # The branchfree forward uses 3D hidden_states (batch, seq, hidden)
+        # that cause FakeTensor validation errors under torch.compile when
+        # batch==seq==1 during decode warmup (symbols unify). Regional
+        # compilation handles the NoPE/RoPE graph breaks instead.
         unified = _unify_attention_types(layers)
         logger.info(
-            "HpuLlama4: applied branch-free attention patches, "
-            "unified %d ChunkedLocalAttention -> Attention",
+            "HpuLlama4: unified %d ChunkedLocalAttention -> Attention",
             unified,
         )
 

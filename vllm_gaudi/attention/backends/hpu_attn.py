@@ -565,10 +565,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                            block_size=attn_metadata.block_size,
                                            is_prompt=attn_metadata.is_prompt)
 
-        if attn_metadata.is_prompt:
+        if attn_metadata.is_prompt or seq_len > 1:
             # Prompt run.
             query_shape = (batch_size, seq_len, self.num_heads, self.head_size)
-            kv_shape = (batch_size, seq_len_kv, self.num_kv_heads, self.head_size)
+            kv_shape = (batch_size, -1, self.num_kv_heads, self.head_size)
 
             attn_bias = attn_metadata.attn_bias
             position_bias = None
