@@ -29,18 +29,3 @@
   border-bottom: 1px solid #0000001a;
   transition: box-shadow 0.4s ease, border-bottom-color 0.4s ease, border-bottom-width 0.4s ease;
 }
-
-.md-typeset .compatibility-matrix table,
-.md-typeset .compatibility-matrix table th,
-.md-typeset .compatibility-matrix table td {
-    border: 1px solid var(--md-default-fg-color--lightest);
-}
-
-.compatibility-matrix table th,
-.compatibility-matrix table td {
-    text-align: center !important;
-}
-
-.compatibility-matrix table td:first-child {
-    text-align: left !important;
-}

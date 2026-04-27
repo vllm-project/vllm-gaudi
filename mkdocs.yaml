@@ -125,6 +125,5 @@ extra_javascript:
 use_directory_urls: false
 
 extra:
-  PT_VERSION: "2.10.0"
-  VERSION: "1.24.0"
-  # VLLM_VERSION is set automatically by main.py from the latest git tag
+  PT_VERSION: "2.9.0"
+  VERSION: "1.23.0"
