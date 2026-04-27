@@ -20,7 +20,8 @@ The following table lists the available variables:
 | **Variable**                    | **Description**                                                                           |
 | ------------------------------- | ----------------------------------------------------------------------------------------- |
 | `PT_HPU_LAZY_MODE`              | Enables Lazy execution mode, potentially improving performance by batching operations.    |
-| `VLLM_SKIP_WARMUP`              | Skips the model warm-up phase to reduce startup time. It may affect initial latency.       |
+|                                 | Lazy mode is not the default. Lazy mode is compatible only with Intel Gaudi PyTorch fork. |
+| `VLLM_SKIP_WARMUP`              | Skips the model warm-up phase to reduce startup time. It may affect initial latency.      |
 | `MAX_MODEL_LEN`                 | Sets the maximum supported sequence length for the model.                                 |
 | `MAX_NUM_SEQS`                  | Specifies the maximum number of sequences processed concurrently.                         |
 | `TENSOR_PARALLEL_SIZE`          | Defines the degree of tensor parallelism.                                                 |
