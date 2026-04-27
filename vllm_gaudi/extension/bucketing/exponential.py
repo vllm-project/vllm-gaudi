@@ -89,16 +89,9 @@ class ExponentialBucketingStrategy():
         decode_bs_limit = math.ceil(math.log2(max_num_seqs)) + 1
         decode_bs_bucket_cfg = [1, 2, max_num_seqs, decode_bs_limit]
         decode_query_bucket_cfg = [1, 1, 1, 1]
-        # Cap block limit to avoid excessive decode warmup buckets.
-        # Without the cap, large KV caches (e.g. 131K context) produce
-        # 17-18 block buckets which, combined with batch-size buckets,
-        # yields 100+ decode graphs and 30+ min warmup time.
-        # The cap scales with batch-size buckets to keep the total
-        # Cartesian product manageable while preserving coverage.
-        decode_block_limit_cap = max(6, decode_bs_limit)
         # With non-contiguous PA, total block references across all sequences
         # can exceed physical num_hpu_blocks (same physical block appears in
-        # multiple sequence block tables).  Scale the cap with both context
+        # multiple sequence block tables).  Scale with both context
         # length and batch size so prepared buckets cover long-context
         # prefix-sharing scenarios and avoid costly HPU graph recompilation.
         # The min() prevents excessive warmup when model_len is very large,
@@ -111,7 +104,7 @@ class ExponentialBucketingStrategy():
                 min(blocks_per_seq * max_num_seqs, max_blocks * max_num_seqs // 3),
                 max_blocks * 3,
             )
-        max_decode_block_limit = min(math.ceil(math.log2(max_decode_blocks)) + 1, decode_block_limit_cap)
+        max_decode_block_limit = math.ceil(math.log2(max_decode_blocks)) + 1
         decode_block_bucket_cfg = [1, max_num_seqs, max_decode_blocks, max_decode_block_limit]
 
         msg = ("Decode bucket config (min, step, max_warmup, limit) "

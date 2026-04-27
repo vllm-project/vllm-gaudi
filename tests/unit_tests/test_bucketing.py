@@ -257,15 +257,13 @@ def test_real_scenario_decode_cfg_matches_fixed_log(mock_get_config):
                                                max_model_len=_REAL_MAX_MODEL_LEN,
                                                max_blocks=_REAL_MAX_BLOCKS)
 
-    # Expected: [1, 256, 10779, 9]
+    # Expected: [1, 256, _REAL_FIXED_MAX_DECODE_BLOCKS, uncapped_limit]
     assert block_cfg[0] == 1, f"block min: expected 1, got {block_cfg[0]}"
     assert block_cfg[1] == _REAL_MAX_NUM_SEQS, (f"block step: expected {_REAL_MAX_NUM_SEQS}, got {block_cfg[1]}")
     assert block_cfg[2] == _REAL_FIXED_MAX_DECODE_BLOCKS, (
         f"block max: expected {_REAL_FIXED_MAX_DECODE_BLOCKS}, got {block_cfg[2]}")
     import math
-    uncapped_limit = math.ceil(math.log2(_REAL_FIXED_MAX_DECODE_BLOCKS)) + 1
-    decode_bs_limit = math.ceil(math.log2(_REAL_MAX_NUM_SEQS)) + 1
-    expected_limit = min(uncapped_limit, max(6, decode_bs_limit))  # min(15, 9) = 9
+    expected_limit = math.ceil(math.log2(_REAL_FIXED_MAX_DECODE_BLOCKS)) + 1
     assert block_cfg[3] == expected_limit, (f"block limit: expected {expected_limit}, got {block_cfg[3]}")
 
 
@@ -524,42 +522,3 @@ def test_calc_fallback_value_contiguous_pa_capped_by_cache():
     # Near the cap, everything converges to max_cache_blocks
     assert max_cache_blocks in results, (f"max_cache_blocks {max_cache_blocks} should be in result set")
     assert len(results) <= 3, (f"Too many distinct buckets near cache limit: {len(results)}")
-
-
-def test_exponential_decode_block_limit_cap(monkeypatch):
-    """Verify that the decode block limit is capped to avoid excessive warmup.
-
-    Reproduces the GAUDISW-247226 scenario: max_num_seqs=21 with a large KV
-    cache (65536 blocks) previously produced ~126 decode buckets and ~30 min
-    warmup.  With the cap the block dimension should have at most 6 exponential
-    steps, giving significantly fewer total buckets.
-    """
-    monkeypatch.setenv("VLLM_EXPONENTIAL_BUCKETING", "true")
-    monkeypatch.setenv("VLLM_CONTIGUOUS_PA", "true")
-    clear_config()
-    get_config()
-
-    strategy = ExponentialBucketingStrategy()
-    max_num_seqs = 21
-    block_size = 128
-    max_num_batched_tokens = 8192
-    max_model_len = 131072
-    max_blocks = 65536
-
-    bs_cfg, query_cfg, block_cfg = strategy.get_decode_cfgs(max_num_seqs, block_size, max_num_batched_tokens,
-                                                            max_model_len, max_blocks)
-
-    bs_range = strategy.get_range(bs_cfg)
-    block_range = strategy.get_range(block_cfg)
-
-    # decode_bs_limit = ceil(log2(21)) + 1 = 6
-    # cap = max(6, 6) = 6  →  block_limit capped at 6
-    assert block_cfg[3] == 6
-
-    # Block range: 6 exponential values + 1 (bmin_origin=1) ≤ 7 unique values
-    assert len(block_range) <= 7
-
-    # Total decode buckets (Cartesian product) should be much less than
-    # the uncapped ~126.
-    total = len(bs_range) * len(block_range)
-    assert total <= 50
