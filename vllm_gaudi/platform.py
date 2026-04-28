@@ -23,7 +23,6 @@ from vllm_gaudi.extension.logger import logger as init_logger
 
 logger = init_logger()
 
-
 QWEN3_5_HYBRID_ARCHS = frozenset({
     "Qwen3_5ForConditionalGeneration",
     "Qwen3_5MoeForConditionalGeneration",
