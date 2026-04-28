@@ -35,6 +35,7 @@ from vllm.distributed.parallel_state import (
 from vllm.platforms import current_platform
 
 from vllm.distributed.kv_transfer.kv_connector.utils import (
+    BlockIds,
     EngineId,
     TpKVTopology,
     get_current_attn_backend,
@@ -212,7 +213,7 @@ def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str, 
     # Requests that need to start recv/send.
     # New requests are added by update_state_after_alloc in
     # the scheduler. Used to make metadata passed to Worker.
-    self._reqs_need_recv: dict[ReqId, tuple[Request, BlockIds] = {}  # type: ignore[misc]
+    self._reqs_need_recv: dict[ReqId, tuple[Request, BlockIds]] = {}  # type: ignore[misc]
     self._reqs_need_save: dict[ReqId, Request] = {}  # type: ignore[misc]
     # Reqs to send and their expiration time
     self._reqs_need_send: dict[ReqId, float] = {}  # type: ignore[misc]
@@ -838,6 +839,9 @@ def kv_caches_postprocess(self, metadata: NixlConnectorMetadata):
         meta.local_physical_block_ids = self._logical_to_kernel_block_ids(meta.local_block_ids)
         block_ids_to_permute.append(meta.local_physical_block_ids)
     for block_ids in block_ids_to_permute:
+        assert len(block_ids) == 1, (
+            f"HPU hetero connector only supports single-group BlockIds, got {len(block_ids)} groups"
+        )
         post_process_device_kv_on_save(self, block_ids[0])
 
 
@@ -882,9 +886,24 @@ def _read_blocks(
     Post a READ point-to-point xfer request from a single local worker to
     a single remote worker.
     """
-    # Unwrap BlockIds (list-of-groups) to flat list for single-group HPU case
-    local_block_ids = local_block_ids[0] if local_block_ids else []
+    # Unwrap BlockIds (list-of-groups) to flat list for single-group HPU case.
+    # HPU hetero connector only supports a single KV cache group.
+    # Local Blocks
+    if local_block_ids:
+        assert len(local_block_ids) == 1, (
+            f"HPU hetero connector only supports single-group BlockIds, got {len(local_block_ids)} groups"
+        )
+        local_block_ids = local_block_ids[0]
+    else:
+        local_block_ids = []
+
+    # Remote Blocks
+    assert remote_block_ids, "_read_blocks called with empty remote_block_ids"
+    assert len(remote_block_ids) == 1, (
+        f"HPU hetero connector only supports single-group BlockIds, got {len(remote_block_ids)} groups"
+    )
     remote_block_ids = remote_block_ids[0]
+
     block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(dst_engine_id)
     if block_size_ratio > 1:
         # NOTE:
@@ -1012,7 +1031,12 @@ def _read_blocks(
             remote_rank=remote_rank,
         )
         if meta := self._recving_metadata.get(request_id):
-            self._invalid_block_ids.update(meta.local_block_ids[0])
+            local_ids = meta.local_block_ids
+            if local_ids:
+                assert len(local_ids) == 1, (
+                    f"HPU hetero connector only supports single-group BlockIds, got {len(local_ids)} groups"
+                )
+                self._invalid_block_ids.update(local_ids[0])
         self.xfer_stats.record_failed_transfer()
         if handle is not None:
             self.nixl_wrapper.release_xfer_handle(handle)
