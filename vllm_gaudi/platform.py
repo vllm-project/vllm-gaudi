@@ -23,6 +23,7 @@ from vllm_gaudi.extension.logger import logger as init_logger
 
 logger = init_logger()
 
+
 QWEN3_5_HYBRID_ARCHS = frozenset({
     "Qwen3_5ForConditionalGeneration",
     "Qwen3_5MoeForConditionalGeneration",
@@ -64,6 +65,14 @@ class HpuPlatform(Platform):
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: Optional[int] = None,
     ) -> str:
+        from vllm.config import get_current_vllm_config
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        current_vllm_config = get_current_vllm_config()
+        if current_vllm_config.device_config.device_type == "cpu":
+            logger.info("Using CPU_ATTN backend for CPU-targeted config.")
+            return AttentionBackendEnum.CPU_ATTN.get_path()
+
         if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on HPU.")
 
