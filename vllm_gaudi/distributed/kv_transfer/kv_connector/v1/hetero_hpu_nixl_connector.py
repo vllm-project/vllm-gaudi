@@ -840,8 +840,7 @@ def kv_caches_postprocess(self, metadata: NixlConnectorMetadata):
         block_ids_to_permute.append(meta.local_physical_block_ids)
     for block_ids in block_ids_to_permute:
         assert len(block_ids) == 1, (
-            f"HPU hetero connector only supports single-group BlockIds, got {len(block_ids)} groups"
-        )
+            f"HPU hetero connector only supports single-group BlockIds, got {len(block_ids)} groups")
         post_process_device_kv_on_save(self, block_ids[0])
 
 
@@ -891,8 +890,7 @@ def _read_blocks(
     # Local Blocks
     if local_block_ids:
         assert len(local_block_ids) == 1, (
-            f"HPU hetero connector only supports single-group BlockIds, got {len(local_block_ids)} groups"
-        )
+            f"HPU hetero connector only supports single-group BlockIds, got {len(local_block_ids)} groups")
         local_block_ids = local_block_ids[0]
     else:
         local_block_ids = []
@@ -900,8 +898,7 @@ def _read_blocks(
     # Remote Blocks
     assert remote_block_ids, "_read_blocks called with empty remote_block_ids"
     assert len(remote_block_ids) == 1, (
-        f"HPU hetero connector only supports single-group BlockIds, got {len(remote_block_ids)} groups"
-    )
+        f"HPU hetero connector only supports single-group BlockIds, got {len(remote_block_ids)} groups")
     remote_block_ids = remote_block_ids[0]
 
     block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(dst_engine_id)
@@ -1034,8 +1031,7 @@ def _read_blocks(
             local_ids = meta.local_block_ids
             if local_ids:
                 assert len(local_ids) == 1, (
-                    f"HPU hetero connector only supports single-group BlockIds, got {len(local_ids)} groups"
-                )
+                    f"HPU hetero connector only supports single-group BlockIds, got {len(local_ids)} groups")
                 self._invalid_block_ids.update(local_ids[0])
         self.xfer_stats.record_failed_transfer()
         if handle is not None:
