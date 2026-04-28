@@ -60,6 +60,12 @@ def register():
     # Remove torch.cuda.is_available hook here as an alternative solution
     if _uses_lmcache_connector():
         HpuPlatform.adjust_cuda_hooks()
+
+    # Apply HPU runtime monkey-patches (e.g. cleanup_dist_env_and_memory).
+    # See vllm_gaudi/patches.py for details (GAUDISW-247825).
+    from vllm_gaudi import patches as _hpu_patches
+    _hpu_patches.apply()
+
     return "vllm_gaudi.platform.HpuPlatform"
 
 
