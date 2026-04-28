@@ -35,6 +35,7 @@ from vllm.distributed.parallel_state import (
 from vllm.platforms import current_platform
 
 from vllm.distributed.kv_transfer.kv_connector.utils import (
+    BlockIds,
     EngineId,
     TpKVTopology,
     get_current_attn_backend,
@@ -170,10 +171,14 @@ def wait_for_save(self):
         self.connector_worker.kv_caches_postprocess(self._connector_metadata)
 
 
-def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str):
+def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config):
     """Implementation of Scheduler side methods"""
 
     self.vllm_config = vllm_config
+    self.kv_cache_config = kv_cache_config
+    self._is_hma_required = False
+    self._has_mamba = False
+    self.blocks_per_sw = []
     self.block_size = vllm_config.cache_config.block_size
     self.kv_cache_layout = get_kv_cache_layout()
     self.engine_id: EngineId = engine_id  # type: ignore[misc]
@@ -208,7 +213,7 @@ def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str):
     # Requests that need to start recv/send.
     # New requests are added by update_state_after_alloc in
     # the scheduler. Used to make metadata passed to Worker.
-    self._reqs_need_recv: dict[ReqId, tuple[Request, list[int]]] = {}  # type: ignore[misc]
+    self._reqs_need_recv: dict[ReqId, tuple[Request, BlockIds]] = {}  # type: ignore[misc]
     self._reqs_need_save: dict[ReqId, Request] = {}  # type: ignore[misc]
     # Reqs to send and their expiration time
     self._reqs_need_send: dict[ReqId, float] = {}  # type: ignore[misc]
@@ -247,7 +252,8 @@ def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", 
                 # If remote_blocks and num_external_tokens = 0, we have
                 # a full prefix cache hit on the D worker. We need to call
                 # send_notif in _read_blocks to free the memory on the P.
-                local_block_ids = (blocks.get_unhashed_block_ids() if num_external_tokens > 0 else [])
+                local_block_ids = (blocks.get_unhashed_block_ids_all_groups() if num_external_tokens > 0 else ())
+                local_block_ids = self.get_sw_clipped_blocks(local_block_ids)
                 # Get unhashed blocks to pull from remote.
                 self._reqs_need_recv[request.request_id] = (
                     request,
@@ -306,7 +312,7 @@ def build_connector_meta(
         # only submit as new req when not partial
         meta.add_new_req_to_save(
             request_id=req_id,
-            local_block_ids=new_block_ids,
+            local_block_ids=[new_block_ids],
             kv_transfer_params=req.kv_transfer_params,
         )
         if not is_partial:
@@ -334,7 +340,7 @@ def build_connector_meta(
 def request_finished(
     self,
     request: "Request",
-    block_ids: list[int],
+    block_ids: BlockIds,
 ) -> tuple[bool, dict[str, Any] | None]:
     """
     Once a request is finished, determine whether request blocks
@@ -376,9 +382,12 @@ def request_finished(
         self.partial_reqs.pop(request.request_id, None)
         return False, None
 
+    # block_ids is BlockIds (list of groups); unwrap single group for HPU
+    flat_block_ids = block_ids[0] if block_ids else []
+
     # TODO: check whether block_ids actually ever be 0. If not we could
     # remove the conditional below
-    delay_free_blocks = len(block_ids) > 0
+    delay_free_blocks = len(flat_block_ids) > 0
 
     if delay_free_blocks:
         # Prefill request on remote. It will be read from D upon completion
@@ -391,20 +400,20 @@ def request_finished(
         self._reqs_need_send[request.request_id] = (time.perf_counter() + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT)
 
     block_size_ratio = self.block_size // self.block_size_on_save
-    block_ids_on_save = block_ids
+    block_ids_on_save = flat_block_ids
     if block_size_ratio > 1:
         num_blocks = math.ceil((request.num_tokens - 1) / self.block_size_on_save)
-        block_ids_on_save = get_mapped_blocks(np.asarray(block_ids), block_size_ratio, num_blocks)
+        block_ids_on_save = get_mapped_blocks(np.asarray(flat_block_ids), block_size_ratio, num_blocks)
         logger.debug(
             "request.num_tokens is %s, block_ids is %s, block_ids_on_save is %s",
             request.num_tokens,
-            block_ids,
+            flat_block_ids,
             block_ids_on_save,
         )
     return delay_free_blocks, dict(
         do_remote_prefill=True,
         do_remote_decode=False,
-        remote_block_ids=block_ids_on_save,
+        remote_block_ids=[block_ids_on_save],
         remote_engine_id=self.engine_id,
         remote_request_id=request.request_id,
         remote_host=self.side_channel_host,
@@ -413,7 +422,7 @@ def request_finished(
     )
 
 
-def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
+def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config):
     """Implementation of Worker side methods"""
 
     if NixlWrapper is None:
@@ -424,6 +433,13 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
 
     # Config.
     self.vllm_config = vllm_config
+    self.kv_cache_config = kv_cache_config
+    self._is_hma_required = False
+    self._has_mamba = False
+    self._is_mamba_group = []
+    self._mamba_ssm_size = (0, 0)
+    self._layer_specs = {}
+    self.hma_group_size = 1
     self.block_size = vllm_config.cache_config.block_size
 
     if vllm_config.kv_transfer_config is None:
@@ -589,7 +605,7 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
         remote_block_size=self._block_size,  # shared state
         is_mla=self.use_mla,
         total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
-        attn_backend=backend,
+        attn_backends=[backend],
     )
     self.compat_hash = compute_nixl_compatibility_hash(self.vllm_config, self.backend_name,
                                                        self.kv_topo.cross_layers_blocks)
@@ -752,6 +768,7 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         block_lens=block_len_per_layer_on_save,
         kv_cache_layout=self.kv_cache_layout_on_save if not self.use_host_buffer else self.host_buffer_kv_cache_layout,
         block_size=self.block_size_on_save,
+        ssm_sizes=self._mamba_ssm_size,
     )
     # Wrap metadata in payload with hash for defensive decoding
     encoder = msgspec.msgpack.Encoder()
@@ -822,7 +839,9 @@ def kv_caches_postprocess(self, metadata: NixlConnectorMetadata):
         meta.local_physical_block_ids = self._logical_to_kernel_block_ids(meta.local_block_ids)
         block_ids_to_permute.append(meta.local_physical_block_ids)
     for block_ids in block_ids_to_permute:
-        post_process_device_kv_on_save(self, block_ids)
+        assert len(block_ids) == 1, (
+            f"HPU hetero connector only supports single-group BlockIds, got {len(block_ids)} groups")
+        post_process_device_kv_on_save(self, block_ids[0])
 
 
 def post_process_device_kv_on_save(self, block_ids: list[int]):
@@ -853,8 +872,8 @@ def post_process_device_kv_on_save(self, block_ids: list[int]):
 
 def _read_blocks(
     self,
-    local_block_ids: list[int],
-    remote_block_ids: list[int],
+    local_block_ids,
+    remote_block_ids,
     dst_engine_id: str,
     request_id: str,
     remote_request_id: str,
@@ -866,6 +885,22 @@ def _read_blocks(
     Post a READ point-to-point xfer request from a single local worker to
     a single remote worker.
     """
+    # Unwrap BlockIds (list-of-groups) to flat list for single-group HPU case.
+    # HPU hetero connector only supports a single KV cache group.
+    # Local Blocks
+    if local_block_ids:
+        assert len(local_block_ids) == 1, (
+            f"HPU hetero connector only supports single-group BlockIds, got {len(local_block_ids)} groups")
+        local_block_ids = local_block_ids[0]
+    else:
+        local_block_ids = []
+
+    # Remote Blocks
+    assert remote_block_ids, "_read_blocks called with empty remote_block_ids"
+    assert len(remote_block_ids) == 1, (
+        f"HPU hetero connector only supports single-group BlockIds, got {len(remote_block_ids)} groups")
+    remote_block_ids = remote_block_ids[0]
+
     block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(dst_engine_id)
     if block_size_ratio > 1:
         # NOTE:
@@ -924,13 +959,14 @@ def _read_blocks(
     remote_block_descs_ids: np.ndarray
     if not self.block_window_per_layer:
         # Default case: assume global attention
+        # _get_block_descs_ids expects BlockIds (list-of-groups); wrap flat list
         remote_block_descs_ids = self._get_block_descs_ids(
             dst_engine_id,
-            remote_block_ids,
+            [remote_block_ids],
         )
         local_block_descs_ids = self._get_block_descs_ids(
             self.engine_id,
-            local_block_ids,
+            [local_block_ids],
             block_size_ratio=block_size_ratio,
         )
     else:
@@ -952,12 +988,12 @@ def _read_blocks(
             # Get descs ids for the layer.
             layer_local_desc_ids = self._get_block_descs_ids(
                 dst_engine_id,
-                layer_local_block_ids,
+                [layer_local_block_ids],
                 layer_idx,
             )
             layer_remote_desc_ids = self._get_block_descs_ids(
                 self.engine_id,
-                layer_remote_block_ids,
+                [layer_remote_block_ids],
                 layer_idx,
                 block_size_ratio=block_size_ratio,
             )
@@ -992,7 +1028,11 @@ def _read_blocks(
             remote_rank=remote_rank,
         )
         if meta := self._recving_metadata.get(request_id):
-            self._invalid_block_ids.update(meta.local_block_ids)
+            local_ids = meta.local_block_ids
+            if local_ids:
+                assert len(local_ids) == 1, (
+                    f"HPU hetero connector only supports single-group BlockIds, got {len(local_ids)} groups")
+                self._invalid_block_ids.update(local_ids[0])
         self.xfer_stats.record_failed_transfer()
         if handle is not None:
             self.nixl_wrapper.release_xfer_handle(handle)
