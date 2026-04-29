@@ -448,6 +448,13 @@ run_sleep_mode_test() {
     echo "✅ Test with sleep mode passed."
 }
 
+# online model swap
+run_online_model_swap_test() {
+    echo "Testing basic model swap functionality"
+    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true PT_HPU_LAZY_MODE=0 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/online_model_swap.py"
+    echo "✅ Test with online model swap passed."
+}
+
 # Structured output
 run_structured_output_test() {
     echo "➡️ Testing structured output..."
@@ -506,6 +513,7 @@ launch_all_tests() {
     run_cpu_offloading_test
     run_offloading_connector_test
     run_sleep_mode_test
+    run_online_model_swap_test
     run_structured_output_test
     echo "🎉 All test suites passed successfully!"
 }
