@@ -70,7 +70,9 @@ def create_fused_moe(quant_config=None):
                     enable_eplb=False,
                     num_redundant_experts=0,
                     has_bias=False,
-                    is_sequence_parallel=False)
+                    is_sequence_parallel=False,
+                    zero_expert_type=None,
+                    hash_indices_table=None)
 
 
 def get_data_path(filename):
