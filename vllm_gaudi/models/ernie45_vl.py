@@ -1,4 +1,5 @@
 import torch
+from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.models.ernie45_vl import (
     Ernie4_5VLMultiModalProcessor,
     Ernie4_5_VLProcessingInfo,
@@ -74,7 +75,7 @@ def ernie4_5_vlmoemoe_forward_hpu(
         final_hidden_states = final_hidden_states[1]
 
     if self.tp_size > 1:
-        final_hidden_states = (self.text_experts.maybe_all_reduce_tensor_model_parallel(final_hidden_states))
+        final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
     return final_hidden_states.view(orig_shape)
 

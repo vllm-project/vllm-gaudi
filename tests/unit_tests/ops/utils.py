@@ -53,7 +53,6 @@ def create_fused_moe(quant_config=None):
                     hidden_size=512,
                     intermediate_size=256,
                     params_dtype=torch.bfloat16,
-                    reduce_results=True,
                     renormalize=True,
                     use_grouped_topk=False,
                     num_expert_group=None,
