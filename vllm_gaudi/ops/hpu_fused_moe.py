@@ -4,8 +4,8 @@ from functools import partial
 import os
 from typing import Union
 
-from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import (
-    DefaultMoERunner, )
+from vllm.model_executor.layers.fused_moe.runner.moe_runner_base import (
+    MoERunnerBase, )
 import torch
 import vllm
 import vllm.envs as envs
@@ -261,13 +261,6 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             return output.view(*input_shape)
 
 
-def reduce_output(self, states: torch.Tensor) -> torch.Tensor:
-    if (not self.moe_config.is_sequence_parallel and not self.use_dp_chunking and self.reduce_results
-            and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)):
-        states = self.maybe_all_reduce_tensor_model_parallel(states)
-    return states
-
-
 def patched_fused_moe_forward(
     self,
     hidden_states: torch.Tensor,
@@ -279,6 +272,11 @@ def patched_fused_moe_forward(
     ensure_moe_quant_config_init, and _sequence_parallel_context — all of
     which access ForwardContext and cause torch.compile graph breaks), we
     cache the layer reference and call _forward_impl directly.
+
+    The post-forward reduction sequence mirrors upstream
+    MoERunnerBase.forward (vllm/model_executor/layers/fused_moe/runner/
+    moe_runner_base.py) so we stay in sync with the new shared/fused
+    output combination logic introduced by upstream PR #35949.
     """
     hidden_states, shared_experts_input = self.apply_routed_input_transform(hidden_states)
     hidden_states, og_hidden_dims = self._maybe_pad_hidden_states(shared_experts_input, hidden_states)
@@ -296,11 +294,24 @@ def patched_fused_moe_forward(
         if self.gate is not None:
             router_logits, _ = self.gate(hidden_states)
 
-        fused_output = self._forward_impl(self._hpu_cached_layer, hidden_states, router_logits, shared_experts_input)
+        result = self._forward_impl(self._hpu_cached_layer, hidden_states, router_logits, shared_experts_input)
     else:
-        fused_output = self.forward_entry(hidden_states, router_logits, shared_experts_input, self._encode_layer_name())
+        result = self._forward_entry(hidden_states, router_logits, shared_experts_input, self._encode_layer_name())
 
-    return self._maybe_reduce_output(fused_output, og_hidden_dims)
+    # Mirror upstream MoERunnerBase.forward post-_forward_entry pipeline.
+    if isinstance(result, tuple):
+        shared_output, fused_output = result
+    else:
+        shared_output, fused_output = None, result
+
+    shared_output = self._maybe_reduce_shared_expert_output(shared_output)
+    shared_output, fused_output = self._maybe_apply_routed_scale_to_output(shared_output, fused_output)
+    fused_output = self.apply_routed_output_transform(fused_output)
+
+    combined = (shared_output + fused_output) if shared_output is not None else fused_output
+
+    combined = self._maybe_reduce_final_output(combined, og_hidden_dims)
+    return self._maybe_add_zero_expert_output(combined)
 
 
 def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
@@ -489,8 +500,8 @@ def create_fused_moe_router(
 
 # Apply patches
 # Keep runner forward patch compatible with upstream layer_name-based dispatch.
-_orig_default_moe_runner_init = DefaultMoERunner.__init__
-_orig_default_moe_runner_forward = DefaultMoERunner.forward
+_orig_default_moe_runner_init = MoERunnerBase.__init__
+_orig_default_moe_runner_forward = MoERunnerBase.forward
 
 # When enabled, bypasses the opaque torch.ops.vllm.moe_forward_shared custom
 # op wrapper so that torch.ops.hpu.mixture_of_experts is captured directly in
@@ -510,9 +521,9 @@ def _patched_default_moe_runner_forward(self, *args, **kwargs):
     return _orig_default_moe_runner_forward(self, *args, **kwargs)
 
 
-DefaultMoERunner.__init__ = _patched_default_moe_runner_init
+MoERunnerBase.__init__ = _patched_default_moe_runner_init
 
-DefaultMoERunner.forward = _patched_default_moe_runner_forward
+MoERunnerBase.forward = _patched_default_moe_runner_forward
 
 vllm.model_executor.layers.fused_moe.layer.get_compressed_expert_map = \
     get_compressed_expert_map
