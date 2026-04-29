@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
 
-from vllm_gaudi.extension.config import Not, Hardware, VersionRange, ModelType, Kernel, Any, All, Value, ValueFromList, Env, Disabled, Engine, MinPackageVersion, boolean, to_dict, split_values_and_flags, list_of
+from vllm_gaudi.extension.config import Not, Hardware, VersionRange, ModelType, Kernel, Any, All, Value, ValueFromList, Env, Disabled, Enabled, Engine, MinPackageVersion, boolean, to_dict, split_values_and_flags, list_of
 from vllm_gaudi.extension.kernels import fsdpa, block_softmax_adjustment
 from vllm_gaudi.extension.validation import for_all, choice
 
@@ -95,7 +95,7 @@ def get_features():
               env_var='VLLM_BUCKETING_STRATEGY',
               env_var_type=str,
               check=choice('exp', 'lin', 'pad')),
-        Value('defrag', False),
+        Value('defrag', Enabled('use_contiguous_pa')),
         Value('regional_compilation', True, env_var='VLLM_T_COMPILE_REGIONAL_COMPILATION', env_var_type=boolean),
         Value('dynamic_shapes_compilation', True, env_var='VLLM_T_COMPILE_DYNAMIC_SHAPES', env_var_type=boolean),
         Value('fullgraph_compilation', False, env_var='VLLM_T_COMPILE_FULLGRAPH', env_var_type=boolean),
