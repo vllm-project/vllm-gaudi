@@ -6,7 +6,7 @@ import math
 import os
 import queue
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import torch
 import torch.distributed
@@ -37,6 +37,7 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm_gaudi.extension.logger import logger as init_logger
 
 logger = init_logger()
+_QUANT_CONFIG_UNCHANGED = object()
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import GrammarOutput, SchedulerOutput
@@ -220,13 +221,29 @@ class HPUWorker(WorkerBase):
     def load_model(
         self,
         vllm_config: Optional[VllmConfig] = None,
+        quant_config_path: Optional[str] | object = _QUANT_CONFIG_UNCHANGED,
     ) -> None:
         """Load a model. If vllm_config is provided, update config and rebuild runner.
 
         If a runner was previously stashed for this model (weights on CPU from
         a prior sleep→unload cycle) it is restored directly and weights are
         moved back to HPU, skipping the expensive warmup_graphs phase.
+
+        Args:
+            vllm_config: Optional new VllmConfig to apply before loading.
+            quant_config_path: Optional path to INC FP8 calibration JSON.
         """
+        if quant_config_path is not _QUANT_CONFIG_UNCHANGED:
+            if quant_config_path is not None:
+                quant_config_path_str = cast(str, quant_config_path)
+                os.environ["QUANT_CONFIG"] = quant_config_path_str
+                logger.info("QUANT_CONFIG=%s", quant_config_path_str)
+            else:
+                os.environ.pop("QUANT_CONFIG", None)
+                logger.info("QUANT_CONFIG cleared")
+        else:
+            logger.info("QUANT_CONFIG unchanged: %s", os.environ.get("QUANT_CONFIG"))
+
         if vllm_config is not None:
             self._apply_vllm_config(vllm_config)
 

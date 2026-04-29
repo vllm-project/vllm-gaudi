@@ -20,6 +20,7 @@ from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.structured_output import StructuredOutputManager
 
 logger = init_logger(__name__)
+_QUANT_CONFIG_UNCHANGED = object()
 
 
 def _collect_numeric_values(value: Any) -> list[float]:
@@ -138,11 +139,20 @@ def install_engine_core_patch() -> None:
     if hasattr(EngineCore, "gaudi_reconfigure_engine"):
         return
 
-    def gaudi_reconfigure_engine(self: Any, vllm_config_bytes: bytes) -> dict[str, float | None]:
+    def gaudi_reconfigure_engine(
+        self: Any,
+        vllm_config_bytes: bytes,
+        quant_config_path: str | None | object = _QUANT_CONFIG_UNCHANGED,
+    ) -> dict[str, float | None]:
         """Reconfigure EngineCore for a new model/config in-process.
 
         This rebuilds KV cache configs, scheduler, and related runtime state
         after reloading model weights on workers.
+
+        Args:
+            vllm_config_bytes: cloudpickle-serialised VllmConfig for the new model.
+            quant_config_path: Optional path to the INC FP8 calibration JSON
+                (``QUANT_CONFIG`` env var value).
         """
         start = time.perf_counter()
         previous_config = self.vllm_config
@@ -187,7 +197,11 @@ def install_engine_core_patch() -> None:
                             type(worker_result).__name__,
                         )
             memory_after_unload_mb = _collect_total_hpu_used_memory_mb(self)
-            self.collective_rpc("load_model", kwargs={"vllm_config": new_config})
+            load_kwargs: dict[str, Any] = {"vllm_config": new_config}
+            if quant_config_path is not _QUANT_CONFIG_UNCHANGED:
+                load_kwargs["quant_config_path"] = quant_config_path
+
+            self.collective_rpc("load_model", kwargs=load_kwargs)
             logger.info("[gaudi_reconfigure] worker model reload complete")
 
             # Update config and reinitialize KV caches.
