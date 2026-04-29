@@ -25,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa
     ExampleConnector, )
@@ -64,9 +65,9 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.encoder_cache_manager.cached) == 0
 
     # KVCache Manager.
-    assert (len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks) == 0)
-    assert (len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].num_cached_block) == 0)
-    num_free_blocks = (scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks)
+    assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks) == 0
+    assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].num_cached_block) == 0
+    num_free_blocks = scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks
     assert num_free_blocks == (scheduler.kv_cache_manager.block_pool.num_gpu_blocks - 1)
 
     # NOTE(rob): just the ref count on blocks will be 0. The hash
@@ -232,6 +233,7 @@ def create_model_runner_output(
     invalid_block_ids: set[int] | None = None,
     use_eos: bool = False,
     token_id: int = 0,
+    kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None,
 ) -> ModelRunnerOutput:
     """Make dummy model runner output for testing."""
 
@@ -243,12 +245,13 @@ def create_model_runner_output(
     sampled_token = EOS_TOKEN_ID if use_eos else token_id
     sampled_token_ids = [[sampled_token] for _ in req_ids]
 
-    kv_connector_output = (None if (finished_sending is None and finished_recving is None and invalid_block_ids is None)
-                           else KVConnectorOutput(
-                               finished_sending=finished_sending,
-                               finished_recving=finished_recving,
-                               invalid_block_ids=invalid_block_ids or set(),
-                           ))
+    kv_connector_output = (None if (finished_sending is None and finished_recving is None and invalid_block_ids is None
+                                    and kv_connector_worker_meta is None) else KVConnectorOutput(
+                                        finished_sending=finished_sending,
+                                        finished_recving=finished_recving,
+                                        invalid_block_ids=invalid_block_ids or set(),
+                                        kv_connector_worker_meta=kv_connector_worker_meta,
+                                    ))
 
     # Make output data structure.
     return ModelRunnerOutput(
@@ -269,7 +272,7 @@ class TestExampleConnector(ExampleConnector):
         self._connector = ExampleConnector(config, role)
         self.call_record: dict[str, int] = defaultdict(int)
         # Use a unique temp file per connector
-        self._event_file = (tempfile.gettempdir() + f"/connector_{self.name}-{self.role.name}_events.log")
+        self._event_file = tempfile.gettempdir() + f"/connector_{self.name}-{self.role.name}_events.log"
         # Start with an empty file
         with open(self._event_file, "w") as _:
             pass
