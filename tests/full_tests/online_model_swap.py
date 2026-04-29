@@ -30,6 +30,7 @@ import asyncio
 import contextlib
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -231,6 +232,21 @@ class ServerLogCapture:
             self.warmup_events = []
 
 
+def _stop_server_process_tree(proc: subprocess.Popen[str], timeout: float = 10.0) -> None:
+    """Stop the server process and its descendants (EngineCore workers) via process group."""
+    if proc.poll() is not None:
+        proc.wait(timeout=0)
+        return
+
+    pgid = os.getpgid(proc.pid)
+    os.killpg(pgid, signal.SIGTERM)
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(pgid, signal.SIGKILL)
+        proc.wait(timeout=timeout)
+
+
 def run_server(config_path: str,
                api_host: str,
                api_port: int,
@@ -271,6 +287,7 @@ def run_server(config_path: str,
         stderr=subprocess.STDOUT,
         universal_newlines=True,
         bufsize=1,
+        start_new_session=True,
     )
 
     def capture_logs():
@@ -926,12 +943,15 @@ async def main():
         if proc:
             print("\n>>> Shutting down server...")
             try:
-                proc.terminate()
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-            print("  ✓ Server stopped")
+                _stop_server_process_tree(proc)
+            except Exception as exc:  # noqa: BLE001
+                print(f"  ✗ Failed to stop server process tree cleanly: {exc}")
+                with contextlib.suppress(Exception):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    proc.wait(timeout=5)
+            else:
+                print("  ✓ Server process tree stopped")
 
         # Clean up temp config if we created it
         if args.config is None and config_path:
