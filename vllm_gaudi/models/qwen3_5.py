@@ -113,7 +113,9 @@ class HPUGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefill_seq_len = (num_tokens // prefill_num_seqs if prefill_num_seqs > 0 else 0)
             initial_state = ssm_state[state_indices].contiguous()
             if has_initial_state is not None:
-                initial_state[~has_initial_state.bool(), ...] = 0
+                # Avoid scatter_nd from boolean indexing
+                mask = has_initial_state.bool().view(-1, 1, 1, 1).to(initial_state.dtype)
+                initial_state = initial_state * mask
 
         return (is_prompt, conv_state, ssm_state, state_indices, query_start_loc, has_initial_state, padding_mask_flat,
                 num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state)
