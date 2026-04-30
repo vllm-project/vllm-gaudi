@@ -12,10 +12,10 @@ This release is based on [vLLM v0.19.0](https://github.com/vllm-project/vllm/rel
 - Introduced **Qwen 3.5** model support with compact mode for improved memory utilization.
 - Introduced **Mamba prefix caching** support for hybrid SSM-Transformer models on v0.19.0.
 - Added **MxFP4 weight loading and dequantization** for next-generation quantization formats.
-- Added **HPUCompressedTensorsW8A8Int8 BF16 fallback** path for compressed-tensors INT8 weights.
+- Added a **BF16 fallback path** for compressed-tensors INT8 (W8A8) weights on HPU (`HPUCompressedTensorsW8A8Int8_BF16Fallback`).
 - Integrated **LMCache** support via monkey-patching for external cache backends.
 - Introduced **custom depthwise conv1d TPC kernel** for MambaMixer2 to improve hybrid model performance.
-- Adapted the **online defragmenter for torch.compile** mode, enabling memory defragmentation in compiled execution, and enabled it automatically when contiguous PA is on.
+- Adapted the **online defragmenter for torch.compile** mode, enabling memory defragmentation in compiled execution and automatically enabling it when contiguous PA is on.
 - Added **single-process model swap** support, exposing the OpenAI-compatible `/v1/models/switch` endpoint for in-process model switching without server restarts.
 - Stabilized **long-context decode** by bounding decode `block_list` growth and refining bucketing for non-power-of-two `block_size` (e.g. Granite hybrid models), significantly reducing recompilations and improving TPOT.
 - Switched the **default `PT_HPU_LAZY_MODE`** in shipped Docker images to `0` (torch.compile) for both PyTorch upstream and fork builds.
