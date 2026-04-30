@@ -10,6 +10,7 @@ import pytest
 
 from vllm_gaudi.extension.config import (VersionRange, Config, Kernel, Env, boolean, All, Not, Eq, Enabled,
                                          FirstEnabled)
+from vllm_gaudi.extension.features import get_features
 from vllm_gaudi.extension.validation import choice, regex
 
 
@@ -203,3 +204,19 @@ def test_regex_with_hint():
     expected = "'ABC' doesn't match pattern '^[a-z]+$'!"\
                " Only lowercase letters allowed"
     assert result == expected
+
+
+def test_defrag_enabled_with_contiguous_pa():
+    feature_values, feature_flags = get_features()
+    config = Config(feature_values, feature_flags, prefix_caching=False, VLLM_CONTIGUOUS_PA=True)
+
+    assert config.get('use_contiguous_pa') is True
+    assert config.get('defrag') is True
+
+
+def test_defrag_override_respected_with_contiguous_pa():
+    feature_values, feature_flags = get_features()
+    config = Config(feature_values, feature_flags, prefix_caching=False, VLLM_CONTIGUOUS_PA=True, VLLM_DEFRAG=False)
+
+    assert config.get('use_contiguous_pa') is True
+    assert config.get('defrag') is False
