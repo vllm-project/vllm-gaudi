@@ -3390,7 +3390,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
             # Compute prompt logprobs.
             logprobs = self.sampler.compute_logprobs(logits)
-            gathered = self.sampler.gather_logprobs(logprobs, num_prompt_logprobs, tgt_token_ids)
+            gathered = self._gather_prompt_logprobs_hpu(logprobs, num_prompt_logprobs, tgt_token_ids)
 
             # Transfer HPU->CPU async.
             chunk_slice = slice(start_idx, start_idx + num_logits)
@@ -3409,6 +3409,25 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             torch.hpu.synchronize()
 
         return prompt_logprobs_dict
+
+    def _gather_prompt_logprobs_hpu(
+        self,
+        logprobs: torch.Tensor,
+        num_prompt_logprobs: int,
+        token_ids: torch.Tensor,
+    ) -> LogprobsTensors:
+        # Keep the HPU prompt-logprobs path local to vllm-gaudi and avoid
+        # upstream symbolic batch markers that Habana compilation cannot lower.
+        topk_logprobs, topk_indices = torch.topk(logprobs, num_prompt_logprobs, dim=-1)
+
+        token_ids = token_ids.unsqueeze(-1)
+        token_logprobs = logprobs.gather(-1, token_ids)
+        token_ranks = (logprobs >= token_logprobs).sum(-1)
+
+        indices = torch.cat((token_ids, topk_indices), dim=1).to(torch.int32)
+        combined_logprobs = torch.cat((token_logprobs, topk_logprobs), dim=1)
+
+        return LogprobsTensors(indices, combined_logprobs, token_ranks)
 
     def _build_logprobs_output(
         self,
