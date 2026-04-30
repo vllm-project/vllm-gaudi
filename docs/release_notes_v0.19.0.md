@@ -12,10 +12,13 @@ This release is based on [vLLM v0.19.0](https://github.com/vllm-project/vllm/rel
 - Introduced **Qwen 3.5** model support with compact mode for improved memory utilization.
 - Introduced **Mamba prefix caching** support for hybrid SSM-Transformer models on v0.19.0.
 - Added **MxFP4 weight loading and dequantization** for next-generation quantization formats.
+- Added **HPUCompressedTensorsW8A8Int8 BF16 fallback** path for compressed-tensors INT8 weights.
 - Integrated **LMCache** support via monkey-patching for external cache backends.
 - Introduced **custom depthwise conv1d TPC kernel** for MambaMixer2 to improve hybrid model performance.
-- Adapted the **online defragmenter for torch.compile** mode, enabling memory defragmentation in compiled execution.
-- Improved warmup performance by **capping decode block bucket limits**.
+- Adapted the **online defragmenter for torch.compile** mode, enabling memory defragmentation in compiled execution, and enabled it automatically when contiguous PA is on.
+- Added **single-process model swap** support, exposing the OpenAI-compatible `/v1/models/switch` endpoint for in-process model switching without server restarts.
+- Stabilized **long-context decode** by bounding decode `block_list` growth and refining bucketing for non-power-of-two `block_size` (e.g. Granite hybrid models), significantly reducing recompilations and improving TPOT.
+- Switched the **default `PT_HPU_LAZY_MODE`** in shipped Docker images to `0` (torch.compile) for both PyTorch upstream and fork builds.
 
 ---
 
@@ -31,10 +34,13 @@ This release is based on [vLLM v0.19.0](https://github.com/vllm-project/vllm/rel
 
 - Created a custom depthwise conv1d kernel for MambaMixer2. ([#1092](https://github.com/vllm-project/vllm-gaudi/pull/1092))
 - Adapted the online defragmenter for torch.compile. ([#986](https://github.com/vllm-project/vllm-gaudi/pull/986))
+- Enabled the online defragmenter automatically when contiguous PA is enabled. ([#1402](https://github.com/vllm-project/vllm-gaudi/pull/1402))
 - Set reserved memory for torch.compile. ([#1093](https://github.com/vllm-project/vllm-gaudi/pull/1093))
-- Capped the decode block bucket limit to reduce warmup time. ([#1160](https://github.com/vllm-project/vllm-gaudi/pull/1160))
 - Optimized `selective_state_update`. ([#1295](https://github.com/vllm-project/vllm-gaudi/pull/1295))
 - Optimized the visible block number for hybrid KV cache. ([#1319](https://github.com/vllm-project/vllm-gaudi/pull/1319))
+- Stabilized decode `block_list` growth for long-context workloads to avoid HPU graph recompilation storms and OOM (significant TPOT/throughput gains on 200K-context runs). ([#1376](https://github.com/vllm-project/vllm-gaudi/pull/1376))
+- Refined prompt bucket filtering, fallback bucket capping, and `mamba_decode_corrector` for non-power-of-two `block_size` long-context cases (e.g. Granite hybrid models). ([#1389](https://github.com/vllm-project/vllm-gaudi/pull/1389))
+- Moved multimodal graph warmup under the `PT_COMPILE_ONLY_MODE` context (torch.compile path only) and reused the processor across resolution buckets to reduce warmup time. ([#1368](https://github.com/vllm-project/vllm-gaudi/pull/1368))
 
 ---
 
@@ -52,17 +58,21 @@ This release is based on [vLLM v0.19.0](https://github.com/vllm-project/vllm/rel
 ## Quantization
 
 - Loaded and dequantized MxFP4 weights. ([#1156](https://github.com/vllm-project/vllm-gaudi/pull/1156))
+- Added `HPUCompressedTensorsW8A8Int8_BF16Fallback` implementation for INT8 weights. ([#1394](https://github.com/vllm-project/vllm-gaudi/pull/1394))
 - Fixed INC FP8 dynamic quantization for MoE models on HPU. ([#1183](https://github.com/vllm-project/vllm-gaudi/pull/1183))
 - Fixed FP8 block-to-channel conversion breaking MLA weight loading. ([#1220](https://github.com/vllm-project/vllm-gaudi/pull/1220))
 - Fixed INC/MLA alias-path quantization failures. ([#1222](https://github.com/vllm-project/vllm-gaudi/pull/1222))
 - Added Granite-4.0-h calibration config. ([#1221](https://github.com/vllm-project/vllm-gaudi/pull/1221))
 - Fixed Synapse GC compile failure for FP8-quantized models. ([#1334](https://github.com/vllm-project/vllm-gaudi/pull/1334))
+- Renamed FP8 blockwise compressed-tensors scales to match HPU ops, fixing a regression in Mistral-Large-3-675B (cherry-pick of [#1304](https://github.com/vllm-project/vllm-gaudi/pull/1304)). ([#1374](https://github.com/vllm-project/vllm-gaudi/pull/1374))
 
 ---
 
 ## Plugin Core
 
 - Added a patch for LMCache. ([#1176](https://github.com/vllm-project/vllm-gaudi/pull/1176))
+- Added single-process model swap support exposing the OpenAI-compatible `/v1/models/switch` endpoint, allowing sequential serving of multiple small models within a single API server process without restarts (cherry-pick of [#1258](https://github.com/vllm-project/vllm-gaudi/pull/1258)). ([#1367](https://github.com/vllm-project/vllm-gaudi/pull/1367))
+- Updated the HPU hetero NIXL connector class to track the new vLLM 0.19.0 NIXL interface. ([#1373](https://github.com/vllm-project/vllm-gaudi/pull/1373))
 - Removed aggregate module HpuDeepseekOCRVisual. ([#1102](https://github.com/vllm-project/vllm-gaudi/pull/1102))
 - Removed deprecated `virtual_engine` from `ForwardContext`. ([#1187](https://github.com/vllm-project/vllm-gaudi/pull/1187))
 - Fixed CPUOffloadingSpec import path and removed obsolete roberta patch. ([#1229](https://github.com/vllm-project/vllm-gaudi/pull/1229))
@@ -76,6 +86,7 @@ This release is based on [vLLM v0.19.0](https://github.com/vllm-project/vllm/rel
 
 - Parameterized EXTRA_INDEX_URL in Dockerfiles. ([#1131](https://github.com/vllm-project/vllm-gaudi/pull/1131))
 - Added VLLM_REPO and VLLM_GAUDI_REPO arguments to RHEL UBI Dockerfile. ([#1225](https://github.com/vllm-project/vllm-gaudi/pull/1225))
+- Set `PT_HPU_LAZY_MODE=0` (torch.compile) as the default in shipped Docker images for both PyTorch upstream and fork builds, with accompanying documentation updates. ([#1397](https://github.com/vllm-project/vllm-gaudi/pull/1397))
 - Added real context length to the high-level profile. ([#1169](https://github.com/vllm-project/vllm-gaudi/pull/1169))
 - Added more than 2 models to the sleep mode model swapping test. ([#1100](https://github.com/vllm-project/vllm-gaudi/pull/1100))
 - Added AI agents config files. ([#1123](https://github.com/vllm-project/vllm-gaudi/pull/1123))
@@ -97,6 +108,7 @@ This release is based on [vLLM v0.19.0](https://github.com/vllm-project/vllm/rel
 - Fixed Granite4.0h fallback bucket padding. ([#1207](https://github.com/vllm-project/vllm-gaudi/pull/1207))
 - Fixed wrong AI Lab names in validated_models.md. ([#1282](https://github.com/vllm-project/vllm-gaudi/pull/1282))
 - Fixed the `-u` flag requiring an argument in calibrate_model.sh. ([#1121](https://github.com/vllm-project/vllm-gaudi/pull/1121))
+- Flattened 3D `inputs_embeds` in `HpuModelAdapter.forward` to fix a shape mismatch on upstream VL models (e.g. Qwen3-VL-MoE deepstack) when using 2D padded prefill batches. ([#1380](https://github.com/vllm-project/vllm-gaudi/pull/1380))
 
 ---
 
@@ -110,6 +122,8 @@ This release is based on [vLLM v0.19.0](https://github.com/vllm-project/vllm/rel
 ## Deprecation & Breaking Changes
 
 - Upgraded to **Intel® Gaudi® Software v1.24.0** and **PyTorch 2.10**, which requires users to update their Intel Gaudi software stack from v1.23.0 to v1.24.0.
+- Changed the default `PT_HPU_LAZY_MODE` in shipped Docker images to `0` (torch.compile) for both PyTorch upstream and fork builds. Lazy mode users must opt back in explicitly. ([#1397](https://github.com/vllm-project/vllm-gaudi/pull/1397))
+- Reverted the v0.19.0 backport of "Cap decode block bucket limit to reduce warmup time" ([#1160](https://github.com/vllm-project/vllm-gaudi/pull/1160)) on the `releases/v0.19.0` branch; long-context decode is now stabilized via [#1376](https://github.com/vllm-project/vllm-gaudi/pull/1376) and [#1389](https://github.com/vllm-project/vllm-gaudi/pull/1389) instead. ([#1388](https://github.com/vllm-project/vllm-gaudi/pull/1388))
 - Removed unused Unified Attention (UA) code. ([#1226](https://github.com/vllm-project/vllm-gaudi/pull/1226)).
 - Removed the aggregate module `HpuDeepseekOCRVisual`. ([#1102](https://github.com/vllm-project/vllm-gaudi/pull/1102)).
 - Removed deprecated `virtual_engine` from `ForwardContext`. ([#1187](https://github.com/vllm-project/vllm-gaudi/pull/1187)).
@@ -120,6 +134,17 @@ This release is based on [vLLM v0.19.0](https://github.com/vllm-project/vllm/rel
 
 | PR | Title | Author |
 | --- | --- | --- |
+| [#1402](https://github.com/vllm-project/vllm-gaudi/pull/1402) | To enable defrag if contig_pa is enabled | @iboiko-habana |
+| [#1397](https://github.com/vllm-project/vllm-gaudi/pull/1397) | Cherry-pick to v0.19.0 Set Docker auto calc PT_HPU_LAZY_MODE=0 as default | @nngokhale |
+| [#1394](https://github.com/vllm-project/vllm-gaudi/pull/1394) | HPUCompressedTensorsW8A8Int8_BF16Fallback impl | @jbyczkow |
+| [#1389](https://github.com/vllm-project/vllm-gaudi/pull/1389) | Bucketing edge cases finetune for longer ctx (#1362) | @ksmusz |
+| [#1388](https://github.com/vllm-project/vllm-gaudi/pull/1388) | [v0.19.0] Revert "Cap decode block bucket limit to reduce warmup time (#1160)" | @adobrzyn |
+| [#1380](https://github.com/vllm-project/vllm-gaudi/pull/1380) | Flatten 3D inputs_embeds in HpuModelAdapter.forward | @shepark |
+| [#1376](https://github.com/vllm-project/vllm-gaudi/pull/1376) | Stabilize decode block_list growth for long-context workloads (v0.19.0) | @adobrzyn |
+| [#1374](https://github.com/vllm-project/vllm-gaudi/pull/1374) | Cherry-pick: Updated fix regression in Mistral-Large-3-675B (#1304) for v0.19.0 | @skavulya |
+| [#1373](https://github.com/vllm-project/vllm-gaudi/pull/1373) | v0.19.0 interface fixes for hetero nixl connector | @sandeep-maddipatla |
+| [#1368](https://github.com/vllm-project/vllm-gaudi/pull/1368) | Move mm graph warmup under pt compile only context | @shepark |
+| [#1367](https://github.com/vllm-project/vllm-gaudi/pull/1367) | Cherry-pick from PR#1258 (single-process model swap) | @12010486 |
 | [#1334](https://github.com/vllm-project/vllm-gaudi/pull/1334) | Fix Synapse GC compile failure for FP8-quantized models | @jiminha |
 | [#1330](https://github.com/vllm-project/vllm-gaudi/pull/1330) | Mamba prefix caching support for v0.19.0 | @jbyczkow |
 | [#1323](https://github.com/vllm-project/vllm-gaudi/pull/1323) | Fix for proper KV cache slot addressing for Hybrid models | @ksmusz |
@@ -192,3 +217,4 @@ Welcome to the following first-time contributors to vLLM Gaudi Plugin!
 - **@Xaenalt** — Fix setuptools package discovery to include sub-packages ([#1212](https://github.com/vllm-project/vllm-gaudi/pull/1212))
 - **@12010486** — Add more than 2 models to sleep mode model swapping test ([#1100](https://github.com/vllm-project/vllm-gaudi/pull/1100))
 - **@hlin99** — Monkey patch for LMCache ([#1176](https://github.com/vllm-project/vllm-gaudi/pull/1176))
+- **@sandeep-maddipatla** — v0.19.0 interface fixes for hetero nixl connector ([#1373](https://github.com/vllm-project/vllm-gaudi/pull/1373))
