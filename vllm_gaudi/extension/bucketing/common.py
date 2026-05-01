@@ -414,6 +414,11 @@ def generate_buckets(bs_range,
     def correct_for_max_model_len(bs, query, ctx):
         return (bs, query, min(ctx, bs * math.ceil(max_model_len / block_size)))
 
+    def mamba_decode_corrector(bs, query, ctx):
+        # GAUDISW-248274: cap decode ctx using floor for hybrid Mamba models
+        # to prevent IndexError in input_batch.token_ids_cpu_tensor index_select.
+        return (bs, query, min(ctx, bs * math.floor(max_model_len / block_size)))
+
     def batch_size_smaller_than_blocks(bs, query, ctx):
         if not bs <= ctx:
             omitted_buckets.add(("condition: bs <= ctx, ", "-> bs, query, ctx: ", bs, query, ctx))
@@ -442,6 +447,8 @@ def generate_buckets(bs_range,
         if is_prompt or use_contiguous_pa:
             return no_corrections
         else:
+            if mamba_chunk_size > 0:
+                return mamba_decode_corrector
             return correct_for_max_model_len
 
     def get_max_bucket_per_query(bs, query):
