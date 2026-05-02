@@ -5053,7 +5053,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # Consider the token space for draft tokens to propose
             # The draft tokens for eagle consumes block table space
             num_lookahead_tokens += self.speculative_config.num_speculative_tokens
-        seq_lengths = [min(b * block_size - num_lookahead_tokens, self.max_model_len) for b in blocks]
+        # Cap at max_model_len - 1 to avoid off-by-one in _prepare_inputs
+        # where position = num_computed_tokens is used as an index into
+        # token_ids_cpu_tensor of shape (max_num_reqs, max_model_len).
+        max_seq = self.max_model_len - 1
+        seq_lengths = [min(b * block_size - num_lookahead_tokens, max_seq) for b in blocks]
         return seq_lengths
 
     def distribute_sum_evenly(self, total_sum, max_length):
