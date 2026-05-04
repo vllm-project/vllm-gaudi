@@ -6,7 +6,7 @@ import math
 import os
 import queue
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import torch
 import torch.distributed
@@ -32,11 +32,12 @@ from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerO
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.utils import is_fake_hpu
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
-from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 from vllm_gaudi.extension.logger import logger as init_logger
 
 logger = init_logger()
+_QUANT_CONFIG_UNCHANGED = object()
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import GrammarOutput, SchedulerOutput
@@ -220,13 +221,29 @@ class HPUWorker(WorkerBase):
     def load_model(
         self,
         vllm_config: Optional[VllmConfig] = None,
+        quant_config_path: Optional[str] | object = _QUANT_CONFIG_UNCHANGED,
     ) -> None:
         """Load a model. If vllm_config is provided, update config and rebuild runner.
 
         If a runner was previously stashed for this model (weights on CPU from
         a prior sleep→unload cycle) it is restored directly and weights are
         moved back to HPU, skipping the expensive warmup_graphs phase.
+
+        Args:
+            vllm_config: Optional new VllmConfig to apply before loading.
+            quant_config_path: Optional path to INC FP8 calibration JSON.
         """
+        if quant_config_path is not _QUANT_CONFIG_UNCHANGED:
+            if quant_config_path is not None:
+                quant_config_path_str = cast(str, quant_config_path)
+                os.environ["QUANT_CONFIG"] = quant_config_path_str
+                logger.info("QUANT_CONFIG=%s", quant_config_path_str)
+            else:
+                os.environ.pop("QUANT_CONFIG", None)
+                logger.info("QUANT_CONFIG cleared")
+        else:
+            logger.info("QUANT_CONFIG unchanged: %s", os.environ.get("QUANT_CONFIG"))
+
         if vllm_config is not None:
             self._apply_vllm_config(vllm_config)
 
@@ -521,7 +538,7 @@ class HPUWorker(WorkerBase):
         logger.info(msg)
         self.compile_or_warm_up_model()
 
-    def compile_or_warm_up_model(self) -> float:
+    def compile_or_warm_up_model(self) -> CompilationTimes:
         # Don't run the warmup if the model is already warmed up
         if not getattr(self.model_runner, 'graphed_buckets', None):
             self.model_runner.warmup_model()  # type: ignore[union-attr]
@@ -529,7 +546,10 @@ class HPUWorker(WorkerBase):
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
-        return self.vllm_config.compilation_config.compilation_time
+        return CompilationTimes(
+            language_model=self.vllm_config.compilation_config.compilation_time,
+            encoder=self.vllm_config.compilation_config.encoder_compilation_time,
+        )
 
     def sample_tokens(self, grammar_output: "GrammarOutput|None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)  # type: ignore[union-attr]
@@ -566,7 +586,7 @@ class HPUWorker(WorkerBase):
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         return self.model_runner.take_draft_token_ids()  # type: ignore[union-attr]
 
-    def profile(self, is_start: bool = True):
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
         if is_start:
