@@ -231,11 +231,6 @@ class ServerLogCapture:
         with self.lock:
             return list(self.warmup_events)
 
-    def get_warmup_times_between(self, start_ts: float, end_ts: float) -> list[int]:
-        """Return warmup times captured within [start_ts, end_ts]."""
-        with self.lock:
-            return [warmup_s for ts, warmup_s in self.warmup_events if start_ts <= ts <= end_ts]
-
     def clear_warmup_events(self):
         """Clear captured warmup events (call before each switch to isolate measurements)."""
         with self.lock:
@@ -493,7 +488,6 @@ async def switch_model(api_host: str, api_port: int, model_name: str, drain_time
         "drain_timeout": drain_timeout,
     }
 
-    window_start_ts = time.time()
     start = time.perf_counter()
     try:
         resp = await asyncio.to_thread(
@@ -503,7 +497,6 @@ async def switch_model(api_host: str, api_port: int, model_name: str, drain_time
             timeout=600,
         )
         elapsed_s = time.perf_counter() - start
-        window_end_ts = time.time()
 
         if resp.status_code == 200:
             data = resp.json()
@@ -518,26 +511,19 @@ async def switch_model(api_host: str, api_port: int, model_name: str, drain_time
                 'memory_after_unload_mb': data.get('memory_after_unload_mb'),
                 'freed_memory_mb': data.get('freed_memory_mb'),
                 'stash_memory_after_mb': data.get('stash_memory_after_mb'),
-                'switch_window_start_ts': window_start_ts,
-                'switch_window_end_ts': window_end_ts,
             }
         else:
             return {
                 'status': 'error',
                 'duration_s': elapsed_s,
                 'error': resp.text,
-                'switch_window_start_ts': window_start_ts,
-                'switch_window_end_ts': window_end_ts,
             }
     except Exception as e:
         elapsed_s = time.perf_counter() - start
-        window_end_ts = time.time()
         return {
             'status': 'error',
             'duration_s': elapsed_s,
             'error': str(e),
-            'switch_window_start_ts': window_start_ts,
-            'switch_window_end_ts': window_end_ts,
         }
 
 
@@ -713,7 +699,7 @@ def print_metrics_table(all_metrics):
               f"{freed_str}  "
               f"{stash_used_str}")
         print(sep)
-        print(f"  Warmup AVG computed on {len(warmup_times)}/{n} phases with correlated warmup events")
+        print(f"  Warmup AVG computed on {len(warmup_times)}/{n} phases with captured warmup events")
 
 
 async def main():
@@ -781,7 +767,6 @@ async def main():
 
         # Start server
         startup_begin = time.perf_counter()
-        startup_window_begin_ts = time.time()
         proc, log_thread = run_server(
             config_path,
             args.api_host,
@@ -791,9 +776,7 @@ async def main():
         )
         available_models = await wait_for_server(args.api_host, args.api_port, proc=proc)
         initial_load_s = time.perf_counter() - startup_begin
-        startup_window_end_ts = time.time()
-        startup_warmup_times = log_capture.get_warmup_times_between(startup_window_begin_ts,
-                                                                    startup_window_end_ts + 2.0)
+        startup_warmup_times = log_capture.get_warmup_times()
         startup_warmup_s = startup_warmup_times[-1] if startup_warmup_times else None
 
         if len(available_models) < 2:
@@ -830,6 +813,9 @@ async def main():
             print("\n" + "=" * 60)
             print(f"  PHASE {phase}/{args.phases}: {model_display_name}")
             print("=" * 60)
+
+            # Clear previous warmup events before this phase
+            log_capture.clear_warmup_events()
 
             # Switch model (only if not on first phase with default model)
             print(f"\n>>> Switching to model: {model_display_name} ({model_name})")
@@ -873,23 +859,16 @@ async def main():
                     phase_metrics['reconfigure_s'] = switch_result.get('duration_s')
                     print(f"  ✓ Switch API duration: {switch_result['duration_s']:.1f}s")
 
-                # Correlate warmup events with this switch window.
+                # Extract warmup time from logs captured during switch.
+                # Wait a bit for final logs to be captured.
                 await asyncio.sleep(0.5)
-                switch_window_start = switch_result.get('switch_window_start_ts')
-                switch_window_end = switch_result.get('switch_window_end_ts')
-                if isinstance(switch_window_start, (int, float)) and isinstance(switch_window_end, (int, float)):
-                    warmup_times = log_capture.get_warmup_times_between(
-                        float(switch_window_start),
-                        float(switch_window_end) + 2.0,
-                    )
-                else:
-                    warmup_times = []
+                warmup_times = log_capture.get_warmup_times()
                 warmup_s = warmup_times[-1] if warmup_times else None
                 phase_metrics['warmup_s'] = warmup_s
                 if warmup_s is not None:
                     print(f"  ✓ Warmup time from logs: {warmup_s}s")
                 else:
-                    print("  [warning] No correlated warmup event found for this switch")
+                    print("  [warning] No warmup event found for this switch")
 
                 freed_gb = _mb_to_gb(switch_result.get('freed_memory_mb'))
                 if freed_gb is not None:
