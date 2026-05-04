@@ -17,42 +17,31 @@ set -e
 # max_num_batched_tokens=na
 # port=8170
 
-VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
-VLLM_ENGINE_ITERATION_TIMEOUT_S=3600 \
-VLLM_RPC_TIMEOUT=100000 \
-VLLM_EXPONENTIAL_BUCKETING=true \
-PT_HPU_ENABLE_LAZY_COLLECTIVES=true \
-FUSER_ENABLE_LOW_UTILIZATION=true \
-ENABLE_FUSION_BEFORE_NORM=true \
-PT_HPU_LAZY_MODE=0 \
-VLLM_USE_V1=1 \
+export VLLM_BUCKET_FILENAME=$(mktemp) && \
+cat > "$VLLM_BUCKET_FILENAME" <<'BUCKETS'
+(1, [256, 512, 1024, 2048, 4096, 8192], [0, 1, 2, 4, 8, 16])
+(1, [512, 2048, 8192], [32, 64, 128, 192, 249])
+(2, 1, [2, 4, 8, 16, 32, 64, 128, 256])
+(8, 1, [8, 16, 32, 64, 128, 256, 512])
+(16, 1, [16, 32, 64, 128, 256, 512, 1024])
+(32, 1, [32, 64, 128, 256, 512, 1024, 2048])
+BUCKETS
 VLLM_CONTIGUOUS_PA=false \
-VLLM_DEFRAG=false \
-VLLM_FUSED_BLOCK_SOFTMAX=true \
-VLLM_WEIGHT_LOAD_FORCE_SYNC=1 \
-PT_HPU_WEIGHT_SHARING=0 \
-VLLM_BUCKET_FILENAME=/software/ae/fmwork/vllm_buckets_131072.txt \
 VLLM_GRAPH_RESERVED_MEM=0.3 \
-vllm serve \
-    --model=ibm-granite/granite-4.0-h-small \
-    --port 8170 \
-    --max-num-seqs=32 \
-    --dtype=bfloat16 \
-    --gpu-memory-util 0.45 \
-    --tensor-parallel-size=1 \
-    --max-model-len=131072 \
-    --block-size=128 \
-    --async-scheduling \
-    --disable-log-stats \
-    --no-enable-prefix-caching \
-    --enable-auto-tool-choice \
-    --tool-call-parser \
-    hermes \
-    --max-num-batched-tokens 8192 \
-    --enable-chunked-prefill \
-    --tool-call-parser hermes \
-    --override-generation-config '{"temperature": 0}' \
-    --trust-remote-code
+VLLM_BUCKETING_FROM_FILE="$VLLM_BUCKET_FILENAME" \
+vllm serve ibm-granite/granite-4.0-h-small \
+--override-generation-config '{"temperature": 0}' \
+--dtype bfloat16 \
+--tensor-parallel-size 1 \
+--max_model_len 131072 \
+--gpu_memory_util 0.9 \
+--max-num-seqs 32 \
+--max-num-batched-tokens 8192 \
+--enable-chunked-prefill \
+--no-enable-prefix-caching \
+--tool-call-parser hermes \
+--enable-auto-tool-choice \
+--async-scheduling  
 
 
 # =========================
