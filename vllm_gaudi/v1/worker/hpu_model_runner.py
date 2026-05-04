@@ -1988,12 +1988,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 requests = scheduler_output.kv_connector_metadata.reqs_to_save | \
                             scheduler_output.kv_connector_metadata.reqs_to_recv
             elif isinstance(scheduler_output.kv_connector_metadata, OffloadingConnectorMetadata):
-                for req in scheduler_output.kv_connector_metadata.reqs_to_store:
-                    requests_type[req] = 'prefill'
-                for req in scheduler_output.kv_connector_metadata.reqs_to_load:
-                    requests_type[req] = 'decode'
-                requests = scheduler_output.kv_connector_metadata.reqs_to_store | \
-                            scheduler_output.kv_connector_metadata.reqs_to_load
+                store_reqs = {job.req_id for job in scheduler_output.kv_connector_metadata.store_jobs.values()}
+                load_reqs = {job.req_id for job in scheduler_output.kv_connector_metadata.load_jobs.values()}
+                for req in store_reqs:
+                    requests_type[req] = "prefill"
+                for req in load_reqs:
+                    requests_type[req] = "decode"
+                requests = store_reqs | load_reqs
             elif isinstance(scheduler_output.kv_connector_metadata, MultiKVConnectorMetadata):
                 for i, metadata in enumerate(scheduler_output.kv_connector_metadata.metadata):
                     if isinstance(metadata, NixlConnectorMetadata) and (metadata.reqs_to_save or metadata.reqs_to_recv):
@@ -2002,13 +2003,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         for req in metadata.reqs_to_recv:
                             requests_type[req] = 'decode'
                         requests = metadata.reqs_to_save | metadata.reqs_to_recv
-                    elif isinstance(metadata, OffloadingConnectorMetadata) and (metadata.reqs_to_store
-                                                                                or metadata.reqs_to_load):
-                        for req in metadata.reqs_to_store:
-                            requests_type[req] = 'prefill'
-                        for req in metadata.reqs_to_load:
-                            requests_type[req] = 'decode'
-                        requests = metadata.reqs_to_store | metadata.reqs_to_load
+                    elif isinstance(metadata, OffloadingConnectorMetadata) and (metadata.store_jobs
+                                                                                or metadata.load_jobs):
+                        store_reqs = {job.req_id for job in metadata.store_jobs.values()}
+                        load_reqs = {job.req_id for job in metadata.load_jobs.values()}
+                        for req in store_reqs:
+                            requests_type[req] = "prefill"
+                        for req in load_reqs:
+                            requests_type[req] = "decode"
+                        requests = store_reqs | load_reqs
             else:
                 requests = scheduler_output.kv_connector_metadata.requests
         # Traverse decodes first

@@ -22,8 +22,6 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
     FusedTopKRouter, )
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
     GroupedTopKRouter, )
-from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
-    get_layer_from_name, )
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     EMPTY_EPLB_STATE, )
 from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
