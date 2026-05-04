@@ -111,7 +111,7 @@ class MockOffloadingSpec(OffloadingSpec):
 
         self.manager = MagicMock(spec=OffloadingManager)
         self.manager.lookup.return_value = 0
-        self.manager.prepare_load = lambda block_hashes: (MockLoadStoreSpec(block_hashes))
+        self.manager.prepare_load = lambda block_hashes, req_context: (MockLoadStoreSpec(block_hashes))
         self.handler = MockOffloadingHandler()
 
     def get_manager(self) -> OffloadingManager:
@@ -210,14 +210,14 @@ class RequestRunner:
         self.scheduler_connector: OffloadingConnector = scheduler_connector
 
         # extract mocked OffloadingManager of scheduler connector
-        connector_scheduler = scheduler_connector.connector_scheduler
-        assert connector_scheduler is not None
-        manager = connector_scheduler.manager
+        self.connector_scheduler = scheduler_connector.connector_scheduler
+        assert self.connector_scheduler is not None
+        manager = self.connector_scheduler.manager
         assert isinstance(manager, MagicMock)
         self.manager: MagicMock = manager
 
-        assert len(connector_scheduler.config.kv_group_configs) == 1
-        kv_group_config = connector_scheduler.config.kv_group_configs[0]
+        assert len(self.connector_scheduler.config.kv_group_configs) == 1
+        kv_group_config = self.connector_scheduler.config.kv_group_configs[0]
         assert kv_group_config.gpu_block_size == gpu_block_size
         assert kv_group_config.offloaded_block_size == offloaded_block_size
 

@@ -50,11 +50,6 @@ class HpuQwen3MoeSparseMoeBlock(UpstreamQwen3MoeSparseMoeBlock):
         if is_seq_parallel:
             out = tensor_model_parallel_all_gather(out, 0)
             out = out[:num_tokens]
-        else:
-            # from upstream : TP>1 may require a reduction here.
-            tp_size = getattr(self, "tp_size", 1)
-            if tp_size > 1 and hasattr(self.experts, "maybe_all_reduce_tensor_model_parallel"):
-                out = self.experts.maybe_all_reduce_tensor_model_parallel(out)
 
         return out.reshape(*orig_shape[:-1], hidden_dim)
 
