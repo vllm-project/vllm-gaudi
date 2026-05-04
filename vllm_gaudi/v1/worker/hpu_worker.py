@@ -586,7 +586,7 @@ class HPUWorker(WorkerBase):
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         return self.model_runner.take_draft_token_ids()  # type: ignore[union-attr]
 
-    def profile(self, is_start: bool = True):
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
         if is_start:

@@ -1248,6 +1248,30 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
         self.w13_input_scale = None
         self.w2_input_scale = None
 
+        # cached views to avoid rebuilding lists every forward
+        self._cached_w13_views = None
+        self._cached_w2_views = None
+        self._cached_w13_scale_views = None
+        self._cached_w2_scale_views = None
+
+    def _cache_weight_lists(self):
+        experts_range = range(self.num_experts)
+        self._cached_w13_views = tuple(self.w13_list[i].weight.squeeze() for i in experts_range)
+        self._cached_w2_views = tuple(self.w2_list[i].weight.squeeze() for i in experts_range)
+        self._cached_w13_scale_views = tuple(self.w13_list[i].scale_inv_fp8.squeeze() for i in experts_range)
+        self._cached_w2_scale_views = tuple(self.w2_list[i].scale_inv_fp8.squeeze() for i in experts_range)
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys,
+                              error_msgs):
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys,
+                                      error_msgs)
+        self._cache_weight_lists()
+
+    def _apply(self, fn):
+        ret = super()._apply(fn)
+        self._cache_weight_lists()
+        return ret
+
     def forward(
         self,
         x,
@@ -1259,11 +1283,14 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
         tokens_num, _ = x.shape
         activation = _as_activation_str(activation)
         kwargs = self._get_extra_kwargs(tokens_num)
-        experts_range = range(self.num_experts)
-        w13_list = [self.w13_list[i].weight.squeeze() for i in experts_range]
-        w2_list = [self.w2_list[i].weight.squeeze() for i in experts_range]
-        w13_weight_scale = [self.w13_list[i].scale_inv_fp8.squeeze() for i in experts_range]
-        w2_weight_scale = [self.w2_list[i].scale_inv_fp8.squeeze() for i in experts_range]
+
+        if self._cached_w13_views is None or self._cached_w2_views is None:
+            self._cache_weight_lists()
+
+        w13_list = self._cached_w13_views
+        w2_list = self._cached_w2_views
+        w13_weight_scale = self._cached_w13_scale_views
+        w2_weight_scale = self._cached_w2_scale_views
 
         if self.w13_input_scale is None:
             x_fp8, x_scale = dynamic_quant(x)
@@ -1283,7 +1310,7 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
         else:
             x_scale = self.w13_input_scale.data
             # w2_input_scale should be List[Tensor] when static and fused
-            w2_input_scale = [self.w2_input_scale[i] for i in experts_range]
+            w2_input_scale = [self.w2_input_scale[i] for i in range(self.num_experts)]
             x_fp8 = torch.ops.hpu.cast_to_fp8_v2(x, 1.0 / x_scale, False, False, torch.float8_e4m3fn)[0]
             final_hidden_states = torch.ops.hpu.mixture_of_experts(hidden_states=x_fp8,
                                                                    expert_routing_table=topk_ids.to(torch.int64),
