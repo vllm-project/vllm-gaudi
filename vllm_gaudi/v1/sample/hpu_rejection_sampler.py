@@ -139,6 +139,8 @@ def rejection_sample(
     # [batch_size, 1]
     bonus_token_ids: torch.Tensor,
     sampling_metadata: SamplingMetadata,
+    synthetic_mode: bool = False,
+    synthetic_conditional_rates: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     assert sampling_metadata.all_greedy, "Only greedy sampling is supported."
 
