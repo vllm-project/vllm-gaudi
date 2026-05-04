@@ -4662,9 +4662,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     # by _gate; setting _gate=None makes it return False.
                     experts._gate = None
                 else:
-                    # INC wrappers (e.g. PatchedMixtralMoE) don't inherit
-                    # the property — set a plain attribute instead.
-                    experts.is_internal_router = False
+                    # INC wrappers (e.g. PatchedMixtralMoE) may inherit
+                    # is_internal_router as a read-only @property;
+                    # runner.gate = None below handles that case.
+                    if not isinstance(
+                            getattr(type(experts), "is_internal_router", None),
+                            property,
+                    ):
+                        experts.is_internal_router = False
                 runner = getattr(experts, "runner", None)
                 if runner is not None and hasattr(runner, "gate"):
                     runner.gate = None

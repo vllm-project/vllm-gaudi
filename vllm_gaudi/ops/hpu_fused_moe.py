@@ -275,6 +275,7 @@ def patched_fused_moe_forward(
     self,
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
+    input_ids: torch.Tensor | None = None,
 ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
     """Patched forward that avoids graph breaks from ForwardContext lookups
     and dynamo per-layer string guards.
@@ -288,8 +289,8 @@ def patched_fused_moe_forward(
     emits per-layer string guards that trigger recompilation.
 
     The post-forward reduction sequence mirrors upstream
-    MoERunnerBase.forward (vllm/model_executor/layers/fused_moe/runner/
-    moe_runner_base.py) so we stay in sync with the new shared/fused
+    MoERunner.forward (vllm/model_executor/layers/fused_moe/runner/
+    moe_runner.py) so we stay in sync with the new shared/fused
     output combination logic introduced by upstream PR #35949.
     """
     hidden_states, shared_experts_input = self.apply_routed_input_transform(hidden_states)
@@ -310,7 +311,7 @@ def patched_fused_moe_forward(
     else:
         result = self._forward_entry(hidden_states, router_logits, shared_experts_input, self._encode_layer_name())
 
-    # Mirror upstream MoERunnerBase.forward post-_forward_entry pipeline.
+    # Mirror upstream MoERunner.forward post-_forward_entry pipeline.
     if isinstance(result, tuple):
         shared_output, fused_output = result
     else:
