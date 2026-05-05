@@ -226,11 +226,6 @@ class ServerLogCapture:
         with self.lock:
             return [warmup_s for _, warmup_s in self.warmup_events]
 
-    def get_warmup_events(self) -> list[tuple[float, int]]:
-        """Return captured warmup events as (timestamp, warmup_secs)."""
-        with self.lock:
-            return list(self.warmup_events)
-
     def clear_warmup_events(self):
         """Clear captured warmup events (call before each switch to isolate measurements)."""
         with self.lock:
