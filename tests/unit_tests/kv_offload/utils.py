@@ -90,6 +90,9 @@ def create_vllm_config(
     attention_backend: str | None = None,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
+    if attention_backend is None:
+        attention_backend = "CPU_ATTN"
+
     model_config = ModelConfig(
         model=model,
         trust_remote_code=True,

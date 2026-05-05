@@ -16,10 +16,10 @@ class HPURMSNorm(RMSNorm):
         HPUFusedRMSNorm = rms_norm()
         if residual is not None:
             orig_shape = x.shape
-            residual = residual + x.view(residual.shape)
+            residual = residual + x.reshape(residual.shape)
             # Note: HPUFusedRMSNorm requires 3D tensors as inputs
             x = HPUFusedRMSNorm.apply(residual, self.weight, self.variance_epsilon)
-            return x.view(orig_shape), residual
+            return x.reshape(orig_shape), residual
 
         x = HPUFusedRMSNorm.apply(x, self.weight, self.variance_epsilon)
         return x
@@ -39,10 +39,10 @@ class HPUGemmaRMSNorm(GemmaRMSNorm):
         gemma_weight = self.weight + 1.0
         if residual is not None:
             orig_shape = x.shape
-            residual = residual + x.view(residual.shape)
+            residual = residual + x.reshape(residual.shape)
             # Note: HPUFusedRMSNorm requires 3D tensors as inputs
             x = HPUFusedRMSNorm.apply(residual, gemma_weight, self.variance_epsilon)
-            return x.view(orig_shape), residual
+            return x.reshape(orig_shape), residual
 
         x = HPUFusedRMSNorm.apply(x, gemma_weight, self.variance_epsilon)
         return x
