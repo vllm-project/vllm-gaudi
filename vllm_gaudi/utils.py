@@ -5,7 +5,7 @@ import vllm.utils.torch_utils as torch_utils
 from vllm_gaudi.extension.runtime import get_config
 import vllm.v1.core.sched.async_scheduler as _async_sched_module
 from vllm_gaudi.v1.core.sched.hpu_async_scheduler import HPUAsyncScheduler
-from typing import (Any, Optional, TypeVar, Union)
+from typing import Any, Optional, TypeVar, Union
 import torch
 import habana_frameworks.torch as htorch
 import numpy as np
@@ -18,18 +18,18 @@ U = TypeVar("U")
 
 @cache
 def is_fake_hpu() -> bool:
-    return os.environ.get('VLLM_USE_FAKE_HPU', '0') != '0'
+    return os.environ.get("VLLM_USE_FAKE_HPU", "0") != "0"
 
 
 @cache
 def hpu_device_string():
-    device_string = 'hpu' if not is_fake_hpu() else 'cpu'
+    device_string = "hpu" if not is_fake_hpu() else "cpu"
     return device_string
 
 
 @cache
 def hpu_backend_string():
-    backend_string = 'hccl' if not is_fake_hpu() else 'gloo'
+    backend_string = "hccl" if not is_fake_hpu() else "gloo"
     return backend_string
 
 
@@ -37,7 +37,7 @@ def has_quant_config(model_config: ModelConfig) -> bool:
     return model_config.quantization == "inc" or os.getenv("QUANT_CONFIG", None) is not None
 
 
-def async_h2d_copy(source, dest_tensor=None, dtype=None, device='hpu'):
+def async_h2d_copy(source, dest_tensor=None, dtype=None, device="hpu"):
     """
     Asynchronously transfer data from host to device.
 
@@ -55,18 +55,17 @@ def async_h2d_copy(source, dest_tensor=None, dtype=None, device='hpu'):
             # Copy into pre-allocated destination tensor
             return dest_tensor.copy_(source, non_blocking=True)
         # Create new device tensor and copy
-        assert source.device.type == 'cpu', \
-            "Source tensor must be on CPU for asynchronous transfer"
+        assert source.device.type == "cpu", "Source tensor must be on CPU for asynchronous transfer"
         target = torch.empty_like(source, device=device)
         return target.copy_(source, non_blocking=True)
     # Create tensor from data and transfer to device
     if dtype is None:
         raise ValueError("dtype must be specified when source is not a tensor")
-    cpu_tensor = torch.tensor(source, dtype=dtype, device='cpu')
+    cpu_tensor = torch.tensor(source, dtype=dtype, device="cpu")
     return cpu_tensor.to(device, non_blocking=True)
 
 
-def async_h2d_update(source: torch.Tensor, dest: torch.Tensor, indices: list[int], device='hpu'):
+def async_h2d_update(source: torch.Tensor, dest: torch.Tensor, indices: list[int], device="hpu"):
     """
     Asynchronously update specific rows of a device tensor from a CPU tensor.
 
@@ -170,7 +169,7 @@ def make_tensor_with_pad_align(
     """
     Make a padded tensor from 2D inputs.
     The padding is applied to the end of each inner list until it reaches
-    max_len_aligned, max_len_aligned is max_len rounding to the nearest 
+    max_len_aligned, max_len_aligned is max_len rounding to the nearest
     `max_len_align`.
     """
     np_dtype = torch_utils.TORCH_DTYPE_TO_NUMPY_DTYPE[dtype]
@@ -243,7 +242,7 @@ def make_mrope_positions_tensor_with_pad(input_positions: list[list[int]], input
                                                 max_len=max_prompt_len,
                                                 pad=0,
                                                 dtype=torch.long,
-                                                device='cpu').flatten()
+                                                device="cpu").flatten()
     # Otherwise, Qwen2.5-VL expects positions in a (3, seq_len)
     # we are going to pad each seq_data in the list
     # using either MRope values or regular position
@@ -253,10 +252,9 @@ def make_mrope_positions_tensor_with_pad(input_positions: list[list[int]], input
             positions = input_mrope_position[idx] if input_mrope_position is not None else input_positions[b_idx]
             padding_size = max_prompt_len - len(positions)
             assert padding_size >= 0
-            padded_positions = positions \
-                + (max_prompt_len - len(positions)) * [pad]
+            padded_positions = positions + (max_prompt_len - len(positions)) * [pad]
             mrope_input_positions[idx].extend(padded_positions)
-    return torch.tensor(mrope_input_positions, dtype=torch.long, device='cpu')
+    return torch.tensor(mrope_input_positions, dtype=torch.long, device="cpu")
 
 
 class HPUCompileConfig:
@@ -272,10 +270,8 @@ class HPUCompileConfig:
         Env variables should not be overwritten when it comes to compilation
         of the whole model.
         """
-        self.fullgraph = fullgraph if fullgraph is not None else \
-            get_config().fullgraph_compilation
-        self.dynamic = dynamic if dynamic is not None else \
-            get_config().dynamic_shapes_compilation
+        self.fullgraph = fullgraph if fullgraph is not None else get_config().fullgraph_compilation
+        self.dynamic = dynamic if dynamic is not None else get_config().dynamic_shapes_compilation
         self.regional_compilation = get_config().regional_compilation
 
     def get_compile_args(self) -> dict[str, Any]:
@@ -284,9 +280,38 @@ class HPUCompileConfig:
         with torch.compile method or decorator
         """
         if self.dynamic:
-            return {'backend': 'hpu_backend', 'fullgraph': self.fullgraph, 'options': {"force_static_compile": True}}
+            return {"backend": "hpu_backend", "fullgraph": self.fullgraph, "options": {"force_static_compile": True}}
         else:
-            return {'backend': 'hpu_backend', 'fullgraph': self.fullgraph, 'dynamic': False}
+            return {"backend": "hpu_backend", "fullgraph": self.fullgraph, "dynamic": False}
 
 
-_async_sched_module.AsyncScheduler = HPUAsyncScheduler
+_async_sched_module.AsyncScheduler = HPUAsyncScheduler  # type: ignore[misc]
+
+
+def patch_nixl_utils_for_hpu():
+    """Patch vllm.distributed.nixl_utils to use nixl._api instead of rixl._api.
+
+    Upstream vLLM gates NIXL imports on is_cuda(), falling back to rixl._api
+    for all other platforms. HPU needs nixl._api (same as CUDA), so we
+    monkey-patch the module-level symbols before anything else imports them.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+    try:
+        from nixl._api import nixl_agent as _NixlWrapper
+        from nixl._api import nixl_agent_config as _nixl_agent_config
+    except ImportError:
+        return
+    try:
+        from nixl._bindings import nixlXferTelemetry as _nixlXferTelemetry
+    except ImportError:
+        _nixlXferTelemetry = None  # type: ignore[assignment]
+
+    import vllm.distributed.nixl_utils as _nixl_mod
+
+    _nixl_mod.NixlWrapper = _NixlWrapper  # type: ignore[attr-defined]
+    _nixl_mod.nixl_agent_config = _nixl_agent_config  # type: ignore[attr-defined]
+    if _nixlXferTelemetry is not None:
+        _nixl_mod.nixlXferTelemetry = _nixlXferTelemetry  # type: ignore[attr-defined]
+    logger.info("Patched vllm.distributed.nixl_utils for HPU (nixl._api)")

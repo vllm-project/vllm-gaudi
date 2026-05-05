@@ -1,18 +1,21 @@
 name: Basic HPU test suite
 
+# NOTE: run-name MUST contain both "#<pr_number>" and "[<head_sha>]".
+# pre-merge-trigger.yaml relies on this format to correlate dispatched runs.
+run-name: "PR #${{ inputs.pr_number }} [${{ inputs.head_sha }}]"
+
 on:
-  pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
-    branches:
-      - main
-      - releases/**
-
-  # Trigger workflow for merge queue
-  merge_group:
-    types: [checks_requested]
-
-  # Allow manual triggering for testing purposes
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      pr_number:  { description: 'PR number',                     required: false, type: string }
+      head_sha:   { description: 'PR head commit SHA',            required: true, type: string }
+      base_ref:   { description: 'PR target branch',              required: true, type: string }
+      pr_title:   { description: 'PR title',                      required: false, type: string }
+      is_draft:   { description: 'Draft PR (true/false)',         required: true, type: string, default: 'false' }
+      skip_tests:           { description: 'Skip Gaudi tests (true/false)',                  required: true,  type: string, default: 'false' }
+      is_merge_group:       { description: 'Triggered from merge queue (true/false)',        required: true,  type: string, default: 'false' }
+      use_hourly_runner:    { description: 'Use hourly-ci pool (maintainers only)',          required: false, type: string, default: 'false' }
+      vllm_ref_override:    { description: 'Override upstream vllm checkout ref (branch/tag/SHA; maintainers only)', required: false, type: string, default: '' }
 
 permissions:
   pull-requests: write
@@ -20,7 +23,7 @@ permissions:
   checks: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.pr_number || inputs.head_sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -32,7 +35,7 @@ jobs:
       - name: Set Head SHA Output
         id: set_sha
         run: |
-          echo "head_sha=${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}" >> "$GITHUB_OUTPUT"
+          echo "head_sha=${{ inputs.head_sha }}" >> "$GITHUB_OUTPUT"
 
   gatekeeper:
     needs: retrieve_head_sha
@@ -42,11 +45,6 @@ jobs:
       checks: read
       # Add this line to allow posting comments on PRs
       pull-requests: write
-    outputs:
-      # This output will be used to signal if the main CI should run
-      run_ci: ${{ steps.check_conditions.outputs.run_ci }}
-      reason: ${{ steps.check_conditions.outputs.reason }}
-
     steps:
       # Add this checkout step
       - name: Checkout repository
@@ -61,8 +59,11 @@ jobs:
         # Provide the GITHUB_TOKEN for the gh CLI to authenticate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IS_MERGE_GROUP: ${{ inputs.is_merge_group }}
+          BASE_REF: ${{ inputs.base_ref }}
+          IS_DRAFT: ${{ inputs.is_draft }}
         run: |
-          if [[ "${{ github.event_name }}" == "merge_group" ]]; then
+          if [[ "$IS_MERGE_GROUP" == "true" ]]; then
             echo "Merge group event detected. Skipping gatekeeper checks."
             echo "run_ci=true" >> "$GITHUB_OUTPUT"
             exit 0
@@ -73,8 +74,8 @@ jobs:
           # --- New check to see if the PR is behind the base branch ---
           echo "Checking if the PR is behind the base branch..."
           # Fetch just the latest commit from the base branch for comparison
-          git fetch origin ${{ github.event.pull_request.base.ref }} --depth=1
-          behind_count=$(git rev-list --count HEAD..origin/${{ github.event.pull_request.base.ref }})
+          git fetch origin "$BASE_REF" --depth=1
+          behind_count=$(git rev-list --count "HEAD..origin/$BASE_REF")
 
           if_pr_is_behind="false"
           if [[ $behind_count -gt 0 ]]; then
@@ -86,7 +87,7 @@ jobs:
           # --- End of new check ---
 
 
-          if [[ "${{ github.event.pull_request.draft }}" == "true" ]]; then
+          if [[ "$IS_DRAFT" == "true" ]]; then
             BLOCKING_REASON="This is a **Draft PR**. Please mark it as 'Ready for Review' to trigger the CI."
 
           # Use the 'gh' CLI to fetch the LIVE mergeable state after the sleep
@@ -110,11 +111,11 @@ jobs:
       - name: Post comment if CI is blocked
         # This ensures that even if commenting fails, the next step will run
         continue-on-error: true
-        # Only run this step if the check failed and we're in a pull_request_target event
-        if: github.event_name == 'pull_request_target' && steps.check_conditions.outputs.run_ci == 'false'
+        # Only run this step for non-merge-group PRs where a PR number is available
+        if: inputs.is_merge_group != 'true' && inputs.pr_number != '' && steps.check_conditions.outputs.run_ci == 'false'
         uses: peter-evans/create-or-update-comment@v4
         with:
-          issue-number: ${{ github.event.pull_request.number }}
+          issue-number: ${{ inputs.pr_number }}
           body: |
             ### 🚧 CI Blocked
 
@@ -122,7 +123,7 @@ jobs:
             > ${{ steps.check_conditions.outputs.reason }}
 
       - name: Fail the job to block downstream CI
-        if: github.event_name == 'pull_request_target' && steps.check_conditions.outputs.run_ci == 'false'
+        if: inputs.is_merge_group != 'true' && steps.check_conditions.outputs.run_ci == 'false'
         run: |
           echo "Failing this job to prevent the main CI from running."
           exit 1
@@ -130,10 +131,11 @@ jobs:
   # --- NEW JOB ---
   # This job runs first on the self-hosted pool, picks a runner,
   # and outputs its name so all other jobs can target it.
-  # If PR title contains [FIX_FOR_VLLM_LATEST], it uses the hourly-ci runner pool.
+  # hourly-ci is selected by the trigger when a maintainer's PR title contains
+  # [FIX_FOR_VLLM_LATEST]; the boolean arrives as inputs.use_hourly_runner.
   discover_runner:
     needs: gatekeeper
-    runs-on: ${{ contains(github.event.pull_request.title, '[FIX_FOR_VLLM_LATEST]') && 'hourly-ci' || 'pr-ci' }}
+    runs-on: ${{ inputs.use_hourly_runner == 'true' && 'hourly-ci' || 'pr-ci' }}
     outputs:
       runner_name: ${{ steps.get_name.outputs.name }}
     steps:
@@ -201,61 +203,6 @@ jobs:
           fi
           echo "matrix=$TEST_FUNCTIONS" >> "$GITHUB_OUTPUT"
 
-  retrieve_pr_info:
-    needs: [gatekeeper, retrieve_head_sha]
-    runs-on: ubuntu-latest
-    outputs:
-      pr_number: ${{ steps.get_pr_info.outputs.pr_number }}
-      pr_title: ${{ steps.get_pr_info.outputs.pr_title }}
-      pr_labels: ${{ steps.get_pr_info.outputs.pr_labels }}
-      pr_base_ref: ${{ steps.get_pr_info.outputs.pr_base_ref }}
-      skip_gaudi_tests: ${{ steps.get_pr_info.outputs.skip_gaudi_tests }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
-          clean: true # Ensure a clean workspace before checkout
-
-      - name: Retrieve source Pull Request information
-        id: get_pr_info
-        uses: ./.github/actions/get-pr-details
-        with:
-          event_name: ${{ github.event_name }}
-          pr_number: ${{ github.event.pull_request.number }}
-          merge_group_head_ref: ${{ github.event.merge_group.head_ref }}
-
-      - name: Validate PR info was retrieved
-        shell: bash
-        env:
-          PR_NUMBER: ${{ steps.get_pr_info.outputs.pr_number }}
-          PR_TITLE: ${{ steps.get_pr_info.outputs.pr_title }}
-          PR_BASE_REF: ${{ steps.get_pr_info.outputs.pr_base_ref }}
-        run: |
-          set -euo pipefail
-
-          if [[ -z "$PR_NUMBER" || -z "$PR_TITLE" || -z "$PR_BASE_REF" ]]; then
-            echo "::error::retrieve_pr_info failed: missing required outputs from get-pr-details."
-            echo "pr_number='$PR_NUMBER'"
-            echo "pr_title='$PR_TITLE'"
-            echo "pr_base_ref='$PR_BASE_REF'"
-            exit 1
-          fi
-
-      - name: Display retrieved PR information
-        env:
-          PR_NUMBER: ${{ steps.get_pr_info.outputs.pr_number }}
-          PR_TITLE: ${{ steps.get_pr_info.outputs.pr_title }}
-          PR_LABELS: ${{ steps.get_pr_info.outputs.pr_labels }}
-          PR_BASE_REF: ${{ steps.get_pr_info.outputs.pr_base_ref }}
-          SKIP_GAUDI_TESTS: ${{ steps.get_pr_info.outputs.skip_gaudi_tests }}
-        run: |
-          echo "PR Number: $PR_NUMBER"
-          echo "PR Title: $PR_TITLE"
-          echo "PR Labels: $PR_LABELS"
-          echo "PR Base Ref: $PR_BASE_REF"
-          echo "Skip Gaudi Tests: $SKIP_GAUDI_TESTS"
-
   pre-commit:
     # This job runs in parallel with the build job
     needs: [gatekeeper, retrieve_head_sha]
@@ -284,8 +231,8 @@ jobs:
 
   pre_merge_hpu_test_build:
     # --- UPDATED: Add discover_runner dependency ---
-    needs: [pre-commit, discover_tests, discover_calibration_tests, discover_runner, retrieve_pr_info, retrieve_head_sha]
-    if: needs.retrieve_pr_info.outputs.skip_gaudi_tests != 'true'
+    needs: [pre-commit, discover_tests, discover_calibration_tests, discover_runner, retrieve_head_sha]
+    if: inputs.skip_tests != 'true'
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     permissions:
@@ -338,40 +285,39 @@ jobs:
 
           # 3. Export the final result
           echo "VLLM_STABLE_COMMIT=$COMMIT_HASH" >> "$GITHUB_ENV"
-      - name: Determine Target Commit Based on PR Title
+      - name: Determine Target Commit
         id: determine_commit
         env:
-          PR_TITLE_ENV: ${{ needs.retrieve_pr_info.outputs.pr_title }}
+          # [FIX_FOR_VLLM_CUSTOM=...] is parsed and gated on author_association
+          # in pre-merge-trigger.yaml and arrives here as vllm_ref_override.
+          PR_TITLE_ENV:         ${{ inputs.pr_title }}
+          VLLM_REF_OVERRIDE:    ${{ inputs.vllm_ref_override }}
+          USE_HOURLY_RUNNER:    ${{ inputs.use_hourly_runner }}
         run: |
-          # Default to the stable commit from the previous step
           FINAL_TARGET="${VLLM_STABLE_COMMIT}"
-          # ⬇️ 2. Read the title from the safe environment variable
           PR_TITLE="$PR_TITLE_ENV"
-
           echo "Pull Request Title: \"${PR_TITLE}\""
 
-          # Check if the title contains the special flag
-          if [[ "$PR_TITLE" == *"[FIX_FOR_VLLM_LATEST]"* ]]; then
-            echo "✅ Flag '[FIX_FOR_VLLM_LATEST]' found in title."
-            echo "Setting target to 'main'."
+          if [[ -n "$VLLM_REF_OVERRIDE" ]]; then
+            if [[ "$VLLM_REF_OVERRIDE" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+              echo "✅ [FIX_FOR_VLLM_CUSTOM] honoured; target = $VLLM_REF_OVERRIDE"
+              FINAL_TARGET="$VLLM_REF_OVERRIDE"
+            else
+              echo "::error::Invalid vllm_ref_override: $VLLM_REF_OVERRIDE"
+              exit 1
+            fi
+          elif [[ "$USE_HOURLY_RUNNER" == "true" ]]; then
+            echo "✅ [FIX_FOR_VLLM_LATEST] honoured; target = vllm-upstream/main"
             FINAL_TARGET="vllm-upstream/main"
-          elif [[ "$PR_TITLE" == *"[FIX_FOR_VLLM_CUSTOM"* ]]; then
-            echo "[FIX_FOR_VLLM_CUSTOM]' found in title."
-            PRE_FINAL_TARGET=$(echo "$PR_TITLE" | cut -d '=' -f 2)
-            echo "Setting target to ${PRE_FINAL_TARGET}"
-            FINAL_TARGET=$(echo "$PRE_FINAL_TARGET" | cut -d ']' -f 1)
-            echo "Setting target to ${FINAL_TARGET}"
           elif [ -z "$FINAL_TARGET" ]; then
-            # This is the corrected check for a missing commit hash
-            echo "⚠️ Stable commit was not found. Defaulting target to 'main'."
+            echo "⚠️ No stable commit; defaulting to vllm-upstream/main"
             FINAL_TARGET="vllm-upstream/main"
           else
-            echo "Using stable commit: ${FINAL_TARGET}"
+            echo "Using stable commit: $FINAL_TARGET"
           fi
 
-          # Export the result to an environment variable for subsequent steps
-          echo "TARGET_COMMIT=${FINAL_TARGET}" >> "$GITHUB_ENV"
-          echo "commit_ref=${FINAL_TARGET}" >> "$GITHUB_OUTPUT"
+          echo "TARGET_COMMIT=$FINAL_TARGET" >> "$GITHUB_ENV"
+          echo "commit_ref=$FINAL_TARGET"   >> "$GITHUB_OUTPUT"
       - name: Add vLLM upstream as a remote and checkout target commit
         id: checkout_vllm_upstream
         run: |
@@ -379,9 +325,9 @@ jobs:
           git remote remove vllm-upstream || true
           echo "add vllm-upstream remote..."
           git remote add vllm-upstream https://github.com/vllm-project/vllm.git
-          echo "Checking out code from '${{ env.TARGET_COMMIT }}'..."
+          echo "Checking out code from '$TARGET_COMMIT'..."
           git fetch vllm-upstream --depth=100
-          git checkout "${{ env.TARGET_COMMIT }}"
+          git checkout "$TARGET_COMMIT"
           COMMIT_ID=$(git rev-parse HEAD)
           echo "TEST_VLLM_COMMIT=$COMMIT_ID" >> "$GITHUB_OUTPUT"
           echo "TEST_VLLM_COMMIT=$COMMIT_ID" >> "$GITHUB_ENV"
@@ -401,9 +347,9 @@ jobs:
           echo "Attempting to build Docker image..."
           docker build \
             --no-cache \
-            --build-arg VLLM_COMMIT_ARG=${{ env.TEST_VLLM_COMMIT }} \
+            --build-arg "VLLM_COMMIT_ARG=$TEST_VLLM_COMMIT" \
             --label ci.owner=vllm-gaudi-pre-merge \
-            --label ci.head_sha=${{ needs.retrieve_head_sha.outputs.head_sha }} \
+            --label "ci.head_sha=${{ needs.retrieve_head_sha.outputs.head_sha }}" \
             -t hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }} \
             -f .github/Dockerfile.ci .
           echo "Docker image built successfully."
@@ -742,7 +688,7 @@ jobs:
   # Build-test production Dockerfiles when they are modified
   check_dockerfile_changes:
     needs: [retrieve_head_sha]
-    if: github.event_name == 'pull_request_target'
+    if: inputs.is_merge_group != 'true'
     runs-on: ubuntu-latest
     outputs:
       nixl_changed: ${{ steps.check.outputs.nixl_changed }}
@@ -754,9 +700,11 @@ jobs:
           fetch-depth: 0
       - name: Detect changed Dockerfiles
         id: check
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
         run: |
           # Compare PR head against merge base to find changed files
-          CHANGED=$(git diff --name-only origin/${{ github.event.pull_request.base.ref }}...HEAD -- '.cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest')
+          CHANGED=$(git diff --name-only "origin/$BASE_REF...HEAD" -- '.cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest')
           if [ -n "$CHANGED" ]; then
             echo "nixl_changed=true" >> "$GITHUB_OUTPUT"
             echo "Nixl Dockerfile was modified"
@@ -808,10 +756,10 @@ jobs:
       pull-requests: write
     steps:
       - name: Post Comment on Success
-        if: github.event_name != 'merge_group' && needs.pre_merge_hpu_test.result == 'success'
+        if: inputs.is_merge_group != 'true' && inputs.pr_number != '' && needs.pre_merge_hpu_test.result == 'success'
         uses: peter-evans/create-or-update-comment@v4
         with:
-          issue-number: ${{ github.event.pull_request.number }}
+          issue-number: ${{ inputs.pr_number }}
           body: |
             ### ✅ CI Passed
             All checks passed successfully against the following vllm commit:
@@ -824,6 +772,8 @@ jobs:
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Remove Docker image to free up space
+        env:
+          HEAD_SHA: ${{ inputs.head_sha }}
         run: |
           echo "Cleaning up Docker images created by this workflow run..."
-          docker rmi -f hpu-plugin-v1-test-env-pre-merge-${{ github.event.pull_request.head.sha }} || true
+          docker rmi -f "hpu-plugin-v1-test-env-pre-merge-$HEAD_SHA" || true

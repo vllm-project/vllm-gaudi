@@ -44,6 +44,19 @@ def regex(pattern, hint='') -> Checker:
     return regex_impl
 
 
+def pep440_version(hint='') -> Checker:
+    """Validates if input is a PEP 440 compliant version string"""
+    from packaging.version import Version, InvalidVersion
+
+    def pep440_impl(value: str):
+        try:
+            Version(value)
+        except InvalidVersion:
+            return f"'{value}' is not a valid PEP 440 version! {hint}"
+
+    return pep440_impl
+
+
 def skip_validation(_) -> None:
     """Dummy Checker used to skip validation"""
     return None

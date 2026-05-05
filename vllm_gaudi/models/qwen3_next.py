@@ -88,14 +88,9 @@ def _hpu_qwen3next_sparse_moe_forward(
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(hidden_states=hidden_states, router_logits=router_logits)
 
-    if self.shared_expert is not None:
-        final_hidden_states = (final_hidden_states[0] + final_hidden_states[1])
-
     if self.is_sequence_parallel:
         final_hidden_states = tensor_model_parallel_all_gather(final_hidden_states, 0)
         final_hidden_states = final_hidden_states[:num_tokens]
-    elif self.tp_size > 1:
-        final_hidden_states = (self.experts.maybe_all_reduce_tensor_model_parallel(final_hidden_states))
 
     return final_hidden_states.reshape(orig_shape)
 
