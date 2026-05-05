@@ -1086,7 +1086,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         os.environ["VLLM_COMPACT_GDN"] = "1"
                 if os.environ.get("VLLM_COMPACT_GDN", "0") in ("1", "true") \
                         and self.vllm_config.cache_config.enable_prefix_caching:
-                    logger.warning("Compact GDN mode does not support prefix caching.")
+                    logger.info("Compact GDN prefix caching support enabled.")
                 logger.info(
                     "GDN layers detected (%d): "
                     "VLLM_USE_HYBRID_CACHE=%s, "
@@ -1125,6 +1125,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self._num_gdn_groups = 0  # set during initialize_kv_cache
         self._gdn_slot_free_list: list[int] = []  # stack of free base-slot IDs
         self._gdn_req_to_base_slot: dict[str, int] = {}
+        self._gdn_req_to_cached_full_blocks: dict[str, int] = {}
+        self._gdn_group_state_tensors: dict[int, tuple[torch.Tensor, ...]] = {}
+        self._gdn_num_shared_rows = 0
+        self._gdn_private_row_offset = 0
+        self._gdn_warned_multi_block_sync = False
 
         # Lazy initialization
         # self.model: nn.Module  # set after load_model
@@ -1469,6 +1474,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         The SamplingMetadata is updated and copied to the GPU if there is a
         new/resumed/paused/finished request in the batch.
         """
+        if self._compact_gdn_group_ids:
+            self._sync_compact_gdn_prefix_states(scheduler_output)
+
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
@@ -1522,6 +1530,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self._compact_gdn_group_ids:
             for req_id in sorted(scheduler_output.finished_req_ids):
                 base_slot = self._gdn_req_to_base_slot.pop(req_id, None)
+                self._gdn_req_to_cached_full_blocks.pop(req_id, None)
                 if base_slot is not None:
                     self._gdn_slot_free_list.append(base_slot)
                 else:
@@ -1664,12 +1673,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         # Allocate GDN compact base-slots for newly added requests.
         if self._compact_gdn_group_ids:
+            newly_allocated_req_ids: list[str] = []
             for req_id in req_ids_to_add:
                 if req_id not in self._gdn_req_to_base_slot:
                     base_slot = self._gdn_slot_free_list.pop()
                     self._gdn_req_to_base_slot[req_id] = base_slot
+                    newly_allocated_req_ids.append(req_id)
                     logger.debug("GDN_COMPACT alloc req=%s base_slot=%d free_list_len=%d", req_id, base_slot,
                                  len(self._gdn_slot_free_list))
+            for req_id in newly_allocated_req_ids:
+                self._restore_compact_gdn_prefix_state(req_id, self.requests[req_id])
 
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
@@ -1704,6 +1717,92 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 return mm_kwargs_combined
 
         return {}
+
+    def _get_compact_gdn_group_state_tensors(self, group_idx: int) -> tuple[torch.Tensor, ...]:
+        tensors = self._gdn_group_state_tensors.get(group_idx)
+        if tensors is not None:
+            return tensors
+
+        layer_name = self.kv_cache_config.kv_cache_groups[group_idx].layer_names[0]
+        kv_cache = self.vllm_config.compilation_config.static_forward_context[layer_name].kv_cache
+        assert kv_cache is not None
+        if isinstance(kv_cache, tuple):
+            tensors = kv_cache
+        elif isinstance(kv_cache, list):
+            tensors = tuple(kv_cache)
+        else:
+            tensors = (kv_cache, )
+        self._gdn_group_state_tensors[group_idx] = tensors
+        return tensors
+
+    def _get_compact_gdn_private_state_index(self, req_id: str, group_idx: int) -> int:
+        g_offset = self._compact_gdn_group_offset[group_idx]
+        base_slot = self._gdn_req_to_base_slot[req_id]
+        return self._gdn_private_row_offset + base_slot * self._num_gdn_groups + g_offset
+
+    def _copy_compact_gdn_group_state(self, group_idx: int, src_index: int, dst_index: int) -> None:
+        for state_tensor in self._get_compact_gdn_group_state_tensors(group_idx):
+            state_tensor[dst_index].copy_(state_tensor[src_index])
+
+    def _restore_compact_gdn_prefix_state(self, req_id: str, req_state: CachedRequestState) -> None:
+        full_blocks = req_state.num_computed_tokens // self.block_size
+        self._gdn_req_to_cached_full_blocks[req_id] = full_blocks
+        if full_blocks == 0:
+            return
+
+        src_block_idx = full_blocks - 1
+        for group_idx in sorted(self._compact_gdn_group_ids):
+            block_ids = req_state.block_ids[group_idx]
+            if src_block_idx >= len(block_ids):
+                logger.warning("GDN_COMPACT restore req=%s missing block_idx=%d in group=%d", req_id, src_block_idx,
+                               group_idx)
+                continue
+            src_index = int(block_ids[src_block_idx])
+            if src_index < 0 or src_index >= self._gdn_num_shared_rows:
+                logger.warning("GDN_COMPACT restore req=%s invalid shared index=%d in group=%d", req_id, src_index,
+                               group_idx)
+                continue
+            dst_index = self._get_compact_gdn_private_state_index(req_id, group_idx)
+            self._copy_compact_gdn_group_state(group_idx, src_index, dst_index)
+
+    def _cache_compact_gdn_full_block(self, req_id: str, req_state: CachedRequestState, full_block_idx: int) -> None:
+        for group_idx in sorted(self._compact_gdn_group_ids):
+            block_ids = req_state.block_ids[group_idx]
+            if full_block_idx >= len(block_ids):
+                logger.warning("GDN_COMPACT cache req=%s missing block_idx=%d in group=%d", req_id, full_block_idx,
+                               group_idx)
+                continue
+            dst_index = int(block_ids[full_block_idx])
+            if dst_index < 0 or dst_index >= self._gdn_num_shared_rows:
+                logger.warning("GDN_COMPACT cache req=%s invalid shared index=%d in group=%d", req_id, dst_index,
+                               group_idx)
+                continue
+            src_index = self._get_compact_gdn_private_state_index(req_id, group_idx)
+            self._copy_compact_gdn_group_state(group_idx, src_index, dst_index)
+
+    def _sync_compact_gdn_prefix_states(self, scheduler_output: "SchedulerOutput") -> None:
+        req_data = scheduler_output.scheduled_cached_reqs
+        for i, req_id in enumerate(req_data.req_ids):
+            if req_id not in self._gdn_req_to_base_slot:
+                continue
+
+            req_state = self.requests.get(req_id)
+            if req_state is None:
+                continue
+
+            prev_full_blocks = self._gdn_req_to_cached_full_blocks.get(req_id, req_state.num_computed_tokens // self.block_size)
+            new_full_blocks = req_data.num_computed_tokens[i] // self.block_size
+            if new_full_blocks <= prev_full_blocks:
+                self._gdn_req_to_cached_full_blocks[req_id] = new_full_blocks
+                continue
+
+            if new_full_blocks - prev_full_blocks > 1 and not self._gdn_warned_multi_block_sync:
+                self._gdn_warned_multi_block_sync = True
+                logger.warning("GDN_COMPACT observed multi-block prefix-state advance in one step; caching only the "
+                               "latest completed full block.")
+
+            self._cache_compact_gdn_full_block(req_id, req_state, new_full_blocks - 1)
+            self._gdn_req_to_cached_full_blocks[req_id] = new_full_blocks
 
     # source: vllm/v1/worker/gpu_model_runner.py
     def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput", req_ids: list[str]):
@@ -5762,6 +5861,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         """
         self._compact_gdn_group_ids.clear()
         self._compact_gdn_group_offset.clear()
+        self._gdn_group_state_tensors.clear()
+        self._gdn_req_to_cached_full_blocks.clear()
+        self._gdn_num_shared_rows = 0
+        self._gdn_private_row_offset = 0
+        self._gdn_warned_multi_block_sync = False
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
@@ -5913,14 +6017,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         if isinstance(kv_caches.get(layer_name), tuple):
                             continue
                         gdn_max_reqs = self._gdn_max_reqs
-                        compact_total = gdn_max_reqs * self._num_gdn_groups + 2
+                        compact_total = num_blocks + 1 + gdn_max_reqs * self._num_gdn_groups
                         state_tensors = []
                         for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
                             target_shape = (compact_total, *shape)
                             tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
                             state_tensors.append(tensor)
-                        logger.debug("GDN compact tensor: %d slots (max_reqs=%d * groups=%d + 2) vs baseline %d",
-                                     compact_total, gdn_max_reqs, self._num_gdn_groups, num_blocks + 1)
+                        logger.debug("GDN compact tensor: %d rows (shared=%d, private=%d * groups=%d) vs baseline %d",
+                                     compact_total, num_blocks + 1, gdn_max_reqs, self._num_gdn_groups,
+                                     num_blocks + 1)
                         # Propagate to all layers sharing the same kv_cache_tensor.
                         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
                             if layer_name not in kv_cache_tensor.shared_by:
@@ -6001,7 +6106,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         if isinstance(kv_caches.get(layer_name), tuple):
                             continue
                         gdn_max_reqs = self._gdn_max_reqs
-                        compact_total = gdn_max_reqs * self._num_gdn_groups + 2
+                        compact_total = num_blocks + 1 + gdn_max_reqs * self._num_gdn_groups
                         state_tensors = []
                         for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
                             target_shape = (compact_total, *shape)
@@ -6134,19 +6239,27 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self._PAD_SLOT_ID = num_blocks * self.attn_block_size
         self._MAMBA_PAD_BLOCK_ID = num_blocks
         self._dummy_num_blocks = num_blocks
+        self._gdn_num_shared_rows = num_blocks
+        self._gdn_private_row_offset = num_blocks + 1
 
         # Initialize the GDN compact slot free-list.
         # The free-list contains base-slot IDs [0..max_num_reqs-1].
-        # For request with base_slot `s` in group `g` (0-indexed within
-        # compact groups), the tensor index is s * num_gdn_groups + g + 1.
+        # Shared rows [0..num_blocks-1] store full-block prefix states.
+        # Row `num_blocks` remains the padding row. Private rows start at
+        # `num_blocks + 1`; for request with base_slot `s` in group `g`
+        # (0-indexed within compact groups), the runtime tensor row is
+        # `num_blocks + 1 + s * num_gdn_groups + g`.
         if self._compact_gdn_group_ids:
             self._compact_gdn_group_offset = {gid: i for i, gid in enumerate(sorted(self._compact_gdn_group_ids))}
             gdn_max_reqs = self._gdn_max_reqs
             self._gdn_slot_free_list = list(range(gdn_max_reqs - 1, -1, -1))
             self._gdn_req_to_base_slot.clear()
-            compact_total = gdn_max_reqs * self._num_gdn_groups + 2
-            logger.info("GDN compact: %d groups, %d base_slots, tensor_dim0=%d vs baseline=%d, free_list_len=%d",
-                        len(self._compact_gdn_group_ids), gdn_max_reqs, compact_total, num_blocks + 1,
+            self._gdn_req_to_cached_full_blocks.clear()
+            compact_total = self._gdn_private_row_offset + gdn_max_reqs * self._num_gdn_groups
+            logger.info("GDN compact: %d groups, shared_rows=%d, private_base_slots=%d, tensor_dim0=%d vs baseline=%d, "
+                        "free_list_len=%d",
+                        len(self._compact_gdn_group_ids), self._gdn_num_shared_rows, gdn_max_reqs, compact_total,
+                        num_blocks + 1,
                         len(self._gdn_slot_free_list))
 
         if has_kv_transfer_group():
