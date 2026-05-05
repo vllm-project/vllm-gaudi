@@ -60,17 +60,27 @@ def register():
     # Remove torch.cuda.is_available hook here as an alternative solution
     if _uses_lmcache_connector():
         HpuPlatform.adjust_cuda_hooks()
+
+    # Apply HPU runtime monkey-patches (e.g. cleanup_dist_env_and_memory).
+    # See vllm_gaudi/patches.py for details (GAUDISW-247825).
+    from vllm_gaudi import patches as _hpu_patches
+    _hpu_patches.apply()
+
     return "vllm_gaudi.platform.HpuPlatform"
 
 
 def register_utils():
     """Register utility functions for the HPU platform."""
     import vllm_gaudi.utils  # noqa: F401
+
+    vllm_gaudi.utils.patch_nixl_utils_for_hpu()
     # Install the in-process EngineCore reconfigure hook only when
     # multi-model mode is requested, to avoid heavy imports for all users.
     import os
+
     if os.environ.get("VLLM_HPU_MULTI_MODEL_CONFIG"):
         from vllm_gaudi.v1.engine.core_patch import install_engine_core_patch
+
         install_engine_core_patch()
 
 
@@ -80,7 +90,8 @@ def register_ops():
     """Register custom ops for the HPU platform."""
     import vllm_gaudi.v1.sample.hpu_rejection_sampler  # noqa: F401
     import vllm_gaudi.distributed.kv_transfer.kv_connector.v1.hpu_nixl_connector  # noqa: F401
-    if os.getenv('VLLM_HPU_HETERO_KV_LAYOUT', 'false').lower() == 'true':
+
+    if os.getenv("VLLM_HPU_HETERO_KV_LAYOUT", "false").lower() == "true":
         import vllm_gaudi.distributed.kv_transfer.kv_connector.v1.hetero_hpu_nixl_connector  # noqa: F401
     import vllm_gaudi.v1.kv_offload.worker.cpu_hpu  # noqa: F401
     import vllm_gaudi.ops.hpu_attention  # noqa: F401
@@ -101,16 +112,18 @@ def register_ops():
 
     # Conditionally register HPURowParallelLinear only when chunking is enabled
     from vllm_gaudi.ops.hpu_row_parallel_linear import register as register_row_parallel
+
     register_row_parallel()
 
     # Register HPU LoRA layers only when row parallel chunking is active
-    env_value = os.environ.get('VLLM_ROW_PARALLEL_CHUNKS', '1')
+    env_value = os.environ.get("VLLM_ROW_PARALLEL_CHUNKS", "1")
     try:
         row_parallel_chunks = int(env_value)
     except ValueError:
         row_parallel_chunks = 1
     if row_parallel_chunks > 1:
         from vllm_gaudi.lora.layers.hpu_row_parallel_linear import register_hpu_lora_layers
+
         register_hpu_lora_layers()
 
 
@@ -119,4 +132,5 @@ def register_models():
     import vllm_gaudi.models.interfaces  # noqa: F401
     import vllm_gaudi.models.bert  # noqa: F401
     from .models import register_model
+
     register_model()

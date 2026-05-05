@@ -93,7 +93,7 @@ def _apply_hpu_llama4_init_patches(model_root: nn.Module) -> None:
     """Shared init-time patches for both CausalLM and ConditionalGeneration.
 
     Swaps the inner model class for the residual=zeros fix and applies
-    branch-free attention + attention type unification in compile mode.
+    attention type unification in compile mode.
     _unify_feed_forward_types is deferred to post-load via
     apply_hpu_llama4_post_load_patches() to avoid breaking weight loading.
     """
@@ -101,11 +101,14 @@ def _apply_hpu_llama4_init_patches(model_root: nn.Module) -> None:
 
     if not htorch.utils.internal.is_lazy():
         layers = getattr(model_root, "layers", [])
-        _apply_branch_free_attention(layers)
+        # NOTE: _apply_branch_free_attention is SKIPPED.
+        # The branchfree forward uses 3D hidden_states (batch, seq, hidden)
+        # that cause FakeTensor validation errors under torch.compile when
+        # batch==seq==1 during decode warmup (symbols unify). Regional
+        # compilation handles the NoPE/RoPE graph breaks instead.
         unified = _unify_attention_types(layers)
         logger.info(
-            "HpuLlama4: applied branch-free attention patches, "
-            "unified %d ChunkedLocalAttention -> Attention",
+            "HpuLlama4: unified %d ChunkedLocalAttention -> Attention",
             unified,
         )
 
