@@ -427,6 +427,67 @@ def gather_list(input, indices, v):
     return [input[i] if i is not None else v for i in indices]
 
 
+def ensure_decodes_first(b: InputBatch):
+    num_reqs = b.num_reqs
+    while True:
+        # Find the first prompt index
+        first_prompt_index = None
+        for i in range(num_reqs):
+            if b.num_computed_tokens_cpu[i] < b.num_prompt_tokens[i]:
+                first_prompt_index = i
+                break
+        if first_prompt_index is None:
+            break
+
+        # Find the last decode index
+        last_decode_index = None
+        for i in reversed(range(num_reqs)):
+            if b.num_computed_tokens_cpu[i] >= b.num_prompt_tokens[i]:
+                last_decode_index = i
+                break
+        if last_decode_index is None:
+            break
+
+        # Sanity
+        assert first_prompt_index != last_decode_index
+
+        # Check if done
+        if first_prompt_index > last_decode_index:
+            break
+
+        # Swap
+        b.swap_states(first_prompt_index, last_decode_index)
+
+
+def ensure_multi_token_decodes_last(b: InputBatch, scheduled_tokens: dict) -> None:
+    """Within the decode region, sort single-token decodes before multi-token ones.
+
+    When spec-decode is not configured, resumed/catch-up decode requests with
+    many scheduled tokens (e.g. from KV offloading requeue) must be processed
+    via the prefill path to avoid bucket overflow in get_habana_paged_attn_buffers.
+    Moving them to the end of the decode region lets _get_prompts_and_decodes
+    route them to the prefill batch where the large scheduled-token count is
+    handled correctly.
+
+    After ensure_decodes_first the layout is: [decodes ... | prompts ...]
+    This function produces:                   [1-tok decodes | multi-tok decodes | prompts]
+    """
+    num_reqs = b.num_reqs
+    decode_end = num_reqs
+    for i in range(num_reqs):
+        if b.num_computed_tokens_cpu[i] < b.num_prompt_tokens[i]:
+            decode_end = i
+            break
+    write_pos = 0
+    for read_pos in range(decode_end):
+        req_id = b.req_ids[read_pos]
+        if scheduled_tokens.get(req_id, 1) == 1:
+            if read_pos != write_pos:
+                b.swap_states(write_pos, read_pos)
+            write_pos += 1
+
+
+
 def get_target_layer_suffix_list(model_type) -> list[str]:
     # This sets the suffix for the hidden layer name, which is controlled by
     # VLLM_CONFIG_HIDDEN_LAYERS. The default suffix is "DecoderLayer," which is
@@ -2030,6 +2091,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if self._is_prompt(i, scheduler_output):
                 break
 
+            # When spec-decode is not configured, a decode request with more
+            # than 1 scheduled token is a resumed/catch-up request that must
+            # be processed via the prefill (prompt) path instead. After
+            # ensure_multi_token_decodes_last these requests are sorted to the
+            # end of the decode region so the break here is correct.
+            if num_scheduled_tokens > 1 and \
+                    not self.vllm_config.speculative_config:
+                break
+
+            # This is decode
             # NOTE(chendi): To support spec decode,
             # we don't assume num_scheduled_tokens == 1.
             decode_req_ids.append(req_id)
@@ -2046,8 +2117,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             req_id = self.input_batch.req_ids[i]
             assert req_id is not None
 
-            # Must be prompt
-            assert self._is_prompt(i, scheduler_output)
+            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
+            num_prompt_tokens = self.input_batch.num_prompt_tokens[i]
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+
+            # Must be a true prompt OR a multi-token catch-up decode re-routed
+            # to the prefill path (num_computed may be >= num_prompt for these).
+            assert num_computed_tokens < num_prompt_tokens or (num_scheduled_tokens > 1
+                                                               and not self.vllm_config.speculative_config), (
+                                                                   f"Unexpected at prompt-traversal idx {i}: "
+                                                                   f"computed={num_computed_tokens}, "
+                                                                   f"prompt={num_prompt_tokens}, "
+                                                                   f"scheduled={num_scheduled_tokens}")
+            # NOTE(kzawora): In preempted sequences, num_output_tokens can be > 0, and still be a valid prefill
 
             prompt_req_ids.append(req_id)
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
@@ -2949,11 +3031,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 token_ids_device[:num_decodes] = self.input_ids_hpu[:num_decodes].view(-1, 1)
             else:
                 token_ids_split_tensors = torch.split(self.input_ids_hpu[:total_num_scheduled_tokens],
-                                                      num_tokens_per_req)
-                token_ids_device[:num_decodes] = \
+                                                      num_tokens_per_req[:num_decodes])
+                # token_ids was already reshaped to [padded_batch*num_tokens, 1]
+                # (via view(-1,1) in the CPU prepare path above) before the
+                # async_h2d_copy, so token_ids_device has the same flat shape.
+                # Index [:num_decodes*num_tokens] to write all rows for the
+                # decode region (not just the first num_decodes rows).
+                token_ids_device[:num_decodes * num_tokens] = \
                     pad_sequence(list(token_ids_split_tensors),
                                     batch_first=True,
-                                    padding_value=0)[:num_decodes]
+                                    padding_value=0)[:num_decodes].view(-1, 1)
 
             #####################################
             # NOTE(Chendi): Since we can't actually do num_tokens = 2,
@@ -3966,7 +4053,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         batch_changed = self.batch_changed
         # If necessary, swap decodes/prompts to have all decodes on the start
-        self._ensure_decodes_first(scheduler_output)
+        ensure_decodes_first(self.input_batch)
+        # When spec-decode is not configured, sort multi-token catch-up
+        # decode requests to the end of the decode region so that
+        # _get_prompts_and_decodes routes them through the prefill path,
+        # preventing bucket overflow and Habana workspace OOM.
+        if not self.vllm_config.speculative_config:
+            ensure_multi_token_decodes_last(self.input_batch, scheduler_output.num_scheduled_tokens)
         # Prepare prompts/decodes info
         pd_info = self._get_prompts_and_decodes(scheduler_output)
         num_decodes = len(pd_info.decode_req_ids)
