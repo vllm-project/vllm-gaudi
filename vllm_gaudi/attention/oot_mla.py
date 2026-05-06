@@ -221,6 +221,7 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         cache_config=None,
         quant_config=None,
         prefix: str = "",
+        skip_topk: bool = False,
     ) -> None:
         super().__init__(
             hidden_size=hidden_size,
@@ -235,6 +236,7 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=prefix,
+            skip_topk=skip_topk,
         )
         layer_name = f"{prefix}.attn"
         static_ctx = get_current_vllm_config().compilation_config.static_forward_context
