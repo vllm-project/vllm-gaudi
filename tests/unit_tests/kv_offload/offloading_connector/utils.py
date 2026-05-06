@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import copy
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -11,31 +10,39 @@ import torch
 
 from tests.unit_tests.kv_offload.utils import (
     EOS_TOKEN_ID,
-    create_request_compatible_with_signature,
     create_model_runner_output,
+    create_request_compatible_with_signature,
     create_vllm_config,
 )
 from vllm import SamplingParams
 from vllm.config import KVTransferConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
-    OffloadingConnectorMetadata, )
+    OffloadingConnectorMetadata,
+    OffloadingWorkerMetadata,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector, )
 from vllm.forward_context import ForwardContext
 from vllm.utils.hashing import sha256
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.core.kv_cache_utils import (
-    BlockHash,
     get_request_block_hasher,
     init_none_hash,
 )
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 from vllm.v1.kv_offload.abstract import (
     LoadStoreSpec,
     OffloadingManager,
+    OffloadKey,
     PrepareStoreOutput,
+    make_offload_key,
 )
 from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import OffloadingSpec
@@ -44,26 +51,28 @@ from vllm.v1.kv_offload.worker.worker import (
     TransferResult,
     TransferSpec,
 )
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
-from vllm.v1.core.sched.async_scheduler import AsyncScheduler
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-)
 from vllm.v1.structured_output import StructuredOutputManager
+
+
+def to_key(int_hash: int) -> OffloadKey:
+    return make_offload_key(str(int_hash).encode(), 0)
+
+
+def to_keys(int_hashes: list[int]) -> list[OffloadKey]:
+    return [to_key(i) for i in int_hashes]
 
 
 class MockLoadStoreSpec(LoadStoreSpec):
 
-    def __init__(self, block_hashes: Iterable[BlockHash]):
-        self.block_hashes: list[BlockHash] = list(block_hashes)
+    def __init__(self, offload_keys: Iterable[OffloadKey]):
+        self.offload_keys: list[OffloadKey] = list(offload_keys)
 
     @staticmethod
     def medium() -> str:
         return "Mock"
 
     def __repr__(self) -> str:
-        return repr(self.block_hashes)
+        return repr(self.offload_keys)
 
 
 class MockOffloadingHandler(OffloadingHandler):
@@ -111,7 +120,8 @@ class MockOffloadingSpec(OffloadingSpec):
 
         self.manager = MagicMock(spec=OffloadingManager)
         self.manager.lookup.return_value = 0
-        self.manager.prepare_load = lambda block_hashes, req_context: (MockLoadStoreSpec(block_hashes))
+        self.manager.prepare_load = lambda keys, req_context: MockLoadStoreSpec(keys)
+        self.manager.lookup.return_value = False
         self.handler = MockOffloadingHandler()
 
     def get_manager(self) -> OffloadingManager:
@@ -143,14 +153,17 @@ class TransferSummary:
 
 class RequestRunner:
 
-    def __init__(self,
-                 offloaded_block_size: int,
-                 gpu_block_size: int,
-                 num_gpu_blocks: int,
-                 async_scheduling: bool = False):
+    def __init__(
+        self,
+        offloaded_block_size: int,
+        gpu_block_size: int,
+        num_gpu_blocks: int,
+        async_scheduling: bool = True,
+    ):
         self.offloaded_block_size: int = offloaded_block_size
         self.gpu_block_size: int = gpu_block_size
         self.num_gpu_blocks: int = num_gpu_blocks
+        self.async_scheduling: bool = async_scheduling
 
         self.req_id: int = -1
 
@@ -184,7 +197,8 @@ class RequestRunner:
         )
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         self.num_kv_groups = len(kv_cache_config.kv_cache_groups)
-        scheduler_cls = (AsyncScheduler if vllm_config.scheduler_config.async_scheduling else Scheduler)
+
+        scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
         self.scheduler = scheduler_cls(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
@@ -247,7 +261,11 @@ class RequestRunner:
             slot_mapping={},
         )
 
-    def new_request(self, token_ids: list[int]):
+    def new_request(
+        self,
+        token_ids: list[int],
+        kv_transfer_params: dict | None = None,
+    ):
         self.req_id += 1
 
         sampling_params = SamplingParams(max_tokens=1000)
@@ -260,9 +278,9 @@ class RequestRunner:
             "pooling_params": None,
             "block_hasher": self._block_hasher,
         }
-
         req = create_request_compatible_with_signature(**request_kwargs)
-
+        if kv_transfer_params is not None:
+            req.kv_transfer_params = kv_transfer_params
         self.scheduler.add_request(req)
 
     def _parse_transfers(self):
@@ -294,11 +312,11 @@ class RequestRunner:
             for block_id in gpu_spec.block_ids:
                 gpu_block_indices.append(self.gpu_block_index[block_id.item()])
 
-            # list of (block_hash, sub_block_offset)
+            # list of (offload_key, sub_block_offset)
             offload_addresses: list[Any] = []
-            for block_hash in offload_spec.block_hashes:
+            for offload_key in offload_spec.offload_keys:
                 for sub_block_idx in range(block_size_factor):
-                    offload_addresses.append((block_hash, sub_block_idx))
+                    offload_addresses.append((offload_key, sub_block_idx))
 
             if store:
                 assert len(gpu_block_indices) == len(offload_addresses)
@@ -329,8 +347,15 @@ class RequestRunner:
 
         tokens_iter = iter(decoded_tokens)
         token_id = next(tokens_iter, None)
+        prev_scheduler_output = None
+        prev_model_runner_output = None
         while True:
-            assert self.scheduler.requests
+            # Strict-always-False frees the request immediately on EOS, but
+            # the worker may still have a deferred store queued. In production
+            # the next request's step drains it; in single-request tests we
+            # must keep stepping until the scheduler sees no in-flight jobs.
+            if not self.scheduler.requests and not self.connector_scheduler._jobs:
+                break
 
             scheduler_output = self.scheduler.schedule()
             self._update_gpu_block_idx()
@@ -351,6 +376,7 @@ class RequestRunner:
                 self.offloading_spec.complete_transfers()
 
             finished_sending, finished_recving = self.worker_connector.get_finished(scheduler_output.finished_req_ids)
+            worker_meta = self.worker_connector.build_connector_worker_meta() or OffloadingWorkerMetadata()
 
             self.worker_connector.clear_connector_metadata()
 
@@ -359,39 +385,37 @@ class RequestRunner:
                 finished_sending=finished_sending,
                 finished_recving=finished_recving,
                 token_id=token_id or 0,
+                kv_connector_worker_meta=worker_meta,
             )
 
             prev_token_id = token_id
             if self.scheduler.running:
                 token_id = next(tokens_iter, None)
 
-            self.scheduler.update_from_output(scheduler_output, model_runner_output)
+            if self.async_scheduling:
+                # in async scheduling we update the output of the previous step
+                if prev_model_runner_output is not None:
+                    self.scheduler.update_from_output(prev_scheduler_output, prev_model_runner_output)
+                prev_scheduler_output = scheduler_output
+                prev_model_runner_output = model_runner_output
+            else:
+                self.scheduler.update_from_output(scheduler_output, model_runner_output)
 
-            if (prev_token_id is EOS_TOKEN_ID and prev_token_id != token_id and self.scheduler.requests):
+            if (prev_token_id == EOS_TOKEN_ID and prev_token_id != token_id
+                    and (self.scheduler.requests or self.connector_scheduler._jobs)):
                 # continue for one more step to allow offloading to kick off
                 continue
 
             if token_id is None:
+                if self.async_scheduling:
+                    # sample last token
+                    self.scheduler.update_from_output(prev_scheduler_output, prev_model_runner_output)
                 break
 
         self._parse_transfers()
 
-        # run one more step to update finished stored
         if EOS_TOKEN_ID in decoded_tokens:
             assert not self.scheduler.running
-
-            while self.scheduler.requests:
-                scheduler_output = self.scheduler.schedule()
-
-                finished_sending, finished_recving = self.worker_connector.get_finished(
-                    scheduler_output.finished_req_ids)
-
-                assert not finished_recving
-
-                model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
-                model_runner_output.kv_connector_output = KVConnectorOutput(finished_sending=finished_sending)
-
-                self.scheduler.update_from_output(scheduler_output, model_runner_output)
 
     def run(
             self,
@@ -445,7 +469,7 @@ class RequestRunner:
 def request_runner():
     runners = []
 
-    def runner_factory(offloaded_block_size, gpu_block_size, num_gpu_blocks, async_scheduling=False):
+    def runner_factory(offloaded_block_size, gpu_block_size, num_gpu_blocks, async_scheduling):
         runner = RequestRunner(
             offloaded_block_size=offloaded_block_size,
             gpu_block_size=gpu_block_size,
@@ -458,10 +482,10 @@ def request_runner():
     yield runner_factory  # pass factory to the test
 
 
-def generate_store_output(block_hashes: Iterable[BlockHash]):
-    block_hashes = list(block_hashes)
+def generate_store_output(keys: Iterable[OffloadKey]):
+    keys = list(keys)
     return PrepareStoreOutput(
-        keys_to_store=list(block_hashes),
-        store_spec=MockLoadStoreSpec(block_hashes),
+        keys_to_store=list(keys),
+        store_spec=MockLoadStoreSpec(keys),
         evicted_keys=[],
     )

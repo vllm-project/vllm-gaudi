@@ -938,6 +938,7 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        **kwargs,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
