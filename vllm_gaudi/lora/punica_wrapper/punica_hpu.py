@@ -4,7 +4,7 @@
 from typing import Optional, Union, final
 
 import torch
-from vllm_gaudi.extension.ops import (dispatch_bgmv_embedding, dispatch_bgmv_linear)
+from vllm_gaudi.extension.ops import LoraMask, dispatch_bgmv_embedding, dispatch_bgmv_linear
 
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
@@ -26,33 +26,43 @@ class PunicaWrapperHPU(PunicaWrapperBase):
                            **kwargs) -> None:
         dispatch_bgmv_embedding(y, x, lora_b_stacked, 0)
 
-    def add_lora_linear(self,
-                        y: torch.Tensor,
-                        x: torch.Tensor,
-                        lora_a_stacked: tuple[torch.Tensor, ...],
-                        lora_b_stacked: tuple[torch.Tensor, ...],
-                        scale: float,
-                        output_slices: tuple[int, ...],
-                        *,
-                        buffer: Optional[tuple[torch.Tensor, ...]] = None,
-                        **kwargs) -> None:
+    def add_lora_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        scale: float,
+        output_slices: tuple[int, ...],
+        *,
+        buffer: Optional[tuple[torch.Tensor, ...]] = None,
+        **kwargs,
+    ) -> None:
         x = x.view(-1, x.shape[-1])
         offset_left = 0
 
         for slice_idx in range(len(output_slices)):
-            dispatch_bgmv_linear(y[:, offset_left:offset_left + output_slices[slice_idx]], x, lora_a_stacked[slice_idx],
-                                 lora_b_stacked[slice_idx], 0, scale)
+            dispatch_bgmv_linear(
+                y[:, offset_left:offset_left + output_slices[slice_idx]],
+                x,
+                lora_a_stacked[slice_idx],
+                lora_b_stacked[slice_idx],
+                0,
+                scale,
+            )
             offset_left += output_slices[slice_idx]
 
-    def add_lora_logits(self,
-                        y: torch.Tensor,
-                        x: torch.Tensor,
-                        lora_a_stacked: torch.Tensor,
-                        lora_b_stacked: torch.Tensor,
-                        scale,
-                        *,
-                        buffer: Optional[torch.Tensor] = None,
-                        **kwargs) -> None:
+    def add_lora_logits(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: torch.Tensor,
+        lora_b_stacked: torch.Tensor,
+        scale,
+        *,
+        buffer: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> None:
         y_org = y
         y = y.view(-1, y.shape[-1])
         x = x.view(-1, x.shape[-1])
@@ -67,7 +77,18 @@ class PunicaWrapperHPU(PunicaWrapperBase):
         scale: float,
         **kwargs,
     ) -> None:
-        raise NotImplementedError
+        x = x.view(-1, x.shape[-1])
+        mask = LoraMask.getLoraMask()
+        for slice_idx in range(len(lora_a_stacked)):
+            wa = lora_a_stacked[slice_idx][:, 0, :, :]
+            num_loras = wa.shape[0]
+            lora_rank = wa.shape[1]
+            wa = wa.reshape(num_loras * lora_rank, wa.shape[2]).transpose(0, 1)
+            wa = wa.to(x.dtype)
+            out = x @ wa
+            out = out * mask
+            out = out.reshape(out.shape[0], num_loras, lora_rank).sum(dim=1)
+            y[slice_idx] += out * scale
 
     def add_expand(
         self,
@@ -79,4 +100,22 @@ class PunicaWrapperHPU(PunicaWrapperBase):
         add_inputs=True,
         **kwargs,
     ) -> None:
-        raise NotImplementedError
+        y = y.view(-1, y.shape[-1])
+        mask = LoraMask.getLoraMask()
+        offset_left = offset_start
+        for slice_idx in range(len(lora_b_stacked)):
+            wb = lora_b_stacked[slice_idx][:, 0, :, :]
+            num_loras = wb.shape[0]
+            lora_rank = wb.shape[2]
+            wb = wb.transpose(1, 2).reshape(num_loras * lora_rank, wb.shape[1])
+            x_i = x[slice_idx]
+            wb = wb.to(x_i.dtype)
+            x_expanded = x_i.repeat(1, num_loras)
+            x_expanded = x_expanded * mask
+            out = x_expanded @ wb
+            out = out.to(y.dtype)
+            if add_inputs:
+                y[:, offset_left:offset_left + output_slices[slice_idx]] += out
+            else:
+                y[:, offset_left:offset_left + output_slices[slice_idx]] = out
+            offset_left += output_slices[slice_idx]
