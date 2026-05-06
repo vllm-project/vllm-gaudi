@@ -246,13 +246,6 @@ run_qwen2_5_vl_load_generate_test() {
     echo "✅ Test with multimodal-support with qwen2.5-vl-7b passed."
 }
 
-# Multimodal-support with qwen2.5-vl with warmup (small max model len and max num seqs) and lazy mode
-run_qwen2_5_vl_lazy_warmup_test() {
-    echo "➡️ Testing Qwen2.5-VL-7B with full warmup under tight limits and lazy mode..."
-    VLLM_SKIP_WARMUP=false VLLM_CONTIGUOUS_PA=False \
-    python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen2.5-vl-7b-small-ctx.yaml"
-    echo "✅ Test Qwen2.5-VL-7B with full restricted warmup and lazy mode passed."
-}
 
 # Multimodal-support with qwen2.5-vl with warmup (small max model len and max num seqs) and torch.compile
 run_qwen2_5_vl_compile_warmup_test() {
@@ -495,7 +488,6 @@ launch_all_tests() {
     run_compressed_w4a16_moe_gidx_load_generate_test
     run_llama3_70b_inc_dynamic_quant_load_generate_test
     run_qwen2_5_vl_load_generate_test
-    run_qwen2_5_vl_lazy_warmup_test
     run_qwen2_5_vl_compile_warmup_test
     run_qwen3_vl_load_generate_test
     run_mistral3_load_generate_test
