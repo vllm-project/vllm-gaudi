@@ -16,12 +16,25 @@ import vllm_gaudi.extension.kernels as kernels
 from vllm.forward_context import ForwardContext, get_forward_context
 
 
+class _DummyPrefillBackend:
+    """No-op MLA prefill backend for HPU (which has its own attention impl)."""
+
+    def __init__(self, **kwargs):
+        pass
+
+
 class HPUMLAAttention(MLAAttention):
 
     scale: float
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        import vllm.model_executor.layers.attention.mla_attention as mla_mod
+        original_get_prefill = mla_mod.get_mla_prefill_backend
+        mla_mod.get_mla_prefill_backend = lambda vllm_config: _DummyPrefillBackend
+        try:
+            super().__init__(*args, **kwargs)
+        finally:
+            mla_mod.get_mla_prefill_backend = original_get_prefill
         self.enable_fp8_attn = self.kv_cache_dtype == 'fp8_inc' and os.environ.get('QUANT_CONFIG', None) is None
         self.scale = float(self.scale)
         self.matmul_qk = Matmul() if not self.enable_fp8_attn \
