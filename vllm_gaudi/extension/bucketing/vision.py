@@ -49,6 +49,10 @@ MULTIMODAL_CONFIG = {
         # patches per image
         'buckets': [196, 256, 441, 480, 576, 900, 1156]
     },
+    'qwen3_omni_moe': {
+        'is_batch_based': False,
+        'buckets': [1600, 3136, 4096, 6400, 7744, 9216, 12544, 131076]
+    },
 }
 
 
