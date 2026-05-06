@@ -23,10 +23,27 @@ from vllm_gaudi.extension.logger import logger as init_logger
 
 logger = init_logger()
 
+QWEN3_5_HYBRID_ARCHS = frozenset({
+    "Qwen3_5ForConditionalGeneration",
+    "Qwen3_5MoeForConditionalGeneration",
+})
+
 
 def retain_envs(var_name):
     retain_var_list = ['GLOO_SOCKET_IFNAME', 'HCCL_SOCKET_IFNAME', 'NCCL_SOCKET_IFNAME']
     return ('HPU' in var_name or 'RAY' in var_name or 'VLLM' in var_name or var_name in retain_var_list)
+
+
+def is_qwen3_5_hybrid_model(model_config: Optional[ModelConfig]) -> bool:
+    if model_config is None or not model_config.is_hybrid:
+        return False
+
+    architectures = set(getattr(getattr(model_config, "hf_config", None), "architectures", []) or [])
+    architecture = getattr(model_config, "architecture", None)
+    if architecture is not None:
+        architectures.add(architecture)
+
+    return any(arch in QWEN3_5_HYBRID_ARCHS for arch in architectures)
 
 
 class HpuPlatform(Platform):
@@ -47,6 +64,14 @@ class HpuPlatform(Platform):
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: Optional[int] = None,
     ) -> str:
+        from vllm.config import get_current_vllm_config
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        current_vllm_config = get_current_vllm_config()
+        if current_vllm_config.device_config.device_type == "cpu":
+            logger.info("Using CPU_ATTN backend for CPU-targeted config.")
+            return AttentionBackendEnum.CPU_ATTN.get_path()
+
         if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on HPU.")
 
@@ -69,6 +94,10 @@ class HpuPlatform(Platform):
         Set the device for the current platform.
         """
         return
+
+    @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        torch.hpu.random.manual_seed_all(seed)
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -105,6 +134,18 @@ class HpuPlatform(Platform):
         cache_config = vllm_config.cache_config
         if not cache_config.user_specified_block_size:
             cache_config.block_size = 128
+        elif is_qwen3_5_hybrid_model(vllm_config.model_config) and cache_config.block_size != 128:
+            # Narrow the reset to Qwen3.5 hybrids. Other hybrid models may
+            # legitimately use a larger KV-manager block size and rely on
+            # virtual block splitting down to 128-token HPU kernels.
+            logger.info(
+                "Resetting Qwen3.5 hybrid block_size from %d to 128 "
+                "before Gaudi hybrid page-size realignment.",
+                cache_config.block_size,
+            )
+            cache_config.block_size = 128
+            if cache_config.mamba_cache_mode == "align":
+                cache_config.mamba_block_size = 128
         # Hybrid GDN/Mamba models: upstream HybridAttentionMambaModelConfig
         # already ran and computed block_size / mamba_page_size_padded for
         # GPU.  HPU overrode block_size to 128 above, so we must re-align
@@ -113,48 +154,32 @@ class HpuPlatform(Platform):
         # unify_kv_cache_spec_page_size() fails because the two page sizes
         # are not divisible.
         if (cache_config and cache_config.block_size is not None and vllm_config.model_config is not None
-                and vllm_config.model_config.is_hybrid):
-            # Ensure block_size is 128-aligned (should already be, but
-            # guard against future callers that set odd sizes).
-            original_block_size = cache_config.block_size
-            aligned_block_size = ((original_block_size + 127) // 128) * 128
-            if aligned_block_size != original_block_size:
-                logger.warning(
-                    "Padding hybrid cache block_size from %d to %d to satisfy "
-                    "Gaudi 128-token kernel alignment.",
-                    original_block_size,
-                    aligned_block_size,
-                )
-                cache_config.block_size = aligned_block_size
-                if cache_config.mamba_cache_mode == "align":
-                    cache_config.mamba_block_size = aligned_block_size
-
+                and vllm_config.model_config.is_hybrid and cache_config.mamba_page_size_padded is not None):
             # Recompute mamba_page_size_padded so it is a multiple of
             # the HPU attention page size.
-            if cache_config.mamba_page_size_padded is not None:
-                from vllm.utils.torch_utils import get_dtype_size
-                from math import ceil
-                model_config = vllm_config.model_config
-                if cache_config.cache_dtype == "auto":
-                    kv_dtype = model_config.dtype
-                else:
-                    from vllm.config.model import STR_DTYPE_TO_TORCH_DTYPE
-                    kv_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
-                num_kv_heads = model_config.get_num_kv_heads(parallel_config)
-                head_size = model_config.get_head_size()
-                attn_page = (2 * cache_config.block_size * num_kv_heads * head_size * get_dtype_size(kv_dtype))
-                if attn_page > 0 and cache_config.mamba_page_size_padded % attn_page != 0:
-                    old_padded = cache_config.mamba_page_size_padded
-                    cache_config.mamba_page_size_padded = (ceil(old_padded / attn_page) * attn_page)
-                    logger.info(
-                        "Rescaled mamba_page_size_padded from %d to %d "
-                        "to align with HPU attention page size %d "
-                        "(block_size=%d).",
-                        old_padded,
-                        cache_config.mamba_page_size_padded,
-                        attn_page,
-                        cache_config.block_size,
-                    )
+            from vllm.utils.torch_utils import get_dtype_size
+            from math import ceil
+            model_config = vllm_config.model_config
+            if cache_config.cache_dtype == "auto":
+                kv_dtype = model_config.dtype
+            else:
+                from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+                kv_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+            num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+            head_size = model_config.get_head_size()
+            attn_page = (2 * cache_config.block_size * num_kv_heads * head_size * get_dtype_size(kv_dtype))
+            if attn_page > 0 and cache_config.mamba_page_size_padded % attn_page != 0:
+                old_padded = cache_config.mamba_page_size_padded
+                cache_config.mamba_page_size_padded = (ceil(old_padded / attn_page) * attn_page)
+                logger.info(
+                    "Rescaled mamba_page_size_padded from %d to %d "
+                    "to align with HPU attention page size %d "
+                    "(block_size=%d).",
+                    old_padded,
+                    cache_config.mamba_page_size_padded,
+                    attn_page,
+                    cache_config.block_size,
+                )
         if (parallel_config.distributed_executor_backend in ['mp', 'uni']
                 and envs.VLLM_WORKER_MULTIPROC_METHOD == 'fork'):
             if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD", None) is not None:
@@ -186,6 +211,18 @@ class HpuPlatform(Platform):
             logger.warning("Using Contiguous PA, disabling prefix caching")
             vllm_config.cache_config.enable_prefix_caching = False
 
+        if (vllm_config.cache_config.enable_prefix_caching and vllm_config.cache_config.mamba_cache_mode == "all"):
+            vllm_config.cache_config.mamba_cache_mode = "align"
+            logger.info("[HPU] Overriding mamba_cache_mode from 'all' to 'align' "
+                        "to ensure block-aligned chunked prefill splits.")
+
+        if (vllm_config.model_config is not None and vllm_config.model_config.is_hybrid):
+            logger.debug(
+                "[HPU] Hybrid model cache config: block_size=%s, "
+                "mamba_block_size=%s, mamba_cache_mode=%s, "
+                "enable_prefix_caching=%s", cache_config.block_size, getattr(cache_config, "mamba_block_size", None),
+                getattr(cache_config, "mamba_cache_mode", None), cache_config.enable_prefix_caching)
+
         if compilation_config.mode != CompilationMode.NONE:
             logger.info("[HPU] Forcing CompilationMode.NONE "
                         "compilation mode")
@@ -211,9 +248,71 @@ class HpuPlatform(Platform):
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
-        # TODO: HPU still sets block_size in check_and_update_config.
-        # Move that logic here so block_size is chosen by the backend.
-        pass
+
+        cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
+
+        # For Granite 4.0-H (granitemoehybrid), we compute the correct
+        # block_size in this method using the PC-aware alignment formula
+        # (528 without prefix caching, 768 with prefix caching).
+        # We set block_size before calling super and mark it as
+        # user-specified so Phase 1 preserves it; Phase 2
+        # (_align_hybrid_block_size) then validates and sets
+        # mamba_page_size_padded.
+        is_granite_hybrid = (model_config is not None
+                             and getattr(model_config.hf_config, "model_type", None) == "granitemoehybrid")
+        if is_granite_hybrid:
+            # Compute the correct block_size using the PC-aware formula.
+            from vllm.utils.math_utils import cdiv
+            from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+            from vllm.model_executor.models import ModelRegistry
+            if cache_config.cache_dtype == "auto":
+                kv_dtype = model_config.dtype
+            else:
+                from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+                kv_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+            attn_1tok = FullAttentionSpec(
+                block_size=1,
+                num_kv_heads=model_config.get_num_kv_heads(vllm_config.parallel_config),
+                head_size=model_config.get_head_size(),
+                dtype=kv_dtype,
+            ).page_size_bytes
+            model_cls, _ = ModelRegistry.resolve_model_cls(
+                model_config.architecture,
+                model_config=model_config,
+            )
+            mamba_page_size = MambaSpec(
+                shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
+                dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
+                block_size=-1,
+            ).page_size_bytes
+            if mamba_page_size > 0:
+                if cache_config.enable_prefix_caching:
+                    mamba_chunk_size = getattr(model_config.hf_config, 'mamba_d_chunk', 256)
+                    alignment = mamba_chunk_size
+                else:
+                    alignment = 16
+                attn_block_size = alignment * cdiv(mamba_page_size, alignment * attn_1tok)
+                cache_config.block_size = attn_block_size
+                if cache_config.mamba_cache_mode == "align":
+                    cache_config.mamba_block_size = attn_block_size
+                logger.info(
+                    "Setting granitemoehybrid block_size to %d tokens "
+                    "(alignment=%d, mamba_page_size=%d bytes, "
+                    "prefix_caching=%s).",
+                    attn_block_size,
+                    alignment,
+                    mamba_page_size,
+                    cache_config.enable_prefix_caching,
+                )
+            if not cache_config.user_specified_block_size:
+                cache_config.user_specified_block_size = True
+                super().update_block_size_for_backend(vllm_config)
+                cache_config.user_specified_block_size = False
+            else:
+                super().update_block_size_for_backend(vllm_config)
+        else:
+            super().update_block_size_for_backend(vllm_config)
 
     @classmethod
     def is_pin_memory_available(cls):
@@ -356,7 +455,7 @@ class HpuPlatform(Platform):
     @classmethod
     def patch_for_pt27(cls) -> None:
 
-        from vllm.utils import is_torch_equal_or_newer
+        from vllm.utils.torch_utils import is_torch_equal_or_newer
         if is_torch_equal_or_newer("2.8.0"):
             return
 
@@ -371,5 +470,5 @@ class HpuPlatform(Platform):
                 return NotImplemented
             return parent_torch_function(func, types, args, kwargs)
 
-        BasevLLMParameter.__torch_function__ = classmethod(torch_function)
+        BasevLLMParameter.__torch_function__ = staticmethod(torch_function)  # type: ignore[assignment]
         return

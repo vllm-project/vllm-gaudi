@@ -1,6 +1,5 @@
 import torch
-import vllm.model_executor.models.qwen3_5 as qwen3_5_module
-from vllm.model_executor.models.qwen3_5 import Qwen3_5GatedDeltaNet
+from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention
 from vllm.forward_context import get_forward_context
 
 from vllm_gaudi.ops.causal_conv1d_pytorch import (
@@ -14,7 +13,20 @@ from vllm_gaudi.ops.hpu_gdn_pytorch import (
 )
 
 
-class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
+def _save_ssm_state(core_attn_out, final_state, ssm_state, state_indices):
+    """Persist GDN final_state into ssm_state cache for chunked prefill.
+
+    Must be @torch._dynamo.disable because HPU torch.compile silently
+    drops in-place index_copy_ to aliased state tensors.  Returns
+    core_attn_out as a pass-through so the compiled graph consumes
+    the call — HPU drops dynamo-disabled calls whose results are unused.
+    """
+    safe_si = torch.remainder(state_indices, ssm_state.shape[0]).long()
+    ssm_state.index_copy_(0, safe_si, final_state.to(device=ssm_state.device, dtype=ssm_state.dtype))
+    return core_attn_out
+
+
+class HPUGatedDeltaNetAttention(GatedDeltaNetAttention):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -28,6 +40,9 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         has_explicit = (hf_text_config is not None and (getattr(hf_text_config, "mamba_chunk_size", None) is not None
                                                         or getattr(hf_text_config, "chunk_size", None) is not None))
         self.mamba_chunk_size = (self.model_config.get_mamba_chunk_size() if has_explicit else 128)
+
+        self.qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
+        self.z_size = self.value_dim // self.tp_size
 
     def rearrange_mixed_qkv(self, mixed_qkv):
         """Pure-torch rearrange – avoids einops graph breaks on HPU."""
@@ -48,8 +63,12 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         return query, key, value
 
     def _resolve_state_indices(self, attn_metadata):
-        """Resolve state_indices_tensor, handling 2-D cache-group case."""
-        indices = attn_metadata.state_indices_tensor
+        """Resolve load_indices_tensor, handling 2-D cache-group case.
+
+        For Qwen 3.5 (GDN), load and store indices are identical
+        so using load_indices_tensor is sufficient.
+        """
+        indices = attn_metadata.load_indices_tensor
         if indices is not None and indices.dim() > 1:
             cg = self.cache_group_idx
             assert cg is not None
@@ -70,9 +89,8 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         is_prompt = bool(getattr(attn_metadata, "is_prompt", False))
         state_indices = self._resolve_state_indices(attn_metadata)
 
-        self_kv_cache = self.kv_cache[0]
-        conv_state = self_kv_cache[0]
-        ssm_state = self_kv_cache[1]
+        conv_state = self.kv_cache[0]
+        ssm_state = self.kv_cache[1]
 
         query_start_loc = attn_metadata.query_start_loc_p
         has_initial_state = getattr(attn_metadata, "has_initial_states_p", None)
@@ -95,7 +113,9 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             prefill_seq_len = (num_tokens // prefill_num_seqs if prefill_num_seqs > 0 else 0)
             initial_state = ssm_state[state_indices].contiguous()
             if has_initial_state is not None:
-                initial_state[~has_initial_state.bool(), ...] = 0
+                # Avoid scatter_nd from boolean indexing
+                mask = has_initial_state.bool().view(-1, 1, 1, 1).to(initial_state.dtype)
+                initial_state = initial_state * mask
 
         return (is_prompt, conv_state, ssm_state, state_indices, query_start_loc, has_initial_state, padding_mask_flat,
                 num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state)
@@ -120,15 +140,34 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
          initial_state) = self._extract_metadata(num_tokens)
 
         # === Part 1: Input Projection ================================
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-        z_size = self.value_dim // self.tp_size
-        mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
-        z = z.reshape(z.size(0), -1, self.head_v_dim)
-        ba, _ = self.in_proj_ba(hidden_states)
-        b, a = ba.chunk(2, dim=-1)
-        b = b.contiguous()
-        a = a.contiguous()
+        if hasattr(self, 'in_proj_qkv'):
+            # LoRA path (Qwen3.5 only): separate in_proj_qkv and in_proj_z
+            mixed_qkv, _ = self.in_proj_qkv(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
+            z, _ = self.in_proj_z(hidden_states)
+            z = z.reshape(z.size(0), -1, self.head_v_dim)
+            b, a = ba.chunk(2, dim=-1)
+            b = b.contiguous()
+            a = a.contiguous()
+        else:
+            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
+
+            if self.gqa_interleaved_layout:
+                # Qwen3-Next: unpack the interleaved GQA layout
+                query, key, value, z, b, a = self.fix_query_key_value_ordering(mixed_qkvz, ba)
+                # Pure-torch flatten instead of einops rearrange (graph breaks)
+                query = query.reshape(query.size(0), -1)
+                key = key.reshape(key.size(0), -1)
+                value = value.reshape(value.size(0), -1)
+                mixed_qkv = torch.cat((query, key, value), dim=-1)
+            else:
+                # Qwen3.5: weights already in [q, k, v, z] and [b, a] order
+                mixed_qkv, z = mixed_qkvz.split([self.qkv_size, self.z_size], dim=-1)
+                z = z.reshape(z.size(0), -1, self.head_v_dim)
+                b, a = ba.chunk(2, dim=-1)
+                b = b.contiguous()
+                a = a.contiguous()
 
         core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
@@ -180,20 +219,27 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 g = g * token_mask_h
                 beta = beta * token_mask_h
 
-            core_attn_out_result, final_state = \
-                hpu_chunk_gated_delta_rule(
-                    q=query, k=key, v=value, g=g, beta=beta,
-                    initial_state=initial_state,
-                    output_final_state=True,
-                    use_qk_l2norm_in_kernel=True,
-                    chunk_size=self.mamba_chunk_size,
-                    prefill_num_seqs=prefill_num_seqs,
-                    prefill_seq_len=prefill_seq_len,
-                )
-
-            assert final_state is not None
-            ssm_state.index_copy_(0, state_indices.long(), final_state.to(device=ssm_state.device,
-                                                                          dtype=ssm_state.dtype))
+            core_attn_out_result, final_state = hpu_chunk_gated_delta_rule(
+                q=query,
+                k=key,
+                v=value,
+                g=g,
+                beta=beta,
+                initial_state=initial_state,
+                output_final_state=True,
+                use_qk_l2norm_in_kernel=True,
+                chunk_size=self.mamba_chunk_size,
+                prefill_num_seqs=prefill_num_seqs,
+                prefill_seq_len=prefill_seq_len,
+            )
+            # State save in dynamo-disabled wrapper — index_copy_ is
+            # silently dropped by HPU torch.compile on aliased tensors.
+            core_attn_out_result = _save_ssm_state(
+                core_attn_out_result,
+                final_state,
+                ssm_state,
+                state_indices,
+            )
 
             non_spec_out = core_attn_out_result.squeeze(0)
             core_attn_out[:non_spec_out.shape[0]] = non_spec_out
@@ -249,6 +295,12 @@ class HPUQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         output_flat[:num_tokens], _ = self.out_proj(core_attn_out)
 
 
-# Replace the class in the upstream module so that Qwen3_5DecoderLayer
-# instantiates HPUQwen3_5GatedDeltaNet instead of the original.
-qwen3_5_module.Qwen3_5GatedDeltaNet = HPUQwen3_5GatedDeltaNet
+# Replace the class in the upstream modules so that both Qwen3-Next and
+# Qwen3.5 model definitions instantiate HPUGatedDeltaNetAttention.
+import vllm.model_executor.layers.mamba.gdn_linear_attn as _gdn_module  # noqa: E402
+import vllm.model_executor.models.qwen3_next as _qwen3_next_module  # noqa: E402
+import vllm.model_executor.models.qwen3_5 as _qwen3_5_module  # noqa: E402
+
+_gdn_module.GatedDeltaNetAttention = HPUGatedDeltaNetAttention
+_qwen3_next_module.GatedDeltaNetAttention = HPUGatedDeltaNetAttention
+_qwen3_5_module.GatedDeltaNetAttention = HPUGatedDeltaNetAttention

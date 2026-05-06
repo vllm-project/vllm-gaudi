@@ -53,7 +53,6 @@ def create_fused_moe(quant_config=None):
                     hidden_size=512,
                     intermediate_size=256,
                     params_dtype=torch.bfloat16,
-                    reduce_results=True,
                     renormalize=True,
                     use_grouped_topk=False,
                     num_expert_group=None,
@@ -71,7 +70,9 @@ def create_fused_moe(quant_config=None):
                     enable_eplb=False,
                     num_redundant_experts=0,
                     has_bias=False,
-                    is_sequence_parallel=False)
+                    is_sequence_parallel=False,
+                    zero_expert_type=None,
+                    hash_indices_table=None)
 
 
 def get_data_path(filename):

@@ -4,11 +4,14 @@
 # This source code is licensed under the Apache 2.0 license found in the
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
+import importlib
 import os
+
+from contextlib import suppress
 
 from .logger import logger
 from .config import Value, boolean, split_values_and_flags, Any, Disabled, Enabled
-from .validation import choice, regex
+from .validation import choice, pep440_version
 
 _VLLM_VALUES = {}
 
@@ -52,17 +55,12 @@ def _get_vllm_hash(_):
 
 
 def _get_build(_):
-    import re
-    import subprocess
-    output = subprocess.run("pip show habana-torch-plugin",
-                            shell=True,
-                            text=True,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE)
-    version_re = re.compile(r'Version:\s*(?P<version>.*)')
-    match = version_re.search(output.stdout)
-    if output.returncode == 0 and match:
-        return match.group('version')
+    with suppress(importlib.metadata.PackageNotFoundError):
+        metadata = importlib.metadata.metadata("habana-torch-plugin")
+        version = metadata.get("Version")
+        if version:
+            return version
+
     # In cpu-test environment we don't have access to habana-torch-plugin
     from vllm_gaudi.extension.utils import is_fake_hpu
     result = '0.0.0.0' if is_fake_hpu() else None
@@ -107,8 +105,7 @@ def get_environment():
         Value('build',
               _get_build,
               env_var_type=str,
-              check=regex(r'^\d+\.\d+\.\d+\.\d+$',
-                          hint='You can override detected build by specifying VLLM_BUILD env variable')),
+              check=pep440_version(hint='You can override detected build by specifying VLLM_BUILD env variable')),
         Value('engine_version', _get_vllm_engine_version, env_var_type=str),
         Value('bridge_mode', _get_pt_bridge_mode, env_var_type=str, check=choice('eager', 'lazy')),
         VllmValue('model_type', str),

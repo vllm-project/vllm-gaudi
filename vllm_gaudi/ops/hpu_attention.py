@@ -28,7 +28,7 @@ def patched_attention_forward(
     context using
     `vllm.forward_context.get_forward_context().attn_metadata`.
     """
-    if self.use_output or not self.use_direct_call:
+    if not self.use_direct_call:
         return layer.Attention._vllm_gaudi_original_forward(self, query, key, value, output_shape=output_shape)
 
     if self.calculate_kv_scales:
@@ -53,7 +53,7 @@ def patched_attention_forward(
     attn_metadata = forward_context.attn_metadata
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[self.layer_name]
-    self_kv_cache = self.kv_cache[0]
+    self_kv_cache = self.kv_cache
     return self.impl.forward(self, query, key, value, self_kv_cache, attn_metadata)
 
 

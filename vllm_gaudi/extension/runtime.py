@@ -15,7 +15,7 @@ USER_FLAGS = None
 EXPERIMENTAL_FLAGS = None
 ENVIRONMENT_VALUES = None
 FEATURE_VALUES = None
-HIDDEN_PARAMS = ['exponential_bucketing', 'linear_bucketing', 'flex_impl', 'fsdpa_impl', 'naive_impl']
+HIDDEN_PARAMS = ['flex_impl', 'fsdpa_impl', 'naive_impl']
 
 
 def filter_defined(config, keys):

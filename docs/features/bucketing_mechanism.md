@@ -20,7 +20,13 @@ Bucketing is focused on three dimensions:
 - `query lenght`: The sequence length without context tokens.
 - `num blocks`: The context length counted in blocks.
 
-Bucketing ranges are generated based on 4 parameters - `min`, `step`, `max`, and `limit` - applied separately for the prompt and decode phases, as well as for batch size, query length, and context block dimensions. These parameters are logged and can be observed during vLLM startup:
+Bucketing ranges are generated separately for the prompt and decode phases, as well as for batch size, query length, and context block dimensions. The parameters depend on the selected strategy:
+
+- Exponential uses `min`, `step`, `max`, and `limit`.
+- Linear uses `min`, `step`, and `max`.
+- Padding-aware uses `min`, `step`, `max`, `pad_max`, and `pad_percent`.
+
+These parameters are logged and can be observed during vLLM startup:
 
 ```{.}
 INFO 07-07 19:27:37 [exponential.py:36] Prompt bucket config (min, step, max_warmup, limit) bs:[1, 1, 1, 1], seq:[128, 128, 1024, 11]
@@ -44,11 +50,14 @@ After the prefill stage, it will be executed as a `(4, 1, 512)` decode bucket, w
 
 Bucketing is transparent to the user – padding in the sequence length dimension is never returned, and padding in the batch dimension does not create new requests.
 
-There are two bucketing strategies: exponential (default) and linear.
+There are three generated bucketing strategies, selected with `VLLM_BUCKETING_STRATEGY`: exponential (`exp`, default), linear (`lin`), and padding-aware (`pad`).
+
+!!! note
+    `VLLM_EXPONENTIAL_BUCKETING` is deprecated, but it is still honored for backward compatibility. If it is set, it overrides `VLLM_BUCKETING_STRATEGY`: `true` forces exponential bucketing and `false` forces linear bucketing. It cannot select padding-aware bucketing, so leave it unset when using `VLLM_BUCKETING_STRATEGY=pad`.
 
 ### Exponential Strategy
 
-The exponential strategy is the default warm-up mechanism. It is based on 4 parameters that are not configurable by the user:
+The exponential strategy is the default warm-up mechanism. Enable it with `VLLM_BUCKETING_STRATEGY=exp`. It is based on 4 parameters that are not configurable by the user:
 
 - `min`: The minimum value
 - `step`: The rounding value for bucket boundaries
@@ -70,7 +79,7 @@ This strategy creates more buckets with smaller values closer to `min`. As the v
 ### Linear Strategy
 
 !!! note
-    Starting from v1.22.0 Intel Gaudi Software release, Linear strategy is no longer the default warm-up mechanism.
+    Starting from v1.22.0 Intel Gaudi Software release, Linear strategy is no longer the default warm-up mechanism. Set `VLLM_BUCKETING_STRATEGY=lin` to use the linear strategy.
 
 The linear strategy is determined with 3 parameters: `min`, `step` and `max`, where:
 
@@ -94,6 +103,62 @@ These parameters can be configured separately by the user for the prompt and dec
     => stable = (128, 256, 384, 512)
     => buckets = ramp_up + stable => (128, 256, 384, 512)
     ```
+
+### Padding-Aware Strategy
+
+Set `VLLM_BUCKETING_STRATEGY=pad` to use the padding-aware strategy.
+
+Padding-aware bucketing extends the linear ramp-up with two additional controls:
+
+- `pad_max`: Maximum absolute padding tolerated before a denser bucket is kept.
+- `pad_percent`: Maximum relative padding tolerated before a denser bucket is kept.
+
+This strategy is useful when you want more direct control over the warm-up versus runtime-padding tradeoff. Lower `pad_percent` values produce more buckets and less runtime padding. Setting `pad_percent=0` approaches dense linear coverage, while larger values (up to 50) reduce warm-up cost and move closer to exponential spacing.
+
+The following examples use the configuration tuple `(min, step, max, pad_max, pad_percent)` and show how the generated warm-up buckets change as the padding limits change.
+
+Dense linear-like coverage:
+
+```{.}
+config = (0, 8, 64, 64, 0)
+=> ramp_up = (0, 1, 2, 4, 8)
+=> stable = (16, 24, 32, 40, 48, 56, 64)
+=> buckets = (0, 1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64)
+```
+
+With `pad_percent=0`, every linear bucket after the ramp-up is kept, so the result stays close to dense linear coverage.
+
+Ratio-limited spacing:
+
+```{.}
+config = (0, 8, 64, 64, 50)
+=> ramp_up = (0, 1, 2, 4, 8)
+=> stable = (16, 32, 64)
+=> buckets = (0, 1, 2, 4, 8, 16, 32, 64)
+```
+
+A larger `pad_percent` allows wider spacing, so several intermediate buckets are skipped and the result moves closer to exponential bucketing.
+
+Absolute pad cap:
+
+```{.}
+config = (0, 8, 64, 16, 50)
+=> ramp_up = (0, 1, 2, 4, 8)
+=> stable = (16, 32, 48, 64)
+=> buckets = (0, 1, 2, 4, 8, 16, 32, 48, 64)
+```
+
+Reducing `pad_max` forces the strategy to keep extra intermediate buckets, even when `pad_percent` would otherwise allow a sparser range.
+
+No ramp-up phase:
+
+```{.}
+config = (16, 16, 128, 32, 25)
+=> stable = (16, 32, 48, 64, 80, 96, 128)
+=> buckets = (16, 32, 48, 64, 80, 96, 128)
+```
+
+When `min` already matches `step`, the strategy skips the ramp-up phase and starts directly with the stable region.
 
 ### Specifying Buckets in a File
 

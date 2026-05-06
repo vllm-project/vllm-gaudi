@@ -8,6 +8,11 @@ from typing import List, Tuple
 
 from vllm_gaudi.extension.logger import logger as logger
 from vllm_gaudi.extension.runtime import get_config
+from vllm_gaudi.extension.config import boolean
+from vllm_gaudi.extension.bucketing.exponential import ExponentialBucketingStrategy
+from vllm_gaudi.extension.bucketing.linear import LinearBucketingStrategy
+from vllm_gaudi.extension.bucketing.padding_aware import PaddingAwareBucketingStrategy
+from vllm_gaudi.extension.bucketing.file_strategy import FileBucketingStrategy
 
 LONG_CTX_THRESHOLD = 8192
 
@@ -70,8 +75,12 @@ class HPUBucketingManager():
         self.mamba_chunk_size_is_explicit = mamba_chunk_size_is_explicit
         self.initialized = True
         self.fallback_bs_base_step = 2
-        self.fallback_seq_base_step = 32
+        self.fallback_seq_base_step = max(32, mamba_chunk_size)
         self.fallback_blocks_base_step = 32
+
+        if mamba_chunk_size > 0 and self.max_num_batched_tokens % mamba_chunk_size != 0:
+            raise ValueError(f"max_num_batched_tokens ({self.max_num_batched_tokens}) must be "
+                             f"divisible by mamba_chunk_size ({mamba_chunk_size})")
 
         self.use_sliding_window = get_config().PT_HPU_SDPA_QKV_SLICE_MODE_FWD
         if self.use_sliding_window:
@@ -89,23 +98,38 @@ class HPUBucketingManager():
 
     def read_from_file(self, is_prompt):
         file_name = get_config().VLLM_BUCKETING_FROM_FILE
-        from vllm_gaudi.extension.bucketing.file_strategy import (FileBucketingStrategy)
         strategy = FileBucketingStrategy()
         return strategy.get_buckets(file_name, is_prompt)
 
     def get_bucketing_strategy(self):
-        strategy = None
         # TODO - we can use different strategies for decode and prompt
-        use_exponential_bucketing = True if \
-                get_config().VLLM_EXPONENTIAL_BUCKETING == None else \
-                get_config().VLLM_EXPONENTIAL_BUCKETING
-
-        if use_exponential_bucketing:
-            from vllm_gaudi.extension.bucketing.exponential import (ExponentialBucketingStrategy)
+        bucketing_strategy = get_config().bucketing_strategy
+        if bucketing_strategy == 'exp':
             strategy = ExponentialBucketingStrategy()
-        else:
-            from vllm_gaudi.extension.bucketing.linear import LinearBucketingStrategy
+        elif bucketing_strategy == 'lin':
             strategy = LinearBucketingStrategy()
+        elif bucketing_strategy == 'pad':
+            strategy = PaddingAwareBucketingStrategy()
+        else:
+            raise ValueError(
+                f"Invalid bucketing strategy: {bucketing_strategy}, please choose from ['exp', 'lin', 'pad']")
+
+        # for backward compatibility - if VLLM_EXPONENTIAL_BUCKETING is set, it will override the bucketing strategy
+        exp_bucketing_env = os.getenv('VLLM_EXPONENTIAL_BUCKETING', None)
+        if exp_bucketing_env is not None:
+            logger().warning(
+                "VLLM_EXPONENTIAL_BUCKETING is deprecated and will be removed in a future release. Use VLLM_BUCKETING_STRATEGY='exp'|'lin'|'pad' instead."
+            )
+            use_exp_bucketing = boolean(exp_bucketing_env)
+            if use_exp_bucketing:
+                override_strategy = ExponentialBucketingStrategy()
+            else:
+                override_strategy = LinearBucketingStrategy()
+            if override_strategy.__class__ != strategy.__class__:
+                logger().warning(
+                    f"Overriding bucketing strategy {strategy.__class__.__name__} with {override_strategy.__class__.__name__} due to VLLM_EXPONENTIAL_BUCKETING={exp_bucketing_env}"
+                )
+                strategy = override_strategy
         return strategy
 
     def generate_prompt_buckets(self):
@@ -128,6 +152,9 @@ class HPUBucketingManager():
                 bs_range = strategy.get_range(bs_cfg)
                 query_range = strategy.get_range(query_cfg)
                 ctx_range = strategy.get_range(ctx_cfg)
+                logger().debug(f"Prompt BS range: {bs_range}")
+                logger().debug(f"Prompt query range: {query_range}")
+                logger().debug(f"Prompt context range: {ctx_range}")
 
             self.prompt_buckets = generate_buckets(bs_range, query_range, ctx_range, True, self.max_model_len,
                                                    self.max_num_seqs, self.max_num_prefill_seqs,
@@ -172,6 +199,10 @@ class HPUBucketingManager():
                 if get_config().use_contiguous_pa and ctx_range[-1] < self.num_hpu_blocks:
                     ctx_range.append(self.num_hpu_blocks)
 
+                logger().debug(f"Decode BS range: {bs_range}")
+                logger().debug(f"Decode query range: {query_range}")
+                logger().debug(f"Decode context range: {ctx_range}")
+
             self.decode_buckets = generate_buckets(bs_range, query_range, ctx_range, False, self.max_model_len,
                                                    self.max_num_seqs, self.max_num_prefill_seqs,
                                                    self.max_num_batched_tokens, self.block_size, self.num_hpu_blocks,
@@ -204,7 +235,7 @@ class HPUBucketingManager():
 
     ### RETRIEVE BUCKETS FUNCTIONS ###
 
-    def generate_fallback_bucket(self, batch_size, seq_len, ctx):
+    def generate_fallback_bucket(self, batch_size, seq_len, ctx, is_prompt=False):
         assert self.max_num_batched_tokens is not None
         new_batch_size = calc_fallback_value(batch_size, self.fallback_bs_base_step)
         if new_batch_size > self.max_num_seqs:
@@ -218,19 +249,30 @@ class HPUBucketingManager():
             new_ctx = 0
         else:
             new_ctx = calc_fallback_value(ctx, self.fallback_blocks_base_step)
-            # Safety cap: limit to max prepared decode bucket ctx to prevent
-            # catastrophic graph compilation from corrupted batch data.
-            if self._fallback_max_ctx > 0 and new_ctx > self._fallback_max_ctx:
-                logger().warning(f"Fallback ctx {new_ctx} exceeds max prepared "
-                                 f"decode bucket ctx {self._fallback_max_ctx}, capping.")
-                new_ctx = self._fallback_max_ctx
+            if is_prompt:
+                # For prompt buckets, cap to the theoretical max number of
+                # context blocks derived from max_model_len.
+                max_prompt_ctx = math.ceil((self.max_model_len - 1) / self.block_size)
+                if new_ctx > max_prompt_ctx:
+                    logger().warning(f"Fallback prompt ctx {new_ctx} exceeds theoretical "
+                                     f"max {max_prompt_ctx} (max_model_len="
+                                     f"{self.max_model_len}, block_size={self.block_size}),"
+                                     f" capping.")
+                    new_ctx = max_prompt_ctx
+            else:
+                # Safety cap: limit to max prepared decode bucket ctx to prevent
+                # catastrophic graph compilation from corrupted batch data.
+                if self._fallback_max_ctx > 0 and new_ctx > self._fallback_max_ctx:
+                    logger().warning(f"Fallback ctx {new_ctx} exceeds max prepared "
+                                     f"decode bucket ctx {self._fallback_max_ctx}, capping.")
+                    new_ctx = self._fallback_max_ctx
         return (new_batch_size, new_seq_len, new_ctx)
 
     def find_prompt_bucket(self, batch_size, seq_len, ctx=0):
         if self.initialized:
             found_bucket = find_equal_or_closest_greater_config(self.prompt_buckets, (batch_size, seq_len, ctx))
             if found_bucket is None:
-                new_bucket = self.generate_fallback_bucket(batch_size, seq_len, ctx)
+                new_bucket = self.generate_fallback_bucket(batch_size, seq_len, ctx, is_prompt=True)
                 logger().warning(f"Prompt bucket for {batch_size, seq_len, ctx}"
                                  f" was not prepared. Adding new bucket: {new_bucket}")
                 self.prompt_buckets.append(new_bucket)
@@ -241,6 +283,12 @@ class HPUBucketingManager():
 
     def find_decode_bucket(self, batch_size, num_blocks, seed_buckets: bool = False):
         if self.initialized:
+            # Cap num_blocks to the max prepared ctx so that previously-added
+            # capped fallback buckets are found on subsequent lookups, avoiding
+            # an infinite loop of "was not prepared" warnings.
+            if self._fallback_max_ctx > 0 and num_blocks > self._fallback_max_ctx:
+                num_blocks = self._fallback_max_ctx
+
             if seed_buckets and self.seed_decode_buckets is not None:
                 found_bucket = find_equal_or_closest_greater_config(self.seed_decode_buckets,
                                                                     (batch_size, 1, num_blocks))
@@ -250,10 +298,11 @@ class HPUBucketingManager():
             found_bucket = find_equal_or_closest_greater_config(self.decode_buckets, (batch_size, 1, num_blocks))
             if found_bucket is None:
                 new_bucket = self.generate_fallback_bucket(batch_size, 1, num_blocks)
-                logger().warning(f"Decode bucket for {batch_size, 1, num_blocks}"
-                                 f" was not prepared. Adding new bucket: {new_bucket}")
-                self.decode_buckets.append(new_bucket)
-                self.decode_buckets.sort()
+                if new_bucket not in self.decode_buckets:
+                    logger().warning(f"Decode bucket for {batch_size, 1, num_blocks}"
+                                     f" was not prepared. Adding new bucket: {new_bucket}")
+                    self.decode_buckets.append(new_bucket)
+                    self.decode_buckets.sort()
                 return new_bucket
             return found_bucket
         return (batch_size, 1, num_blocks)
@@ -354,10 +403,20 @@ def generate_buckets(bs_range,
     # filter rules for buckets
     # prompt
     def not_over_max_model_len(bs, query, ctx):
-        smaller_than_limit = (query + ctx * block_size) <= max_model_len
+        # For chunked prefill, the final query chunk can be shorter than the
+        # bucket query size due to padding. Keep buckets as long as context
+        # blocks can represent at least one valid context length with one
+        # query token available.
+        # The -1 reserves at least 1 token for query so that when
+        # max_model_len is exactly divisible by block_size, the ceiling
+        # ctx is not over-counted.
+        # Also reject buckets whose query alone exceeds max_model_len,
+        # since such a prompt chunk is never reachable at runtime.
+        max_ctx_blocks = math.ceil((max_model_len - 1) / block_size)
+        smaller_than_limit = ctx <= max_ctx_blocks and query <= max_model_len
         if not smaller_than_limit:
-            omitted_buckets.add(
-                ("condition: (query + ctx * block_size) <= max_model_len", "-> bs, query, ctx: ", bs, query, ctx))
+            omitted_buckets.add(("condition: ctx <= ceil((max_model_len - 1) / block_size) and query <= max_model_len",
+                                 "-> bs, query, ctx: ", bs, query, ctx))
         return smaller_than_limit
 
     def not_over_max_num_batched_tokens(bs, query, ctx):
@@ -378,9 +437,6 @@ def generate_buckets(bs_range,
 
     def no_corrections(bs, query, ctx):
         return (bs, query, ctx)
-
-    def mamba_decode_corrector(bs, query, ctx):
-        return (bs, query, min(ctx, bs * math.floor(max_model_len / block_size)))
 
     def correct_for_max_model_len(bs, query, ctx):
         return (bs, query, min(ctx, bs * math.ceil(max_model_len / block_size)))
@@ -410,9 +466,7 @@ def generate_buckets(bs_range,
         return filters_map[phase][use_contiguous_pa]
 
     def get_corrector(is_prompt, use_contiguous_pa):
-        if mamba_chunk_size > 0 and not is_prompt:
-            return mamba_decode_corrector
-        elif is_prompt or use_contiguous_pa:
+        if is_prompt or use_contiguous_pa:
             return no_corrections
         else:
             return correct_for_max_model_len
@@ -450,14 +504,20 @@ def generate_buckets(bs_range,
                         ctx = edge_ctx
                 if all(bucket_filter(bs, query, ctx) for bucket_filter in filters):
                     buckets.add(corrector(bs, query, ctx))
+    if file_buckets and omitted_buckets:
+        phase = 'prompt' if is_prompt else 'decode'
+        logger().warning(
+            "The following %s buckets from custom bucketing file "
+            "(VLLM_BUCKETING_FROM_FILE) were omitted during warmup:", phase)
+        for bucket in sorted(omitted_buckets):
+            logger().warning("  %s", bucket)
+
     if not buckets:
         phase = 'prompt' if is_prompt else 'decode'
         for bucket in omitted_buckets:
             logger().error(bucket)
-        raise RuntimeError(
-            "Generated 0 " + phase +
-            " buckets. Please use default exponential bucketing, VLLM_EXPONENTIAL_BUCKETING=true or generate linear warmup flags according to README"
-        )
+        raise RuntimeError("Generated 0 " + phase +
+                           " buckets. Please adjust the bucketing configuration according to README")
 
     return sorted(buckets)
 

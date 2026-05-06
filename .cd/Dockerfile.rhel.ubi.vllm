@@ -3,14 +3,14 @@
 
 # Global build arguments - declared before first FROM to be available in all stages
 ARG ARTIFACTORY_URL="vault.habana.ai"
-ARG SYNAPSE_VERSION=1.23.0
+ARG SYNAPSE_VERSION=1.24.0
 # Use an exact revision (e.g. 695) or "latest" to auto-detect the newest available revision.
 # If you do not want metadata to show "latest", pass an exact SYNAPSE_REVISION.
-ARG SYNAPSE_REVISION=695
+ARG SYNAPSE_REVISION=1007
 ARG BASE_NAME=rhel9.6
 ARG OS_VERSION=9.6
 ARG OS_STRING=rhel96
-ARG PT_VERSION=2.9.0
+ARG PT_VERSION=2.10.0
 ARG PT_MODULES_REPO_NAME=gaudi-pt-modules
 # for internal use - to support a different package name for RHEL 9.4 with Python 3.12
 ARG PT_PACKAGE_NAME_NON_DEFAULT_PYTHON_SUBSTRING=
@@ -209,7 +209,7 @@ RUN set -e && \
     git remote add upstream $VLLM_REPO && \
     git fetch upstream --tags && \
     git checkout ${VLLM_PROJECT_COMMIT} && \
-    pip install --no-cache-dir -r <(sed '/^torch/d' requirements/build.txt) && \
+    pip install --no-cache-dir -r <(sed '/^torch/d' requirements/build/cuda.txt) && \
     VLLM_TARGET_DEVICE=empty pip install --no-cache-dir --no-build-isolation . && \
     cd $VLLM_PATH2 && \
     git checkout ${VLLM_GAUDI_COMMIT} && \

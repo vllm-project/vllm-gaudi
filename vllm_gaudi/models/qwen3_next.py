@@ -11,19 +11,21 @@ _orig_qwen3next_attention_forward = Qwen3NextAttention.forward
 
 
 # ====================================================================
-# Qwen3NextAttention.forward  (full-attention layers, decode path)
-# Only patch decode-like layout:
-#   hidden_states: [B, 1, H]
-#   output:        [B, 1, H_out]
-#
-# Keep prompt/prefill on the original upstream path to avoid
-# impacting compile-heavy prompt/MoE cases.
+# Qwen3NextAttention.forward  (full-attention layers)
+# Patch any 3D layout (decode or bucketed prefill with BS > 1):
+#   hidden_states: [B, L, H],  output: [B, L, H_out]
 # ====================================================================
 def _hpu_qwen3next_attention_forward(self, positions, output, hidden_states):
 
-    is_decode_like = (hidden_states is not None and output is not None and hidden_states.dim() == 3
-                      and output.dim() == 3 and hidden_states.shape[1] == 1 and output.shape[1] == 1)
-    if not is_decode_like:
+    # Patch any 3D layout (BS > 1):
+    #   Decode:  hidden_states [B, 1, H],  output [B, 1, H_out]
+    #   Prefill: hidden_states [B, L, H],  output [B, L, H_out]
+    #
+    # Upstream forward assumes 2D (tokens, dim) for attn_output but
+    # preserves 3D for gate when hidden_states is 3D, causing a shape
+    # mismatch in `attn_output * gate`.  We flatten both to 2D.
+    is_3d = (hidden_states is not None and output is not None and hidden_states.dim() == 3 and output.dim() == 3)
+    if not is_3d:
         return _orig_qwen3next_attention_forward(self, positions, output, hidden_states)
 
     qkv, _ = self.qkv_proj(hidden_states)
@@ -86,14 +88,9 @@ def _hpu_qwen3next_sparse_moe_forward(
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(hidden_states=hidden_states, router_logits=router_logits)
 
-    if self.shared_expert is not None:
-        final_hidden_states = (final_hidden_states[0] + final_hidden_states[1])
-
     if self.is_sequence_parallel:
         final_hidden_states = tensor_model_parallel_all_gather(final_hidden_states, 0)
         final_hidden_states = final_hidden_states[:num_tokens]
-    elif self.tp_size > 1:
-        final_hidden_states = (self.experts.maybe_all_reduce_tensor_model_parallel(final_hidden_states))
 
     return final_hidden_states.reshape(orig_shape)
 

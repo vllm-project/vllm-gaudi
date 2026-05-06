@@ -6,6 +6,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, FusedMoEConfig)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from compressed_tensors.quantization import (QuantizationArgs, QuantizationStrategy)
 
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import convert_to_channelwise, all_close_1d
@@ -22,13 +23,20 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     SparsityCompressionConfig,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors_moe)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
+    compressed_tensors_moe_w8a8_fp8,
+    compressed_tensors_moe_wna16,
+    compressed_tensors_moe_wna16_marlin,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (  # noqa: E501
     CompressedTensorsScheme, CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_TYPES_MAP)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (find_matched_target)
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
-    CompressedTensorsW8A8Fp8MoEMethod, CompressedTensorsWNA16MarlinMoEMethod)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8 import (  # noqa: E501
+    CompressedTensorsW8A8Fp8MoEMethod)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16_marlin import (  # noqa: E501
+    CompressedTensorsWNA16MarlinMoEMethod)
 from vllm.model_executor.kernels.linear.mixed_precision import (
     MPLinearKernel,
     MPLinearLayerConfig,
@@ -45,12 +53,31 @@ from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8, VllmMixtureOfExpertsOpFP8PerChannel,
                                       VllmMixtureOfExpertsOpWNA16)
 from vllm_gaudi.extension.runtime import get_config
+from vllm_gaudi.ops.hpu_fused_moe import _normalize_moe_activation
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase, )
 import vllm.model_executor.model_loader.weight_utils as vllm_weight_utils
 
 logger = init_logger(__name__)
 SUPPORTED_STRATEGIES = [QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR, QuantizationStrategy.BLOCK]
+
+
+def _hpu_weight_scale_alias(layer: torch.nn.Module, scale_name: str, hpu_scale_name: str) -> None:
+    """Rename weight scale name to convention expected by HPU ops
+
+    For example, for block quantization, HPU ops expect `weight_scale` to be named `weight_scale_inv`.
+
+    This preserves compatibility across checkpoints/codepaths that use either
+    naming convention.
+    """
+    if hasattr(layer, hpu_scale_name) or not hasattr(layer, scale_name):
+        return
+
+    # Rename weight_scale to convention expected by HPU ops
+    scale = getattr(layer, scale_name)
+    scale = scale.data if isinstance(scale, torch.nn.Parameter) else scale
+    layer.register_parameter(hpu_scale_name, torch.nn.Parameter(scale, requires_grad=False))
+    delattr(layer, scale_name)
 
 
 @CustomOp.register_oot(name='CompressedTensorsLinearMethod')
@@ -90,6 +117,13 @@ class HPUCompressedTensorsLinearMethod(OrigCompressedTensorsLinearMethod):
             if scheme_dict:
                 weight_quant = scheme_dict.get("weights")
             hpu_scheme = HPUCompressedTensorsW8A8Fp8(scheme.strategy, scheme.is_static_input_scheme, weight_quant)
+        elif (scheme_classname == "CompressedTensorsW8A8Int8"):
+            scheme_dict = self.quantization_config.get_scheme_dict(layer, layer.prefix)
+            weight_quant = None
+            if scheme_dict:
+                weight_quant = scheme_dict.get("weights")
+            hpu_scheme = HPUCompressedTensorsW8A8Int8_BF16Fallback(scheme.strategy, scheme.is_static_input_scheme,
+                                                                   weight_quant)
         elif (scheme_classname == "CompressedTensorsWNA16"):
             matched_target = find_matched_target(layer_name=layer.prefix,
                                                  module=layer,
@@ -110,14 +144,15 @@ class HPUCompressedTensorsLinearMethod(OrigCompressedTensorsLinearMethod):
 
     def dequant_fp8_weight(self, layer: torch.nn.Module) -> torch.Tensor:
         if layer.scheme.strategy == QuantizationStrategy.CHANNEL:  # weights were quantized per-channel
-            dequant_weight = layer.weight.to(layer.weight_scale.dtype) * layer.weight_scale.squeeze()
+            weight_scale = layer.weight_scale_inv if hasattr(layer, "weight_scale_inv") else layer.weight_scale
+            dequant_weight = layer.weight.to(weight_scale.dtype) * weight_scale.squeeze()
             return dequant_weight.to(torch.bfloat16).t()
         elif layer.scheme.strategy == QuantizationStrategy.BLOCK:
             if hasattr(layer, "updated_fp8_weight") and layer.updated_fp8_weight:
                 return layer.weight
             dequant_weight = hpu_ops.dequant_block_fp8_weight_naive(
-                layer.weight.t(),
-                layer.weight_scale.data,
+                layer.weight,
+                layer.weight_scale_inv.data,
                 layer.weight_block_size,
                 original_M=layer.orig_M,
                 original_N=layer.orig_N,
@@ -152,7 +187,14 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             ws_channelwise = convert_to_channelwise(layer.weight_scale, layer.logical_widths)
             layer.weight_scale = torch.nn.Parameter(ws_channelwise, requires_grad=False)
         elif layer.scheme.strategy == QuantizationStrategy.BLOCK:
+            # Rename blockwise quantization scales to match fp8_block_linear_postprocess_weights
+            # Needed for models like Mistral-Large-3-675B
+            assert self.is_static_input_scheme is False
+            _hpu_weight_scale_alias(layer, "weight_scale", "weight_scale_inv")
+            layer.quant_config.weight_block_size = self.weight_block_size
             layer = hpu_ops.fp8_block_linear_postprocess_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
+            input_scale = None
+            return
         else:
             # required by torch.compile to be torch.nn.Parameter
             layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data, requires_grad=False)
@@ -247,14 +289,87 @@ class HPUCompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             layer.register_parameter("input_scale", input_scale)
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor, bias: Optional[torch.Tensor] = None):
-        weight_scale = layer.weight_scale.transpose(0, 1) if layer.weight_scale.dim() > 1 else layer.weight_scale
+        if self.weight_block_size is not None and layer.weight.dtype == torch.float8_e4m3fn:
+            return hpu_ops.apply_block_fp8_linear_hpu(
+                input=x,
+                layer=layer,
+                block_size=self.weight_block_size,
+                bias=bias,
+                do_unpad=True,
+                force_channel_fp8=envs.VLLM_HPU_FORCE_CHANNEL_FP8,
+            )
+        weight_scale = layer.weight_scale_inv if hasattr(layer, "weight_scale_inv") else layer.weight_scale
+        weight_scale = weight_scale.transpose(0, 1) if weight_scale.dim() > 1 else weight_scale
         input_scale = getattr(layer, 'input_scale', None)
-        return hpu_ops.apply_fp8_linear_hpu(input=x,
-                                            weight=layer.weight,
-                                            weight_scale=weight_scale,
-                                            input_scale=input_scale,
-                                            bias=bias,
-                                            trans_B=False)
+        input_2d = x.view(-1, x.shape[-1])
+        output = hpu_ops.apply_fp8_linear_hpu(input=input_2d,
+                                              weight=layer.weight,
+                                              weight_scale=weight_scale,
+                                              input_scale=input_scale,
+                                              bias=bias,
+                                              trans_B=False)
+        return output.view(*x.shape[:-1], -1)
+
+
+@CustomOp.register_oot(name='CompressedTensorsW8A8Int8')
+class HPUCompressedTensorsW8A8Int8_BF16Fallback(CompressedTensorsScheme):
+    """
+    Note: BF16 weights are used instead of INT8 because an INT8 GEMM kernel is not available.
+    """
+
+    def __init__(self, strategy: str, is_static_input_scheme: bool, weight_quant: QuantizationArgs):
+        self.strategy = strategy
+        self.is_static_input_scheme = is_static_input_scheme
+        self.weight_quant = weight_quant
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return -1
+
+    def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int, output_partition_sizes: list[int],
+                       input_size: int, output_size: int, params_dtype: torch.dtype, **extra_weight_attrs):
+
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        if hpu_ops.is_hpu_gaudi2:
+            weight_loader = hpu_ops.gaudi_weight_wrapper(weight_loader)
+        output_size_per_partition = sum(output_partition_sizes)
+        layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
+        layer.weight_block_size = None
+
+        weight = ModelWeightParameter(data=torch.empty(output_size_per_partition,
+                                                       input_size_per_partition,
+                                                       dtype=torch.int8),
+                                      input_dim=1,
+                                      output_dim=0,
+                                      weight_loader=weight_loader)
+        layer.register_parameter("weight", weight)
+
+        if layer.scheme.strategy == QuantizationStrategy.CHANNEL:
+            weight_scale = ChannelQuantScaleParameter(data=torch.empty((output_size_per_partition, 1),
+                                                                       dtype=torch.float32),
+                                                      output_dim=0,
+                                                      weight_loader=weight_loader)
+        else:
+            raise ValueError(f"Weight strategy={layer.scheme.strategy} not implemented for int8 weights dequantization")
+
+        layer.register_parameter("weight_scale", weight_scale)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+
+        weight_bf16 = (layer.weight.to(torch.float32) * layer.weight_scale).to(torch.bfloat16)
+
+        layer.register_parameter("weight", None)
+        layer.register_parameter("weight_scale", None)
+
+        weight = torch.nn.Parameter(weight_bf16, requires_grad=False)
+        layer.register_parameter("weight", weight)
+
+    def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor, bias: Optional[torch.Tensor] = None):
+
+        return torch.nn.functional.linear(x, layer.weight, bias)
 
 
 @CustomOp.register_oot(name='CompressedTensorsW8A8Fp8MoEMethod')
@@ -374,10 +489,38 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
 
         if self.block_quant:
             assert layer.weight_block_size is not None
+            # Rename blockwise quantization scales to match fp8_block_moe_prepare_weights
+            # Needed for models like Mistral-Large-3-675B
+            _hpu_weight_scale_alias(layer, "w13_weight_scale", "w13_weight_scale_inv")
+            _hpu_weight_scale_alias(layer, "w2_weight_scale", "w2_weight_scale_inv")
+            layer.quant_config.weight_block_size = self.weight_block_size
             layer = hpu_ops.fp8_block_moe_prepare_weights(layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
         else:
             layer = hpu_ops.fp8_channel_moe_prepare_weights(layer)
         return
+
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig | None:
+        # On HPU, block quantization renames w13_weight_scale/w2_weight_scale
+        # to w13_weight_scale_inv/w2_weight_scale_inv via _hpu_weight_scale_alias.
+        # Use the renamed attributes for block quant.
+        if self.block_quant:
+            w13_scale = layer.w13_weight_scale_inv
+            w2_scale = layer.w2_weight_scale_inv
+        else:
+            w13_scale = layer.w13_weight_scale
+            w2_scale = layer.w2_weight_scale
+
+        is_per_token = self.input_quant.strategy == QuantizationStrategy.TOKEN
+        return FusedMoEQuantConfig.make(
+            quant_dtype=self.fp8_backend,
+            w1_scale=w13_scale,
+            w2_scale=w2_scale,
+            a1_scale=layer.w13_input_scale,
+            a2_scale=layer.w2_input_scale,
+            per_act_token_quant=is_per_token,
+            per_out_ch_quant=is_per_token,
+            block_shape=self.weight_block_size,
+        )
 
     def apply_monolithic(
         self,
@@ -404,7 +547,7 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
             topk_ids.to(torch.int64),
             topk_weights.to(x.dtype),
             permuted_weights=True,
-            activation=layer.activation,
+            activation=_normalize_moe_activation(layer.activation),
         )
         return output.view(*input_shape)
 
@@ -795,6 +938,7 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        **kwargs,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
@@ -815,7 +959,7 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
             topk_ids.to(torch.int64),
             topk_weights.to(x.dtype),
             permuted_weights=False,
-            activation=layer.activation,
+            activation=_normalize_moe_activation(layer.activation),
         )
         return output.view(*input_shape)
 
@@ -1000,10 +1144,16 @@ compressed_tensors.CompressedTensorsLinearMethod = \
     HPUCompressedTensorsLinearMethod
 compressed_tensors_moe.CompressedTensorsW8A8Fp8MoEMethod = \
     HPUCompressedTensorsW8A8Fp8MoEMethod
+compressed_tensors_moe_w8a8_fp8.CompressedTensorsW8A8Fp8MoEMethod = \
+    HPUCompressedTensorsW8A8Fp8MoEMethod
 compressed_tensors_moe.CompressedTensorsWNA16MoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod
 compressed_tensors_moe.CompressedTensorsWNA16MarlinMoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod # Override default WNA16 MoE method
+compressed_tensors_moe_wna16.CompressedTensorsWNA16MoEMethod = \
+    HPUCompressedTensorsWNA16MoEMethod
+compressed_tensors_moe_wna16_marlin.CompressedTensorsWNA16MarlinMoEMethod = \
+    HPUCompressedTensorsWNA16MoEMethod
 compressed_tensors.CompressedTensorsConfig = HPUCompressedTensorsConfig
 
 # support weight_loader_v2

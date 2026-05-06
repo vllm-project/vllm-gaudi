@@ -572,8 +572,10 @@ class InputBatch:
             # The prompt tokens are used only for applying penalties during
             # the sampling process. Hence copy these tensors only when
             # there are requests which need penalties to be applied.
-            prompt_token_ids = self._make_prompt_token_ids_tensor()
+            prompt_token_ids_cpu = self._make_prompt_token_ids_cpu_tensor()
+            prompt_token_ids = prompt_token_ids_cpu.to(device=self.device, non_blocking=True)
         else:
+            prompt_token_ids_cpu = None
             prompt_token_ids = None
 
         allowed_token_ids_mask: Optional[torch.Tensor] = None
@@ -609,7 +611,7 @@ class InputBatch:
         """
         cache: Optional[torch.Tensor] = getattr(self, '_prompt_token_ids_cache', None)
         if cache is None and not self.no_penalties:
-            self._prompt_token_ids_cache = self._make_prompt_token_ids_tensor()
+            self._prompt_token_ids_cache = self._make_prompt_token_ids_cpu_tensor()
         return self._prompt_token_ids_cache
 
     def _invalidate_prompt_token_ids_cache(self):
@@ -638,7 +640,7 @@ class InputBatch:
                 # The prompt tokens are used only for applying penalties during
                 # the sampling process. Hence copy these tensors only when
                 # there are requests which need penalties to be applied.
-                prompt_token_ids = self._make_prompt_token_ids_tensor()[req_indices]
+                prompt_token_ids = self._make_prompt_token_ids_cpu_tensor()[req_indices]
         else:
             # Even with skip_copy=True, we need prompt_token_ids for penalties
             if not self.no_penalties:
@@ -699,15 +701,19 @@ class InputBatch:
     def get_pooling_metadata(self) -> PoolingMetadata:
         pooling_params = self.get_pooling_params()
         pooling_states = self.get_pooling_states()
+        prompt_token_ids_cpu = None
+        if any(p.requires_token_ids for p in pooling_params):
+            prompt_token_ids_cpu = self._make_prompt_token_ids_cpu_tensor()
 
         return PoolingMetadata(
             prompt_lens=torch.from_numpy(self.num_prompt_tokens[:self.num_reqs]).to(self.device),
             prompt_token_ids=self.sampling_metadata.prompt_token_ids,
+            prompt_token_ids_cpu=prompt_token_ids_cpu,
             pooling_params=pooling_params,
             pooling_states=pooling_states,
         )
 
-    def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
+    def _make_prompt_token_ids_cpu_tensor(self) -> torch.Tensor:
         max_prompt_len = self.num_prompt_tokens[:self.num_reqs].max()
         prompt_token_ids_cpu_tensor = torch.empty(
             (self.num_reqs, max_prompt_len),
@@ -721,7 +727,7 @@ class InputBatch:
         # token_id of this value.
         for i in range(self.num_reqs):
             prompt_token_ids[i, self.num_prompt_tokens[i]:] = self.vocab_size
-        return prompt_token_ids_cpu_tensor.to(device=self.device, non_blocking=True)
+        return prompt_token_ids_cpu_tensor
 
     def make_lora_inputs(self,
                          num_scheduled_tokens: np.ndarray) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:

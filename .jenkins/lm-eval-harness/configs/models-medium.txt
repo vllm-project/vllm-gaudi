@@ -1,4 +1,3 @@
 granite-20b.yaml
 Qwen3-30B-A3B.yaml
-Qwen3.5-35B-A3B.yaml
 

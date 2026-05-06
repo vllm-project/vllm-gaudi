@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
 
-from vllm_gaudi.extension.config import Not, Hardware, VersionRange, ModelType, Kernel, Any, All, Value, ValueFromList, Env, Disabled, Engine, MinPackageVersion, boolean, to_dict, split_values_and_flags, list_of
+from vllm_gaudi.extension.config import Not, Hardware, VersionRange, ModelType, Kernel, Any, All, Value, ValueFromList, Env, Disabled, Enabled, Engine, MinPackageVersion, boolean, to_dict, split_values_and_flags, list_of
 from vllm_gaudi.extension.kernels import fsdpa, block_softmax_adjustment
 from vllm_gaudi.extension.validation import for_all, choice
 
@@ -13,26 +13,37 @@ from vllm_gaudi.extension.validation import for_all, choice
 def get_user_flags():
     flags = [
         Env('VLLM_DEVELOPER_MODE', boolean),
-        Env('VLLM_EXPONENTIAL_BUCKETING', boolean),
         Env('VLLM_PROMPT_BS_BUCKET_MIN', int),
         Env('VLLM_PROMPT_BS_BUCKET_STEP', int),
         Env('VLLM_PROMPT_BS_BUCKET_MAX', int),
+        Env('VLLM_PROMPT_BS_BUCKET_PAD_MAX', int),
+        Env('VLLM_PROMPT_BS_BUCKET_PAD_PERCENT', int),
         Env('VLLM_PROMPT_QUERY_BUCKET_MIN', int),
         Env('VLLM_PROMPT_QUERY_BUCKET_STEP', int),
         Env('VLLM_PROMPT_QUERY_BUCKET_MAX', int),
+        Env('VLLM_PROMPT_QUERY_BUCKET_PAD_MAX', int),
+        Env('VLLM_PROMPT_QUERY_BUCKET_PAD_PERCENT', int),
         Env('VLLM_PROMPT_SEQ_BUCKET_MIN', int),
         Env('VLLM_PROMPT_SEQ_BUCKET_STEP', int),
         Env('VLLM_PROMPT_SEQ_BUCKET_MAX', int),
+        Env('VLLM_PROMPT_SEQ_BUCKET_PAD_MAX', int),
+        Env('VLLM_PROMPT_SEQ_BUCKET_PAD_PERCENT', int),
         Env('VLLM_PROMPT_CTX_BUCKET_MIN', int),
         Env('VLLM_PROMPT_CTX_BUCKET_STEP', int),
         Env('VLLM_PROMPT_CTX_BUCKET_MAX', int),
+        Env('VLLM_PROMPT_CTX_BUCKET_PAD_MAX', int),
+        Env('VLLM_PROMPT_CTX_BUCKET_PAD_PERCENT', int),
         Env('VLLM_DECODE_BS_BUCKET_MIN', int),
         Env('VLLM_DECODE_BS_BUCKET_STEP', int),
         Env('VLLM_DECODE_BS_BUCKET_MAX', int),
+        Env('VLLM_DECODE_BS_BUCKET_PAD_MAX', int),
+        Env('VLLM_DECODE_BS_BUCKET_PAD_PERCENT', int),
         Env('VLLM_DECODE_BLOCK_BUCKET_MIN', int),
         Env('VLLM_DECODE_BLOCK_BUCKET_STEP', int),
         Env('VLLM_DECODE_BLOCK_BUCKET_MAX', int),
-        Env('VLLM_DECODE_BLOCK_BUCKET_LIMIT', int),
+        Env('VLLM_DECODE_BLOCK_BUCKET_PAD_MAX', int),
+        Env('VLLM_DECODE_BLOCK_BUCKET_PAD_PERCENT', int),
+        Env('VLLM_BUCKETING_STRATEGY', str),
         Env('VLLM_BUCKETING_FROM_FILE', str),
 
         # Non-vllm flags that are also important to print
@@ -63,7 +74,6 @@ def get_experimental_flags():
 
 def get_features():
     supported_attn_impls = ['flex_impl', 'fsdpa_impl', 'naive_impl']
-    bucketing_strategies = ['exponential_bucketing', 'linear_bucketing']
     features = [
         Value('fp32_alibi_biases', True, env_var='VLLM_ALIBI_USE_FLOAT32_BIASES'),
         Value('fp32_softmax', Any(ModelType('qwen2'), ModelType('qwen2_5_vl'))),
@@ -80,10 +90,12 @@ def get_features():
         Value('merged_prefill', False),
         Value('use_contiguous_pa', Disabled('prefix_caching'), env_var='VLLM_CONTIGUOUS_PA'),
         Value('use_bucketing', True, env_var='VLLM_ENABLE_BUCKETING'),
-        Value('exponential_bucketing', True),
-        Value('linear_bucketing', True),
-        ValueFromList('bucketing_strategy', bucketing_strategies),
-        Value('defrag', False),
+        Value('bucketing_strategy',
+              'exp',
+              env_var='VLLM_BUCKETING_STRATEGY',
+              env_var_type=str,
+              check=choice('exp', 'lin', 'pad')),
+        Value('defrag', Enabled('use_contiguous_pa')),
         Value('regional_compilation', True, env_var='VLLM_T_COMPILE_REGIONAL_COMPILATION', env_var_type=boolean),
         Value('dynamic_shapes_compilation', True, env_var='VLLM_T_COMPILE_DYNAMIC_SHAPES', env_var_type=boolean),
         Value('fullgraph_compilation', False, env_var='VLLM_T_COMPILE_FULLGRAPH', env_var_type=boolean),
@@ -91,15 +103,11 @@ def get_features():
         Value('flatten_input', Any(ModelType('qwen3_moe'), ModelType('granitemoe'), ModelType('glm4_moe'))),
         Value('high_level_profiler_enabled', False, env_var='VLLM_PROFILER_ENABLED', env_var_type=boolean),
         Value('track_graph_compilation', False, env_var='PT_HPU_METRICS_GC_DETAILS', env_var_type=boolean),
-        Value('use_output_tensor_in_matmulqk',
-              All(VersionRange(">=1.24.0.171"), MinPackageVersion("neural_compressor_pt", "3.7")),
-              env_var_type=boolean),
         Value('per_token_kv_scaling_support',
               All(VersionRange(">=1.24.0.350"), MinPackageVersion("neural_compressor_pt", "3.7")),
               env_var_type=boolean),
         Value('moe_chunk', "", env_var='VLLM_MOE_CHUNK', env_var_type=list_of(int)),
         Value('moe_token_boundary', "", env_var='VLLM_MOE_TOKEN_BOUNDARY', env_var_type=list_of(int)),
-        Value('split_moe_compilation', False, env_var='VLLM_SPLIT_MOE_COMPILATION', env_var_type=boolean),
         Value('row_parallel_chunks', 1, env_var='VLLM_ROW_PARALLEL_CHUNKS', env_var_type=int),
         Value('row_parallel_chunk_threshold', 8192, env_var='VLLM_ROW_PARALLEL_CHUNK_THRESHOLD', env_var_type=int),
         Value('use_dispatch_fn',
