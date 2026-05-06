@@ -238,10 +238,11 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         self.softmax = Softmax()
         self.matmul_av = Matmul() if not self.enable_fp8_attn \
             else FP8Matmul()
-        self.batch2block_matmul = B2BMatmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
-        self.block2batch_matmul = B2BMatmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
+        # B2B matmuls are used for softmax rescaling normalization,
+        # not attention computation. They must use bf16 to preserve
+        # precision when summing across many blocks (long sequences).
+        self.batch2block_matmul = B2BMatmul()
+        self.block2batch_matmul = B2BMatmul()
         self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn \
             else VLLMFP8KVCache()
         HPUFusedSDPA = kernels.fsdpa()
@@ -443,10 +444,11 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         self.softmax = Softmax()
         self.matmul_av = Matmul() if not self.enable_fp8_attn \
             else FP8Matmul()
-        self.batch2block_matmul = B2BMatmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
-        self.block2batch_matmul = B2BMatmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
+        # B2B matmuls are used for softmax rescaling normalization,
+        # not attention computation. They must use bf16 to preserve
+        # precision when summing across many blocks (long sequences).
+        self.batch2block_matmul = B2BMatmul()
+        self.block2batch_matmul = B2BMatmul()
         self.k_cache = VLLMKVCache() if not self.enable_fp8_attn \
             else VLLMFP8KVCache()
         self.v_cache = VLLMKVCache(is_v_cache=True) if not self.enable_fp8_attn \
