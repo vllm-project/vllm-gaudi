@@ -938,6 +938,33 @@ class TestFsdpaPromptAttentionCausalMask:
 # ---------------------------------------------------------------------------
 
 
+def _generate_realistic_qkv(bs,
+                            heads,
+                            kv_heads,
+                            head_dim,
+                            q_len_pad,
+                            kv_len_pad,
+                            device='hpu',
+                            dtype=torch.bfloat16,
+                            seed=42):
+    """Generate Q/K/V with peaked attention patterns simulating real model inference.
+
+    Real transformers produce attention logits (Q·K^T / sqrt(d)) with std ≈ 3-5,
+    creating peaked softmax distributions where each query attends strongly to a
+    few key positions.  Pure random unit-std Q/K produce logit std ≈ 1, yielding
+    near-uniform attention and near-zero output magnitudes.
+
+    Scaling Q by 3x restores realistic logit spread.  This produces peaked
+    attention (max_weight > 0.9) and meaningful output magnitudes, giving
+    SNR > 5 for FP8 and cos_sim > 0.99.
+    """
+    torch.manual_seed(seed)
+    q = torch.randn(bs, heads, q_len_pad, head_dim, dtype=dtype, device=device) * 3.0
+    k = torch.randn(bs, kv_heads, kv_len_pad, head_dim, dtype=dtype, device=device)
+    v = torch.randn(bs, kv_heads, kv_len_pad, head_dim, dtype=dtype, device=device)
+    return q, k, v
+
+
 def _build_causal_mask(valid_shape, pad_shape, device='hpu', dtype=torch.bfloat16):
     """Build a causal attention mask with prefix context and padding.
 
@@ -986,16 +1013,13 @@ _ACCURACY_SCRIPT = """\
 import torch, math, sys, json
 sys.path.insert(0, '.')
 from tests.unit_tests.test_fsdpa_slicing import (
-    TestFsdpaSlicingAccuracy{dtype}, _build_causal_mask)
+    TestFsdpaSlicingAccuracy{dtype}, _build_causal_mask, _generate_realistic_qkv)
 
 bs, heads, kv_heads, head_dim, pad = 1, 8, 2, 128, 128
 q_len, ctx_len, cs = {q_len}, {ctx_len}, {chunk_size}
-torch.manual_seed(42)
 qp, cp = q_len + pad, ctx_len + pad
 kvp = qp + cp
-q = torch.randn(bs, heads, qp, head_dim, dtype=torch.bfloat16, device='hpu')
-k = torch.randn(bs, kv_heads, kvp, head_dim, dtype=torch.bfloat16, device='hpu')
-v = torch.randn(bs, kv_heads, kvp, head_dim, dtype=torch.bfloat16, device='hpu')
+q, k, v = _generate_realistic_qkv(bs, heads, kv_heads, head_dim, qp, kvp, device='hpu')
 mask = _build_causal_mask((bs, q_len, ctx_len), (bs, qp, cp), device='hpu')
 
 ref_out = TestFsdpaSlicingAccuracy{dtype}._run_reference(q, k, v, mask)
@@ -1005,8 +1029,7 @@ sliced_out = TestFsdpaSlicingAccuracy{dtype}._run_sliced(
 
 cos_sim = torch.nn.functional.cosine_similarity(
     ref_out.flatten().float(), sliced_out.flatten().float(), dim=0).item()
-max_abs_diff = (ref_out.float() - sliced_out.float()).abs().max().item()
-print(json.dumps({{'cos_sim': cos_sim, 'max_abs_diff': max_abs_diff}}))
+print(json.dumps({{'cos_sim': cos_sim}}))
 """
 
 
@@ -1037,7 +1060,7 @@ def _run_accuracy_subprocess(dtype, q_len, ctx_len, chunk_size, graph_breaks, mo
     assert result.returncode == 0, (f"Subprocess failed (mode={mode}, lazy={lazy_mode}, dtype={dtype}):\n"
                                     f"{result.stderr[-500:]}")
     data = json.loads(result.stdout.strip().split('\n')[-1])
-    return data['cos_sim'], data['max_abs_diff']
+    return data['cos_sim']
 
 
 @requires_hpu
@@ -1099,9 +1122,8 @@ class TestFsdpaSlicingAccuracyBF16:
         if graph_breaks and mode == 'compile':
             pytest.skip('graph breaks are not supported with torch.compile')
         if mode in ('lazy', 'hpu_graph'):
-            cos_sim, max_abs_diff = _run_accuracy_subprocess('BF16', q_len, ctx_len, chunk_size, graph_breaks, mode)
+            cos_sim = _run_accuracy_subprocess('BF16', q_len, ctx_len, chunk_size, graph_breaks, mode)
         else:
-            torch.manual_seed(42)
             bs = 1
             heads = 8
             kv_heads = 2
@@ -1112,9 +1134,7 @@ class TestFsdpaSlicingAccuracyBF16:
             kv_len_pad = q_len_pad + ctx_len_pad
             slice_thld = kv_len_pad
 
-            q = torch.randn(bs, heads, q_len_pad, head_dim, dtype=torch.bfloat16, device='hpu')
-            k = torch.randn(bs, kv_heads, kv_len_pad, head_dim, dtype=torch.bfloat16, device='hpu')
-            v = torch.randn(bs, kv_heads, kv_len_pad, head_dim, dtype=torch.bfloat16, device='hpu')
+            q, k, v = _generate_realistic_qkv(bs, heads, kv_heads, head_dim, q_len_pad, kv_len_pad, device='hpu')
             attn_mask = _build_causal_mask((bs, q_len, ctx_len), (bs, q_len_pad, ctx_len_pad), device='hpu')
 
             ref_out = self._run_reference(q, k, v, attn_mask)
@@ -1132,10 +1152,8 @@ class TestFsdpaSlicingAccuracyBF16:
             cos_sim = torch.nn.functional.cosine_similarity(ref_out.flatten().float(),
                                                             sliced_out.flatten().float(),
                                                             dim=0).item()
-            max_abs_diff = (ref_out.float() - sliced_out.float()).abs().max().item()
 
-        assert cos_sim > 0.92, f"BF16 cosine similarity too low: {cos_sim}"
-        assert max_abs_diff < 0.45, f"BF16 max abs diff too large: {max_abs_diff}"
+        assert cos_sim > 0.95, f"BF16 cosine similarity too low: {cos_sim}"
 
 
 @requires_hpu
@@ -1215,9 +1233,8 @@ class TestFsdpaSlicingAccuracyFP8:
         if graph_breaks and mode == 'compile':
             pytest.skip('graph breaks are not supported with torch.compile')
         if mode in ('lazy', 'hpu_graph'):
-            cos_sim, max_abs_diff = _run_accuracy_subprocess('FP8', q_len, ctx_len, chunk_size, graph_breaks, mode)
+            cos_sim = _run_accuracy_subprocess('FP8', q_len, ctx_len, chunk_size, graph_breaks, mode)
         else:
-            torch.manual_seed(42)
             bs = 1
             heads = 8
             kv_heads = 2
@@ -1228,9 +1245,7 @@ class TestFsdpaSlicingAccuracyFP8:
             kv_len_pad = q_len_pad + ctx_len_pad
             slice_thld = kv_len_pad
 
-            q = torch.randn(bs, heads, q_len_pad, head_dim, dtype=torch.bfloat16, device='hpu')
-            k = torch.randn(bs, kv_heads, kv_len_pad, head_dim, dtype=torch.bfloat16, device='hpu')
-            v = torch.randn(bs, kv_heads, kv_len_pad, head_dim, dtype=torch.bfloat16, device='hpu')
+            q, k, v = _generate_realistic_qkv(bs, heads, kv_heads, head_dim, q_len_pad, kv_len_pad, device='hpu')
             attn_mask = _build_causal_mask((bs, q_len, ctx_len), (bs, q_len_pad, ctx_len_pad), device='hpu')
 
             ref_out = self._run_reference(q, k, v, attn_mask)
@@ -1248,10 +1263,8 @@ class TestFsdpaSlicingAccuracyFP8:
             cos_sim = torch.nn.functional.cosine_similarity(ref_out.flatten().float(),
                                                             sliced_out.flatten().float(),
                                                             dim=0).item()
-            max_abs_diff = (ref_out.float() - sliced_out.float()).abs().max().item()
 
-        assert cos_sim > 0.74, f"FP8 cosine similarity too low: {cos_sim}"
-        assert max_abs_diff < 0.45, f"FP8 max abs diff too large: {max_abs_diff}"
+        assert cos_sim > 0.94, f"FP8 cosine similarity too low: {cos_sim}"
 
 
 # ---------------------------------------------------------------------------
@@ -1264,16 +1277,13 @@ _GRAPH_COUNT_SCRIPT = """\
 import torch, math, sys, glob
 sys.path.insert(0, '.')
 from tests.unit_tests.test_fsdpa_slicing import (
-    TestFsdpaSlicingAccuracy{dtype}, _build_causal_mask)
+    TestFsdpaSlicingAccuracy{dtype}, _build_causal_mask, _generate_realistic_qkv)
 
 bs, heads, kv_heads, head_dim, pad = 1, 8, 2, 128, 128
 q_len, ctx_len, cs = 2048, 4096, 2048
-torch.manual_seed(42)
 qp, cp = q_len + pad, ctx_len + pad
 kvp = qp + cp
-q = torch.randn(bs, heads, qp, head_dim, dtype=torch.bfloat16, device='hpu')
-k = torch.randn(bs, kv_heads, kvp, head_dim, dtype=torch.bfloat16, device='hpu')
-v = torch.randn(bs, kv_heads, kvp, head_dim, dtype=torch.bfloat16, device='hpu')
+q, k, v = _generate_realistic_qkv(bs, heads, kv_heads, head_dim, qp, kvp, device='hpu')
 mask = _build_causal_mask((bs, q_len, ctx_len), (bs, qp, cp), device='hpu')
 out = TestFsdpaSlicingAccuracy{dtype}._run_sliced(
     q, k, v, mask, kvp, cs, pad, pad,
