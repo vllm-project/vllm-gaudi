@@ -30,6 +30,7 @@ import asyncio
 import contextlib
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -231,6 +232,21 @@ class ServerLogCapture:
             self.warmup_events = []
 
 
+def _stop_server_process_tree(proc: subprocess.Popen[str], timeout: float = 10.0) -> None:
+    """Stop the server process and its descendants (EngineCore workers) via process group."""
+    if proc.poll() is not None:
+        proc.wait(timeout=0)
+        return
+
+    pgid = os.getpgid(proc.pid)
+    os.killpg(pgid, signal.SIGTERM)
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(pgid, signal.SIGKILL)
+        proc.wait(timeout=timeout)
+
+
 def run_server(config_path: str,
                api_host: str,
                api_port: int,
@@ -271,6 +287,7 @@ def run_server(config_path: str,
         stderr=subprocess.STDOUT,
         universal_newlines=True,
         bufsize=1,
+        start_new_session=True,
     )
 
     def capture_logs():
@@ -586,7 +603,21 @@ async def generate(api_host: str,
 
 def print_metrics_table(all_metrics):
     """Print a summary table of per-phase metrics."""
+
+    def fmt_num(value: Any, width: int, precision: int = 1) -> str:
+        if isinstance(value, (int, float)):
+            return f"{value:>{width}.{precision}f}"
+        return f"{'N/A':>{width}}"
+
+    def fmt_int(value: Any, width: int) -> str:
+        if isinstance(value, int):
+            return f"{value:>{width}d}"
+        if isinstance(value, float):
+            return f"{int(value):>{width}d}"
+        return f"{'N/A':>{width}}"
+
     hdr = (f"{'Phase':>5}  {'Model':<38}  "
+           f"{'Status':<12}  "
            f"{'Init/Switch(s)':>14}  {'Warmup(s)':>9}  "
            f"{'Gen(s)':>7}  "
            f"{'Tokens':>7}  "
@@ -598,8 +629,11 @@ def print_metrics_table(all_metrics):
     print(sep)
 
     for m in all_metrics:
-        warmup_s = m.get('warmup_s', 'N/A')
-        warmup_str = f"{warmup_s:>9.1f}" if isinstance(warmup_s, (int, float)) else f"{str(warmup_s):>9}"
+        warmup_str = fmt_num(m.get('warmup_s'), 9, 1)
+        reconfigure_str = fmt_num(m.get('reconfigure_s'), 13, 1)
+        gen_str = fmt_num(m.get('gen_s'), 7, 2)
+        tokens_str = fmt_int(m.get('tokens'), 7)
+        status_str = str(m.get('status', 'ok'))
 
         freed_gb = _mb_to_gb(m.get('freed_memory_mb'))
         freed_str = f"{freed_gb:>9.2f}" if isinstance(freed_gb, (int, float)) else f"{'N/A':>9}"
@@ -609,21 +643,27 @@ def print_metrics_table(all_metrics):
 
         print(f"{m['phase']:>5}  "
               f"{_display_model_name(m['model'], 38):<38}  "
-              f"{m['reconfigure_s']:>13.1f}  "
+              f"{status_str:<12}  "
+              f"{reconfigure_str}  "
               f"{warmup_str}  "
-              f"{m['gen_s']:>7.2f}  "
-              f"{m['tokens']:>7}  "
+              f"{gen_str}  "
+              f"{tokens_str}  "
               f"{freed_str}  "
               f"{stash_used_str}")
     print(sep)
 
     n = len(all_metrics)
     if n > 0:
-        avg = {
-            'reconfigure_s': sum(m['reconfigure_s'] for m in all_metrics) / n,
-            'gen_s': sum(m['gen_s'] for m in all_metrics) / n,
-            'tokens': sum(m['tokens'] for m in all_metrics) / n,
-        }
+        reconfigure_values = [
+            m.get('reconfigure_s') for m in all_metrics if isinstance(m.get('reconfigure_s'), (int, float))
+        ]
+        gen_values = [m.get('gen_s') for m in all_metrics if isinstance(m.get('gen_s'), (int, float))]
+        token_values = [m.get('tokens') for m in all_metrics if isinstance(m.get('tokens'), (int, float))]
+
+        avg_reconfigure = (sum(reconfigure_values) / len(reconfigure_values)) if reconfigure_values else None
+        avg_gen = (sum(gen_values) / len(gen_values)) if gen_values else None
+        avg_tokens = (sum(token_values) / len(token_values)) if token_values else None
+
         warmup_times = [m.get('warmup_s') for m in all_metrics if isinstance(m.get('warmup_s'), (int, float))]
         if warmup_times:
             avg_warmup = sum(warmup_times) / len(warmup_times)
@@ -646,13 +686,15 @@ def print_metrics_table(all_metrics):
             stash_used_str = f"{'N/A':>13}"
 
         print(f"{'AVG':>5}  {'':<38}  "
-              f"{avg['reconfigure_s']:>13.1f}  "
+              f"{'':<12}  "
+              f"{fmt_num(avg_reconfigure, 13, 1)}  "
               f"{warmup_str}  "
-              f"{avg['gen_s']:>7.2f}  "
-              f"{avg['tokens']:>7.0f}  "
+              f"{fmt_num(avg_gen, 7, 2)}  "
+              f"{fmt_int(avg_tokens, 7)}  "
               f"{freed_str}  "
               f"{stash_used_str}")
         print(sep)
+        print(f"  Warmup AVG computed on {len(warmup_times)}/{n} phases with captured warmup events")
 
 
 async def main():
@@ -753,6 +795,16 @@ async def main():
             model_name = model_info['id']
             model_display_name = model_info['display_name']
 
+            phase_metrics: dict[str, Any] = {
+                'phase': phase,
+                'model': model_display_name,
+                'status': 'pending',
+                'reconfigure_s': None,
+                'warmup_s': None,
+                'gen_s': None,
+                'tokens': None,
+            }
+
             print("\n" + "=" * 60)
             print(f"  PHASE {phase}/{args.phases}: {model_display_name}")
             print("=" * 60)
@@ -772,7 +824,7 @@ async def main():
                     'switched': False,
                     'model': model_name,
                 }
-                warmup_s = None  # Phase 1 warmup not measured separately
+                warmup_s = startup_warmup_s
                 # Capture baseline output on first load (no switch yet).
                 if not args.no_accuracy_check:
                     print(f"  [accuracy] Capturing baseline for {model_display_name} on {len(PROMPTS)} prompts...")
@@ -788,22 +840,30 @@ async def main():
                 if switch_result['status'] != 'ok':
                     error_msg = switch_result.get('error')
                     print(f"  ✗ Switch failed: {error_msg}")
+                    phase_metrics['status'] = 'switch_failed'
+                    phase_metrics['error'] = error_msg
                     phase_failures.append(f"phase{phase} switch failed: {error_msg}")
+                    all_metrics.append(phase_metrics)
                     continue
 
                 reconfigure_ms = switch_result.get('reconfigure_ms')
                 if isinstance(reconfigure_ms, (int, float)):
+                    phase_metrics['reconfigure_s'] = reconfigure_ms / 1000.0
                     print(f"  ✓ Sleep+load(reconfigure) duration: {reconfigure_ms / 1000.0:.1f}s")
                 else:
+                    phase_metrics['reconfigure_s'] = switch_result.get('duration_s')
                     print(f"  ✓ Switch API duration: {switch_result['duration_s']:.1f}s")
 
-                # Extract warmup time from logs captured during switch
-                # Wait a bit for final logs to be captured
+                # Extract warmup time from logs captured during switch.
+                # Wait a bit for final logs to be captured.
                 await asyncio.sleep(0.5)
                 warmup_times = log_capture.get_warmup_times()
                 warmup_s = warmup_times[-1] if warmup_times else None
+                phase_metrics['warmup_s'] = warmup_s
                 if warmup_s is not None:
                     print(f"  ✓ Warmup time from logs: {warmup_s}s")
+                else:
+                    print("  [warning] No warmup event found for this switch")
 
                 freed_gb = _mb_to_gb(switch_result.get('freed_memory_mb'))
                 if freed_gb is not None:
@@ -812,6 +872,9 @@ async def main():
                 stash_used_gb = _mb_to_gb(switch_result.get('stash_memory_after_mb'))
                 if stash_used_gb is not None:
                     print(f"  ✓ HPU memory still used after stashing: {stash_used_gb:.2f} GB")
+
+                phase_metrics['freed_memory_mb'] = switch_result.get('freed_memory_mb')
+                phase_metrics['stash_memory_after_mb'] = switch_result.get('stash_memory_after_mb')
 
                 # Accuracy check: compare post-switch output to baseline.
                 if not args.no_accuracy_check:
@@ -856,25 +919,20 @@ async def main():
             if gen_result['status'] != 'ok':
                 error_msg = gen_result.get('error')
                 print(f"  ✗ Generation failed: {error_msg}")
+                phase_metrics['status'] = 'generation_failed'
+                phase_metrics['error'] = error_msg
                 phase_failures.append(f"phase{phase} generation failed: {error_msg}")
+                all_metrics.append(phase_metrics)
                 continue
 
             print(f"  ✓ Generated {gen_result['output_tokens']} tokens in {gen_result['duration_s']:.2f}s")
 
-            phase_metrics = {
-                'phase': len(all_metrics) + 1,
-                'model': model_display_name,
-                'reconfigure_s': (switch_result.get('reconfigure_ms') or 0) / 1000.0,
-                'warmup_s': warmup_s,
-                'gen_s': gen_result['duration_s'],
-                'tokens': gen_result['output_tokens'],
-            }
             if phase == 1:
                 phase_metrics['reconfigure_s'] = initial_load_s
                 phase_metrics['warmup_s'] = startup_warmup_s
-            else:
-                phase_metrics['freed_memory_mb'] = switch_result.get('freed_memory_mb')
-                phase_metrics['stash_memory_after_mb'] = switch_result.get('stash_memory_after_mb')
+            phase_metrics['gen_s'] = gen_result['duration_s']
+            phase_metrics['tokens'] = gen_result['output_tokens']
+            phase_metrics['status'] = 'ok'
             all_metrics.append(phase_metrics)
 
         total_time = time.time() - test_start
@@ -926,12 +984,15 @@ async def main():
         if proc:
             print("\n>>> Shutting down server...")
             try:
-                proc.terminate()
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-            print("  ✓ Server stopped")
+                _stop_server_process_tree(proc)
+            except Exception as exc:  # noqa: BLE001
+                print(f"  ✗ Failed to stop server process tree cleanly: {exc}")
+                with contextlib.suppress(Exception):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    proc.wait(timeout=5)
+            else:
+                print("  ✓ Server process tree stopped")
 
         # Clean up temp config if we created it
         if args.config is None and config_path:
