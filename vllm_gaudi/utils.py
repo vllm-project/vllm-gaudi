@@ -291,6 +291,9 @@ _async_sched_module.AsyncScheduler = HPUAsyncScheduler  # type: ignore[misc]
 # when KV-cache blocks are invalidated during OOM and token-count bookkeeping
 # becomes temporarily inconsistent.  Prometheus counters require non-negative
 # increments; clamping here prevents a crash in PrometheusStatLogger.record().
+# noqa: E402 cannot be hoisted to the module top: this monkey-patch must run
+# AFTER the `_async_sched_module.AsyncScheduler = HPUAsyncScheduler` rebind
+# above so vllm.v1.metrics.stats picks up the HPU scheduler symbol.
 import vllm.v1.metrics.stats as _stats_module  # noqa: E402
 
 _stats_get_by_source_orig = _stats_module.PromptTokenStats.get_by_source

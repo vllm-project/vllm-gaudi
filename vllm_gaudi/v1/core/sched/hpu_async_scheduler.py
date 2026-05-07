@@ -10,14 +10,20 @@ class HPUAsyncScheduler(AsyncScheduler):
     def schedule(self):
         """HPU override: fix stale num_cached_tokens after OOM preemption.
 
-        After preemption and requeue a request restarts scheduling from
-        num_computed_tokens=0.  The OffloadingConnector may assign new external
-        cache hits, setting num_external_computed_tokens > 0 while
-        num_cached_tokens stays stale at 0 from the previous scheduling pass.
-        Upstream only refreshes num_cached_tokens when it is negative, missing
-        this case.  We post-process running requests to detect and fix it:
-        inv: num_cached_tokens >= num_external_computed_tokens (always holds
-        when both fields are consistent), so a violation means staleness.
+        After preemption a request is requeued with num_computed_tokens reset.
+        On the next schedule() the OffloadingConnector may assign new external
+        cache hits, raising num_external_computed_tokens above the stale
+        num_cached_tokens (which upstream only refreshes when negative). After
+        super().schedule() has advanced num_computed_tokens for this step, we
+        post-process running requests to detect this staleness
+        (num_cached_tokens < num_external_computed_tokens) and resync
+        num_cached_tokens.
+
+        NOTE: only requests that were actually scheduled this step land in
+        self.running here; a request requeued by the connector but not yet
+        re-scheduled stays in self.waiting and the inconsistency persists
+        until it is picked up. The Prometheus clamp in vllm_gaudi/utils.py
+        guards the metrics path during that window.
         """
         output = super().schedule()
         for request in self.running:
@@ -34,6 +40,15 @@ class HPUAsyncScheduler(AsyncScheduler):
         """HPU override: clamp num_external_computed_tokens to 0 instead of
         allowing it to go negative when OOM-invalidated blocks span both
         externally-computed and locally-computed token ranges.
+
+        NOTE: This is a near-verbatim copy of the upstream
+        ``vllm.v1.core.sched.async_scheduler.AsyncScheduler
+        ._update_requests_with_invalid_blocks``. The only functional delta is
+        the ``max(0, ...)`` clamp on ``request.num_external_computed_tokens``
+        below (search for "HPU delta"). Keep this method in sync with
+        upstream when that routine evolves (hybrid memory allocator support,
+        new connector types, etc.). An upstream issue tracking the negative
+        clamp should be filed against vllm-project/vllm.
         """
         affected_req_ids: set[str] = set()
         total_affected_tokens = 0
@@ -70,9 +85,10 @@ class HPUAsyncScheduler(AsyncScheduler):
                 request.num_computed_tokens = idx * self.block_size
                 num_affected_tokens = (req_num_computed_tokens - request.num_computed_tokens)
                 total_affected_tokens += num_affected_tokens
-                # Clamp to 0: num_affected_tokens may exceed the number of
-                # externally-computed tokens when OOM-invalidation spans
-                # locally-computed blocks too.
+                # HPU delta vs upstream: clamp to 0. num_affected_tokens may
+                # exceed the number of externally-computed tokens when
+                # OOM-invalidation spans locally-computed blocks too, which
+                # would otherwise drive num_external_computed_tokens negative.
                 request.num_external_computed_tokens = max(
                     0,
                     request.num_external_computed_tokens - num_affected_tokens,
