@@ -53,11 +53,9 @@ def ernie4_5_vlmoemoe_forward_hpu(
     elif visual_token_mask is not None and visual_token_mask.cpu().any():  # WA for HPU: fallback to CPU
         text_token_mask = ~visual_token_mask
         text_router_logits, _ = self.text_experts_gate(hidden_states.to(dtype=torch.float32))
-        text_experts_output = self.text_experts(hidden_states=hidden_states,
-                                                                    router_logits=text_router_logits)
+        text_experts_output = self.text_experts(hidden_states=hidden_states, router_logits=text_router_logits)
         vision_router_logits, _ = self.vision_experts_gate(hidden_states.to(dtype=torch.float32))
-        vision_experts_output = self.vision_experts(hidden_states=hidden_states,
-                                                                          router_logits=vision_router_logits)
+        vision_experts_output = self.vision_experts(hidden_states=hidden_states, router_logits=vision_router_logits)
         final_hidden_states = (text_experts_output * text_token_mask + vision_experts_output * visual_token_mask)
     else:
         # only text modal input
