@@ -1153,7 +1153,7 @@ class TestFsdpaSlicingAccuracyBF16:
                                                             sliced_out.flatten().float(),
                                                             dim=0).item()
 
-        assert cos_sim > 0.95, f"BF16 cosine similarity too low: {cos_sim}"
+        assert cos_sim > 0.999, f"BF16 cosine similarity too low: {cos_sim}"
 
 
 @requires_hpu
@@ -1264,7 +1264,7 @@ class TestFsdpaSlicingAccuracyFP8:
                                                             sliced_out.flatten().float(),
                                                             dim=0).item()
 
-        assert cos_sim > 0.94, f"FP8 cosine similarity too low: {cos_sim}"
+        assert cos_sim > 0.99, f"FP8 cosine similarity too low: {cos_sim}"
 
 
 # ---------------------------------------------------------------------------

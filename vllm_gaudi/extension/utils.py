@@ -307,17 +307,18 @@ class SlicedFusedSDPABase(torch.nn.Module):
                 k_chunk = k[..., kv_start:kv_end, :].contiguous()
                 v_chunk = v[..., kv_start:kv_end, :].contiguous()
 
-                is_causal_chunk = kv_chunk_idx == 0 and q_chunk_idx >= self.num_padded_query_chunks
-                # chunk sizes must be multiples of 1024 to get valid m and linv
-                is_causal_chunk = is_causal_chunk and q_chunk_size % 1024 == 0 and kv_chunk_size % 1024 == 0
-                # use mask only for the causal chunks that may have padding
+                # Always pass explicit mask for the diagonal chunk (kv_chunk_idx==0)
+                # to ensure numerical consistency. The kernel's is_causal=True path
+                # uses a different internal algorithm that can diverge from the
+                # explicit mask path even when both encode the same triangular pattern.
+                # For non-diagonal chunks within the padded region, also pass mask.
                 mask_chunk = (attn_mask[..., q_start:q_end, kv_start:kv_end].contiguous()
-                              if kv_chunk_idx < self.num_padded_query_chunks and not is_causal_chunk else None)
+                              if kv_chunk_idx == 0 or kv_chunk_idx < self.num_padded_query_chunks else None)
 
                 self.maybe_break_graph()
 
                 chunk_out, chunk_m, chunk_linv = chunk_kernel_fn(q_chunk, k_chunk, v_chunk, mask_chunk, dropout_p,
-                                                                 scale, is_causal_chunk, softmax_mode)
+                                                                 scale, False, softmax_mode)
 
                 last_out, last_m, last_linv = self._merge_chunk(last_out, last_m, last_linv, chunk_out, chunk_m,
                                                                 chunk_linv)
