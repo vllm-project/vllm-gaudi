@@ -10,20 +10,24 @@ from collections.abc import Iterator
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_cache_interface import AttentionSpec, UniformTypeKVCacheSpecs
-from vllm.v1.kv_offload.mediums import BlockIDsLoadStoreSpec
-from vllm.v1.kv_offload.spec import (
+from vllm.v1.kv_offload.base import (
+    BlockIDsLoadStoreSpec,
     CanonicalKVCacheRef,
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
+    GPULoadStoreSpec,
+    LoadStoreSpec,
 )
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.gpu_worker import (
+    CpuGpuOffloadingHandlers,
+    SingleDirectionOffloadingHandler,
+)
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
     TransferSpec,
 )
-from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
-from vllm.v1.kv_offload.abstract import LoadStoreSpec
-from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
-from vllm.v1.kv_offload.worker.cpu_gpu import (SingleDirectionOffloadingHandler, CpuGpuOffloadingHandlers)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import OffloadingConnectorWorker
 
 logger = init_logger(__name__)
