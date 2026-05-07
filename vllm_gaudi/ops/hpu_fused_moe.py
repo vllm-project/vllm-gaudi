@@ -547,7 +547,7 @@ _orig_fused_moe_init = FusedMoE.__init__
 def _hpu_fused_moe_init(self, *args, **kwargs):
     _orig_fused_moe_init(self, *args, **kwargs)
     if hasattr(self, 'runner'):
-        self.runner._hpu_layer_ref = self
+        object.__setattr__(self.runner, '_hpu_layer_ref', self)
 
 
 FusedMoE.__init__ = _hpu_fused_moe_init
