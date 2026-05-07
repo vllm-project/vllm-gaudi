@@ -409,14 +409,12 @@ class ModuleFusedSDPA(torch.nn.Module):
         window_size=None,
         sinks=None,
     ):
-        bs = query.shape[0]
-        q_len = query.shape[-2]
-        kv_len = key.shape[-2]
-        if (self._sliced_module.enable_slicing and kv_len >= self._sliced_module.slice_thld \
-                and bs == 1  # bs should be 1 for chunked prefill
-                and q_len != kv_len  # normal causal prefill route to the default dispatch for better performance
+        if (self._sliced_module.enable_slicing
+                and key.shape[-2] >= self._sliced_module.slice_thld  # apply for kv_len >= slice_thld only
+                and query.shape[0] == 1  # bs should be 1 for prefix-prefill
+                and query.shape[-2] != key.shape[-2]  # normal prefill with q_len == kv_len route to the default
                 and is_causal and attn_mask is not None  # only supports causal attention with mask
-                and padding_side == 'right'  # currently only supports right padding for the chunks that may have padding
+                and padding_side == 'right'  # supports right padding only for the chunks that may have padding
                 and window_size is None  # slicing is not compatible with sliding window attention
                 and sinks is None  # slicing is not compatible with kernel fusion with sinks
             ):
