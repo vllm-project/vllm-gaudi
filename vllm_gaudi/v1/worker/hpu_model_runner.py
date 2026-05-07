@@ -1201,14 +1201,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.use_hpu_graph = not self.model_config.enforce_eager
         self.max_batch_size = self.scheduler_config.max_num_seqs
         self.max_num_seqs = self.scheduler_config.max_num_seqs
-        self.max_cudagraph_capture_size = self.vllm_config.compilation_config.max_cudagraph_capture_size
         if prompt_profile_cfg:
             self.max_prefill_batch_size = prompt_profile_cfg[0]
         else:
             self.max_prefill_batch_size = with_default(get_config().VLLM_PROMPT_BS_BUCKET_MAX, 1)
         self.seen_configs: set = set()
-        self.max_num_batched_tokens = \
-            self.scheduler_config.max_num_batched_tokens
+        self.max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+        self.max_cudagraph_capture_size = self.vllm_config.compilation_config.max_cudagraph_capture_size
+        if self.max_cudagraph_capture_size is None:
+            self.max_cudagraph_capture_size = self.max_num_batched_tokens
         self.use_prefix_caching = (self.vllm_config.cache_config.enable_prefix_caching)
         self.bucketing_manager = HPUBucketingManager()
         max_num_prefill_seqs = self.max_num_seqs if self.use_merged_prefill \
@@ -3258,9 +3259,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self._check_config(batch_size, seq_len, num_blocks, attn_metadata, warmup_mode)
         additional_kwargs = {}
         if htorch.utils.internal.is_lazy():
-            use_graphs = self._use_graphs()
-            if self.max_cudagraph_capture_size is not None and batch_size * seq_len > self.max_cudagraph_capture_size:
-                use_graphs = False
+            use_graphs = self._use_graphs(attn_metadata, batch_size)
             additional_kwargs.update({"bypass_hpu_graphs": not use_graphs})
         else:
             # no hpu graphs for t.compile?
@@ -4562,8 +4561,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def _compile(self, module):
         return torch.compile(module, **self.compile_config.get_compile_args())
 
-    def _use_graphs(self):
-        return not self.model_config.enforce_eager
+    def _use_graphs(self, attn_metadata, batch_size):
+        if self.model_config.enforce_eager:
+            return False
+        # skip HPU graphs for long (query + context) prefills
+        if attn_metadata is not None and attn_metadata.is_prompt:
+            seq_len = attn_metadata.seq_len()
+            num_blocks = attn_metadata.num_blocks()
+            total_tokens = (batch_size * seq_len + num_blocks * attn_metadata.block_size)
+            if total_tokens > self.max_cudagraph_capture_size:
+                logger.debug_once(f"Skipping HPU graph capture for prompt with [bs, query, num_blocks] = "
+                                  f"[{batch_size}, {seq_len}, {num_blocks}] due to total token count "
+                                  f"{total_tokens} exceeding the threshold of {self.max_cudagraph_capture_size}.")
+                return False
+        return True
 
     def _get_model_layers(self):
         """Return the decoder layers from the model, handling both
