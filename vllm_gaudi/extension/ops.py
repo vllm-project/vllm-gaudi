@@ -682,86 +682,42 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
         w13_list = self._cached_w13_views
         w2_list = self._cached_w2_views
         if(activation != "silu"):
-            T, H = hidden_states.shape
-            device = hidden_states.device
-            dtype = hidden_states.dtype  # expected bf16
-
             limit = 7.0
+            device = hidden_states.device
+            dtype = hidden_states.dtype
+            T, H = hidden_states.shape
 
-            # ---- local experts
+            # 本地 experts 数
             E_local = len(self.w13_list)
+            if(activation != "silu"):
+                # 1) global experts mask: [E_global, T, 1]
+                experts_mask = torch.zeros((T, self.global_num_experts), dtype=dtype, device=device)
+                experts_mask.scatter_(-1, expert_routing_table.long(), router_weights.to(dtype))
+                experts_mask = experts_mask.transpose(0, 1).unsqueeze(-1)  # [E_global, T, 1]
 
-            # ------------------------------------------------------------
-            # 1) 准备权重：从 list 取出并 stack 成 batch
-            #   W13: [E, 2D, H] 
-            #   W2 : [E, H, D]   
-            # ------------------------------------------------------------
-            W13 = torch.stack(
-                [self.w13_list[i].weight.squeeze().to(dtype=dtype, device=device) for i in range(E_local)],
-                dim=0,
-            )  # [E, 2D, H]
+                out = torch.zeros((T, H), dtype=dtype, device=device)
 
-            W2 = torch.stack(
-                [self.w2_list[i].weight.squeeze().to(dtype=dtype, device=device) for i in range(E_local)],
-                dim=0,
-            )  # [E, H, D]  
+                # 2) 只算本地 experts，但 mask 用 global id 取
+                for local_e in range(E_local):
+                    global_eid = self.experts_min + local_e
 
-            twoD = W13.size(1)
-            if twoD % 2 != 0:
-                raise RuntimeError(f"W13 second dim should be 2D and even, got {twoD}")
-            D = twoD // 2
+                    W13 = w13_list[local_e]  # 期望 [2D, H] 或等价
+                    W2  = w2_list[local_e]   # 期望 [H, D] 或等价
 
-            # ------------------------------------------------------------
-            # 2) 构造 experts_mask_local: [E_local, T, 1]
-            #    这里完全沿用你原写法：先做 global mask，再按 global_eid 切本地段
-            # ------------------------------------------------------------
-            if expert_routing_table.dim() == 1:
-                topk_ids = expert_routing_table.view(T, 1)
-            else:
-                topk_ids = expert_routing_table  # [T,K]
+                    gate_up = hidden_states @ W13.t()  # [T, 2D]
 
-            if router_weights.dim() == 1:
-                topk_w = router_weights.view(T, 1).to(dtype)
-            else:
-                topk_w = router_weights.to(dtype)
+                    # if activation == "silu":
+                    #     # 标准 swiglu: silu(gate) * up
+                    #     gate, up = gate_up.chunk(2, dim=-1)
+                    #     ff = F.silu(gate) * up
+                    # else:
+                    #     # 自定义 clamp 版本
+                    ff = self.custom_gateup_activation(gate_up, limit=limit)
 
-            experts_mask = torch.zeros((T, self.global_num_experts), dtype=dtype, device=device)
-            experts_mask.scatter_(-1, topk_ids.long(), topk_w)
-            experts_mask = experts_mask.transpose(0, 1).unsqueeze(-1)  # [E_global, T, 1]
+                    y = ff @ W2.t()  # [T, H]
 
-            e0 = int(self.experts_min)
-            e1 = e0 + E_local
-            experts_mask_local = experts_mask[e0:e1, ...]  # [E_local, T, 1]
-
-            # ------------------------------------------------------------
-            # 3) 第一次 batched GEMM：gate_up = x @ W13^T
-            #    用 bmm 实现：把 x 扩成 [E,T,H]，W13^T 变成 [E,H,2D]
-            # ------------------------------------------------------------
-            xE = hidden_states.unsqueeze(0).expand(E_local, -1, -1).contiguous()  # [E,T,H]
-            W13_T = W13.transpose(1, 2).contiguous()                              # [E,H,2D]
-
-            gate_up = torch.bmm(xE, W13_T)                                        # [E,T,2D]
-
-            # ------------------------------------------------------------
-            # 4) activation：得到 [E,T,D]
-            # ------------------------------------------------------------
-            if activation == "silu":
-                gate, up = gate_up.split(D, dim=-1)  # 比 chunk 更明确
-                ff = F.silu(gate) * up               # [E,T,D]
-            else:
-                ff = self.custom_gateup_activation(gate_up, limit=limit)  # [E,T,D]
-
-            # ------------------------------------------------------------
-            # 5) 第二次 batched GEMM：y = ff @ W2^T -> [E,T,H]
-            #    W2: [E,H,D] => W2^T: [E,D,H]
-            # ------------------------------------------------------------
-            W2_T = W2.transpose(1, 2).contiguous()  # [E,D,H]
-            y = torch.bmm(ff, W2_T)                 # [E,T,H]
-
-            # ------------------------------------------------------------
-            # 6) 路由加权并 sum experts：out = sum_e (y_e * mask_e)
-            # ------------------------------------------------------------
-            out = (y * experts_mask_local).sum(dim=0)  # [T,H]
+                    # 乘该 expert 的权重并累加
+                    out = out + y * experts_mask[global_eid]  # [T,H] * [T,1]
         if self.moe_n_slice == 1 and activation == "silu":
             if self.bias is not None:
                 return torch.ops.hpu.mixture_of_experts.bias_fused_weights(hidden_states=hidden_states,
