@@ -773,7 +773,7 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
             xE = hidden_states.unsqueeze(0).expand(E_local, -1, -1).contiguous()  # [E,T,H]
             W13_T = W13.transpose(1, 2)                              # [E,H,2D]
 
-            gate_up = torch.bmm(xE, W13_T)                                        # [E,T,2D]
+            gate_up = torch.bmm(xE, W13_T).contiguous()                                      # [E,T,2D]
 
             # ------------------------------------------------------------
             # 4) activation：得到 [E,T,D]
@@ -789,7 +789,7 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
             #    W2: [E,H,D] => W2^T: [E,D,H]
             # ------------------------------------------------------------
             W2_T = W2.transpose(1, 2)  # [E,D,H]
-            y = torch.bmm(ff, W2_T)                 # [E,T,H]
+            y = torch.bmm(ff, W2_T).contiguous()                  # [E,T,H]
 
             # ------------------------------------------------------------
             # 6) 路由加权并 sum experts：out = sum_e (y_e * mask_e)
