@@ -1,5 +1,4 @@
 import torch
-from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.models.ernie45_vl import (
     Ernie4_5VLMultiModalProcessor,
     Ernie4_5_VLProcessingInfo,
