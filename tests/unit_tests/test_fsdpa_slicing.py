@@ -17,7 +17,21 @@ import sys
 import pytest
 from unittest.mock import patch, MagicMock
 
+import habana_frameworks.torch as ht
+from habana_frameworks.torch.hpex.kernels import FusedSDPA
+
+from vllm_gaudi.extension.bucketing.linear import LinearBucketingStrategy
+from vllm_gaudi.extension.bucketing.padding_aware import PaddingAwareBucketingStrategy
 from vllm_gaudi.extension.config import Config, Eq, All, Disabled, Kernel, Value, Env, boolean
+from vllm_gaudi.extension.features import get_user_flags, get_features
+from vllm_gaudi.extension.ops import _fsdpa_prompt_attention, dynamic_quant
+from vllm_gaudi.extension.utils import (
+    ModuleFP8FusedSDPA,
+    ModuleFusedSDPA,
+    SlicedFP8FusedSDPA,
+    SlicedFusedSDPA,
+    SlicedFusedSDPABase,
+)
 
 # ---------------------------------------------------------------------------
 # HPU availability check
@@ -26,7 +40,6 @@ from vllm_gaudi.extension.config import Config, Eq, All, Disabled, Kernel, Value
 
 def _hpu_available():
     try:
-        import torch
         return hasattr(torch, 'hpu') and torch.hpu.is_available()
     except Exception:
         return False
@@ -51,7 +64,6 @@ class _MockBucketingManager:
     def get_bucketing_strategy(self):
         if self._strategy_cls is not None:
             return self._strategy_cls()
-        from vllm_gaudi.extension.bucketing.padding_aware import PaddingAwareBucketingStrategy
         return PaddingAwareBucketingStrategy()
 
 
@@ -176,7 +188,6 @@ class TestSetupSlicing:
         mock_get_config.return_value = _make_config(enable_fsdpa_slicing=False)
         mock_get_instance.return_value = None
 
-        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         result = base._setup_slicing()
         assert result is False
@@ -187,7 +198,6 @@ class TestSetupSlicing:
         mock_get_config.return_value = _make_config(bucketing_strategy='exp')
         mock_get_instance.return_value = None
 
-        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         result = base._setup_slicing()
         assert result is False
@@ -198,7 +208,6 @@ class TestSetupSlicing:
         mock_get_config.return_value = _make_config(merged_prefill=True)
         mock_get_instance.return_value = None
 
-        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         result = base._setup_slicing()
         assert result is False
@@ -209,7 +218,6 @@ class TestSetupSlicing:
         mock_get_config.return_value = _make_config()
         mock_get_instance.return_value = None
 
-        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         with pytest.raises(AssertionError):
             base._setup_slicing()
@@ -220,7 +228,6 @@ class TestSetupSlicing:
         mock_get_config.return_value = _make_config()
         mock_get_instance.return_value = _MockBucketingManager(initialized=False)
 
-        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         with pytest.raises(AssertionError):
             base._setup_slicing()
@@ -228,11 +235,9 @@ class TestSetupSlicing:
     @patch('vllm_gaudi.extension.utils.get_config')
     @patch('vllm_gaudi.extension.bucketing.common.HPUBucketingManager.get_instance')
     def test_raises_when_not_padding_aware_strategy(self, mock_get_instance, mock_get_config):
-        from vllm_gaudi.extension.bucketing.linear import LinearBucketingStrategy
         mock_get_config.return_value = _make_config()
         mock_get_instance.return_value = _MockBucketingManager(strategy_cls=LinearBucketingStrategy)
 
-        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         with pytest.raises(AssertionError):
             base._setup_slicing()
@@ -244,7 +249,6 @@ class TestSetupSlicing:
         mock_get_config.return_value = _make_config()
         mock_get_instance.return_value = _MockBucketingManager(max_num_batched_tokens=8192, block_size=128)
 
-        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         result = base._setup_slicing()
         assert result is True
@@ -259,7 +263,6 @@ class TestSetupSlicing:
         mock_get_config.return_value = _make_config()
         mock_get_instance.return_value = _MockBucketingManager(max_num_batched_tokens=8192, block_size=128)
 
-        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         result = base._setup_slicing()
         assert result is True
@@ -272,7 +275,6 @@ class TestSetupSlicing:
         mock_get_config.return_value = _make_config()
         mock_get_instance.return_value = _MockBucketingManager(max_num_batched_tokens=16384, block_size=128)
 
-        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         result = base._setup_slicing()
         assert result is True
@@ -285,7 +287,6 @@ class TestSetupSlicing:
         mock_get_config.return_value = _make_config()
         mock_get_instance.return_value = _MockBucketingManager(max_num_batched_tokens=4096, block_size=128)
 
-        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         result = base._setup_slicing()
         assert result is True
@@ -300,7 +301,6 @@ class TestSetupSlicing:
         mock_get_config.return_value = _make_config()
         mock_get_instance.return_value = _MockBucketingManager(max_num_batched_tokens=8192, block_size=128)
 
-        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         result = base._setup_slicing()
         assert result is True
@@ -318,7 +318,6 @@ class TestSetupSlicing:
         mock_get_config.return_value = _make_config()
         mock_get_instance.return_value = _MockBucketingManager(max_num_batched_tokens=8192, block_size=128)
 
-        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         result = base._setup_slicing()
         # threshold 4096 < default 8192 logs a warning but proceeds
@@ -334,7 +333,6 @@ class TestSetupSlicing:
         mock_get_config.return_value = _make_config()
         mock_get_instance.return_value = _MockBucketingManager(max_num_batched_tokens=8192, block_size=128)
 
-        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         result = base._setup_slicing()
         assert result is True
@@ -348,7 +346,6 @@ class TestSetupSlicing:
         mock_get_config.return_value = _make_config()
         mock_get_instance.return_value = _MockBucketingManager(max_num_batched_tokens=8192, block_size=1024)
 
-        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         with pytest.raises(AssertionError):
             base._setup_slicing()
@@ -361,7 +358,6 @@ class TestSetupSlicing:
         mock_get_config.return_value = _make_config()
         mock_get_instance.return_value = _MockBucketingManager(max_num_batched_tokens=8192, block_size=128)
 
-        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         with pytest.raises(AssertionError):
             base._setup_slicing()
@@ -374,7 +370,6 @@ class TestSetupSlicing:
         mock_get_config.return_value = _make_config()
         mock_get_instance.return_value = _MockBucketingManager(max_num_batched_tokens=8192, block_size=128)
 
-        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         result = base._setup_slicing()
         assert result is True
@@ -387,7 +382,6 @@ class TestSetupSlicing:
         mock_get_config.return_value = _make_config()
         mock_get_instance.return_value = _MockBucketingManager(max_num_batched_tokens=8192, block_size=128)
 
-        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         result = base._setup_slicing()
         assert result is True
@@ -412,7 +406,6 @@ class TestSetupSlicing:
         mock_get_config.return_value = _make_config()
         mock_get_instance.return_value = _MockBucketingManager(max_num_batched_tokens=8192, block_size=128)
 
-        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         result = base._setup_slicing()
         assert result is True
@@ -424,7 +417,6 @@ class TestSetupSlicing:
         mock_get_config.return_value = _make_config(use_bucketing=False)
         mock_get_instance.return_value = None
 
-        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         result = base._setup_slicing()
         assert result is False
@@ -438,7 +430,6 @@ class TestSetupSlicing:
         mock_get_config.return_value = _make_config()
         mock_get_instance.return_value = _MockBucketingManager(max_num_batched_tokens=8192, block_size=128)
 
-        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         with pytest.raises(AssertionError):
             base._setup_slicing()
@@ -452,7 +443,6 @@ class TestSetupSlicing:
         mock_get_config.return_value = _make_config()
         mock_get_instance.return_value = _MockBucketingManager(max_num_batched_tokens=8192, block_size=128)
 
-        from vllm_gaudi.extension.utils import SlicedFusedSDPABase
         base = SlicedFusedSDPABase.__new__(SlicedFusedSDPABase)
         with pytest.raises(AssertionError):
             base._setup_slicing()
@@ -465,7 +455,6 @@ class TestSetupSlicing:
 
 def _make_sliced_bf16(chunk_size, num_padded_query_chunks=0, num_padded_ctx_chunks=0, with_graph_breaks=False):
     """Build a SlicedFusedSDPA bypassing _setup_slicing (for testing / HPU accuracy)."""
-    from vllm_gaudi.extension.utils import SlicedFusedSDPA
     with patch('vllm_gaudi.extension.utils.SlicedFusedSDPABase._setup_slicing', return_value=True):
         module = SlicedFusedSDPA()
     module.enable_slicing = True
@@ -492,7 +481,6 @@ def _make_sliced_fp8(chunk_size,
                      descale_amax,
                      with_graph_breaks=False):
     """Build a SlicedFP8FusedSDPA bypassing _setup_slicing (for testing / HPU accuracy)."""
-    from vllm_gaudi.extension.utils import SlicedFP8FusedSDPA
 
     # Create a lightweight parent-like namespace to hold scale tensors
     class _ScaleHolder:
@@ -569,8 +557,6 @@ class TestModuleFusedSDPAForwardDispatch:
 
     def _make_module(self, enable_slicing=True, slice_thld=4096, chunk_size=2048):
         """Create a ModuleFusedSDPA with slicing attributes set directly."""
-        import torch
-        from vllm_gaudi.extension.utils import ModuleFusedSDPA
 
         mock_kernel = MagicMock()
         mock_kernel.apply.return_value = torch.zeros(1, 4, 1024, 64)
@@ -591,7 +577,6 @@ class TestModuleFusedSDPAForwardDispatch:
         return module
 
     def test_slicing_dispatched_when_conditions_met(self):
-        import torch
         module = self._make_module()
         q = torch.randn(1, 4, 2048, 64)  # bs=1, heads=4, q_len=2048
         k = torch.randn(1, 4, 8192, 64)  # kv_len=8192 >= threshold
@@ -603,7 +588,6 @@ class TestModuleFusedSDPAForwardDispatch:
         module._sliced_module.assert_called_once()
 
     def test_default_path_when_slicing_disabled(self):
-        import torch
         module = self._make_module(enable_slicing=False)
         q = torch.randn(1, 4, 2048, 64)
         k = torch.randn(1, 4, 8192, 64)
@@ -614,7 +598,6 @@ class TestModuleFusedSDPAForwardDispatch:
         module._hpu_kernel_fsdpa.apply.assert_called_once()
 
     def test_default_path_when_bs_not_1(self):
-        import torch
         module = self._make_module()
         q = torch.randn(2, 4, 2048, 64)  # bs=2
         k = torch.randn(2, 4, 8192, 64)
@@ -625,7 +608,6 @@ class TestModuleFusedSDPAForwardDispatch:
         module._sliced_module.assert_not_called()
 
     def test_default_path_when_q_len_equals_kv_len(self):
-        import torch
         module = self._make_module()
         q = torch.randn(1, 4, 4096, 64)
         k = torch.randn(1, 4, 4096, 64)  # q_len == kv_len
@@ -636,7 +618,6 @@ class TestModuleFusedSDPAForwardDispatch:
         module._sliced_module.assert_not_called()
 
     def test_default_path_when_not_causal(self):
-        import torch
         module = self._make_module()
         q = torch.randn(1, 4, 2048, 64)
         k = torch.randn(1, 4, 8192, 64)
@@ -647,7 +628,6 @@ class TestModuleFusedSDPAForwardDispatch:
         module._sliced_module.assert_not_called()
 
     def test_default_path_when_no_attn_mask(self):
-        import torch
         module = self._make_module()
         q = torch.randn(1, 4, 2048, 64)
         k = torch.randn(1, 4, 8192, 64)
@@ -657,7 +637,6 @@ class TestModuleFusedSDPAForwardDispatch:
         module._sliced_module.assert_not_called()
 
     def test_default_path_when_padding_side_left(self):
-        import torch
         module = self._make_module()
         q = torch.randn(1, 4, 2048, 64)
         k = torch.randn(1, 4, 8192, 64)
@@ -668,7 +647,6 @@ class TestModuleFusedSDPAForwardDispatch:
         module._sliced_module.assert_not_called()
 
     def test_default_path_with_window_size(self):
-        import torch
         module = self._make_module()
         q = torch.randn(1, 4, 2048, 64)
         k = torch.randn(1, 4, 8192, 64)
@@ -679,7 +657,6 @@ class TestModuleFusedSDPAForwardDispatch:
         module._sliced_module.assert_not_called()
 
     def test_default_path_with_sinks(self):
-        import torch
         module = self._make_module()
         q = torch.randn(1, 4, 2048, 64)
         k = torch.randn(1, 4, 8192, 64)
@@ -701,7 +678,6 @@ class TestModuleFusedSDPAForwardDispatch:
         module._sliced_module.assert_not_called()
 
     def test_default_path_when_kv_len_below_threshold(self):
-        import torch
         module = self._make_module(slice_thld=8192)
         q = torch.randn(1, 4, 2048, 64)
         k = torch.randn(1, 4, 4096, 64)  # kv_len=4096 < threshold=8192
@@ -714,7 +690,6 @@ class TestModuleFusedSDPAForwardDispatch:
     def test_causal_with_mask_clears_causal_on_default_path(self):
         """When slicing is not triggered but is_causal=True and attn_mask is set,
         the default path should clear is_causal and valid_sequence_lengths."""
-        import torch
         module = self._make_module(enable_slicing=False)
         q = torch.randn(1, 4, 2048, 64)
         k = torch.randn(1, 4, 8192, 64)
@@ -739,8 +714,6 @@ class TestModuleFP8FusedSDPAForwardDispatch:
     """Tests that FP8 forward dispatches correctly."""
 
     def _make_module(self, enable_slicing=True, slice_thld=4096, chunk_size=2048):
-        import torch
-        from vllm_gaudi.extension.utils import ModuleFP8FusedSDPA
 
         mock_kernel = MagicMock()
         mock_kernel.return_value = (torch.zeros(1, 4, 1024, 64), )
@@ -775,7 +748,6 @@ class TestModuleFP8FusedSDPAForwardDispatch:
         return module
 
     def test_slicing_dispatched_when_conditions_met(self):
-        import torch
         module = self._patch_quant(self._make_module())
         q = torch.randn(1, 4, 2048, 64)
         k = torch.randn(1, 4, 8192, 64)
@@ -787,7 +759,6 @@ class TestModuleFP8FusedSDPAForwardDispatch:
         module._sliced_module.assert_called_once()
 
     def test_default_path_when_slicing_disabled(self):
-        import torch
         module = self._patch_quant(self._make_module(enable_slicing=False))
         q = torch.randn(1, 4, 2048, 64)
         k = torch.randn(1, 4, 8192, 64)
@@ -798,7 +769,6 @@ class TestModuleFP8FusedSDPAForwardDispatch:
         module.fp8_fused_sdpa.assert_called_once()
 
     def test_default_path_when_bs_not_1(self):
-        import torch
         module = self._patch_quant(self._make_module())
         q = torch.randn(2, 4, 2048, 64)
         k = torch.randn(2, 4, 8192, 64)
@@ -809,7 +779,6 @@ class TestModuleFP8FusedSDPAForwardDispatch:
         module._sliced_module.assert_not_called()
 
     def test_default_path_with_window_size(self):
-        import torch
         module = self._patch_quant(self._make_module())
         q = torch.randn(1, 4, 2048, 64)
         k = torch.randn(1, 4, 8192, 64)
@@ -826,7 +795,6 @@ class TestModuleFP8FusedSDPAForwardDispatch:
         assert module.d_scale_output.item() == 1.0
 
     def test_causal_with_mask_clears_causal_on_default_path(self):
-        import torch
         module = self._patch_quant(self._make_module(enable_slicing=False))
         q = torch.randn(1, 4, 2048, 64)
         k = torch.randn(1, 4, 8192, 64)
@@ -839,7 +807,6 @@ class TestModuleFP8FusedSDPAForwardDispatch:
         assert call_kwargs['valid_seq_len'] is None
 
     def test_default_path_when_q_len_equals_kv_len(self):
-        import torch
         module = self._patch_quant(self._make_module())
         q = torch.randn(1, 4, 4096, 64)
         k = torch.randn(1, 4, 4096, 64)  # q_len == kv_len
@@ -850,7 +817,6 @@ class TestModuleFP8FusedSDPAForwardDispatch:
         module._sliced_module.assert_not_called()
 
     def test_default_path_when_not_causal(self):
-        import torch
         module = self._patch_quant(self._make_module())
         q = torch.randn(1, 4, 2048, 64)
         k = torch.randn(1, 4, 8192, 64)
@@ -861,7 +827,6 @@ class TestModuleFP8FusedSDPAForwardDispatch:
         module._sliced_module.assert_not_called()
 
     def test_default_path_when_no_attn_mask(self):
-        import torch
         module = self._patch_quant(self._make_module())
         q = torch.randn(1, 4, 2048, 64)
         k = torch.randn(1, 4, 8192, 64)
@@ -871,7 +836,6 @@ class TestModuleFP8FusedSDPAForwardDispatch:
         module._sliced_module.assert_not_called()
 
     def test_default_path_when_padding_side_left(self):
-        import torch
         module = self._patch_quant(self._make_module())
         q = torch.randn(1, 4, 2048, 64)
         k = torch.randn(1, 4, 8192, 64)
@@ -882,7 +846,6 @@ class TestModuleFP8FusedSDPAForwardDispatch:
         module._sliced_module.assert_not_called()
 
     def test_default_path_when_kv_len_below_threshold(self):
-        import torch
         module = self._patch_quant(self._make_module(slice_thld=8192))
         q = torch.randn(1, 4, 2048, 64)
         k = torch.randn(1, 4, 4096, 64)  # kv_len < threshold
@@ -902,7 +865,6 @@ class TestFsdpaSlicingUserFlags:
     """Tests for the FSDPA slicing env flags registered in features.py."""
 
     def test_slicing_env_flags_registered(self):
-        from vllm_gaudi.extension.features import get_user_flags
         flags = get_user_flags()
         assert 'VLLM_HPU_FSDPA_SLICE_ENABLED' in flags
         assert 'VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD' in flags
@@ -910,25 +872,21 @@ class TestFsdpaSlicingUserFlags:
         assert 'VLLM_HPU_FSDPA_SLICE_WITH_GRAPH_BREAKS' in flags
 
     def test_slice_enabled_flag_is_boolean(self):
-        from vllm_gaudi.extension.features import get_user_flags
         flags = get_user_flags()
         flag = flags['VLLM_HPU_FSDPA_SLICE_ENABLED']
         assert flag.value_type is boolean
 
     def test_slice_thld_flag_is_int(self):
-        from vllm_gaudi.extension.features import get_user_flags
         flags = get_user_flags()
         flag = flags['VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD']
         assert flag.value_type is int
 
     def test_slice_chunk_size_flag_is_int(self):
-        from vllm_gaudi.extension.features import get_user_flags
         flags = get_user_flags()
         flag = flags['VLLM_HPU_FSDPA_SLICE_CHUNK_SIZE']
         assert flag.value_type is int
 
     def test_enable_fsdpa_slicing_feature_registered(self):
-        from vllm_gaudi.extension.features import get_features
         values, flags = get_features()
         assert 'enable_fsdpa_slicing' in values
         assert 'VLLM_HPU_FSDPA_SLICE_ENABLED' in flags
@@ -945,8 +903,6 @@ class TestFsdpaPromptAttentionCausalMask:
     def test_causal_and_mask_passed_through(self):
         """After removal of the workaround, is_causal and attn_bias should
         both be forwarded to the fsdpa kernel when both are provided."""
-        import torch
-        from unittest.mock import MagicMock
 
         mock_fsdpa_op = MagicMock(return_value=torch.randn(1, 4, 2048, 64))
 
@@ -954,8 +910,6 @@ class TestFsdpaPromptAttentionCausalMask:
             cfg = MagicMock()
             cfg.fp32_softmax = False
             mock_cfg.return_value = cfg
-
-            from vllm_gaudi.extension.ops import _fsdpa_prompt_attention
 
             q = torch.randn(1, 2048, 4, 64)  # before transpose: [bs, seq, heads, dim]
             k = torch.randn(1, 2048, 4, 64)
@@ -1097,7 +1051,6 @@ class TestFsdpaSlicingAccuracyBF16:
     @staticmethod
     def _run_reference(q, k, v, attn_mask):
         """Non-sliced reference: single FusedSDPA call with full mask."""
-        from habana_frameworks.torch.hpex.kernels import FusedSDPA
         with torch.inference_mode():
             output = FusedSDPA.apply(
                 q,
@@ -1125,7 +1078,6 @@ class TestFsdpaSlicingAccuracyBF16:
             torch._dynamo.reset()
             module = torch.compile(module, backend='hpu_backend')
         elif mode == 'hpu_graph':
-            import habana_frameworks.torch as ht
             module = ht.hpu.wrap_in_hpu_graph(module)
         with torch.inference_mode():
             output = module(q, k, v, attn_mask, 0.0, True, None, 'fast')
@@ -1198,7 +1150,6 @@ class TestFsdpaSlicingAccuracyFP8:
     @staticmethod
     def _run_reference(q, k, v, attn_mask):
         """BF16 ground-truth reference: single FusedSDPA call with full mask."""
-        from habana_frameworks.torch.hpex.kernels import FusedSDPA
         with torch.inference_mode():
             output = FusedSDPA.apply(
                 q,
@@ -1223,7 +1174,6 @@ class TestFsdpaSlicingAccuracyFP8:
         Uses dynamic_quant for FP8 quantization following FP8BucketSDPA.__init__
         in profile_fsdpa_apc.py.
         """
-        from vllm_gaudi.extension.ops import dynamic_quant
 
         q_fp8, scale_q = dynamic_quant(q, single_scale=True)
         k_fp8, scale_k = dynamic_quant(k, single_scale=True)
@@ -1244,7 +1194,6 @@ class TestFsdpaSlicingAccuracyFP8:
             torch._dynamo.reset()
             module = torch.compile(module, backend='hpu_backend')
         elif mode == 'hpu_graph':
-            import habana_frameworks.torch as ht
             module = ht.hpu.wrap_in_hpu_graph(module)
         with torch.inference_mode():
             output = module(q_fp8, k_fp8, v_fp8, attn_mask, 0.0, True, None, 'fast')
