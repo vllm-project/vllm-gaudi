@@ -4561,7 +4561,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def _compile(self, module):
         return torch.compile(module, **self.compile_config.get_compile_args())
 
-    def _use_graphs(self, attn_metadata=None, batch_size=0):
+    def _use_graphs(self, attn_metadata, batch_size):
         if self.model_config.enforce_eager:
             return False
         # skip HPU graphs for long (query + context) prefills
