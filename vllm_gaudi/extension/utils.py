@@ -219,6 +219,7 @@ class SlicedFusedSDPABase(torch.nn.Module):
         # should align with the default value in PaddingAwareBucketingStrategy
         max_query_pad_default = math.ceil(max_num_batched_tokens / 4)
         max_query_pad = int(os.getenv("VLLM_PROMPT_QUERY_BUCKET_PAD_MAX", str(max_query_pad_default)))
+        assert max_query_pad >= block_size, 'Invalid max query padding, the max query padding should be greater than or equal to the block size.'
         self.num_padded_query_chunks = math.ceil(max_query_pad / self.chunk_size)
 
         # should align with the default value in PaddingAwareBucketingStrategy
