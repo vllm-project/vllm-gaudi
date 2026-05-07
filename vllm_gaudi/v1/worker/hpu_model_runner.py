@@ -5075,6 +5075,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             num_scheduled_tokens[req_id] = scheduled_tokens
 
     def _generate_seq_lengths(self, num_samples, num_blocks, block_size):
+        # ensure the actual number of blocks is less than the KV cache blocks
+        num_blocks = min(self.kv_cache_config.num_blocks, num_blocks)
+
         assert num_samples <= num_blocks
         blocks = [num_blocks // num_samples] * num_samples
         missing_blocks = num_blocks - sum(blocks)

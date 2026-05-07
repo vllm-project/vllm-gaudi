@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
 
+import math
+
 import pytest
 from unittest.mock import patch
 
@@ -189,25 +191,25 @@ class _MockConfig:
 
 
 @patch('vllm_gaudi.extension.bucketing.exponential.get_config')
-def test_exponential_decode_cfgs_non_contiguous_pa_bounded(mock_get_config):
-    """max_decode_blocks should be max_blocks * 3 when use_contiguous_pa=False.
-
-    The 3x multiplier accounts for prefix-cache block sharing: the same
-    physical block can appear in multiple sequences' block tables, so total
-    block references may exceed num_hpu_blocks.
+def test_exponential_decode_cfgs_non_contiguous_pa_unbounded(mock_get_config):
+    """max_decode_blocks should be ceil(max_model_len/block_size)*max_num_seqs
+    when use_contiguous_pa=False.  Actual bounding of generated buckets
+    happens via filters in generate_buckets().
     """
     mock_get_config.return_value = _MockConfig(use_contiguous_pa=False)
     strategy = ExponentialBucketingStrategy()
 
     max_blocks = 3593
     block_size = 128
-    _, _, block_cfg = strategy.get_decode_cfgs(max_num_seqs=256,
+    max_model_len = 91964
+    max_num_seqs = 256
+    _, _, block_cfg = strategy.get_decode_cfgs(max_num_seqs=max_num_seqs,
                                                block_size=block_size,
                                                max_num_batched_tokens=131072,
-                                               max_model_len=91964,
+                                               max_model_len=max_model_len,
                                                max_blocks=max_blocks)
 
-    expected_max = max_blocks * 3  # 10779
+    expected_max = math.ceil(max_model_len / block_size) * max_num_seqs
     assert block_cfg[2] == expected_max, (f"Expected max_decode_blocks={expected_max}, got {block_cfg[2]}")
 
 
@@ -229,8 +231,12 @@ def test_exponential_decode_cfgs_contiguous_pa_uses_max_blocks(mock_get_config):
 
 
 @patch('vllm_gaudi.extension.bucketing.exponential.get_config')
-def test_exponential_decode_max_never_exceeds_bounded_value(mock_get_config):
-    """Regression test: large max_model_len must NOT produce gigantic decode buckets."""
+def test_exponential_decode_cfgs_non_contiguous_pa_formula(mock_get_config):
+    """Verify non-contiguous PA decode cfg uses ceil(max_model_len/block_size)*max_num_seqs.
+
+    Actual bounding of excessive buckets happens via the
+    num_ctx_tokens_less_or_equal_batched_max_model_len filter in generate_buckets().
+    """
     mock_get_config.return_value = _MockConfig(use_contiguous_pa=False)
     strategy = ExponentialBucketingStrategy()
 
@@ -245,14 +251,8 @@ def test_exponential_decode_max_never_exceeds_bounded_value(mock_get_config):
                                                max_model_len=max_model_len,
                                                max_blocks=max_blocks)
 
-    # The old (buggy) formula would produce min(91964//128*256, ...) = 183808
-    # The fix should give max_blocks * 3 = 10779
-    assert block_cfg[2] <= max_blocks * 3, (f"Decode bucket max {block_cfg[2]} exceeds bounded limit "
-                                            f"{max_blocks * 3}. Buckets are too large!")
-    # Sanity: must not be the old gigantic value
-    old_buggy_value = max_model_len // block_size * max_num_seqs
-    assert block_cfg[2] < old_buggy_value, (f"Decode bucket max {block_cfg[2]} matches buggy formula output "
-                                            f"{old_buggy_value}")
+    expected_max = math.ceil(max_model_len / block_size) * max_num_seqs
+    assert block_cfg[2] == expected_max, (f"Expected max_decode_blocks={expected_max}, got {block_cfg[2]}")
 
 
 @patch('vllm_gaudi.extension.bucketing.exponential.get_config')
@@ -315,8 +315,8 @@ _REAL_BUGGY_MAX_DECODE_BLOCKS = 183808  # min(91964//128*256, 3593*256//4)
 @patch('vllm_gaudi.extension.bucketing.exponential.get_config')
 def test_real_scenario_decode_cfg_matches_fixed_log(mock_get_config):
     """Verify decode bucket config matches expected values for real scenario.
-
-    With max_blocks * 3: block config should be [1, 256, 10779, 14]
+    With non-contiguous PA: block config should be
+    [1, 256, ceil(91964/128)*256, ceil(log2(that))+1]
     """
     mock_get_config.return_value = _MockConfig(use_contiguous_pa=False)
     strategy = ExponentialBucketingStrategy()
@@ -327,13 +327,11 @@ def test_real_scenario_decode_cfg_matches_fixed_log(mock_get_config):
                                                max_model_len=_REAL_MAX_MODEL_LEN,
                                                max_blocks=_REAL_MAX_BLOCKS)
 
-    # Expected: [1, 256, 10779, 14]
+    expected_max = math.ceil(_REAL_MAX_MODEL_LEN / _REAL_BLOCK_SIZE) * _REAL_MAX_NUM_SEQS
+    expected_limit = math.ceil(math.log2(expected_max)) + 1
     assert block_cfg[0] == 1, f"block min: expected 1, got {block_cfg[0]}"
     assert block_cfg[1] == _REAL_MAX_NUM_SEQS, (f"block step: expected {_REAL_MAX_NUM_SEQS}, got {block_cfg[1]}")
-    assert block_cfg[2] == _REAL_FIXED_MAX_DECODE_BLOCKS, (
-        f"block max: expected {_REAL_FIXED_MAX_DECODE_BLOCKS}, got {block_cfg[2]}")
-    import math
-    expected_limit = math.ceil(math.log2(_REAL_MAX_BLOCKS * 3)) + 1  # 14
+    assert block_cfg[2] == expected_max, (f"block max: expected {expected_max}, got {block_cfg[2]}")
     assert block_cfg[3] == expected_limit, (f"block limit: expected {expected_limit}, got {block_cfg[3]}")
 
 
@@ -357,10 +355,11 @@ def test_real_scenario_decode_cfg_matches_fixed_bs_log(mock_get_config):
 
 
 @patch('vllm_gaudi.extension.bucketing.exponential.get_config')
-def test_real_scenario_decode_block_range_bounded(mock_get_config):
-    """Verify generated decode block range stays within bounds (real scenario).
+def test_real_scenario_decode_block_range_within_cfg_max(mock_get_config):
+    """Verify generated decode block range stays within cfg max (real scenario).
 
-    Fixed log showed blocks up to 3721. Buggy run had blocks up to 183808.
+    The block range from get_range() extends up to max_decode_blocks.
+    Actual bounding per (bs, ctx) pair happens via filters in generate_buckets().
     """
     mock_get_config.return_value = _MockConfig(use_contiguous_pa=False)
     strategy = ExponentialBucketingStrategy()
@@ -372,14 +371,9 @@ def test_real_scenario_decode_block_range_bounded(mock_get_config):
                                                max_blocks=_REAL_MAX_BLOCKS)
 
     block_range = strategy.get_range(block_cfg)
+    expected_max = math.ceil(_REAL_MAX_MODEL_LEN / _REAL_BLOCK_SIZE) * _REAL_MAX_NUM_SEQS
 
-    assert max(block_range) <= _REAL_FIXED_MAX_DECODE_BLOCKS, (
-        f"Largest block bucket {max(block_range)} exceeds bounded max "
-        f"{_REAL_FIXED_MAX_DECODE_BLOCKS}")
-    assert max(block_range) < _REAL_BUGGY_MAX_DECODE_BLOCKS, (
-        f"Block range still contains buggy value {_REAL_BUGGY_MAX_DECODE_BLOCKS}")
-    # Verify reasonable number of buckets (log showed 13 unique block values)
-    assert len(block_range) <= 20, (f"Too many block buckets: {len(block_range)}")
+    assert max(block_range) <= expected_max, (f"Largest block bucket {max(block_range)} exceeds cfg max {expected_max}")
 
 
 @patch('vllm_gaudi.extension.bucketing.exponential.get_config')
@@ -533,6 +527,36 @@ def test_real_scenario_fallback_ctx_7408_not_truncated():
     assert new_ctx == calc_fallback_value(7408, 32), (f"Fallback ctx {new_ctx} should equal calc_fallback_value result")
 
 
+def test_exponential_decode_block_limit_uncapped(monkeypatch):
+    """Verify that decode block limit is computed from log2(max_decode_blocks).
+
+    With the new approach, excessive warmup buckets are controlled by
+    filters in generate_buckets() (num_ctx_tokens_less_or_equal_batched_max_model_len)
+    rather than by capping the block limit in get_decode_cfgs().
+    """
+    monkeypatch.setenv("VLLM_EXPONENTIAL_BUCKETING", "true")
+    monkeypatch.setenv("VLLM_CONTIGUOUS_PA", "true")
+    clear_config()
+    get_config()
+
+    strategy = ExponentialBucketingStrategy()
+    max_num_seqs = 21
+    block_size = 128
+    max_num_batched_tokens = 8192
+    max_model_len = 131072
+    max_blocks = 65536
+
+    bs_cfg, query_cfg, block_cfg = strategy.get_decode_cfgs(max_num_seqs, block_size, max_num_batched_tokens,
+                                                            max_model_len, max_blocks)
+
+    # max_decode_blocks = min(65536, ceil(131072/128)*21) = min(65536, 21504) = 21504
+    expected_max_decode_blocks = min(max_blocks, math.ceil(max_model_len / block_size) * max_num_seqs)
+    expected_limit = math.ceil(math.log2(expected_max_decode_blocks)) + 1
+    assert block_cfg[2] == expected_max_decode_blocks, (
+        f"Expected max_decode_blocks={expected_max_decode_blocks}, got {block_cfg[2]}")
+    assert block_cfg[3] == expected_limit, (f"Expected decode_blocks_limit={expected_limit}, got {block_cfg[3]}")
+
+
 # --- Padding-aware bucketing tests ---
 
 
@@ -640,3 +664,66 @@ def test_padding_aware_decode_cfgs_contiguous_pa_clamps_block_range(mock_get_con
                                                max_blocks=3593)
 
     assert block_cfg == [3465, 128, 3593, 899, 25]
+
+
+# --- Tests that num_ctx_tokens_less_or_equal_batched_max_model_len filter is applied ---
+
+
+@pytest.mark.parametrize("use_contiguous_pa", [True, False], ids=["contiguous_pa", "non_contiguous_pa"])
+@pytest.mark.parametrize(
+    ("max_model_len", "block_size", "max_num_seqs", "max_blocks", "max_num_batched_tokens"),
+    [
+        (91964, 128, 256, 3593, 2048),  # Qwen3-32B real scenario
+        (4096, 128, 64, 500, 2048),  # small model
+        (131072, 128, 21, 65536, 8192),  # long context
+    ],
+    ids=["qwen3_32b", "small_model", "long_ctx"],
+)
+def test_decode_buckets_satisfy_ctx_filter(monkeypatch, use_contiguous_pa, max_model_len, block_size, max_num_seqs,
+                                           max_blocks, max_num_batched_tokens):
+    """Every decode bucket returned by generate_buckets must satisfy
+    num_ctx_tokens_less_or_equal_batched_max_model_len:
+        ctx <= ceil(max_model_len / block_size) * bs   (when ctx > ctx_range[0])
+    """
+    monkeypatch.setenv("VLLM_CONTIGUOUS_PA", str(use_contiguous_pa).lower())
+    clear_config()
+    get_config()
+
+    strategy = ExponentialBucketingStrategy()
+
+    bs_cfg, query_cfg, block_cfg = strategy.get_decode_cfgs(
+        max_num_seqs=max_num_seqs,
+        block_size=block_size,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_model_len=max_model_len,
+        max_blocks=max_blocks,
+    )
+    bs_range = strategy.get_range(bs_cfg)
+    query_range = strategy.get_range(query_cfg)
+    ctx_range = strategy.get_range(block_cfg)
+
+    buckets = generate_buckets(
+        bs_range=bs_range,
+        query_range=query_range,
+        ctx_range=ctx_range,
+        is_prompt=False,
+        max_model_len=max_model_len,
+        max_num_seqs=max_num_seqs,
+        max_num_prefill_seqs=1,
+        max_num_batched_tokens=max_num_batched_tokens,
+        block_size=block_size,
+        max_blocks=max_blocks,
+    )
+
+    ctx_min = ctx_range[0]
+    max_blocks_per_seq = math.ceil(max_model_len / block_size)
+
+    violations = []
+    for bs, query, ctx in buckets:
+        if ctx > ctx_min and ctx > max_blocks_per_seq * bs:
+            violations.append((bs, query, ctx))
+
+    assert not violations, (f"Found {len(violations)} decode bucket(s) violating "
+                            f"ctx <= ceil(max_model_len/block_size) * bs "
+                            f"(max_blocks_per_seq={max_blocks_per_seq}):\n" +
+                            "\n".join(f"  bs={bs}, query={query}, ctx={ctx}" for bs, query, ctx in violations[:20]))
