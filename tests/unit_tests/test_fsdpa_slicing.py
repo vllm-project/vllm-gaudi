@@ -462,9 +462,10 @@ def _make_sliced_bf16(chunk_size, num_padded_query_chunks=0, num_padded_ctx_chun
     module.slice_thld = 0
     module.num_padded_query_chunks = num_padded_query_chunks
     module.num_padded_ctx_chunks = num_padded_ctx_chunks
-    module._with_graph_breaks = with_graph_breaks
-    if with_graph_breaks:
-        import habana_frameworks.torch as ht
+    # Mirror the production guard: graph breaks only work in lazy mode.
+    is_lazy = ht.utils.internal.is_lazy()
+    module._with_graph_breaks = with_graph_breaks and is_lazy
+    if module._with_graph_breaks:
         module._break_graph = ht.core.mark_step
     return module
 
@@ -506,9 +507,10 @@ def _make_sliced_fp8(chunk_size,
     module.slice_thld = 0
     module.num_padded_query_chunks = num_padded_query_chunks
     module.num_padded_ctx_chunks = num_padded_ctx_chunks
-    module._with_graph_breaks = with_graph_breaks
-    if with_graph_breaks:
-        import habana_frameworks.torch as ht
+    # Mirror the production guard: graph breaks only work in lazy mode.
+    is_lazy = ht.utils.internal.is_lazy()
+    module._with_graph_breaks = with_graph_breaks and is_lazy
+    if module._with_graph_breaks:
         module._break_graph = ht.core.mark_step
     return module
 
