@@ -1160,6 +1160,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                              and (getattr(hf_text_config, "mamba_chunk_size", None) is not None
                                                   or getattr(hf_text_config, "chunk_size", None) is not None))
 
+        # Non-GDN hybrid: at least one mamba/linear-style layer and zero GDN
+        # (gdn_attention / linear_attention) layers. Used to gate optimizations
+        # that have only been validated on non-GDN hybrid topologies
+        # (e.g. Granite-4 Mamba2+Transformer).
+        self.is_non_gdn_hybrid = (self.num_mamba_like_layers > 0 and self.num_gdn == 0)
+
         # For HPU GDN, use configured chunk size when explicitly provided;
         # otherwise default to 128 to match bucket alignment.
         if self.num_mamba_like_layers > 0:
@@ -2049,12 +2055,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 requests = scheduler_output.kv_connector_metadata.reqs_to_save | \
                             scheduler_output.kv_connector_metadata.reqs_to_recv
             elif isinstance(scheduler_output.kv_connector_metadata, OffloadingConnectorMetadata):
-                for req in scheduler_output.kv_connector_metadata.reqs_to_store:
-                    requests_type[req] = 'prefill'
-                for req in scheduler_output.kv_connector_metadata.reqs_to_load:
-                    requests_type[req] = 'decode'
-                requests = scheduler_output.kv_connector_metadata.reqs_to_store | \
-                            scheduler_output.kv_connector_metadata.reqs_to_load
+                store_reqs = {job.req_id for job in scheduler_output.kv_connector_metadata.store_jobs.values()}
+                load_reqs = {job.req_id for job in scheduler_output.kv_connector_metadata.load_jobs.values()}
+                for req in store_reqs:
+                    requests_type[req] = "prefill"
+                for req in load_reqs:
+                    requests_type[req] = "decode"
+                requests = store_reqs | load_reqs
             elif isinstance(scheduler_output.kv_connector_metadata, MultiKVConnectorMetadata):
                 for i, metadata in enumerate(scheduler_output.kv_connector_metadata.metadata):
                     if isinstance(metadata, NixlConnectorMetadata) and (metadata.reqs_to_save or metadata.reqs_to_recv):
@@ -2063,13 +2070,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         for req in metadata.reqs_to_recv:
                             requests_type[req] = 'decode'
                         requests = metadata.reqs_to_save | metadata.reqs_to_recv
-                    elif isinstance(metadata, OffloadingConnectorMetadata) and (metadata.reqs_to_store
-                                                                                or metadata.reqs_to_load):
-                        for req in metadata.reqs_to_store:
-                            requests_type[req] = 'prefill'
-                        for req in metadata.reqs_to_load:
-                            requests_type[req] = 'decode'
-                        requests = metadata.reqs_to_store | metadata.reqs_to_load
+                    elif isinstance(metadata, OffloadingConnectorMetadata) and (metadata.store_jobs
+                                                                                or metadata.load_jobs):
+                        store_reqs = {job.req_id for job in metadata.store_jobs.values()}
+                        load_reqs = {job.req_id for job in metadata.load_jobs.values()}
+                        for req in store_reqs:
+                            requests_type[req] = "prefill"
+                        for req in load_reqs:
+                            requests_type[req] = "decode"
+                        requests = store_reqs | load_reqs
             else:
                 requests = scheduler_output.kv_connector_metadata.requests
         # Traverse decodes first
@@ -3478,7 +3487,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
             # Compute prompt logprobs.
             logprobs = self.sampler.compute_logprobs(logits)
-            gathered = self.sampler.gather_logprobs(logprobs, num_prompt_logprobs, tgt_token_ids)
+            gathered = self._gather_prompt_logprobs_hpu(logprobs, num_prompt_logprobs, tgt_token_ids)
 
             # Transfer HPU->CPU async.
             chunk_slice = slice(start_idx, start_idx + num_logits)
@@ -3497,6 +3506,25 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             torch.hpu.synchronize()
 
         return prompt_logprobs_dict
+
+    def _gather_prompt_logprobs_hpu(
+        self,
+        logprobs: torch.Tensor,
+        num_prompt_logprobs: int,
+        token_ids: torch.Tensor,
+    ) -> LogprobsTensors:
+        # Keep the HPU prompt-logprobs path local to vllm-gaudi and avoid
+        # upstream symbolic batch markers that Habana compilation cannot lower.
+        topk_logprobs, topk_indices = torch.topk(logprobs, num_prompt_logprobs, dim=-1)
+
+        token_ids = token_ids.unsqueeze(-1)
+        token_logprobs = logprobs.gather(-1, token_ids)
+        token_ranks = (logprobs >= token_logprobs).sum(-1)
+
+        indices = torch.cat((token_ids, topk_indices), dim=1).to(torch.int32)
+        combined_logprobs = torch.cat((token_logprobs, topk_logprobs), dim=1)
+
+        return LogprobsTensors(indices, combined_logprobs, token_ranks)
 
     def _build_logprobs_output(
         self,
@@ -3889,9 +3917,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         return None
 
     def set_attn_bias(self, attn_metadata, batch_size, seq_len, device, dtype):
-        if (attn_metadata is None
-                or (self.prefill_use_fusedsdpa and self.is_causal and attn_metadata.block_list is None)
-                or not attn_metadata.is_prompt):
+        if attn_metadata is None or not attn_metadata.is_prompt:
+            return attn_metadata
+
+        # FusedSDPA can handle a purely causal mask natively via
+        # is_causal=True + valid_seq_lengths, including chunked prefill where
+        # block_list is non-None. Skipping the materialised
+        # [bs, 1, q_len, total_kv_len] attn_bias avoids a large add_bf16 on the
+        # attention critical path (significant at long context). The original
+        # short-circuit only covered block_list is None; extend it to all
+        # plain-causal cases (no sliding-window / no chunked-attention / no
+        # alibi / not pooling).
+        # Conservative scope: only non-GDN hybrid models (e.g. Granite-4
+        # Mamba2+Transformer). GDN / pure-transformer / other topologies keep
+        # the materialised bias path until validated.
+        if (self.prefill_use_fusedsdpa and self.is_causal and not self.is_pooling_model
+                and not getattr(self, 'sliding_window', None)
+                and not getattr(self, 'model_has_chunked_attention', False)
+                and getattr(self, 'alibi_slopes', None) is None and self.is_non_gdn_hybrid):
             return attn_metadata
 
         if attn_metadata.attn_bias is not None:
@@ -4752,9 +4795,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     # by _gate; setting _gate=None makes it return False.
                     experts._gate = None
                 else:
-                    # INC wrappers (e.g. PatchedMixtralMoE) don't inherit
-                    # the property — set a plain attribute instead.
-                    experts.is_internal_router = False
+                    # INC wrappers (e.g. PatchedMixtralMoE) may inherit
+                    # is_internal_router as a read-only @property;
+                    # runner.gate = None below handles that case.
+                    if not isinstance(
+                            getattr(type(experts), "is_internal_router", None),
+                            property,
+                    ):
+                        experts.is_internal_router = False
                 runner = getattr(experts, "runner", None)
                 if runner is not None and hasattr(runner, "gate"):
                     runner.gate = None
@@ -6695,6 +6743,17 @@ class HPUAttentionMetadataProcessor:
         self.interleaved_sliding_window = (is_interleaved(vllm_config.model_config.hf_text_config)
                                            and self.sliding_window)
 
+        # Detect non-GDN hybrid topologies (e.g. Granite-4 Mamba2+Transformer).
+        # Used to gate the FSDPA-native causal short-circuit in _set_attn_bias.
+        # Mirrors the runner's num_mamba_like_layers / num_gdn computation
+        # (HPUModelRunner.__init__) so the same set of models is targeted.
+        get_num_layers = vllm_config.model_config.get_num_layers_by_block_type
+        parallel_config = vllm_config.parallel_config
+        num_mamba_like = sum(
+            get_num_layers(parallel_config, bt) for bt in ("mamba", "gdn_attention", "linear_attention"))
+        num_gdn = sum(get_num_layers(parallel_config, bt) for bt in ("gdn_attention", "linear_attention"))
+        self.is_non_gdn_hybrid = (num_mamba_like > 0 and num_gdn == 0)
+
         if self.interleaved_sliding_window:
             self.use_window_sdpa = with_default(get_config().PT_HPU_SDPA_QKV_SLICE_MODE_FWD, False)
             #os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
@@ -6723,8 +6782,19 @@ class HPUAttentionMetadataProcessor:
         Returns:
             Updated attention metadata with attn_bias set
         """
-        if (attn_metadata is None or (self.prefill_use_fusedsdpa and attn_metadata.block_list is None)
-                or not attn_metadata.is_prompt):
+        if attn_metadata is None or not attn_metadata.is_prompt:
+            return attn_metadata
+
+        # FusedSDPA handles a purely causal mask natively (is_causal=True +
+        # valid_seq_lengths). Skip materialising a [bs, 1, q_len,
+        # total_kv_len] attn_bias when the model is plain-causal (no
+        # sliding-window / chunked-attention). This removes a sizable
+        # add_bf16 from the attention critical path during long-context
+        # chunked prefill. interleaved_sliding_window and chunked-attention
+        # bias paths (window_attn_bias / chunked_attn_bias) are populated
+        # later in process_metadata and used by hpu_attn instead.
+        # Conservative scope: only non-GDN hybrid models (e.g. Granite-4).
+        if (self.prefill_use_fusedsdpa and not self.interleaved_sliding_window and self.is_non_gdn_hybrid):
             return attn_metadata
 
         if attn_metadata.attn_bias is not None:

@@ -31,7 +31,7 @@ run_granite_calibration_test() {
     echo "➡️ Testing calibration procedure on ibm-granite/granite-3.3-2b-instruct..."
     cleanup_calibration_output
 
-    PT_HPU_LAZY_MODE=1 "${VLLM_GAUDI_PREFIX}/calibration/calibrate_model.sh" \
+    "${VLLM_GAUDI_PREFIX}/calibration/calibrate_model.sh" \
         -m ibm-granite/granite-3.3-2b-instruct \
         -d "${CALIBRATION_DATASET}" \
         -o "${CALIBRATION_OUTPUT_DIR}" \
@@ -52,7 +52,7 @@ run_qwen_calibration_test() {
     echo "➡️ Testing calibration procedure on Qwen/Qwen2.5-0.5B-Instruct..."
     cleanup_calibration_output
 
-    PT_HPU_LAZY_MODE=1 "${VLLM_GAUDI_PREFIX}/calibration/calibrate_model.sh" \
+    "${VLLM_GAUDI_PREFIX}/calibration/calibrate_model.sh" \
         -m Qwen/Qwen2.5-0.5B-Instruct \
         -d "${CALIBRATION_DATASET}" \
         -o "${CALIBRATION_OUTPUT_DIR}" \
@@ -74,7 +74,7 @@ run_qwen_calibration_test() {
 #     echo "➡️ Testing VLM calibration procedure on Qwen/Qwen2.5-VL-3B-Instruct..."
 #     cleanup_calibration_output
 
-#     PT_HPU_LAZY_MODE=1 "${VLLM_GAUDI_PREFIX}/calibration/vlm-calibration/calibrate_model.sh" \
+#     "${VLLM_GAUDI_PREFIX}/calibration/vlm-calibration/calibrate_model.sh" \
 #         -m Qwen/Qwen2.5-VL-3B-Instruct \
 #         -o "${CALIBRATION_OUTPUT_DIR}" \
 #         -b ${BATCH_SIZE} \

@@ -8,7 +8,7 @@ from tests.unit_tests.kv_offload.offloading_connector.utils import (
     generate_store_output, )
 from tests.unit_tests.kv_offload.utils import EOS_TOKEN_ID
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
-from vllm.v1.kv_offload.abstract import OffloadingEvent, OffloadKey, make_offload_key
+from vllm.v1.kv_offload.base import OffloadingEvent, OffloadKey, make_offload_key
 from vllm.v1.request import RequestStatus
 
 
