@@ -2856,7 +2856,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
             # Adjust sliding block size for specific model types
             model_type = self._get_model_type()
-            if model_type is not None and model_type in ["gpt_oss"]:
+            if model_type is not None and model_type in ["gpt_oss", "step3p5"]:
                 sliding_block_size += 1
 
             window_block_tables = [block_table[-sliding_block_size:] for block_table in block_tables_list]

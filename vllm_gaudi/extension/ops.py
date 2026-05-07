@@ -624,7 +624,8 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
         # init list for w13(gate+up) and w2(down)
         self.w13_list = torch.nn.ModuleList([MoeMatmul() for _ in range(num_total_experts)])
         self.w2_list = torch.nn.ModuleList([MoeMatmul() for _ in range(num_total_experts)])
-
+        self.w13_raw = None
+        self.w2_raw = None
         # per-expert views used by forward() (tuple of tensors)
         self._cached_w13_views = None
         self._cached_w2_views = None
@@ -659,9 +660,20 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
         self._cache_weight_lists()
         return ret
 
+    def custom_gateup_activation(self, gate_up: torch.Tensor, limit: float) -> torch.Tensor:
+        """
+        gate_up: [N, 2*D] (last dim is the concated gate and up )
+        return:  [N, D]
+        """
+        gate, up = gate_up.chunk(2, dim=-1)     # chunk last dim
+        gate = F.silu(gate)
+        gate = gate.clamp(max=limit)
+        up = up.clamp(min=-limit, max=limit)
+        return gate * up
+
     def forward(self, hidden_states, expert_routing_table, router_weights, permuted_weights=True, activation="silu"):
         tokens_num, _ = hidden_states.shape
-        activation = _as_activation_str(activation)
+
         kwargs = self._get_extra_kwargs(tokens_num) if self.bias is None else None
 
         # if cache wasn't built by the caller (e.g., after set_weight), build once here.
@@ -670,8 +682,120 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
 
         w13_list = self._cached_w13_views
         w2_list = self._cached_w2_views
+        use_loop = False
+        if(activation != "silu" and use_loop):
+            limit = 7.0
+            device = hidden_states.device
+            dtype = hidden_states.dtype
+            T, H = hidden_states.shape
 
-        if self.moe_n_slice == 1:
+            # 本地 experts 数
+            E_local = len(self.w13_list)
+            if(activation != "silu"):
+                # 1) global experts mask: [E_global, T, 1]
+                experts_mask = torch.zeros((T, self.global_num_experts), dtype=dtype, device=device)
+                experts_mask.scatter_(-1, expert_routing_table.long(), router_weights.to(dtype))
+                experts_mask = experts_mask.transpose(0, 1).unsqueeze(-1)  # [E_global, T, 1]
+
+                out = torch.zeros((T, H), dtype=dtype, device=device)
+
+                # 2) 只算本地 experts，但 mask 用 global id 取
+                for local_e in range(E_local):
+                    global_eid = self.experts_min + local_e
+
+                    W13 = w13_list[local_e]  # 期望 [2D, H] 或等价
+                    W2  = w2_list[local_e]   # 期望 [H, D] 或等价
+
+                    gate_up = hidden_states @ W13.t()  # [T, 2D]
+
+                    # if activation == "silu":
+                    #     # 标准 swiglu: silu(gate) * up
+                    #     gate, up = gate_up.chunk(2, dim=-1)
+                    #     ff = F.silu(gate) * up
+                    # else:
+                    #     # 自定义 clamp 版本
+                    ff = self.custom_gateup_activation(gate_up, limit=limit)
+
+                    y = ff @ W2.t()  # [T, H]
+
+                    # 乘该 expert 的权重并累加
+                    out = out + y * experts_mask[global_eid]  # [T,H] * [T,1]
+        elif(activation != "silu" and not use_loop):
+            T, H = hidden_states.shape
+            device = hidden_states.device
+            dtype = hidden_states.dtype  # expected bf16
+
+            limit = 7.0
+
+            # ---- local experts
+            E_local = len(self.w13_list)
+
+            # ------------------------------------------------------------
+            # 1) 准备权重：从 list 取出并 stack 成 batch
+            #   W13: [E, 2D, H] 
+            #   W2 : [E, H, D]   
+            # ------------------------------------------------------------
+            W13 = self.w13_raw
+
+            W2 = self.w2_raw
+
+            twoD = W13.size(1)
+            if twoD % 2 != 0:
+                raise RuntimeError(f"W13 second dim should be 2D and even, got {twoD}")
+            D = twoD // 2
+
+            # ------------------------------------------------------------
+            # 2) 构造 experts_mask_local: [E_local, T, 1]
+            #    这里完全沿用你原写法：先做 global mask，再按 global_eid 切本地段
+            # ------------------------------------------------------------
+            if expert_routing_table.dim() == 1:
+                topk_ids = expert_routing_table.view(T, 1)
+            else:
+                topk_ids = expert_routing_table  # [T,K]
+
+            if router_weights.dim() == 1:
+                topk_w = router_weights.view(T, 1).to(dtype)
+            else:
+                topk_w = router_weights.to(dtype)
+
+            experts_mask = torch.zeros((T, self.global_num_experts), dtype=dtype, device=device)
+            experts_mask.scatter_(-1, topk_ids.long(), topk_w)
+            experts_mask = experts_mask.transpose(0, 1).unsqueeze(-1)  # [E_global, T, 1]
+
+            e0 = int(self.experts_min)
+            e1 = e0 + E_local
+            experts_mask_local = experts_mask[e0:e1, ...]  # [E_local, T, 1]
+
+            # ------------------------------------------------------------
+            # 3) 第一次 batched GEMM：gate_up = x @ W13^T
+            #    用 bmm 实现：把 x 扩成 [E,T,H]，W13^T 变成 [E,H,2D]
+            # ------------------------------------------------------------
+            xE = hidden_states.unsqueeze(0).expand(E_local, -1, -1).contiguous()  # [E,T,H]
+            W13_T = W13.transpose(1, 2)                              # [E,H,2D]
+
+            gate_up = torch.bmm(xE, W13_T).contiguous()                                      # [E,T,2D]
+
+            # ------------------------------------------------------------
+            # 4) activation：得到 [E,T,D]
+            # ------------------------------------------------------------
+            if activation == "silu":
+                gate, up = gate_up.split(D, dim=-1)  # 比 chunk 更明确
+                ff = F.silu(gate) * up               # [E,T,D]
+            else:
+                ff = self.custom_gateup_activation(gate_up, limit=limit)  # [E,T,D]
+
+            # ------------------------------------------------------------
+            # 5) 第二次 batched GEMM：y = ff @ W2^T -> [E,T,H]
+            #    W2: [E,H,D] => W2^T: [E,D,H]
+            # ------------------------------------------------------------
+            W2_T = W2.transpose(1, 2)  # [E,D,H]
+            y = torch.bmm(ff, W2_T).contiguous()                  # [E,T,H]
+
+            # ------------------------------------------------------------
+            # 6) 路由加权并 sum experts：out = sum_e (y_e * mask_e)
+            # ------------------------------------------------------------
+            out = (y * experts_mask_local).sum(dim=0)  # [T,H]
+        if self.moe_n_slice == 1 and activation == "silu":
             if self.bias is not None:
                 return torch.ops.hpu.mixture_of_experts.bias_fused_weights(hidden_states=hidden_states,
                                                                            expert_routing_table=expert_routing_table,
@@ -698,48 +822,50 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
         if self.bias is not None:
             w13_bias_list = self._cached_w13_bias_views
             w2_bias_list = self._cached_w2_bias_views
+        if(activation == "silu"):
+            for i in range(self.moe_n_slice):
+                if self.bias is not None:
+                    start = i * self.num_expert_per_group
+                    end = (i + 1) * self.num_expert_per_group
+                    w13_bias_list_slice = w13_bias_list[start:end]
+                    w2_bias_list_slice = w2_bias_list[start:end]
 
-        for i in range(self.moe_n_slice):
-            if self.bias is not None:
-                start = i * self.num_expert_per_group
-                end = (i + 1) * self.num_expert_per_group
-                w13_bias_list_slice = w13_bias_list[start:end]
-                w2_bias_list_slice = w2_bias_list[start:end]
+                    slice_final_hidden_states = torch.ops.hpu.mixture_of_experts.bias_fused_weights(
+                        hidden_states=hidden_states,
+                        expert_routing_table=expert_routing_table,
+                        router_weights=router_weights,
+                        w12=w13_list,
+                        w3=w2_list,
+                        w12_bias=w13_bias_list_slice,
+                        w3_bias=w2_bias_list_slice,
+                        permuted_weights=permuted_weights,
+                        experts_min=self.experts_min,
+                        experts_max=self.experts_max)
+                else:
+                    start = i * self.num_expert_per_group
+                    end = (i + 1) * self.num_expert_per_group
+                    w13_list_slice = w13_list[start:end]
+                    w2_list_slice = w2_list[start:end]
+                    min_expert = self.experts_min + start
+                    max_expert = min_expert + self.num_expert_per_group - 1
 
-                slice_final_hidden_states = torch.ops.hpu.mixture_of_experts.bias_fused_weights(
-                    hidden_states=hidden_states,
-                    expert_routing_table=expert_routing_table,
-                    router_weights=router_weights,
-                    w12=w13_list,
-                    w3=w2_list,
-                    w12_bias=w13_bias_list_slice,
-                    w3_bias=w2_bias_list_slice,
-                    permuted_weights=permuted_weights,
-                    experts_min=self.experts_min,
-                    experts_max=self.experts_max)
-            else:
-                start = i * self.num_expert_per_group
-                end = (i + 1) * self.num_expert_per_group
-                w13_list_slice = w13_list[start:end]
-                w2_list_slice = w2_list[start:end]
-                min_expert = self.experts_min + start
-                max_expert = min_expert + self.num_expert_per_group - 1
-
-                slice_final_hidden_states = torch.ops.hpu.mixture_of_experts(hidden_states=hidden_states,
-                                                                             expert_routing_table=expert_routing_table,
-                                                                             router_weights=router_weights,
-                                                                             w12=w13_list_slice,
-                                                                             w3=w2_list_slice,
-                                                                             permuted_weights=permuted_weights,
-                                                                             activation=activation,
-                                                                             experts_min=min_expert,
-                                                                             experts_max=max_expert,
-                                                                             **kwargs)
-            if i == 0:
-                final_hidden_states = slice_final_hidden_states
-            else:
-                final_hidden_states += slice_final_hidden_states
-            htorch.core.mark_step()
+                    slice_final_hidden_states = torch.ops.hpu.mixture_of_experts(hidden_states=hidden_states,
+                                                                                expert_routing_table=expert_routing_table,
+                                                                                router_weights=router_weights,
+                                                                                w12=w13_list_slice,
+                                                                                w3=w2_list_slice,
+                                                                                permuted_weights=permuted_weights,
+                                                                                activation=activation,
+                                                                                experts_min=min_expert,
+                                                                                experts_max=max_expert,
+                                                                                **kwargs)
+                if i == 0:
+                    final_hidden_states = slice_final_hidden_states
+                else:
+                    final_hidden_states += slice_final_hidden_states
+                htorch.core.mark_step()
+        else: # activation != "silu"
+            final_hidden_states = out
         return final_hidden_states
 
 
