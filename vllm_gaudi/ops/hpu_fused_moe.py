@@ -101,6 +101,8 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             if has_bias:
                 layer.moe_op.w13_list[expert_id].set_bias(layer.w13_bias.data[expert_id])
                 layer.moe_op.w2_list[expert_id].set_bias(layer.w2_bias.data[expert_id])
+        layer.moe_op.w13_raw = layer.w13_weight
+        layer.moe_op.w2_raw = layer.w2_weight
 
         # Build cache once AFTER weights/bias are set (BF16 + unquantized only)
         if cache_weight_lists and hasattr(layer.moe_op, "_cache_weight_lists"):
