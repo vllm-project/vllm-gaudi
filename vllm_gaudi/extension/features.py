@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
 
-from vllm_gaudi.extension.config import Not, Hardware, VersionRange, ModelType, Kernel, Any, All, Value, ValueFromList, Env, Disabled, Enabled, Engine, MinPackageVersion, boolean, to_dict, split_values_and_flags, list_of
+from vllm_gaudi.extension.config import Not, Hardware, VersionRange, ModelType, Kernel, Any, All, Value, ValueFromList, Env, Eq, Disabled, Enabled, MinPackageVersion, boolean, to_dict, split_values_and_flags, list_of
 from vllm_gaudi.extension.kernels import fsdpa, block_softmax_adjustment
 from vllm_gaudi.extension.validation import for_all, choice
 
@@ -55,6 +55,12 @@ def get_user_flags():
         Env('PT_HPU_SDPA_QKV_SLICE_MODE_FWD', boolean),
         Env('PT_HPU_SDPA_BC_FACTOR', int),
         Env('VLLM_FUSEDSDPA_SLIDE_THLD', int),
+
+        # FusedSDPA slicing flags
+        Env('VLLM_HPU_FSDPA_SLICE_ENABLED', boolean),
+        Env('VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD', int),
+        Env('VLLM_HPU_FSDPA_SLICE_CHUNK_SIZE', int),
+        Env('VLLM_HPU_FSDPA_SLICE_WITH_GRAPH_BREAKS', boolean),
     ]
     return to_dict(flags)
 
@@ -114,5 +120,10 @@ def get_features():
               All(VersionRange(">=1.24.0.460"), MinPackageVersion("neural_compressor_pt", "3.7")),
               env_var_type=boolean),
         Value('use_hpu_aligned_scale', False, env_var='HPU_ALIGNED_SCALE', env_var_type=boolean),
+        Value('enable_fsdpa_slicing',
+              All(Eq('use_bucketing', True), Eq('bucketing_strategy', 'pad'), Disabled('merged_prefill'),
+                  Kernel(fsdpa)),
+              env_var='VLLM_HPU_FSDPA_SLICE_ENABLED',
+              env_var_type=boolean),
     ]
     return split_values_and_flags(features)

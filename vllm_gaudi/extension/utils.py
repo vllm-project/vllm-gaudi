@@ -6,12 +6,14 @@
 ###############################################################################
 
 import os
+import math
 from functools import lru_cache, wraps
 from typing import Optional, Any
 
 import habana_frameworks.torch as htorch
 import torch
 import itertools
+from vllm_gaudi.extension.logger import logger
 
 from vllm_gaudi.extension.runtime import get_config
 
@@ -149,12 +151,248 @@ class FP8Matmul(torch.nn.Module):
         return output
 
 
+class SlicedFusedSDPABase(torch.nn.Module):
+    """Base class for sliced FusedSDPA modules.
+
+    Encapsulates the common slicing initialization (chunk size, padded chunk
+    counts, graph-break setup) shared by :class:`SlicedFusedSDPA` and
+    :class:`SlicedFP8FusedSDPA`.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.enable_slicing = self._setup_slicing()
+
+    def _setup_slicing(self) -> bool:
+        enable_slicing = get_config().enable_fsdpa_slicing
+        if not enable_slicing:
+            return False
+
+        if get_config().bucketing_strategy != 'pad':
+            logger().warning_once(
+                'FusedSDPA slicing is only compatible with padding-based bucketing strategy, slicing in FusedSDPA will be disabled.'
+            )
+            return False
+
+        if get_config().merged_prefill:
+            logger().warning_once(
+                'FusedSDPA slicing is not compatible with merged prefill, slicing in FusedSDPA will be disabled.')
+            return False
+
+        if not get_config().use_bucketing:
+            logger().warning_once(
+                'FusedSDPA slicing requires bucketing to be enabled, slicing in FusedSDPA will be disabled.')
+            return False
+
+        from vllm_gaudi.extension.bucketing.common import get_bucketing_manager
+        bucketing_manager = get_bucketing_manager()
+        assert bucketing_manager is not None and bucketing_manager.initialized, 'Bucketing manager should be instantiated and initialized to enable FusedSDPA slicing.'
+
+        from vllm_gaudi.extension.bucketing.padding_aware import PaddingAwareBucketingStrategy
+        strategy = bucketing_manager.get_bucketing_strategy()
+        assert isinstance(
+            strategy,
+            PaddingAwareBucketingStrategy), 'Bucketing strategy should be Padding-Aware to enable FusedSDPA slicing.'
+
+        max_num_batched_tokens = bucketing_manager.max_num_batched_tokens
+        block_size = bucketing_manager.block_size
+        slice_thld_default = min(max_num_batched_tokens, 8192)
+        slice_thld = int(os.getenv("VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD", str(slice_thld_default)))
+        assert slice_thld > block_size, 'Invalid FusedSDPA slice sequence length threshold, the threshold should be greater than the block size.'
+        assert slice_thld >= 1024, 'The FusedSDPA slice sequence length threshold should be greater than or equal to 1024 to ensure the chunk sizes are valid for the attention kernel.'
+        if slice_thld < slice_thld_default:
+            logger().warning_once(
+                f'The FusedSDPA slice sequence length threshold {slice_thld} is less than the default {slice_thld_default} which is not recommended.'
+            )
+
+        # defaults to half of the threshold and round up by 1024
+        chunk_size_default = math.ceil(slice_thld // 2 / 1024) * 1024
+        chunk_size = int(os.getenv("VLLM_HPU_FSDPA_SLICE_CHUNK_SIZE", str(chunk_size_default)))
+        if chunk_size % 1024 != 0:
+            chunk_size = math.ceil(chunk_size / 1024) * 1024
+            logger().warning_once('Rounded up the chunk size for FusedSDPA slicing to the next multiple of 1024.')
+        assert chunk_size > block_size and chunk_size <= slice_thld, 'Invalid FusedSDPA slice chunk size, the chunk size should be between the block size and the slice sequence length threshold.'
+
+        self.slice_thld = slice_thld
+        self.chunk_size = chunk_size
+
+        # should align with the default value in PaddingAwareBucketingStrategy
+        max_query_pad_default = math.ceil(max_num_batched_tokens / 4)
+        max_query_pad = int(os.getenv("VLLM_PROMPT_QUERY_BUCKET_PAD_MAX", str(max_query_pad_default)))
+        assert max_query_pad >= block_size, 'Invalid max query padding, the max query padding should be greater than or equal to the block size.'
+        self.num_padded_query_chunks = math.ceil(max_query_pad / self.chunk_size)
+
+        # should align with the default value in PaddingAwareBucketingStrategy
+        max_ctx_pad_default = math.ceil(max_num_batched_tokens / block_size)
+        max_ctx_pad = int(os.getenv("VLLM_PROMPT_CTX_BUCKET_PAD_MAX", str(max_ctx_pad_default)))
+        self.num_padded_ctx_chunks = math.ceil(max_ctx_pad * block_size / self.chunk_size)
+
+        import habana_frameworks.torch as ht
+        is_lazy = ht.utils.internal.is_lazy()
+        self._with_graph_breaks = os.getenv("VLLM_HPU_FSDPA_SLICE_WITH_GRAPH_BREAKS",
+                                            str(is_lazy)).strip().lower() in ['true', 't', '1', 'yes', 'y', 'on']
+        if self._with_graph_breaks and not is_lazy:
+            logger().warning_once('FusedSDPA slicing graph breaks are only supported in lazy mode. '
+                                  'Disabling graph breaks for eager/compile mode to avoid Synapse compiler failures.')
+            self._with_graph_breaks = False
+        if self._with_graph_breaks:
+            self._break_graph = ht.core.mark_step
+
+        msg = (f"FusedSDPA slicing is enabled with sequence length threshold {slice_thld}, "
+               f"chunk size {self.chunk_size}, num padded query chunks {self.num_padded_query_chunks}, "
+               f"num padded ctx chunks {self.num_padded_ctx_chunks}, with graph breaks {self._with_graph_breaks}.")
+        logger().debug_once(msg)
+
+        return True
+
+    def maybe_break_graph(self):
+        if self._with_graph_breaks:
+            self._break_graph()
+
+    @staticmethod
+    def _merge_chunk(last_out, last_m, last_linv, chunk_out, chunk_m, chunk_linv):
+        """Online softmax rescaling merge of two attention chunks."""
+        if last_out is None or last_m is None or last_linv is None:
+            return chunk_out, chunk_m, chunk_linv
+        eps = 1e-8
+        new_m = torch.maximum(last_m, chunk_m)
+        # When both m values are -inf (fully masked rows), the diff -inf - (-inf) = NaN.
+        # Replace NaN with -inf so that exp(-inf) = 0, giving zero contribution.
+        last_linv_rescaled = (1.0 / (last_linv + eps)) * torch.exp(torch.nan_to_num(last_m - new_m, float('-inf')))
+        chunk_linv_rescaled = (1.0 / (chunk_linv + eps)) * torch.exp(torch.nan_to_num(chunk_m - new_m, float('-inf')))
+        new_linv = 1.0 / (last_linv_rescaled + chunk_linv_rescaled + eps)
+        new_out = (last_linv_rescaled * new_linv) * last_out + (chunk_linv_rescaled * new_linv) * chunk_out
+        return new_out, new_m, new_linv
+
+    def _chunked_attention(self, q, k, v, attn_mask, dropout_p, scale, softmax_mode, chunk_kernel_fn):
+        """Run chunked attention with online softmax rescaling.
+
+        Args:
+            q, k, v: Query, key, value tensors (after GQA reshape if needed).
+            attn_mask: Attention mask tensor.
+            dropout_p: Dropout probability.
+            scale: Attention scale factor.
+            softmax_mode: Softmax mode string.
+            chunk_kernel_fn: Callable
+                ``(q, k, v, mask, dropout_p, scale, is_causal, softmax_mode)``
+                returning ``(out, m, linv)`` all as float32.
+
+        Returns:
+            Concatenated output tensor in float32.
+        """
+        q_len = q.shape[-2]
+        kv_len = k.shape[-2]
+        prefix_len = kv_len - q_len
+
+        chunk_outputs = []
+        num_q_chunks = math.ceil(q_len / self.chunk_size)
+        num_prefix_chunks = math.ceil(prefix_len / self.chunk_size)
+        for q_chunk_idx in range(num_q_chunks):
+            q_start = q_len - (q_chunk_idx + 1) * self.chunk_size
+            q_start = max(q_start, 0)
+            q_end = q_len - q_chunk_idx * self.chunk_size
+            q_chunk_size = q_end - q_start
+            q_chunk = q[..., q_start:q_end, :].contiguous()
+
+            last_out = None
+            last_m = None
+            last_linv = None
+
+            # the causal part
+            for kv_chunk_idx in range(0, num_q_chunks - q_chunk_idx):
+                kv_start = prefix_len + q_end - (kv_chunk_idx + 1) * self.chunk_size
+                kv_start = max(kv_start, prefix_len)
+                kv_end = prefix_len + q_end - kv_chunk_idx * self.chunk_size
+                kv_chunk_size = kv_end - kv_start
+                k_chunk = k[..., kv_start:kv_end, :].contiguous()
+                v_chunk = v[..., kv_start:kv_end, :].contiguous()
+
+                # Always pass explicit mask for the diagonal chunk (kv_chunk_idx==0)
+                # to ensure numerical consistency. The kernel's is_causal=True path
+                # uses a different internal algorithm that can diverge from the
+                # explicit mask path even when both encode the same triangular pattern.
+                # For non-diagonal chunks within the padded region, also pass mask.
+                mask_chunk = (attn_mask[..., q_start:q_end, kv_start:kv_end].contiguous()
+                              if kv_chunk_idx == 0 or kv_chunk_idx < self.num_padded_query_chunks else None)
+
+                self.maybe_break_graph()
+
+                chunk_out, chunk_m, chunk_linv = chunk_kernel_fn(q_chunk, k_chunk, v_chunk, mask_chunk, dropout_p,
+                                                                 scale, False, softmax_mode)
+
+                last_out, last_m, last_linv = self._merge_chunk(last_out, last_m, last_linv, chunk_out, chunk_m,
+                                                                chunk_linv)
+
+                self.maybe_break_graph()
+
+            # the context part
+            for kv_chunk_idx in range(num_prefix_chunks):
+                kv_start = prefix_len - (kv_chunk_idx + 1) * self.chunk_size
+                kv_start = max(kv_start, 0)
+                kv_end = prefix_len - kv_chunk_idx * self.chunk_size
+                k_chunk = k[..., kv_start:kv_end, :].contiguous()
+                v_chunk = v[..., kv_start:kv_end, :].contiguous()
+                # use mask only for the chunks that may have padding
+                mask_chunk = (attn_mask[..., q_start:q_end, kv_start:kv_end].contiguous()
+                              if kv_chunk_idx < self.num_padded_ctx_chunks else None)
+
+                self.maybe_break_graph()
+
+                chunk_out, chunk_m, chunk_linv = chunk_kernel_fn(q_chunk, k_chunk, v_chunk, mask_chunk, dropout_p,
+                                                                 scale, False, softmax_mode)
+
+                assert not (last_out is None or last_m is None or last_linv is None)
+                last_out, last_m, last_linv = self._merge_chunk(last_out, last_m, last_linv, chunk_out, chunk_m,
+                                                                chunk_linv)
+
+                self.maybe_break_graph()
+            chunk_outputs.append(last_out)
+        chunk_outputs = list(reversed(chunk_outputs))
+        return torch.cat(chunk_outputs, dim=-2)
+
+
+class SlicedFusedSDPA(SlicedFusedSDPABase):
+    """Standalone module for BF16 sliced FusedSDPA.
+
+    Extracting the sliced attention path into its own ``nn.Module`` allows it
+    to be wrapped with ``torch.compile``, ``ht.hpu.wrap_in_hpu_graph``, or
+    any other module-level wrapper independently of the dispatch logic in
+    :class:`ModuleFusedSDPA`.
+    """
+
+    def forward(self, query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode):
+        assert is_causal and attn_mask is not None
+
+        from habana_frameworks.torch.hpex.kernels.FusedSDPA import is_gqa, gqa_input_reshape_fwd, gqa_output_reshape
+        gqa = is_gqa(query, key)
+        if gqa:
+            q, k, v, attn_mask = gqa_input_reshape_fwd(query, key, value, attn_mask)
+        else:
+            q, k, v, attn_mask = (query, key, value, attn_mask)
+        if scale is None:
+            scale = 1.0 / (query.shape[-1]**0.5)
+
+        def chunk_kernel(q_c, k_c, v_c, mask_c, dp, sc, is_c, sm):
+            res = torch.ops.hpu.sdpa_recomp_fwd(q_c, k_c, v_c, mask_c, dp, sc, is_c, True, sm, None, 'right')
+            out, m, linv = tuple((gqa_output_reshape(x) if gqa else x).to(torch.float32) for x in res[:3])
+            # Sanitize NaN from fully-masked rows: the kernel returns NaN when all
+            # attention scores are -inf (padding positions).  Replace with safe
+            # defaults so the online-softmax merge treats them as zero-contribution.
+            out = torch.nan_to_num(out, 0.0)
+            linv = torch.nan_to_num(linv, 0.0)
+            return out, m, linv
+
+        output = self._chunked_attention(q, k, v, attn_mask, dropout_p, scale, softmax_mode, chunk_kernel)
+        return output.to(q.dtype)
+
+
 class ModuleFusedSDPA(torch.nn.Module):
 
     def __init__(self, fusedSDPA):
         super().__init__()
         assert fusedSDPA is not None, f'fusedSDPA kernel is None'
         self._hpu_kernel_fsdpa = fusedSDPA
+        self._sliced_module = SlicedFusedSDPA()
 
     def forward(
         self,
@@ -172,6 +410,22 @@ class ModuleFusedSDPA(torch.nn.Module):
         window_size=None,
         sinks=None,
     ):
+        if (self._sliced_module.enable_slicing
+                and key.shape[-2] >= self._sliced_module.slice_thld  # apply for kv_len >= slice_thld only
+                and query.shape[0] == 1  # bs should be 1 for prefix-prefill
+                and query.shape[-2] != key.shape[-2]  # normal prefill with q_len == kv_len route to the default
+                and is_causal and attn_mask is not None  # only supports causal attention with mask
+                and padding_side == 'right'  # supports right padding only for the chunks that may have padding
+                and window_size is None  # slicing is not compatible with sliding window attention
+                and sinks is None  # slicing is not compatible with kernel fusion with sinks
+            ):
+            return self._sliced_module(query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode)
+
+        if is_causal and attn_mask is not None:
+            # TODO: causal + attn_bias is not yet supported
+            is_causal = False
+            valid_sequence_lengths = None
+
         if window_size is not None:
             return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode,
                                                 recompute_mode, valid_sequence_lengths, padding_side, False, False,
@@ -180,6 +434,77 @@ class ModuleFusedSDPA(torch.nn.Module):
             return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode,
                                                 recompute_mode, valid_sequence_lengths, padding_side, False, False,
                                                 (-1, -1), sinks)
+
+
+class SlicedFP8FusedSDPA(SlicedFusedSDPABase):
+    """Standalone module for FP8 sliced FusedSDPA.
+
+    Like :class:`SlicedFusedSDPA`, extracting the sliced path enables
+    wrapping with ``torch.compile`` or ``ht.hpu.wrap_in_hpu_graph``.
+    Expects pre-quantized FP8 inputs; dequantises chunk outputs to
+    BF16/FP32 before the online-softmax rescaling merge.
+    """
+
+    def __init__(self, parent):
+        super().__init__()
+        # Store parent reference without registering as a submodule
+        # to avoid circular module graph while sharing scale tensors.
+        object.__setattr__(self, '_parent', parent)
+
+    def _dequant_output(self, output):
+        return torch.ops.hpu.cast_from_fp8(output, self._parent.d_scale_output, torch.bfloat16)
+
+    def _fp8_fsdpa_fwd(self, q, k, v, attn_mask, dropout_p, scale, is_causal, softmax_mode):
+        results = torch.ops.hpu.fp8_sdpa_recomp_fwd(
+            q,
+            k,
+            v,
+            attn_mask,
+            dropout_p,
+            scale,
+            is_causal,
+            True,  # requires_backward
+            softmax_mode,
+            self._parent.d_scale_q,
+            self._parent.d_scale_k,
+            self._parent.d_scale_v,
+            self._parent.scale_amax,
+            self._parent.d_scale_output,
+            self._parent.descale_amax,
+            False,  # is_amax_s
+            False,  # is_amax_o
+            None,  # valid_seq_len
+            "right",  # padding_side
+            (-1, -1),  # window_size
+            None,  # sinks
+        )
+        return results
+
+    def forward(self, query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode):
+        assert is_causal and attn_mask is not None
+
+        from habana_frameworks.torch.hpex.kernels.Fp8FusedSDPA import is_gqa, gqa_input_reshape_fwd, gqa_output_reshape
+        gqa = is_gqa(query, key)
+        if gqa:
+            q, k, v, attn_mask = gqa_input_reshape_fwd(query, key, value, attn_mask)
+        else:
+            q, k, v, attn_mask = (query, key, value, attn_mask)
+        softmax_mode = softmax_mode if softmax_mode == "fp32" else "fast"
+        if scale is None:
+            scale = 1.0 / (query.shape[-1]**0.5)
+
+        def chunk_kernel(q_c, k_c, v_c, mask_c, dp, sc, is_c, sm):
+            res = self._fp8_fsdpa_fwd(q_c, k_c, v_c, mask_c, dp, sc, is_c, sm)
+            out, m, linv = tuple(gqa_output_reshape(x) if gqa else x for x in res[:3])
+            m = m.to(torch.float32)
+            linv = linv.to(torch.float32) * (128.0 if sm == "fast" else 1.0)
+            out = self._dequant_output(out).to(torch.float32)
+            # Sanitize NaN from fully-masked rows (same as BF16 path).
+            out = torch.nan_to_num(out, 0.0)
+            linv = torch.nan_to_num(linv, 0.0)
+            return out, m, linv
+
+        return self._chunked_attention(q, k, v, attn_mask, dropout_p, scale, softmax_mode, chunk_kernel)
 
 
 class ModuleFP8FusedSDPA(torch.nn.Module):
@@ -198,12 +523,11 @@ class ModuleFP8FusedSDPA(torch.nn.Module):
         self.d_scale_q = torch.tensor(1.0, dtype=torch.float32)
         self.d_scale_k = torch.tensor(1.0, dtype=torch.float32)
         self.d_scale_v = torch.tensor(1.0, dtype=torch.float32)
+        self.d_scale_output = torch.tensor(1.0, dtype=torch.float32)
+        self._sliced_module = SlicedFP8FusedSDPA(parent=self)
 
     def quant_input(self, x, scale):
         return torch.ops.hpu.cast_to_fp8_v2(x, scale, False, False, torch.float8_e4m3fn)[0]
-
-    def dequant_output(self, output, scale):
-        return torch.ops.hpu.cast_from_fp8(output, scale, torch.bfloat16)
 
     def forward(
         self,
@@ -221,9 +545,27 @@ class ModuleFP8FusedSDPA(torch.nn.Module):
         window_size=None,
     ):
 
-        qinput = self.quant_input(query, self.scale_q)
-        kinput = self.quant_input(key, self.scale_k)
-        vinput = self.quant_input(value, self.scale_v)
+        qinput = self.quant_input(query, self.scale_q).detach()
+        kinput = self.quant_input(key, self.scale_k).detach()
+        vinput = self.quant_input(value, self.scale_v).detach()
+
+        bs = query.shape[0]
+        q_len = query.shape[-2]
+        kv_len = key.shape[-2]
+        if (self._sliced_module.enable_slicing and kv_len >= self._sliced_module.slice_thld \
+                and bs == 1  # bs should be 1 for chunked prefill
+                and q_len != kv_len  # normal causal prefill route to the default dispatch for better performance
+                and is_causal and attn_mask is not None  # only supports causal attention with mask
+                and padding_side == 'right'  # currently only supports right padding for the chunks that may have padding
+                and window_size is None  # slicing is not compatible with sliding window attention
+            ):
+            return self._sliced_module(qinput, kinput, vinput, attn_mask, dropout_p, is_causal, scale,
+                                       softmax_mode).to(query.dtype)
+
+        if is_causal and attn_mask is not None:
+            # TODO: causal + attn_bias is not yet supported
+            is_causal = False
+            valid_sequence_lengths = None
 
         results = self.fp8_fused_sdpa(
             qinput,
