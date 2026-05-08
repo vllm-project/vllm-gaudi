@@ -2,6 +2,14 @@
 
 This document provides an overview of the features, changes, and fixes introduced in each release of the vLLM Hardware Plugin for Intel® Gaudi®.
 
+## 0.19.1
+
+This is a minor patch release on top of 0.19.0 and continues to support [Intel® Gaudi® Software v1.24.0](https://docs.habana.ai/en/v1.24.0/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.10.
+
+The release lifts the `transformers < 5` upper-bound constraint, allowing Hugging Face Transformers v5 to be installed alongside the plugin.
+
+For a full list of changes, see the [Detailed Release Notes](release_notes_v0.19.1.md).
+
 ## 0.19.0
 
 This version is based on [vLLM 0.19.0](https://github.com/vllm-project/vllm/releases/tag/v0.19.0) and supports the latest [Intel® Gaudi® Software v1.24.0](https://docs.habana.ai/en/v1.24.0/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.10.
