@@ -310,7 +310,7 @@ def patched_fused_moe_forward(
         result = self._forward_impl(self._hpu_layer_ref, hidden_states, router_logits, shared_experts_input, input_ids)
     else:
         result = self._forward_entry(hidden_states, router_logits, shared_experts_input, input_ids,
-                                     self._encode_layer_name())
+                                     self._encode_layer_name(), self._trtllm_mxfp4_unpadded_dim())
 
     # Mirror upstream MoERunner.forward post-_forward_entry pipeline.
     if isinstance(result, tuple):
