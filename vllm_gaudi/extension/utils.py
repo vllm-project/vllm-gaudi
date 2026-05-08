@@ -254,11 +254,10 @@ class SlicedFusedSDPABase(torch.nn.Module):
         """Online softmax rescaling merge of two attention chunks."""
         if last_out is None or last_m is None or last_linv is None:
             return chunk_out, chunk_m, chunk_linv
-        eps = 1e-8
         new_m = torch.maximum(last_m, chunk_m)
-        last_linv_rescaled = (1.0 / (last_linv + eps)) * torch.exp(last_m - new_m)
-        chunk_linv_rescaled = (1.0 / (chunk_linv + eps)) * torch.exp(chunk_m - new_m)
-        new_linv = 1.0 / (last_linv_rescaled + chunk_linv_rescaled + eps)
+        last_linv_rescaled = (1.0 / last_linv) * torch.exp(last_m - new_m)
+        chunk_linv_rescaled = (1.0 / chunk_linv) * torch.exp(chunk_m - new_m)
+        new_linv = 1.0 / (last_linv_rescaled + chunk_linv_rescaled)
         new_out = (last_linv_rescaled * new_linv) * last_out + (chunk_linv_rescaled * new_linv) * chunk_out
         return new_out, new_m, new_linv
 
