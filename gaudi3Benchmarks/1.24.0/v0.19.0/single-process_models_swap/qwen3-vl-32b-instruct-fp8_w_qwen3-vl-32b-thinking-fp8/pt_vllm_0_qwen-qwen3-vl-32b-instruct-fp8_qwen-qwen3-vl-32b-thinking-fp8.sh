@@ -68,10 +68,54 @@ VLLM_SERVER_DEV_MODE=1 \
 VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
 VLLM_HPU_MULTI_MODEL_CONFIG=multi_models.yaml \
 python -m vllm_gaudi.entrypoints.openai.multi_model_api_server \
-    --port 8220 \ 
-    --disable-log-stats \
-    --trust-remote-code
+	--port 8220 \
+	--enable-auto-tool-choice \
+	--tool-call-parser \
+	hermes \
+	--disable-log-stats \
+	--trust-remote-code
 
+# ====================================
+# TOOL VALIDATION CURL ONLY - Model 1
+# ====================================
+
+cat > /tmp/tool_probe_8220.json <<'JSON'
+{
+  "model": "Qwen/Qwen3-VL-32B-Instruct-FP8",
+  "messages": [
+    {
+      "role": "user",
+      "content": "What is 2+2? Use the tool and return the final answer."
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "add",
+        "description": "Add two numbers",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "a": {"type": "number"},
+            "b": {"type": "number"}
+          },
+          "required": ["a", "b"]
+        }
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "temperature": 0,
+  "max_tokens": 256,
+  "logprobs": true
+}
+JSON
+
+curl -sS http://localhost:8220/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  --data @/tmp/tool_probe_8220.json
+  
 # =============================
 # BENCHMARK COMMAND - Model 1
 # =============================
@@ -107,6 +151,47 @@ curl -s http://localhost:8220/v1/models/switch \
     "model": "Qwen/Qwen3-VL-32B-Thinking-FP8",
     "drain_timeout": 60
   }' | jq
+ 
+# ====================================
+# TOOL VALIDATION CURL ONLY - Model 2
+# ====================================
+
+cat > /tmp/tool_probe_8220_bis.json <<'JSON'
+{
+  "model": "Qwen/Qwen3-VL-32B-Thinking-FP8",
+  "messages": [
+    {
+      "role": "user",
+      "content": "What is 2+2? Use the tool and return the final answer."
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "add",
+        "description": "Add two numbers",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "a": {"type": "number"},
+            "b": {"type": "number"}
+          },
+          "required": ["a", "b"]
+        }
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "temperature": 0,
+  "max_tokens": 256,
+  "logprobs": true
+}
+JSON
+
+curl -sS http://localhost:8220/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  --data @/tmp/tool_probe_8220_bis.json
   
 # =========================
 # BENCHMARK COMMAND - Model 2

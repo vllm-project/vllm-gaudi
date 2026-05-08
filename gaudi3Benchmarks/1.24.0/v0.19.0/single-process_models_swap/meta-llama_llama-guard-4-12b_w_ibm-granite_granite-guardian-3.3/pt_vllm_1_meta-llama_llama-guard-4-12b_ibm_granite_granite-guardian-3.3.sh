@@ -36,9 +36,9 @@ models:
     enable_prefix_caching: False
     gpu_memory_utilization: 0.90
     override_generation_config:
-     temperature: 0.0
-     top_p: 1.0
-     max_new_tokens: 512
+      temperature: 0.0
+      top_p: 1.0
+      max_new_tokens: 512
 EOF
 
 VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
