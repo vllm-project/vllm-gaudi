@@ -30,7 +30,6 @@ fi
 
 GRAPH_VISUALIZATION=true \
 PT_HPU_METRICS_GC_DETAILS=1 \
-PT_HPU_LAZY_MODE=1 \
 vllm bench throughput \
   --model ${model} \
   --backend vllm \

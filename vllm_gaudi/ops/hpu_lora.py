@@ -54,7 +54,8 @@ layers.VocabParallelEmbeddingWithLoRA = HPUVocabParallelEmbeddingWithLoRA
 # Patch _all_lora_classes so from_layer() creates HPU-specific instances.
 # The module-level patching above is not sufficient because vllm.lora.utils
 # captures class references at import time via `from ... import`.
+import vllm.lora.utils  # noqa: E402
 from vllm.lora.utils import _all_lora_classes  # noqa: E402
 
-_all_lora_classes.discard(VocabParallelEmbeddingWithLoRA)
-_all_lora_classes.add(HPUVocabParallelEmbeddingWithLoRA)
+vllm.lora.utils._all_lora_classes = tuple(
+    HPUVocabParallelEmbeddingWithLoRA if cls is VocabParallelEmbeddingWithLoRA else cls for cls in _all_lora_classes)

@@ -25,6 +25,7 @@ This document lists the supported diagnostic and profiling, as well as performan
 | `VLLM_BUCKETING_FROM_FILE`   | Enables reading bucket configuration from file.              | `None`        |
 | `VLLM_ROW_PARALLEL_CHUNKS`   | Number of chunks to split input into for pipelining matmul with all-reduce in RowParallelLinear layers. Setting to a value greater than 1 enables chunking. See [Row-Parallel Chunking](../features/row_parallel_chunking.md). | `1` (disabled) |
 | `VLLM_ROW_PARALLEL_CHUNK_THRESHOLD` | Minimum number of tokens required to activate row-parallel chunking. Inputs below this threshold use the standard non-chunked path. | `8192` |
+| `VLLM_PROMPT_BS_BUCKET_MAX`  | Sets prefill batch size | `1` |
 
 Use `VLLM_BUCKETING_STRATEGY=exp` for the default exponential warm-up, `VLLM_BUCKETING_STRATEGY=lin` for explicitly configured linear ranges, or `VLLM_BUCKETING_STRATEGY=pad` for padding-aware ranges with absolute and relative padding limits.
 
@@ -94,6 +95,8 @@ The following table lists the available variables with their default values. `PA
 | Decode | num blocks max (`VLLM_DECODE_BLOCK_BUCKET_MAX`)                          | `ceil(max_model_len * max_num_seqs / block_size)` <br>by default or `max_blocks` <br>if `VLLM_CONTIGUOUS_PA = True` |
 | Decode | num blocks max abs padding (`VLLM_DECODE_BLOCK_BUCKET_PAD_MAX`)          | `ceil(VLLM_DECODE_BLOCK_BUCKET_MAX / 4)`                                                                            |
 | Decode | num blocks max padding percent (`VLLM_DECODE_BLOCK_BUCKET_PAD_PERCENT`)  | `25`                                                                                                                |
+
+`VLLM_PROMPT_BS_BUCKET_MAX` no longer affects only prompt warm-up coverage. It also affects the real prefill batch size used by the Gaudi runner.
 
 The default value of `25` for `VLLM_*_BUCKET_PAD_PERCENT` is a balance of warmup duration and runtime performance. Using smaller value like `10` introduce more buckets and reduces the padding to get better runtime performance. Setting to `0` to fall back to the original linear bucketing with minimum padding. And setting to `50` is close to the exponential bucketing except for the corresponding  `VLLM_*_BUCKET_MIN` is not `0` nor `1`.
 

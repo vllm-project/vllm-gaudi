@@ -11,7 +11,7 @@ from vllm_gaudi.ops.hpu_compressed_tensors import (HPUCompressedTensorsLinearMet
                                                    HPUCompressedTensorsW8A8Int8_BF16Fallback,
                                                    HPUCompressedTensorsW8A8Fp8MoEMethod)
 from vllm_gaudi.utils import HPUCompileConfig
-from vllm.forward_context import override_forward_context
+from vllm.forward_context import ForwardContext, override_forward_context
 from safetensors import safe_open
 
 
@@ -387,10 +387,13 @@ def test_compressed_tensors_wna16_moe_method(default_vllm_config: None, dist_ini
         ref_output = f.get_tensor("ref_output")
 
     # Execute layer
-    mock_ctx = MagicMock(spec=["dp_metadata"])
-    mock_ctx.dp_metadata = None
-    with override_forward_context(mock_ctx):
-        out = oot_op.runner._forward_dispatch(oot_op, hidden_states, router_logits, hidden_states)
+    ctx = ForwardContext(
+        no_compile_layers={oot_op.runner.layer_name: oot_op},
+        attn_metadata={},
+        slot_mapping={},
+    )
+    with override_forward_context(ctx):
+        out = oot_op.runner.forward(hidden_states, router_logits)
 
     # Check correctness
     torch.testing.assert_close(ref_output, out, atol=1e-4, rtol=1e-4)
