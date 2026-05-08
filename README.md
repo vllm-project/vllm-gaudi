@@ -16,7 +16,7 @@ vLLM Hardware Plugin for Intel® Gaudi®
 *Latest News* 🔥
 - [2026/05] Version 0.19.1 is now available, and fully compatible with [Intel® Gaudi® v1.24.0](https://docs.habana.ai/en/v1.24.0/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.10.
 
-  This is a minor patch release on top of 0.19.0. It enabling installation of Hugging Face Transformers v5 alongside the plugin.
+  This is a minor patch release on top of 0.19.0. It enables installation of Hugging Face Transformers v5 alongside the plugin.
 
 - [2026/04] Version 0.19.0 is now available, built on [vLLM 0.19.0](https://github.com/vllm-project/vllm/releases/tag/v0.19.0) and fully compatible with [Intel® Gaudi® v1.24.0](https://docs.habana.ai/en/v1.24.0/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.10.
 

@@ -12,21 +12,14 @@ For the full set of features delivered in the v0.19.x line, see the [v0.19.0 rel
 
 ## Highlights
 
-- Lifted the **`transformers < 5`** version cap in `requirements.txt`, enabling installation of Hugging Face Transformers v5.
+- Removed the **`transformers >= 4.56.0, <5`** dependency constraint from `requirements.txt`, enabling installation of Hugging Face Transformers v5.
 - Refreshed the pinned **upstream vLLM stable commit** used by build scripts and CI.
 
 ---
 
 ## Plugin Core
 
-- Removed the `transformers >= 4.56.0, <5` upper-bound from `requirements.txt` and dropped the now-redundant `add_bos_token=True` test setting in `tests/models/language/generation/test_common.py`. ([#1420](https://github.com/vllm-project/vllm-gaudi/pull/1420))
-
----
-
-## Serving & Infrastructure
-
-- Bumped the pinned upstream vLLM stable commit (`VLLM_STABLE_COMMIT`) to the validated commit for v0.19.1.
-- Refreshed `CODEOWNERS` for the v0.19.1 release branch.
+- Removed the `transformers >= 4.56.0, <5` dependency entry entirely from `requirements.txt` (the plugin no longer pins a `transformers` version), and dropped the now-redundant `add_bos_token=True` test setting in `tests/models/language/generation/test_common.py`. ([#1420](https://github.com/vllm-project/vllm-gaudi/pull/1420))
 
 ---
 
@@ -35,9 +28,3 @@ For the full set of features delivered in the v0.19.x line, see the [v0.19.0 rel
 | PR | Title | Author |
 | --- | --- | --- |
 | [#1420](https://github.com/vllm-project/vllm-gaudi/pull/1420) | Transformers v5 upgrade | @iboiko-habana |
-
----
-
-## New Contributors
-
-No new first-time contributors in this patch release. See the [v0.19.0 release notes](release_notes_v0.19.0.md#new-contributors) for the full v0.19.x contributor list.
