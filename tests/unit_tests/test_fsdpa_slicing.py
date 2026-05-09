@@ -17,9 +17,6 @@ import sys
 import pytest
 from unittest.mock import patch, MagicMock
 
-import habana_frameworks.torch as ht
-from habana_frameworks.torch.hpex.kernels import FusedSDPA
-
 from vllm_gaudi.extension.bucketing.linear import LinearBucketingStrategy
 from vllm_gaudi.extension.bucketing.padding_aware import PaddingAwareBucketingStrategy
 from vllm_gaudi.extension.config import Config, Eq, All, Disabled, Kernel, Value, Env, boolean
@@ -463,6 +460,7 @@ def _make_sliced_bf16(chunk_size, num_padded_query_chunks=0, num_padded_ctx_chun
     module.num_padded_query_chunks = num_padded_query_chunks
     module.num_padded_ctx_chunks = num_padded_ctx_chunks
     # Mirror the production guard: graph breaks only work in lazy mode.
+    import habana_frameworks.torch as ht
     is_lazy = ht.utils.internal.is_lazy()
     module._with_graph_breaks = with_graph_breaks and is_lazy
     if module._with_graph_breaks:
@@ -508,6 +506,7 @@ def _make_sliced_fp8(chunk_size,
     module.num_padded_query_chunks = num_padded_query_chunks
     module.num_padded_ctx_chunks = num_padded_ctx_chunks
     # Mirror the production guard: graph breaks only work in lazy mode.
+    import habana_frameworks.torch as ht
     is_lazy = ht.utils.internal.is_lazy()
     module._with_graph_breaks = with_graph_breaks and is_lazy
     if module._with_graph_breaks:
@@ -1076,6 +1075,7 @@ class TestFsdpaSlicingAccuracyBF16:
     @staticmethod
     def _run_reference(q, k, v, attn_mask):
         """Non-sliced reference: single FusedSDPA call with full mask."""
+        from habana_frameworks.torch.hpex.kernels import FusedSDPA
         with torch.inference_mode():
             output = FusedSDPA.apply(
                 q,
@@ -1103,6 +1103,7 @@ class TestFsdpaSlicingAccuracyBF16:
             torch._dynamo.reset()
             module = torch.compile(module, backend='hpu_backend')
         elif mode == 'hpu_graph':
+            import habana_frameworks.torch as ht
             module = ht.hpu.wrap_in_hpu_graph(module)
         with torch.inference_mode():
             output = module(q, k, v, attn_mask, 0.0, True, None, 'fast')
@@ -1170,6 +1171,7 @@ class TestFsdpaSlicingAccuracyFP8:
     @staticmethod
     def _run_reference(q, k, v, attn_mask):
         """BF16 ground-truth reference: single FusedSDPA call with full mask."""
+        from habana_frameworks.torch.hpex.kernels import FusedSDPA
         with torch.inference_mode():
             output = FusedSDPA.apply(
                 q,
@@ -1214,6 +1216,7 @@ class TestFsdpaSlicingAccuracyFP8:
             torch._dynamo.reset()
             module = torch.compile(module, backend='hpu_backend')
         elif mode == 'hpu_graph':
+            import habana_frameworks.torch as ht
             module = ht.hpu.wrap_in_hpu_graph(module)
         with torch.inference_mode():
             output = module(q_fp8, k_fp8, v_fp8, attn_mask, 0.0, True, None, 'fast')
