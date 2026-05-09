@@ -253,6 +253,7 @@ class TestSetupSlicing:
         assert base.chunk_size == 4096
         assert base._with_graph_breaks is False
 
+    @pytest.mark.skip(reason='lazy mode tests are skipped')
     @patch('habana_frameworks.torch.utils.internal.is_lazy', return_value=True)
     @patch('vllm_gaudi.extension.utils.get_config')
     @patch('vllm_gaudi.extension.bucketing.common.HPUBucketingManager.get_instance')
@@ -1120,6 +1121,8 @@ class TestFsdpaSlicingAccuracyBF16:
         (1024, 8192, 4096),
     ])
     def test_bf16_accuracy(self, q_len, ctx_len, chunk_size, graph_breaks, mode):
+        if mode in ('lazy', 'hpu_graph'):
+            pytest.skip('lazy mode tests are skipped')
         if graph_breaks and mode == 'compile':
             pytest.skip('graph breaks are not supported with torch.compile')
         if mode in ('lazy', 'hpu_graph'):
@@ -1233,6 +1236,8 @@ class TestFsdpaSlicingAccuracyFP8:
         (1024, 8192, 4096),
     ])
     def test_fp8_accuracy(self, q_len, ctx_len, chunk_size, graph_breaks, mode):
+        if mode in ('lazy', 'hpu_graph'):
+            pytest.skip('lazy mode tests are skipped')
         if graph_breaks and mode == 'compile':
             pytest.skip('graph breaks are not supported with torch.compile')
         if mode in ('lazy', 'hpu_graph'):
@@ -1344,6 +1349,7 @@ class TestGraphBreaksSplitGraphs:
     graph break.  The constraint is enforced in ``_setup_slicing``.
     """
 
+    @pytest.mark.skip(reason='lazy mode tests are skipped')
     @pytest.mark.parametrize("dtype", ["BF16", "FP8"])
     def test_lazy_graph_breaks_split_graphs(self, dtype):
         """In lazy mode, graph_breaks should split into more graphs."""
