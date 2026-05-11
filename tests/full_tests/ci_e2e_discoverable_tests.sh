@@ -541,7 +541,7 @@ run_structured_output_test() {
 # Function to run all tests sequentially
 launch_all_tests() {
     echo "🚀 Starting all test suites..."
-    # run_gemma3_load_generate_test
+    run_gemma3_load_generate_test
     run_basic_load_generate_test
     run_tp2_load_generate_test
     run_mla_moe_load_generate_test
@@ -587,6 +587,7 @@ launch_all_tests() {
     run_sleep_mode_test
     run_online_model_swap_test
     run_structured_output_test
+    run_ernie4.5_vl_test
     echo "🎉 All test suites passed successfully!"
 }
 

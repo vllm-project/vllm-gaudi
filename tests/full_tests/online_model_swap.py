@@ -18,7 +18,7 @@ Requires:
 Usage:
   VLLM_SERVER_DEV_MODE=1 \
   VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
-  python tests/full_tests/online_model_swap_test.py \
+  python tests/full_tests/online_model_swap.py \
     --config tests/full_tests/multi_models.yaml \
     --phases 5 \
     --api-host localhost \
