@@ -367,6 +367,7 @@ run_mistral3_load_generate_test() {
 #     echo "✅ Test with multimodal-support with deepseek-ocr passed."
 # }
 
+# Duplicate of run_llama3_70b_inc_dynamic_quant_load_generate_test — kept for backward compatibility
 run_llama3_70b_inc_dynamic_quant_test() {
     echo "➡️ Testing Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode ..."
     QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/calibration/quantization_config/maxabs_quant_dynamic_quantization_weight_pcs_pow2.json" \
@@ -570,7 +571,7 @@ launch_all_tests() {
     run_qwen2_5_vl_compile_warmup_test
     run_qwen3_vl_load_generate_test
     run_mistral3_load_generate_test
-    run_llama3_70b_inc_dynamic_quant_test
+    # run_llama3_70b_inc_dynamic_quant_test removed: duplicate of run_llama3_70b_inc_dynamic_quant_load_generate_test
     run_gsm8k_granite_test
     run_gsm8k_granite_async_test
     run_gsm8k_deepseek_test
