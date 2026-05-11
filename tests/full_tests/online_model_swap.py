@@ -735,12 +735,13 @@ async def main():
         if len(available_models) < 2:
             raise RuntimeError(f"Expected at least 2 models, got {len(available_models)}: {available_models}")
 
-        models = select_models_for_test(available_models, default_model_id, count=2)
+        models = select_models_for_test(available_models, default_model_id, count=len(available_models))
         print("  Using models for test:")
         for model in models:
             print(f"    - {model['id']} -> {model['display_name']}")
 
         all_metrics: list[dict[str, Any]] = []
+        phase_failures: list[str] = []
         # baseline_texts[model_id] = outputs for all prompts on first load.
         baseline_texts: dict[str, list[str | None]] = {}
         accuracy_stats: dict[str, tuple[int, int]] = {}
@@ -785,7 +786,9 @@ async def main():
                 switch_result = await switch_model(args.api_host, args.api_port, model_name)
 
                 if switch_result['status'] != 'ok':
-                    print(f"  ✗ Switch failed: {switch_result.get('error')}")
+                    error_msg = switch_result.get('error')
+                    print(f"  ✗ Switch failed: {error_msg}")
+                    phase_failures.append(f"phase{phase} switch failed: {error_msg}")
                     continue
 
                 reconfigure_ms = switch_result.get('reconfigure_ms')
@@ -851,7 +854,9 @@ async def main():
             )
 
             if gen_result['status'] != 'ok':
-                print(f"  ✗ Generation failed: {gen_result.get('error')}")
+                error_msg = gen_result.get('error')
+                print(f"  ✗ Generation failed: {error_msg}")
+                phase_failures.append(f"phase{phase} generation failed: {error_msg}")
                 continue
 
             print(f"  ✓ Generated {gen_result['output_tokens']} tokens in {gen_result['duration_s']:.2f}s")
@@ -890,6 +895,15 @@ async def main():
         print("=" * 60)
         print_metrics_table(all_metrics)
         print(f"\n  Total time: {total_time:.2f}s")
+
+        if phase_failures:
+            print("\n" + "=" * 60)
+            print("  TEST FAILED ✗")
+            print("=" * 60)
+            print(f"  ✗ {len(phase_failures)} phase operation(s) failed")
+            for failure in phase_failures:
+                print(f"    - {failure}")
+            return 1
 
         # Success
         print("\n" + "=" * 60)

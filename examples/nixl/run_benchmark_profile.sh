@@ -17,7 +17,6 @@ MODELS=(
 CMD="hl-prof-config --use-template profile_api --hw-trace off"
 eval "$CMD &" 
 export VLLM_SKIP_WARMUP=True
-export PT_HPU_LAZY_MODE=1
 export HABANA_PROFILE=1 
 Enable full vLLM Profiler and instruct where to save the profiling:
 export VLLM_PROFILER_ENABLED=1 

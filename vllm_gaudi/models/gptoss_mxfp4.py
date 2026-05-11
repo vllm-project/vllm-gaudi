@@ -163,7 +163,10 @@ def _load_weights_mxfp4_dequantize_hpu(
             param = params_dict[block_name]
 
             weight = convert_moe_packed_tensors(block_weight, narrow_weight_scale)
-            param[:, :2 * (tp_rank_end - tp_rank_start), :] = weight
+            if use_ep:
+                param.copy_(weight)
+            else:
+                param[:, :2 * (tp_rank_end - tp_rank_start), :] = weight
             del block_weight_dict[block_name]
             loaded_params.add(name)
             continue
@@ -192,7 +195,10 @@ def _load_weights_mxfp4_dequantize_hpu(
             param = params_dict[block_name]
 
             weight = convert_moe_packed_tensors(block_weight, narrow_weight_scale)
-            param[:, :, :(tp_rank_end - tp_rank_start)] = weight
+            if use_ep:
+                param.copy_(weight)
+            else:
+                param[:, :, :(tp_rank_end - tp_rank_start)] = weight
             del block_weight_dict[block_name]
             loaded_params.add(name)
             continue
@@ -215,7 +221,10 @@ def _load_weights_mxfp4_dequantize_hpu(
             narrow_weight = narrow_weight.contiguous()
 
             param = params_dict[name]
-            param[:, :2 * (tp_rank_end - tp_rank_start)] = narrow_weight
+            if use_ep:
+                param.copy_(narrow_weight)
+            else:
+                param[:, :2 * (tp_rank_end - tp_rank_start)] = narrow_weight
             loaded_params.add(name)
             continue
         elif ".w2_bias" in name:

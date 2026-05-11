@@ -26,7 +26,6 @@ def launch_lm_eval(eval_config):
         'async_scheduling': async_scheduling,
         'enforce_eager': enforce_eager,
         'enable_prefix_caching': enable_apc,
-        'add_bos_token': True,
         'dtype': dtype,
         'max_model_len': max_model_len,
         'max_num_seqs': max_num_seqs,

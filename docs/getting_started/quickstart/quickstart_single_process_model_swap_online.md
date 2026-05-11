@@ -23,10 +23,13 @@ models:
     model: meta-llama/Llama-3.1-8B-Instruct
     tensor_parallel_size: 1
     max_model_len: 4096
+    enable_auto_tool_choice: false
   qwen:
     model: Qwen/Qwen3-0.6B
     tensor_parallel_size: 1
     max_model_len: 4096
+    enable_auto_tool_choice: true
+    tool_call_parser: hermes
 ```
 
 ## Start Server
@@ -47,6 +50,12 @@ Notes:
 - `/v1/models` lists every configured alias, but generation requests are handled by the currently active model only.
 - `/v1/models/switch` is available only when `VLLM_SERVER_DEV_MODE=1`.
 - `VLLM_ALLOW_INSECURE_SERIALIZATION=1` is currently required because the in-process reconfigure hook uses `cloudpickle` internally. Use this mode only in trusted/internal deployments.
+- Frontend settings can now be set per model in the YAML config for `enable_auto_tool_choice`, `tool_call_parser`, and `chat_template`.
+- Per-model `chat_template` values can be absolute paths or paths relative to the multi-model config file.
+- Per-model `quant_config` path can be specified to modify `QUANT_CONFIG` env variable.
+- If frontend settings are absent per model, the server falls back to the corresponding CLI values.
+- If `quant_config` is absent for a model, the existing `QUANT_CONFIG` environment value is preserved.
+- Set `quant_config: null` for a model to explicitly clear `QUANT_CONFIG` when that model is active.
 
 ## Online Flow (Smoke Test)
 

@@ -53,7 +53,6 @@ stages:
         flavor: g3
         command: >-
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen2_5_vl_load_generate_test &&
-          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen2_5_vl_lazy_warmup_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_qwen2_5_vl_compile_warmup_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_offloading_connector_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_embedding_model_test &&
@@ -75,6 +74,7 @@ stages:
         flavor: g3
         command: >-
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_sleep_mode_test &&
+          VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_online_model_swap_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_structured_output_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_deepseek_ocr_vl_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_granite_inc_load_generate_test &&

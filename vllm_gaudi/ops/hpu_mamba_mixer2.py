@@ -363,23 +363,28 @@ class HPUMambaMixer2(MambaMixer2):
         )
 
         forward_context = get_forward_context()
-        # attn_metadata contains metadata necessary for the mamba2 triton
-        # kernels to operate in continuous batching and in chunked prefill
-        # modes; they are computed at top-level model forward since they
-        # stay the same and reused for all mamba layers in the same iteration
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
 
         assert self.cache_config is not None
-        assert not self.cache_config.enable_prefix_caching
+        enable_prefix_caching = self.cache_config.enable_prefix_caching
         if attn_metadata is not None:
             self_kv_cache = self.kv_cache
             # conv_state = (..., dim, width-1) yet contiguous along 'dim'
             conv_state = self_kv_cache[0]
             ssm_state = self_kv_cache[1]
 
-            state_indices_tensor = attn_metadata.state_indices_tensor[self.cache_group_idx]
+            load_indices_tensor = attn_metadata.load_indices_tensor[self.cache_group_idx]
+            store_indices_tensor = attn_metadata.store_indices_tensor[self.cache_group_idx]
+            if enable_prefix_caching and attn_metadata.is_prompt:
+                blocks_caching_range = attn_metadata.blocks_caching_range[self.cache_group_idx]
+                mamba_chunks_to_block_mapping = attn_metadata.mamba_chunks_to_block_mapping[self.cache_group_idx]
+                seqlens_offsets_for_blocks = attn_metadata.seqlens_offsets_for_blocks
+            else:
+                blocks_caching_range = None
+                mamba_chunks_to_block_mapping = None
+                seqlens_offsets_for_blocks = None
+
             has_initial_states_p = attn_metadata.has_initial_states_p
-            prep_initial_states = attn_metadata.prep_initial_states
             # is below sufficient to get chunk_size or does it need to passed via metadata
             assert self.model_config is not None
             chunk_size = self.model_config.get_mamba_chunk_size()
@@ -398,9 +403,8 @@ class HPUMambaMixer2(MambaMixer2):
 
         # Process prefill requests
         if has_prefill:
-            # 2. Convolution sequence transformation
             assert padding_mask_flat is not None
-            x = hidden_states_B_C.transpose(0, 1)  # this is the form that causal-conv see
+            x = hidden_states_B_C.transpose(0, 1)
             hidden_states_B_C = hidden_states_B_C * padding_mask_flat
             dt = dt * padding_mask_flat
 
@@ -411,7 +415,11 @@ class HPUMambaMixer2(MambaMixer2):
                 activation=self.activation,
                 conv_states=conv_state,
                 has_initial_state=has_initial_states_p,
-                cache_indices=state_indices_tensor,
+                enable_prefix_caching=enable_prefix_caching,
+                load_cache_indices=load_indices_tensor,
+                store_cache_indices=store_indices_tensor,
+                blocks_caching_range=blocks_caching_range,
+                seqlens_offsets_for_blocks=seqlens_offsets_for_blocks,
                 metadata=attn_metadata,
                 query_start_loc=query_start_loc_p,
                 is_prompt=True,
@@ -422,13 +430,8 @@ class HPUMambaMixer2(MambaMixer2):
 
             # 3. State Space Model sequence transformation
             initial_states = None
-            if has_initial_states_p is not None and prep_initial_states:
-                kernel_ssm_indices = state_indices_tensor
-                initial_states = torch.where(
-                    has_initial_states_p[:, None, None, None],
-                    ssm_state[kernel_ssm_indices],
-                    0,
-                )
+            if attn_metadata.prep_initial_states:
+                initial_states = ssm_state[load_indices_tensor]
 
             # NOTE: final output is an in-place update of out tensor
             varlen_states = hpu_mamba_chunk_scan_combined_varlen(
@@ -449,10 +452,13 @@ class HPUMambaMixer2(MambaMixer2):
                 out=output.view(output.shape[0], -1, self.head_dim),
                 state_dtype=ssm_state.dtype,
                 padding_mask=padding_mask_flat,
-            )[last_chunk_indices_p]
+            )
             output = output * padding_mask_flat.view(output.shape[0], 1)
 
-            ssm_state[state_indices_tensor] = varlen_states
+            if enable_prefix_caching:
+                ssm_state[mamba_chunks_to_block_mapping] = varlen_states
+            else:
+                ssm_state[store_indices_tensor] = varlen_states[last_chunk_indices_p]
 
         # Process decode requests
         if has_decode:
@@ -463,7 +469,8 @@ class HPUMambaMixer2(MambaMixer2):
                 self.conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=state_indices_tensor,
+                load_cache_indices=load_indices_tensor,
+                store_cache_indices=store_indices_tensor,
                 query_start_loc=query_start_loc_p,
             )
 
@@ -495,7 +502,7 @@ class HPUMambaMixer2(MambaMixer2):
                 z=None,
                 dt_bias=dt_bias,
                 dt_softplus=True,
-                state_batch_indices=state_indices_tensor,
-                dst_state_batch_indices=state_indices_tensor,
+                state_batch_indices=load_indices_tensor,
+                dst_state_batch_indices=store_indices_tensor,
                 out=output.view(output.shape[0], -1, self.head_dim),
             )
