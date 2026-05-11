@@ -2,6 +2,22 @@
 
 This document provides an overview of the features, changes, and fixes introduced in each release of the vLLM Hardware Plugin for Intel® Gaudi®.
 
+## 0.19.0
+
+This version is based on [vLLM 0.19.0](https://github.com/vllm-project/vllm/releases/tag/v0.19.0) and supports the latest [Intel® Gaudi® Software v1.24.0](https://docs.habana.ai/en/v1.24.0/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.10.
+
+This release introduces Qwen 3.5 model support with compact mode, Mamba prefix caching for hybrid models, MxFP4 weight loading and dequantization, LMCache integration, and a custom depthwise conv1d TPC kernel for MambaMixer2. Performance improvements include torch.compile-compatible online defragmentation, reduced warmup time via decode bucket capping, and optimized hybrid KV cache visibility. Multiple stability fixes address OOM crashes, multimodal prefill batching, grammar bitmask corruption, and FP8 quantization issues.
+
+For a full list of changes, see the [Detailed Release Notes](release_notes_v0.19.0.md).
+
+## 0.17.1
+
+This version is based on [vLLM 0.17.1](https://github.com/vllm-project/vllm/releases/tag/v0.17.1) and supports [Intel® Gaudi® Software v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html) and [Intel® Gaudi® Software v1.24.0](https://docs.habana.ai/en/v1.24.0/Release_Notes/GAUDI_Release_Notes.html).
+
+This release adds validated support for Ernie4.5-VL, GPT-OSS (20B/120B), and reranking models (Bert, Roberta, Qwen3-based), introduces MxFP4 weight loading and dequantization, and delivers major Mamba/Granite 4.0-h improvements including prefix caching, custom depthwise conv1d TPC kernels, and precision enhancements. It also introduces RowParallel NIC chunking for distributed inference, logprobs output functionality, and Granite tool calling accuracy improvements. Stability was improved through grammar bitmask corruption fixes.
+
+For a full list of changes, see the [Detailed Release Notes](release_notes_v0.17.1.md).
+
 ## 0.16.0
 
 This version is based on [vLLM 0.16.0](https://github.com/vllm-project/vllm/releases/tag/v0.16.0) and supports [Intel® Gaudi® Software v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).

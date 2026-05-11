@@ -35,6 +35,7 @@ from vllm.model_executor.models.utils import (maybe_prefix, cast_overflow_tensor
 from vllm.multimodal.inputs import MultiModalFieldConfig
 
 import habana_frameworks.torch.core as htcore
+import habana_frameworks.torch.internal.bridge_config as bridge_config
 from habana_frameworks.torch.hpex.kernels import FusedSDPA
 
 logger = init_logger(__name__)
@@ -411,8 +412,22 @@ class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
                     0.0)
             rot_pos_emb_sin = F.pad(rot_pos_emb_sin, (0, 0, 0, num_pad_tokens), "constant", 0.0)
 
-            padding_attn_mask_full = create_block_diagonal_attention_mask(cu_seqlens)
-            padding_attn_mask_window = create_block_diagonal_attention_mask(cu_window_seqlens)
+            # In PT_COMPILE_ONLY_MODE, Synapse compiles graph recipes without
+            # executing tensors, so cu_seqlens values are uninitialized garbage.
+            # create_block_diagonal_attention_mask() reads cu_seqlens values to
+            # determine mask shapes and control flow (e.g. .to("cpu") fallback
+            # when seq_len > 40000), which is unsafe during compile-only warmup.
+            # Since create_block_diagonal_attention_mask() has no guard for the
+            # warmup path despite pt_compile_only_mode being active, we bypass
+            # it here with a dummy mask of the correct [bucket_size, bucket_size]
+            # shape, which is sufficient for FusedSDPA recipe compilation.
+            if bridge_config.get_pt_compile_only_mode():
+                mask_size = int(bucket_size)
+                padding_attn_mask_full = torch.zeros(mask_size, mask_size, dtype=torch.bool, device=self.device)
+                padding_attn_mask_window = torch.zeros(mask_size, mask_size, dtype=torch.bool, device=self.device)
+            else:
+                padding_attn_mask_full = create_block_diagonal_attention_mask(cu_seqlens)
+                padding_attn_mask_window = create_block_diagonal_attention_mask(cu_window_seqlens)
 
             # static part
             htcore.mark_step()

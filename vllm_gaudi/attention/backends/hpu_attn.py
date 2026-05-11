@@ -17,7 +17,7 @@ from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, B2BMatmul, ModuleFuse
                                         VLLMFP8KVCache, VLLMKVCache)
 
 from vllm.v1.attention.backend import (AttentionBackend, AttentionImpl, AttentionLayer, AttentionMetadata,
-                                       AttentionType)
+                                       AttentionType, MultipleOf)
 from vllm.model_executor.layers.attention.mla_attention import (MLACommonImpl)
 from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention, HPUPagedAttentionMetadata,
                                                      HPUPagedAttentionMetadataBuilder)
@@ -71,6 +71,10 @@ class HPUAttentionBackend(AttentionBackend):
         src_to_dsts: torch.Tensor,
     ) -> None:
         HPUPagedAttention.copy_blocks(kv_caches, src_to_dsts)
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [128]
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "HPU_MLA")
@@ -135,7 +139,8 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     chunked_block_usage: Optional[torch.Tensor] = None
     has_initial_states_p: Optional[torch.Tensor] = None
     last_chunk_indices_p: Optional[torch.Tensor] = None
-    state_indices_tensor: Optional[torch.Tensor] = None  # shape: [batch,]
+    load_indices_tensor: Optional[torch.Tensor] = None  # shape: [batch,]
+    store_indices_tensor: Optional[torch.Tensor] = None  # shape: [batch,]
 
 
 @dataclass
@@ -525,8 +530,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         else:
             batch_size, seq_len, hidden_size = query.shape
 
-        seq_len_kv = key.shape[0] // batch_size if key.dim() == 2 else key.shape[1]
-
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
         slot_mapping = attn_metadata.slot_mapping.flatten() if attn_metadata.slot_mapping is not None else None
@@ -560,10 +563,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                            block_size=attn_metadata.block_size,
                                            is_prompt=attn_metadata.is_prompt)
 
-        if attn_metadata.is_prompt:
+        if attn_metadata.is_prompt or seq_len > 1:
             # Prompt run.
             query_shape = (batch_size, seq_len, self.num_heads, self.head_size)
-            kv_shape = (batch_size, seq_len_kv, self.num_kv_heads, self.head_size)
+            kv_shape = (batch_size, -1, self.num_kv_heads, self.head_size)
 
             attn_bias = attn_metadata.attn_bias
             position_bias = None

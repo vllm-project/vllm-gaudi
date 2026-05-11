@@ -76,6 +76,67 @@ To enable the feature:
    "scaleformat": "CONST"
    ```
 
+### Single-Process Model Swap
+
+This feature enables sequential serving of multiple small models from one API server process without restart. The implementation uses a dedicated Gaudi OpenAI server entrypoint together with an in-process V1 engine reconfigure path.
+
+To enable the feature:
+
+1. Create a `yaml` file with models' config. For example:
+
+    ```yaml
+    default_model: llama
+    models:
+        llama:
+            model: meta-llama/Llama-3.1-8B-Instruct
+            max_model_len: 4096
+            tensor_parallel_size: 1
+        qwen:
+            model: Qwen/Qwen3-0.6B
+            max_model_len: 4096
+            tensor_parallel_size: 1
+    ```
+
+2. Set the required environment variables:
+
+    ```bash
+    export VLLM_SERVER_DEV_MODE=1
+    export VLLM_ALLOW_INSECURE_SERIALIZATION=1
+    export VLLM_HPU_MULTI_MODEL_CONFIG=/path/to/multi_models.yaml
+    ```
+
+3. Launch the dedicated OpenAI-compatible entrypoint:
+
+    ```bash
+    python -m vllm_gaudi.entrypoints.openai.multi_model_api_server --port 8080
+    ```
+
+    See full online walkthrough in [Single-Process Model Swap (Online Quickstart)](../getting_started/quickstart/quickstart_single_process_model_swap_online.md).
+
+4. Verify the configured model aliases:
+
+    ```bash
+    curl http://localhost:8080/v1/models | jq
+    ```
+
+5. Switch the active model in-process:
+
+    ```bash
+    curl http://localhost:8080/v1/models/switch \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "qwen",
+        "drain_timeout": 60
+      }' | jq
+    ```
+
+**Notes:**
+
+- `/v1/models` shows all configured aliases from the YAML file.
+- Inference requests are served by the currently active model only.
+- `/v1/models/switch` is intentionally gated behind `VLLM_SERVER_DEV_MODE=1`.
+- `VLLM_ALLOW_INSECURE_SERIALIZATION=1` is required because the current in-process reconfigure path uses `cloudpickle` for internal config transfer. Enable this only for trusted/internal deployments.
+
 ## Planned Features
 
 Future plugin releases are planned to provide support for the following vLLM features:

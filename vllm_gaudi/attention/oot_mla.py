@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
+import torch.nn as nn
 import os
 
 from vllm.config import get_current_vllm_config
@@ -15,12 +16,25 @@ import vllm_gaudi.extension.kernels as kernels
 from vllm.forward_context import ForwardContext, get_forward_context
 
 
+class _DummyPrefillBackend:
+    """No-op MLA prefill backend for HPU (which has its own attention impl)."""
+
+    def __init__(self, **kwargs):
+        pass
+
+
 class HPUMLAAttention(MLAAttention):
 
     scale: float
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        import vllm.model_executor.layers.attention.mla_attention as mla_mod
+        original_get_prefill = mla_mod.get_mla_prefill_backend
+        mla_mod.get_mla_prefill_backend = lambda vllm_config: _DummyPrefillBackend
+        try:
+            super().__init__(*args, **kwargs)
+        finally:
+            mla_mod.get_mla_prefill_backend = original_get_prefill
         self.enable_fp8_attn = self.kv_cache_dtype == 'fp8_inc' and os.environ.get('QUANT_CONFIG', None) is None
         self.scale = float(self.scale)
         self.matmul_qk = Matmul() if not self.enable_fp8_attn \
@@ -69,19 +83,7 @@ class HPUMLAAttention(MLAAttention):
             #    self.kv_cache_dtype,
             #    self._k_scale,
             #)
-            if self.attn_backend.accept_output_buffer:
-                output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-                self.forward_impl(
-                    q,
-                    kv_c_normed,
-                    k_pe,
-                    self_kv_cache,
-                    attn_metadata,
-                    output=output,
-                )
-                return output
-            else:
-                return self.forward_impl(q, kv_c_normed, k_pe, self_kv_cache, attn_metadata)
+            return self.forward_impl(q, kv_c_normed, k_pe, self_kv_cache, attn_metadata)
         else:
             kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed,
@@ -90,25 +92,16 @@ class HPUMLAAttention(MLAAttention):
                 self.kv_cache_dtype,
                 self._k_scale,
             )
-            if self.attn_backend.accept_output_buffer:
-                output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-                torch.ops.vllm.unified_mla_attention_with_output(
-                    q,
-                    kv_c_normed,
-                    k_pe,
-                    output,
-                    self.layer_name,
-                    kv_cache_dummy_dep=kv_cache_dummy_dep,
-                )
-                return output
-            else:
-                return torch.ops.vllm.unified_mla_attention(
-                    q,
-                    kv_c_normed,
-                    k_pe,
-                    self.layer_name,
-                    kv_cache_dummy_dep=kv_cache_dummy_dep,
-                )
+            output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
+            torch.ops.vllm.unified_mla_attention_with_output(
+                q,
+                kv_c_normed,
+                k_pe,
+                output,
+                self.layer_name,
+                kv_cache_dummy_dep=kv_cache_dummy_dep,
+            )
+            return output
 
     def forward_impl(
         self,
@@ -121,9 +114,6 @@ class HPUMLAAttention(MLAAttention):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if output is not None:
-            raise NotImplementedError("output is not yet supported for MLAImplBase")
-
         is_prefill = attn_metadata.is_prompt
 
         if not is_prefill:
@@ -173,14 +163,14 @@ class HPUMLAAttention(MLAAttention):
                 # Channel-wise FP8 (produced by VLLM_HPU_FORCE_CHANNEL_FP8=True):
                 # one scale per output channel; dequant via simple broadcast multiply.
                 ws = weight_scale_inv.view(-1, 1).to(act_dtype)  # [N_out, 1]
-                kv_b_proj_weight = (weight.to(act_dtype) * ws).T
+                kv_b_proj_weight = (weight.to(act_dtype) * ws).T.contiguous()
             else:
                 # Block FP8 (force_channel_fp8=False): use HPU block dequant.
                 from vllm_gaudi.extension.ops import dequant_block_fp8_weight_naive
                 orig_M = kv_b_proj.orig_M.item() if hasattr(kv_b_proj, 'orig_M') else None
                 orig_N = kv_b_proj.orig_N.item() if hasattr(kv_b_proj, 'orig_N') else None
                 kv_b_proj_weight = dequant_block_fp8_weight_naive(
-                    weight,
+                    weight.contiguous(),
                     weight_scale_inv,
                     kv_b_proj.weight_block_size,
                     dtype=act_dtype,
@@ -245,21 +235,41 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         cache_config=None,
         quant_config=None,
         prefix: str = "",
+        skip_topk: bool = False,
     ) -> None:
-        super().__init__(
-            hidden_size=hidden_size,
-            num_heads=num_heads,
-            scale=scale,
-            qk_nope_head_dim=qk_nope_head_dim,
-            qk_rope_head_dim=qk_rope_head_dim,
-            v_head_dim=v_head_dim,
-            q_lora_rank=q_lora_rank,
-            kv_lora_rank=kv_lora_rank,
-            mla_modules=mla_modules,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=prefix,
-        )
+        # Skip MultiHeadLatentAttentionWrapper.__init__() because it creates
+        # MLAAttention → FlashAttnPrefillBackend which crashes on HPU.
+        # Instead, inline the field assignments and create HPUMLAAttention.
+        nn.Module.__init__(self)
+        self.hidden_size = hidden_size
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        self.v_head_dim = v_head_dim
+        self.q_lora_rank = q_lora_rank
+        self.kv_lora_rank = kv_lora_rank
+        self.num_heads = num_heads
+        self.fused_qkv_a_proj = mla_modules.fused_qkv_a_proj
+        self.kv_a_proj_with_mqa = mla_modules.kv_a_proj_with_mqa
+        self.q_a_layernorm = mla_modules.q_a_layernorm
+        self.q_b_proj = mla_modules.q_b_proj
+        self.q_proj = mla_modules.q_proj
+        self.kv_a_layernorm = mla_modules.kv_a_layernorm
+        self.kv_b_proj = mla_modules.kv_b_proj
+        self.rotary_emb = mla_modules.rotary_emb
+        self.o_proj = mla_modules.o_proj
+        self.indexer = mla_modules.indexer
+        self.indexer_rope_emb = mla_modules.indexer_rotary_emb
+        self.is_sparse = mla_modules.is_sparse
+
+        self.skip_topk = skip_topk
+        if self.indexer is not None:
+            assert hasattr(self.indexer, "topk_tokens")
+            self.topk_tokens = self.indexer.topk_tokens
+            self.topk_indices_buffer = mla_modules.topk_indices_buffer
+
+        self.prefix = prefix
+
         layer_name = f"{prefix}.attn"
         static_ctx = get_current_vllm_config().compilation_config.static_forward_context
         static_ctx.pop(layer_name, None)

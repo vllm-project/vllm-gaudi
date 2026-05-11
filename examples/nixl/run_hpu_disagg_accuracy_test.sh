@@ -10,7 +10,6 @@ MODELS=(
 )
 
 export VLLM_SKIP_WARMUP="true"
-#export PT_HPU_LAZY_MODE=1
 
 # Number of prefill and decode instances to create
 NUM_PREFILL_INSTANCES=${NUM_PREFILL_INSTANCES:-1} # Default to 1

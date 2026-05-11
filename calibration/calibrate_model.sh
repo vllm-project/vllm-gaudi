@@ -61,11 +61,7 @@ create_quant_config() {
 
     #note(kwisniewski98): mixtral models has attention masked to not cause regression in accuracy
     if [[ $model_name_lower =~ ^mixtral ]]; then
-        if [[ $PT_HPU_LAZY_MODE == 0 ]]; then
-            tmp_config="{\"mode\": \"QUANTIZE\",\"observer\": \"maxabs\",\"scale_method\": \"maxabs_hw\", \"scale_format\": \"CONST\",\"allowlist\": {\"types\": [],\"names\": []},\"blocklist\": {\"types\": [],\"names\": [\"self_attn\", \"lm_head\"]},\"dump_stats_path\": \"$1/$2/$3/inc_output\"}"
-        else
-            tmp_config="{\"mode\": \"QUANTIZE\",\"observer\": \"maxabs\",\"scale_method\": \"maxabs_hw\",\"allowlist\": {\"types\": [],\"names\": []},\"blocklist\": {\"types\": [],\"names\": [\"self_attn\", \"lm_head\"]},\"dump_stats_path\": \"$1/$2/$3/inc_output\"}"
-        fi
+        tmp_config="{\"mode\": \"QUANTIZE\",\"observer\": \"maxabs\",\"scale_method\": \"maxabs_hw\", \"scale_format\": \"CONST\",\"allowlist\": {\"types\": [],\"names\": []},\"blocklist\": {\"types\": [],\"names\": [\"self_attn\", \"lm_head\"]},\"dump_stats_path\": \"$1/$2/$3/inc_output\"}"
     elif [[ $model_name_lower =~ ^deepseek ]]; then
         tmp_config="{\"mode\": \"QUANTIZE\",\"observer\": \"maxabs\",\"scale_method\": \"maxabs_hw\", \"scale_format\": \"scalar\", \"allowlist\": {\"types\": [],\"names\": []},\"blocklist\": {\"types\": [],\"names\": [\"lm_head\", \"mlp\\\.gate\\\b\"]},\"dump_stats_path\": \"$1/$2/$3/inc_output\"}"
     elif [[ $model_name_lower =~ ^granite-4 ]]; then
@@ -221,7 +217,7 @@ fi
 
 # Skip step 1 if the DATASET_PATH_OR_NAME is a .pkl file
 if $SKIP_STEP_1; then
-    EXTRA_FLAGS_STEP_2+="--max-dataset-samples 512 --batch-size 1 --max-tokens 32 "
+    EXTRA_FLAGS_STEP_2+="--max-dataset-samples 1 --batch-size 1 --max-tokens 32 "
     EXTRA_FLAGS_STEP_2+="--auto-process-dataset --sample-len 1024 --max-model-len 2048 "
     EXTRA_FLAGS_STEP_2+="--dataset ${DATASET_PATH_OR_NAME} "
 fi

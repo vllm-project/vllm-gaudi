@@ -104,8 +104,8 @@ There are two ways to install vLLM Hardware Plugin for Intel Gaudi from source: 
 
 2. Run the latest Docker image from the Intel Gaudi vault as in the following code sample. Make sure to provide your versions of vLLM Hardware Plugin for Intel Gaudi, operating system, and PyTorch. Ensure that these versions are supported, according to the [Support Matrix](https://docs.habana.ai/en/latest/Support_Matrix/Support_Matrix.html).
   
-        docker pull vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/pytorch-installer-{{ PT_VERSION }}:latest
-        docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --ipc=host vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/pytorch-installer-{{ PT_VERSION }}:latest
+        docker pull vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/pytorch-upstream-installer-{{ PT_VERSION }}:latest
+        docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --ipc=host vault.habana.ai/gaudi-docker/{{ VERSION }}/ubuntu24.04/habanalabs/pytorch-upstream-installer-{{ PT_VERSION }}:latest
   
     For more information, see the [Intel Gaudi documentation](https://docs.habana.ai/en/latest/Installation_Guide/Bare_Metal_Fresh_OS.html#pull-prebuilt-containers).
   
@@ -122,7 +122,7 @@ There are two ways to install vLLM Hardware Plugin for Intel Gaudi from source: 
         git clone https://github.com/vllm-project/vllm
         cd vllm
         git checkout $VLLM_COMMIT_HASH
-        pip install -r <(sed '/^torch/d' requirements/build.txt)
+        pip install -r <(sed '/^torch/d' requirements/build/cuda.txt)
         VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
         cd ..
   
@@ -173,7 +173,7 @@ To install vLLM Hardware Plugin for Intel Gaudi and NIXL using a Dockerfile:
         git clone https://github.com/vllm-project/vllm
         cd vllm
         git checkout $VLLM_COMMIT_HASH
-        pip install -r <(sed '/^torch/d' requirements/build.txt)
+        pip install -r <(sed '/^torch/d' requirements/build/cuda.txt)
         VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
         cd ..
 

@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
     VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
     VLLM_HPU_FORCE_CHANNEL_FP8: bool = True
     VLLM_HPU_HETERO_KV_LAYOUT: bool = False
+    VLLM_HPU_MULTI_MODEL_CONFIG: Optional[str] = None
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -28,6 +29,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable prefill side kv_layout and block_size for heterogeneous run.
     "VLLM_HPU_HETERO_KV_LAYOUT":
     lambda: os.environ.get("VLLM_HPU_HETERO_KV_LAYOUT", "false").lower() in ("0", "false"),
+
+    # Path to a YAML config file describing the multi-model setup
+    # (model names, weights, tensor-parallel config, etc.).
+    # When unset, multi-model mode is disabled.
+    "VLLM_HPU_MULTI_MODEL_CONFIG":
+    lambda: os.environ.get("VLLM_HPU_MULTI_MODEL_CONFIG", None),
 }
 
 # end-env-vars-definition

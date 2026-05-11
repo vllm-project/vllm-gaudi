@@ -5,8 +5,8 @@
 #   VLLM_COMMIT_ARG - the upstream vLLM commit to checkout and test against
 #   PT_VERSION      - PyTorch version (must match the base image)
 
-ARG PT_VERSION=2.9.0
-ARG BASE_IMAGE=vault.habana.ai/gaudi-docker/1.23.0/ubuntu24.04/habanalabs/pytorch-installer-${PT_VERSION}:latest
+ARG PT_VERSION=2.10.0
+ARG BASE_IMAGE=vault.habana.ai/gaudi-docker/1.24.0/ubuntu24.04/habanalabs/pytorch-upstream-installer-${PT_VERSION}:latest
 FROM ${BASE_IMAGE}
 
 ARG VLLM_COMMIT_ARG
@@ -27,7 +27,7 @@ ENV no_proxy=localhost,127.0.0.1
 ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
 
 # Install vLLM build requirements (excluding torch, already in base image)
-RUN bash -c 'pip install -r <(sed "/^torch/d" requirements/build.txt)'
+RUN bash -c 'pip install -r <(sed "/^torch/d" requirements/build/cuda.txt)'
 RUN VLLM_TARGET_DEVICE=empty pip install --no-build-isolation .
 
 # Install development dependencies (for testing)
