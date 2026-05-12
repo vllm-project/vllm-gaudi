@@ -183,8 +183,6 @@ class HPUGatedDeltaNetAttention(GatedDeltaNetAttention):
             if (padding_mask_flat is not None and padding_mask_flat.numel() == num_tokens):
                 token_mask_flat = padding_mask_flat.view(-1, 1).to(dtype=mixed_qkv.dtype)
                 mixed_qkv = mixed_qkv * token_mask_flat
-                b = b * token_mask_flat
-                a = a * token_mask_flat
             else:
                 token_mask_flat = None
 
