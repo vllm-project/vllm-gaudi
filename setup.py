@@ -59,6 +59,7 @@ setup(
         "Operating System :: OS Independent",
     ],
     packages=find_packages(exclude=("docs", "examples", "tests*", "csrc")),
+    py_modules=["pytest_compat"],
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     extras_require={},
@@ -69,5 +70,6 @@ setup(
             "02.hpu_custom_ops = vllm_gaudi:register_ops",
             "03.hpu_custom_models = vllm_gaudi:register_models",
         ],
+        "pytest11": ["vllm_gaudi_compat = pytest_compat"],
     },
 )
