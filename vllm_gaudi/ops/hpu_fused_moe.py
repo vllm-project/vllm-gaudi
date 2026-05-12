@@ -320,7 +320,7 @@ def patched_fused_moe_forward(
         result = self._maybe_combine(shared_output, fused_hidden)
     else:
         result = self._forward_entry(hidden_states, router_logits, shared_experts_input, input_ids,
-                                     self._encode_layer_name())
+                                     self._encode_layer_name(), self._trtllm_mxfp4_unpadded_dim())
 
     # Mirror upstream MoERunner.forward post-_forward_entry pipeline.
     if isinstance(result, tuple):
