@@ -24,8 +24,7 @@ def _patch_hf3fs_mock_client():
 
     try:
         from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils import (
-            hf3fs_mock_client,
-        )
+            hf3fs_mock_client, )
     except ImportError:
         return
 
