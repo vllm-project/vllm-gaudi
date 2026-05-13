@@ -10,7 +10,10 @@ Currently:
   fixture teardown (see GAUDISW-247825). We replace it with an HPU-safe
   variant that uses ``current_platform.empty_cache()`` instead.
 """
+
+import functools
 import gc
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -60,3 +63,36 @@ def apply() -> None:
     import vllm.distributed as _vllm_distributed
 
     _vllm_distributed.cleanup_dist_env_and_memory = _hpu_cleanup_dist_env_and_memory
+
+
+def patch_hf3fs_mock_client():
+    """Guard CUDA sync in the HF3FS mock client on non-CUDA platforms.
+
+    The upstream mock client's ``batch_write`` unconditionally calls
+    ``torch.cuda.current_stream().wait_event(event)``, which raises
+    ``RuntimeError`` on platforms without CUDA (e.g. HPU).  We wrap
+    ``batch_write`` to stub ``torch.cuda.current_stream`` with a no-op
+    mock for the duration of the call.
+
+    Called from ``register_utils()`` (general plugin) rather than
+    ``apply()`` (platform plugin) to avoid circular imports — the mock
+    client transitively imports ``vllm.config`` which is not yet fully
+    initialized during platform registration.
+    """
+    if torch.cuda.is_available():
+        return
+
+    try:
+        from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils import (
+            hf3fs_mock_client, )
+    except ImportError:
+        return
+
+    _orig_batch_write = hf3fs_mock_client.Hf3fsClient.batch_write
+
+    @functools.wraps(_orig_batch_write)
+    def _safe_batch_write(self, offsets, tensors, event):
+        with patch("torch.cuda.current_stream", return_value=MagicMock()):
+            return _orig_batch_write(self, offsets, tensors, event)
+
+    hf3fs_mock_client.Hf3fsClient.batch_write = _safe_batch_write
