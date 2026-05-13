@@ -2,13 +2,21 @@
 
 Currently:
 
+* ``torch.accelerator.empty_cache`` — HPU's allocator does not implement the
+  ``c10::DeviceAllocator`` interface, so the upstream helper raises
+  ``RuntimeError: Allocator for hpu is not a DeviceAllocator``.  We replace
+  it with an HPU-safe variant that routes through
+  ``current_platform.empty_cache()`` (a no-op on HPU).  This also makes the
+  ``cleanup_dist_env_and_memory`` patch resilient to import-order issues.
+
+* ``torch._C._host_emptyCache`` — does not exist on HPU; we install a no-op
+  stub to prevent ``AttributeError`` in ``cleanup_dist_env_and_memory``.
+
 * ``vllm.distributed.parallel_state.cleanup_dist_env_and_memory`` — upstream
   (since vllm PR #34328) calls ``torch.accelerator.empty_cache()``, which
-  requires the device's allocator to be a ``c10::DeviceAllocator``. HPU's
-  allocator does not implement that interface, so the call raises
-  ``RuntimeError: Allocator for hpu is not a DeviceAllocator`` during pytest
-  fixture teardown (see GAUDISW-247825). We replace it with an HPU-safe
-  variant that uses ``current_platform.empty_cache()`` instead.
+  requires the device's allocator to be a ``c10::DeviceAllocator``.  We
+  replace it with an HPU-safe variant that uses
+  ``current_platform.empty_cache()`` instead (see GAUDISW-247825).
 """
 
 import functools
@@ -20,6 +28,19 @@ import torch
 from vllm import envs
 from vllm.distributed import parallel_state
 from vllm.platforms import current_platform
+
+
+def _hpu_accelerator_empty_cache() -> None:
+    """HPU-safe replacement for ``torch.accelerator.empty_cache()``.
+
+    HPU's allocator does not implement the ``c10::DeviceAllocator``
+    interface, so the upstream ``torch.accelerator.empty_cache()`` raises
+    ``RuntimeError``.  Route through ``current_platform.empty_cache``
+    instead (which is ``None`` on HPU, making this a no-op).
+    """
+    empty_cache = current_platform.empty_cache
+    if empty_cache is not None:
+        empty_cache()
 
 
 def _hpu_cleanup_dist_env_and_memory(shutdown_ray: bool = False) -> None:
@@ -55,6 +76,13 @@ def _hpu_cleanup_dist_env_and_memory(shutdown_ray: bool = False) -> None:
 
 def apply() -> None:
     """Install all HPU runtime monkey-patches."""
+    # --- torch.accelerator.empty_cache ---
+    torch.accelerator.empty_cache = _hpu_accelerator_empty_cache
+
+    # --- torch._C._host_emptyCache ---
+    if not hasattr(torch._C, "_host_emptyCache"):
+        torch._C._host_emptyCache = lambda: None
+
     # Patch the canonical definition.
     parallel_state.cleanup_dist_env_and_memory = _hpu_cleanup_dist_env_and_memory
     # Patch the re-export from ``vllm.distributed`` so ``from vllm.distributed
