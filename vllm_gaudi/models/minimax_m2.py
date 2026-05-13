@@ -81,7 +81,6 @@ class HpuMiniMaxM2MoE(nn.Module):
             e_score_correction_bias=self.e_score_correction_bias,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
-            reduce_results=False,
             renormalize=True,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
